@@ -1,6 +1,13 @@
-cmake_minimum_required(VERSION 3.29)
-project(artval C)
+cmake_minimum_required(VERSION 3.28)
+project(cdict)
 
-set(CMAKE_C_STANDARD 11)
+set(CMAKE_CPP_STANDARD 17)
 
-add_library(artval SHARED src/art.c src/artval.c)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++")
+include_directories("module/fast_float/include")
+
+file(GLOB SOURCES
+    "src/*.c" "src/*.cpp"
+)
+
+add_library(cdict SHARED ${SOURCES})

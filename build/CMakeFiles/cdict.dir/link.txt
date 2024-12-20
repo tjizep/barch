@@ -1,0 +1,1 @@
+/usr/bin/g++ -fPIC  -Werror -Wall -Wextra -Weffc++ -g -shared -Wl,-soname,libcdict.so -o libcdict.so CMakeFiles/cdict.dir/src/art.cpp.o CMakeFiles/cdict.dir/src/cdict.cpp.o 

@@ -35,7 +35,15 @@ typedef struct {
     uint8_t type;
     uint8_t num_children;
     unsigned char partial[MAX_PREFIX_LEN];
-} art_node;
+}  art_node;
+
+/**
+ * so that we dont have to switch all the time when dealing with children
+ */
+typedef struct  {
+    int size;
+    art_node* const * children;
+} child_list;
 
 /**
  * Small node with only 4 children
@@ -82,7 +90,17 @@ typedef struct {
     uint32_t key_len;
     unsigned char key[];
 } art_leaf;
-
+/**
+ * global statistics
+ */
+struct art_statistics {
+    uint64_t leaf_nodes;
+    uint64_t node4_nodes;
+    uint64_t node16_nodes;
+    uint64_t node48_nodes;
+    uint64_t node256_nodes;
+    uint64_t bytes_allocated;
+};
 /**
  * Main struct, points to root.
  */
@@ -183,6 +201,16 @@ art_leaf* art_minimum(art_tree *t);
 art_leaf* art_maximum(art_tree *t);
 
 /**
+ * Returns the lower bound value of a given key
+ * lower bound is defined as first value not less than the key parameter
+ * @arg t The tree
+ * @arg key The key
+ * @arg key_len The length of the key
+ * @return the lower bound or NULL if there is no value not less than key
+ */
+void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len);
+
+/**
  * Iterates through the entries pairs in the map,
  * invoking a callback for each. The call back gets a
  * key, value for each and returns an integer stop value.
@@ -207,6 +235,22 @@ int art_iter(art_tree *t, art_callback cb, void *data);
  * @return 0 on success, or the return of the callback.
  */
 int art_iter_prefix(art_tree *t, const unsigned char *prefix, int prefix_len, art_callback cb, void *data);
+/**
+ * iterates through a range from small to large from key to key_end
+ * the first key is located in log(n) time
+ * @return 0 on success, or the return of the callback.
+ */
+int art_range(const art_tree *t, const unsigned char *key, int key_len, const unsigned char *key_end, int key_end_len, art_callback cb, void *data);
+/**
+ * iterate from a potentially non existent lower bound
+ */
+void art_iter_from(const art_tree *t, const unsigned char *key, int key_len);
+
+/**
+ * gets per module per node type statistics for all art_node* types  
+ * @return art_statistics 
+ */
+art_statistics art_get_statistics();
 
 #ifdef __cplusplus
 }

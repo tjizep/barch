@@ -1,3 +1,3 @@
 [submodule "fast_float"]
-	path = fast_float
+	path = module/fast_float
 	url = https://github.com/fastfloat/fast_float.git

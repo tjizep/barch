@@ -3,8 +3,10 @@
 #include <strings.h>
 #include <stdio.h>
 #include <assert.h>
+#include <vector>
+#include <atomic>
 #include "art.h"
-
+#include "valkeymodule.h"
 #ifdef __i386__
     #include <emmintrin.h>
 #else
@@ -13,31 +15,67 @@
 #endif
 #endif
 
+namespace statistics{
+    static std::atomic<uint64_t> n4_nodes;
+    static std::atomic<uint64_t> n16_nodes;
+    static std::atomic<uint64_t> n48_nodes;
+    static std::atomic<uint64_t> n256_nodes;
+    static std::atomic<uint64_t> leaf_nodes;
+    static std::atomic<uint64_t> node_bytes_alloc;
+}
 /**
  * Macros to manipulate pointer tags
  */
 #define IS_LEAF(x) (((uintptr_t)x & 1))
-#define SET_LEAF(x) ((void*)((uintptr_t)x | 1))
+#define SET_LEAF(x) (art_node*)(((void*)((uintptr_t)x | 1)))
 #define LEAF_RAW(x) ((art_leaf*)((void*)((uintptr_t)x & ~1)))
+
+struct trace_element {
+    art_node* el;
+    art_node* child;
+    int child_ix;
+    bool empty() const {
+        return el == NULL && child == NULL && child_ix == 0;
+    }
+};
+
+typedef std::vector<trace_element> trace_list;
 
 /**
  * Allocates a node of the given type,
  * initializes to zero and sets the type.
  */
 static art_node* alloc_node(uint8_t type) {
+    // these never run the constructor
     art_node* n;
     switch (type) {
         case NODE4:
-            n = (art_node*)calloc(1, sizeof(art_node4));
+            n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node4));
+            if (n) {
+                statistics::node_bytes_alloc += sizeof(art_node4);
+                statistics::n4_nodes++;
+            } 
             break;
         case NODE16:
-            n = (art_node*)calloc(1, sizeof(art_node16));
+            n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node16));
+            if (n) { 
+                statistics::node_bytes_alloc += sizeof(art_node16);
+                statistics::n16_nodes++;
+            }
             break;
         case NODE48:
-            n = (art_node*)calloc(1, sizeof(art_node48));
+            n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node48));
+            if (n) {
+                statistics::node_bytes_alloc += sizeof(art_node48);
+                statistics::n48_nodes++;
+            }
             break;
         case NODE256:
-            n = (art_node*)calloc(1, sizeof(art_node256));
+            n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node256));
+            if (n) {
+                statistics::node_bytes_alloc += sizeof(art_node256);
+                statistics::n256_nodes++;
+            }
             break;
         default:
             abort();
@@ -45,6 +83,7 @@ static art_node* alloc_node(uint8_t type) {
     n->type = type;
     return n;
 }
+
 
 /**
  * Initializes an ART tree
@@ -55,6 +94,70 @@ int art_tree_init(art_tree *t) {
     t->size = 0;
     return 0;
 }
+/**
+ * free a node while updating statistics 
+ */
+static void free_node(art_node *n) {
+    // Break if null
+    if (!n) return;
+
+    // Special case leafs
+    if (IS_LEAF(n)) {
+        ValkeyModule_Free(LEAF_RAW(n));
+        statistics::leaf_nodes--;
+        statistics::node_bytes_alloc -= sizeof(art_leaf);
+        return;
+    }
+
+    switch (n->type) {
+        case NODE4:
+            statistics::node_bytes_alloc -= sizeof(art_node4);
+            statistics::n4_nodes--;
+            break;
+
+        case NODE16:
+            statistics::node_bytes_alloc -= sizeof(art_node16);
+            statistics::n16_nodes--;
+            break;
+
+        case NODE48:
+            statistics::node_bytes_alloc -= sizeof(art_node4);
+            statistics::n48_nodes--;
+            break;
+
+        case NODE256:
+            statistics::node_bytes_alloc -= sizeof(art_node4);
+            statistics::n256_nodes--;
+            break;
+
+        default:
+            abort();
+    }
+
+    // Free ourself on the way up
+    ValkeyModule_Free(n);
+}
+static void free_node(art_node4 *n){
+    free_node(&n->n);
+}
+
+static void free_node(art_node16 *n){
+    free_node(&n->n);
+}
+
+static void free_node(art_node48 *n){
+    free_node(&n->n);
+}
+
+static void free_node(art_node256 *n){
+    free_node(&n->n);
+}
+
+static void free_node(art_leaf *n){
+    ValkeyModule_Free(LEAF_RAW(n));
+    statistics::leaf_nodes--;
+    statistics::node_bytes_alloc -= sizeof(art_leaf);
+}
 
 // Recursively destroys the tree
 static void destroy_node(art_node *n) {
@@ -63,7 +166,7 @@ static void destroy_node(art_node *n) {
 
     // Special case leafs
     if (IS_LEAF(n)) {
-        free(LEAF_RAW(n));
+        free_node(n);
         return;
     }
 
@@ -112,7 +215,7 @@ static void destroy_node(art_node *n) {
     }
 
     // Free ourself on the way up
-    free(n);
+    free_node(n);
 }
 
 /**
@@ -131,6 +234,94 @@ int art_tree_destroy(art_tree *t) {
 #ifndef BROKEN_GCC_C99_INLINE
 extern inline uint64_t art_size(art_tree *t);
 #endif
+static int leaf_compare(const art_leaf *n, const unsigned char *key, int key_len, int depth) {
+    (void)depth;
+    // Fail if the key lengths are different
+    if (n->key_len != (uint32_t)key_len) return 1;
+
+    // Compare the keys starting at the depth
+    return memcmp(n->key, key, key_len);
+}
+/**
+ * find first not less than
+ */
+static trace_element lower_bound_child(art_node *n, const unsigned char * key, int key_len, int depth, int * is_equal) {
+
+    int i, uc;
+    unsigned char prev = 0x00, c = 0x00;
+    union {
+        art_node4 *p1;
+        art_node16 *p2;
+        art_node48 *p3;
+        art_node256 *p4;
+    } p;
+    if (depth >= key_len){
+        abort();
+    }
+    c = key[depth];
+    switch (n->type) {
+        case NODE4:
+            p.p1 = (art_node4*)n;
+            for (i=0 ; i < n->num_children; i++) {
+                if(prev > p.p1->keys[i]){
+                    abort();
+                }
+		        if (p.p1->keys[i] >= c){
+                    *is_equal = p.p1->keys[i] == c;
+                    return {n,p.p1->children[i],i};
+                }
+                prev = p.p1->keys[i];
+            }
+            break;
+
+        
+        case NODE16:
+            p.p2 = (art_node16*)n;
+
+            for (i = 0; i < n->num_children; ++i) {
+                if (prev > p.p2->keys[i]) {
+                    abort();
+                }
+                if (p.p2->keys[i] >= c){
+                    *is_equal = (p.p2->keys[i] == c);
+                    return {n,p.p2->children[i],i};// the keys are ordered so fine I think
+                }
+                prev = p.p2->keys[i];
+            }
+            break;
+        
+
+        case NODE48:
+            p.p3 = (art_node48*)n;
+            /*
+             * find first not less than
+             * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
+             */
+            uc = c;
+            for (; uc < 256;uc++){
+                i = p.p3->keys[uc];
+                if(i > 0){
+                    *is_equal = (i == c);
+                    return {n,p.p3->children[i-1],i-1};
+                }
+            }
+            break;
+
+        case NODE256:
+            p.p4 = (art_node256*)n;
+            for (i = c; i < 256; ++i) {
+                if (p.p4->children[i]) {// because nodes are ordered accordingly
+                    *is_equal = (i == c);
+                    return {n,p.p4->children[i],i};
+                }
+            }
+            break;
+
+        default:
+            abort();
+    }
+    return {NULL, NULL, 0};
+}
 
 static art_node** find_child(art_node *n, unsigned char c) {
     int i, mask, bitfield;
@@ -238,6 +429,7 @@ static int check_prefix(const art_node *n, const unsigned char *key, int key_len
     return idx;
 }
 
+
 /**
  * Checks if a leaf matches
  * @return 0 on success.
@@ -290,32 +482,51 @@ void* art_search(const art_tree *t, const unsigned char *key, int key_len) {
     return NULL;
 }
 
-// Find the minimum leaf under a node
-static art_leaf* minimum(const art_node *n) {
-    // Handle base cases
-    if (!n) return NULL;
-    if (IS_LEAF(n)) return LEAF_RAW(n);
+#if 0
+static child_list init_cl(int size, art_node*const* n){
+    child_list r = {size, n};
+    return r;
+}
+
+static child_list get_children(const art_node *n){
+    child_list r = {0,NULL}; 
+    if (!n) return r;
+    if (IS_LEAF(n)) return init_cl(0,NULL);
 
     int idx;
     switch (n->type) {
         case NODE4:
-            return minimum(((const art_node4*)n)->children[0]);
+            return init_cl(n->num_children, ((const art_node4*)n)->children);        
+        
         case NODE16:
-            return minimum(((const art_node16*)n)->children[0]);
+            return init_cl(n->num_children, ((const art_node16*)n)->children);        
+        
         case NODE48:
-            idx=0;
-            while (!((const art_node48*)n)->keys[idx]) idx++;
+            idx=255;
+            while (!((const art_node48*)n)->keys[idx]) idx--;
             idx = ((const art_node48*)n)->keys[idx] - 1;
-            return minimum(((const art_node48*)n)->children[idx]);
+            return init_cl(256 - idx, &(((const art_node48*)n)->children)[idx]);
         case NODE256:
-            idx=0;
-            while (!((const art_node256*)n)->children[idx]) idx++;
-            return minimum(((const art_node256*)n)->children[idx]);
+            idx=255;
+            while (!((const art_node256*)n)->children[idx]) idx--;
+            return init_cl(256 - idx, &(((const art_node256*)n)->children)[idx]);
         default:
             abort();
     }
+    return init_cl(0,NULL);
 }
-
+/**
+ * set parent of each child with new parent
+ */
+static void set_new_parent(art_node* current, art_node* new_parent){
+    child_list cl = get_children(current);
+    for(int i = 0; i < cl.size; ++i){
+        if(cl.children[i]){
+            cl.children[i]->parent = new_parent;
+        }
+    }
+}
+#endif
 // Find the maximum leaf under a node
 static art_leaf* maximum(const art_node *n) {
     // Handle base cases
@@ -342,6 +553,258 @@ static art_leaf* maximum(const art_node *n) {
     }
 }
 
+
+// Find the minimum leaf under a node
+static art_leaf* minimum(const art_node *n) {
+    // Handle base cases
+    if (!n) return NULL;
+    if (IS_LEAF(n)) return LEAF_RAW(n);
+
+    int idx;
+    switch (n->type) {
+        case NODE4:
+            return minimum(((const art_node4*)n)->children[0]);
+        case NODE16:
+            return minimum(((const art_node16*)n)->children[0]);
+        case NODE48:
+            idx=0;
+            while (!((const art_node48*)n)->keys[idx]) idx++;
+            idx = ((const art_node48*)n)->keys[idx] - 1;
+            return minimum(((const art_node48*)n)->children[idx]);
+        case NODE256:
+            idx=0;
+            while (!((const art_node256*)n)->children[idx]) idx++;
+            return minimum(((const art_node256*)n)->children[idx]);
+        default:
+            abort();
+    }
+}
+
+/**
+ * Searches for the lower bound key
+ * @arg t The tree
+ * @arg key The key
+ * @arg key_len The length of the key
+ * @return NULL if the item was not found, otherwise
+ * the leaf containing the value pointer is returned.
+ */
+static const art_leaf* lower_bound(trace_list& trace, const art_tree *t, const unsigned char *key, int key_len) {
+    art_node *n = t->root;
+    int prefix_len, depth = 0, is_equal = 0;
+
+    while (n) {
+        if (IS_LEAF(n)) {
+            const art_leaf * leaf = LEAF_RAW(n);
+            // Check if the expanded path matches
+            if (leaf_compare(leaf, key, key_len, depth) >= 0) {
+                return leaf;
+            }
+            return NULL;
+        }
+        // Bail if the prefix does not match
+        if (n->partial_len) {
+            prefix_len = check_prefix(n, key, key_len, depth);
+            if (prefix_len != min(MAX_PREFIX_LEN, n->partial_len))
+                break;
+            depth += n->partial_len;
+        }
+
+        trace_element te = lower_bound_child(n, key, key_len, depth, &is_equal);
+        trace.push_back(te);
+        n = te.child;
+        depth++;
+    }
+    return maximum(n);
+}
+static trace_element first_child_off(art_node* n){
+    int i, uc;
+    union {
+        art_node4 *p1;
+        art_node16 *p2;
+        art_node48 *p3;
+        art_node256 *p4;
+    } p;
+    switch (n->type) {
+        case NODE4:
+            p.p1 = (art_node4*)n;
+            return {n,p.p1->children[0],0};
+
+        
+        case NODE16:
+            p.p2 = (art_node16*)n;
+
+            return {n,p.p2->children[0],0};// the keys are ordered so fine I think
+        
+
+        case NODE48:
+            p.p3 = (art_node48*)n;
+            /*
+             * find first not less than
+             * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
+             */
+            uc = 0; // ?
+            for (; uc < 256;uc++){
+                i = p.p3->keys[uc];
+                if(i > 0){
+                    return {n,p.p3->children[i-1],uc};
+                }
+            }
+            break;
+
+        case NODE256:
+            p.p4 = (art_node256*)n;
+            for (i = 0; i < 256; ++i) {
+                if (p.p4->children[i]) {// because nodes are ordered accordingly
+                    return {n,p.p4->children[i],i};
+                }
+            }
+            break;
+
+        default:
+            abort();
+    }
+    return {NULL, NULL, 0};
+}
+
+static trace_element increment_te(trace_element &te){
+    int i, uc;
+    union {
+        art_node4 *p1;
+        art_node16 *p2;
+        art_node48 *p3;
+        art_node256 *p4;
+    } p;
+    art_node * n = te.el; 
+    switch (n->type) {
+        case NODE4:
+            p.p1 = (art_node4*)n;
+            for (i = te.child_ix + 1; i < n->num_children; i++) {
+                return {n,p.p1->children[i],i};
+            }
+
+            break;
+
+        
+        case NODE16:
+            p.p2 = (art_node16*)n;
+
+            for (i = te.child_ix + 1; i < n->num_children; ++i) {
+                return {n,p.p2->children[i],i};// the keys are ordered so fine I think
+            }
+            break;
+        
+
+        case NODE48:
+            p.p3 = (art_node48*)n;
+            /*
+             * find first not less than
+             * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
+             */
+            uc = te.child_ix + 1;
+            for (; uc < 256;uc++){
+                i = p.p3->keys[uc];
+                if(i > 0){
+                    return {n,p.p3->children[i-1],i-1};
+                }
+            }
+            break;
+
+        case NODE256:
+            p.p4 = (art_node256*)n;
+            for (i = te.child_ix+1; i < 256; ++i) {
+                if (p.p4->children[i]) {// because nodes are ordered accordingly
+                    return {n,p.p4->children[i],i};
+                }
+            }
+            break;
+
+        default:
+            abort();
+    }
+    return {NULL, NULL, 0};
+}
+
+
+static trace_element& last_el(trace_list& trace){
+    if(trace.empty())
+        abort();
+    return *(trace.rbegin());
+}
+/**
+ * assuming that the path to each leaf is not the same depth
+ * we always have to check and extend if required
+ * @return false if any non leaf node has no child 
+ */
+static bool extend_trace(trace_list& trace){
+    if(trace.empty()) return true;
+    trace_element u; 
+    while(!IS_LEAF(last_el(trace).child)){
+        u = first_child_off(last_el(trace).el);
+        if(u.empty()) return false;
+        trace.push_back(u);
+    }
+    return true;
+}
+
+static bool increment_trace(trace_list& trace){
+    for(auto r = trace.rbegin(); r != trace.rend(); ++r){
+        trace_element te = increment_te(*r);
+        if(te.empty()) 
+            continue; // goto the parent further back and try to increment that 
+        *r = te;
+        if (r != trace.rbegin()){
+            auto u = r;
+            // go forward
+            do {
+                --u;
+                te = first_child_off(te.child);
+                if(te.empty())
+                    return false;
+                *u = te;
+
+            } while(u != trace.rbegin());
+        }
+        return extend_trace(trace);
+    
+    }
+    return false;
+}
+
+void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len) {
+    const art_leaf* al;
+    trace_list tl;
+    al = lower_bound(tl, t, key, key_len);
+    if (al) {
+        return al->value;
+    }
+    return NULL;
+}
+
+int art_range(const art_tree *t, const unsigned char *key, int key_len, const unsigned char *key_end, int key_end_len, art_callback cb, void *data) {
+    trace_list tl;
+    const art_leaf* al;
+    al = lower_bound(tl, t, key, key_len);
+    if (al) {
+        do {
+            art_node * n = last_el(tl).child;
+            if(IS_LEAF(n)){
+                art_leaf * leaf = LEAF_RAW(n);
+                if(leaf_compare(leaf, key_end, key_end_len, 0) < 0) { // upper bound is not
+                    int r = cb(data, leaf->key, leaf->key_len, leaf->value); 
+                    if( r != 0) 
+                        return r;
+                } else {
+                    return 0;
+                }
+            }else{
+                abort();
+            }
+        
+        } while(increment_trace(tl));
+        
+    }
+    return 0;
+}
 /**
  * Returns the minimum valued leaf
  */
@@ -357,7 +820,9 @@ art_leaf* art_maximum(art_tree *t) {
 }
 
 static art_leaf* make_leaf(const unsigned char *key, int key_len, void *value) {
-    art_leaf *l = (art_leaf*)calloc(1, sizeof(art_leaf)+key_len);
+    art_leaf *l = (art_leaf*)ValkeyModule_Calloc(1, sizeof(art_leaf)+key_len);
+    statistics::leaf_nodes++;
+    statistics::node_bytes_alloc += (sizeof(art_leaf)+key_len);
     l->value = value;
     l->key_len = key_len;
     memcpy(l->key, key, key_len);
@@ -402,7 +867,7 @@ static void add_child48(art_node48 *n, art_node **ref, unsigned char c, void *ch
         }
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = (art_node*)new_node;
-        free(n);
+        free_node(n);
         add_child256(new_node, ref, c, child);
     }
 }
@@ -470,12 +935,12 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
         }
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = (art_node*)new_node;
-        free(n);
+        free_node(n);
         add_child48(new_node, ref, c, child);
     }
 }
 
-static void add_child4(art_node4 *n, art_node **ref, unsigned char c, void *child) {
+static void add_child4(art_node4 *n, art_node **ref, unsigned char c, art_node *child) {
     if (n->n.num_children < 4) {
         int idx;
         for (idx=0; idx < n->n.num_children; idx++) {
@@ -502,12 +967,12 @@ static void add_child4(art_node4 *n, art_node **ref, unsigned char c, void *chil
                 sizeof(unsigned char)*n->n.num_children);
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = (art_node*)new_node;
-        free(n);
+        free_node(n);
         add_child16(new_node, ref, c, child);
     }
 }
 
-static void add_child(art_node *n, art_node **ref, unsigned char c, void *child) {
+static void add_child(art_node *n, art_node **ref, unsigned char c, art_node *child) {
     switch (n->type) {
         case NODE4:
             return add_child4((art_node4*)n, ref, c, child);
@@ -673,7 +1138,7 @@ static void remove_child256(art_node256 *n, art_node **ref, unsigned char c) {
         art_node48 *new_node = (art_node48*)alloc_node(NODE48);
         *ref = (art_node*)new_node;
         copy_header((art_node*)new_node, (art_node*)n);
-
+    
         int pos = 0;
         for (int i=0;i<256;i++) {
             if (n->children[i]) {
@@ -682,7 +1147,7 @@ static void remove_child256(art_node256 *n, art_node **ref, unsigned char c) {
                 pos++;
             }
         }
-        free(n);
+        free_node(n);
     }
 }
 
@@ -696,7 +1161,7 @@ static void remove_child48(art_node48 *n, art_node **ref, unsigned char c) {
         art_node16 *new_node = (art_node16*)alloc_node(NODE16);
         *ref = (art_node*)new_node;
         copy_header((art_node*)new_node, (art_node*)n);
-
+    
         int child = 0;
         for (int i=0;i<256;i++) {
             pos = n->keys[i];
@@ -706,7 +1171,8 @@ static void remove_child48(art_node48 *n, art_node **ref, unsigned char c) {
                 child++;
             }
         }
-        free(n);
+        
+        free_node(n);
     }
 }
 
@@ -722,7 +1188,8 @@ static void remove_child16(art_node16 *n, art_node **ref, art_node **l) {
         copy_header((art_node*)new_node, (art_node*)n);
         memcpy(new_node->keys, n->keys, 4);
         memcpy(new_node->children, n->children, 4*sizeof(void*));
-        free(n);
+        
+        free_node(n);
     }
 }
 
@@ -753,7 +1220,7 @@ static void remove_child4(art_node4 *n, art_node **ref, art_node **l) {
             child->partial_len += n->n.partial_len + 1;
         }
         *ref = child;
-        free(n);
+        free_node(n);
     }
 }
 
@@ -827,7 +1294,7 @@ void* art_delete(art_tree *t, const unsigned char *key, int key_len) {
     if (l) {
         t->size--;
         void *old = l->value;
-        free(l);
+        free_node(l);
         return old;
     }
     return NULL;
@@ -972,4 +1439,15 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
         depth++;
     }
     return 0;
+}
+
+art_statistics art_get_statistics(){
+    art_statistics as;
+    as.leaf_nodes = statistics::leaf_nodes;
+    as.node4_nodes = statistics::n4_nodes;
+    as.node16_nodes = statistics::n16_nodes;
+    as.node256_nodes = statistics::n256_nodes;
+    as.node48_nodes = statistics::n4_nodes;
+    as.bytes_allocated = statistics::node_bytes_alloc;
+    return as;
 }

@@ -7,6 +7,14 @@
 #include <atomic>
 #include "art.h"
 #include "valkeymodule.h"
+
+/**
+ * hopefully __ARM_NEON__ is mutually exclusive with __i386__ or __amd64__
+ */
+#ifdef __ARM_NEON__
+    #include "sse2neon.h"
+#endif
+
 #ifdef __i386__
     #include <emmintrin.h>
 #else
@@ -16,12 +24,33 @@
 #endif
 
 namespace statistics{
+    /**
+     * size stats
+     */
     static std::atomic<uint64_t> n4_nodes;
     static std::atomic<uint64_t> n16_nodes;
     static std::atomic<uint64_t> n48_nodes;
     static std::atomic<uint64_t> n256_nodes;
     static std::atomic<uint64_t> leaf_nodes;
     static std::atomic<uint64_t> node_bytes_alloc;
+    static std::atomic<uint64_t> interior_bytes_alloc;
+    /**
+     * ops stats
+     */
+    static std::atomic<uint64_t> delete_ops;
+    static std::atomic<uint64_t> set_ops;
+    static std::atomic<uint64_t> iter_ops;
+    static std::atomic<uint64_t> iter_start_ops;
+    static std::atomic<uint64_t> iter_range_ops;
+    static std::atomic<uint64_t> range_ops;
+    static std::atomic<uint64_t> get_ops;
+    static std::atomic<uint64_t> lb_ops;
+    static std::atomic<uint64_t> size_ops;
+    static std::atomic<uint64_t> insert_ops;
+    static std::atomic<uint64_t> min_ops;
+    static std::atomic<uint64_t> max_ops;
+    
+    
 }
 /**
  * Macros to manipulate pointer tags
@@ -53,6 +82,7 @@ static art_node* alloc_node(uint8_t type) {
             n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node4));
             if (n) {
                 statistics::node_bytes_alloc += sizeof(art_node4);
+                statistics::interior_bytes_alloc += sizeof(art_node4);
                 statistics::n4_nodes++;
             } 
             break;
@@ -60,6 +90,7 @@ static art_node* alloc_node(uint8_t type) {
             n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node16));
             if (n) { 
                 statistics::node_bytes_alloc += sizeof(art_node16);
+                statistics::interior_bytes_alloc += sizeof(art_node16);
                 statistics::n16_nodes++;
             }
             break;
@@ -67,6 +98,7 @@ static art_node* alloc_node(uint8_t type) {
             n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node48));
             if (n) {
                 statistics::node_bytes_alloc += sizeof(art_node48);
+                statistics::interior_bytes_alloc += sizeof(art_node48);
                 statistics::n48_nodes++;
             }
             break;
@@ -74,6 +106,7 @@ static art_node* alloc_node(uint8_t type) {
             n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node256));
             if (n) {
                 statistics::node_bytes_alloc += sizeof(art_node256);
+                statistics::interior_bytes_alloc += sizeof(art_node256);
                 statistics::n256_nodes++;
             }
             break;
@@ -94,6 +127,13 @@ int art_tree_init(art_tree *t) {
     t->size = 0;
     return 0;
 }
+static void free_node(art_leaf *n){
+    if(!n) return;
+    int kl = n->key_len;
+    ValkeyModule_Free(LEAF_RAW(n));
+    statistics::leaf_nodes--;
+    statistics::node_bytes_alloc -= (sizeof(art_leaf) + kl);
+}
 /**
  * free a node while updating statistics 
  */
@@ -103,30 +143,33 @@ static void free_node(art_node *n) {
 
     // Special case leafs
     if (IS_LEAF(n)) {
-        ValkeyModule_Free(LEAF_RAW(n));
-        statistics::leaf_nodes--;
-        statistics::node_bytes_alloc -= sizeof(art_leaf);
+        art_leaf * leaf = LEAF_RAW(n);
+        free_node(leaf);
         return;
     }
 
     switch (n->type) {
         case NODE4:
             statistics::node_bytes_alloc -= sizeof(art_node4);
+            statistics::interior_bytes_alloc -= sizeof(art_node4);
             statistics::n4_nodes--;
             break;
 
         case NODE16:
             statistics::node_bytes_alloc -= sizeof(art_node16);
+            statistics::interior_bytes_alloc -= sizeof(art_node16);
             statistics::n16_nodes--;
             break;
 
         case NODE48:
-            statistics::node_bytes_alloc -= sizeof(art_node4);
+            statistics::node_bytes_alloc -= sizeof(art_node48);
+            statistics::interior_bytes_alloc -= sizeof(art_node48);
             statistics::n48_nodes--;
             break;
 
         case NODE256:
-            statistics::node_bytes_alloc -= sizeof(art_node4);
+            statistics::node_bytes_alloc -= sizeof(art_node256);
+            statistics::interior_bytes_alloc -= sizeof(art_node256);
             statistics::n256_nodes--;
             break;
 
@@ -153,11 +196,6 @@ static void free_node(art_node256 *n){
     free_node(&n->n);
 }
 
-static void free_node(art_leaf *n){
-    ValkeyModule_Free(LEAF_RAW(n));
-    statistics::leaf_nodes--;
-    statistics::node_bytes_alloc -= sizeof(art_leaf);
-}
 
 // Recursively destroys the tree
 static void destroy_node(art_node *n) {
@@ -231,9 +269,7 @@ int art_tree_destroy(art_tree *t) {
  * Returns the size of the ART tree.
  */
 
-#ifndef BROKEN_GCC_C99_INLINE
-extern inline uint64_t art_size(art_tree *t);
-#endif
+
 static int leaf_compare(const art_leaf *n, const unsigned char *key, int key_len, int depth) {
     (void)depth;
     // Fail if the key lengths are different
@@ -242,6 +278,80 @@ static int leaf_compare(const art_leaf *n, const unsigned char *key, int key_len
     // Compare the keys starting at the depth
     return memcmp(n->key, key, key_len);
 }
+enum OPERATION_BIT {
+    eq = 1,
+    gt = 2,
+    lt = 4
+};
+/**
+ * compare two buffers and put the result in a bitmap
+ */
+
+static unsigned bits_oper16(const unsigned char * a, const unsigned char * b, unsigned mask, int operbits){
+    unsigned bitfield = 0;
+    // support non-86 architectures
+    #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
+        // Compare the key to all 16 stored keys
+        __m128i cmp;
+        #if 0
+            if (operbits == (OPERATION_BIT::eq | OPERATION_BIT::gt)) {
+                // supposedly a >= b same as !(b < a)
+                cmp = _mm_cmplt_epi8(_mm_loadu_si128((__m128i*)b), _mm_loadu_si128((__m128i*)a));
+                bitfield |= _mm_movemask_epi8(cmp);
+                bitfield &= mask;
+                return ~bitfield;
+            }
+        #endif
+
+        if ((operbits & OPERATION_BIT::eq) == OPERATION_BIT::eq) {
+            // _mm_set1_epi8(a)
+            cmp = _mm_cmpeq_epi8(_mm_loadu_si128((__m128i*)a),_mm_loadu_si128((__m128i*)b)); 
+            bitfield |= _mm_movemask_epi8(cmp);
+        }
+        
+        if ((operbits & OPERATION_BIT::lt) == OPERATION_BIT::lt) {
+            cmp = _mm_cmplt_epi8(_mm_loadu_si128((__m128i*)a), _mm_loadu_si128((__m128i*)b));
+            bitfield |= _mm_movemask_epi8(cmp);
+        }       
+        
+        if ((operbits & OPERATION_BIT::gt) == OPERATION_BIT::gt) {
+            cmp = _mm_cmpgt_epi8(_mm_loadu_si128((__m128i*)a), _mm_loadu_si128((__m128i*)b));
+            bitfield |= (_mm_movemask_epi8(cmp));
+        }
+    #else
+        // Compare the key to all 16 stored keys
+        if (operbits & OPERATION_BIT::eq) {
+            for (i = 0; i < 16; ++i) {
+                if (a[i] == b[i])
+                    bitfield |= (1 << i);
+            }
+        }
+        if (operbits & OPERATION_BIT::gt) {
+            for (i = 0; i < 16; ++i) {
+                if (a[i] > b[i])
+                    bitfield |= (1 << i);
+            }
+        }
+        if (operbits & OPERATION_BIT::lt) {
+            for (i = 0; i < 16; ++i) {
+                if (a[i] < b[i])
+                    bitfield |= (1 << i);
+            }
+        }
+    #endif
+    bitfield &= mask;
+    return bitfield;
+}
+template<int N, typename C = unsigned char>
+struct nuchar {
+    C data[N];
+    nuchar(C c){
+        memset(data, c, sizeof(data));
+    }
+    operator const C* () const {
+        return data;
+    } 
+};
 /**
  * find first not less than
  */
@@ -277,16 +387,13 @@ static trace_element lower_bound_child(art_node *n, const unsigned char * key, i
         
         case NODE16:
             p.p2 = (art_node16*)n;
-
-            for (i = 0; i < n->num_children; ++i) {
-                if (prev > p.p2->keys[i]) {
-                    abort();
+            {
+                int mask = (1 << n->num_children) - 1;
+                unsigned bf = bits_oper16(p.p2->keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt); // inverse logic
+                if (bf) {
+                    i = __builtin_ctz(bf);
+                    return {n,p.p2->children[i],i};
                 }
-                if (p.p2->keys[i] >= c){
-                    *is_equal = (p.p2->keys[i] == c);
-                    return {n,p.p2->children[i],i};// the keys are ordered so fine I think
-                }
-                prev = p.p2->keys[i];
             }
             break;
         
@@ -324,7 +431,7 @@ static trace_element lower_bound_child(art_node *n, const unsigned char * key, i
 }
 
 static art_node** find_child(art_node *n, unsigned char c) {
-    int i, mask, bitfield;
+    int i;
     union {
         art_node4 *p1;
         art_node16 *p2;
@@ -346,48 +453,11 @@ static art_node** find_child(art_node *n, unsigned char c) {
         {
         case NODE16:
             p.p2 = (art_node16*)n;
-
-            // support non-86 architectures
-            #ifdef __i386__
-                // Compare the key to all 16 stored keys
-                __m128i cmp;
-                cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
-                        _mm_loadu_si128((__m128i*)p.p2->keys));
-                
-                // Use a mask to ignore children that don't exist
-                mask = (1 << n->num_children) - 1;
-                bitfield = _mm_movemask_epi8(cmp) & mask;
-            #else
-            #ifdef __amd64__
-                // Compare the key to all 16 stored keys
-                __m128i cmp;
-                cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
-                        _mm_loadu_si128((__m128i*)p.p2->keys));
-
-                // Use a mask to ignore children that don't exist
-                mask = (1 << n->num_children) - 1;
-                bitfield = _mm_movemask_epi8(cmp) & mask;
-            #else
-                // Compare the key to all 16 stored keys
-                bitfield = 0;
-                for (i = 0; i < 16; ++i) {
-                    if (p.p2->keys[i] == c)
-                        bitfield |= (1 << i);
-                }
-
-                // Use a mask to ignore children that don't exist
-                mask = (1 << n->num_children) - 1;
-                bitfield &= mask;
-            #endif
-            #endif
-
-            /*
-             * If we have a match (any bit set) then we can
-             * return the pointer match using ctz to get
-             * the index.
-             */
-            if (bitfield)
-                return &p.p2->children[__builtin_ctz(bitfield)];
+            i = bits_oper16(p.p2->keys, nuchar<16>(c), (1 << n->num_children) - 1, OPERATION_BIT::eq);
+            if (i) {
+                i = __builtin_ctz(i);
+                return &p.p2->children[i];
+            }
             break;
         }
 
@@ -452,6 +522,7 @@ static int leaf_matches(const art_leaf *n, const unsigned char *key, int key_len
  * the value pointer is returned.
  */
 void* art_search(const art_tree *t, const unsigned char *key, int key_len) {
+    statistics::get_ops++;
     art_node **child;
     art_node *n = t->root;
     int prefix_len, depth = 0;
@@ -482,51 +553,6 @@ void* art_search(const art_tree *t, const unsigned char *key, int key_len) {
     return NULL;
 }
 
-#if 0
-static child_list init_cl(int size, art_node*const* n){
-    child_list r = {size, n};
-    return r;
-}
-
-static child_list get_children(const art_node *n){
-    child_list r = {0,NULL}; 
-    if (!n) return r;
-    if (IS_LEAF(n)) return init_cl(0,NULL);
-
-    int idx;
-    switch (n->type) {
-        case NODE4:
-            return init_cl(n->num_children, ((const art_node4*)n)->children);        
-        
-        case NODE16:
-            return init_cl(n->num_children, ((const art_node16*)n)->children);        
-        
-        case NODE48:
-            idx=255;
-            while (!((const art_node48*)n)->keys[idx]) idx--;
-            idx = ((const art_node48*)n)->keys[idx] - 1;
-            return init_cl(256 - idx, &(((const art_node48*)n)->children)[idx]);
-        case NODE256:
-            idx=255;
-            while (!((const art_node256*)n)->children[idx]) idx--;
-            return init_cl(256 - idx, &(((const art_node256*)n)->children)[idx]);
-        default:
-            abort();
-    }
-    return init_cl(0,NULL);
-}
-/**
- * set parent of each child with new parent
- */
-static void set_new_parent(art_node* current, art_node* new_parent){
-    child_list cl = get_children(current);
-    for(int i = 0; i < cl.size; ++i){
-        if(cl.children[i]){
-            cl.children[i]->parent = new_parent;
-        }
-    }
-}
-#endif
 // Find the maximum leaf under a node
 static art_leaf* maximum(const art_node *n) {
     // Handle base cases
@@ -771,6 +797,7 @@ static bool increment_trace(trace_list& trace){
 }
 
 void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len) {
+    statistics::lb_ops++;
     const art_leaf* al;
     trace_list tl;
     al = lower_bound(tl, t, key, key_len);
@@ -781,6 +808,7 @@ void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len) 
 }
 
 int art_range(const art_tree *t, const unsigned char *key, int key_len, const unsigned char *key_end, int key_end_len, art_callback cb, void *data) {
+    statistics::range_ops++;
     trace_list tl;
     const art_leaf* al;
     al = lower_bound(tl, t, key, key_len);
@@ -790,6 +818,7 @@ int art_range(const art_tree *t, const unsigned char *key, int key_len, const un
             if(IS_LEAF(n)){
                 art_leaf * leaf = LEAF_RAW(n);
                 if(leaf_compare(leaf, key_end, key_end_len, 0) < 0) { // upper bound is not
+                    ++statistics::iter_range_ops;
                     int r = cb(data, leaf->key, leaf->key_len, leaf->value); 
                     if( r != 0) 
                         return r;
@@ -809,6 +838,7 @@ int art_range(const art_tree *t, const unsigned char *key, int key_len, const un
  * Returns the minimum valued leaf
  */
 art_leaf* art_minimum(art_tree *t) {
+    statistics::min_ops++;
     return minimum((art_node*)t->root);
 }
 
@@ -816,6 +846,7 @@ art_leaf* art_minimum(art_tree *t) {
  * Returns the maximum valued leaf
  */
 art_leaf* art_maximum(art_tree *t) {
+    statistics::max_ops++;
     return maximum((art_node*)t->root);
 }
 
@@ -876,39 +907,8 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
     if (n->n.num_children < 16) {
         unsigned mask = (1 << n->n.num_children) - 1;
         
-        // support non-x86 architectures
-        #ifdef __i386__
-            __m128i cmp;
-
-            // Compare the key to all 16 stored keys
-            cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
-                    _mm_loadu_si128((__m128i*)n->keys));
-
-            // Use a mask to ignore children that don't exist
-            unsigned bitfield = _mm_movemask_epi8(cmp) & mask;
-        #else
-        #ifdef __amd64__
-            __m128i cmp;
-
-            // Compare the key to all 16 stored keys
-            cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
-                    _mm_loadu_si128((__m128i*)n->keys));
-
-            // Use a mask to ignore children that don't exist
-            unsigned bitfield = _mm_movemask_epi8(cmp) & mask;
-        #else
-            // Compare the key to all 16 stored keys
-            unsigned bitfield = 0;
-            for (short i = 0; i < 16; ++i) {
-                if (c < n->keys[i])
-                    bitfield |= (1 << i);
-            }
-
-            // Use a mask to ignore children that don't exist
-            bitfield &= mask;    
-        #endif
-        #endif
-
+        unsigned bitfield = bits_oper16(nuchar<16>(c), n->keys, mask, OPERATION_BIT::lt);
+        
         // Check if less than any
         unsigned idx;
         if (bitfield) {
@@ -1106,9 +1106,15 @@ RECURSE_SEARCH:;
  * the old value pointer is returned.
  */
 void* art_insert(art_tree *t, const unsigned char *key, int key_len, void *value) {
+    
     int old_val = 0;
     void *old = recursive_insert(t->root, &t->root, key, key_len, value, 0, &old_val, 1);
-    if (!old_val) t->size++;
+    if (!old_val){
+        t->size++;
+        ++statistics::insert_ops;
+    } else {
+        ++statistics::set_ops;
+    }
     return old;
 }
 
@@ -1122,9 +1128,13 @@ void* art_insert(art_tree *t, const unsigned char *key, int key_len, void *value
  * the old value pointer is returned.
  */
 void* art_insert_no_replace(art_tree *t, const unsigned char *key, int key_len, void *value) {
+    ++statistics::insert_ops;
+
     int old_val = 0;
     void *old = recursive_insert(t->root, &t->root, key, key_len, value, 0, &old_val, 0);
-    if (!old_val) t->size++;
+    if (!old_val){
+         t->size++;     
+    }
     return old;
 }
 
@@ -1290,11 +1300,14 @@ static art_leaf* recursive_delete(art_node *n, art_node **ref, const unsigned ch
  * the value pointer is returned.
  */
 void* art_delete(art_tree *t, const unsigned char *key, int key_len) {
+    ++statistics::delete_ops;
+
     art_leaf *l = recursive_delete(t->root, &t->root, key, key_len, 0);
     if (l) {
         t->size--;
         void *old = l->value;
         free_node(l);
+        
         return old;
     }
     return NULL;
@@ -1306,6 +1319,7 @@ static int recursive_iter(art_node *n, art_callback cb, void *data) {
     if (!n) return 0;
     if (IS_LEAF(n)) {
         art_leaf *l = LEAF_RAW(n);
+        ++statistics::iter_ops;
         return cb(data, (const unsigned char*)l->key, l->key_len, l->value);
     }
 
@@ -1360,6 +1374,10 @@ static int recursive_iter(art_node *n, art_callback cb, void *data) {
  * @return 0 on success, or the return of the callback.
  */
 int art_iter(art_tree *t, art_callback cb, void *data) {
+    ++statistics::iter_start_ops;
+    if (!t) {
+        return -1;
+    }
     return recursive_iter(t->root, cb, data);
 }
 
@@ -1388,6 +1406,12 @@ static int leaf_prefix_matches(const art_leaf *n, const unsigned char *prefix, i
  * @return 0 on success, or the return of the callback.
  */
 int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_callback cb, void *data) {
+    ++statistics::iter_start_ops;
+    
+    if (!t) {
+        return -1;
+    }
+    
     art_node **child;
     art_node *n = t->root;
     int prefix_len, depth = 0;
@@ -1440,6 +1464,17 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
     }
     return 0;
 }
+/**
+ * just return the size
+ */
+uint64_t art_size(art_tree *t) {
+    ++statistics::size_ops;
+
+    if(t == NULL) 
+        return 0;
+    
+    return t->size;
+}
 
 art_statistics art_get_statistics(){
     art_statistics as;
@@ -1450,4 +1485,21 @@ art_statistics art_get_statistics(){
     as.node48_nodes = statistics::n4_nodes;
     as.bytes_allocated = statistics::node_bytes_alloc;
     return as;
+}
+
+art_ops_statistics art_get_ops_statistics(){
+
+    art_ops_statistics os;
+    os.delete_ops = statistics::delete_ops;
+    os.get_ops = statistics::get_ops;
+    os.insert_ops = statistics::insert_ops;
+    os.iter_ops = statistics::iter_ops;
+    os.iter_range_ops = statistics::iter_range_ops;
+    os.lb_ops = statistics::lb_ops;
+    os.max_ops = statistics::max_ops;
+    os.min_ops = statistics::min_ops;
+    os.range_ops = statistics::range_ops;
+    os.set_ops = statistics::set_ops;
+    os.size_ops = statistics::size_ops;
+    return os;
 }

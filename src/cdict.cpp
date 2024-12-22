@@ -45,30 +45,16 @@ static art_tree *get_art(ValkeyModuleCtx *ctx)
     return &ad;
 }
 
-template <typename V>
-static const uint8_t *ucast(const V *v)
-{
-    return reinterpret_cast<const uint8_t *>(v);
-}
-template <typename V>
-uint8_t *ucast(V *v)
-{
-    return reinterpret_cast<uint8_t *>(v);
-}
-
-template <typename V>
-static char *ccast(V *v)
-{
-    return reinterpret_cast<char *>(v);
-}
 static int key_ok(const char * k, size_t klen){
-    if (k == NULL){
+    if (k == NULL)
         return -1;
-    }
+
     if (klen == 0) 
         return -1;
+    
     if (*k == 0 || *k == 1 || *k == 2)
         return -1;
+    
     return 0;
 
 }
@@ -81,9 +67,38 @@ static int key_check(ValkeyModuleCtx *ctx, const char * k, size_t klen){
     if (klen == 0) 
         return ValkeyModule_ReplyWithError(ctx, "No empty keys");
 
-    if (*k == 0 || *k == 1)
+    if (*k == 0 || *k == 1 || *k == 2)
         return ValkeyModule_ReplyWithError(ctx, "Keys cannot start with a byte containing 0,1 or 2");
+    
     return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
+}
+
+static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, size_t key_len){
+    double dk;
+    uint64_t ik;
+    const char * k;
+    size_t kl;
+    
+    if((*enck == 0 || *enck == 1) && key_len == 9){
+        ik = conversion::enc_bytes_to_int(enck, key_len);
+        if (*enck == 1) {
+            memcpy(&dk, &ik, sizeof(ik));
+            if (ValkeyModule_ReplyWithDouble(ctx, dk) == VALKEYMODULE_ERR) {
+                return -1;    
+            }
+        } else {
+            if (ValkeyModule_ReplyWithLongLong(ctx, ik) == VALKEYMODULE_ERR) {
+                return -1;    
+            }
+        }
+    } else { //it's a string
+        k = (const char*) &enck[0];
+        kl = key_len;
+        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, kl) == VALKEYMODULE_ERR) {
+            return -1;
+        }
+    }
+    return 0;
 }
 struct iter_state {
     ValkeyModuleCtx *ctx;
@@ -91,21 +106,15 @@ struct iter_state {
     ValkeyModuleString **argv;
     int64_t replylen;
     int64_t count;
-    std::string chars;
 
     iter_state(ValkeyModuleCtx *ctx, ValkeyModuleDictIter *iter, ValkeyModuleString **argv, int64_t count)
-    :   ctx(ctx), iter(iter), argv(argv), replylen(0), count(count), chars("")
+    :   ctx(ctx), iter(iter), argv(argv), replylen(0), count(count)
     {}
 
     iter_state(const iter_state& is) = delete; 
     iter_state& operator=(const iter_state& ) = delete;
 
     int iterate(const unsigned char *key, uint32_t key_len, void *) {
-        double dk;
-        uint64_t ik;
-        const char * k;
-        size_t kl;
-        
         if(key_len == 0) { /// 
             return -1;
         }
@@ -114,29 +123,16 @@ struct iter_state {
             return -1;
         }
         
-        if((*key == 0 || *key == 1) && key_len == 9){
-            ik = conversion::enc_bytes_to_int(key, key_len);
-            if (*key == 1) {
-                memcpy(&dk, &ik, sizeof(ik));
-                chars = std::to_string(dk);
-            } else {
-                chars = std::to_string(ik); // its probably slow
-                
-            }
-            k = chars.c_str();
-            kl = chars.length();
-        }else { //it's a string
-            k = (const char*) &key[0];
-            kl = key_len;
-        }
+        if(0 != reply_encoded_key(ctx, key, key_len)){
+            return -1;
+        };
+
         if (replylen >= count)
             return -1;
         if (ValkeyModule_DictCompare(iter, "<=", argv[2]) == VALKEYMODULE_ERR)
             return -1;
         
-        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, kl) == VALKEYMODULE_ERR) {
-            return -1;
-        };
+        
         replylen++;
         return 0;
     }
@@ -164,6 +160,9 @@ extern "C" {
         
         if (key_ok(k1, k1len) != 0)
             return key_check(ctx, k1, k1len);
+        if (key_ok(k2, k2len) != 0)
+            return key_check(ctx, k2, k2len);
+        
         auto c1 = conversion::convert(k1, k1len);
         auto c2 = conversion::convert(k2, k2len);
         
@@ -213,6 +212,30 @@ extern "C" {
         return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 
+    /* CDICT.ADD <key> <value>
+     *
+     * Add the specified key only if its not there, with specified value. */
+    int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
+    {
+        if (argc != 3)
+            return ValkeyModule_WrongArity(ctx);
+        ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
+        
+        size_t klen;
+        const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
+        
+        if (key_ok(k, klen) != 0)
+            return key_check(ctx, k, klen);
+        
+        auto converted = conversion::convert(k, klen);
+        art_insert_no_replace(get_art(ctx), converted.get_data(), converted.get_size(), argv[2]);
+
+        /* We need to keep a reference to the value stored at the key, otherwise
+         * it would be freed when this callback returns. */
+        ValkeyModule_RetainString(NULL, argv[2]);
+        return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+    }
+
     /* CDICT.GET <key>
      *
      * Return the value of the specified key, or a null reply if the key
@@ -239,6 +262,47 @@ extern "C" {
         else
         {
             return ValkeyModule_ReplyWithString(ctx, val);
+        }
+    }
+    /* CDICT.MINIMUM
+     *
+     * Return the value of the specified key, or a null reply if the key
+     * is not defined. */
+    int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    {
+        if (argc != 1)
+            return ValkeyModule_WrongArity(ctx);
+
+        art_leaf *r = art_minimum(get_art(ctx));
+
+        if (r == NULL)
+        {
+            return ValkeyModule_ReplyWithNull(ctx);
+        }
+        else
+        {
+            return reply_encoded_key(ctx, r->key, r->key_len);
+        }
+    }
+
+    /* CDICT.MAXIMUM
+     *
+     * Return the value of the specified key, or a null reply if the key
+     * is not defined. */
+    int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    {
+        if (argc != 1)
+            return ValkeyModule_WrongArity(ctx);
+
+        art_leaf *r = art_maximum(get_art(ctx));
+
+        if (r == NULL)
+        {
+            return ValkeyModule_ReplyWithNull(ctx);
+        }
+        else
+        {
+            return reply_encoded_key(ctx, r->key, r->key_len);
         }
     }
 
@@ -300,9 +364,19 @@ extern "C" {
             return ValkeyModule_ReplyWithString(ctx, val);
         }
     }
-    /* CDICT.RM <key>
+    /* CDICT.SIZE <key>
+     * @return the size or o.k.a. key count. 
+     */
+    int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    {
+        if (argc !=1)
+            return ValkeyModule_WrongArity(ctx);
+        return ValkeyModule_ReplyWithLongLong(ctx, art_size(get_art(ctx)));
+        
+    }
+    /* CDICT.STATISTICS
      *
-     * remove the value associated with the key and return the key if such a key existed. */
+     * get memory statistics. */
     int cmd_STATISTICS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
         if (argc != 1)
@@ -338,19 +412,76 @@ extern "C" {
         return 0;
     }
 
-    
+    /* CDICT.STATISTICS
+     *
+     * get memory statistics. */
+    int cmd_OPS_STATISTICS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    {
+        if (argc != 1)
+            return ValkeyModule_WrongArity(ctx);
+
+        art_ops_statistics as = art_get_ops_statistics();
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Deletes");
+        ValkeyModule_ReplyWithLongLong(ctx,as.delete_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Retrieves"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.get_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Inserts"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.insert_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Regular Iterations"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.iter_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "Range Iterations");
+        ValkeyModule_ReplyWithLongLong(ctx,as.iter_range_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Lower Bounds"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.lb_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Maximums"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.max_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Minimums"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.min_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Ranges Started"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.range_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Sets"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.set_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Size Requests"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.size_ops);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 11);
+        return 0;
+    }
 
     /* This function must be present on each module. It is used in order to
      * register the commands into the server. */
-    int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
+    int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int)
     {
-        VALKEYMODULE_NOT_USED(argv);
-        VALKEYMODULE_NOT_USED(argc);
 
         if (ValkeyModule_Init(ctx, "cdict", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
         if (ValkeyModule_CreateCommand(ctx, "cdict.set", cmd_SET, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+        
+        if (ValkeyModule_CreateCommand(ctx, "cdict.add", cmd_ADD, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
         if (ValkeyModule_CreateCommand(ctx, "cdict.get", cmd_GET, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
@@ -359,13 +490,25 @@ extern "C" {
         if (ValkeyModule_CreateCommand(ctx, "cdict.lb", cmd_LB, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.rm", cmd_RM, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "cdict.rem", cmd_RM, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.range", cmd_KEYRANGE, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "cdict.range", cmd_KEYRANGE, "readonly", 1, 2, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.statistics", cmd_STATISTICS, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "cdict.size", cmd_SIZE, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "cdict.statistics", cmd_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+        
+        if (ValkeyModule_CreateCommand(ctx, "cdict.operations", cmd_OPS_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "cdict.maximum", cmd_MAX, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "cdict.minimum", cmd_MIN, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
         /* Create our global dictionary. Here we'll set our keys and values. */

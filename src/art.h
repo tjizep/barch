@@ -101,6 +101,20 @@ struct art_statistics {
     uint64_t node256_nodes;
     uint64_t bytes_allocated;
 };
+struct art_ops_statistics {
+    uint64_t delete_ops;
+    uint64_t set_ops;
+    uint64_t iter_ops;
+    uint64_t iter_range_ops;
+    uint64_t range_ops;
+    uint64_t get_ops;
+    uint64_t lb_ops;
+    uint64_t size_ops;
+    uint64_t insert_ops;
+    uint64_t min_ops;
+    uint64_t max_ops;
+    
+};
 /**
  * Main struct, points to root.
  */
@@ -138,13 +152,7 @@ int art_tree_destroy(art_tree *t);
 /**
  * Returns the size of the ART tree.
  */
-#ifdef BROKEN_GCC_C99_INLINE
-# define art_size(t) ((t)->size)
-#else
-inline uint64_t art_size(art_tree *t) {
-    return t->size;
-}
-#endif
+uint64_t art_size(art_tree *t);
 
 /**
  * inserts a new value into the art tree
@@ -251,6 +259,11 @@ void art_iter_from(const art_tree *t, const unsigned char *key, int key_len);
  * @return art_statistics 
  */
 art_statistics art_get_statistics();
+
+/**
+ * get statistics for each operation performed
+ */
+art_ops_statistics art_get_ops_statistics();
 
 #ifdef __cplusplus
 }

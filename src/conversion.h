@@ -33,12 +33,12 @@ namespace conversion
         uint64_t in = n;
         const uint64_t mask = (uint64_t)0xFF;
         r.bytes[0] = type_byte; // most significant is the type (overriding any value bytes)
-        size_t i = r.get_size() - 2;
+        size_t E = r.get_size() - 1;
         // writing from least to most significant byte
-        for (; i > 1; --i)
+        for (size_t i = E ; i > 1; --i)
         {
             r.bytes[i] = (uint8_t)(in & mask);
-            in = in / 256; // drop the written bits (probably should shift 8)
+            in = in >> 8; // drop the written bits
         }
         return r;
     }

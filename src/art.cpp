@@ -358,11 +358,9 @@ static trace_element lower_bound_child(art_node *n, const unsigned char * key, i
 
     int i, uc;
     unsigned char c = 0x00;
-    if(IS_LEAF(n)) return {NULL, NULL, 0};
+    if (!n) return {NULL, NULL, 0};
+    if (IS_LEAF(n)) return {NULL, NULL, 0};
     
-    if (depth >= key_len){
-        abort();
-    }
     c = key[std::min(depth, key_len)];
     switch (n->type) {
         case NODE4:

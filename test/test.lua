@@ -1,3 +1,6 @@
+local vk
+vk = redis
+
 local count = 1000
 local result = {}
 local i = 1
@@ -5,8 +8,8 @@ local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
 local keylen = 8
 local index = 0
-local succeses = 0
 local convert
+local tests = 0
 local inc = function()
     index = index + 1
     return index
@@ -37,46 +40,50 @@ end
 
 local test = function()
 
-    result[inc()] = redis.call('ODLB',"abaachcd")
+    local succeses = 0
+    tests = tests + 1
+    result[inc()] = {"running test "..tests}
+    result[inc()] = vk.call('ODLB',"abaachcd")
 
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
-        redis.call('ODSET',k,v)
-        if not redis.call('ODGET',k) == v then
-            result[inc()] = {k, v, redis.call('ODGET',k)} --redis.call('cdict.lb',k)
+        vk.call('ODSET',k,v)
+        if not vk.call('ODGET',k) == v then
+            result[inc()] = {k, v, vk.call('ODGET',k)} --vk.call('cdict.lb',k)
         else
             succeses = succeses + 1
         end
         
     end
 
-    result[inc()] = {"'ODRANGE',convert(200), convert(210), 1000", redis.call('ODRANGE',convert(200), convert(210), 1000)}
-    result[inc()] = {"'ODMIN'",redis.call('ODMIN')}
-    result[inc()] = {"'ODMAX'",redis.call('ODMAX')}
-    result[inc()] = {"'ODLB'",redis.call('ODLB',"abaachcd")}
-    result[inc()] = {[['ODLB',"ddddddde"]], redis.call('ODLB',"ddddddde")}
-    result[inc()] = {[['ODLB',"z"]], redis.call('ODLB',"z")}
-    result[inc()] = {[['ODLB',"dddddddd"]], redis.call('ODLB',"dddddddd")}
-    result[inc()] = {[['ODLB',"aaaaaad#"]], redis.call('ODLB',"aaaaaad#")}
-    result[inc()] = {[['ODLB',"aaaaaad1"]], redis.call('ODLB',"aaaaaad1")}
-    result[inc()] = {[['ODLB',"aaaadaee"]], redis.call('ODLB',"aaaadaee")}
-    result[inc()] = {[['ODLB',"aaaaaaad"]], redis.call('ODLB',"aaaaaaad")}
-    result[inc()] = {[['ODLB',"aaaachcd"]], redis.call('ODLB',"aaaachcd")}
+    result[inc()] = {"'ODRANGE',convert(200), convert(210), 1000", vk.call('ODRANGE',convert(200), convert(210), 1000)}
+    result[inc()] = {"'ODMIN'", vk.call('ODMIN')}
+    result[inc()] = {"'ODMAX'", vk.call('ODMAX')}
+    result[inc()] = {"'ODLB'", vk.call('ODLB',"abaachcd")}
+    result[inc()] = {[['ODLB',"ddddddde"]], vk.call('ODLB',"ddddddde")}
+    result[inc()] = {[['ODLB',"z"]], vk.call('ODLB',"z")}
+    result[inc()] = {[['ODLB',"dddddddd"]], vk.call('ODLB',"dddddddd")}
+    result[inc()] = {[['ODLB',"aaaaaad#"]], vk.call('ODLB',"aaaaaad#")}
+    result[inc()] = {[['ODLB',"aaaaaad1"]], vk.call('ODLB',"aaaaaad1")}
+    result[inc()] = {[['ODLB',"aaaadaee"]], vk.call('ODLB',"aaaadaee")}
+    result[inc()] = {[['ODLB',"aaaaaaad"]], vk.call('ODLB',"aaaaaaad")}
+    result[inc()] = {[['ODLB',"aaaachcd"]], vk.call('ODLB',"aaaachcd")}
 
-    result[inc()] = {[['ODSTATS']], redis.call('ODSTATS')}
-    result[inc()] = {[['ODSIZE']], redis.call('ODSIZE')}
+    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
+    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
 
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
-        redis.call('ODREM',k)
+        vk.call('ODREM',k)
     end
     
-    result[inc()] = {[['ODSTATS']], redis.call('ODSTATS')}
-    result[inc()] = {[['ODSIZE']],redis.call('ODSIZE')}
-    result[inc()] = {[['ODOPS']], redis.call('ODOPS')}
-    result[inc()] = {"succeses", succeses}
+    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
+    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
+    result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
+    result[inc()] = {"succeses for test "..tests..": "..succeses}
+    
 end
 
 convert = tochars123

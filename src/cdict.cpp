@@ -475,40 +475,40 @@ extern "C" {
     int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int)
     {
 
-        if (ValkeyModule_Init(ctx, "cdict", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
+        if (ValkeyModule_Init(ctx, "OD", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.set", cmd_SET, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODSET", cmd_SET, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
         
-        if (ValkeyModule_CreateCommand(ctx, "cdict.add", cmd_ADD, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODADD", cmd_ADD, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.get", cmd_GET, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODGET", cmd_GET, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
         
-        if (ValkeyModule_CreateCommand(ctx, "cdict.lb", cmd_LB, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODLB", cmd_LB, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.rem", cmd_RM, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODREM", cmd_RM, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.range", cmd_KEYRANGE, "readonly", 1, 2, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODRANGE", cmd_KEYRANGE, "readonly", 1, 2, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.size", cmd_SIZE, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODSIZE", cmd_SIZE, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.statistics", cmd_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODSTATS", cmd_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
         
-        if (ValkeyModule_CreateCommand(ctx, "cdict.operations", cmd_OPS_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODOPS", cmd_OPS_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.maximum", cmd_MAX, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODMAX", cmd_MAX, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "cdict.minimum", cmd_MIN, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, "ODMIN", cmd_MIN, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
         /* Create our global dictionary. Here we'll set our keys and values. */

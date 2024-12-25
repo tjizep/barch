@@ -68,6 +68,15 @@ struct trace_element {
     }
 };
 
+template <typename T> 
+static T* get_node(art_node* n){
+    return (T*)n;
+}
+template <typename T> 
+static const T* get_node(const art_node* n) {
+    return (T*)n;
+}
+
 typedef std::vector<trace_element> trace_list;
 
 /**
@@ -84,7 +93,7 @@ static art_node* alloc_node(uint8_t type) {
                 statistics::node_bytes_alloc += sizeof(art_node4);
                 statistics::interior_bytes_alloc += sizeof(art_node4);
                 statistics::n4_nodes++;
-            } 
+            } // else theres an oom condition - this code should not be called in that case but you never know 
             break;
         case NODE16:
             n = (art_node*)ValkeyModule_Calloc(1, sizeof(art_node16));
@@ -210,41 +219,31 @@ static void destroy_node(art_node *n) {
 
     // Handle each node type
     int i, idx;
-    union {
-        art_node4 *p1;
-        art_node16 *p2;
-        art_node48 *p3;
-        art_node256 *p4;
-    } p;
     switch (n->type) {
         case NODE4:
-            p.p1 = (art_node4*)n;
             for (i=0;i<n->num_children;i++) {
-                destroy_node(p.p1->children[i]);
+                destroy_node(get_node<art_node4>(n)->children[i]);
             }
             break;
 
         case NODE16:
-            p.p2 = (art_node16*)n;
             for (i=0;i<n->num_children;i++) {
-                destroy_node(p.p2->children[i]);
+                destroy_node(get_node<art_node16>(n)->children[i]);
             }
             break;
 
         case NODE48:
-            p.p3 = (art_node48*)n;
             for (i=0;i<256;i++) {
-                idx = ((art_node48*)n)->keys[i]; 
+                idx = get_node<art_node48>(n)->keys[i]; 
                 if (!idx) continue; 
-                destroy_node(p.p3->children[idx-1]);
+                destroy_node(get_node<art_node48>(n)->children[idx-1]);
             }
             break;
 
         case NODE256:
-            p.p4 = (art_node256*)n;
             for (i=0;i<256;i++) {
-                if (p.p4->children[i])
-                    destroy_node(p.p4->children[i]);
+                if (get_node<art_node256>(n)->children[i])
+                    destroy_node(get_node<art_node256>(n)->children[i]);
             }
             break;
 
@@ -292,8 +291,8 @@ static unsigned bits_oper16(const unsigned char * a, const unsigned char * b, un
     // support non-86 architectures
     #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
         // Compare the key to all 16 stored keys
-        __m128i cmp;
-        #if 0
+        __m128i cmp; 
+        #if 0 // this doesnt work yet but hopefully one day
             if (operbits == (OPERATION_BIT::eq | OPERATION_BIT::gt)) {
                 // supposedly a >= b same as !(b < a)
                 cmp = _mm_cmplt_epi8(_mm_loadu_si128((__m128i*)b), _mm_loadu_si128((__m128i*)a));
@@ -358,68 +357,66 @@ struct nuchar {
 static trace_element lower_bound_child(art_node *n, const unsigned char * key, int key_len, int depth, int * is_equal) {
 
     int i, uc;
-    unsigned char prev = 0x00, c = 0x00;
-    union {
-        art_node4 *p1;
-        art_node16 *p2;
-        art_node48 *p3;
-        art_node256 *p4;
-    } p;
+    unsigned char c = 0x00;
+    if(IS_LEAF(n)) return {NULL, NULL, 0};
+    
     if (depth >= key_len){
         abort();
     }
-    c = key[depth];
+    c = key[std::min(depth, key_len)];
     switch (n->type) {
         case NODE4:
-            p.p1 = (art_node4*)n;
-            for (i=0 ; i < n->num_children; i++) {
-                if(prev > p.p1->keys[i]){
-                    abort();
+            {
+                auto p = get_node<art_node4>(n);
+                for (i=0 ; i < n->num_children; i++) {
+                    if (p->keys[i] >= c){
+                        *is_equal = p->keys[i] == c;
+                        return {n,p->children[i],i};
+                    }
                 }
-		        if (p.p1->keys[i] >= c){
-                    *is_equal = p.p1->keys[i] == c;
-                    return {n,p.p1->children[i],i};
-                }
-                prev = p.p1->keys[i];
             }
             break;
 
         
         case NODE16:
-            p.p2 = (art_node16*)n;
             {
+                auto p = get_node<art_node16>(n);
                 int mask = (1 << n->num_children) - 1;
-                unsigned bf = bits_oper16(p.p2->keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt); // inverse logic
+                unsigned bf = bits_oper16(p->keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt); // inverse logic
                 if (bf) {
                     i = __builtin_ctz(bf);
-                    return {n,p.p2->children[i],i};
+                    return {n,p->children[i],i};
                 }
             }
             break;
         
 
         case NODE48:
-            p.p3 = (art_node48*)n;
-            /*
-             * find first not less than
-             * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
-             */
-            uc = c;
-            for (; uc < 256;uc++){
-                i = p.p3->keys[uc];
-                if(i > 0){
-                    *is_equal = (i == c);
-                    return {n,p.p3->children[i-1],i-1};
+            {
+                auto p = get_node<art_node48>(n);
+                /*
+                * find first not less than
+                * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
+                */
+                uc = c;
+                for (; uc < 256;uc++){
+                    i = p->keys[uc];
+                    if(i > 0){
+                        *is_equal = (i == c);
+                        return {n,p->children[i-1],i-1};
+                    }
                 }
             }
             break;
 
         case NODE256:
-            p.p4 = (art_node256*)n;
-            for (i = c; i < 256; ++i) {
-                if (p.p4->children[i]) {// because nodes are ordered accordingly
-                    *is_equal = (i == c);
-                    return {n,p.p4->children[i],i};
+            {   
+                auto p = get_node<art_node256>(n);
+                for (i = c; i < 256; ++i) {
+                    if (p->children[i]) {// because nodes are ordered accordingly
+                        *is_equal = (i == c);
+                        return {n,p->children[i],i};
+                    }
                 }
             }
             break;
@@ -484,7 +481,47 @@ static art_node** find_child(art_node *n, unsigned char c) {
 static inline int min(int a, int b) {
     return (a < b) ? a : b;
 }
+/**
+ * return last element of trace unless its empty
+ */
+static trace_element& last_el(trace_list& trace){
+    if(trace.empty())
+        abort();
+    return *(trace.rbegin());
+}
+static trace_element first_child_off(art_node* n);
+static trace_element last_child_off(art_node* n);
+static art_leaf* maximum(const art_node *n);
+/**
+ * assuming that the path to each leaf is not the same depth
+ * we always have to check and extend if required
+ * @return false if any non leaf node has no child 
+ */
+static bool extend_trace_min(art_node * root, trace_list& trace){
+    if (trace.empty()) {
+        trace.push_back(first_child_off(root));
+    };
+    trace_element u = last_el(trace); 
+    while(!IS_LEAF(u.child)){
+        u = first_child_off(u.child);
+        if(u.empty()) return false;
+        trace.push_back(u);
+    }
+    return true;
+}
 
+static bool extend_trace_max(art_node* root, trace_list& trace){
+    if (trace.empty()) {
+        trace.push_back(last_child_off(root));
+    };
+    trace_element u = last_el(trace); 
+    while (!IS_LEAF(u.child)) {
+        u = last_child_off(u.child);
+        if (u.empty()) return false;
+        trace.push_back(u);
+    }
+    return true;
+}
 /**
  * Returns the number of prefix characters shared between
  * the key and node.
@@ -536,13 +573,18 @@ void* art_search(const art_tree *t, const unsigned char *key, int key_len) {
             }
             return NULL;
         }
-
+        if (depth >= key_len){
+            return NULL;
+        }
         // Bail if the prefix does not match
         if (n->partial_len) {
             prefix_len = check_prefix(n, key, key_len, depth);
             if (prefix_len != min(MAX_PREFIX_LEN, n->partial_len))
                 return NULL;
             depth = depth + n->partial_len;
+            if (depth >= key_len){
+                return NULL;
+            }
         }
 
         // Recursively search
@@ -627,6 +669,7 @@ static const art_leaf* lower_bound(trace_list& trace, const art_tree *t, const u
             }
             return NULL;
         }
+
         // Bail if the prefix does not match
         if (n->partial_len) {
             prefix_len = check_prefix(n, key, key_len, depth);
@@ -635,53 +678,49 @@ static const art_leaf* lower_bound(trace_list& trace, const art_tree *t, const u
             depth += n->partial_len;
         }
 
+
         trace_element te = lower_bound_child(n, key, key_len, depth, &is_equal);
-        trace.push_back(te);
+        if(!te.empty()){
+            trace.push_back(te);
+        }
         n = te.child;
         depth++;
     }
-    return maximum(n);
+    if (!extend_trace_max(t->root, trace)) return NULL;
+    return LEAF_RAW(last_el(trace).child);
 }
 static trace_element first_child_off(art_node* n){
     int i, uc;
-    union {
-        art_node4 *p1;
-        art_node16 *p2;
-        art_node48 *p3;
-        art_node256 *p4;
-    } p;
+    if(!n) return {NULL, NULL, 0};
+    if(IS_LEAF(n)) return {NULL, NULL, 0};
+
     switch (n->type) {
         case NODE4:
-            p.p1 = (art_node4*)n;
-            return {n,p.p1->children[0],0};
-
-        
+            return {n,get_node<art_node4>(n)->children[0],0};
         case NODE16:
-            p.p2 = (art_node16*)n;
-
-            return {n,p.p2->children[0],0};// the keys are ordered so fine I think
+            
+            return {n,get_node<art_node16>(n)->children[0],0};// the keys are ordered so fine I think
         
 
         case NODE48:
-            p.p3 = (art_node48*)n;
             /*
              * find first not less than
              * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
              */
             uc = 0; // ?
             for (; uc < 256;uc++){
-                i = p.p3->keys[uc];
+                i = get_node<art_node48>(n)->keys[uc];
                 if(i > 0){
-                    return {n,p.p3->children[i-1],uc};
+                    return {n,get_node<art_node48>(n)->children[i-1],uc};
                 }
             }
             break;
 
         case NODE256:
-            p.p4 = (art_node256*)n;
+            
             for (i = 0; i < 256; ++i) {
-                if (p.p4->children[i]) {// because nodes are ordered accordingly
-                    return {n,p.p4->children[i],i};
+                if (get_node<art_node256>(n)->children[i]) {// because nodes are ordered accordingly
+                    return {n,get_node<art_node256>(n)->children[i],i};
                 }
             }
             break;
@@ -691,56 +730,77 @@ static trace_element first_child_off(art_node* n){
     }
     return {NULL, NULL, 0};
 }
-
-static trace_element increment_te(trace_element &te){
-    int i, uc;
-    union {
-        art_node4 *p1;
-        art_node16 *p2;
-        art_node48 *p3;
-        art_node256 *p4;
-    } p;
-    art_node * n = te.el; 
+static trace_element last_child_off(art_node* n){
+    int idx;
+    if(!n) return {NULL, NULL, 0};
+    if(IS_LEAF(n)) return {NULL, NULL, 0};
+    
     switch (n->type) {
         case NODE4:
-            p.p1 = (art_node4*)n;
-            for (i = te.child_ix + 1; i < n->num_children; i++) {
-                return {n,p.p1->children[i],i};
-            }
-
-            break;
-
-        
-        case NODE16:
-            p.p2 = (art_node16*)n;
-
-            for (i = te.child_ix + 1; i < n->num_children; ++i) {
-                return {n,p.p2->children[i],i};// the keys are ordered so fine I think
-            }
-            break;
-        
-
+            idx = n->num_children - 1;
+            return {n,get_node<art_node4>(n)->children[idx],idx};
+        case NODE16:            
+            idx = n->num_children - 1;
+            return {n,get_node<art_node16>(n)->children[idx],idx};// the keys are ordered so fine I think
         case NODE48:
-            p.p3 = (art_node48*)n;
             /*
              * find first not less than
              * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
              */
+            idx=255;
+            while (!((const art_node48*)n)->keys[idx]) idx--;
+            idx = ((const art_node48*)n)->keys[idx] - 1;
+            return {n,get_node<art_node48>(n)->children[idx],idx};
+            
+        case NODE256:
+            idx=255;
+            while (!((const art_node256*)n)->children[idx]) idx--;
+            return {n,get_node<art_node256>(n)->children[idx],idx};
+
+        default:
+            abort();
+    }
+    return {NULL, NULL, 0};
+}
+
+static trace_element increment_te(const trace_element &te){
+    int i, uc;
+    art_node * n = te.el; 
+    switch (n->type) {
+        case NODE4:
+            i = te.child_ix + 1;
+            if (i < n->num_children) {
+                return {n,get_node<art_node4>(n)->children[i],i};
+            }
+            break;
+        
+        case NODE16:
+            i = te.child_ix + 1;
+            if (i < n->num_children) {
+                return {n,get_node<art_node16>(n)->children[i],i};// the keys are ordered so fine I think
+            }
+            break;
+        
+
+        case NODE48:{
+            auto *p = get_node<art_node48>(n);
             uc = te.child_ix + 1;
             for (; uc < 256;uc++){
-                i = p.p3->keys[uc];
+                i = p->keys[uc];
                 if(i > 0){
-                    return {n,p.p3->children[i-1],i-1};
+                    return {n,p->children[i-1],i-1};
                 }
+            }
             }
             break;
 
-        case NODE256:
-            p.p4 = (art_node256*)n;
+        case NODE256: {
+            auto *p = get_node<art_node256>(n);
             for (i = te.child_ix+1; i < 256; ++i) {
-                if (p.p4->children[i]) {// because nodes are ordered accordingly
-                    return {n,p.p4->children[i],i};
+                if (p->children[i]) {// because nodes are ordered accordingly
+                    return {n,p->children[i],i};
                 }
+            }
             }
             break;
 
@@ -751,28 +811,10 @@ static trace_element increment_te(trace_element &te){
 }
 
 
-static trace_element& last_el(trace_list& trace){
-    if(trace.empty())
-        abort();
-    return *(trace.rbegin());
-}
-/**
- * assuming that the path to each leaf is not the same depth
- * we always have to check and extend if required
- * @return false if any non leaf node has no child 
- */
-static bool extend_trace(trace_list& trace){
-    if(trace.empty()) return true;
-    trace_element u; 
-    while(!IS_LEAF(last_el(trace).child)){
-        u = first_child_off(last_el(trace).el);
-        if(u.empty()) return false;
-        trace.push_back(u);
-    }
-    return true;
-}
 
-static bool increment_trace(trace_list& trace){
+
+
+static bool increment_trace(art_node* root, trace_list& trace){
     for(auto r = trace.rbegin(); r != trace.rend(); ++r){
         trace_element te = increment_te(*r);
         if(te.empty()) 
@@ -790,7 +832,7 @@ static bool increment_trace(trace_list& trace){
 
             } while(u != trace.rbegin());
         }
-        return extend_trace(trace);
+        return extend_trace_min(root, trace);
     
     }
     return false;
@@ -825,11 +867,11 @@ int art_range(const art_tree *t, const unsigned char *key, int key_len, const un
                 } else {
                     return 0;
                 }
-            }else{
+            } else {
                 abort();
             }
         
-        } while(increment_trace(tl));
+        } while(increment_trace(t->root,tl));
         
     }
     return 0;

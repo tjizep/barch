@@ -4,7 +4,8 @@ local i = 1
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
 local keylen = 8
-    
+local index = 0
+
 local func = {
     tochars = function(num)
         local n = num
@@ -19,30 +20,54 @@ local func = {
         r = string.format("%"..keylen.."s", r)
         r = string.gsub(r," ", "a")
         return r
+    end,
+    tochars123 = function(num)
+        return '#'..num
+    end,
+    inc = function()
+        index = index + 1
+        return index
     end
 }
+local succeses = 0
+
+result[func.inc()] = redis.call('ODLB',"abaachcd")
 
 for i = 1, count do
     local k = func.tochars(i-1)
     local v = '#'..i
-    redis.call('cdict.set',k,v)
-    result[i] = {k, v, redis.call('cdict.get',k)} --redis.call('cdict.lb',k)
+    
+    redis.call('ODSET',k,v)
+    if not redis.call('ODGET',k) == v then
+        result[func.inc()] = {k, v, redis.call('ODGET',k)} --redis.call('cdict.lb',k)
+    else
+        succeses = succeses + 1
+    end
+    
 end
 
-result[count+1] = redis.call('cdict.lb',"aaaaaaad")
-result[count+2] = redis.call('cdict.lb',"aaaachcd")
-result[count+3] = redis.call('cdict.lb',"abaachcd")
-result[count+4] = redis.call('cdict.range',func.tochars(200), func.tochars(210), 1000)
+result[func.inc()] = redis.call('ODRANGE',func.tochars(200), func.tochars(210), 1000)
 
-result[count+5] = redis.call('cdict.statistics')
-result[count+6] = redis.call('cdict.size')
+result[func.inc()] = redis.call('ODLB',"abaachcd")
+result[func.inc()] = redis.call('ODLB',"ddddddde")
+result[func.inc()] = redis.call('ODLB',"z")
+result[func.inc()] = redis.call('ODLB',"dddddddd")
+result[func.inc()] = redis.call('ODLB',"aaaaaad#")
+result[func.inc()] = redis.call('ODLB',"aaaaaad1")
+result[func.inc()] = redis.call('ODLB',"aaaadaee")
+result[func.inc()] = redis.call('ODLB',"aaaaaaad")
+result[func.inc()] = redis.call('ODLB',"aaaachcd")
+
+result[func.inc()] = redis.call('ODSTATS')
+result[func.inc()] = redis.call('ODSIZE')
 
 for i = 1, count do
     local k = func.tochars(i-1)
     local v = '#'..i
-    redis.call('cdict.rem',k)
+    redis.call('ODREM',k)
 end
-result[count+7] = redis.call('cdict.statistics')
-result[count+8] = redis.call('cdict.size')
-result[count+9] = redis.call('cdict.operations')
+result[func.inc()] = redis.call('ODSTATS')
+result[func.inc()] = redis.call('ODSIZE')
+result[func.inc()] = redis.call('ODOPS')
+result[func.inc()] = succeses
 return result

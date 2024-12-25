@@ -96,29 +96,51 @@ namespace conversion
             return size;
         }
     };
+    static bool is_integer(const char * str, size_t l) 
+    {
+        const char * s = str;
+        for (;s != str + l; ++s) // eat continous initial spaces
+        { 
+            if(*s == ' ')
+                continue;
+            else
+                break;
+        }
+        
+        if (s == str + l)
+        {
+            return false;
+        }
 
-    // take a null terminated string and convert to a number as bytes or leave it alone
+        for (;s != str + l; ++s)
+        {
+            if(!fast_float::is_integer(*s)) 
+                return false;
+        }
+        return true;
+    }
+    // take a string and convert to a number as bytes or leave it alone
     // and return the bytes directly. the bytes will be copied
     static comparable_result convert(const char *v, size_t vlen)
     {
         uint64_t i;
         double d;
 
+        if (is_integer(v, vlen))
+        {
+            auto ianswer = fast_float::from_chars(v, v + vlen, i); // check if it's an integer first
 
+            if (ianswer.ec == std::errc())
+            {
+                return comparable_result(i);
+            }
+        }
+        
         auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
-        
-        
-        
+    
         if (fanswer.ec == std::errc())
         {
             return comparable_result(d);
-        }
-
-        auto ianswer = fast_float::from_chars(v, v + vlen, i);
-
-        if (ianswer.ec == std::errc())
-        {
-            return comparable_result(i);
         }
 
         return comparable_result(v, vlen);

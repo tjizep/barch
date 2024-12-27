@@ -7,52 +7,60 @@ namespace conversion
     template <typename I>
     struct byte_comparable
     {
-        byte_comparable() : value(I())
+        byte_comparable()
         {
         }
-        byte_comparable(I value) : value(value)
-        {
+        explicit byte_comparable(const uint8_t * data, size_t len ){
+            memcpy(&bytes[0], data, std::min(sizeof(bytes), len));
         }
+        
         // probably cpp will optimize this
         size_t get_size() const
         {
             return sizeof(bytes);
         }
-        union
-        {
-            uint8_t bytes[sizeof(I) + 1];
-            I value;
-        };
+        uint8_t bytes[sizeof(I) + 1];
+
     };
+    static inline int64_t dec_bytes_to_int(const byte_comparable<int64_t> &i){
+        uint64_t r = 0;
+        
+        r += (i.bytes[1] & 0xFF); r <<= 8;
+        r += (i.bytes[2] & 0xFF); r <<= 8;
+        r += (i.bytes[3] & 0xFF); r <<= 8;
+        r += (i.bytes[4] & 0xFF); r <<= 8;
+        r += (i.bytes[5] & 0xFF); r <<= 8;
+        r += (i.bytes[6] & 0xFF); r <<= 8;
+        r += (i.bytes[7] & 0xFF); r <<= 8;
+        r += (i.bytes[8] & 0xFF);
+        
+        int64_t v = (r - (1ull << 63));
+        return v;
+    }
     // compute a comparable string of bytes from a number using a type byte to separate 
     // floats and integers else theres going to be floats mixed in integers
     // regardless of memory representation
-    static inline byte_comparable<uint64_t> comparable_bytes(uint64_t n, uint8_t type_byte)
+    static inline byte_comparable<int64_t> comparable_bytes(int64_t n, uint8_t type_byte)
     {
-        byte_comparable<uint64_t> r;
-        uint64_t in = n;
-        const uint64_t mask = (uint64_t)0xFF;
+        byte_comparable<int64_t> r; 
+        uint64_t t = n + (1ull << 63); // so that negative numbers compare to less than positive numbers
         r.bytes[0] = type_byte; // most significant is the type (overriding any value bytes)
-        size_t E = r.get_size() - 1;
-        // writing from least to most significant byte
-        for (size_t i = E ; i > 1; --i)
-        {
-            r.bytes[i] = (uint8_t)(in & mask);
-            in = in >> 8; // drop the written bits
-        }
+        
+        r.bytes[8] = (uint8_t) (t & 0xFF); t >>= 8;
+        r.bytes[7] = (uint8_t) (t & 0xFF); t >>= 8;
+        r.bytes[6] = (uint8_t) (t & 0xFF); t >>= 8;
+        r.bytes[5] = (uint8_t) (t & 0xFF); t >>= 8;
+        r.bytes[4] = (uint8_t) (t & 0xFF); t >>= 8;
+        r.bytes[3] = (uint8_t) (t & 0xFF); t >>= 8;
+        r.bytes[2] = (uint8_t) (t & 0xFF); t >>= 8;
+        r.bytes[1] = (uint8_t) (t & 0xFF);
         return r;
     }
     // TODO: function isnt considering mantissa maybe
-    static inline byte_comparable<uint64_t> comparable_bytes(double n, uint8_t type_byte)
+    static inline byte_comparable<int64_t> comparable_bytes(double n, uint8_t type_byte)
     {
-        uint64_t in;
+        int64_t in;
         memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
-        //
-        // should be copy most significant 10-bits (mantissa) then rest of number
-        // [0][     1         ][      2                         ][  3       ][  4  ][  5  ][  6  ][ 7   ][8]
-        // [8][8 bits mantissa][2 bits mantissa + 6 bits integer][8 bits int][8 int][8 int][8 int][8 int][8]
-        // [8][           10         ][                       54                                           ] 
-        //
         return comparable_bytes(in, type_byte);
     }
 
@@ -60,12 +68,12 @@ namespace conversion
     {
     private:
         const uint8_t *data; // nthis may point to the integer or another externally allocated variable 
-        byte_comparable<uint64_t> integer;
+        byte_comparable<int64_t> integer;
         size_t size; // the size as initialized - only changed on construction
 
     public:
 
-        comparable_result(uint64_t value) 
+        comparable_result(int64_t value) 
         : data(&integer.bytes[0])
         , integer (comparable_bytes(value, 0)) // numbers are ordered before most ascii strings unless they start with 0x01
         , size(integer.get_size())
@@ -73,7 +81,7 @@ namespace conversion
 
         comparable_result(double value) 
         : data(&integer.bytes[0])
-        , integer (comparable_bytes(value, 1)) // doubles are bigger than ints for our type ordering
+        , integer(comparable_bytes(value, 1))
         , size(integer.get_size())
         {
             size = integer.get_size();
@@ -81,7 +89,7 @@ namespace conversion
 
         comparable_result(const char *val, size_t size) 
         : data((const uint8_t *)val)
-        , integer(0)
+        , integer()
         , size(size)
         {
         }
@@ -111,7 +119,9 @@ namespace conversion
         {
             return false;
         }
-
+        if(*s =='-'){
+            ++s;
+        }
         for (;s != str + l; ++s)
         {
             if(!fast_float::is_integer(*s)) 
@@ -123,7 +133,7 @@ namespace conversion
     // and return the bytes directly. the bytes will be copied
     static comparable_result convert(const char *v, size_t vlen)
     {
-        uint64_t i;
+        int64_t i;
         double d;
 
         if (is_integer(v, vlen))
@@ -144,17 +154,13 @@ namespace conversion
         }
 
         return comparable_result(v, vlen);
-    }
-    uint64_t enc_bytes_to_int(const uint8_t * bytes, size_t len){
+    } 
+    int64_t enc_bytes_to_int(const uint8_t * bytes, size_t len){
         uint64_t r = 0;
         if (len != 9)
             return r;
+        byte_comparable<int64_t> dec(bytes, len);
         
-        for (size_t a = 0; a < 8; ++a) 
-        {
-            r = (r << 8) + bytes[a+1]; // << 8 equivalent to x256
-        }
-        
-        return r;
+        return dec_bytes_to_int(dec);
     }
 }

@@ -385,8 +385,12 @@ extern "C" {
         art_statistics as = art_get_statistics();
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Bytes Allocated");
+        ValkeyModule_ReplyWithSimpleString(ctx, "Total Bytes Allocated");
         ValkeyModule_ReplyWithLongLong(ctx,as.bytes_allocated);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Interior Bytes Allocated");
+        ValkeyModule_ReplyWithLongLong(ctx,as.bytes_interior);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "Leaf Nodes"); 

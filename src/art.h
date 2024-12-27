@@ -101,6 +101,7 @@ struct art_statistics {
     uint64_t node48_nodes;
     uint64_t node256_nodes;
     uint64_t bytes_allocated;
+    uint64_t bytes_interior;
 };
 struct art_ops_statistics {
     uint64_t delete_ops;

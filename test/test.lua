@@ -31,11 +31,19 @@ local tocharsabc = function(num)
 end
 
 local tocharsnum = function(num)
-    return num
+    if num % 2 == 0 then
+        return (num + 1634556)
+    else
+        return -(num + 1634556)
+    end
 end
 
 local tochars123 = function(num)
     return '#'..num
+end
+
+local tocharsdbl = function(num)
+    return num+0.5
 end
 
 local test = function()
@@ -56,7 +64,14 @@ local test = function()
         end
         
     end
+    result[inc()] = {[['ODMIN']], vk.call('ODMIN')}
+    result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
+    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
+    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
+    result[inc()] = {"succeses for test "..tests..": "..succeses}
+end
 
+local abctest = function()
     result[inc()] = {"'ODRANGE',convert(200), convert(210), 1000", vk.call('ODRANGE',convert(200), convert(210), 1000)}
     result[inc()] = {"'ODMIN'", vk.call('ODMIN')}
     result[inc()] = {"'ODMAX'", vk.call('ODMAX')}
@@ -68,11 +83,10 @@ local test = function()
     result[inc()] = {[['ODLB',"aaaaaad1"]], vk.call('ODLB',"aaaaaad1")}
     result[inc()] = {[['ODLB',"aaaadaee"]], vk.call('ODLB',"aaaadaee")}
     result[inc()] = {[['ODLB',"aaaaaaad"]], vk.call('ODLB',"aaaaaaad")}
-    result[inc()] = {[['ODLB',"aaaachcd"]], vk.call('ODLB',"aaaachcd")}
+    result[inc()] = {[['ODLB',"aaaachcd"]], vk.call('ODLB',"aaaachcd")}    
+end
 
-    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
-    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
-
+local clear = function()
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
@@ -82,15 +96,23 @@ local test = function()
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
-    result[inc()] = {"succeses for test "..tests..": "..succeses}
     
 end
 
+--[[
 convert = tochars123
 test()
+clear()
 convert = tocharsnum
 test()
+clear()
 convert = tocharsabc
 test()
+abctest()
+clear()
+]]
+convert = tocharsdbl
+test()
+clear()
 
 return result

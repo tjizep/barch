@@ -1524,6 +1524,7 @@ art_statistics art_get_statistics(){
     as.node256_nodes = statistics::n256_nodes;
     as.node48_nodes = statistics::n4_nodes;
     as.bytes_allocated = statistics::node_bytes_alloc;
+    as.bytes_interior = statistics::interior_bytes_alloc;
     return as;
 }
 

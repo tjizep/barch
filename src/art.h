@@ -1,96 +1,11 @@
 #include <stdint.h>
+#include <bitset>
 #ifndef ART_H
 #define ART_H
+#include "nodes.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
-#define NODE4   1
-#define NODE16  2
-#define NODE48  3
-#define NODE256 4
 
-#define MAX_PREFIX_LEN 10
-
-#if defined(__GNUC__) && !defined(__clang__)
-# if __STDC_VERSION__ >= 199901L && 402 == (__GNUC__ * 100 + __GNUC_MINOR__)
-/*
- * GCC 4.2.2's C99 inline keyword support is pretty broken; avoid. Introduced in
- * GCC 4.2.something, fixed in 4.3.0. So checking for specific major.minor of
- * 4.2 is fine.
- */
-#  define BROKEN_GCC_C99_INLINE
-# endif
-#endif
-
-typedef int(*art_callback)(void *data, const unsigned char *key, uint32_t key_len, void *value);
-
-/**
- * This struct is included as part
- * of all the various node sizes
- */
-typedef struct {
-    uint32_t partial_len;
-    uint8_t type;
-    uint8_t num_children;
-    unsigned char partial[MAX_PREFIX_LEN];
-    
-}  art_node;
-
-/**
- * so that we dont have to switch all the time when dealing with children
- */
-typedef struct  {
-    int size;
-    art_node* const * children;
-} child_list;
-
-/**
- * Small node with only 4 children
- */
-typedef struct {
-    art_node n;
-    unsigned char keys[4];
-    art_node *children[4];
-} art_node4;
-
-/**
- * Node with 16 children
- */
-typedef struct {
-    art_node n;
-    unsigned char keys[16];
-    art_node *children[16];
-} art_node16;
-
-/**
- * Node with 48 children, but
- * a full 256 byte field.
- */
-typedef struct {
-    art_node n;
-    unsigned char keys[256];
-    art_node *children[48];
-} art_node48;
-
-/**
- * Full node with 256 children
- */
-typedef struct {
-    art_node n;
-    art_node *children[256];
-} art_node256;
-
-/**
- * Represents a leaf. These are
- * of arbitrary size, as they include the key.
- */
-typedef struct {
-    void *value;
-    uint32_t key_len;
-    unsigned char key[];
-} art_leaf;
 /**
  * global statistics
  */
@@ -103,6 +18,7 @@ struct art_statistics {
     uint64_t bytes_allocated;
     uint64_t bytes_interior;
 };
+
 struct art_ops_statistics {
     uint64_t delete_ops;
     uint64_t set_ops;
@@ -117,14 +33,17 @@ struct art_ops_statistics {
     uint64_t max_ops;
     
 };
+
+typedef int(*art_callback)(void *data, const unsigned char *key, uint32_t key_len, void *value);
+
 /**
  * Main struct, points to root.
  */
 typedef struct {
-    art_node *root;
+    node_ptr root;
     uint64_t size;
 } art_tree;
-
+extern "C" {
 /**
  * Initializes an ART tree
  * @return 0 on success.
@@ -132,24 +51,10 @@ typedef struct {
 int art_tree_init(art_tree *t);
 
 /**
- * DEPRECATED
- * Initializes an ART tree
- * @return 0 on success.
- */
-#define init_art_tree(...) art_tree_init(__VA_ARGS__)
-
-/**
  * Destroys an ART tree
  * @return 0 on success.
  */
 int art_tree_destroy(art_tree *t);
-
-/**
- * DEPRECATED
- * Initializes an ART tree
- * @return 0 on success.
- */
-#define destroy_art_tree(...) art_tree_destroy(__VA_ARGS__)
 
 /**
  * Returns the size of the ART tree.
@@ -251,10 +156,6 @@ int art_iter_prefix(art_tree *t, const unsigned char *prefix, int prefix_len, ar
  * @return 0 on success, or the return of the callback.
  */
 int art_range(const art_tree *t, const unsigned char *key, int key_len, const unsigned char *key_end, int key_end_len, art_callback cb, void *data);
-/**
- * iterate from a potentially non existent lower bound
- */
-void art_iter_from(const art_tree *t, const unsigned char *key, int key_len);
 
 /**
  * gets per module per node type statistics for all art_node* types  
@@ -266,9 +167,5 @@ art_statistics art_get_statistics();
  * get statistics for each operation performed
  */
 art_ops_statistics art_get_ops_statistics();
-
-#ifdef __cplusplus
 }
-#endif
-
 #endif

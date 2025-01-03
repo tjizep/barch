@@ -104,8 +104,7 @@ namespace conversion
             return size;
         }
     };
-    static bool is_integer(const char * str, size_t l) 
-    {
+    static const char* eat_space(const char * str, size_t l){
         const char * s = str;
         for (;s != str + l; ++s) // eat continous initial spaces
         { 
@@ -114,7 +113,11 @@ namespace conversion
             else
                 break;
         }
-        
+        return s;
+    }
+    static bool is_integer(const char * str, size_t l) 
+    {
+        const char * s = eat_space(str, l);
         if (s == str + l)
         {
             return false;
@@ -122,6 +125,8 @@ namespace conversion
         if(*s =='-'){
             ++s;
         }
+        s = eat_space(s, l - (s- str));
+
         for (;s != str + l; ++s)
         {
             if(!fast_float::is_integer(*s)) 

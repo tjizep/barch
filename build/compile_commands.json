@@ -1,14 +1,32 @@
 [
 {
   "directory": "/home/linuxlite/Desktop/artval/build",
-  "command": "/usr/bin/g++ -Dcdict_EXPORTS -I/home/linuxlite/Desktop/artval/module/fast_float/include  -Werror -Wall -Wextra -Weffc++ -g -fPIC -o CMakeFiles/cdict.dir/src/art.cpp.o -c /home/linuxlite/Desktop/artval/src/art.cpp",
+  "command": "/usr/bin/g++ -Dcdict_EXPORTS -I/home/linuxlite/Desktop/artval/module/fast_float/include  -Werror -Wall -Wextra -Weffc++ -O2 -g -DNDEBUG -fPIC -o CMakeFiles/cdict.dir/src/art.cpp.o -c /home/linuxlite/Desktop/artval/src/art.cpp",
   "file": "/home/linuxlite/Desktop/artval/src/art.cpp",
   "output": "CMakeFiles/cdict.dir/src/art.cpp.o"
 },
 {
   "directory": "/home/linuxlite/Desktop/artval/build",
-  "command": "/usr/bin/g++ -Dcdict_EXPORTS -I/home/linuxlite/Desktop/artval/module/fast_float/include  -Werror -Wall -Wextra -Weffc++ -g -fPIC -o CMakeFiles/cdict.dir/src/cdict.cpp.o -c /home/linuxlite/Desktop/artval/src/cdict.cpp",
+  "command": "/usr/bin/g++ -Dcdict_EXPORTS -I/home/linuxlite/Desktop/artval/module/fast_float/include  -Werror -Wall -Wextra -Weffc++ -O2 -g -DNDEBUG -fPIC -o CMakeFiles/cdict.dir/src/cdict.cpp.o -c /home/linuxlite/Desktop/artval/src/cdict.cpp",
   "file": "/home/linuxlite/Desktop/artval/src/cdict.cpp",
   "output": "CMakeFiles/cdict.dir/src/cdict.cpp.o"
+},
+{
+  "directory": "/home/linuxlite/Desktop/artval/build",
+  "command": "/usr/bin/g++ -Dcdict_EXPORTS -I/home/linuxlite/Desktop/artval/module/fast_float/include  -Werror -Wall -Wextra -Weffc++ -O2 -g -DNDEBUG -fPIC -o CMakeFiles/cdict.dir/src/nodes.cpp.o -c /home/linuxlite/Desktop/artval/src/nodes.cpp",
+  "file": "/home/linuxlite/Desktop/artval/src/nodes.cpp",
+  "output": "CMakeFiles/cdict.dir/src/nodes.cpp.o"
+},
+{
+  "directory": "/home/linuxlite/Desktop/artval/build",
+  "command": "/usr/bin/g++ -Dcdict_EXPORTS -I/home/linuxlite/Desktop/artval/module/fast_float/include  -Werror -Wall -Wextra -Weffc++ -O2 -g -DNDEBUG -fPIC -o CMakeFiles/cdict.dir/src/statistics.cpp.o -c /home/linuxlite/Desktop/artval/src/statistics.cpp",
+  "file": "/home/linuxlite/Desktop/artval/src/statistics.cpp",
+  "output": "CMakeFiles/cdict.dir/src/statistics.cpp.o"
+},
+{
+  "directory": "/home/linuxlite/Desktop/artval/build",
+  "command": "/usr/bin/g++ -Dcdict_EXPORTS -I/home/linuxlite/Desktop/artval/module/fast_float/include  -Werror -Wall -Wextra -Weffc++ -O2 -g -DNDEBUG -fPIC -o CMakeFiles/cdict.dir/src/vector.cpp.o -c /home/linuxlite/Desktop/artval/src/vector.cpp",
+  "file": "/home/linuxlite/Desktop/artval/src/vector.cpp",
+  "output": "CMakeFiles/cdict.dir/src/vector.cpp.o"
 }
 ]

@@ -25,7 +25,7 @@ extern "C"
 #include <functional>
 
 static ValkeyModuleDict *Keyspace;
-static art_tree ad = {NULL, 0};
+static art_tree ad = {nullptr, 0};
 
 /// @brief  getting an initialized art tree
 /// @param ctx not used but could be 
@@ -412,7 +412,7 @@ extern "C" {
         ValkeyModule_ReplyWithSimpleString(ctx, "Node 256 Nodes"); 
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
-        ValkeyModule_ReplySetArrayLength(ctx, 6);
+        ValkeyModule_ReplySetArrayLength(ctx, 7);
         return 0;
     }
 

@@ -54,6 +54,7 @@
         "stdexcept": "cpp",
         "stdfloat": "cpp",
         "streambuf": "cpp",
-        "typeinfo": "cpp"
+        "typeinfo": "cpp",
+        "bitset": "cpp"
     }
 }

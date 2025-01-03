@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 1000
+local count = 1200
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
@@ -57,7 +57,11 @@ local test = function()
         local k = convert(i-1)
         local v = '#'..i
         vk.call('ODSET',k,v)
-        if not vk.call('ODGET',k) == v then
+    end
+    for i = 1, count do
+        local k = convert(i-1)
+        local v = '#'..i
+        if vk.call('ODGET',k) ~= v then
             result[inc()] = {k, v, vk.call('ODGET',k)} --vk.call('cdict.lb',k)
         else
             succeses = succeses + 1
@@ -65,7 +69,7 @@ local test = function()
         
     end
     result[inc()] = {[['ODMIN']], vk.call('ODMIN')}
-    result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
+    --result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {"succeses for test "..tests..": "..succeses}
@@ -97,22 +101,24 @@ local clear = function()
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
     
-end
+end 
 
---[[
+--[[ Testing ints,doubles and string key types]]
+
 convert = tochars123
 test()
 clear()
+
 convert = tocharsnum
 test()
 clear()
+
 convert = tocharsabc
 test()
 abctest()
 clear()
-]]
+
 convert = tocharsdbl
 test()
 clear()
-
 return result

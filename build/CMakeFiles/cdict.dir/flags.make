@@ -6,5 +6,5 @@ CXX_DEFINES = -Dcdict_EXPORTS
 
 CXX_INCLUDES = -I/home/linuxlite/Desktop/artval/module/fast_float/include
 
-CXX_FLAGS =  -Werror -Wall -Wextra -Weffc++ -g -fPIC
+CXX_FLAGS =  -Werror -Wall -Wextra -Weffc++ -O2 -g -DNDEBUG -fPIC
 

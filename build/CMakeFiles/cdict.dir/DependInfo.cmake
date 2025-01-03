@@ -10,6 +10,9 @@ set(CMAKE_DEPENDS_LANGUAGES
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/linuxlite/Desktop/artval/src/art.cpp" "CMakeFiles/cdict.dir/src/art.cpp.o" "gcc" "CMakeFiles/cdict.dir/src/art.cpp.o.d"
   "/home/linuxlite/Desktop/artval/src/cdict.cpp" "CMakeFiles/cdict.dir/src/cdict.cpp.o" "gcc" "CMakeFiles/cdict.dir/src/cdict.cpp.o.d"
+  "/home/linuxlite/Desktop/artval/src/nodes.cpp" "CMakeFiles/cdict.dir/src/nodes.cpp.o" "gcc" "CMakeFiles/cdict.dir/src/nodes.cpp.o.d"
+  "/home/linuxlite/Desktop/artval/src/statistics.cpp" "CMakeFiles/cdict.dir/src/statistics.cpp.o" "gcc" "CMakeFiles/cdict.dir/src/statistics.cpp.o.d"
+  "/home/linuxlite/Desktop/artval/src/vector.cpp" "CMakeFiles/cdict.dir/src/vector.cpp.o" "gcc" "CMakeFiles/cdict.dir/src/vector.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

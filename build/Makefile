@@ -177,6 +177,78 @@ src/cdict.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/cdict.cpp.s
 .PHONY : src/cdict.cpp.s
 
+src/nodes.o: src/nodes.cpp.o
+.PHONY : src/nodes.o
+
+# target to build an object file
+src/nodes.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/nodes.cpp.o
+.PHONY : src/nodes.cpp.o
+
+src/nodes.i: src/nodes.cpp.i
+.PHONY : src/nodes.i
+
+# target to preprocess a source file
+src/nodes.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/nodes.cpp.i
+.PHONY : src/nodes.cpp.i
+
+src/nodes.s: src/nodes.cpp.s
+.PHONY : src/nodes.s
+
+# target to generate assembly for a file
+src/nodes.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/nodes.cpp.s
+.PHONY : src/nodes.cpp.s
+
+src/statistics.o: src/statistics.cpp.o
+.PHONY : src/statistics.o
+
+# target to build an object file
+src/statistics.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/statistics.cpp.o
+.PHONY : src/statistics.cpp.o
+
+src/statistics.i: src/statistics.cpp.i
+.PHONY : src/statistics.i
+
+# target to preprocess a source file
+src/statistics.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/statistics.cpp.i
+.PHONY : src/statistics.cpp.i
+
+src/statistics.s: src/statistics.cpp.s
+.PHONY : src/statistics.s
+
+# target to generate assembly for a file
+src/statistics.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/statistics.cpp.s
+.PHONY : src/statistics.cpp.s
+
+src/vector.o: src/vector.cpp.o
+.PHONY : src/vector.o
+
+# target to build an object file
+src/vector.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/vector.cpp.o
+.PHONY : src/vector.cpp.o
+
+src/vector.i: src/vector.cpp.i
+.PHONY : src/vector.i
+
+# target to preprocess a source file
+src/vector.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/vector.cpp.i
+.PHONY : src/vector.cpp.i
+
+src/vector.s: src/vector.cpp.s
+.PHONY : src/vector.s
+
+# target to generate assembly for a file
+src/vector.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cdict.dir/build.make CMakeFiles/cdict.dir/src/vector.cpp.s
+.PHONY : src/vector.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -192,6 +264,15 @@ help:
 	@echo "... src/cdict.o"
 	@echo "... src/cdict.i"
 	@echo "... src/cdict.s"
+	@echo "... src/nodes.o"
+	@echo "... src/nodes.i"
+	@echo "... src/nodes.s"
+	@echo "... src/statistics.o"
+	@echo "... src/statistics.i"
+	@echo "... src/statistics.s"
+	@echo "... src/vector.o"
+	@echo "... src/vector.i"
+	@echo "... src/vector.s"
 .PHONY : help
 
 

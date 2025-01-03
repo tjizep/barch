@@ -1,10 +1,46 @@
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <stdio.h>
+#include <assert.h>
+#include <vector>
+#include <atomic>
+
 #include "art.h"
 #include "statistics.h"
-#include <stdlib.h>
+#include "vector.h"
 
-extern void free_node(art_node *n);
 
-art_node::art_node () { type = 0 ;}
+void free_node(art_leaf *n){
+    if(!n) return;
+    int kl = n->key_len;
+    ValkeyModule_Free(n);
+    statistics::leaf_nodes--;
+    statistics::node_bytes_alloc -= (sizeof(art_leaf) + kl);
+}
+
+void free_node(node_ptr n){
+    if (n.is_leaf) {
+        free_node(n.leaf());
+    } else {
+        free_node(n.node);
+    }
+
+}
+/**
+ * free a node while updating statistics 
+ */
+void free_node(art_node *n) {
+    // Break if null
+    if (!n) return;
+
+    n->~art_node();
+    // Free ourself on the way up
+    ValkeyModule_Free(n);
+}
+
+
+art_node::art_node () { type = 0; }
 art_node::~art_node() {}
 /**
  * Returns the number of prefix characters shared between
@@ -20,6 +56,7 @@ unsigned art_node::check_prefix(const unsigned char *key, int key_len, int depth
     }
     return idx;
 }
+
 art_node4::art_node4() { 
     type = NODE4 ;
     statistics::node_bytes_alloc += sizeof(art_node4);

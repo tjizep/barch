@@ -4,11 +4,10 @@
 #define ART_H
 #include "nodes.h"
 
-
-
 /**
  * global statistics
  */
+
 struct art_statistics {
     uint64_t leaf_nodes;
     uint64_t node4_nodes;
@@ -43,6 +42,7 @@ typedef struct {
     node_ptr root;
     uint64_t size;
 } art_tree;
+
 extern "C" {
 /**
  * Initializes an ART tree

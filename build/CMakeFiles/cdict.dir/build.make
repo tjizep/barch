@@ -97,19 +97,67 @@ CMakeFiles/cdict.dir/src/cdict.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/cdict.dir/src/cdict.cpp.s"
 	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/linuxlite/Desktop/artval/src/cdict.cpp -o CMakeFiles/cdict.dir/src/cdict.cpp.s
 
+CMakeFiles/cdict.dir/src/nodes.cpp.o: CMakeFiles/cdict.dir/flags.make
+CMakeFiles/cdict.dir/src/nodes.cpp.o: /home/linuxlite/Desktop/artval/src/nodes.cpp
+CMakeFiles/cdict.dir/src/nodes.cpp.o: CMakeFiles/cdict.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/linuxlite/Desktop/artval/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/cdict.dir/src/nodes.cpp.o"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/cdict.dir/src/nodes.cpp.o -MF CMakeFiles/cdict.dir/src/nodes.cpp.o.d -o CMakeFiles/cdict.dir/src/nodes.cpp.o -c /home/linuxlite/Desktop/artval/src/nodes.cpp
+
+CMakeFiles/cdict.dir/src/nodes.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/cdict.dir/src/nodes.cpp.i"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/linuxlite/Desktop/artval/src/nodes.cpp > CMakeFiles/cdict.dir/src/nodes.cpp.i
+
+CMakeFiles/cdict.dir/src/nodes.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/cdict.dir/src/nodes.cpp.s"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/linuxlite/Desktop/artval/src/nodes.cpp -o CMakeFiles/cdict.dir/src/nodes.cpp.s
+
+CMakeFiles/cdict.dir/src/statistics.cpp.o: CMakeFiles/cdict.dir/flags.make
+CMakeFiles/cdict.dir/src/statistics.cpp.o: /home/linuxlite/Desktop/artval/src/statistics.cpp
+CMakeFiles/cdict.dir/src/statistics.cpp.o: CMakeFiles/cdict.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/linuxlite/Desktop/artval/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/cdict.dir/src/statistics.cpp.o"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/cdict.dir/src/statistics.cpp.o -MF CMakeFiles/cdict.dir/src/statistics.cpp.o.d -o CMakeFiles/cdict.dir/src/statistics.cpp.o -c /home/linuxlite/Desktop/artval/src/statistics.cpp
+
+CMakeFiles/cdict.dir/src/statistics.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/cdict.dir/src/statistics.cpp.i"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/linuxlite/Desktop/artval/src/statistics.cpp > CMakeFiles/cdict.dir/src/statistics.cpp.i
+
+CMakeFiles/cdict.dir/src/statistics.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/cdict.dir/src/statistics.cpp.s"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/linuxlite/Desktop/artval/src/statistics.cpp -o CMakeFiles/cdict.dir/src/statistics.cpp.s
+
+CMakeFiles/cdict.dir/src/vector.cpp.o: CMakeFiles/cdict.dir/flags.make
+CMakeFiles/cdict.dir/src/vector.cpp.o: /home/linuxlite/Desktop/artval/src/vector.cpp
+CMakeFiles/cdict.dir/src/vector.cpp.o: CMakeFiles/cdict.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/linuxlite/Desktop/artval/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/cdict.dir/src/vector.cpp.o"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/cdict.dir/src/vector.cpp.o -MF CMakeFiles/cdict.dir/src/vector.cpp.o.d -o CMakeFiles/cdict.dir/src/vector.cpp.o -c /home/linuxlite/Desktop/artval/src/vector.cpp
+
+CMakeFiles/cdict.dir/src/vector.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/cdict.dir/src/vector.cpp.i"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/linuxlite/Desktop/artval/src/vector.cpp > CMakeFiles/cdict.dir/src/vector.cpp.i
+
+CMakeFiles/cdict.dir/src/vector.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/cdict.dir/src/vector.cpp.s"
+	/usr/bin/g++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/linuxlite/Desktop/artval/src/vector.cpp -o CMakeFiles/cdict.dir/src/vector.cpp.s
+
 # Object files for target cdict
 cdict_OBJECTS = \
 "CMakeFiles/cdict.dir/src/art.cpp.o" \
-"CMakeFiles/cdict.dir/src/cdict.cpp.o"
+"CMakeFiles/cdict.dir/src/cdict.cpp.o" \
+"CMakeFiles/cdict.dir/src/nodes.cpp.o" \
+"CMakeFiles/cdict.dir/src/statistics.cpp.o" \
+"CMakeFiles/cdict.dir/src/vector.cpp.o"
 
 # External object files for target cdict
 cdict_EXTERNAL_OBJECTS =
 
 libcdict.so: CMakeFiles/cdict.dir/src/art.cpp.o
 libcdict.so: CMakeFiles/cdict.dir/src/cdict.cpp.o
+libcdict.so: CMakeFiles/cdict.dir/src/nodes.cpp.o
+libcdict.so: CMakeFiles/cdict.dir/src/statistics.cpp.o
+libcdict.so: CMakeFiles/cdict.dir/src/vector.cpp.o
 libcdict.so: CMakeFiles/cdict.dir/build.make
 libcdict.so: CMakeFiles/cdict.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/linuxlite/Desktop/artval/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Linking CXX shared library libcdict.so"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/linuxlite/Desktop/artval/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX shared library libcdict.so"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/cdict.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

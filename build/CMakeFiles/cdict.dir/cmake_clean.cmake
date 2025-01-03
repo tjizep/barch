@@ -3,6 +3,12 @@ file(REMOVE_RECURSE
   "CMakeFiles/cdict.dir/src/art.cpp.o.d"
   "CMakeFiles/cdict.dir/src/cdict.cpp.o"
   "CMakeFiles/cdict.dir/src/cdict.cpp.o.d"
+  "CMakeFiles/cdict.dir/src/nodes.cpp.o"
+  "CMakeFiles/cdict.dir/src/nodes.cpp.o.d"
+  "CMakeFiles/cdict.dir/src/statistics.cpp.o"
+  "CMakeFiles/cdict.dir/src/statistics.cpp.o.d"
+  "CMakeFiles/cdict.dir/src/vector.cpp.o"
+  "CMakeFiles/cdict.dir/src/vector.cpp.o.d"
   "libcdict.pdb"
   "libcdict.so"
 )

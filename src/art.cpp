@@ -31,7 +31,7 @@ static void destroy_node(node_ptr n) {
     }
     // Handle each node type
     int i, idx;
-    switch (n->type) {
+    switch (n->type()) {
         case NODE4:
         case NODE16:
         case NODE256:
@@ -90,7 +90,7 @@ static trace_element lower_bound_child(node_ptr n, const unsigned char * key, in
     if (n.is_leaf) return {nullptr, nullptr, 0};
 
     c = key[std::min(depth, key_len)];
-    switch (n->type) {
+    switch (n->type()) {
         case NODE4:
             {
                 auto p = get_node<art_node4>(n.node);
@@ -257,7 +257,7 @@ static node_ptr maximum(node_ptr n) {
     if (n.is_leaf) return n;
 
     int idx;
-    switch (n->type) {
+    switch (n->type()) {
         case NODE4:
         case NODE16:
             return maximum(n->get_node(n->num_children-1));        
@@ -283,7 +283,7 @@ static node_ptr minimum(const node_ptr n) {
     if (n.is_leaf) return n;
 
     int idx;
-    switch (n->type) {
+    switch (n->type()) {
         case NODE4:
         case NODE16:
             return minimum(n->get_node(0));        
@@ -362,7 +362,7 @@ static trace_element increment_te(const trace_element &te){
     if (te.el.is_leaf) return {nullptr, nullptr, 0};
 
     art_node * n = te.el.node; 
-    switch (n->type) {
+    switch (n->type()) {
         case NODE4:
             i = te.child_ix + 1;
             if (i < n->num_children) {
@@ -749,7 +749,7 @@ static int recursive_iter(node_ptr n, art_callback cb, void *data) {
     }
 
     int idx, res;
-    switch (n->type) {
+    switch (n->type()) {
         case NODE4:
             for (int i=0; i < n->num_children; i++) {
                 res = recursive_iter(n->get_child(i), cb, data);
@@ -905,6 +905,7 @@ art_statistics art_get_statistics(){
     as.node4_nodes = statistics::n4_nodes;
     as.node16_nodes = statistics::n16_nodes;
     as.node256_nodes = statistics::n256_nodes;
+    as.node256_occupants = as.node256_nodes ? (statistics::node256_occupants / as.node256_nodes ) : 0ll;
     as.node48_nodes = statistics::n48_nodes;
     as.bytes_allocated = statistics::node_bytes_alloc;
     as.bytes_interior = statistics::interior_bytes_alloc;

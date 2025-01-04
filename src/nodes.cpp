@@ -9,6 +9,7 @@
 #include "art.h"
 #include "statistics.h"
 #include "vector.h"
+#include "nodes.h"
 
 
 void free_node(art_leaf *n){
@@ -40,7 +41,7 @@ void free_node(art_node *n) {
 }
 
 
-art_node::art_node () { type = 0; }
+art_node::art_node () {}
 art_node::~art_node() {}
 /**
  * Returns the number of prefix characters shared between
@@ -58,7 +59,6 @@ unsigned art_node::check_prefix(const unsigned char *key, int key_len, int depth
 }
 
 art_node4::art_node4() { 
-    type = NODE4 ;
     statistics::node_bytes_alloc += sizeof(art_node4);
     statistics::interior_bytes_alloc += sizeof(art_node4);
     statistics::n4_nodes++;
@@ -68,6 +68,10 @@ art_node4::~art_node4() {
     statistics::node_bytes_alloc -= sizeof(art_node4);
     statistics::interior_bytes_alloc -= sizeof(art_node4);
     statistics::n4_nodes--;
+}
+
+uint8_t art_node4::type() const {
+    return NODE4;
 }
 
 void art_node4::remove(node_ptr& ref, unsigned pos, unsigned char ) {
@@ -138,7 +142,6 @@ unsigned art_node4::last_index() const {
 }
     
 art_node16::art_node16() { 
-    type = NODE16;
     statistics::node_bytes_alloc += sizeof(art_node16);
     statistics::interior_bytes_alloc += sizeof(art_node16);
     statistics::n16_nodes++;
@@ -147,6 +150,10 @@ art_node16::~art_node16() {
     statistics::node_bytes_alloc -= sizeof(art_node16);
     statistics::interior_bytes_alloc -= sizeof(art_node16);
     statistics::n16_nodes--;
+}
+
+uint8_t art_node16::type() const {
+    return NODE16;
 }
 
 unsigned art_node16::index(unsigned char c, int operbits) const {
@@ -216,8 +223,8 @@ unsigned art_node16::last_index() const{
     return num_children - 1;
 }
 
+
 art_node48::art_node48(){ 
-    type = NODE48;
     statistics::node_bytes_alloc += sizeof(art_node48);
     statistics::interior_bytes_alloc += sizeof(art_node48);
     statistics::n48_nodes++;
@@ -226,6 +233,10 @@ art_node48::~art_node48() {
     statistics::node_bytes_alloc -= sizeof(art_node48);
     statistics::interior_bytes_alloc -= sizeof(art_node48);
     statistics::n48_nodes--;
+}
+
+uint8_t art_node48::type() const{
+    return NODE48;
 }
 
 unsigned art_node48::index(unsigned char c) const {
@@ -293,6 +304,7 @@ void art_node48::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
             }
         }
         copy_header(new_node, this);
+        statistics::node256_occupants += new_node->num_children;
         ref = new_node;
         free_node(this);
         new_node->add_child(c, ref, child);
@@ -320,16 +332,19 @@ unsigned art_node48::first_index() const {
 }
 
 art_node256::art_node256() { 
-    type = NODE256 ;
     statistics::node_bytes_alloc += sizeof(art_node256);
     statistics::interior_bytes_alloc += sizeof(art_node256);
     statistics::n256_nodes++;
 }
 
 art_node256::~art_node256() {
+    statistics::node256_occupants -= num_children;
     statistics::node_bytes_alloc -= sizeof(art_node256);
     statistics::interior_bytes_alloc -= sizeof(art_node256);
     statistics::n256_nodes--;
+}
+uint8_t art_node256::type() const {
+    return NODE256;
 }
 
 unsigned art_node256::index(unsigned char c) const {
@@ -345,7 +360,7 @@ unsigned art_node256::index(unsigned char c) const {
     children[key] = nullptr;
     types.set(key, false);
     num_children--;
-
+    statistics::node256_occupants--;
     // Resize to a node48 on underflow, not immediately to prevent
     // trashing if we sit on the 48/49 boundary
     if (num_children == 37) {
@@ -368,6 +383,7 @@ unsigned art_node256::index(unsigned char c) const {
 
 void art_node256::add_child(unsigned char c, node_ptr&, node_ptr child) {
     if(!has_child(c)) {
+        statistics::node256_occupants++;
         ++num_children; // just to keep stats ok
     }
     set_child(c, child);

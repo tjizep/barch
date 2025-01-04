@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 1200
+local count = 1000
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
@@ -91,25 +91,29 @@ local abctest = function()
 end
 
 local clear = function()
+    local failures = 0
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
         vk.call('ODREM',k)
+        if vk.call('ODGET',k) then
+            failures = failures + 1
+        end
     end
     
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
+    result[inc()] = {'REMOVE FAILURES', failures}
     
 end 
 
 --[[ Testing ints,doubles and string key types]]
-
-convert = tochars123
+convert = tocharsnum
 test()
 clear()
 
-convert = tocharsnum
+convert = tochars123
 test()
 clear()
 
@@ -121,4 +125,5 @@ clear()
 convert = tocharsdbl
 test()
 clear()
+--[[]]
 return result

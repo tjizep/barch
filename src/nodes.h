@@ -13,8 +13,9 @@
 
 #define MAX_PREFIX_LEN 12
 
-
-
+/**
+ * utility to create N copies of unsigned character C c
+ */
 template<int N, typename C = unsigned char>
 struct nuchar {
     C data[N];
@@ -24,15 +25,6 @@ struct nuchar {
     operator const C* () const {
         return data;
     } 
-};
-/**
- * This struct is included as part
- * of all the various node sizes
- */
-template<typename node_t, typename leaf_t>
-struct result {
-    leaf_t* leaf;
-    node_t* node;
 };
 
 struct art_node;
@@ -128,11 +120,12 @@ struct node_ptr {
 
 struct art_node {
     uint8_t partial_len = 0;
-    uint8_t type = 0;
+    
     uint8_t num_children = 0;
     unsigned char partial[MAX_PREFIX_LEN];
     art_node();
     virtual ~art_node();
+    virtual uint8_t type() const = 0;
     virtual void set_leaf(int at) = 0;
     virtual void set_child(int at, node_ptr child) = 0;
     virtual bool is_leaf(int at) const = 0;
@@ -163,6 +156,7 @@ struct trace_element {
         return el.null() && child.null() && child_ix == 0;
     }
 };
+typedef std::vector<trace_element> trace_list;
 
 extern art_node* alloc_node(uint8_t type);
 extern void free_node(art_node *n);
@@ -190,52 +184,54 @@ struct art_leaf {
     }
 } ;
 
+/**
+ * node content to do common things related to keys and pointers on each node
+ */
 template<int SIZE, int KEYS>
 struct node_content : public art_node {
     node_content() : types(0) {};
     virtual ~node_content(){};
-        
-    virtual void set_leaf(int at) {
+    virtual void set_leaf(int at) final {
         if (SIZE < at) 
             abort();
         types.set(at, true);
     }
-    virtual void set_child(int at, node_ptr node) {
+    virtual void set_child(int at, node_ptr node) final {
         if (SIZE < at) 
             abort();
         types.set(at, node.is_leaf);
         children[at] = node;
     }
-    virtual bool is_leaf(int at) const {
+    virtual bool is_leaf(int at) const final {
         if (SIZE < at) 
             abort();
         bool is = types.test(at);
         return is;
     }
-    virtual bool has_child(int at) const {
+    virtual bool has_child(int at) const final {
         if (SIZE < at) 
             abort();
         return children[at] ;
     }
-    virtual const node_ptr get_node(int at) const {
+    virtual const node_ptr get_node(int at) const final {
         
-        if (at < num_children) 
+        if (at < SIZE) 
             return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
         
         return nullptr;
     }
-    virtual node_ptr get_node(int at) {
+    virtual node_ptr get_node(int at) final {
         
-        if (at < num_children) 
+        if (at < SIZE) 
             return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
         
         return nullptr;
     }
     
-    virtual node_ptr get_child(int at){
+    virtual node_ptr get_child(int at) final {
         return get_node(at);
     }
-    virtual const node_ptr get_child(int at) const {
+    virtual const node_ptr get_child(int at) const final {
         return get_node(at);
     }
 
@@ -252,6 +248,13 @@ struct node_content : public art_node {
                     return i; 
             }
             if (operbits == (OPERATION_BIT::eq & OPERATION_BIT::gt)) return num_children;
+        }
+        if (operbits & (OPERATION_BIT::eq & OPERATION_BIT::lt) ) {
+            for (i = 0; i < num_children; ++i) {
+                if (keys[i] <= c)
+                    return i; 
+            }
+            if (operbits == (OPERATION_BIT::eq & OPERATION_BIT::lt)) return num_children;
         }
         if (operbits & OPERATION_BIT::eq) {
             for (i = 0; i < num_children; ++i) {
@@ -288,12 +291,12 @@ struct node_content : public art_node {
 
     unsigned char keys[KEYS];
 
-    virtual const unsigned char& get_key(unsigned at) const {
+    virtual const unsigned char& get_key(unsigned at) const final {
         if(at < KEYS)
             return keys[at];
         abort();
     }
-    virtual unsigned char& get_key(unsigned at){
+    virtual unsigned char& get_key(unsigned at) final {
         if(at < KEYS)
             return keys[at];
         abort();
@@ -371,11 +374,9 @@ struct node_content : public art_node {
         dest->num_children = src->num_children;
         dest->partial_len = src->partial_len;
         memcpy(dest->partial, src->partial, std::min<int>(MAX_PREFIX_LEN, src->partial_len));
-        //for (unsigned p = 0; p < src->num_children; ++p) {
-        //    dest->types[p] = src->types[p]; 
-        //}
     }
     std::bitset<SIZE> types;
+    //std::bitset<SIZE> encoded;
 protected:
     
     union
@@ -393,10 +394,11 @@ struct art_node256;
  * Small node with only 4 children
  */
 
-struct art_node4 : public node_content<4, 4> {
+struct art_node4 final : public node_content<4, 4> {
     
     art_node4();
     virtual ~art_node4();
+    virtual uint8_t type() const ;
     virtual void remove(node_ptr& ref, unsigned pos, unsigned char key);
 
     virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) ;
@@ -408,9 +410,10 @@ struct art_node4 : public node_content<4, 4> {
 /**
  * Node with 16 children
  */
-struct art_node16 : public node_content<16,16> {
+struct art_node16 final : public node_content<16,16> {
     art_node16();
     virtual ~art_node16();
+    virtual uint8_t type() const ;
     virtual unsigned index(unsigned char c, int operbits) const ;
     
     
@@ -426,22 +429,11 @@ struct art_node16 : public node_content<16,16> {
  * Node with 48 children, but
  * a full 256 byte field.
  */
-struct art_node48 : public node_content<48,256> {    
+struct art_node48 final : public node_content<48,256> {    
     art_node48();
     virtual ~art_node48();
+    virtual uint8_t type() const ;
     virtual unsigned index(unsigned char c) const ;
-    virtual const node_ptr get_node(int at) const {
-        if(at < 256)
-            return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
-        
-        return nullptr;
-    }
-    virtual node_ptr get_node(int at) {
-            if(at < 256)
-                return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
-            
-            return nullptr;
-    }
     
     virtual void remove(node_ptr& ref, unsigned pos, unsigned char key);
     virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) ;
@@ -454,21 +446,10 @@ struct art_node48 : public node_content<48,256> {
 /**
  * Full node with 256 children
  */
-struct art_node256 : public node_content<256,0> {
+struct art_node256 final : public node_content<256,0> {
     art_node256();
     virtual ~art_node256();
-    virtual const node_ptr get_node(int at) const {
-        if(at < 256)
-            return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
-        
-        return nullptr;
-    }
-    virtual node_ptr get_node(int at) {
-            if(at < 256)
-                return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
-            
-            return nullptr;
-    }
+    virtual uint8_t type() const ;
     virtual unsigned index(unsigned char c) const ;
     
     virtual void remove(node_ptr& ref, unsigned pos, unsigned char key) ;
@@ -497,23 +478,22 @@ static const T* get_node(const art_node* n) {
     return (T*)n;
 }
 
-typedef std::vector<trace_element> trace_list;
-
 /**
  * Allocates a node of the given type,
  * initializes to zero and sets the type.
  */
+
 template<typename art_node_t>
 art_node_t* alloc_node() {
-    // these never run the constructor
     return new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
 }
 
-extern void free_node(art_leaf *n);
-
-extern void free_node(node_ptr n);
 /**
  * free a node while updating statistics 
  */
+extern void free_node(art_leaf *n);
+
+extern void free_node(node_ptr n);
+
 extern void free_node(art_node *n);
 

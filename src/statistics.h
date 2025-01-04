@@ -8,6 +8,7 @@ namespace statistics {
     extern std::atomic<uint64_t> n16_nodes;
     extern std::atomic<uint64_t> n48_nodes;
     extern std::atomic<uint64_t> n256_nodes;
+    extern std::atomic<uint64_t> node256_occupants;
     extern std::atomic<uint64_t> leaf_nodes;
     extern std::atomic<uint64_t> node_bytes_alloc;
     extern std::atomic<uint64_t> interior_bytes_alloc;

@@ -397,22 +397,26 @@ extern "C" {
         ValkeyModule_ReplyWithLongLong(ctx,as.leaf_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Node 4 Nodes"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "Size 4 Nodes"); 
         ValkeyModule_ReplyWithLongLong(ctx,as.node4_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Node 16 Nodes"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "Size 16 Nodes"); 
         ValkeyModule_ReplyWithLongLong(ctx,as.node16_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
-        ValkeyModule_ReplyWithSimpleString(ctx, "Node 48 Nodes");
+        ValkeyModule_ReplyWithSimpleString(ctx, "Size 48 Nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node48_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Node 256 Nodes"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "Size 256 Nodes"); 
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
-        ValkeyModule_ReplySetArrayLength(ctx, 7);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "Size 256 Node Occupancy"); 
+        ValkeyModule_ReplyWithLongLong(ctx,as.node256_occupants);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 8);
         return 0;
     }
 

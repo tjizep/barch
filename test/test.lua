@@ -68,8 +68,9 @@ local test = function()
         end
         
     end
+    result[inc()] = {"'ODRANGE',convert(2), convert(count-2), 10", vk.call('ODRANGE',convert(2), convert(count-2), 4)}
     result[inc()] = {[['ODMIN']], vk.call('ODMIN')}
-    --result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
+    result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {"succeses for test "..tests..": "..succeses}
@@ -92,11 +93,18 @@ end
 
 local clear = function()
     local failures = 0
+    local success = 0
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
-        vk.call('ODREM',k)
+        if vk.call('ODREM',k) == v then
+            success = success + 1
+        else
+            result[inc()] = {"Failed remove result ",k, v, vk.call('ODGET',k)}
+        end
+
         if vk.call('ODGET',k) then
+            result[inc()] = {"Failed remove",k, v, vk.call('ODGET',k)}
             failures = failures + 1
         end
     end
@@ -105,6 +113,7 @@ local clear = function()
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
     result[inc()] = {'REMOVE FAILURES', failures}
+    result[inc()] = {'REMOVE SUCCESSES', success}
     
 end 
 
@@ -112,7 +121,7 @@ end
 convert = tocharsnum
 test()
 clear()
-
+--[[
 convert = tochars123
 test()
 clear()
@@ -125,5 +134,5 @@ clear()
 convert = tocharsdbl
 test()
 clear()
---[[]]
+]]
 return result

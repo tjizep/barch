@@ -120,7 +120,6 @@ struct node_ptr {
 
 struct art_node {
     uint8_t partial_len = 0;
-    
     uint8_t num_children = 0;
     unsigned char partial[MAX_PREFIX_LEN];
     art_node();
@@ -359,6 +358,7 @@ struct node_content : public art_node {
             memmove(keys+pos, keys+pos+1, num_children - 1 - pos);
             memmove(children+pos, children+pos+1, (num_children - 1 - pos)*sizeof(void*));
             remove_type(pos);
+            children[num_children - 1] = nullptr;
             num_children--;
         } else {
             abort();

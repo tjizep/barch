@@ -48,7 +48,7 @@ art_node::~art_node() = default;
  */
 
 unsigned art_node::check_prefix(const unsigned char *key, unsigned key_len, unsigned depth) {
-    unsigned max_cmp = std::min<unsigned>(std::min<unsigned>(partial_len, max_prefix_llength), key_len - depth);
+    unsigned max_cmp = std::min<int>(std::min<int>(partial_len, max_prefix_llength), (int)key_len - (int)depth);
     unsigned idx;
     for (idx=0; idx < max_cmp; idx++) {
         if (partial[idx] != key[depth+idx])
@@ -66,7 +66,7 @@ art_node4::art_node4() {
 art_node4::~art_node4() {
     statistics::node_bytes_alloc -= sizeof(art_node4);
     statistics::interior_bytes_alloc -= sizeof(art_node4);
-    statistics::n4_nodes--;
+    --statistics::n4_nodes;
 }
 
 uint8_t art_node4::type() const {
@@ -317,7 +317,7 @@ unsigned art_node48::index(unsigned char c) const {
     num_children--;
     
     if (num_children == 12) {
-        art_node16 *new_node = alloc_node<art_node16>();
+        auto *new_node = alloc_node<art_node16>();
         copy_header(new_node, this);
         unsigned child = 0;
         for (unsigned i = 0; i < 256; i++) {
@@ -465,7 +465,7 @@ unsigned art_node256::index(unsigned char c) const {
         ref = new_node;
         copy_header(new_node, this);
     
-        unsigned pos = 0;
+        pos = 0;
         for (unsigned i = 0; i < 256; i++) {
             if (has_any(i)) {
                 new_node->set_child(pos, get_child(i)); //[pos] = n->children[i];

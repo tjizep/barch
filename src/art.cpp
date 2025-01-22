@@ -1,8 +1,7 @@
-#include <stdlib.h>
-#include <string.h>
-#include <strings.h>
-#include <stdio.h>
-#include <assert.h>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <cassert>
 #include <vector>
 #include <atomic>
 #include "art.h"
@@ -368,7 +367,7 @@ int art_range(const art_tree *t, const unsigned char *key, int key_len, const un
  * Returns the minimum valued leaf
  */
 art_leaf* art_minimum(art_tree *t) {
-    statistics::min_ops++;
+    ++statistics::min_ops;
     return minimum(t->root).leaf();
 }
 
@@ -376,7 +375,7 @@ art_leaf* art_minimum(art_tree *t) {
  * Returns the maximum valued leaf
  */
 art_leaf* art_maximum(art_tree *t) {
-    statistics::max_ops++;
+    ++statistics::max_ops;
     return maximum(t->root).leaf();
 }
 

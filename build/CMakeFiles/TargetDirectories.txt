@@ -1,3 +1,0 @@
-/home/linuxlite/Desktop/artval/build/CMakeFiles/cdict.dir
-/home/linuxlite/Desktop/artval/build/CMakeFiles/edit_cache.dir
-/home/linuxlite/Desktop/artval/build/CMakeFiles/rebuild_cache.dir

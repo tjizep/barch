@@ -128,7 +128,7 @@ struct trace_element {
 struct art_node {
     uint8_t partial_len = 0;
     uint8_t num_children = 0;
-    unsigned char partial[max_prefix_llength];
+    unsigned char partial[max_prefix_llength]{};
     art_node();
     virtual ~art_node();
     [[nodiscard]] virtual uint8_t type() const = 0;

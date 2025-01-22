@@ -40,8 +40,8 @@ void free_node(art_node *n) {
 }
 
 
-art_node::art_node () {}
-art_node::~art_node() {}
+art_node::art_node () = default;
+art_node::~art_node() = default;
 /**
  * Returns the number of prefix characters shared between
  * the key and node.

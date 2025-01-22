@@ -1,4 +1,5 @@
-#include <stdint.h>
+#pragma once
+#include <cstdint>
 #include <bitset>
 #include <vector>
 #include "valkeymodule.h"
@@ -16,7 +17,7 @@
 /**
  * utility to create N copies of unsigned character C c
  */
-template<int N, typename C = unsigned char>
+template<unsigned N, typename C = unsigned char>
 struct nuchar {
     C data[N];
     nuchar(C c){
@@ -108,7 +109,7 @@ struct node_ptr {
         }
         return node;
     }
-    
+
     operator const art_node* () const {
         return node;
     }
@@ -117,6 +118,14 @@ struct node_ptr {
     }
     
 };
+struct trace_element {
+    node_ptr el;
+    node_ptr child;
+    unsigned child_ix;
+    bool empty() const {
+        return el.null() && child.null() && child_ix == 0;
+    }
+};
 
 struct art_node {
     uint8_t partial_len = 0;
@@ -124,37 +133,31 @@ struct art_node {
     unsigned char partial[MAX_PREFIX_LEN];
     art_node();
     virtual ~art_node();
-    virtual uint8_t type() const = 0;
-    virtual void set_leaf(int at) = 0;
-    virtual void set_child(int at, node_ptr child) = 0;
-    virtual bool is_leaf(int at) const = 0;
-    virtual bool has_child(int at) const = 0;
-    virtual node_ptr get_node(int at) = 0;
-    virtual const node_ptr get_node(int at) const = 0;
-    virtual node_ptr get_child(int at) = 0;
-    virtual const node_ptr get_child(int at) const = 0;
-    virtual unsigned index(unsigned char, int operbits) const = 0;
-    virtual unsigned index(unsigned char c) const = 0;
-    virtual node_ptr find(unsigned char, int operbits) const = 0;
-    virtual node_ptr find(unsigned char) const = 0;
-    virtual node_ptr last() const = 0;
-    virtual unsigned last_index() const = 0;
+    [[nodiscard]] virtual uint8_t type() const = 0;
+    virtual void set_leaf(unsigned at) = 0;
+    virtual void set_child(unsigned at, node_ptr child) = 0;
+    [[nodiscard]] virtual bool is_leaf(unsigned at) const = 0;
+    [[nodiscard]] virtual bool has_child(unsigned at) const = 0;
+    virtual node_ptr get_node(unsigned at) = 0;
+    [[nodiscard]] virtual const node_ptr get_node(unsigned at) const = 0;
+    virtual node_ptr get_child(unsigned at) = 0;
+    [[nodiscard]] virtual const node_ptr get_child(unsigned at) const = 0;
+    [[nodiscard]] virtual unsigned index(unsigned char, unsigned operbits) const = 0;
+    [[nodiscard]] virtual unsigned index(unsigned char c) const = 0;
+    [[nodiscard]] virtual node_ptr find(unsigned char, unsigned operbits) const = 0;
+    [[nodiscard]] virtual node_ptr find(unsigned char) const = 0;
+    [[nodiscard]] virtual node_ptr last() const = 0;
+    [[nodiscard]] virtual unsigned last_index() const = 0;
     virtual void remove(node_ptr& ref, unsigned pos, unsigned char key) = 0;
     virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) = 0;
-    virtual const unsigned char& get_key(unsigned at) const = 0;
+    [[nodiscard]] virtual const unsigned char& get_key(unsigned at) const = 0;
     virtual unsigned char& get_key(unsigned at) = 0;
-    unsigned check_prefix(const unsigned char *, int, int); 
-    virtual unsigned first_index() const = 0;
+    unsigned check_prefix(const unsigned char *, unsigned, unsigned);
+    [[nodiscard]] virtual unsigned first_index() const = 0;
+    [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) = 0;
 };
 
-struct trace_element {
-    node_ptr el;
-    node_ptr child;
-    int child_ix;
-    bool empty() const {
-        return el.null() && child.null() && child_ix == 0;
-    }
-};
+
 typedef std::vector<trace_element> trace_list;
 
 extern art_node* alloc_node(uint8_t type);
@@ -173,7 +176,7 @@ struct art_leaf {
      * Checks if a leaf matches
      * @return 0 on success.
      */
-    int compare(const unsigned char *key, int key_len, int depth) {
+    unsigned compare(const unsigned char *key, unsigned key_len, unsigned depth) {
         (void)depth;
         // Fail if the key lengths are different
         if (this->key_len != (uint32_t)key_len) return 1;
@@ -186,40 +189,40 @@ struct art_leaf {
 /**
  * node content to do common things related to keys and pointers on each node
  */
-template<int SIZE, int KEYS>
+template<unsigned SIZE, unsigned KEYS>
 struct node_content : public art_node {
     node_content() : types(0) {};
-    virtual ~node_content(){};
-    virtual void set_leaf(int at) final {
+    ~node_content() override{};
+    void set_leaf(unsigned at) final {
         if (SIZE < at) 
             abort();
         types.set(at, true);
     }
-    virtual void set_child(int at, node_ptr node) final {
+    void set_child(unsigned at, node_ptr node) final {
         if (SIZE < at) 
             abort();
         types.set(at, node.is_leaf);
         children[at] = node;
     }
-    virtual bool is_leaf(int at) const final {
+    [[nodiscard]] bool is_leaf(unsigned at) const final {
         if (SIZE < at) 
             abort();
         bool is = types.test(at);
         return is;
     }
-    virtual bool has_child(int at) const final {
+    [[nodiscard]] bool has_child(unsigned at) const final {
         if (SIZE < at) 
             abort();
         return children[at] ;
     }
-    virtual const node_ptr get_node(int at) const final {
+    [[nodiscard]] const node_ptr get_node(unsigned at) const final {
         
         if (at < SIZE) 
             return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
         
         return nullptr;
     }
-    virtual node_ptr get_node(int at) final {
+    node_ptr get_node(unsigned at) final {
         
         if (at < SIZE) 
             return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
@@ -227,16 +230,16 @@ struct node_content : public art_node {
         return nullptr;
     }
     
-    virtual node_ptr get_child(int at) final {
+    node_ptr get_child(unsigned at) final {
         return get_node(at);
     }
-    virtual const node_ptr get_child(int at) const final {
+    [[nodiscard]] const node_ptr get_child(unsigned at) const final {
         return get_node(at);
     }
 
 
     // TODO: NB check where this function is used
-    virtual unsigned index(unsigned char c, int operbits) const {
+    [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
         unsigned i; 
         if (KEYS < num_children) {
             return num_children;
@@ -275,27 +278,28 @@ struct node_content : public art_node {
         }
         return num_children;
     }
-    virtual unsigned index(unsigned char c) const {
+    [[nodiscard]] unsigned index(unsigned char c) const override {
         return index(c, OPERATION_BIT::eq);
     }
-    virtual node_ptr find(unsigned char c) const {
+    [[nodiscard]] node_ptr find(unsigned char c) const override {
         return get_child(index(c));
     }
-    virtual node_ptr find(unsigned char c, int operbits) const {
+    [[nodiscard]] node_ptr find(unsigned char c, unsigned operbits) const override {
         return get_child(index(c,operbits));
     }
-    virtual unsigned first_index() const {
+    [[nodiscard]] unsigned first_index() const override {
         return 0;
     };
 
-    unsigned char keys[KEYS];
+    unsigned char keys[KEYS]{};
 
-    virtual const unsigned char& get_key(unsigned at) const final {
+    [[nodiscard]] const unsigned char& get_key(unsigned at) const final {
         if(at < KEYS)
             return keys[at];
         abort();
     }
-    virtual unsigned char& get_key(unsigned at) final {
+
+    unsigned char& get_key(unsigned at) final {
         if(at < KEYS)
             return keys[at];
         abort();
@@ -313,17 +317,17 @@ struct node_content : public art_node {
             abort();
         memcpy(keys, other_keys, count);
     }
-    const art_node * get_children() const {
+    [[nodiscard]] const art_node * get_children() const {
         return (art_node *)children;
     }
     art_node* get_children() {
         return &children[0];
     }
-    void insert_type(int pos) { 
+    void insert_type(unsigned pos) {
         if (SIZE < pos) 
             abort();
-        int count = num_children;
-        for (int p = count; p > pos; --p) {
+        unsigned count = num_children;
+        for (unsigned p = count; p > pos; --p) {
             types[p] = types[p - 1]; 
         }
     }
@@ -373,7 +377,7 @@ struct node_content : public art_node {
         }
         dest->num_children = src->num_children;
         dest->partial_len = src->partial_len;
-        memcpy(dest->partial, src->partial, std::min<int>(MAX_PREFIX_LEN, src->partial_len));
+        memcpy(dest->partial, src->partial, std::min<unsigned>(MAX_PREFIX_LEN, src->partial_len));
     }
     std::bitset<SIZE> types;
     //std::bitset<SIZE> encoded;
@@ -381,7 +385,7 @@ protected:
     
     union
     {
-        art_leaf *leaves[SIZE];
+        art_leaf *leaves[SIZE]{};
         art_node *children[SIZE];
     };
 };
@@ -397,14 +401,14 @@ struct art_node256;
 struct art_node4 final : public node_content<4, 4> {
     
     art_node4();
-    virtual ~art_node4();
-    virtual uint8_t type() const ;
-    virtual void remove(node_ptr& ref, unsigned pos, unsigned char key);
+    ~art_node4() override;
+    [[nodiscard]] virtual uint8_t type() const ;
+    void remove(node_ptr& ref, unsigned pos, unsigned char key) override;
 
-    virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) ;
-    virtual node_ptr last() const ;
-    virtual unsigned last_index() const ;
-    
+    void add_child(unsigned char c, node_ptr& ref, node_ptr child) override ;
+    [[nodiscard]] node_ptr last() const override ;
+    [[nodiscard]] unsigned last_index() const override ;
+    [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override;
 };
 
 /**
@@ -412,16 +416,17 @@ struct art_node4 final : public node_content<4, 4> {
  */
 struct art_node16 final : public node_content<16,16> {
     art_node16();
-    virtual ~art_node16();
-    virtual uint8_t type() const ;
-    virtual unsigned index(unsigned char c, int operbits) const ;
+    ~art_node16() override;
+    [[nodiscard]] uint8_t type() const override ;
+    [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override ;
     
     
     // unsigned pos = l - children;
-    virtual void remove(node_ptr& ref, unsigned pos, unsigned char key);
-    virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child);
-    virtual node_ptr last() const;
-    virtual unsigned last_index() const;
+    void remove(node_ptr& ref, unsigned pos, unsigned char key) override;
+    void add_child(unsigned char c, node_ptr& ref, node_ptr child) override;
+    [[nodiscard]] node_ptr last() const override;
+    [[nodiscard]] unsigned last_index() const override;
+    [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override;
     
 };
 
@@ -431,15 +436,16 @@ struct art_node16 final : public node_content<16,16> {
  */
 struct art_node48 final : public node_content<48,256> {    
     art_node48();
-    virtual ~art_node48();
-    virtual uint8_t type() const ;
-    virtual unsigned index(unsigned char c) const ;
+    ~art_node48() override;
+    [[nodiscard]] uint8_t type() const override ;
+    [[nodiscard]] unsigned index(unsigned char c) const override ;
     
-    virtual void remove(node_ptr& ref, unsigned pos, unsigned char key);
-    virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) ;
-    virtual node_ptr last() const ;
-    virtual unsigned last_index() const;
-    virtual unsigned first_index() const;
+    void remove(node_ptr& ref, unsigned pos, unsigned char key) override;
+    void add_child(unsigned char c, node_ptr& ref, node_ptr child) override ;
+    [[nodiscard]] node_ptr last() const override ;
+    [[nodiscard]] unsigned last_index() const override;
+    [[nodiscard]] unsigned first_index() const override;
+    [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override;
     
 } ;
 
@@ -448,34 +454,34 @@ struct art_node48 final : public node_content<48,256> {
  */
 struct art_node256 final : public node_content<256,0> {
     art_node256();
-    virtual ~art_node256();
-    virtual uint8_t type() const ;
-    virtual unsigned index(unsigned char c) const ;
+    ~art_node256() override;
+    [[nodiscard]] uint8_t type() const override ;
+    [[nodiscard]] unsigned index(unsigned char c) const override ;
     
-    virtual void remove(node_ptr& ref, unsigned pos, unsigned char key) ;
+    void remove(node_ptr& ref, unsigned pos, unsigned char key) override ;
 
-    virtual void add_child(unsigned char c, node_ptr&, node_ptr child) ;
-    virtual node_ptr last() const ;
-    virtual unsigned last_index() const ;
-    virtual unsigned first_index() const ;
-    
+    void add_child(unsigned char c, node_ptr&, node_ptr child) override ;
+    [[nodiscard]] node_ptr last() const override ;
+    [[nodiscard]] unsigned last_index() const override ;
+    [[nodiscard]] unsigned first_index() const override ;
+    [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override ;
 
 };
 template <typename T> 
 static T* get_node(art_node* n){
-    return (T*)n;
+    return static_cast<T*>(n);
 }
 template <typename T> 
 static T* get_node(node_ptr n){
-    return (T*)n.node;
+    return static_cast<T*>(n.node);
 }
 template <typename T> 
 static const T* get_node(const node_ptr n){
-    return (const T*)n.node;
+    return static_cast<const T*>(n.node);
 }
 template <typename T> 
 static const T* get_node(const art_node* n) {
-    return (T*)n;
+    return static_cast<T*>(n);
 }
 
 /**

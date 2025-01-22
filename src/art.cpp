@@ -84,74 +84,14 @@ static int leaf_compare(const art_leaf *n, const unsigned char *key, int key_len
  */
 static trace_element lower_bound_child(node_ptr n, const unsigned char * key, int key_len, int depth, int * is_equal) {
 
-    int i, uc;
     unsigned char c = 0x00;
     if (!n) return {nullptr, nullptr, 0};
     if (n.is_leaf) return {nullptr, nullptr, 0};
 
     c = key[std::min(depth, key_len)];
-    switch (n->type()) {
-        case NODE4:
-            {
-                auto p = get_node<art_node4>(n.node);
-                for (i=0 ; i < n->num_children; i++) {
-
-                    if (p->keys[i] >= c && p->has_child(i)){
-                        *is_equal = p->keys[i] == c;
-                        return {n,p->get_child(i),i};
-                    }
-                }
-            }
-            break;
-
-        
-        case NODE16:
-            {
-                auto p = get_node<art_node16>(n.node);
-                int mask = (1 << n->num_children) - 1;
-                unsigned bf = bits_oper16(p->keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt); // inverse logic
-                if (bf) {
-                    i = __builtin_ctz(bf);
-                    return {n,p->get_child(i),i};
-                }
-            }
-            break;
-        
-
-        case NODE48:
-            {
-                auto p = get_node<art_node48>(n.node);
-                /*
-                * find first not less than
-                * todo: make lb faster by adding bit map index and using __builtin_ctz as above 
-                */
-                uc = c;
-                for (; uc < 256;uc++){
-                    i = p->keys[uc];
-                    if (i > 0) {
-                        *is_equal = (i == c);
-                        return {n,p->get_child(i-1),i-1};
-                    }
-                }
-            }
-            break;
-
-        case NODE256:
-            {   
-                auto p = get_node<art_node256>(n.node);
-                for (i = c; i < 256; ++i) {
-                    if (p->has_child(i)) {// because nodes are ordered accordingly
-                        *is_equal = (i == c);
-                        return {n,p->get_child(i),i};
-                    }
-                }
-            }
-            break;
-
-        default:
-            abort();
-    }
-    return {nullptr, nullptr, 0};
+    auto r = n->lower_bound_child(c);
+    *is_equal = r.second;
+    return r.first;
 }
 
 static node_ptr find_child(node_ptr n, unsigned char c) {
@@ -348,7 +288,7 @@ static trace_element first_child_off(node_ptr n){
     return {n,n->get_child(n->first_index()),0};
 }
 static trace_element last_child_off(node_ptr n){
-    int idx;
+    unsigned idx;
     if(!n) return {nullptr, nullptr, 0};
     if(n.is_leaf) return {nullptr, nullptr, 0};
     idx = n->last_index();
@@ -357,7 +297,7 @@ static trace_element last_child_off(node_ptr n){
 }
 
 static trace_element increment_te(const trace_element &te){
-    int i, uc;
+    unsigned i, uc;
     if (!te.el) return {nullptr, nullptr, 0};
     if (te.el.is_leaf) return {nullptr, nullptr, 0};
 

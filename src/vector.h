@@ -6,4 +6,4 @@ enum OPERATION_BIT {
     lt = 4
 };
 
-extern unsigned bits_oper16(const unsigned char * a, const unsigned char * b, unsigned mask, int operbits);
+extern unsigned bits_oper16(const unsigned char * a, const unsigned char * b, unsigned mask, unsigned operbits);

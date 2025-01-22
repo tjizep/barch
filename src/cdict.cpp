@@ -35,18 +35,18 @@ static art_tree *get_art(ValkeyModuleCtx *ctx)
 {
     VALKEYMODULE_NOT_USED(ctx);
 
-    if (ad.root == NULL)
+    if (ad.root == nullptr)
     {
         if (art_tree_init(&ad) != 0)
         {
-            return NULL;
+            return nullptr;
         }
     }
     return &ad;
 }
 
 static int key_ok(const char * k, size_t klen){
-    if (k == NULL)
+    if (k == nullptr)
         return -1;
 
     if (klen == 0) 
@@ -61,7 +61,7 @@ static int key_ok(const char * k, size_t klen){
 
 static int key_check(ValkeyModuleCtx *ctx, const char * k, size_t klen){
 
-    if (k == NULL) 
+    if (k == nullptr)
         return ValkeyModule_ReplyWithError(ctx, "No null keys");
 
     if (klen == 0) 
@@ -119,7 +119,7 @@ struct iter_state {
             return -1;
         }
         
-        if (key == NULL){
+        if (key == nullptr){
             return -1;
         }
         
@@ -208,7 +208,7 @@ extern "C" {
 
         /* We need to keep a reference to the value stored at the key, otherwise
          * it would be freed when this callback returns. */
-        ValkeyModule_RetainString(NULL, argv[2]);
+        ValkeyModule_RetainString(nullptr, argv[2]);
         return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 
@@ -232,7 +232,7 @@ extern "C" {
 
         /* We need to keep a reference to the value stored at the key, otherwise
          * it would be freed when this callback returns. */
-        ValkeyModule_RetainString(NULL, argv[2]);
+        ValkeyModule_RetainString(nullptr, argv[2]);
         return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 
@@ -255,7 +255,7 @@ extern "C" {
 
         ValkeyModuleString *val = (ValkeyModuleString *)r;
 
-        if (val == NULL)
+        if (val == nullptr)
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
@@ -275,7 +275,7 @@ extern "C" {
 
         art_leaf *r = art_minimum(get_art(ctx));
 
-        if (r == NULL)
+        if (r == nullptr)
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
@@ -296,7 +296,7 @@ extern "C" {
 
         art_leaf *r = art_maximum(get_art(ctx));
 
-        if (r == NULL)
+        if (r == nullptr)
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
@@ -325,7 +325,7 @@ extern "C" {
 
         ValkeyModuleString *val = (ValkeyModuleString *)r;
 
-        if (val == NULL)
+        if (val == nullptr)
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
@@ -355,7 +355,7 @@ extern "C" {
 
         ValkeyModuleString *val = (ValkeyModuleString *)r;
 
-        if (val == NULL)
+        if (val == nullptr)
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
@@ -520,8 +520,8 @@ extern "C" {
             return VALKEYMODULE_ERR;
 
         /* Create our global dictionary. Here we'll set our keys and values. */
-        Keyspace = ValkeyModule_CreateDict(NULL);
-        if (get_art(ctx) == NULL)
+        Keyspace = ValkeyModule_CreateDict(nullptr);
+        if (get_art(ctx) == nullptr)
         {
             return VALKEYMODULE_ERR;
         }

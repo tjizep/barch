@@ -17,7 +17,7 @@
  * compare two buffers and put the result in a bitmap
  */
 
-unsigned bits_oper16(const unsigned char * a, const unsigned char * b, unsigned mask, int operbits){
+unsigned bits_oper16(const unsigned char * a, const unsigned char * b, unsigned mask, unsigned operbits){
     unsigned bitfield = 0;
     // support non-86 architectures
     #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)

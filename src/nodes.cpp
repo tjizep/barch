@@ -16,7 +16,7 @@ void free_node(art_leaf *n){
     if(!n) return;
     unsigned kl = n->key_len;
     ValkeyModule_Free(n);
-    statistics::leaf_nodes--;
+    --statistics::leaf_nodes;
     statistics::node_bytes_alloc -= (sizeof(art_leaf) + kl);
 }
 
@@ -49,7 +49,7 @@ art_node::~art_node() {}
  */
 
 unsigned art_node::check_prefix(const unsigned char *key, unsigned key_len, unsigned depth) {
-    unsigned max_cmp = std::min<unsigned>(std::min<unsigned>(partial_len, MAX_PREFIX_LEN), key_len - depth);
+    unsigned max_cmp = std::min<unsigned>(std::min<unsigned>(partial_len, max_prefix_llength), key_len - depth);
     unsigned idx;
     for (idx=0; idx < max_cmp; idx++) {
         if (partial[idx] != key[depth+idx])
@@ -71,7 +71,7 @@ art_node4::~art_node4() {
 }
 
 uint8_t art_node4::type() const {
-    return NODE4;
+    return node_4;
 }
 
 void art_node4::remove(node_ptr& ref, unsigned pos, unsigned char ) {
@@ -84,18 +84,18 @@ void art_node4::remove(node_ptr& ref, unsigned pos, unsigned char ) {
         if (!child.is_leaf) {
             // Concatenate the prefixes
             unsigned prefix = partial_len;
-            if (prefix < MAX_PREFIX_LEN) {
+            if (prefix < max_prefix_llength) {
                 partial[prefix] = keys[0];
                 prefix++;
             }
-            if (prefix < MAX_PREFIX_LEN) {
-                unsigned sub_prefix = std::min<unsigned>(child->partial_len, MAX_PREFIX_LEN - prefix);
+            if (prefix < max_prefix_llength) {
+                unsigned sub_prefix = std::min<unsigned>(child->partial_len, max_prefix_llength - prefix);
                 memcpy(partial+prefix, child->partial, sub_prefix);
                 prefix += sub_prefix;
             }
 
             // Store the prefix in the child
-            memcpy(child->partial, partial, std::min<unsigned>(prefix, MAX_PREFIX_LEN));
+            memcpy(child->partial, partial, std::min<unsigned>(prefix, max_prefix_llength));
             child->partial_len += partial_len + 1;
         }
         ref = child;
@@ -120,7 +120,7 @@ void art_node4::add_child(unsigned char c, node_ptr &ref, node_ptr child)
         num_children++;
 
     } else {
-        art_node16 *new_node = alloc_node<art_node16>();
+        auto *new_node = alloc_node<art_node16>();
 
         // Copy the child pointers and the key map
         new_node->set_children(0, this, num_children);
@@ -151,6 +151,24 @@ std::pair<trace_element, bool> art_node4::lower_bound_child(unsigned char c)
     }
     return {{nullptr,nullptr,num_children},false};
 }
+
+trace_element art_node4::next(const trace_element& te)
+{
+    unsigned i = te.child_ix + 1;
+    if (i < num_children) {
+        return {this,get_child(i),i};
+    }
+    return {};
+}
+trace_element art_node4::previous(const trace_element& te)
+{
+    unsigned i = te.child_ix;
+    if (i > 0) {
+        return {this,get_child(i),i-1};
+    }
+    return {};
+}
+
 art_node16::art_node16() { 
     statistics::node_bytes_alloc += sizeof(art_node16);
     statistics::interior_bytes_alloc += sizeof(art_node16);
@@ -163,7 +181,7 @@ art_node16::~art_node16() {
 }
 
 uint8_t art_node16::type() const {
-    return NODE16;
+    return node_16;
 }
 
 unsigned art_node16::index(unsigned char c, unsigned operbits) const {
@@ -243,6 +261,23 @@ std::pair<trace_element, bool> art_node16::lower_bound_child(unsigned char c)
     }
     return {{nullptr,nullptr,num_children},false};
 }
+trace_element art_node16::next(const trace_element& te)
+{
+    unsigned i = te.child_ix + 1;
+    if (i < num_children) {
+        return {this,get_child(i),i};// the keys are ordered so fine I think
+    }
+    return {};
+}
+trace_element art_node16::previous(const trace_element& te)
+{
+    unsigned i = te.child_ix;
+    if (i > 0) {
+        return {this,get_child(i),i-1};// the keys are ordered so fine I think
+    }
+    return {};
+}
+
 
 art_node48::art_node48(){ 
     statistics::node_bytes_alloc += sizeof(art_node48);
@@ -256,7 +291,7 @@ art_node48::~art_node48() {
 }
 
 uint8_t art_node48::type() const{
-    return NODE48;
+    return node_48;
 }
 
 unsigned art_node48::index(unsigned char c) const {
@@ -369,6 +404,30 @@ std::pair<trace_element, bool> art_node48::lower_bound_child(unsigned char c)
     return {{nullptr,nullptr,256},false};
 
 }
+trace_element art_node48::next(const trace_element& te)
+{
+    unsigned uc = te.child_ix, i;
+
+    for (; uc > 0; --uc){
+        i = keys[uc];
+        if(i > 0){
+            return {this,get_child(i-1),i-1};
+        }
+    }
+    return {};
+}
+trace_element art_node48::previous(const trace_element& te)
+{
+    unsigned uc = te.child_ix + 1, i;
+    for (; uc < 256;uc++){
+        i = keys[uc];
+        if(i > 0){
+            return {this,get_child(i-1),i-1};
+        }
+    }
+    return {};
+}
+
 
 art_node256::art_node256() { 
     statistics::node_bytes_alloc += sizeof(art_node256);
@@ -383,7 +442,7 @@ art_node256::~art_node256() {
     statistics::n256_nodes--;
 }
 uint8_t art_node256::type() const {
-    return NODE256;
+    return node_256;
 }
 
 unsigned art_node256::index(unsigned char c) const {
@@ -456,3 +515,25 @@ std::pair<trace_element, bool> art_node256::lower_bound_child(unsigned char c)
     }
     return {{nullptr,nullptr,256},false};
 }
+
+trace_element art_node256::next(const trace_element& te)
+{
+    for (unsigned i = te.child_ix+1; i < 256; ++i) { // these aren't sparse so shouldn't take long
+        if (has_child(i)) {// because nodes are ordered accordingly
+            return {this,get_child(i),i};
+        }
+    }
+    return {};
+}
+
+trace_element art_node256::previous(const trace_element& te)
+{
+    if(!te.child_ix) return {};
+    for (unsigned i = te.child_ix-1; i > 0; --i) { // these aren't sparse so shouldn't take long
+        if (has_child(i)) {// because nodes are ordered accordingly
+            return {this,get_child(i),i};
+        }
+    }
+    return {};
+}
+

@@ -6,13 +6,18 @@
 #include "statistics.h"
 #include "vector.h"
 
-#pragma once
-#define NODE4   1
-#define NODE16  2
-#define NODE48  3
-#define NODE256 4
+enum node_kind
+{
+    node_4 = 1u,
+    node_16 = 2u,
+    node_48 = 3u,
+    node_256 = 4u
+};
 
-#define MAX_PREFIX_LEN 12
+enum constants
+{
+    max_prefix_llength = 12u
+};
 
 /**
  * utility to create N copies of unsigned character C c
@@ -87,24 +92,17 @@ struct node_ptr {
     art_leaf* leaf(){
         if (!is_leaf)
             abort();
-        return is_leaf ? l : nullptr;
+        return l;
     }
 
     const art_leaf* leaf() const {
         if (!is_leaf)
             abort();
-        return is_leaf ? l : nullptr;
+        return l;
     }
     
-    art_node * operator -> (){
+    art_node * operator -> () const {
         if(is_leaf) {
-            abort();
-        }
-        return node;
-    }
-
-    const art_node * operator -> () const {
-         if(is_leaf) {
             abort();
         }
         return node;
@@ -119,10 +117,10 @@ struct node_ptr {
     
 };
 struct trace_element {
-    node_ptr el;
-    node_ptr child;
-    unsigned child_ix;
-    bool empty() const {
+    node_ptr el = nullptr;
+    node_ptr child = nullptr;
+    unsigned child_ix = 0;
+    [[nodiscard]] bool empty() const {
         return el.null() && child.null() && child_ix == 0;
     }
 };
@@ -130,7 +128,7 @@ struct trace_element {
 struct art_node {
     uint8_t partial_len = 0;
     uint8_t num_children = 0;
-    unsigned char partial[MAX_PREFIX_LEN];
+    unsigned char partial[max_prefix_llength];
     art_node();
     virtual ~art_node();
     [[nodiscard]] virtual uint8_t type() const = 0;
@@ -155,6 +153,9 @@ struct art_node {
     unsigned check_prefix(const unsigned char *, unsigned, unsigned);
     [[nodiscard]] virtual unsigned first_index() const = 0;
     [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) = 0;
+    [[nodiscard]] virtual trace_element next(const trace_element& te) = 0;
+    [[nodiscard]] virtual trace_element previous(const trace_element& te) = 0;
+
 };
 
 
@@ -377,7 +378,7 @@ struct node_content : public art_node {
         }
         dest->num_children = src->num_children;
         dest->partial_len = src->partial_len;
-        memcpy(dest->partial, src->partial, std::min<unsigned>(MAX_PREFIX_LEN, src->partial_len));
+        memcpy(dest->partial, src->partial, std::min<unsigned>(max_prefix_llength, src->partial_len));
     }
     std::bitset<SIZE> types;
     //std::bitset<SIZE> encoded;
@@ -402,13 +403,16 @@ struct art_node4 final : public node_content<4, 4> {
     
     art_node4();
     ~art_node4() override;
-    [[nodiscard]] virtual uint8_t type() const ;
+    [[nodiscard]] uint8_t type() const override ;
     void remove(node_ptr& ref, unsigned pos, unsigned char key) override;
 
     void add_child(unsigned char c, node_ptr& ref, node_ptr child) override ;
     [[nodiscard]] node_ptr last() const override ;
     [[nodiscard]] unsigned last_index() const override ;
     [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override;
+    [[nodiscard]] trace_element next(const trace_element& te) override;
+    [[nodiscard]] trace_element previous(const trace_element& te) override;
+
 };
 
 /**
@@ -427,6 +431,8 @@ struct art_node16 final : public node_content<16,16> {
     [[nodiscard]] node_ptr last() const override;
     [[nodiscard]] unsigned last_index() const override;
     [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override;
+    [[nodiscard]] trace_element next(const trace_element& te) override;
+    [[nodiscard]] trace_element previous(const trace_element& te) override;
     
 };
 
@@ -446,6 +452,8 @@ struct art_node48 final : public node_content<48,256> {
     [[nodiscard]] unsigned last_index() const override;
     [[nodiscard]] unsigned first_index() const override;
     [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override;
+    [[nodiscard]] trace_element next(const trace_element& te) override;
+    [[nodiscard]] trace_element previous(const trace_element& te) override;
     
 } ;
 
@@ -465,6 +473,8 @@ struct art_node256 final : public node_content<256,0> {
     [[nodiscard]] unsigned last_index() const override ;
     [[nodiscard]] unsigned first_index() const override ;
     [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override ;
+    [[nodiscard]] trace_element next(const trace_element& te) override;
+    [[nodiscard]] trace_element previous(const trace_element& te) override;
 
 };
 template <typename T> 

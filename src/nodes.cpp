@@ -1,8 +1,7 @@
-#include <stdlib.h>
-#include <string.h>
-#include <strings.h>
-#include <stdio.h>
-#include <assert.h>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <cassert>
 #include <vector>
 #include <atomic>
 
@@ -197,7 +196,7 @@ void art_node16::remove(node_ptr& ref, unsigned pos, unsigned char) {
     remove_child(pos);
     
     if (num_children == 3) {
-        art_node4 *new_node = alloc_node<art_node4>();
+        auto *new_node = alloc_node<art_node4>();
         copy_header(new_node, this);
         new_node->set_keys(keys, 3);
         new_node->set_children(0, this, 3);
@@ -230,7 +229,7 @@ void art_node16::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
         num_children++;
 
     } else {
-        art_node48 *new_node = alloc_node<art_node48>();
+        auto *new_node = alloc_node<art_node48>();
 
         // Copy the child pointers and populate the key map
         new_node->set_children(0, this, num_children);
@@ -432,14 +431,14 @@ trace_element art_node48::previous(const trace_element& te)
 art_node256::art_node256() { 
     statistics::node_bytes_alloc += sizeof(art_node256);
     statistics::interior_bytes_alloc += sizeof(art_node256);
-    statistics::n256_nodes++;
+    ++statistics::n256_nodes;
 }
 
 art_node256::~art_node256() {
     statistics::node256_occupants -= num_children;
     statistics::node_bytes_alloc -= sizeof(art_node256);
     statistics::interior_bytes_alloc -= sizeof(art_node256);
-    statistics::n256_nodes--;
+    --statistics::n256_nodes;
 }
 uint8_t art_node256::type() const {
     return node_256;
@@ -458,11 +457,11 @@ unsigned art_node256::index(unsigned char c) const {
     children[key] = nullptr;
     types.set(key, false);
     num_children--;
-    statistics::node256_occupants--;
+    --statistics::node256_occupants;
     // Resize to a node48 on underflow, not immediately to prevent
     // trashing if we sit on the 48/49 boundary
     if (num_children == 37) {
-        art_node48 *new_node = alloc_node<art_node48>();
+        auto *new_node = alloc_node<art_node48>();
         ref = new_node;
         copy_header(new_node, this);
     
@@ -481,7 +480,7 @@ unsigned art_node256::index(unsigned char c) const {
 
 void art_node256::add_child(unsigned char c, node_ptr&, node_ptr child) {
     if(!has_child(c)) {
-        statistics::node256_occupants++;
+        ++statistics::node256_occupants;
         ++num_children; // just to keep stats ok
     }
     set_child(c, child);

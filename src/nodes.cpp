@@ -7,10 +7,22 @@
 
 #include "art.h"
 #include "statistics.h"
-#include "vector.h"
 #include "nodes.h"
 
-
+#include <algorithm>
+#include <limits>
+//static char * offset_val = nullptr;
+int64_t get_node_offset()
+{
+    return 0;
+#if 0
+    if(!offset_val)
+    {
+        offset_val = (char*)ValkeyModule_Calloc(1,4);
+    }
+    return (int64_t)offset_val;
+#endif
+}
 void free_node(art_leaf *n){
     if(!n) return;
     unsigned kl = n->key_len;
@@ -38,7 +50,23 @@ void free_node(art_node *n) {
     // Free ourself on the way up
     ValkeyModule_Free(n);
 }
+art_node* alloc_node(unsigned nt) {
+    switch (nt)
+    {
+    case node_4:
+        return alloc_any_node<art_node4>();
+    case node_16:
+        return alloc_any_node<art_node16>();
+    case node_48:
+        return alloc_any_node<art_node48>();
+    case node_256:
+        return alloc_any_node<art_node256>();
+    default:
+        abort();
+    }
 
+    return nullptr;
+}
 
 art_node::art_node () = default;
 art_node::~art_node() = default;
@@ -119,7 +147,7 @@ void art_node4::add_child(unsigned char c, node_ptr &ref, node_ptr child)
         num_children++;
 
     } else {
-        auto *new_node = alloc_node<art_node16>();
+        auto *new_node = alloc_any_node<art_node16>();
 
         // Copy the child pointers and the key map
         new_node->set_children(0, this, num_children);
@@ -196,7 +224,7 @@ void art_node16::remove(node_ptr& ref, unsigned pos, unsigned char) {
     remove_child(pos);
     
     if (num_children == 3) {
-        auto *new_node = alloc_node<art_node4>();
+        auto *new_node = alloc_any_node<art_node4>();
         copy_header(new_node, this);
         new_node->set_keys(keys, 3);
         new_node->set_children(0, this, 3);
@@ -229,7 +257,7 @@ void art_node16::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
         num_children++;
 
     } else {
-        auto *new_node = alloc_node<art_node48>();
+        auto *new_node = alloc_any_node<art_node48>();
 
         // Copy the child pointers and populate the key map
         new_node->set_children(0, this, num_children);
@@ -317,7 +345,7 @@ unsigned art_node48::index(unsigned char c) const {
     num_children--;
     
     if (num_children == 12) {
-        auto *new_node = alloc_node<art_node16>();
+        auto *new_node = alloc_any_node<art_node16>();
         copy_header(new_node, this);
         unsigned child = 0;
         for (unsigned i = 0; i < 256; i++) {
@@ -347,7 +375,7 @@ void art_node48::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
         keys[c] = pos + 1;
         num_children++;
     } else {
-        auto *new_node = alloc_node<art_node256>();
+        auto *new_node = alloc_any_node<art_node256>();
         for (unsigned i = 0;i < 256; i++) {
             if (keys[i]) {
                 node_ptr nc = get_child(keys[i] - 1);
@@ -461,7 +489,7 @@ unsigned art_node256::index(unsigned char c) const {
     // Resize to a node48 on underflow, not immediately to prevent
     // trashing if we sit on the 48/49 boundary
     if (num_children == 37) {
-        auto *new_node = alloc_node<art_node48>();
+        auto *new_node = alloc_any_node<art_node48>();
         ref = new_node;
         copy_header(new_node, this);
     

@@ -1,10 +1,25 @@
 #pragma once
 #include <cstdint>
 #include <bitset>
+#include <limits>
 #include <vector>
+#include <bits/ios_base.h>
+
 #include "valkeymodule.h"
 #include "statistics.h"
 #include "vector.h"
+
+typedef int64_t default_int_t;
+template<typename I>
+int64_t i64max()
+{
+    return std::numeric_limits<I>::max();
+}
+template<typename I>
+int64_t i64min()
+{
+    return std::numeric_limits<I>::min();
+}
 
 enum node_kind
 {
@@ -18,7 +33,7 @@ enum constants
 {
     max_prefix_llength = 12u
 };
-
+typedef int16_t node_ptr_int_t;
 /**
  * utility to create N copies of unsigned character C c
  */
@@ -39,7 +54,7 @@ struct art_leaf;
 struct node_ptr {
     
     bool is_leaf;
-    node_ptr() : is_leaf(false), node(nullptr) {}
+    node_ptr() : is_leaf(false), node(nullptr) {};
     node_ptr(const node_ptr& p) : is_leaf(p.is_leaf), node(p.node) {}
     
     node_ptr(art_node* p) : is_leaf(false), node(p) {}
@@ -120,6 +135,7 @@ struct trace_element {
     node_ptr el = nullptr;
     node_ptr child = nullptr;
     unsigned child_ix = 0;
+    unsigned char k = 0;
     [[nodiscard]] bool empty() const {
         return el.null() && child.null() && child_ix == 0;
     }
@@ -155,13 +171,23 @@ struct art_node {
     [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) = 0;
     [[nodiscard]] virtual trace_element next(const trace_element& te) = 0;
     [[nodiscard]] virtual trace_element previous(const trace_element& te) = 0;
+    virtual void set_keys(const unsigned char* other_keys, unsigned count) = 0;
+    [[nodiscard]] virtual const unsigned char* get_keys() const = 0;
+    virtual void set_key(unsigned at, unsigned char k) = 0;
+    virtual void copy_from(node_ptr s) = 0;
+    virtual void copy_header(node_ptr dest, node_ptr src) = 0;
+    [[nodiscard]] virtual art_node * const * get_children() const = 0;
+    virtual art_node** get_children() = 0;
+    virtual void set_children(unsigned dpos, const art_node* other, unsigned spos, unsigned count) = 0;
+    [[nodiscard]] virtual bool child_type(unsigned at) const = 0;
 
 };
 
 
 typedef std::vector<trace_element> trace_list;
 
-extern art_node* alloc_node(uint8_t type);
+int64_t get_node_offset();
+extern art_node* alloc_any_nnode(uint8_t type);
 extern void free_node(art_node *n);
 void free_node(art_leaf *n);
 
@@ -177,7 +203,7 @@ struct art_leaf {
      * Checks if a leaf matches
      * @return 0 on success.
      */
-    unsigned compare(const unsigned char *key, unsigned key_len, unsigned depth) {
+    int compare(const unsigned char *key, unsigned key_len, unsigned depth) {
         (void)depth;
         // Fail if the key lengths are different
         if (this->key_len != (uint32_t)key_len) return 1;
@@ -245,33 +271,33 @@ struct node_content : public art_node {
         if (KEYS < num_children) {
             return num_children;
         }
-        if (operbits & (OPERATION_BIT::eq & OPERATION_BIT::gt) ) {
+        if (operbits & (eq & gt) ) {
             for (i = 0; i < num_children; ++i) {
                 if (keys[i] >= c)
                     return i; 
             }
-            if (operbits == (OPERATION_BIT::eq & OPERATION_BIT::gt)) return num_children;
+            if (operbits == (eq & gt)) return num_children;
         }
-        if (operbits & (OPERATION_BIT::eq & OPERATION_BIT::lt) ) {
+        if (operbits & (eq & lt) ) {
             for (i = 0; i < num_children; ++i) {
                 if (keys[i] <= c)
                     return i; 
             }
-            if (operbits == (OPERATION_BIT::eq & OPERATION_BIT::lt)) return num_children;
+            if (operbits == (eq & lt)) return num_children;
         }
-        if (operbits & OPERATION_BIT::eq) {
+        if (operbits & eq) {
             for (i = 0; i < num_children; ++i) {
                 if (keys[i] == c)
                     return i; 
             }
         }
-        if (operbits & OPERATION_BIT::gt) {
+        if (operbits & gt) {
             for (i = 0; i < num_children; ++i) {
                 if (keys[i] > c)
                     return i;
             }
         }
-        if (operbits & OPERATION_BIT::lt) {
+        if (operbits & lt) {
             for (i = 0; i < num_children; ++i) {
                 if (keys[i] < c)
                     return i;
@@ -280,7 +306,7 @@ struct node_content : public art_node {
         return num_children;
     }
     [[nodiscard]] unsigned index(unsigned char c) const override {
-        return index(c, OPERATION_BIT::eq);
+        return index(c, eq);
     }
     [[nodiscard]] node_ptr find(unsigned char c) const override {
         return get_child(index(c));
@@ -293,10 +319,24 @@ struct node_content : public art_node {
     };
 
     unsigned char keys[KEYS]{};
-
+    [[nodiscard]] const unsigned char* get_keys() const override
+    {
+        return keys;
+    }
     [[nodiscard]] const unsigned char& get_key(unsigned at) const final {
         if(at < KEYS)
             return keys[at];
+        abort();
+    }
+
+    void set_key(unsigned at, unsigned char k) final
+    {
+        auto max_keys = KEYS;
+        if(at < max_keys)
+        {
+            keys[at] = k;
+            return;
+        }
         abort();
     }
 
@@ -313,15 +353,15 @@ struct node_content : public art_node {
         return children[pos] != nullptr;
     }
     
-    void set_keys(const unsigned char* other_keys, unsigned count){
+    void set_keys(const unsigned char* other_keys, unsigned count) override{
         if (KEYS < count )
             abort();
         memcpy(keys, other_keys, count);
     }
-    [[nodiscard]] const art_node * get_children() const {
-        return (art_node *)children;
+    [[nodiscard]] art_node *const* get_children() const override {
+        return children;
     }
-    art_node* get_children() {
+    art_node** get_children() override {
         return &children[0];
     }
     void insert_type(unsigned pos) {
@@ -340,14 +380,18 @@ struct node_content : public art_node {
             types[p] = types[p + 1]; 
         }
     }
-    template<typename S>
-    void set_children(unsigned dpos, const S* other, unsigned spos, unsigned count){
+    [[nodiscard]] bool child_type(unsigned at) const override
+    {
+        return types[at];
+    }
+
+    void set_children(unsigned dpos, const art_node* other, unsigned spos, unsigned count) override {
         if (dpos < SIZE && count < SIZE) {
             
-            memcpy(children + dpos, other->get_children() + spos, count*sizeof(void*));
+            memcpy(children + dpos, other->get_children() + spos, count*sizeof(art_node*));
 
             for(unsigned t = 0; t < count; ++t) {
-                types[t+dpos] = other->types[t+spos];
+                types[t+dpos] = other->child_type(t+spos);
             }
         }else {
             abort();
@@ -371,14 +415,44 @@ struct node_content : public art_node {
         
         
     }
-    template<typename D, typename S> 
-    void copy_header(D *dest, S *src) {
+    void copy_header(node_ptr dest, node_ptr src) override {
         if (src->num_children > SIZE) {
             abort();
         }
         dest->num_children = src->num_children;
         dest->partial_len = src->partial_len;
         memcpy(dest->partial, src->partial, std::min<unsigned>(max_prefix_llength, src->partial_len));
+    }
+    void copy_from(node_ptr s) override
+    {
+        copy_header(this, s);
+        set_keys(s->get_keys(), s->num_children);
+        set_children(0, s, 0, s->num_children);
+        if (num_children != s->num_children)
+        {
+            abort();
+        }
+
+    }
+    [[nodiscard]] int64_t get_offset() const
+    {
+        return get_node_offset();
+    }
+    art_leaf* pleaves(unsigned at)
+    {
+        return (art_leaf*)pleaves[at];
+    }
+    art_node* pchildren(unsigned at)
+    {
+        return (art_node*)children[at];
+    }
+    [[nodiscard]] art_leaf* pleaves(unsigned at) const
+    {
+        return (art_leaf*)leaves[at];
+    }
+    [[nodiscard]] art_node* pchildren(unsigned at) const
+    {
+        return (art_node*)children[at];
     }
     std::bitset<SIZE> types;
     //std::bitset<SIZE> encoded;
@@ -390,10 +464,18 @@ protected:
         art_node *children[SIZE];
     };
 };
+/**
+ * Allocates a node of the given type,
+ * initializes to zero and sets the type.
+ */
 
-struct art_node16;
-struct art_node48;
-struct art_node256;
+template<typename art_node_t>
+art_node_t* alloc_any_node() {
+    auto r =  new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
+    return r;
+}
+extern art_node* alloc_node(unsigned nt );
+extern art_node* alloc_node(unsigned nt, std::pair<int64_t,int64_t> mix);
 
 /**
  * Small node with only 4 children
@@ -494,22 +576,12 @@ static const T* get_node(const art_node* n) {
     return static_cast<T*>(n);
 }
 
-/**
- * Allocates a node of the given type,
- * initializes to zero and sets the type.
- */
 
-template<typename art_node_t>
-art_node_t* alloc_node() {
-    return new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
-}
 
 /**
  * free a node while updating statistics 
  */
-extern void free_node(art_leaf *n);
 
 extern void free_node(node_ptr n);
 
-extern void free_node(art_node *n);
 

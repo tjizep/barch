@@ -250,10 +250,11 @@ extern "C" {
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
+        trace_list trace;
+        trace.reserve(klen);
+        void *r = art_search(trace, get_art(ctx), converted.get_data(), converted.get_size());
 
-        void *r = art_search(get_art(ctx), converted.get_data(), converted.get_size());
-
-        ValkeyModuleString *val = (ValkeyModuleString *)r;
+        auto *val = (ValkeyModuleString *)r;
 
         if (val == nullptr)
         {

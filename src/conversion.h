@@ -7,23 +7,21 @@ namespace conversion
     template <typename I>
     struct byte_comparable
     {
-        byte_comparable()
-        {
-        }
+        byte_comparable() = default;
         explicit byte_comparable(const uint8_t * data, size_t len ){
             memcpy(&bytes[0], data, std::min(sizeof(bytes), len));
         }
         
         // probably cpp will optimize this
-        size_t get_size() const
+        [[nodiscard]] size_t get_size() const
         {
             return sizeof(bytes);
         }
-        uint8_t bytes[sizeof(I) + 1];
+        uint8_t bytes[sizeof(I) + 1]{};
 
     };
-    static inline int64_t dec_bytes_to_int(const byte_comparable<int64_t> &i){
-        uint64_t r = 0;
+    inline int64_t dec_bytes_to_int(const byte_comparable<int64_t> &i){
+        int64_t r = 0;
         
         r += (i.bytes[1] & 0xFF); r <<= 8;
         r += (i.bytes[2] & 0xFF); r <<= 8;
@@ -34,7 +32,7 @@ namespace conversion
         r += (i.bytes[7] & 0xFF); r <<= 8;
         r += (i.bytes[8] & 0xFF);
         
-        int64_t v = (r - (1ull << 63));
+        int64_t v = (r - (1ll << 63));
         return v;
     }
     // compute a comparable string of bytes from a number using a type byte to separate 
@@ -57,11 +55,11 @@ namespace conversion
         return r;
     }
     // TODO: function isnt considering mantissa maybe
-    static inline byte_comparable<int64_t> comparable_bytes(double n, uint8_t type_byte)
+    static byte_comparable<int64_t> comparable_bytes(double n, uint8_t )
     {
         int64_t in;
         memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
-        return comparable_bytes(in, type_byte);
+        return comparable_bytes(in, 1);
     }
 
     struct comparable_result
@@ -73,13 +71,13 @@ namespace conversion
 
     public:
 
-        comparable_result(int64_t value) 
+        explicit comparable_result(int64_t value)
         : data(&integer.bytes[0])
         , integer (comparable_bytes(value, 0)) // numbers are ordered before most ascii strings unless they start with 0x01
         , size(integer.get_size())
         {}
 
-        comparable_result(double value) 
+        explicit comparable_result(double value)
         : data(&integer.bytes[0])
         , integer(comparable_bytes(value, 1))
         , size(integer.get_size())
@@ -94,19 +92,19 @@ namespace conversion
         {
         }
 
-        const uint8_t *get_data() const
+        [[nodiscard]] const uint8_t *get_data() const
         {
             return data;
         }
 
-        size_t get_size() const
+        [[nodiscard]] size_t get_size() const
         {
             return size;
         }
     };
     static const char* eat_space(const char * str, size_t l){
         const char * s = str;
-        for (;s != str + l; ++s) // eat continous initial spaces
+        for (;s != str + l; ++s) // eat continuous initial spaces
         { 
             if(*s == ' ')
                 continue;
@@ -158,10 +156,11 @@ namespace conversion
             return comparable_result(d);
         }
 
-        return comparable_result(v, vlen);
-    } 
-    int64_t enc_bytes_to_int(const uint8_t * bytes, size_t len){
-        uint64_t r = 0;
+        return {v, vlen};
+    }
+
+    inline int64_t enc_bytes_to_int(const uint8_t * bytes, size_t len){
+        int64_t r = 0;
         if (len != 9)
             return r;
         byte_comparable<int64_t> dec(bytes, len);

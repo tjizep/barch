@@ -141,7 +141,7 @@ void art_node4::add_child(unsigned char c, node_ptr &ref, node_ptr child)
 {
 
     if (num_children < 4) {
-        unsigned idx = index(c, OPERATION_BIT::gt|OPERATION_BIT::eq);
+        unsigned idx = index(c, gt|eq);
         // Shift to make room
         memmove(keys+idx+1, keys+idx, num_children - idx);
         memmove(children+idx+1, children+idx,
@@ -154,7 +154,7 @@ void art_node4::add_child(unsigned char c, node_ptr &ref, node_ptr child)
 
     } else {
 
-        art_node *new_node = ok<int32_t>(child) ? alloc_any_node<art_node16_4>() : alloc_any_node<art_node16_8>();
+        art_node *new_node = alloc_node(node_16, {child});
 
         // Copy the child pointers and the key map
         new_node->set_children(0, this, 0, num_children);

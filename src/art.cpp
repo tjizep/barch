@@ -7,7 +7,7 @@
 #include "art.h"
 #include "valkeymodule.h"
 #include "statistics.h"
-#include "vector.h"
+#include "simd.h"
 
 
 /**
@@ -292,8 +292,7 @@ void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len) 
 int art_range(const art_tree *t, const unsigned char *key, int key_len, const unsigned char *key_end, int key_end_len, art_callback cb, void *data) {
     ++statistics::range_ops;
     trace_list tl;
-    const art_leaf* al;
-    al = lower_bound(tl, t, key, key_len).leaf();
+    const art_leaf* al = lower_bound(tl, t, key, key_len).leaf();
     if (al) {
         do {
             node_ptr n = last_el(tl).child;
@@ -394,13 +393,11 @@ static void* recursive_insert(trace_list& trace, node_ptr n, node_ptr &ref, cons
             if(replace) l->value = value;
             return old_val;
         }
-
-        // New value, we must split the leaf into a node_4
-        auto *new_node = alloc_any_node<art_node4>();
-
         // Create a new leaf
         art_leaf *l2 = make_leaf(key, key_len, value);
 
+        // New value, we must split the leaf into a node_4
+        auto *new_node = alloc_node(node_4, {l, l2});
         // Determine longest prefix
         unsigned longest_prefix = longest_common_prefix(l, l2, depth);
         new_node->partial_len = longest_prefix;
@@ -422,7 +419,7 @@ static void* recursive_insert(trace_list& trace, node_ptr n, node_ptr &ref, cons
         }
 
         // Create a new node
-        auto *new_node = alloc_any_node<art_node4>();
+        auto *new_node = alloc_node(node_4, {n});
         ref = new_node;
         new_node->partial_len = prefix_diff;
         memcpy(new_node->partial, n->partial, std::min<int>(max_prefix_llength, prefix_diff));
@@ -443,6 +440,10 @@ static void* recursive_insert(trace_list& trace, node_ptr n, node_ptr &ref, cons
 
         // Insert the new leaf
         art_leaf *l = make_leaf(key, key_len, value);
+        if(!new_node->ok_child(l))
+        {
+
+        }
         new_node->add_child(key[depth+prefix_diff], ref, l);
         return nullptr;
     }
@@ -458,14 +459,22 @@ RECURSE_SEARCH:;
         trace.push_back(te);
         auto r = recursive_insert(trace, child, nc, key, key_len, value, depth+1, old, replace);
         if (nc != child) {
-            n->set_child(pos, nc);
+            if(n->ok_child(child))
+            {
+                n->set_child(pos, nc);
+            }
+
         }
         return r;
     }
 
     // No child, node goes within us
     art_leaf *l = make_leaf(key, key_len, value);
-    n->add_child(key[depth], ref, l);
+    if (n->ok_child(l))
+    {
+        n->add_child(key[depth], ref, l);
+    }
+
     return nullptr;
 }
 

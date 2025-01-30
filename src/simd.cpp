@@ -12,7 +12,7 @@
     #include <emmintrin.h>
 #endif
 #endif
-#include "vector.h"
+#include "simd.h"
 /**
  * compare two buffers and put the result in a bitmap
  */

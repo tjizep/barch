@@ -10,7 +10,6 @@
 #include "nodes.h"
 
 #include <algorithm>
-#include <limits>
 int64_t get_node_offset()
 {
     static char * offset_val = nullptr;
@@ -48,13 +47,23 @@ void free_node(art_node *n) {
     // Free ourself on the way up
     ValkeyModule_Free(n);
 }
-art_node* alloc_node(unsigned nt, node_ptr child) {
+art_node* alloc_node(unsigned nt, const std::array<node_ptr, max_alloc_children>& children) {
+    bool int32Ok = !children.empty();
+    for (auto child : children)
+    {
+        if(child.null()) continue;
+        if(!ok<int32_t>(child))
+        {
+            int32Ok = false;
+            break;
+        }
+    }
     switch (nt)
     {
     case node_4:
         return alloc_any_node<art_node4>();
     case node_16:
-        return ok<int32_t>(child) ? alloc_any_node<art_node16_4>() : alloc_any_node<art_node16_8>();
+        return int32Ok ? alloc_any_node<art_node16_4>() : alloc_any_node<art_node16_8>();
     case node_48:
         return alloc_any_node<art_node48>();
     case node_256:
@@ -63,7 +72,6 @@ art_node* alloc_node(unsigned nt, node_ptr child) {
         abort();
     }
 
-    return nullptr;
 }
 
 art_node::art_node () = default;
@@ -86,7 +94,7 @@ unsigned art_node::check_prefix(const unsigned char *key, unsigned key_len, unsi
 art_node4::art_node4() { 
     statistics::node_bytes_alloc += sizeof(art_node4);
     statistics::interior_bytes_alloc += sizeof(art_node4);
-    statistics::n4_nodes++;
+    ++statistics::n4_nodes;
 }
 
 art_node4::~art_node4() {

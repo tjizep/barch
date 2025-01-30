@@ -7,7 +7,8 @@
 
 #include "valkeymodule.h"
 #include "statistics.h"
-#include "vector.h"
+#include "simd.h"
+#include <array>
 
 struct art_node48;
 typedef int64_t default_int_t;
@@ -33,7 +34,8 @@ enum node_kind
 
 enum constants
 {
-    max_prefix_llength = 12u
+    max_prefix_llength = 12u,
+    max_alloc_children = 8u
 };
 typedef int16_t node_ptr_int_t;
 /**
@@ -180,14 +182,14 @@ struct art_node {
     virtual void copy_header(node_ptr src) = 0;
     virtual void set_children(unsigned dpos, const art_node* other, unsigned spos, unsigned count) = 0;
     [[nodiscard]] virtual bool child_type(unsigned at) const = 0;
-
+    // returns true if node does not need to be rebuilt
+    [[nodiscard]] virtual bool ok_child(node_ptr np) const = 0;
 };
-
 
 typedef std::vector<trace_element> trace_list;
 
 int64_t get_node_offset();
-extern art_node* alloc_any_nnode(uint8_t type);
+extern art_node* alloc_any_node(uint8_t type);
 extern void free_node(art_node *n);
 void free_node(art_leaf *n);
 
@@ -205,6 +207,7 @@ struct art_leaf {
      */
     int compare(const unsigned char *key, unsigned key_len, unsigned depth) {
         (void)depth;
+        // TODO: compare is broken will fail some edge cases
         // Fail if the key lengths are different
         if (this->key_len != (uint32_t)key_len) return 1;
 
@@ -262,6 +265,10 @@ struct node_content : public art_node {
     }
     [[nodiscard]] const node_ptr get_child(unsigned at) const final {
         return get_node(at);
+    }
+    [[nodiscard]] bool ok_child(node_ptr ) const override
+    {
+        return true;
     }
 
 
@@ -580,6 +587,10 @@ struct encoded_node_content : public art_node {
     [[nodiscard]] const node_ptr get_child(unsigned at) const final {
         return get_node(at);
     }
+    [[nodiscard]] bool ok_child(node_ptr np) const override
+    {
+        return ok<i_ptr_t>(np);
+    }
 
 
     // TODO: NB check where this function is used
@@ -770,7 +781,8 @@ art_node* alloc_any_node() {
     auto r =  new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
     return r;
 }
-extern art_node* alloc_node(unsigned nt, node_ptr child);
+
+extern art_node* alloc_node(unsigned nt, const std::array<node_ptr, max_alloc_children>& child);
 
 /**
  * Small node with only 4 children
@@ -859,10 +871,10 @@ encoded_node_content<16,16, IPtrType >
             // Set the child
             this->keys[idx] = c;
             this->set_child(idx, child);
-            this->num_children++;
+            ++this->num_children;
 
         } else {
-            art_node *new_node = alloc_node(node_48,child);
+            art_node *new_node = alloc_node(node_48,{child});
 
             // Copy the child pointers and populate the key map
             new_node->set_children(0, this, 0, this->num_children);
@@ -956,11 +968,11 @@ static T* get_node(art_node* n){
     return static_cast<T*>(n);
 }
 template <typename T> 
-static T* get_node(node_ptr n){
+static T* get_node(const node_ptr& n){
     return static_cast<T*>(n.node);
 }
 template <typename T> 
-static const T* get_node(const node_ptr n){
+static const T* get_node(const node_ptr& n){
     return static_cast<const T*>(n.node);
 }
 template <typename T> 

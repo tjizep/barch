@@ -11,17 +11,15 @@
 
 #include <algorithm>
 #include <limits>
-//static char * offset_val = nullptr;
 int64_t get_node_offset()
 {
-    return 0;
-#if 0
+    static char * offset_val = nullptr;
+
     if(!offset_val)
     {
         offset_val = (char*)ValkeyModule_Calloc(1,4);
     }
-    return (int64_t)offset_val;
-#endif
+    return reinterpret_cast<int64_t>(offset_val);
 }
 void free_node(art_leaf *n){
     if(!n) return;
@@ -50,13 +48,13 @@ void free_node(art_node *n) {
     // Free ourself on the way up
     ValkeyModule_Free(n);
 }
-art_node* alloc_node(unsigned nt) {
+art_node* alloc_node(unsigned nt, node_ptr child) {
     switch (nt)
     {
     case node_4:
         return alloc_any_node<art_node4>();
     case node_16:
-        return alloc_any_node<art_node16>();
+        return ok<int32_t>(child) ? alloc_any_node<art_node16_4>() : alloc_any_node<art_node16_8>();
     case node_48:
         return alloc_any_node<art_node48>();
     case node_256:
@@ -147,12 +145,13 @@ void art_node4::add_child(unsigned char c, node_ptr &ref, node_ptr child)
         num_children++;
 
     } else {
-        auto *new_node = alloc_any_node<art_node16>();
+
+        art_node *new_node = ok<int32_t>(child) ? alloc_any_node<art_node16_4>() : alloc_any_node<art_node16_8>();
 
         // Copy the child pointers and the key map
-        new_node->set_children(0, this, num_children);
+        new_node->set_children(0, this, 0, num_children);
         new_node->set_keys(keys, num_children);
-        copy_header(new_node, this);
+        new_node->copy_header(this);
         ref = new_node;
         free_node(this);
         new_node->add_child(c, ref, child);
@@ -196,116 +195,6 @@ trace_element art_node4::previous(const trace_element& te)
     return {};
 }
 
-art_node16::art_node16() { 
-    statistics::node_bytes_alloc += sizeof(art_node16);
-    statistics::interior_bytes_alloc += sizeof(art_node16);
-    ++statistics::n16_nodes;
-}
-art_node16::~art_node16() {
-    statistics::node_bytes_alloc -= sizeof(art_node16);
-    statistics::interior_bytes_alloc -= sizeof(art_node16);
-    --statistics::n16_nodes;
-}
-
-uint8_t art_node16::type() const {
-    return node_16;
-}
-
-unsigned art_node16::index(unsigned char c, unsigned operbits) const {
-    unsigned i = bits_oper16(keys, nuchar<16>(c), (1 << num_children) - 1, operbits);
-    if (i) {
-        i = __builtin_ctz(i);
-        return i;
-    }
-    return num_children;
-}
-
-void art_node16::remove(node_ptr& ref, unsigned pos, unsigned char) {
-    remove_child(pos);
-    
-    if (num_children == 3) {
-        auto *new_node = alloc_any_node<art_node4>();
-        copy_header(new_node, this);
-        new_node->set_keys(keys, 3);
-        new_node->set_children(0, this, 3);
-
-        ref = new_node;   
-        free_node(this); // ???
-    }
-} 
-void art_node16::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
-    if (num_children < 16) {
-        unsigned mask = (1 << num_children) - 1;
-        
-        unsigned bitfield = bits_oper16(nuchar<16>(c), keys, mask, OPERATION_BIT::lt);
-        
-        // Check if less than any
-        unsigned idx;
-        if (bitfield) {
-            idx = __builtin_ctz(bitfield);
-            memmove(keys+idx+1,keys+idx,num_children-idx);
-            memmove(children+idx+1,children+idx,
-                    (num_children-idx)*sizeof(void*));
-        } else
-            idx = num_children;
-        
-        insert_type(idx);
-
-        // Set the child
-        keys[idx] = c;
-        set_child(idx, child);
-        num_children++;
-
-    } else {
-        auto *new_node = alloc_any_node<art_node48>();
-
-        // Copy the child pointers and populate the key map
-        new_node->set_children(0, this, num_children);
-        for (unsigned i=0;i< num_children;i++) {
-            new_node->keys[keys[i]] = i + 1;
-        }
-        copy_header(new_node, this);
-        ref = new_node;
-        free_node(this);
-        new_node->add_child(c, ref, child);
-    }
-
-}
-node_ptr art_node16::last() const {
-    return get_child(num_children - 1);
-}
-unsigned art_node16::last_index() const{
-    return num_children - 1;
-}
-
-std::pair<trace_element, bool> art_node16::lower_bound_child(unsigned char c)
-{
-    unsigned mask = (1 << num_children) - 1;
-    unsigned bf = bits_oper16(keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt); // inverse logic
-    if (bf) {
-        unsigned i = __builtin_ctz(bf);
-        return {{this,get_child(i),i}, keys[i]==c};
-    }
-    return {{nullptr,nullptr,num_children},false};
-}
-trace_element art_node16::next(const trace_element& te)
-{
-    unsigned i = te.child_ix + 1;
-    if (i < num_children) {
-        return {this,get_child(i),i};// the keys are ordered so fine I think
-    }
-    return {};
-}
-trace_element art_node16::previous(const trace_element& te)
-{
-    unsigned i = te.child_ix;
-    if (i > 0) {
-        return {this,get_child(i),i-1};// the keys are ordered so fine I think
-    }
-    return {};
-}
-
-
 art_node48::art_node48(){ 
     statistics::node_bytes_alloc += sizeof(art_node48);
     statistics::interior_bytes_alloc += sizeof(art_node48);
@@ -345,8 +234,8 @@ unsigned art_node48::index(unsigned char c) const {
     num_children--;
     
     if (num_children == 12) {
-        auto *new_node = alloc_any_node<art_node16>();
-        copy_header(new_node, this);
+        auto *new_node = alloc_any_node<art_node16_8>();
+        new_node->copy_header(this);
         unsigned child = 0;
         for (unsigned i = 0; i < 256; i++) {
             pos = keys[i];
@@ -355,7 +244,7 @@ unsigned art_node48::index(unsigned char c) const {
                 if (!nn) {
                     abort();
                 }
-                new_node->keys[child] = i;
+                new_node->set_key(child, i);
                 new_node->set_child(child, nn); 
                 child++;
             }
@@ -385,7 +274,7 @@ void art_node48::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
                 new_node->set_child(i, nc);
             }
         }
-        copy_header(new_node, this);
+        new_node->copy_header(this);
         statistics::node256_occupants += new_node->num_children;
         ref = new_node;
         free_node(this);
@@ -491,13 +380,13 @@ unsigned art_node256::index(unsigned char c) const {
     if (num_children == 37) {
         auto *new_node = alloc_any_node<art_node48>();
         ref = new_node;
-        copy_header(new_node, this);
+        new_node->copy_header(this);
     
         pos = 0;
         for (unsigned i = 0; i < 256; i++) {
             if (has_any(i)) {
                 new_node->set_child(pos, get_child(i)); //[pos] = n->children[i];
-                new_node->keys[i] = pos + 1;
+                new_node->set_key(i, pos + 1);
                 pos++;
             }
         }

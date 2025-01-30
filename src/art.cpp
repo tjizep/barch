@@ -419,7 +419,8 @@ static void* recursive_insert(trace_list& trace, node_ptr n, node_ptr &ref, cons
         }
 
         // Create a new node
-        auto *new_node = alloc_node(node_4, {n});
+        art_leaf *l = make_leaf(key, key_len, value);
+        auto *new_node = alloc_node(node_4, {n, l});
         ref = new_node;
         new_node->partial_len = prefix_diff;
         memcpy(new_node->partial, n->partial, std::min<int>(max_prefix_llength, prefix_diff));
@@ -439,10 +440,10 @@ static void* recursive_insert(trace_list& trace, node_ptr n, node_ptr &ref, cons
         }
 
         // Insert the new leaf
-        art_leaf *l = make_leaf(key, key_len, value);
+
         if(!new_node->ok_child(l))
         {
-
+            abort();
         }
         new_node->add_child(key[depth+prefix_diff], ref, l);
         return nullptr;
@@ -473,6 +474,11 @@ RECURSE_SEARCH:;
     if (n->ok_child(l))
     {
         n->add_child(key[depth], ref, l);
+    }else
+    {
+        ref = n->expand_pointers(l);
+        ref->add_child(key[depth], ref, l);
+
     }
 
     return nullptr;
@@ -566,12 +572,18 @@ static art_leaf* recursive_delete(node_ptr n, node_ptr &ref, const unsigned char
         }
         return nullptr;
 
-    // Recurse
+
     } else {
+        // Recurse
         node_ptr new_child = child;
         auto r = recursive_delete(child, new_child, key, key_len, depth+1);
         if (new_child != child) {
-            n->set_child(idx, new_child);
+            if(!n->ok_child(new_child))
+            {
+                ref = n->expand_pointers(new_child);
+                ref->set_child(idx, new_child);
+            }else
+                n->set_child(idx, new_child);
         }
         return r;
     }

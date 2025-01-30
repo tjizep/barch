@@ -296,7 +296,7 @@ node_ptr art_node48::last() const {
 unsigned art_node48::last_index() const {
     unsigned idx=255;
     while (!keys[idx]) idx--;
-    return idx - 1;
+    return keys[idx] - 1;
 }
 unsigned art_node48::first_index() const {
     unsigned uc = 0; // ?

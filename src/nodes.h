@@ -11,7 +11,6 @@
 #include <array>
 
 struct art_node48;
-typedef int64_t default_int_t;
 template<typename I>
 int64_t i64max()
 {
@@ -184,7 +183,9 @@ struct art_node {
     [[nodiscard]] virtual bool child_type(unsigned at) const = 0;
     // returns true if node does not need to be rebuilt
     [[nodiscard]] virtual bool ok_child(node_ptr np) const = 0;
+    [[nodiscard]] virtual node_ptr expand_pointers(node_ptr child) const = 0;
 };
+extern art_node* alloc_node(unsigned nt, const std::array<node_ptr, max_alloc_children>& child);
 
 typedef std::vector<trace_element> trace_list;
 
@@ -245,6 +246,10 @@ struct node_content : public art_node {
             abort();
         return children[at] ;
     }
+    [[nodiscard]] node_ptr expand_pointers(node_ptr ) const override
+    {
+        return (art_node*)this;
+    };
     [[nodiscard]] const node_ptr get_node(unsigned at) const final {
         
         if (at < SIZE) 
@@ -437,6 +442,7 @@ struct node_content : public art_node {
         }
 
     }
+
     std::bitset<SIZE> types;
     //std::bitset<SIZE> encoded;
 protected:
@@ -759,7 +765,13 @@ struct encoded_node_content : public art_node {
         }
 
     }
+    [[nodiscard]] node_ptr expand_pointers(node_ptr child) const override
+    {
+        node_ptr n = alloc_node(type(), {child});
+        n->copy_from((art_node*)this);
+        return n;
 
+    }
     std::bitset<SIZE> types;
     //std::bitset<SIZE> encoded;
 protected:
@@ -782,7 +794,6 @@ art_node* alloc_any_node() {
     return r;
 }
 
-extern art_node* alloc_node(unsigned nt, const std::array<node_ptr, max_alloc_children>& child);
 
 /**
  * Small node with only 4 children

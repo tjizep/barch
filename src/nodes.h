@@ -85,7 +85,38 @@ struct node_ptr {
         l = lf;
         is_leaf = true;
     }
-
+    bool operator == (const node_ptr& p) const
+    {
+        return node == p.node && is_leaf == p.is_leaf;
+    }
+    bool operator != (const node_ptr& p) const
+    {
+        return node != p.node || is_leaf != p.is_leaf;
+    }
+    bool operator == (nullptr_t) const
+    {
+        return node == nullptr && is_leaf == false;
+    }
+    bool operator != (nullptr_t) const
+    {
+        return node != nullptr || is_leaf == false;
+    }
+    bool operator == (const art_node* p) const
+    {
+        return node == p && is_leaf == false;
+    }
+    bool operator != (const art_node* p) const
+    {
+        return node != p || is_leaf == true;
+    }
+    bool operator == (const art_leaf* p) const
+    {
+        return l == p && is_leaf ;
+    }
+    bool operator != (const art_leaf* p) const
+    {
+        return l != p || !is_leaf;
+    }
     node_ptr& operator = (art_node* n){
         set(n);
         return *this;
@@ -135,12 +166,12 @@ struct node_ptr {
     
 };
 struct trace_element {
-    node_ptr el = nullptr;
+    node_ptr parent = nullptr;
     node_ptr child = nullptr;
     unsigned child_ix = 0;
     unsigned char k = 0;
     [[nodiscard]] bool empty() const {
-        return el.null() && child.null() && child_ix == 0;
+        return parent.null() && child.null() && child_ix == 0;
     }
 };
 
@@ -167,6 +198,7 @@ struct art_node {
     [[nodiscard]] virtual unsigned last_index() const = 0;
     virtual void remove(node_ptr& ref, unsigned pos, unsigned char key) = 0;
     virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) = 0;
+    virtual void add_child_inner(unsigned char , node_ptr){}
     [[nodiscard]] virtual const unsigned char& get_key(unsigned at) const = 0;
     virtual unsigned char& get_key(unsigned at) = 0;
     unsigned check_prefix(const unsigned char *, unsigned, unsigned);
@@ -183,9 +215,10 @@ struct art_node {
     [[nodiscard]] virtual bool child_type(unsigned at) const = 0;
     // returns true if node does not need to be rebuilt
     [[nodiscard]] virtual bool ok_child(node_ptr np) const = 0;
-    [[nodiscard]] virtual node_ptr expand_pointers(node_ptr child) const = 0;
+    [[nodiscard]] virtual node_ptr expand_pointers(node_ptr child)  = 0;
 };
-extern art_node* alloc_node(unsigned nt, const std::array<node_ptr, max_alloc_children>& child);
+typedef std::array<node_ptr, max_alloc_children> children_t;
+extern art_node* alloc_node(unsigned nt, const children_t& child);
 
 typedef std::vector<trace_element> trace_list;
 
@@ -246,7 +279,7 @@ struct node_content : public art_node {
             abort();
         return children[at] ;
     }
-    [[nodiscard]] node_ptr expand_pointers(node_ptr ) const override
+    [[nodiscard]] node_ptr expand_pointers(node_ptr ) override
     {
         return (art_node*)this;
     };
@@ -715,7 +748,7 @@ struct encoded_node_content : public art_node {
     }
 
     void set_children(unsigned dpos, const art_node* other, unsigned spos, unsigned count) override {
-        if (dpos < SIZE && count < SIZE) {
+        if (dpos < SIZE && count <= SIZE) {
 
             for(unsigned d = dpos; d < count; ++d )
             {
@@ -765,17 +798,19 @@ struct encoded_node_content : public art_node {
         }
 
     }
-    [[nodiscard]] node_ptr expand_pointers(node_ptr child) const override
+    [[nodiscard]] node_ptr expand_pointers(node_ptr child) override
     {
+        if(ok_child(child)) return this;
+
         node_ptr n = alloc_node(type(), {child});
         n->copy_from((art_node*)this);
+        free_node(this);
         return n;
 
     }
-    std::bitset<SIZE> types;
-    //std::bitset<SIZE> encoded;
-protected:
 
+    std::bitset<SIZE> types;
+protected:
     union
     {
         LeafElementType leaves[SIZE]{};
@@ -860,29 +895,39 @@ encoded_node_content<16,16, IPtrType >
             free_node(this); // ???
         }
     }
-    void add_child(unsigned char c, node_ptr& ref, node_ptr child) override{
+    void add_child_inner(unsigned char c, node_ptr child) override
+    {
+        unsigned mask = (1 << this->num_children) - 1;
+
+        unsigned bitfield = bits_oper16(nuchar<16>(c), this->get_keys(), mask, lt);
+
+        // Check if less than any
+        unsigned idx;
+        if (bitfield) {
+            idx = __builtin_ctz(bitfield);
+            memmove(this->keys+idx+1,this->keys+idx,this->num_children-idx);
+            memmove(this->children+idx+1,this->children+idx,
+                    (this->num_children-idx)*sizeof(typename Parent::ChildElementType));
+        } else
+            idx = this->num_children;
+
+        this->insert_type(idx);
+        // Set the child
+        this->keys[idx] = c;
+        this->set_child(idx, child);
+        ++this->num_children;
+    }
+    void add_child(unsigned char c, node_ptr& ref, node_ptr child) override {
 
         if (this->num_children < 16)
         {
-            unsigned mask = (1 << this->num_children) - 1;
+            node_ptr current = this;
+            node_ptr expanded = this->expand_pointers(child);
+            if (expanded != current)
+            {   ref = expanded;
+            }
 
-            unsigned bitfield = bits_oper16(nuchar<16>(c), this->keys, mask, OPERATION_BIT::lt);
-
-            // Check if less than any
-            unsigned idx;
-            if (bitfield) {
-                idx = __builtin_ctz(bitfield);
-                memmove(this->keys+idx+1,this->keys+idx,this->num_children-idx);
-                memmove(this->children+idx+1,this->children+idx,
-                        (this->num_children-idx)*sizeof(typename Parent::ChildElementType));
-            } else
-                idx = this->num_children;
-
-            this->insert_type(idx);
-            // Set the child
-            this->keys[idx] = c;
-            this->set_child(idx, child);
-            ++this->num_children;
+            expanded->add_child_inner(c, child);
 
         } else {
             art_node *new_node = alloc_node(node_48,{child});

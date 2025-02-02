@@ -10,15 +10,17 @@
 #include "nodes.h"
 
 #include <algorithm>
-int64_t get_node_offset()
+uint64_t get_node_base()
 {
-    static char * offset_val = nullptr;
+    static char * base_val = nullptr;
+    static int64_t base = 0;
 
-    if(!offset_val)
+    if(!base_val)
     {
-        offset_val = (char*)ValkeyModule_Calloc(1,4);
+        base_val = (char*)ValkeyModule_Calloc(1,4);
+        base = reinterpret_cast<int64_t>(base_val);
     }
-    return reinterpret_cast<int64_t>(offset_val);
+    return base;
 }
 void free_node(art_leaf *n){
     if(!n) return;
@@ -49,11 +51,11 @@ void free_node(art_node *n) {
 }
 
 art_node* alloc_node(unsigned nt, const children_t& children) {
-    bool int32Ok = false; //!children.empty();
+    bool int32Ok = !children.empty();
     for (auto child : children)
     {
         if(child.null()) continue;
-        if(!ok<uint32_t>(child))
+        if(!ok<int32_t>(child))
         {
             int32Ok = false;
             break;

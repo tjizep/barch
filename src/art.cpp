@@ -447,7 +447,9 @@ static void* recursive_insert(trace_list& trace, art_tree* t, node_ptr n, node_p
 RECURSE_SEARCH:;
 
     // Find a child to recurse to
-    unsigned pos = n->index(key[depth]);
+    art_node * tn = n;
+    unsigned pos = tn->index('\0');
+    pos = tn->index(key[depth]);
     node_ptr child = n->get_node(pos);
     if(!n.is_leaf)
     {

@@ -32,7 +32,7 @@ enum node_kind
 
 enum constants
 {
-    max_prefix_llength = 12u,
+    max_prefix_llength = 10u,
     max_alloc_children = 8u
 };
 typedef int16_t node_ptr_int_t;
@@ -225,13 +225,13 @@ struct art_node {
     }
 };
 typedef std::array<node_ptr, max_alloc_children> children_t;
-extern art_node* alloc_node(unsigned nt, const children_t& child);
+art_node* alloc_node(unsigned nt, const children_t& child);
 
 typedef std::vector<trace_element> trace_list;
 
-extern int64_t get_node_offset();
+uint64_t get_node_base();
 
-extern void free_node(art_node *n);
+void free_node(art_node *n);
 void free_node(art_leaf *n);
 
 /**
@@ -528,8 +528,10 @@ bool ok(const art_node* node)
 
     auto uval = reinterpret_cast<int64_t>(node);
 
-    int64_t ival = uval-get_node_offset() ;
-    return (ival < i64max<EncodingType>() && ival > i64min<EncodingType>() );
+    int64_t ival = uval-get_node_base() ;
+    int64_t imax = i64max<EncodingType>();
+    int64_t imin = i64min<EncodingType>();
+    return (ival > imin && ival < imax  );
 }
 template<typename PtrType, typename EncodingType>
 struct encoding_element {
@@ -564,33 +566,33 @@ public:
         {
             if(!ok<EncodingType>(ptr))
             {
-                auto val = reinterpret_cast<int64_t>(ptr) - get_node_offset();
+                auto val = reinterpret_cast<int64_t>(ptr) - get_node_base();
                 if(val)
                 {
                     value = val;
                 }
                 abort();
             }
-            value = (reinterpret_cast<int64_t>(ptr) - get_node_offset());
+            value = (reinterpret_cast<int64_t>(ptr) - get_node_base());
+            if(get() != ptr)
+            {
+                abort();
+            }
         }
     }
-    [[nodiscard]] const PtrType* get() const
+    [[nodiscard]] PtrType* get()
     {
         if(sizeof(EncodingType) == sizeof(uintptr_t))
         {
             return reinterpret_cast<PtrType*>(value);
         }
         if(!value) return nullptr;
-        return reinterpret_cast<PtrType*>((int64_t)value + get_node_offset());
+        return reinterpret_cast<PtrType*>((int64_t)value + get_node_base());
     }
-    PtrType* get()
+    const PtrType* cget() const
     {
-        if(sizeof(EncodingType) == sizeof(uintptr_t))
-        {
-            return reinterpret_cast<PtrType*>(value);
-        }
-        if(!value) return nullptr;
-        return reinterpret_cast<PtrType*>((int64_t)value + get_node_offset());
+
+        return const_cast<encoding_element*>(this)->get();
     }
 
     encoding_element& operator=(PtrType* ptr)
@@ -615,11 +617,11 @@ public:
 
     operator node_ptr() const
     {
-        return node_ptr(const_cast<PtrType*>(get())); // well have to just cast it
+        return node_ptr(const_cast<PtrType*>(cget())); // well have to just cast it
     }
     operator const PtrType*() const
     {
-        return get();
+        return cget();
     }
     PtrType* operator -> ()
     {
@@ -649,6 +651,8 @@ struct encoded_node_content : public art_node {
     void set_child(unsigned at, node_ptr node) final {
         check_object();
         if (SIZE <= at)
+            abort();
+        if(!ok<i_ptr_t>(node))
             abort();
         types.set(at, node.is_leaf);
         children[at] = node;
@@ -883,16 +887,11 @@ struct encoded_node_content : public art_node {
         }
 
     }
-    [[nodiscard]] node_ptr expand_pointers(node_ptr& ref, node_ptr ) override
+    [[nodiscard]] node_ptr expand_pointers(node_ptr& ref, node_ptr c) override
     {
         check_object();
-        //if(ok_child(child)) return this;
-        static uintptr_t ptr_sizes = 0;
-        node_ptr n = alloc_node(type(), {});
-        if(n->ptr_size() != this->ptr_size())
-        {
-            ++ptr_sizes;
-        }
+        if(ok_child(c)) return this;
+        node_ptr n = alloc_node(type(), {c});
         n->copy_from((art_node*)this);
         free_node(this);
         ref = n;
@@ -993,7 +992,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
         // Shift to make room
         memmove(keys+idx+1, keys+idx, num_children - idx);
         memmove(children+idx+1, children+idx,
-                (num_children - idx)*sizeof(void*));
+                (num_children - idx)*sizeof(IntegerPtr));
         insert_type(idx);
         // Insert element
         keys[idx] = c;
@@ -1240,6 +1239,6 @@ static const T* get_node(const art_node* n) {
  * free a node while updating statistics 
  */
 
-extern void free_node(node_ptr n);
+void free_node(node_ptr n);
 
 

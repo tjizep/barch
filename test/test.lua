@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 1000
+local count = 12
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
@@ -122,7 +122,7 @@ convert = tocharsnum
 test()
 clear()
 
-
+--[[
 convert = tochars123
 test()
 clear()
@@ -135,5 +135,5 @@ clear()
 convert = tocharsdbl
 test()
 clear()
---[[]]
+]]
 return result

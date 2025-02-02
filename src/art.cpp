@@ -402,8 +402,8 @@ static void* recursive_insert(trace_list& trace, art_tree* t, node_ptr n, node_p
         memcpy(new_node->partial, key+depth, std::min<unsigned>(max_prefix_llength, longest_prefix));
         // Add the leafs to the new node_4
         ref = new_node;
-        new_node->add_child(l->key[depth+longest_prefix], ref, l);
-        new_node->add_child(l2->key[depth+longest_prefix], ref, l2);
+        ref->add_child(l->key[depth+longest_prefix], ref, l);
+        ref->add_child(l2->key[depth+longest_prefix], ref, l2);
         return nullptr;
     }
 
@@ -425,21 +425,21 @@ static void* recursive_insert(trace_list& trace, art_tree* t, node_ptr n, node_p
         memcpy(new_node->partial, n->partial, std::min<int>(max_prefix_llength, prefix_diff));
         // Adjust the prefix of the old node
         if (n->partial_len <= max_prefix_llength) {
-            new_node->add_child(n->partial[prefix_diff], ref, n);
+            ref->add_child(n->partial[prefix_diff], ref, n);
             n->partial_len -= (prefix_diff+1);
             memmove(n->partial, n->partial+prefix_diff+1,
                     std::min<int>(max_prefix_llength, n->partial_len));
         } else {
             n->partial_len -= (prefix_diff+1);
             art_leaf *l = minimum(n).leaf();
-            new_node->add_child(l->key[depth+prefix_diff], ref, n);
+            ref->add_child(l->key[depth+prefix_diff], ref, n);
             memcpy(n->partial, l->key+depth+prefix_diff+1,
                     std::min<int>(max_prefix_llength, n->partial_len));
         }
 
         // Insert the new leaf (safely considering optimal pointer sizes)
 
-        new_node->add_child(key[depth+prefix_diff], ref, new_leaf);
+        ref->add_child(key[depth+prefix_diff], ref, new_leaf);
 
         return nullptr;
     }
@@ -459,12 +459,7 @@ RECURSE_SEARCH:;
 
         auto r = recursive_insert(trace, t, child, nc, key, key_len, value, depth+1, old, replace);
         if (nc != child) {
-            node_ptr nn = n->expand_pointers(nc);
-            if (nn!=n)
-            {
-                n = nn;
-                ref = n;
-            }
+            n = n->expand_pointers(ref, nc);
             n->set_child(pos, nc);
         }
         return r;
@@ -575,7 +570,7 @@ static art_leaf* recursive_delete(node_ptr n, node_ptr &ref, const unsigned char
         if (new_child != child) {
             if(!n->ok_child(new_child))
             {
-                ref = n->expand_pointers(new_child);
+                ref = n->expand_pointers(ref,new_child);
                 ref->set_child(idx, new_child);
             }else
                 n->set_child(idx, new_child);

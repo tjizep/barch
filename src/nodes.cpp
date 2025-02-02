@@ -49,11 +49,11 @@ void free_node(art_node *n) {
 }
 
 art_node* alloc_node(unsigned nt, const children_t& children) {
-    bool int32Ok = !children.empty();
+    bool int32Ok = false; //!children.empty();
     for (auto child : children)
     {
         if(child.null()) continue;
-        if(!ok<int32_t>(child))
+        if(!ok<uint32_t>(child))
         {
             int32Ok = false;
             break;
@@ -62,7 +62,7 @@ art_node* alloc_node(unsigned nt, const children_t& children) {
     switch (nt)
     {
     case node_4:
-        return alloc_any_node<art_node4>();
+        return int32Ok ? alloc_any_node<art_node4_4>() : alloc_any_node<art_node4_8>() ;
     case node_16:
         return int32Ok ? alloc_any_node<art_node16_4>() : alloc_any_node<art_node16_8>(); // optimize pointer sizes
     case node_48:
@@ -76,7 +76,10 @@ art_node* alloc_node(unsigned nt, const children_t& children) {
 }
 
 art_node::art_node () = default;
-art_node::~art_node() = default;
+art_node::~art_node() {
+    check_object();
+    partial_len = 255;
+};
 /**
  * Returns the number of prefix characters shared between
  * the key and node.
@@ -90,118 +93,6 @@ unsigned art_node::check_prefix(const unsigned char *key, unsigned key_len, unsi
             return idx;
     }
     return idx;
-}
-
-art_node4::art_node4() { 
-    statistics::node_bytes_alloc += sizeof(art_node4);
-    statistics::interior_bytes_alloc += sizeof(art_node4);
-    ++statistics::n4_nodes;
-}
-
-art_node4::~art_node4() {
-    statistics::node_bytes_alloc -= sizeof(art_node4);
-    statistics::interior_bytes_alloc -= sizeof(art_node4);
-    --statistics::n4_nodes;
-}
-
-uint8_t art_node4::type() const {
-    return node_4;
-}
-
-void art_node4::remove(node_ptr& ref, unsigned pos, unsigned char ) {
-   
-    remove_child(pos);
-
-    // Remove nodes with only a single child
-    if (num_children == 1) {
-        node_ptr child = get_child(0);
-        if (!child.is_leaf) {
-            // Concatenate the prefixes
-            unsigned prefix = partial_len;
-            if (prefix < max_prefix_llength) {
-                partial[prefix] = keys[0];
-                prefix++;
-            }
-            if (prefix < max_prefix_llength) {
-                unsigned sub_prefix = std::min<unsigned>(child->partial_len, max_prefix_llength - prefix);
-                memcpy(partial+prefix, child->partial, sub_prefix);
-                prefix += sub_prefix;
-            }
-
-            // Store the prefix in the child
-            memcpy(child->partial, partial, std::min<unsigned>(prefix, max_prefix_llength));
-            child->partial_len += partial_len + 1;
-        }
-        ref = child;
-        free_node(this);
-        
-    }
-}
-
-void art_node4::add_child(unsigned char c, node_ptr &ref, node_ptr child)
-{
-
-    if (num_children < 4) {
-        unsigned idx = index(c, gt|eq);
-        // Shift to make room
-        memmove(keys+idx+1, keys+idx, num_children - idx);
-        memmove(children+idx+1, children+idx,
-                (num_children - idx)*sizeof(void*));
-        insert_type(idx);
-        // Insert element
-        keys[idx] = c;
-        set_child(idx, child);
-        num_children++;
-
-    } else {
-
-        art_node *new_node = alloc_node(node_16, {child});
-
-        // Copy the child pointers and the key map
-        new_node->set_children(0, this, 0, num_children);
-        new_node->set_keys(keys, num_children);
-        new_node->copy_header(this);
-        ref = new_node;
-        free_node(this);
-        new_node->add_child(c, ref, child);
-    }
-}
-
-node_ptr art_node4::last() const {
-    unsigned  idx = num_children - 1;
-    return get_child(idx);
-}
-
-unsigned art_node4::last_index() const {
-    return num_children - 1;
-}
-
-std::pair<trace_element, bool> art_node4::lower_bound_child(unsigned char c)
-{
-    for (unsigned i=0 ; i < num_children; i++) {
-
-        if (keys[i] >= c && has_child(i)){
-            return {{this,get_child(i),i},keys[i] == c};
-        }
-    }
-    return {{nullptr,nullptr,num_children},false};
-}
-
-trace_element art_node4::next(const trace_element& te)
-{
-    unsigned i = te.child_ix + 1;
-    if (i < num_children) {
-        return {this,get_child(i),i};
-    }
-    return {};
-}
-trace_element art_node4::previous(const trace_element& te)
-{
-    unsigned i = te.child_ix;
-    if (i > 0) {
-        return {this,get_child(i),i-1};
-    }
-    return {};
 }
 
 art_node48::art_node48(){ 
@@ -243,7 +134,7 @@ unsigned art_node48::index(unsigned char c) const {
     num_children--;
     
     if (num_children == 12) {
-        auto *new_node = alloc_any_node<art_node16_8>();
+        auto *new_node = alloc_node(node_16, {});
         new_node->copy_header(this);
         unsigned child = 0;
         for (unsigned i = 0; i < 256; i++) {
@@ -273,7 +164,7 @@ void art_node48::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
         keys[c] = pos + 1;
         num_children++;
     } else {
-        auto *new_node = alloc_any_node<art_node256>();
+        auto *new_node = alloc_node(node_256,{});
         for (unsigned i = 0;i < 256; i++) {
             if (keys[i]) {
                 node_ptr nc = get_child(keys[i] - 1);
@@ -387,7 +278,7 @@ unsigned art_node256::index(unsigned char c) const {
     // Resize to a node48 on underflow, not immediately to prevent
     // trashing if we sit on the 48/49 boundary
     if (num_children == 37) {
-        auto *new_node = alloc_any_node<art_node48>();
+        auto *new_node = alloc_node(node_48, {});
         ref = new_node;
         new_node->copy_header(this);
     

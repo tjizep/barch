@@ -521,32 +521,39 @@ protected:
         art_node *children[SIZE];
     };
 };
+
+
 template<typename EncodingType>
-bool ok(const art_node* node)
+bool ok(const art_node* node, uintptr_t base)
 {
     if(sizeof(EncodingType) == sizeof(uintptr_t)) return true;
 
     auto uval = reinterpret_cast<int64_t>(node);
 
-    int64_t ival = uval-get_node_base() ;
+    int64_t ival = uval-base ;
     int64_t imax = i64max<EncodingType>();
     int64_t imin = i64min<EncodingType>();
     return (ival > imin && ival < imax  );
 }
+template<typename EncodingType>
+bool ok(const art_node* node)
+{
+    return ok<EncodingType>(node, get_node_base());
+}
 template<typename PtrType, typename EncodingType>
-struct encoding_element {
+struct encoded_element {
 private:
-    EncodingType value;
+    EncodingType &value;
+    uintptr_t base;
 public:
-    encoding_element() : value(0) {}
-    //encoding_element(const encoding_element& other) : value(other.value) {}
+    encoded_element(EncodingType &value, uintptr_t base) : value(value), base(base) {}
 
-    encoding_element& operator=(nullptr_t)
+    encoded_element& operator=(nullptr_t)
     {
         value = 0;
         return *this;
     }
-    encoding_element& operator=(const node_ptr& t)
+    encoded_element& operator=(const node_ptr& t)
     {
         set(static_cast<const PtrType*>(t));
         return *this;
@@ -564,16 +571,16 @@ public:
             value = 0;
         }else
         {
-            if(!ok<EncodingType>(ptr))
+            if(!ok<EncodingType>(ptr,base))
             {
-                auto val = reinterpret_cast<int64_t>(ptr) - get_node_base();
+                auto val = reinterpret_cast<int64_t>(ptr) - base;
                 if(val)
                 {
                     value = val;
                 }
                 abort();
             }
-            value = (reinterpret_cast<int64_t>(ptr) - get_node_base());
+            value = (reinterpret_cast<int64_t>(ptr) - base);
             if(get() != ptr)
             {
                 abort();
@@ -587,20 +594,20 @@ public:
             return reinterpret_cast<PtrType*>(value);
         }
         if(!value) return nullptr;
-        return reinterpret_cast<PtrType*>((int64_t)value + get_node_base());
+        return reinterpret_cast<PtrType*>((int64_t)value + base);
     }
     const PtrType* cget() const
     {
 
-        return const_cast<encoding_element*>(this)->get();
+        return const_cast<encoded_element*>(this)->get();
     }
 
-    encoding_element& operator=(PtrType* ptr)
+    encoded_element& operator=(PtrType* ptr)
     {
         set(ptr);
         return *this;
     }
-    encoding_element& operator=(const PtrType* ptr)
+    encoded_element& operator=(const PtrType* ptr)
     {
         set(ptr);
         return *this;
@@ -633,14 +640,42 @@ public:
     }
 };
 
+template<typename NodeType, typename EncodedType, int SIZE>
+struct node_array
+{
+    typedef encoded_element<NodeType,EncodedType> ProxyType;
+    EncodedType data[SIZE];
+    [[nodiscard]] uintptr_t get_offset() const
+    {
+        return (uintptr_t)this;
+    }
+    [[nodiscard]] bool ok(const node_ptr& p) const
+    {
+        return ::ok<EncodedType>(p, get_offset());
+    }
+
+    ProxyType operator[](unsigned at)
+    {
+        return ProxyType(data[at], get_offset());
+    }
+    ProxyType operator[](unsigned at) const
+    {
+        return ProxyType(const_cast<EncodedType&>(data[at]), get_offset());
+    }
+
+};
 template<unsigned SIZE, unsigned KEYS, typename i_ptr_t>
 struct encoded_node_content : public art_node {
 
     // test somewhere that sizeof ChildElementType == sizeof LeafElementType
-    typedef encoding_element<art_node, i_ptr_t> ChildElementType;
-    typedef encoding_element<art_leaf, i_ptr_t> LeafElementType;
+    typedef i_ptr_t ChildElementType;
+    typedef i_ptr_t LeafElementType;
+    typedef node_array<art_node, i_ptr_t, SIZE> ChildArrayType;
+    typedef node_array<art_leaf, i_ptr_t, SIZE> LeafArrayType;
 
-    encoded_node_content() : types(0) {};
+    encoded_node_content() : types(0)
+    {
+    };
     ~encoded_node_content() override{};
     void set_leaf(unsigned at) final {
         check_object();
@@ -651,8 +686,6 @@ struct encoded_node_content : public art_node {
     void set_child(unsigned at, node_ptr node) final {
         check_object();
         if (SIZE <= at)
-            abort();
-        if(!ok<i_ptr_t>(node))
             abort();
         types.set(at, node.is_leaf);
         children[at] = node;
@@ -696,7 +729,7 @@ struct encoded_node_content : public art_node {
     }
     [[nodiscard]] bool ok_child(node_ptr np) const override
     {   check_object();
-        return ok<i_ptr_t>(np);
+        return children.ok(np);
     }
 
 
@@ -852,7 +885,7 @@ struct encoded_node_content : public art_node {
         check_object();
         if(pos < KEYS && KEYS == SIZE) {
             memmove(keys+pos, keys+pos+1, num_children - 1 - pos);
-            memmove(children+pos, children+pos+1, (num_children - 1 - pos)*sizeof(ChildElementType));
+            memmove(children.data+pos, children.data+pos+1, (num_children - 1 - pos)*sizeof(ChildElementType));
             remove_type(pos);
             children[num_children - 1] = nullptr;
             num_children--;
@@ -907,21 +940,11 @@ struct encoded_node_content : public art_node {
 protected:
     union
     {
-        LeafElementType leaves[SIZE]{};
-        ChildElementType children[SIZE];
+        LeafArrayType leaves{};
+        ChildArrayType children;
     };
 };
 
-/**
- * Allocates a node of the given type,
- * initializes to zero and sets the type.
- */
-
-template<typename art_node_t>
-art_node* alloc_any_node() {
-    auto r =  new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
-    return r;
-}
 
 /**
  * Small node with only 4 children
@@ -991,7 +1014,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
         unsigned idx = index(c, gt|eq);
         // Shift to make room
         memmove(keys+idx+1, keys+idx, num_children - idx);
-        memmove(children+idx+1, children+idx,
+        memmove(children.data+idx+1, children.data+idx,
                 (num_children - idx)*sizeof(IntegerPtr));
         insert_type(idx);
         // Insert element
@@ -1109,7 +1132,7 @@ encoded_node_content<16,16, IPtrType >
         if (bitfield) {
             idx = __builtin_ctz(bitfield);
             memmove(this->keys+idx+1,this->keys+idx,this->num_children-idx);
-            memmove(this->children+idx+1,this->children+idx,
+            memmove(this->children.data+idx+1,this->children.data+idx,
                     (this->num_children-idx)*sizeof(typename Parent::ChildElementType));
         } else
             idx = this->num_children;

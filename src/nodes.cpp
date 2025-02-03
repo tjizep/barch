@@ -49,7 +49,16 @@ void free_node(art_node *n) {
     // Free ourself on the way up
     ValkeyModule_Free(n);
 }
+/**
+ * Allocates a node of the given type,
+ * initializes to zero and sets the type.
+ */
 
+template<typename art_node_t>
+art_node* alloc_any_node() {
+    auto r =  new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
+    return r;
+}
 art_node* alloc_node(unsigned nt, const children_t& children) {
     bool int32Ok = !children.empty();
     for (auto child : children)

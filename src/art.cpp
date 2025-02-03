@@ -461,7 +461,7 @@ RECURSE_SEARCH:;
 
         auto r = recursive_insert(trace, t, child, nc, key, key_len, value, depth+1, old, replace);
         if (nc != child) {
-            n = n->expand_pointers(ref, nc);
+            n = n->expand_pointers(ref, {nc});
             n->set_child(pos, nc);
         }
         return r;
@@ -572,7 +572,7 @@ static art_leaf* recursive_delete(node_ptr n, node_ptr &ref, const unsigned char
         if (new_child != child) {
             if(!n->ok_child(new_child))
             {
-                ref = n->expand_pointers(ref,new_child);
+                ref = n->expand_pointers(ref,{new_child});
                 ref->set_child(idx, new_child);
             }else
                 n->set_child(idx, new_child);

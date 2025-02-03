@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 100000
+local count = 1000000
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
@@ -118,10 +118,10 @@ local clear = function()
 end 
 
 --[[ Testing ints,doubles and string key types]]
+
 convert = tocharsnum
 test()
 clear()
-
 
 convert = tochars123
 test()

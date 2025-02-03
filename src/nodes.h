@@ -10,7 +10,6 @@
 #include "simd.h"
 #include <array>
 
-struct art_node48;
 template<typename I>
 int64_t i64max()
 {
@@ -173,6 +172,7 @@ struct trace_element {
         return parent.null() && child.null() && child_ix == 0;
     }
 };
+typedef std::array<node_ptr, max_alloc_children> children_t;
 
 struct art_node {
     uint8_t partial_len = 0;
@@ -214,8 +214,10 @@ struct art_node {
     [[nodiscard]] virtual bool child_type(unsigned at) const = 0;
     // returns true if node does not need to be rebuilt
     [[nodiscard]] virtual bool ok_child(node_ptr np) const = 0;
+    [[nodiscard]] virtual bool ok_children(const children_t& child) const = 0;
     [[nodiscard]] virtual unsigned ptr_size() const = 0;
-    [[nodiscard]] virtual node_ptr expand_pointers(node_ptr& ref, node_ptr child)  = 0;
+
+    [[nodiscard]] virtual node_ptr expand_pointers(node_ptr& ref, const children_t& child)  = 0;
     void check_object() const
     {
         if(partial_len > max_prefix_llength)
@@ -224,8 +226,9 @@ struct art_node {
         }
     }
 };
-typedef std::array<node_ptr, max_alloc_children> children_t;
+
 art_node* alloc_node(unsigned nt, const children_t& child);
+art_node* alloc_8_node(unsigned nt);
 
 typedef std::vector<trace_element> trace_list;
 
@@ -290,7 +293,7 @@ struct node_content : public art_node {
             abort();
         return children[at] ;
     }
-    [[nodiscard]] node_ptr expand_pointers(node_ptr&,node_ptr ) override
+    [[nodiscard]] node_ptr expand_pointers(node_ptr&,const children_t& ) override
     {   check_object();
         return (art_node*)this;
     };
@@ -319,6 +322,10 @@ struct node_content : public art_node {
     }
     [[nodiscard]] bool ok_child(node_ptr ) const override
     {   check_object();
+        return true;
+    }
+    [[nodiscard]] bool ok_children(const children_t& ) const override
+    {
         return true;
     }
 
@@ -526,6 +533,7 @@ protected:
 template<typename EncodingType>
 bool ok(const art_node* node, uintptr_t base)
 {
+    if(node == nullptr) return true;
     if(sizeof(EncodingType) == sizeof(uintptr_t)) return true;
 
     auto uval = reinterpret_cast<int64_t>(node);
@@ -534,11 +542,6 @@ bool ok(const art_node* node, uintptr_t base)
     int64_t imax = i64max<EncodingType>();
     int64_t imin = i64min<EncodingType>();
     return (ival > imin && ival < imax  );
-}
-template<typename EncodingType>
-bool ok(const art_node* node)
-{
-    return ok<EncodingType>(node, get_node_base());
 }
 template<typename PtrType, typename EncodingType>
 struct encoded_element {
@@ -729,7 +732,25 @@ struct encoded_node_content : public art_node {
     }
     [[nodiscard]] bool ok_child(node_ptr np) const override
     {   check_object();
+        if(np.is_leaf)
+            return leaves.ok(np);
         return children.ok(np);
+    }
+    [[nodiscard]] bool ok_children(const children_t& child) const override
+    {   check_object();
+        for(auto np: child)
+        {
+            if(np.is_leaf && !leaves.ok(np))
+            {
+               return false;
+
+            }
+            if(!np.is_leaf && !children.ok(np))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
 
@@ -920,11 +941,11 @@ struct encoded_node_content : public art_node {
         }
 
     }
-    [[nodiscard]] node_ptr expand_pointers(node_ptr& ref, node_ptr c) override
+    [[nodiscard]] node_ptr expand_pointers(node_ptr& ref, const children_t& children) override
     {
         check_object();
-        if(ok_child(c)) return this;
-        node_ptr n = alloc_node(type(), {c});
+        if(ok_children(children)) return this;
+        node_ptr n = alloc_8_node(type());
         n->copy_from((art_node*)this);
         free_node(this);
         ref = n;
@@ -1025,7 +1046,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     void add_child(unsigned char c, node_ptr& ref, node_ptr child) override {
 
         if (num_children < 4) {
-            this->expand_pointers(ref, child)->add_child_inner(c, child);
+            this->expand_pointers(ref, {child})->add_child_inner(c, child);
         } else {
 
             art_node *new_node = alloc_node(node_16, {child});
@@ -1147,7 +1168,7 @@ encoded_node_content<16,16, IPtrType >
 
         if (this->num_children < 16)
         {
-            this->expand_pointers(ref, child)->add_child_inner(c, child);
+            this->expand_pointers(ref, {child})->add_child_inner(c, child);
 
         } else {
             art_node *new_node = alloc_node(node_48,{child});
@@ -1202,23 +1223,176 @@ typedef art_node16_v<uintptr_t> art_node16_8;
  * Node with 48 children, but
  * a full 256 byte field.
  */
-struct art_node48 final : public node_content<48,256> {    
-    art_node48();
-    ~art_node48() override;
-    [[nodiscard]] uint8_t type() const override ;
-    [[nodiscard]] unsigned index(unsigned char c) const override ;
-    
-    void remove(node_ptr& ref, unsigned pos, unsigned char key) override;
-    void add_child(unsigned char c, node_ptr& ref, node_ptr child) override ;
-    [[nodiscard]] node_ptr last() const override ;
-    [[nodiscard]] unsigned last_index() const override;
-    [[nodiscard]] unsigned first_index() const override;
-    [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override;
-    [[nodiscard]] trace_element next(const trace_element& te) override;
-    [[nodiscard]] trace_element previous(const trace_element& te) override;
+template <typename PtrEncodedType>
+struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
+    typedef encoded_node_content<48,256,PtrEncodedType> this_type;
+
+    using this_type::copy_from;
+    using this_type::remove_child;
+    using this_type::set_child;
+    using this_type::add_child;
+    using this_type::has_child;
+
+    using this_type::num_children;
+    using this_type::get_child;
+    using this_type::partial_len;
+    using this_type::partial;
+    using this_type::keys;
+    using this_type::children;
+    using this_type::types;
+    using this_type::insert_type;
+    using this_type::index;
+
+    art_node48(){
+        statistics::node_bytes_alloc += sizeof(art_node48);
+        statistics::interior_bytes_alloc += sizeof(art_node48);
+        ++statistics::n48_nodes;
+    }
+    ~art_node48() override{
+        statistics::node_bytes_alloc -= sizeof(art_node48);
+        statistics::interior_bytes_alloc -= sizeof(art_node48);
+        --statistics::n48_nodes;
+    }
+    [[nodiscard]] uint8_t type() const override {
+        return node_48;
+    }
+    [[nodiscard]] unsigned index(unsigned char c) const override {
+        unsigned  i = keys[c];
+        if (i)
+            return i-1;
+        return 256;
+    }
+    void remove(node_ptr& ref, unsigned pos, unsigned char key) override{
+        if((unsigned)keys[key] -1 != pos) {
+            abort();
+        }
+        if (keys[key] == 0){
+            return;
+        }
+        if (children[pos] == nullptr) {
+            abort();
+        }
+        keys[key] = 0;
+        children[pos] = nullptr;
+        types[pos] = false;
+        num_children--;
+
+        if (num_children == 12) {
+            auto *new_node = alloc_node(node_16, {});
+            new_node->copy_header(this);
+            unsigned child = 0;
+            for (unsigned i = 0; i < 256; i++) {
+                pos = keys[i];
+                if (pos) {
+                    node_ptr nn = get_child(pos - 1);
+                    if (!nn) {
+                        abort();
+                    }
+                    new_node->set_key(child, i);
+                    new_node->set_child(child, nn);
+                    child++;
+                }
+            }
+            ref = new_node;
+            free_node(this);
+        }
+
+    }
+    void add_child_inner(unsigned char c, node_ptr child) override
+    {
+        unsigned pos = 0;
+        while (has_child(pos)) pos++;
+        // not we do not need to call insert_type an empty child is found
+        set_child(pos, child);
+        keys[c] = pos + 1;
+        num_children++;
+
+    }
+    void add_child(unsigned char c, node_ptr& ref, node_ptr child) override {
+        if (num_children < 48) {
+            this->expand_pointers(ref, {child})->add_child_inner(c, child);
+        } else {
+            auto *new_node = alloc_node(node_256,{});
+            for (unsigned i = 0;i < 256; i++) {
+                if (keys[i]) {
+                    node_ptr nc = get_child(keys[i] - 1);
+                    if(!nc) {
+                        abort();
+                    }
+                    new_node->set_child(i, nc);
+                }
+            }
+            new_node->copy_header(this);
+            statistics::node256_occupants += new_node->num_children;
+            ref = new_node;
+            free_node(this);
+            new_node->add_child(c, ref, child);
+        }
+    }
+    [[nodiscard]] node_ptr last() const override {
+        return get_child(last_index());
+    }
+    [[nodiscard]] unsigned last_index() const override{
+        unsigned idx=255;
+        while (!keys[idx]) idx--;
+        return keys[idx] - 1;
+    }
+    [[nodiscard]] unsigned first_index() const override{
+        unsigned uc = 0; // ?
+        unsigned i;
+        for (; uc < 256;uc++){
+            i = keys[uc];
+            if(i > 0){
+                return i-1;
+            }
+        }
+        return uc;
+    }
+    [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override{
+        /*
+        * find first not less than
+        * todo: make lb faster by adding bit map index and using __builtin_ctz as above
+        */
+        unsigned uc = c;
+        unsigned i = 0;
+        for (; uc < 256;uc++){
+            i = keys[uc];
+            if (i > 0) {
+                trace_element te = {this, get_child(i-1),i-1};
+                return {te, (i == c)};
+            }
+        }
+        return {{nullptr,nullptr,256},false};
+
+    }
+
+    [[nodiscard]] trace_element next(const trace_element& te) override{
+        unsigned uc = te.child_ix, i;
+
+        for (; uc > 0; --uc){
+            i = keys[uc];
+            if(i > 0){
+                return {this,get_child(i-1),i-1};
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] trace_element previous(const trace_element& te) override{
+        unsigned uc = te.child_ix + 1, i;
+        for (; uc < 256;uc++){
+            i = keys[uc];
+            if(i > 0){
+                return {this,get_child(i-1),i-1};
+            }
+        }
+        return {};
+    }
+
     
 } ;
-
+typedef art_node48<int32_t> art_node48_4;
+typedef art_node48<uintptr_t> art_node48_8;
 /**
  * Full node with 256 children
  */

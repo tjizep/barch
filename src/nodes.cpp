@@ -59,25 +59,35 @@ art_node* alloc_any_node() {
     auto r =  new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
     return r;
 }
-art_node* alloc_node(unsigned nt, const children_t& children) {
-    bool int32Ok = !children.empty();
-    for (auto child : children)
-    {
-        if(child.null()) continue;
-        if(!ok<int32_t>(child))
-        {
-            int32Ok = false;
-            break;
-        }
-    }
+art_node* alloc_node(unsigned nt, const children_t& c) {
+    node_ptr ref;
+    node_ptr n;
     switch (nt)
     {
     case node_4:
-        return int32Ok ? alloc_any_node<art_node4_4>() : alloc_any_node<art_node4_8>() ;
+        return alloc_any_node<art_node4_4>()->expand_pointers(ref, c); // : alloc_any_node<art_node4_8>() ;
     case node_16:
-        return int32Ok ? alloc_any_node<art_node16_4>() : alloc_any_node<art_node16_8>(); // optimize pointer sizes
+        return alloc_any_node<art_node16_4>(); // optimize pointer sizes
     case node_48:
-        return alloc_any_node<art_node48>();
+        return alloc_any_node<art_node48_4>();
+    case node_256:
+        return alloc_any_node<art_node256>();
+    default:
+        abort();
+    }
+
+}
+art_node* alloc_8_node(unsigned nt) {
+    node_ptr ref;
+    node_ptr n;
+    switch (nt)
+    {
+    case node_4:
+        return alloc_any_node<art_node4_8>(); // : alloc_any_node<art_node4_8>() ;
+    case node_16:
+        return alloc_any_node<art_node16_8>(); // optimize pointer sizes
+    case node_48:
+        return alloc_any_node<art_node48_8>();
     case node_256:
         return alloc_any_node<art_node256>();
     default:
@@ -105,156 +115,6 @@ unsigned art_node::check_prefix(const unsigned char *key, unsigned key_len, unsi
     }
     return idx;
 }
-
-art_node48::art_node48(){ 
-    statistics::node_bytes_alloc += sizeof(art_node48);
-    statistics::interior_bytes_alloc += sizeof(art_node48);
-    ++statistics::n48_nodes;
-}
-art_node48::~art_node48() {
-    statistics::node_bytes_alloc -= sizeof(art_node48);
-    statistics::interior_bytes_alloc -= sizeof(art_node48);
-    --statistics::n48_nodes;
-}
-
-uint8_t art_node48::type() const{
-    return node_48;
-}
-
-unsigned art_node48::index(unsigned char c) const {
-    unsigned  i = keys[c];
-    if (i)
-        return i-1;
-    return 256;
-}
-    
-    
- void art_node48::remove(node_ptr& ref, unsigned pos, unsigned char key){
-    if((unsigned)keys[key] -1 != pos) {
-        abort();
-    }
-    if (keys[key] == 0){
-        return;
-    }
-    if (children[pos] == nullptr) {
-        abort();
-    }
-    keys[key] = 0;
-    children[pos] = nullptr;
-    types[pos] = false;
-    num_children--;
-    
-    if (num_children == 12) {
-        auto *new_node = alloc_node(node_16, {});
-        new_node->copy_header(this);
-        unsigned child = 0;
-        for (unsigned i = 0; i < 256; i++) {
-            pos = keys[i];
-            if (pos) {
-                node_ptr nn = get_child(pos - 1);
-                if (!nn) {
-                    abort();
-                }
-                new_node->set_key(child, i);
-                new_node->set_child(child, nn); 
-                child++;
-            }
-        }
-        ref = new_node;    
-        free_node(this);
-    }
-    
-}
-
-void art_node48::add_child(unsigned char c, node_ptr& ref, node_ptr child) {
-    if (num_children < 48) {
-        unsigned pos = 0; 
-        while (has_child(pos)) pos++;
-        // not we do not need to call insert_type an empty child is found
-        set_child(pos, child);
-        keys[c] = pos + 1;
-        num_children++;
-    } else {
-        auto *new_node = alloc_node(node_256,{});
-        for (unsigned i = 0;i < 256; i++) {
-            if (keys[i]) {
-                node_ptr nc = get_child(keys[i] - 1);
-                if(!nc) {
-                    abort();
-                }
-                new_node->set_child(i, nc);
-            }
-        }
-        new_node->copy_header(this);
-        statistics::node256_occupants += new_node->num_children;
-        ref = new_node;
-        free_node(this);
-        new_node->add_child(c, ref, child);
-    }
-}
-
-node_ptr art_node48::last() const {
-    return get_child(last_index());
-}
-unsigned art_node48::last_index() const {
-    unsigned idx=255;
-    while (!keys[idx]) idx--;
-    return keys[idx] - 1;
-}
-unsigned art_node48::first_index() const {
-    unsigned uc = 0; // ?
-    unsigned i;
-    for (; uc < 256;uc++){
-        i = keys[uc];
-        if(i > 0){
-            return i-1;
-        }
-    }
-    return uc;
-}
-
-std::pair<trace_element, bool> art_node48::lower_bound_child(unsigned char c)
-{
-    /*
-    * find first not less than
-    * todo: make lb faster by adding bit map index and using __builtin_ctz as above
-    */
-    unsigned uc = c;
-    unsigned i = 0;
-    for (; uc < 256;uc++){
-        i = keys[uc];
-        if (i > 0) {
-            trace_element te = {this, get_child(i-1),i-1};
-            return {te, (i == c)};
-        }
-    }
-    return {{nullptr,nullptr,256},false};
-
-}
-trace_element art_node48::next(const trace_element& te)
-{
-    unsigned uc = te.child_ix, i;
-
-    for (; uc > 0; --uc){
-        i = keys[uc];
-        if(i > 0){
-            return {this,get_child(i-1),i-1};
-        }
-    }
-    return {};
-}
-trace_element art_node48::previous(const trace_element& te)
-{
-    unsigned uc = te.child_ix + 1, i;
-    for (; uc < 256;uc++){
-        i = keys[uc];
-        if(i > 0){
-            return {this,get_child(i-1),i-1};
-        }
-    }
-    return {};
-}
-
 
 art_node256::art_node256() { 
     statistics::node_bytes_alloc += sizeof(art_node256);

@@ -59,9 +59,11 @@ struct node_ptr {
     node_ptr(const node_ptr& p) : is_leaf(p.is_leaf), node(p.node) {}
     
     node_ptr(art_node* p) : is_leaf(false), node(p) {}
+    node_ptr(const art_node* p) : is_leaf(false), node(const_cast<art_node*>(p)) {}
     node_ptr(art_leaf* p) : is_leaf(true), l(p) {}
-    node_ptr(const nullptr_t n) : is_leaf(false), l(n) {}
-    
+    node_ptr(const art_leaf* p) : is_leaf(true), l(const_cast<art_leaf*>(p)) {}
+    node_ptr(std::nullptr_t) : is_leaf(false), l(nullptr) {}
+
     bool null() const {
         return node == nullptr;
     }
@@ -115,6 +117,11 @@ struct node_ptr {
     {
         return l != p || !is_leaf;
     }
+    node_ptr& operator = (const art_node* n){
+        set(const_cast<art_node*>(n));
+        return *this;
+    }
+
     node_ptr& operator = (art_node* n){
         set(n);
         return *this;
@@ -122,6 +129,11 @@ struct node_ptr {
     
     node_ptr& operator = (art_leaf* l){
         set(l);
+        return *this;
+    }
+
+    node_ptr& operator = (const art_leaf* l){
+        set(const_cast<art_leaf*>(l));
         return *this;
     }
 
@@ -142,7 +154,7 @@ struct node_ptr {
         return l;
     }
 
-    const art_leaf* leaf() const {
+    [[nodiscard]] const art_leaf* leaf() const {
         if (!is_leaf)
             abort();
         return l;

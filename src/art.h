@@ -1,4 +1,5 @@
-#include <stdint.h>
+#pragma once
+#include <cstdint>
 #include <bitset>
 #ifndef ART_H
 #define ART_H

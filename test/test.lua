@@ -1,12 +1,12 @@
 local vk
 vk = redis
 
-local count = 1000000
+local count = 1000
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
-local keylen = 8
+local keylen = 16
 local index = 0
 local convert
 local tests = 0

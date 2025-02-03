@@ -31,7 +31,7 @@ enum node_kind
 
 enum constants
 {
-    max_prefix_llength = 10u,
+    max_prefix_llength = 8u,
     max_alloc_children = 8u
 };
 typedef int16_t node_ptr_int_t;

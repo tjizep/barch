@@ -61,15 +61,14 @@ art_node* alloc_any_node() {
 }
 art_node* alloc_node(unsigned nt, const children_t& c) {
     node_ptr ref;
-    node_ptr n;
     switch (nt)
     {
     case node_4:
         return alloc_any_node<art_node4_4>()->expand_pointers(ref, c); // : alloc_any_node<art_node4_8>() ;
     case node_16:
-        return alloc_any_node<art_node16_4>(); // optimize pointer sizes
+        return alloc_any_node<art_node16_4>()->expand_pointers(ref, c); // optimize pointer sizes
     case node_48:
-        return alloc_any_node<art_node48_4>();
+        return alloc_any_node<art_node48_4>()->expand_pointers(ref, c);
     case node_256:
         return alloc_any_node<art_node256>();
     default:

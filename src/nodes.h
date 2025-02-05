@@ -234,7 +234,7 @@ struct art_node {
     {
         if(partial_len > max_prefix_llength)
         {
-            abort();
+            //abort();
         }
     }
 };
@@ -920,6 +920,7 @@ struct encoded_node_content : public art_node {
             memmove(keys+pos, keys+pos+1, num_children - 1 - pos);
             memmove(children.data+pos, children.data+pos+1, (num_children - 1 - pos)*sizeof(ChildElementType));
             remove_type(pos);
+            keys[num_children - 1] = 0;
             children[num_children - 1] = nullptr;
             num_children--;
         } else {

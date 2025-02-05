@@ -65,7 +65,7 @@ namespace conversion
 
     struct comparable_result
     {
-        enum types
+        enum
         {
             rinteger = 0,
             rdouble = 1,
@@ -80,7 +80,7 @@ namespace conversion
     public:
 
         explicit comparable_result(int64_t value)
-        : integer (comparable_bytes(value, rinteger)) // numbers are ordered before byte buffers
+        : integer (comparable_bytes(value, rinteger)) // numbers are ordered before most ascii strings unless they start with 0x01
         , size(integer.get_size())
         , type(rinteger)
         {}
@@ -89,14 +89,16 @@ namespace conversion
         : integer(comparable_bytes(value, rdouble))
         , size(integer.get_size())
         , type(rdouble)
-        {}
+        {
+            size = integer.get_size();
+        }
 
         comparable_result(const char *val, size_t size) 
         : integer()
         , size(size)
         , type(rbuffer)
         {
-            //bytes.push_back(rbuffer); // push the type
+            bytes.push_back(type); // push the type
             bytes.insert(bytes.end(),val, val + size);
             this->size = bytes.size();
         }
@@ -121,7 +123,6 @@ namespace conversion
             return size;
         }
     };
-
     static const char* eat_space(const char * str, size_t l){
         const char * s = str;
         for (;s != str + l; ++s) // eat continuous initial spaces

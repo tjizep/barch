@@ -404,7 +404,7 @@ static void* recursive_insert(trace_list& trace, art_tree* t, node_ptr n, node_p
         auto *new_node = alloc_node(node_4, {l, l2});
         // Determine longest prefix
         unsigned longest_prefix = longest_common_prefix(l, l2, depth);
-        new_node->partial_len = std::min<unsigned>(max_prefix_llength, longest_prefix);
+        new_node->partial_len = longest_prefix;
         memcpy(new_node->partial, key+depth, std::min<unsigned>(max_prefix_llength, longest_prefix));
         // Add the leafs to the new node_4
         ref = new_node;

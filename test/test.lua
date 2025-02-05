@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 10
+local count = 1000
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
@@ -97,6 +97,10 @@ local clear = function()
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
+        if vk.call('ODGET',k) == nil then
+            result[inc()] = {"Failed get before remove",k, v, vk.call('ODGET',k)}
+            failures = failures + 1
+        end
         if vk.call('ODREM',k) == v then
             success = success + 1
         else
@@ -118,7 +122,6 @@ local clear = function()
 end 
 
 --[[ Testing ints,doubles and string key types]]
---[[
 convert = tocharsnum
 test()
 clear()
@@ -126,14 +129,14 @@ clear()
 convert = tochars123
 test()
 clear()
-]]
+
 convert = tocharsabc
 test()
 abctest()
 clear()
---[[
+
 convert = tocharsdbl
 test()
 clear()
-]]
+
 return result

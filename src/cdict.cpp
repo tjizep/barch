@@ -51,10 +51,7 @@ static int key_ok(const char * k, size_t klen){
 
     if (klen == 0) 
         return -1;
-    
-    if (*k == 0 || *k == 1 || *k == 2)
-        return -1;
-    
+
     return 0;
 
 }
@@ -67,9 +64,7 @@ static int key_check(ValkeyModuleCtx *ctx, const char * k, size_t klen){
     if (klen == 0) 
         return ValkeyModule_ReplyWithError(ctx, "No empty keys");
 
-    if (*k == 0 || *k == 1 || *k == 2)
-        return ValkeyModule_ReplyWithError(ctx, "Keys cannot start with a byte containing 0,1 or 2");
-    
+
     return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
 }
 
@@ -91,12 +86,16 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, s
                 return -1;    
             }
         }
-    } else { //it's a string
+    } else  if ( key_len > 0) { //it's a string *enck == 2 &&
+
         k = (const char*) &enck[0];
         kl = key_len;
         if (ValkeyModule_ReplyWithStringBuffer(ctx, k, kl) == VALKEYMODULE_ERR) {
             return -1;
         }
+    } else
+    {
+        abort();
     }
     return 0;
 }
@@ -351,8 +350,8 @@ extern "C" {
         
 
         auto converted = conversion::convert(k, klen);
-
-        void *r = art_delete(get_art(ctx), converted.get_data(), converted.get_size());
+        auto t = get_art(ctx);
+        void *r = art_delete(t, converted.get_data(), converted.get_size());
 
         ValkeyModuleString *val = (ValkeyModuleString *)r;
 

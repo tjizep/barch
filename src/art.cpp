@@ -291,7 +291,9 @@ void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len) 
 int art_range(const art_tree *t, const unsigned char *key, int key_len, const unsigned char *key_end, int key_end_len, art_callback cb, void *data) {
     ++statistics::range_ops;
     trace_list tl;
-    const art_leaf* al = lower_bound(tl, t, key, key_len).leaf();
+    auto lb = lower_bound(tl, t, key, key_len);
+    if(lb.null()) return 0;
+    const art_leaf* al = lb.leaf();
     if (al) {
         do {
             node_ptr n = last_el(tl).child;
@@ -319,7 +321,9 @@ int art_range(const art_tree *t, const unsigned char *key, int key_len, const un
  */
 art_leaf* art_minimum(art_tree *t) {
     ++statistics::min_ops;
-    return minimum(t->root).leaf();
+    auto l = minimum(t->root);
+    if(l.null()) return nullptr;
+    return l.leaf();
 }
 
 /**
@@ -327,7 +331,9 @@ art_leaf* art_minimum(art_tree *t) {
  */
 art_leaf* art_maximum(art_tree *t) {
     ++statistics::max_ops;
-    return maximum(t->root).leaf();
+    auto l = maximum(t->root);
+    if (l.null()) return nullptr;
+    return l.leaf();
 }
 
 static art_leaf* make_leaf(const unsigned char *key, int key_len, void *value) {

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 #include <fast_float/fast_float.h>
 
 namespace conversion
@@ -64,37 +65,55 @@ namespace conversion
 
     struct comparable_result
     {
+        enum types
+        {
+            rinteger = 0,
+            rdouble = 1,
+            rbuffer = 2
+        };
     private:
-        const uint8_t *data; // nthis may point to the integer or another externally allocated variable 
         byte_comparable<int64_t> integer;
         size_t size; // the size as initialized - only changed on construction
+        std::vector<uint8_t> bytes{};
+        uint8_t type;
 
     public:
 
         explicit comparable_result(int64_t value)
-        : data(&integer.bytes[0])
-        , integer (comparable_bytes(value, 0)) // numbers are ordered before most ascii strings unless they start with 0x01
+        : integer (comparable_bytes(value, rinteger)) // numbers are ordered before byte buffers
         , size(integer.get_size())
+        , type(rinteger)
         {}
 
         explicit comparable_result(double value)
-        : data(&integer.bytes[0])
-        , integer(comparable_bytes(value, 1))
+        : integer(comparable_bytes(value, rdouble))
         , size(integer.get_size())
-        {
-            size = integer.get_size();
-        }
+        , type(rdouble)
+        {}
 
         comparable_result(const char *val, size_t size) 
-        : data((const uint8_t *)val)
-        , integer()
+        : integer()
         , size(size)
+        , type(rbuffer)
         {
+            //bytes.push_back(rbuffer); // push the type
+            bytes.insert(bytes.end(),val, val + size);
+            this->size = bytes.size();
         }
 
         [[nodiscard]] const uint8_t *get_data() const
         {
-            return data;
+            switch (type)
+            {
+                case rinteger:
+                    return &integer.bytes[0];
+                case rdouble:
+                    return &integer.bytes[0];
+                case rbuffer:
+                    return bytes.data();
+                default:
+                    abort();
+            }
         }
 
         [[nodiscard]] size_t get_size() const
@@ -102,6 +121,7 @@ namespace conversion
             return size;
         }
     };
+
     static const char* eat_space(const char * str, size_t l){
         const char * s = str;
         for (;s != str + l; ++s) // eat continuous initial spaces

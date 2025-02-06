@@ -31,7 +31,7 @@ enum node_kind
 
 enum constants
 {
-    max_prefix_llength = 8u,
+    max_prefix_llength = 10u,
     max_alloc_children = 8u
 };
 typedef int16_t node_ptr_int_t;
@@ -577,20 +577,9 @@ public:
             value = 0;
         }else
         {
-            if(!ok<EncodingType>(ptr,base))
-            {
-                auto val = reinterpret_cast<int64_t>(ptr) - base;
-                if(val)
-                {
-                    value = val;
-                }
-                abort();
-            }
+
             value = (reinterpret_cast<int64_t>(ptr) - base);
-            if(get() != ptr)
-            {
-                abort();
-            }
+
         }
     }
     [[nodiscard]] PtrType* get()

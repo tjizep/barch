@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 100000
+local count = 10000
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
@@ -58,9 +58,9 @@ local test = function()
 
     for i = 1, count do
         local k = convert(i-1)
-        local v = '#'..i
-        vk.call('ODSET',k,v)
+        vk.call('ODSET',k,'#'..i)
     end
+
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
@@ -100,12 +100,11 @@ local clear = function()
         end
     end
 
-    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
-    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
-    result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
+    result[inc()] = {'ODSTATS', vk.call('ODSTATS')}
+    result[inc()] = {'ODSIZE', vk.call('ODSIZE')}
+    result[inc()] = {'ODOPS', vk.call('ODOPS')}
     result[inc()] = {'FAILURES', failures}
     result[inc()] = {'SUCCESSES', successes}
-
 end
 
 --[[ Testing ints,doubles and string key types]]

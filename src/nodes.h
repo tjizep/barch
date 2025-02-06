@@ -37,34 +37,34 @@ enum constants
 typedef int16_t node_ptr_int_t;
 
 
-struct art_node;
-struct art_leaf;
 
-struct node_ptr {
+struct art_leaf;
+template<typename art_node_t>
+struct node_ptr_t {
     
     bool is_leaf;
-    node_ptr() : is_leaf(false), node(nullptr) {};
-    node_ptr(const node_ptr& p) : is_leaf(p.is_leaf), node(p.node) {}
+    node_ptr_t() : is_leaf(false), node(nullptr) {};
+    node_ptr_t(const node_ptr_t& p) : is_leaf(p.is_leaf), node(p.node) {}
     
-    node_ptr(art_node* p) : is_leaf(false), node(p) {}
-    node_ptr(const art_node* p) : is_leaf(false), node(const_cast<art_node*>(p)) {}
-    node_ptr(art_leaf* p) : is_leaf(true), l(p) {}
-    node_ptr(const art_leaf* p) : is_leaf(true), l(const_cast<art_leaf*>(p)) {}
-    node_ptr(std::nullptr_t) : is_leaf(false), l(nullptr) {}
+    explicit node_ptr_t(art_node_t* p) : is_leaf(false), node(p) {}
+    node_ptr_t(const art_node_t* p) : is_leaf(false), node(const_cast<art_node_t*>(p)) {}
+    node_ptr_t(art_leaf* p) : is_leaf(true), l(p) {}
+    node_ptr_t(const art_leaf* p) : is_leaf(true), l(const_cast<art_leaf*>(p)) {}
+    node_ptr_t(std::nullptr_t) : is_leaf(false), l(nullptr) {}
 
     bool null() const {
         return node == nullptr;
     }
 
     union {
-        art_node* node;
+        art_node_t* node;
         art_leaf* l;
     };
     void set(nullptr_t n) {
         node = n;
         is_leaf = false;
     }
-    void set(art_node* n) {
+    void set(art_node_t* n) {
         node = n;
         is_leaf = false;
     }
@@ -73,11 +73,11 @@ struct node_ptr {
         l = lf;
         is_leaf = true;
     }
-    bool operator == (const node_ptr& p) const
+    bool operator == (const node_ptr_t& p) const
     {
         return node == p.node && is_leaf == p.is_leaf;
     }
-    bool operator != (const node_ptr& p) const
+    bool operator != (const node_ptr_t& p) const
     {
         return node != p.node || is_leaf != p.is_leaf;
     }
@@ -89,11 +89,11 @@ struct node_ptr {
     {
         return node != nullptr || is_leaf == false;
     }
-    bool operator == (const art_node* p) const
+    bool operator == (const art_node_t* p) const
     {
         return node == p && is_leaf == false;
     }
-    bool operator != (const art_node* p) const
+    bool operator != (const art_node_t* p) const
     {
         return node != p || is_leaf == true;
     }
@@ -105,34 +105,33 @@ struct node_ptr {
     {
         return l != p || !is_leaf;
     }
-    node_ptr& operator = (const art_node* n){
-        set(const_cast<art_node*>(n));
+    node_ptr_t& operator = (const node_ptr_t& n){
+        this->is_leaf = n.is_leaf;
+        this->node = n.node;
+        return *this;
+    }
+    node_ptr_t& operator = (const art_node_t* n){
+        set(const_cast<art_node_t*>(n));
         return *this;
     }
 
-    node_ptr& operator = (art_node* n){
+    node_ptr_t& operator = (art_node_t* n){
         set(n);
         return *this;
     }
     
-    node_ptr& operator = (art_leaf* l){
+    node_ptr_t& operator = (art_leaf* l){
         set(l);
         return *this;
     }
 
-    node_ptr& operator = (const art_leaf* l){
+    node_ptr_t& operator = (const art_leaf* l){
         set(const_cast<art_leaf*>(l));
         return *this;
     }
 
-    node_ptr& operator = (nullptr_t l){
+    node_ptr_t& operator = (nullptr_t l){
         set(l);
-        return *this;
-    }
-
-    node_ptr& operator = (const node_ptr& l){
-        is_leaf = l.is_leaf;
-        node = l.node;
         return *this;
     }
 
@@ -148,33 +147,37 @@ struct node_ptr {
         return l;
     }
     
-    art_node * operator -> () const {
+    art_node_t * operator -> () const {
         if(is_leaf) {
             abort();
         }
         return node;
     }
 
-    operator const art_node* () const {
+    operator const art_node_t* () const {
         return node;
     }
-    operator art_node* () {
+    operator art_node_t* () {
         return node;
     }
     
 };
-struct trace_element {
-    node_ptr parent = nullptr;
-    node_ptr child = nullptr;
-    unsigned child_ix = 0;
-    unsigned char k = 0;
-    [[nodiscard]] bool empty() const {
-        return parent.null() && child.null() && child_ix == 0;
-    }
-};
-typedef std::array<node_ptr, max_alloc_children> children_t;
+
+
 
 struct art_node {
+    typedef node_ptr_t<art_node> node_ptr;
+    struct trace_element {
+        node_ptr parent = nullptr;
+        node_ptr child = nullptr;
+        unsigned child_ix = 0;
+        unsigned char k = 0;
+        [[nodiscard]] bool empty() const {
+            return parent.null() && child.null() && child_ix == 0;
+        }
+    };
+    typedef std::array<node_ptr, max_alloc_children> children_t;
+
     uint8_t partial_len = 0;
     uint8_t num_children = 0;
     unsigned char partial[max_prefix_llength]{};
@@ -186,9 +189,9 @@ struct art_node {
     [[nodiscard]] virtual bool is_leaf(unsigned at) const = 0;
     [[nodiscard]] virtual bool has_child(unsigned at) const = 0;
     virtual node_ptr get_node(unsigned at) = 0;
-    [[nodiscard]] virtual const node_ptr get_node(unsigned at) const = 0;
+    [[nodiscard]] virtual node_ptr get_node(unsigned at) const = 0;
     virtual node_ptr get_child(unsigned at) = 0;
-    [[nodiscard]] virtual const node_ptr get_child(unsigned at) const = 0;
+    [[nodiscard]] virtual node_ptr get_child(unsigned at) const = 0;
     [[nodiscard]] virtual unsigned index(unsigned char, unsigned operbits) const = 0;
     [[nodiscard]] virtual unsigned index(unsigned char c) const = 0;
     [[nodiscard]] virtual node_ptr find(unsigned char, unsigned operbits) const = 0;
@@ -223,6 +226,9 @@ struct art_node {
 
     }
 };
+typedef art_node::node_ptr node_ptr;
+typedef art_node::trace_element trace_element;
+typedef art_node::children_t children_t;
 
 art_node* alloc_node(unsigned nt, const children_t& child);
 art_node* alloc_8_node(unsigned nt); // magic 8 ball
@@ -292,9 +298,9 @@ struct node_content : public art_node {
     }
     [[nodiscard]] node_ptr expand_pointers(node_ptr&,const children_t& ) override
     {   check_object();
-        return (art_node*)this;
+        return this;
     };
-    [[nodiscard]] const node_ptr get_node(unsigned at) const final {
+    [[nodiscard]] node_ptr get_node(unsigned at) const final {
         check_object();
         if (at < SIZE)
             return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
@@ -313,7 +319,7 @@ struct node_content : public art_node {
         check_object();
         return get_node(at);
     }
-    [[nodiscard]] const node_ptr get_child(unsigned at) const final {
+    [[nodiscard]] node_ptr get_child(unsigned at) const final {
         check_object();
         return get_node(at);
     }
@@ -613,16 +619,16 @@ public:
         return *this;
     }
 
-    operator PtrType*()
+    explicit operator PtrType*()
     {
         return get();
     }
-    operator node_ptr()
+    explicit operator node_ptr()
     {
         return node_ptr(get());
     }
 
-    operator node_ptr() const
+    explicit operator node_ptr() const
     {
         return node_ptr(const_cast<PtrType*>(cget())); // well have to just cast it
     }
@@ -703,7 +709,7 @@ struct encoded_node_content : public art_node {
             abort();
         return children[at] ;
     }
-    [[nodiscard]] const node_ptr get_node(unsigned at) const final {
+    [[nodiscard]] node_ptr get_node(unsigned at) const final {
         check_object();
         if (at < SIZE)
             return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
@@ -723,7 +729,7 @@ struct encoded_node_content : public art_node {
         check_object();
         return get_node(at);
     }
-    [[nodiscard]] const node_ptr get_child(unsigned at) const final {
+    [[nodiscard]] node_ptr get_child(unsigned at) const final {
         check_object();
         return get_node(at);
     }
@@ -944,13 +950,13 @@ struct encoded_node_content : public art_node {
         check_object();
         if(ok_children(children)) return this;
         node_ptr n = alloc_8_node(type());
-        n->copy_from((art_node*)this);
+        n->copy_from(this);
         free_node(this);
         ref = n;
         return n;
 
     }
-    [[nodiscard]] virtual unsigned ptr_size() const
+    [[nodiscard]] unsigned ptr_size() const override
     {
         check_object();
         return sizeof(ChildElementType);
@@ -1011,7 +1017,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
                 unsigned prefix = partial_len;
                 if (prefix < max_prefix_llength) {
                     partial[prefix] = keys[0];
-                    prefix++;
+                    ++prefix;
                 }
                 if (prefix < max_prefix_llength) {
                     unsigned sub_prefix = std::min<unsigned>(child->partial_len, max_prefix_llength - prefix);

@@ -103,7 +103,7 @@ static node_ptr maximum(node_ptr n);
  * we always have to check and extend if required
  * @return false if any non leaf node has no child 
  */
-static bool extend_trace_min(art_node * root, trace_list& trace){
+static bool extend_trace_min(node_ptr root, trace_list& trace){
     if (trace.empty()) {
         trace.push_back(first_child_off(root));
     };
@@ -122,7 +122,7 @@ static bool extend_trace_max(node_ptr root, trace_list& trace){
     };
     trace_element u = last_el(trace); 
     while (!u.child.is_leaf) {
-        u = last_child_off(u.child.node);
+        u = last_child_off(u.child);
         if (u.empty()) return false;
         trace.push_back(u);
     }

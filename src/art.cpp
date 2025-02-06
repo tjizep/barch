@@ -183,7 +183,7 @@ static node_ptr maximum(node_ptr n) {
 
 
 // Find the minimum leaf under a node
-static node_ptr minimum(const node_ptr n) {
+static node_ptr minimum(const node_ptr& n) {
     // Handle base cases
     if (n.null()) return nullptr;
     if (n.is_leaf) return n;
@@ -253,7 +253,7 @@ static trace_element increment_te(const trace_element &te){
 }
 
 
-static bool increment_trace(node_ptr root, trace_list& trace){
+static bool increment_trace(const node_ptr& root, trace_list& trace){
     for(auto r = trace.rbegin(); r != trace.rend(); ++r){
         trace_element te = increment_te(*r);
         if(te.empty())
@@ -339,7 +339,7 @@ art_leaf* art_maximum(art_tree *t) {
 static art_leaf* make_leaf(const unsigned char *key, int key_len, void *value) {
     auto *l = static_cast<art_leaf*>(ValkeyModule_Calloc(1, sizeof(art_leaf) + key_len));
     ++statistics::leaf_nodes;
-    statistics::node_bytes_alloc += (sizeof(art_leaf)+key_len);
+    statistics::node_bytes_alloc += (int64_t)(sizeof(art_leaf)+key_len);
     l->value = value;
     l->key_len = key_len;
     memcpy(l->key, key, key_len);
@@ -373,7 +373,7 @@ static int prefix_mismatch(const node_ptr n, const unsigned char *key, int key_l
     if (n->partial_len > max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
         art_leaf *l = minimum(n).leaf();
-        max_cmp = std::min<uint32_t>(l->key_len, key_len) - depth;
+        max_cmp = std::min<unsigned short>(l->key_len, key_len) - depth;
         for (; idx < max_cmp; idx++) {
             if (l->key[idx+depth] != key[depth+idx])
                 return idx;

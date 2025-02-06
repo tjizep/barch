@@ -7,7 +7,7 @@
 using namespace std;
 static std::string valkey_cli = "_deps/valkey-src/src/valkey-cli";
 static std::string ping_cmd = valkey_cli + " -e PING ";
-
+static std::string failed = "failure: ";
 static unsigned max_iterations = 100;
 int wait_to_stop(){
     if(0 != std::system("pkill -9 valkey-server")){
@@ -19,7 +19,7 @@ int wait_to_stop(){
     while (0 == std::system(ping_cmd.c_str())) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (--iters == 0){
-            std::cerr << "server not stopped in time" << std::endl;
+            std::cerr << failed << "server not stopped in time" << std::endl;
             return -1;
         }
     }
@@ -32,7 +32,7 @@ int wait_to_start() {
     while (0 != std::system(ping_cmd.c_str())) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (--iters == 0){
-            std::cerr << "server not started in time" << std::endl;
+            std::cerr << failed << "server not started in time" << std::endl;
             return -1;
         }
     }
@@ -57,7 +57,7 @@ int main(int argc, char *argv[]) {
         server_cmd += "libcdict.so &";
         cout << server_cmd << endl;
         if (0 != std::system(server_cmd.c_str())) {
-          std::cerr << server_cmd << " failed" << std::endl;
+          std::cerr << failed << server_cmd << std::endl;
         }
     };
     std::thread t(run_server);
@@ -67,14 +67,16 @@ int main(int argc, char *argv[]) {
     std::cout << test_cmd << std::endl;
 
     if (wait_to_start() !=0) return -1;
-
+    int r = 0;
     if(std::system(test_cmd.c_str()) != 0)
     {
-        std::cerr << test_cmd << std::endl;
-        return -1;
+        std::cerr << failed << test_cmd << std::endl;
+        r = -1;
     }
-    if (0!=wait_to_stop()) return -1;
+    if (0!=wait_to_stop()){
+        r = -1;
+    }
     t.join();
     cout << "complete";
-    return 0;
+    return r;
 }

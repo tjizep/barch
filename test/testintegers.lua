@@ -10,6 +10,9 @@ local keylen = 16
 local index = 0
 local convert
 local tests = 0
+local failures = 0
+local successes = 0
+
 local inc = function()
     index = index + 1
     return index
@@ -25,7 +28,6 @@ end
 
 local test = function()
 
-    local succeses = 0
     tests = tests + 1
     result[inc()] = {"running test "..tests}
     result[inc()] = vk.call('ODLB',"abaachcd")
@@ -41,7 +43,7 @@ local test = function()
         if vk.call('ODGET',k) ~= v then
             result[inc()] = {k, v, vk.call('ODGET',k)} --vk.call('cdict.lb',k)
         else
-            succeses = succeses + 1
+            successes = successes + 1
         end
 
     end
@@ -50,13 +52,11 @@ local test = function()
     result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
-    result[inc()] = {"succeses for test "..tests..": "..succeses}
+    result[inc()] = {"succeses for test "..tests..": "..successes}
 end
 
 
 local clear = function()
-    local failures = 0
-    local success = 0
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
@@ -65,7 +65,7 @@ local clear = function()
             failures = failures + 1
         end
         if vk.call('ODREM',k) == v then
-            success = success + 1
+            successes = successes + 1
         else
             result[inc()] = {"Failed remove result ",k, v, vk.call('ODGET',k)}
         end
@@ -79,8 +79,8 @@ local clear = function()
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
-    result[inc()] = {'REMOVE FAILURES', failures}
-    result[inc()] = {'REMOVE SUCCESSES', success}
+    result[inc()] = {'FAILURES', failures}
+    result[inc()] = {'SUCCESSES', successes}
 
 end
 
@@ -88,4 +88,7 @@ end
 convert = tocharsnum
 test()
 clear()
+assert(successes==2000, "test failures")
+assert(failures==0, "test failures")
+
 return result

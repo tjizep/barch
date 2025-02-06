@@ -45,6 +45,10 @@ add_test(NAME TestAbc
         COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testabc.lua
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
 
+add_test(NAME Test123
+        COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} test123.lua
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+
 #add_test(
 #        NAME start_valkey_server
 #        COMMAND valkey-server --loadmodule ${CMAKE_BINARY_DIR}/libcdict.so

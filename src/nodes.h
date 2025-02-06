@@ -35,19 +35,7 @@ enum constants
     max_alloc_children = 8u
 };
 typedef int16_t node_ptr_int_t;
-/**
- * utility to create N copies of unsigned character C c
- */
-template<unsigned N, typename C = unsigned char>
-struct nuchar {
-    C data[N];
-    nuchar(C c){
-        memset(data, c, sizeof(data));
-    }
-    operator const C* () const {
-        return data;
-    } 
-};
+
 
 struct art_node;
 struct art_leaf;
@@ -232,15 +220,12 @@ struct art_node {
     [[nodiscard]] virtual node_ptr expand_pointers(node_ptr& ref, const children_t& child)  = 0;
     void check_object() const
     {
-        if(partial_len > max_prefix_llength)
-        {
-            abort();
-        }
+
     }
 };
 
 art_node* alloc_node(unsigned nt, const children_t& child);
-art_node* alloc_8_node(unsigned nt);
+art_node* alloc_8_node(unsigned nt); // magic 8 ball
 
 typedef std::vector<trace_element> trace_list;
 

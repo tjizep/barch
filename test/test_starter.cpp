@@ -39,14 +39,15 @@ int wait_to_start() {
     return 0;
 }
 int main(int argc, char *argv[]) {
-    if(argc != 2)
+    if(argc != 3)
     {
-        std::cerr << "Usage: " << argv[0] << " <directory containing libcdict.so>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <directory containing libcdict.so> <lua test file>" << std::endl;
         return -1;
     }
     if ( 0 != wait_to_stop()) return -1;
 
     std::string bindir = argv[1];
+    std::string luatest = argv[2];
     std::cout << "directory for : libcdict.so " << bindir << std::endl;
     auto run_server = [&]()
     {
@@ -62,7 +63,7 @@ int main(int argc, char *argv[]) {
     std::thread t(run_server);
 
     cout << "waiting to start valkey...";
-    std::string test_cmd = valkey_cli + " -e --eval ../test.lua";
+    std::string test_cmd = valkey_cli + " -e --eval ../" + luatest;
     std::cout << test_cmd << std::endl;
 
     if (wait_to_start() !=0) return -1;

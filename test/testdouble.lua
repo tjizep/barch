@@ -1,0 +1,102 @@
+local vk
+vk = redis
+
+local count = 1000
+local result = {}
+local i = 1
+local chars = {'a','b','c','e','f','g','h'}
+local radix = #chars
+local keylen = 16
+local index = 0
+local convert
+local tests = 0
+local inc = function()
+    index = index + 1
+    return index
+end
+
+local tocharsabc = function(num)
+    local n = num
+    local r = ''
+    while (true) do
+        r = chars[math.mod(n, radix)+1]..r
+        n = math.floor(n / radix)
+        if n == 0 then
+            break
+        end
+    end
+    r = string.format("%"..keylen.."s", r)
+    r = string.gsub(r," ", "a")
+    return r
+end
+
+local tocharsdbl = function(num)
+    return num+0.5
+end
+
+local test = function()
+
+    local succeses = 0
+    tests = tests + 1
+    result[inc()] = {"running test "..tests}
+    result[inc()] = vk.call('ODLB',"abaachcd")
+
+    for i = 1, count do
+        local k = convert(i-1)
+        local v = '#'..i
+        vk.call('ODSET',k,v)
+    end
+    for i = 1, count do
+        local k = convert(i-1)
+        local v = '#'..i
+        if vk.call('ODGET',k) ~= v then
+            result[inc()] = {k, v, vk.call('ODGET',k)} --vk.call('cdict.lb',k)
+        else
+            succeses = succeses + 1
+        end
+
+    end
+    result[inc()] = {"'ODRANGE',convert(2), convert(count-2), 10", vk.call('ODRANGE',convert(2), convert(count-2), 4)}
+    result[inc()] = {[['ODMIN']], vk.call('ODMIN')}
+    result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
+    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
+    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
+    result[inc()] = {"succeses for test "..tests..": "..succeses}
+end
+
+local clear = function()
+    local failures = 0
+    local success = 0
+    for i = 1, count do
+        local k = convert(i-1)
+        local v = '#'..i
+        if vk.call('ODGET',k) == nil then
+            result[inc()] = {"Failed get before remove",k, v, vk.call('ODGET',k)}
+            failures = failures + 1
+        end
+        if vk.call('ODREM',k) == v then
+            success = success + 1
+        else
+            result[inc()] = {"Failed remove result ",k, v, vk.call('ODGET',k)}
+        end
+
+        if vk.call('ODGET',k) then
+            result[inc()] = {"Failed remove",k, v, vk.call('ODGET',k)}
+            failures = failures + 1
+        end
+    end
+
+    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
+    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
+    result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
+    result[inc()] = {'REMOVE FAILURES', failures}
+    result[inc()] = {'REMOVE SUCCESSES', success}
+
+end
+
+--[[ Testing doubles]]
+
+convert = tocharsdbl
+test()
+clear()
+return result

@@ -86,7 +86,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, s
                 return -1;    
             }
         }
-    } else if ( key_len > 1 && *enck == 2) { //it's a string
+    } else if ( key_len >= 1 && *enck == 2) { //it's a string
 
         k = (const char*) &enck[1];
         kl = key_len - 1;

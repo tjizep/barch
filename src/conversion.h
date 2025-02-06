@@ -1,10 +1,16 @@
 #pragma once
 #include <cstdint>
-#include <vector>
 #include <fast_float/fast_float.h>
 
 namespace conversion
 {
+    enum
+    {
+        tinteger = 0,
+        tdouble = 1,
+        tstring = 2
+
+    };
     template <typename I>
     struct byte_comparable
     {
@@ -65,57 +71,56 @@ namespace conversion
 
     struct comparable_result
     {
-        enum
-        {
-            rinteger = 0,
-            rdouble = 1,
-            rbuffer = 2
-        };
     private:
-        byte_comparable<int64_t> integer;
-        size_t size; // the size as initialized - only changed on construction
-        std::vector<uint8_t> bytes{};
-        uint8_t type;
-
+        uint8_t *data = nullptr; // this may point to the integer or another externally allocated variable
+        byte_comparable<int64_t> integer{};
+        size_t size = 0; // the size as initialized - only changed on construction
+        uint8_t* bytes = nullptr;
     public:
 
         explicit comparable_result(int64_t value)
-        : integer (comparable_bytes(value, rinteger)) // numbers are ordered before most ascii strings unless they start with 0x01
+        : data(&integer.bytes[0])
+        , integer (comparable_bytes(value, tinteger)) // numbers are ordered before most ascii strings unless they start with 0x01
         , size(integer.get_size())
-        , type(rinteger)
         {}
 
         explicit comparable_result(double value)
-        : integer(comparable_bytes(value, rdouble))
+        : data(&integer.bytes[0])
+        , integer(comparable_bytes(value, tdouble))
         , size(integer.get_size())
-        , type(rdouble)
         {
             size = integer.get_size();
         }
 
-        comparable_result(const char *val, size_t size) 
-        : integer()
-        , size(size)
-        , type(rbuffer)
+        comparable_result(const char *val, size_t size)
+        : size(size+1)
         {
-            bytes.push_back(type); // push the type
-            bytes.insert(bytes.end(),val, val + size);
-            this->size = bytes.size();
-        }
+            bytes = (uint8_t*)ValkeyModule_Calloc(1,this->size); //.assign(val, val + size);
+            memcpy(bytes+1, val, this->size - 1);
+            bytes[0] = tstring;
+            data = bytes;
 
+        }
+        comparable_result(const comparable_result& r)
+        {
+            *this = r;
+        }
+        ~comparable_result()
+        {
+            if (bytes != nullptr) ValkeyModule_Free(bytes);
+        }
+        comparable_result& operator=(const comparable_result& r)
+        {
+            if(this == &r) return *this;
+            bytes = (uint8_t*)ValkeyModule_Calloc(1,r.size);
+            size = r.size;
+            data = bytes;
+            memcpy(bytes, r.bytes, size);
+            return *this;
+        }
         [[nodiscard]] const uint8_t *get_data() const
         {
-            switch (type)
-            {
-                case rinteger:
-                    return &integer.bytes[0];
-                case rdouble:
-                    return &integer.bytes[0];
-                case rbuffer:
-                    return bytes.data();
-                default:
-                    abort();
-            }
+            return data;
         }
 
         [[nodiscard]] size_t get_size() const

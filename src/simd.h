@@ -6,4 +6,18 @@ enum OPERATION_BIT {
     lt = 4
 };
 
+/**
+ * utility to create N copies of unsigned character C c
+ */
+template<unsigned N, typename C = unsigned char>
+struct nuchar {
+    C data[N];
+    nuchar(C c){
+        memset(data, c, sizeof(data));
+    }
+    operator const C* () const {
+        return data;
+    }
+};
+
 extern unsigned bits_oper16(const unsigned char * a, const unsigned char * b, unsigned mask, unsigned operbits);

@@ -234,7 +234,7 @@ struct art_node {
     {
         if(partial_len > max_prefix_llength)
         {
-            //abort();
+            abort();
         }
     }
 };
@@ -1061,9 +1061,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
         if (num_children < 4) {
             this->expand_pointers(ref, {child})->add_child_inner(c, child);
         } else {
-
             art_node *new_node = alloc_node(node_16, {child});
-
             // Copy the child pointers and the key map
             new_node->set_children(0, this, 0, num_children);
             new_node->set_keys(keys, num_children);

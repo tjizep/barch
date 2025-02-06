@@ -10,28 +10,28 @@
  */
 
 struct art_statistics {
-    uint64_t leaf_nodes;
-    uint64_t node4_nodes;
-    uint64_t node16_nodes;
-    uint64_t node48_nodes;
-    uint64_t node256_nodes;
-    uint64_t node256_occupants;
-    uint64_t bytes_allocated;
-    uint64_t bytes_interior;
+    int64_t leaf_nodes;
+    int64_t node4_nodes;
+    int64_t node16_nodes;
+    int64_t node48_nodes;
+    int64_t node256_nodes;
+    int64_t node256_occupants;
+    int64_t bytes_allocated;
+    int64_t bytes_interior;
 };
 
 struct art_ops_statistics {
-    uint64_t delete_ops;
-    uint64_t set_ops;
-    uint64_t iter_ops;
-    uint64_t iter_range_ops;
-    uint64_t range_ops;
-    uint64_t get_ops;
-    uint64_t lb_ops;
-    uint64_t size_ops;
-    uint64_t insert_ops;
-    uint64_t min_ops;
-    uint64_t max_ops;
+    int64_t delete_ops;
+    int64_t set_ops;
+    int64_t iter_ops;
+    int64_t iter_range_ops;
+    int64_t range_ops;
+    int64_t get_ops;
+    int64_t lb_ops;
+    int64_t size_ops;
+    int64_t insert_ops;
+    int64_t min_ops;
+    int64_t max_ops;
     
 };
 

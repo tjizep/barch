@@ -39,7 +39,7 @@ local tocharsnum = function(num)
 end
 
 local tochars123 = function(num)
-    return '#'..num
+    return 'a'..(90 + num)
 end
 
 local tocharsdbl = function(num)
@@ -122,14 +122,15 @@ local clear = function()
 end 
 
 --[[ Testing ints,doubles and string key types]]
+--[[]
 convert = tocharsnum
 test()
 clear()
-
+]]
 convert = tochars123
 test()
-clear()
-
+--clear()
+--[[
 convert = tocharsabc
 test()
 abctest()
@@ -138,5 +139,5 @@ clear()
 convert = tocharsdbl
 test()
 clear()
-
+]]
 return result

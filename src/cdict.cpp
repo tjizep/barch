@@ -353,7 +353,7 @@ extern "C" {
         auto t = get_art(ctx);
         void *r = art_delete(t, converted.get_data(), converted.get_size());
 
-        ValkeyModuleString *val = (ValkeyModuleString *)r;
+        auto *val = (ValkeyModuleString *)r;
 
         if (val == nullptr)
         {
@@ -371,7 +371,7 @@ extern "C" {
     {
         if (argc !=1)
             return ValkeyModule_WrongArity(ctx);
-        return ValkeyModule_ReplyWithLongLong(ctx, art_size(get_art(ctx)));
+        return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)art_size(get_art(ctx)));
         
     }
     /* CDICT.STATISTICS

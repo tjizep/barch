@@ -360,6 +360,7 @@ static unsigned longest_common_prefix(art_leaf *l1, art_leaf *l2, int depth) {
 /**
  * Calculates the index at which the prefixes mismatch
  */
+static unsigned initial_node = node_4;
 static int prefix_mismatch(const node_ptr n, const unsigned char *key, int key_len, int depth) {
     int max_cmp = std::min<int>(std::min<int>(max_prefix_llength, n->partial_len), key_len - depth);
     int idx;
@@ -401,7 +402,7 @@ static void* recursive_insert(trace_list& trace, art_tree* t, node_ptr n, node_p
         art_leaf *l2 = make_leaf(key, key_len, value);
 
         // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
-        auto *new_node = alloc_node(node_4, {l, l2});
+        auto *new_node = alloc_node(initial_node, {l, l2});
         // Determine longest prefix
         unsigned longest_prefix = longest_common_prefix(l, l2, depth);
         new_node->partial_len = longest_prefix;
@@ -425,7 +426,7 @@ static void* recursive_insert(trace_list& trace, art_tree* t, node_ptr n, node_p
         // TODO: do fast child adding (by adding multiple children at once)
         // Create a new node and a new leaf
         art_leaf *new_leaf = make_leaf(key, key_len, value);
-        art_node *new_node = alloc_node(node_4, {n, new_leaf}); // pass children to get opt. ptr size
+        art_node *new_node = alloc_node(initial_node, {n, new_leaf}); // pass children to get opt. ptr size
         ref = new_node;
         new_node->partial_len = prefix_diff;
         memcpy(new_node->partial, n->partial, std::min<int>(max_prefix_llength, prefix_diff));

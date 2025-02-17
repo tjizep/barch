@@ -93,10 +93,10 @@ namespace conversion
         }
 
         comparable_result(const char *val, size_t size)
-        : size(size+1)
+        : size(size + 1)
         {
-            bytes = (uint8_t*)ValkeyModule_Calloc(1,this->size); //.assign(val, val + size);
-            memcpy(bytes+1, val, this->size - 1);
+            bytes = (uint8_t*)ValkeyModule_Calloc(1,this->size + 1); //.assign(val, val + size);
+            memcpy(bytes + 1, val, this->size - 1);
             bytes[0] = tstring;
             data = bytes;
 

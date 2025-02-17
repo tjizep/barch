@@ -32,7 +32,8 @@ enum node_kind
 enum constants
 {
     max_prefix_llength = 10u,
-    max_alloc_children = 8u
+    max_alloc_children = 8u,
+    initial_node = node_4
 };
 typedef int16_t node_ptr_int_t;
 
@@ -1025,7 +1026,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     }
     void add_child_inner(unsigned char c, node_ptr child) override
     {
-        unsigned idx = index(c, gt|eq);
+        unsigned idx = index(c, gt);
         // Shift to make room
         memmove(keys+idx+1, keys+idx, num_children - idx);
         memmove(children.data+idx+1, children.data+idx,

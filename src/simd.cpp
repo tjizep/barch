@@ -49,7 +49,8 @@ unsigned bits_oper16(const unsigned char * a, const unsigned char * b, unsigned 
             bitfield |= (_mm_movemask_epi8(cmp));
         }
     #else
-        // Compare the key to all 16 stored keys
+        unsigned i;
+    // Compare the key to all 16 stored keys
         if (operbits & eq) {
             for (i = 0; i < 16; ++i) {
                 if (a[i] == b[i])

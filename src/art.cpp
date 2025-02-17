@@ -360,7 +360,7 @@ static unsigned longest_common_prefix(art_leaf *l1, art_leaf *l2, int depth) {
 /**
  * Calculates the index at which the prefixes mismatch
  */
-static unsigned initial_node = node_4;
+;
 static int prefix_mismatch(const node_ptr n, const unsigned char *key, int key_len, int depth) {
     int max_cmp = std::min<int>(std::min<int>(max_prefix_llength, n->partial_len), key_len - depth);
     int idx;

@@ -1,12 +1,12 @@
 local vk
 vk = redis
 
-local count = 10000
+local count = 1000000
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
-local keylen = 16
+local keylen = 8
 local index = 0
 local convert
 local tests = 0
@@ -19,7 +19,7 @@ local inc = function()
 end
 
 local tochars123 = function(num)
-    return chars[math.mod(num, radix)+1]..(90 + num)
+    return 'a'..chars[math.mod(num, radix)+1]..(90 + num)
 end
 
 local test = function()

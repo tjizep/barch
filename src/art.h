@@ -4,6 +4,15 @@
 #ifndef ART_H
 #define ART_H
 #include "nodes.h"
+#include "compress.h"
+
+/**
+ * context management
+ */
+struct compressed_release
+{
+ ~compressed_release();
+};
 
 /**
  * global statistics
@@ -40,10 +49,11 @@ typedef int(*art_callback)(void *data, const unsigned char *key, uint32_t key_le
 /**
  * Main struct, points to root.
  */
-typedef struct {
-    node_ptr root;
-    uint64_t size;
-} art_tree;
+struct art_tree{
+    node_ptr root = nullptr;
+    uint64_t size = 0;
+    art_tree(node_ptr root, uint64_t size) : root(root), size(size) {}
+};
 
 extern "C" {
 /**
@@ -109,13 +119,13 @@ void* art_search(trace_list& trace, const art_tree *t, const unsigned char *key,
  * Returns the minimum valued leaf
  * @return The minimum leaf or NULL
  */
-art_leaf* art_minimum(art_tree *t);
+const art_leaf* art_minimum(art_tree *t);
 
 /**
  * Returns the maximum valued leaf
  * @return The maximum leaf or NULL
  */
-art_leaf* art_maximum(art_tree *t);
+const art_leaf* art_maximum(art_tree *t);
 
 /**
  * Returns the lower bound value of a given key

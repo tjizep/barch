@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.9)
 project(cdict VERSION 0.0.1 LANGUAGES CXX)
 enable_testing()
-
+set(ADD_ZSTD_COMPRESSION ON)
+set(TEST_OD OFF)
 set(CMAKE_CPP_STANDARD 17)
 
 if (NOT CMAKE_BUILD_TYPE)
@@ -11,6 +12,7 @@ endif()
 include(FetchContent)
 
 if (ADD_ZSTD_COMPRESSION)
+    message("Using ZSTD compression")
     set(ZSTD_BUILD_STATIC ON)
     set(ZSTD_BUILD_SHARED OFF)
 
@@ -37,6 +39,7 @@ endif ()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++")
 include_directories(${fast_float_SOURCE_DIR}/include)
+include_directories(${zstd_SOURCE_DIR}/lib)
 
 if (NOT TEST_OD)
     message("Testing not enabled Use -DTEST_OD=ON")
@@ -51,11 +54,13 @@ else()
     execute_process(COMMAND make RESULT_VARIABLE result
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
 endif ()
+
 file(GLOB SOURCES
     "src/*.c" "src/*.cpp"
 )
 
 add_library(cdict SHARED ${SOURCES})
+
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(cdict PRIVATE libzstd_static)
 endif ()

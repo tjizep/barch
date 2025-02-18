@@ -7,8 +7,18 @@
 #include "art.h"
 #include "valkeymodule.h"
 #include "statistics.h"
+#include "compress.h"
 
+compress & get_leaf_compression()
+{
+    static compress leaf_compression;
+    return leaf_compression;
+};
 
+compressed_release::~compressed_release()
+{
+    get_leaf_compression().release_decompressed();
+}
 /**
  * Initializes an ART tree
  * @return 0 on success.
@@ -143,7 +153,7 @@ void* art_search(trace_list& trace, const art_tree *t, const unsigned char *key,
     ++statistics::get_ops;
     node_ptr n = t->root;
     unsigned depth = 0;
-    while (n) {
+    while (!n.null()) {
         // Might be a leaf
         if(n.is_leaf){
 
@@ -176,7 +186,7 @@ void* art_search(trace_list& trace, const art_tree *t, const unsigned char *key,
 // Find the maximum leaf under a node
 static node_ptr maximum(node_ptr n) {
     // Handle base cases
-    if (!n) return nullptr;
+    if (n.null()) return nullptr;
     if (n.is_leaf) return n;
     return maximum(n->last());
 }
@@ -202,7 +212,7 @@ static node_ptr lower_bound(trace_list& trace, const art_tree *t, const unsigned
     node_ptr n = t->root;
     int depth = 0, is_equal = 0;
 
-    while (n) {
+    while (!n.null()) {
         if (n.is_leaf) {
             // Check if the expanded path matches
             if (n.leaf()->compare(key, key_len, depth) >= 0) {
@@ -298,7 +308,7 @@ int art_range(const art_tree *t, const unsigned char *key, int key_len, const un
         do {
             node_ptr n = last_el(tl).child;
             if(n.is_leaf){
-                art_leaf * leaf = n.leaf();
+                const art_leaf * leaf = n.leaf();
                 if(leaf->compare(key_end, key_end_len, 0) < 0) { // upper bound is not
                     ++statistics::iter_range_ops;
                     int r = cb(data, leaf->key, leaf->key_len, leaf->value); 
@@ -319,7 +329,7 @@ int art_range(const art_tree *t, const unsigned char *key, int key_len, const un
 /**
  * Returns the minimum valued leaf
  */
-art_leaf* art_minimum(art_tree *t) {
+const art_leaf* art_minimum(art_tree *t) {
     ++statistics::min_ops;
     auto l = minimum(t->root);
     if(l.null()) return nullptr;
@@ -329,7 +339,7 @@ art_leaf* art_minimum(art_tree *t) {
 /**
  * Returns the maximum valued leaf
  */
-art_leaf* art_maximum(art_tree *t) {
+const art_leaf* art_maximum(art_tree *t) {
     ++statistics::max_ops;
     auto l = maximum(t->root);
     if (l.null()) return nullptr;
@@ -346,7 +356,7 @@ static art_leaf* make_leaf(const unsigned char *key, int key_len, void *value) {
     return l;
 }
 
-static unsigned longest_common_prefix(art_leaf *l1, art_leaf *l2, int depth) {
+static unsigned longest_common_prefix(const art_leaf *l1, const art_leaf *l2, int depth) {
     unsigned max_cmp = std::min<unsigned>(l1->key_len, l2->key_len) - depth;
     unsigned idx;
     for (idx=0; idx < max_cmp; idx++) {
@@ -372,7 +382,7 @@ static int prefix_mismatch(const node_ptr n, const unsigned char *key, int key_l
     // If the prefix is short we can avoid finding a leaf
     if (n->partial_len > max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
-        art_leaf *l = minimum(n).leaf();
+        const art_leaf *l = minimum(n).leaf();
         max_cmp = std::min<unsigned short>(l->key_len, key_len) - depth;
         for (; idx < max_cmp; idx++) {
             if (l->key[idx+depth] != key[depth+idx])
@@ -461,7 +471,7 @@ RECURSE_SEARCH:;
         trace_element te = {n,child,pos, key[depth]};
         trace.push_back(te);
     }
-    if (child) {
+    if (!child.null()) {
         node_ptr nc = child;
 
         auto r = recursive_insert(trace, t, child, nc, key, key_len, value, depth+1, old, replace);
@@ -528,13 +538,13 @@ static void remove_child(node_ptr n, node_ptr& ref, unsigned char c, unsigned po
     n->remove(ref, pos, c);
 }
 
-static art_leaf* recursive_delete(node_ptr n, node_ptr &ref, const unsigned char *key, int key_len, int depth) {
+static const art_leaf* recursive_delete(node_ptr n, node_ptr &ref, const unsigned char *key, int key_len, int depth) {
     // Search terminated
     if (n.null()) return nullptr;
 
     // Handle hitting a leaf node
     if (n.is_leaf) {
-        art_leaf *l = n.leaf();
+        const art_leaf *l = n.leaf();
         if (l->compare(key, key_len, depth) == 0) {
             ref = nullptr;
             return l;
@@ -554,12 +564,12 @@ static art_leaf* recursive_delete(node_ptr n, node_ptr &ref, const unsigned char
     // Find child node
     unsigned idx = n->index(key[depth]);
     node_ptr child = n->get_node(idx);
-    if (!child) 
+    if (child.null())
         return nullptr;
 
     // If the child is leaf, delete from this node
     if (child.is_leaf) {
-        art_leaf *l = child.leaf();
+        const art_leaf *l = child.leaf();
         if (l->compare(key, key_len, depth) == 0) {
             remove_child(n, ref, key[depth], idx);
             return l;
@@ -593,7 +603,7 @@ static art_leaf* recursive_delete(node_ptr n, node_ptr &ref, const unsigned char
  */
 void* art_delete(art_tree *t, const unsigned char *key, int key_len) {
     ++statistics::delete_ops;
-    art_leaf *l = recursive_delete(t->root, t->root, key, key_len, 0);
+    const art_leaf *l = recursive_delete(t->root, t->root, key, key_len, 0);
     if (l) {
         t->size--;
         void *old = l->value;
@@ -609,7 +619,7 @@ static int recursive_iter(node_ptr n, art_callback cb, void *data) {
     // Handle base cases
     if (n.null()) return 0;
     if (n.is_leaf) {
-        art_leaf *l = n.leaf();
+        const art_leaf *l = n.leaf();
         ++statistics::iter_ops;
         return cb(data, static_cast<const unsigned char*>(l->key), l->key_len, l->value);
     }
@@ -719,7 +729,7 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
 
         // If the depth matches the prefix, we need to handle this node
         if (depth == key_len) {
-            art_leaf *l = minimum(n).leaf();
+            const art_leaf *l = minimum(n).leaf();
             if (0 == leaf_prefix_compare(l, key, key_len))
                return recursive_iter(n, cb, data);
             return 0;

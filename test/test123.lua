@@ -6,7 +6,7 @@ local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
-local keylen = 8
+local keylen = 16
 local index = 0
 local convert
 local tests = 0

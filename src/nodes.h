@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <bitset>
 #include <limits>
@@ -9,6 +10,7 @@
 #include "statistics.h"
 #include "simd.h"
 #include <array>
+#include "compress.h"
 
 template<typename I>
 int64_t i64max()
@@ -35,11 +37,9 @@ enum constants
     max_alloc_children = 8u,
     initial_node = node_4
 };
-typedef int16_t node_ptr_int_t;
-
-
-
 struct art_leaf;
+extern compress& get_leaf_compression();
+
 template<typename art_node_t>
 struct node_ptr_t {
     
@@ -253,7 +253,7 @@ struct art_leaf {
      * Checks if a leaf matches
      * @return 0 on success.
      */
-    int compare(const unsigned char *key, unsigned key_len, unsigned depth) {
+    int compare(const unsigned char *key, unsigned key_len, unsigned depth) const {
         (void)depth;
         // TODO: compare is broken will fail some edge cases
         // Fail if the key lengths are different
@@ -660,6 +660,102 @@ struct node_array
     }
 
 };
+template<typename EncodingType>
+struct encoded_arena_element {
+private:
+    EncodingType &value;
+    //uint64_t base;
+public:
+    encoded_arena_element(EncodingType &value, uint64_t ) : value(value)
+    //, base(base)
+    {}
+
+    encoded_arena_element& operator=(nullptr_t)
+    {
+        value = 0;
+        return *this;
+    }
+    encoded_arena_element& operator=(const compressed_address& t)
+    {
+        set(t);
+        return *this;
+    }
+    encoded_arena_element& operator=(const node_ptr& t)
+    {
+        if(!t.is_leaf)
+        {
+            abort();
+        }
+        set(t.l);
+        return *this;
+    }
+
+    void set(const compressed_address& ptr)
+    {
+        if(ptr.null())
+        {
+            value = 0;
+            return;
+        }
+        int64_t index = ptr.address();// - (int64_t)base;
+        value = index;
+    }
+    [[nodiscard]] compressed_address get() const
+    {
+        if(value == 0)
+        {
+            return {};
+        }
+        return compressed_address{(size_t)value};
+    }
+    [[nodiscard]] compressed_address  cget() const
+    {
+
+        return this->get();
+    }
+
+    operator compressed_address() const
+    {
+        return cget();
+    }
+};
+
+template<typename EncodedType, int SIZE>
+struct arena_array
+{
+    typedef encoded_arena_element<EncodedType> ProxyType;
+    EncodedType data[SIZE]{};
+    //compressed_address offset = get_leaf_compression().highest_reserve_address;
+
+    [[nodiscard]] uintptr_t get_offset() const
+    {
+        return 0; //offset.address();
+    }
+    [[nodiscard]] bool ok(const node_ptr& p) const
+    {   if(!p.is_leaf)
+        {
+            return true;
+        }
+        //int64_t delta = std::max<int64_t>(p.l.address(),get_offset()) - std::min<int64_t>(p.l.address(),get_offset());
+
+        if(sizeof(EncodedType) == sizeof(uintptr_t))
+        {
+            return true;
+        }
+        return true; //delta < 1000000000;
+    }
+
+    ProxyType operator[](unsigned at)
+    {
+        return ProxyType(data[at], get_offset());
+    }
+    ProxyType operator[](unsigned at) const
+    {
+        return ProxyType(const_cast<EncodedType&>(data[at]), get_offset());
+    }
+
+};
+
 template<unsigned SIZE, unsigned KEYS, typename i_ptr_t>
 struct encoded_node_content : public art_node {
 
@@ -684,7 +780,14 @@ struct encoded_node_content : public art_node {
         if (SIZE <= at)
             abort();
         types.set(at, node.is_leaf);
-        children[at] = node;
+        if(node.is_leaf)
+        {
+            leaves[at] = node.leaf();
+        }else
+        {
+            children[at] = node;
+        }
+
     }
     [[nodiscard]] bool is_leaf(unsigned at) const final {
         check_object();
@@ -733,14 +836,14 @@ struct encoded_node_content : public art_node {
     {   check_object();
         for(auto np: child)
         {
-            if(np.is_leaf && !leaves.ok(np))
+            // TODO: compress leaf addresses again
+            if(np.is_leaf)
             {
-               return false;
+               return leaves.ok(np);
 
-            }
-            if(!np.is_leaf && !children.ok(np))
+            }else
             {
-                return false;
+                return children.ok(np);
             }
         }
         return true;
@@ -880,7 +983,12 @@ struct encoded_node_content : public art_node {
 
             for(unsigned d = dpos; d < count; ++d )
             {
-                children[d] = other->get_child(d+spos);
+                auto n = other->get_child(d+spos);
+                if(n.is_leaf)
+                {
+                    leaves[d] = n.leaf();
+                }else
+                    children[d] = n;
             }
             for(unsigned t = 0; t < count; ++t) {
                 types[t+dpos] = other->child_type(t+spos);

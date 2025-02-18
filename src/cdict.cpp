@@ -26,7 +26,7 @@ extern "C"
 
 static ValkeyModuleDict *Keyspace;
 static art_tree ad = {nullptr, 0};
-
+static auto startTime = std::chrono::high_resolution_clock::now();
 /// @brief  getting an initialized art tree
 /// @param ctx not used but could be 
 /// @return a once initialized art_tree
@@ -273,7 +273,7 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        art_leaf *r = art_minimum(get_art(ctx));
+        const art_leaf *r = art_minimum(get_art(ctx));
 
         if (r == nullptr)
         {
@@ -283,6 +283,15 @@ extern "C" {
         {
             return reply_encoded_key(ctx, r->key, r->key_len);
         }
+    }
+    int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int )
+    {
+
+        auto t = std::chrono::high_resolution_clock::now();
+        auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - startTime);
+
+        return ValkeyModule_ReplyWithLongLong(ctx,d.count());
+
     }
 
     /* CDICT.MAXIMUM
@@ -294,7 +303,7 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        art_leaf *r = art_maximum(get_art(ctx));
+        const art_leaf *r = art_maximum(get_art(ctx));
 
         if (r == nullptr)
         {
@@ -517,6 +526,9 @@ extern "C" {
             return VALKEYMODULE_ERR;
 
         if (ValkeyModule_CreateCommand(ctx, "ODMIN", cmd_MIN, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "ODMILLIS", cmd_MILLIS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
         /* Create our global dictionary. Here we'll set our keys and values. */

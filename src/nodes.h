@@ -331,7 +331,14 @@ struct node_content : public art_node {
         if (SIZE <= at)
             abort();
         types.set(at, node.is_leaf);
-        children[at] = node;
+        if(node.is_leaf)
+        {
+            leaves[at] = node.logical;
+        }else
+        {
+            children[at] = node;
+        }
+
     }
     [[nodiscard]] bool is_leaf(unsigned at) const final {
         check_object();
@@ -725,7 +732,7 @@ public:
     }
     bool empty() const
     {
-        return value != 0;
+        return value == 0;
     }
 };
 
@@ -943,7 +950,7 @@ struct encoded_node_content : public art_node {
         if (SIZE <= pos)
             abort();
 
-        return children[pos] != nullptr;
+        return children[pos].exists();
     }
 
     void set_keys(const unsigned char* other_keys, unsigned count) override{
@@ -1384,7 +1391,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
                 pos = keys[i];
                 if (pos) {
                     node_ptr nn = get_child(pos - 1);
-                    if (!nn) {
+                    if (nn.null()) {
                         abort();
                     }
                     new_node->set_key(child, i);
@@ -1415,7 +1422,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
             for (unsigned i = 0;i < 256; i++) {
                 if (keys[i]) {
                     node_ptr nc = get_child(keys[i] - 1);
-                    if(!nc) {
+                    if(nc.null()) {
                         abort();
                     }
                     new_node->set_child(i, nc);
@@ -1495,7 +1502,7 @@ typedef art_node48<uintptr_t> art_node48_8;
 /**
  * Full node with 256 children
  */
-struct art_node256 final : public node_content<256,0> {
+struct art_node256 final : public encoded_node_content<256,0,uintptr_t> {
     art_node256();
     ~art_node256() override;
     [[nodiscard]] uint8_t type() const override ;

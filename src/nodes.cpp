@@ -133,7 +133,7 @@ uint8_t art_node256::type() const {
 }
 
 unsigned art_node256::index(unsigned char c) const {
-    if (children[c])
+    if (children[c].exists())
         return c;
     return 256;
 }
@@ -178,14 +178,14 @@ node_ptr art_node256::last() const {
 }
 unsigned art_node256::last_index() const {
     unsigned idx = 255;
-    while (!children[idx]) idx--;
+    while (children[idx].empty()) idx--;
     return idx;
 }
 
 unsigned art_node256::first_index() const {
     unsigned uc = 0; // ?
     for (; uc < 256; uc++){
-        if(children[uc]) {
+        if(children[uc].exists()) {
             return uc;
         }
     }

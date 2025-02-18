@@ -22,17 +22,18 @@ uint64_t get_node_base()
     }
     return base;
 }
-void free_node(art_leaf *n){
-    if(!n) return;
-    unsigned kl = n->key_len;
-    ValkeyModule_Free(n);
+void free_leaf_node(node_ptr n){
+    if(n.null()) return;
+    unsigned kl = n.leaf()->key_len;
+    //ValkeyModule_Free(n);
+    get_leaf_compression().free(n.logical, sizeof(art_leaf) + kl);
     --statistics::leaf_nodes;
     statistics::node_bytes_alloc -= (sizeof(art_leaf) + kl);
 }
 
 void free_node(node_ptr n){
     if (n.is_leaf) {
-        free_node(n.leaf());
+        free_leaf_node(n);
     } else {
         free_node(n.node);
     }

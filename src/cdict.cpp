@@ -74,7 +74,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, s
     const char * k;
     size_t kl;
     
-    if( key_len == 9 && (*enck == 0 || *enck == 1)){
+    if( key_len == 9 && (*enck == conversion::tinteger || *enck == conversion::tdouble)){
         ik = conversion::enc_bytes_to_int(enck, key_len);
         if (*enck == 1) {
             memcpy(&dk, &ik, sizeof(ik));
@@ -86,7 +86,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, s
                 return -1;    
             }
         }
-    } else if ( key_len >= 1 ) { //&& *enck == 2 //it's a string
+    } else if ( key_len >= 1  && *enck == conversion::tstring) { //&& *enck == 2 //it's a string
 
         k = (const char*) &enck[1];
         kl = key_len-1;

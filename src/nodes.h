@@ -38,25 +38,33 @@ enum constants
     initial_node = node_4
 };
 struct art_leaf;
+typedef compressed_address logical_leaf;
 extern compress& get_leaf_compression();
 
 template<typename art_node_t>
 struct node_ptr_t {
     
     bool is_leaf;
-    node_ptr_t() : is_leaf(false), node(nullptr) {};
-    node_ptr_t(const node_ptr_t& p) : is_leaf(p.is_leaf), node(p.node) {}
+    node_ptr_t() : is_leaf(false), resolver(nullptr), node(nullptr) {};
+    node_ptr_t(const node_ptr_t& p) : is_leaf(p.is_leaf), resolver(p.resolver), logical(p.logical), node(p.node) {}
     
-    explicit node_ptr_t(art_node_t* p) : is_leaf(false), node(p) {}
-    node_ptr_t(const art_node_t* p) : is_leaf(false), node(const_cast<art_node_t*>(p)) {}
-    node_ptr_t(art_leaf* p) : is_leaf(true), l(p) {}
-    node_ptr_t(const art_leaf* p) : is_leaf(true), l(const_cast<art_leaf*>(p)) {}
-    node_ptr_t(std::nullptr_t) : is_leaf(false), l(nullptr) {}
+    explicit node_ptr_t(art_node_t* p) : is_leaf(false), resolver(nullptr), node(p) {}
+    node_ptr_t(const art_node_t* p) : is_leaf(false), resolver(nullptr), node(const_cast<art_node_t*>(p)) {}
+    //node_ptr_t(art_leaf* p) : is_leaf(true), l(p) {}
+    // TODO: maybe this mechanism should work for interior nodes - one day
+    node_ptr_t(compressed_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl), l(nullptr)
+    {
+        l = resolver->resolve<art_leaf>(logical);
+    }
+
+    //node_ptr_t(const art_leaf* p) : is_leaf(true), l(const_cast<art_leaf*>(p)) {}
+    node_ptr_t(std::nullptr_t) : is_leaf(false), resolver(nullptr), l(nullptr) {}
 
     bool null() const {
         return node == nullptr;
     }
-
+    compress *resolver;
+    compressed_address logical {};
     union {
         art_node_t* node;
         art_leaf* l;
@@ -64,14 +72,20 @@ struct node_ptr_t {
     void set(nullptr_t n) {
         node = n;
         is_leaf = false;
+        logical = nullptr;
+        resolver = nullptr;
     }
     void set(art_node_t* n) {
         node = n;
+        logical = nullptr;
         is_leaf = false;
+        resolver = nullptr;
     }
     
-    void set(art_leaf* lf) {
-        l = lf;
+    void set(const logical_leaf& lf) {
+        logical = lf;
+        if(!resolver) resolver = &get_leaf_compression();
+        l = resolver->resolve<art_leaf>(lf);
         is_leaf = true;
     }
     bool operator == (const node_ptr_t& p) const
@@ -109,6 +123,9 @@ struct node_ptr_t {
     node_ptr_t& operator = (const node_ptr_t& n){
         this->is_leaf = n.is_leaf;
         this->node = n.node;
+        this->logical = n.logical;
+        this->resolver = n.resolver;
+        check();
         return *this;
     }
     node_ptr_t& operator = (const art_node_t* n){
@@ -121,13 +138,8 @@ struct node_ptr_t {
         return *this;
     }
     
-    node_ptr_t& operator = (art_leaf* l){
+    node_ptr_t& operator = (const logical_leaf& l){
         set(l);
-        return *this;
-    }
-
-    node_ptr_t& operator = (const art_leaf* l){
-        set(const_cast<art_leaf*>(l));
         return *this;
     }
 
@@ -135,16 +147,52 @@ struct node_ptr_t {
         set(l);
         return *this;
     }
+    void check() const
+    {
+        if (is_leaf)
+        {
+            if(resolver == nullptr)
+            {
+                 abort();
+            }
+            if(logical.null() && l != nullptr)
+            {
+                abort();
+            }
+            if(!logical.null() && l == nullptr)
+            {
+                abort();
+            }
+        }
+    }
 
     art_leaf* leaf(){
         if (!is_leaf)
             abort();
+        check();
         return l;
+    }
+    art_node_t* get_node()
+    {
+        if(is_leaf) {
+            abort();
+        }
+        check();
+        return node;
+    }
+    const art_node_t* get_node() const
+    {
+        if(is_leaf) {
+            abort();
+        }
+
+        return node;
     }
 
     [[nodiscard]] const art_leaf* leaf() const {
         if (!is_leaf)
             abort();
+        check();
         return l;
     }
     
@@ -155,11 +203,12 @@ struct node_ptr_t {
         return node;
     }
 
-    operator const art_node_t* () const {
-        return node;
+    explicit operator const art_node_t* () const {
+        return get_node();
     }
+
     operator art_node_t* () {
-        return node;
+        return get_node();
     }
     
 };
@@ -528,7 +577,7 @@ protected:
     
     union
     {
-        art_leaf *leaves[SIZE]{};
+        logical_leaf leaves[SIZE]{};
         art_node *children[SIZE];
     };
 };
@@ -547,7 +596,7 @@ bool ok(const art_node* node, uintptr_t base)
     int64_t imin = i64min<EncodingType>();
     return (ival > imin && ival < imax  );
 }
-template<typename PtrType, typename EncodingType>
+template<typename EncodingType, bool IsLeaf>
 struct encoded_element {
 private:
     EncodingType &value;
@@ -562,12 +611,41 @@ public:
     }
     encoded_element& operator=(const node_ptr& t)
     {
-        set(static_cast<const PtrType*>(t));
+        if(t.is_leaf != IsLeaf)
+        {
+            abort();
+        }
+        if(t.is_leaf)
+        {
+            set_leaf(t.logical);
+        }else
+        {
+            set_node(t.get_node());
+        }
         return *this;
     }
-
-    void set(const PtrType* ptr)
+    void set_leaf(const logical_leaf& ptr)
     {
+        if(!IsLeaf)
+        {
+            abort();
+        }
+        value = ptr.null() ? 0 : ptr.address();
+    }
+    [[nodiscard]] logical_leaf get_leaf() const
+    {
+        if(!IsLeaf)
+        {
+            abort();
+        }
+        return logical_leaf(value);
+    }
+    void set_node(const art_node* ptr)
+    {
+        if(IsLeaf)
+        {
+            abort();
+        }
         if(sizeof(EncodingType) == sizeof(uintptr_t))
         {
             value = (EncodingType)(uintptr_t)ptr;
@@ -583,63 +661,78 @@ public:
 
         }
     }
-    [[nodiscard]] PtrType* get()
+    [[nodiscard]] art_node* get_node()
     {
+        if(IsLeaf)
+        {
+            abort();
+        }
+
         if(sizeof(EncodingType) == sizeof(uintptr_t))
         {
-            return reinterpret_cast<PtrType*>(value);
+            return reinterpret_cast<art_node*>(value);
         }
         if(!value) return nullptr;
-        return reinterpret_cast<PtrType*>((int64_t)value + base);
+        return reinterpret_cast<art_node*>((int64_t)value + base);
     }
-    const PtrType* cget() const
+    [[nodiscard]] const art_node* cget() const
     {
+        if(IsLeaf)
+        {
+            abort();
+        }
 
-        return const_cast<encoded_element*>(this)->get();
+        return const_cast<encoded_element*>(this)->get_node();
     }
 
-    encoded_element& operator=(PtrType* ptr)
+    encoded_element& operator=(const art_node* ptr)
     {
-        set(ptr);
+        set_node(ptr);
         return *this;
     }
-    encoded_element& operator=(const PtrType* ptr)
+    encoded_element& operator=(const compressed_address ptr)
     {
-        set(ptr);
+        set_leaf(ptr);
         return *this;
     }
 
-    explicit operator PtrType*()
+    explicit operator logical_leaf()
     {
-        return get();
+        return get_leaf();
     }
     explicit operator node_ptr()
     {
-        return node_ptr(get());
+        if(IsLeaf)
+        {
+            return node_ptr(get_leaf());
+        }
+        return node_ptr(get_node());
     }
 
     explicit operator node_ptr() const
     {
-        return node_ptr(const_cast<PtrType*>(cget())); // well have to just cast it
+        if(IsLeaf)
+        {
+            return node_ptr(get_leaf());
+        }
+        return cget(); // well have to just cast it
     }
-    operator const PtrType*() const
+
+
+    bool exists() const
     {
-        return cget();
+        return value != 0;
     }
-    PtrType* operator -> ()
+    bool empty() const
     {
-        return get();
-    }
-    PtrType* operator -> () const
-    {
-        return get();
+        return value != 0;
     }
 };
 
-template<typename NodeType, typename EncodedType, int SIZE>
+template<typename EncodedType, bool IsLeaf, int SIZE>
 struct node_array
 {
-    typedef encoded_element<NodeType,EncodedType> ProxyType;
+    typedef encoded_element<EncodedType, IsLeaf> ProxyType;
     EncodedType data[SIZE];
     [[nodiscard]] uintptr_t get_offset() const
     {
@@ -647,102 +740,8 @@ struct node_array
     }
     [[nodiscard]] bool ok(const node_ptr& p) const
     {
-        return ::ok<EncodedType>(p, get_offset());
-    }
-
-    ProxyType operator[](unsigned at)
-    {
-        return ProxyType(data[at], get_offset());
-    }
-    ProxyType operator[](unsigned at) const
-    {
-        return ProxyType(const_cast<EncodedType&>(data[at]), get_offset());
-    }
-
-};
-template<typename EncodingType>
-struct encoded_arena_element {
-private:
-    EncodingType &value;
-    //uint64_t base;
-public:
-    encoded_arena_element(EncodingType &value, uint64_t ) : value(value)
-    //, base(base)
-    {}
-
-    encoded_arena_element& operator=(nullptr_t)
-    {
-        value = 0;
-        return *this;
-    }
-    encoded_arena_element& operator=(const compressed_address& t)
-    {
-        set(t);
-        return *this;
-    }
-    encoded_arena_element& operator=(const node_ptr& t)
-    {
-        if(!t.is_leaf)
-        {
-            abort();
-        }
-        set(t.l);
-        return *this;
-    }
-
-    void set(const compressed_address& ptr)
-    {
-        if(ptr.null())
-        {
-            value = 0;
-            return;
-        }
-        int64_t index = ptr.address();// - (int64_t)base;
-        value = index;
-    }
-    [[nodiscard]] compressed_address get() const
-    {
-        if(value == 0)
-        {
-            return {};
-        }
-        return compressed_address{(size_t)value};
-    }
-    [[nodiscard]] compressed_address  cget() const
-    {
-
-        return this->get();
-    }
-
-    operator compressed_address() const
-    {
-        return cget();
-    }
-};
-
-template<typename EncodedType, int SIZE>
-struct arena_array
-{
-    typedef encoded_arena_element<EncodedType> ProxyType;
-    EncodedType data[SIZE]{};
-    //compressed_address offset = get_leaf_compression().highest_reserve_address;
-
-    [[nodiscard]] uintptr_t get_offset() const
-    {
-        return 0; //offset.address();
-    }
-    [[nodiscard]] bool ok(const node_ptr& p) const
-    {   if(!p.is_leaf)
-        {
-            return true;
-        }
-        //int64_t delta = std::max<int64_t>(p.l.address(),get_offset()) - std::min<int64_t>(p.l.address(),get_offset());
-
-        if(sizeof(EncodedType) == sizeof(uintptr_t))
-        {
-            return true;
-        }
-        return true; //delta < 1000000000;
+        if(p.is_leaf) return true;
+        return ::ok<EncodedType>((const art_node*)p, get_offset());
     }
 
     ProxyType operator[](unsigned at)
@@ -762,8 +761,8 @@ struct encoded_node_content : public art_node {
     // test somewhere that sizeof ChildElementType == sizeof LeafElementType
     typedef i_ptr_t ChildElementType;
     typedef i_ptr_t LeafElementType;
-    typedef node_array<art_node, i_ptr_t, SIZE> ChildArrayType;
-    typedef node_array<art_leaf, i_ptr_t, SIZE> LeafArrayType;
+    typedef node_array<i_ptr_t, false, SIZE> ChildArrayType;
+    typedef node_array<i_ptr_t, true, SIZE> LeafArrayType;
 
     encoded_node_content() : types(0)
     {
@@ -782,7 +781,7 @@ struct encoded_node_content : public art_node {
         types.set(at, node.is_leaf);
         if(node.is_leaf)
         {
-            leaves[at] = node.leaf();
+            leaves[at] = node.logical;
         }else
         {
             children[at] = node;
@@ -800,7 +799,7 @@ struct encoded_node_content : public art_node {
         check_object();
         if (SIZE <= at)
             abort();
-        return children[at] ;
+        return children[at].exists() ;
     }
     [[nodiscard]] node_ptr get_node(unsigned at) const final {
         check_object();
@@ -986,7 +985,7 @@ struct encoded_node_content : public art_node {
                 auto n = other->get_child(d+spos);
                 if(n.is_leaf)
                 {
-                    leaves[d] = n.leaf();
+                    leaves[d] = n.logical;
                 }else
                     children[d] = n;
             }
@@ -1369,7 +1368,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         if (keys[key] == 0){
             return;
         }
-        if (children[pos] == nullptr) {
+        if (children[pos].empty()) {
             abort();
         }
         keys[key] = 0;

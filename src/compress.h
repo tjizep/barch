@@ -31,6 +31,11 @@ struct compressed_address
     {
         from_page_offset(p, o);
     }
+    compressed_address &operator =(nullptr_t)
+    {
+        index = 0;
+        return *this;
+    }
 
     [[nodiscard]] bool null() const
     {
@@ -163,6 +168,11 @@ struct compress
     };
     compress()= default;
     compress(const compress&) = delete;
+    ~compress()
+    {
+        ZSTD_freeCCtx(cctx);
+    }
+private:
     std::thread tdict {};
     unsigned size_in_training = 0;
     unsigned size_to_train = 0;
@@ -181,10 +191,7 @@ struct compress
     compress& operator=(const compress& ) {
         return *this;
     };
-    ~compress()
-    {
-        ZSTD_freeCCtx(cctx);
-    }
+
     void train()
     {
         if(size_in_training < min_training_size)
@@ -404,9 +411,31 @@ struct compress
             }
         }
     }
-    heap::vector<const uint8_t*> mapper{};
-    const uint8_t* resolve(compressed_address at)
+    heap::vector<uint8_t*> mapper{};
+public:
+
+    void free(compressed_address at, size_t size)
     {
+        auto mapped = mapper.at(at.address());
+
+        //mapper.begin()[at] = nullptr;
+        heap::free(mapped, size);
+
+    }
+    bool valid(compressed_address at) const
+    {
+        if(at == 0) return true;
+
+        return mapper.size() > at.address();
+    }
+    template<typename T>
+    T* resolve(compressed_address at)
+    {   if(at == 0) return nullptr;
+        return (T*)basic_resolve(at);
+    }
+    uint8_t* basic_resolve(compressed_address at)
+    {
+        if(at.address() == 0) return nullptr;
         return mapper.at(at.address());
 #if 0
         if (at.null())
@@ -435,15 +464,14 @@ struct compress
 #endif
     }
 
-    compressed_address new_address(const uint8_t* data, size_t)
+    compressed_address new_address(size_t size)
     {
         if(mapper.empty())
         {
             mapper.push_back(nullptr);
         }
-        //uint8_t *d = heap::allocate<uint8_t>(size);
-        //memcpy(d, data, size);
-        mapper.push_back(data);
+        uint8_t *d = heap::allocate<uint8_t>(size);
+        mapper.push_back(d);
         return compressed_address(mapper.size()-1);
 #if 0
         if (arena.empty())

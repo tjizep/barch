@@ -52,23 +52,20 @@ struct node_ptr_t {
     node_ptr_t(const art_node_t* p) : is_leaf(false), resolver(nullptr), node(const_cast<art_node_t*>(p)) {}
     //node_ptr_t(art_leaf* p) : is_leaf(true), l(p) {}
     // TODO: maybe this mechanism should work for interior nodes - one day
-    node_ptr_t(compressed_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl), l(nullptr)
+    node_ptr_t(compressed_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl)
     {
-        l = resolver->resolve<art_leaf>(logical);
     }
 
     //node_ptr_t(const art_leaf* p) : is_leaf(true), l(const_cast<art_leaf*>(p)) {}
-    node_ptr_t(std::nullptr_t) : is_leaf(false), resolver(nullptr), l(nullptr) {}
+    node_ptr_t(std::nullptr_t) : is_leaf(false), resolver(nullptr) {}
 
     bool null() const {
+        if(is_leaf) return logical.null();
         return node == nullptr;
     }
     compress *resolver;
     compressed_address logical {};
-    union {
-        art_node_t* node;
-        art_leaf* l;
-    };
+    art_node_t* node = nullptr;
     void set(nullptr_t n) {
         node = n;
         is_leaf = false;
@@ -85,41 +82,20 @@ struct node_ptr_t {
     void set(const logical_leaf& lf) {
         logical = lf;
         if(!resolver) resolver = &get_leaf_compression();
-        l = resolver->resolve<art_leaf>(lf);
         is_leaf = true;
     }
-    bool operator == (const node_ptr_t& p) const
+    bool operator == (const node_ptr_t& p) const = delete;
+    bool operator == (nullptr_t) const
     {
-        return node == p.node && is_leaf == p.is_leaf;
+        if(is_leaf) return logical.null();
+        return node == nullptr;
     }
     bool operator != (const node_ptr_t& p) const
     {
-        return node != p.node || is_leaf != p.is_leaf;
-    }
-    bool operator == (nullptr_t) const
-    {
-        return node == nullptr && is_leaf == false;
-    }
-    bool operator != (nullptr_t) const
-    {
-        return node != nullptr || is_leaf == false;
-    }
-    bool operator == (const art_node_t* p) const
-    {
-        return node == p && is_leaf == false;
-    }
-    bool operator != (const art_node_t* p) const
-    {
-        return node != p || is_leaf == true;
-    }
-    bool operator == (const art_leaf* p) const
-    {
-        return l == p && is_leaf ;
-    }
-    bool operator != (const art_leaf* p) const
-    {
-        return l != p || !is_leaf;
-    }
+        if(is_leaf != p.is_leaf) return true;
+        if(is_leaf && logical != p.logical) return true;
+        return node != p.node;
+    };
     node_ptr_t& operator = (const node_ptr_t& n){
         this->is_leaf = n.is_leaf;
         this->node = n.node;
@@ -149,27 +125,18 @@ struct node_ptr_t {
     }
     void check() const
     {
-        if (is_leaf)
-        {
-            if(resolver == nullptr)
-            {
-                 abort();
-            }
-            if(logical.null() && l != nullptr)
-            {
-                abort();
-            }
-            if(!logical.null() && l == nullptr)
-            {
-                abort();
-            }
-        }
+
     }
 
     art_leaf* leaf(){
         if (!is_leaf)
             abort();
         check();
+        art_leaf * l = resolver->resolve<art_leaf>(logical);
+        if(l == nullptr)
+        {
+            abort();
+        }
         return l;
     }
     art_node_t* get_node()
@@ -193,6 +160,11 @@ struct node_ptr_t {
         if (!is_leaf)
             abort();
         check();
+        const art_leaf * l = resolver->resolve<art_leaf>(logical);
+        if(l == nullptr)
+        {
+            abort();
+        }
         return l;
     }
     

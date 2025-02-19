@@ -16,7 +16,7 @@
 #include <zdict.h>
 enum
 {
-    page_size = 1024,
+    page_size = 4096,
     reserved_address = 10000000
 };
 struct compressed_address
@@ -158,7 +158,7 @@ struct compress
 {
     enum
     {
-        min_training_size = 1024*1024,
+        min_training_size = 1024*10,
         compression_level = 1
     };
     compress()= default;
@@ -309,7 +309,12 @@ private:
     }
     void decompress(storage & todo)
     {
-        todo.decompressed = decompress_buffer(todo.write_position,todo.compressed);
+        todo.decompressed = decompress_buffer(page_size,todo.compressed);
+        if(todo.decompressed.size() != page_size)
+        {
+            abort();
+        }
+
     }
 
     [[nodiscard]] static bool is_null_base(const compressed_address& at)
@@ -346,8 +351,22 @@ private:
             return;
         }
         auto &back = arena.back();
+        if (back.decompressed.empty() && !back.compressed.empty())
+        {
+            decompress(back);
+        }
         if (back.write_position + size >= page_size)
         {
+            if(!dict)
+            {
+                add_training_entry(back.decompressed.begin(), back.write_position);
+            }else if (!back.decompressed.empty())
+            {
+                back.compressed = std::move(compress_2_buffer(back.decompressed.begin(),page_size));
+
+                back.decompressed.release();
+
+            }
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
         }
@@ -368,6 +387,7 @@ public:
         }
         if (t.size == 1)
         {
+            t.compressed.release();
             t.decompressed.release();
             t.size = 0;
             t.write_position = 0;
@@ -397,15 +417,23 @@ public:
 
     template<typename T>
     T* resolve(compressed_address at)
-    {   if (at == 0) return nullptr;
+    {   if (at.null()) return nullptr;
         return (T*)basic_resolve(at);
     }
 
     uint8_t* basic_resolve(compressed_address at)
     {
-        if (at == 0) return nullptr;
+        if (at.null()) return nullptr;
         invalid(at);
         auto& t = arena.at(at.page());
+        if(t.decompressed.empty() && !t.compressed.empty())
+        {
+            decompress(t);
+        }
+        if (t.decompressed.empty())
+        {
+            abort();
+        }
         return t.decompressed.begin() + at.offset();
 
     }

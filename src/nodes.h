@@ -207,7 +207,7 @@ struct node_ptr_t {
         return get_node();
     }
 
-    operator art_node_t* () {
+    explicit operator art_node_t* () {
         return get_node();
     }
     
@@ -1042,7 +1042,7 @@ struct encoded_node_content : public art_node {
         }
         this->copy_header(s);
         set_keys(s->get_keys(), s->num_children);
-        set_children(0, s, 0, s->num_children);
+        set_children(0, (art_node*)s, 0, s->num_children);
         if (num_children != s->num_children)
         {
             abort();

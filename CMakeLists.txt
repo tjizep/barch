@@ -38,6 +38,7 @@ if (ADD_ZSTD_COMPRESSION)
 endif ()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++")
+include_directories(src)
 include_directories(${fast_float_SOURCE_DIR}/include)
 include_directories(${zstd_SOURCE_DIR}/lib)
 

@@ -32,7 +32,7 @@ int art_tree_init(art_tree *t) {
 // Recursively destroys the tree
 static void destroy_node(node_ptr n) {
     // Break if null
-    if (!n) return;
+    if (n.null()) return;
 
     if (n.is_leaf){
         free_leaf_node(n);
@@ -80,7 +80,7 @@ int art_tree_destroy(art_tree *t) {
 static trace_element lower_bound_child(node_ptr n, const unsigned char * key, int key_len, int depth, int * is_equal) {
 
     unsigned char c = 0x00;
-    if (!n) return {};
+    if (n.null()) return {};
     if (n.is_leaf) return {};
 
     c = key[std::min(depth, key_len)];
@@ -90,7 +90,7 @@ static trace_element lower_bound_child(node_ptr n, const unsigned char * key, in
 }
 
 static node_ptr find_child(node_ptr n, unsigned char c) {
-    if(!n) return nullptr;
+    if(n.null()) return nullptr;
     if(n.is_leaf) return nullptr;
 
     unsigned i = n->index(c);
@@ -242,13 +242,13 @@ static node_ptr lower_bound(trace_list& trace, const art_tree *t, const unsigned
     return last_el(trace).child;
 }
 static trace_element first_child_off(node_ptr n){
-    if(!n) return {nullptr, nullptr, 0};
+    if(n.null()) return {nullptr, nullptr, 0};
     if(n.is_leaf) return {nullptr, nullptr, 0};
 
     return {n,n->get_child(n->first_index()),0};
 }
 static trace_element last_child_off(node_ptr n){
-    if(!n) return {nullptr, nullptr, 0};
+    if(n.null()) return {nullptr, nullptr, 0};
     if(n.is_leaf) return {nullptr, nullptr, 0};
     unsigned idx = n->last_index();
 
@@ -256,7 +256,7 @@ static trace_element last_child_off(node_ptr n){
 }
 
 static trace_element increment_te(const trace_element &te){
-    if (!(const art_node*)te.parent) return {nullptr, nullptr, 0};
+    if (te.parent.null()) return {nullptr, nullptr, 0};
     if (te.parent.is_leaf) return {nullptr, nullptr, 0};
 
     art_node * n = te.parent.node;
@@ -293,7 +293,7 @@ void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len) 
     node_ptr al;
     trace_list tl;
     al = lower_bound(tl, t, key, key_len);
-    if (al) {
+    if (!al.null()) {
         return al.leaf()->value;
     }
     return nullptr;
@@ -719,7 +719,7 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
     node_ptr child;
     node_ptr n = t->root;
     int prefix_len, depth = 0;
-    while (n) {
+    while (!n.null()) {
         // Might be a leaf
         if (n.is_leaf) {
             // Check if the expanded path matches

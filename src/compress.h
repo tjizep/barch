@@ -17,7 +17,6 @@
 enum
 {
     page_size = 1024,
-    max_buffered_el_size = 256,
     reserved_address = 10000000
 };
 struct compressed_address
@@ -106,13 +105,11 @@ struct storage
     {
 
     }
-
     storage(storage&& other)  noexcept : compressed(0), decompressed(0)
     {
         *this = std::move(other);
     }
-#if 0
-#endif
+
     storage(const storage& other) : compressed(0), decompressed(0)
     {
         *this = other;
@@ -135,7 +132,6 @@ struct storage
         modifications = 0;
         size = 0;
     }
-
     storage& operator=(storage&& other) noexcept
     {
         if(&other == this) return *this;
@@ -147,8 +143,7 @@ struct storage
         other.clear();
         return *this;
     }
-#if 0
-#endif
+
     [[nodiscard]] bool empty() const
     {
         return size == 0 && write_position == 0 && compressed.empty() && decompressed.empty();
@@ -271,32 +266,6 @@ private:
     }
 
 
-    void flush(compressed_address address)
-    {
-        if(address.page() >= arena.size()) return;
-
-        auto &s = arena.at(address.page());
-
-        if(s.modifications)
-        {
-            if (dict && cctx && trained_size)
-            {
-                s.compressed = compress_2_buffer(s.decompressed.begin(),s.write_position);
-
-                s.modifications = 0;
-            }else
-            {
-                s.modifications = 0;
-            }
-
-        }
-        if(!s.compressed.empty() && !s.modifications)
-            s.decompressed.release();
-    }
-    void flush()
-    {
-        flush(arena_head);
-    }
     heap::buffer<uint8_t> compress_2_buffer(const uint8_t* data, size_t size) const
     {
 
@@ -340,199 +309,125 @@ private:
     }
     void decompress(storage & todo)
     {
-        if(!dict)
-            abort();
-        if(!dctx)
-            abort();
-        if (todo.empty()) {
-            abort();
-        }
-        if (todo.compressed.empty())
-        {
-            abort();
-        }
-        if (!todo.write_position)
-        {
-            abort();
-        }
-        if (todo.modifications && todo.decompressed.empty())
-        {
-            abort();
-        }
-        if(!todo.decompressed.empty() && todo.decompressed.size() != todo.write_position)
-        {
-            abort();
-        }
-        if(!todo.decompressed.empty())
-        {
-            return;
-        }
         todo.decompressed = decompress_buffer(todo.write_position,todo.compressed);
     }
+
     [[nodiscard]] static bool is_null_base(const compressed_address& at)
     {
         return is_null_base(at.page());
     }
+
     [[nodiscard]] static bool is_null_base(size_t at)
     {
         return (at % reserved_address) == 0;
     }
-    void allocate_arena()
+
+    size_t last_block() const
     {
-        arena.emplace_back();
-
-        if(is_null_base(arena.size()-1))
-        {   highest_reserve_address.from_page_index(arena.size()-1);
-            arena.emplace_back();// reserve and address
+        if(arena.empty()) return 0;
+        return arena.size() - 1;
+    }
+    void create_if_required(size_t size)
+    {
+        if (is_null_base(last_block()))
+        {
+            arena.emplace_back();
+            arena.back().write_position = page_size;
+        } else if (arena.back().decompressed.empty())
+        {
+            arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
+            arena.back().write_position = 0;
+            return;
         }
-
-        arena_head.from_page_index(arena.size()-1);
+        if (size > page_size)
+        {
+            arena.emplace_back();
+            arena.back().decompressed = std::move(heap::buffer<uint8_t>(size));
+            return;
+        }
+        auto &back = arena.back();
+        if (back.write_position + size >= page_size)
+        {
+            arena.emplace_back();
+            arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
+        }
 
     }
-    void release(const compressed_address& at)
-    {
-        if(is_null_base(at))
-        {
-            abort();
-        }
-        if(at.page() >= arena.size())
-        {
-            abort();
-        }
-        auto& t = arena.at(at.page());
-        if(t.size > 0)
-        {
-            t.size--;// TODO: modifications ??
-            if(t.size == 0)
-            {
-                t.compressed.release();
-                t.decompressed.release();
-                t.write_position = 0;
-            }
-        }
-    }
-    heap::vector<uint8_t*> mapper{};
 public:
 
     void free(compressed_address at, size_t size)
     {
-        auto mapped = mapper.at(at.address());
-
-        //mapper.begin()[at] = nullptr;
-        heap::free(mapped, size);
-
-    }
-    bool valid(compressed_address at) const
-    {
-        if(at == 0) return true;
-
-        return mapper.size() > at.address();
-    }
-    template<typename T>
-    T* resolve(compressed_address at)
-    {   if(at == 0) return nullptr;
-        return (T*)basic_resolve(at);
-    }
-    uint8_t* basic_resolve(compressed_address at)
-    {
-        if(at.address() == 0) return nullptr;
-        return mapper.at(at.address());
-#if 0
-        if (at.null())
-        {
-            return nullptr;
-        }
-        if (is_null_base(at))
-        {
-            return nullptr;
-        }
-        auto& s = arena.at(at.page());
-        auto offset = at.offset();
-        if (s.empty())
-        {
-            return nullptr;
-        }
-        if(s.decompressed.empty())
-        {
-            decompress(at);
-        }
-        if (offset >= s.write_position)
+        if(at.address() == 0 || size == 0)
         {
             abort();
         }
-        return s.decompressed.begin() + offset;
-#endif
+        auto& t = arena.at(at.page());
+        if(t.size == 0)
+        {
+            abort();
+        }
+        if (t.size == 1)
+        {
+            t.decompressed.release();
+            t.size = 0;
+            t.write_position = 0;
+        }else
+        {
+            t.size--;
+        }
+
+    }
+    void invalid(compressed_address at) const
+    {
+        if (!valid(at))
+        {
+            abort();
+        }
+    }
+    [[nodiscard]] bool valid(compressed_address at) const
+    {
+        if (at == 0) return true;
+        if (at.page() >= arena.size())
+        {
+            return false;
+        }
+        const auto& t = arena.at(at.page());
+        return t.size > 0 && t.write_position > at.offset();
+    }
+
+    template<typename T>
+    T* resolve(compressed_address at)
+    {   if (at == 0) return nullptr;
+        return (T*)basic_resolve(at);
+    }
+
+    uint8_t* basic_resolve(compressed_address at)
+    {
+        if (at == 0) return nullptr;
+        invalid(at);
+        auto& t = arena.at(at.page());
+        return t.decompressed.begin() + at.offset();
+
     }
 
     compressed_address new_address(size_t size)
     {
-        if(mapper.empty())
-        {
-            mapper.push_back(nullptr);
-        }
-        uint8_t *d = heap::allocate<uint8_t>(size);
-        mapper.push_back(d);
-        return compressed_address(mapper.size()-1);
-#if 0
-        if (arena.empty())
-        {   allocate_arena();
-        }
-
-        if (size > page_size)
-        {
-            storage s;
-            s.decompressed = heap::buffer<uint8_t>(size);
-            s.decompressed.emplace(size, data);
-            s.write_position = size;
-            s.compressed = compress_2_buffer(data, size);
-            s.size++;
-            arena.emplace_back(s); // preserve the head
-            compressed_address address { (arena.size()-1) * page_size} ;
-            //decompressed.emplace_back(address);
-            return address;
-        }
-
-        if (arena.at(arena_head.page()).write_position + size> page_size)
-        {
-            flush();
-            allocate_arena();
-        }
-
-        auto& current = arena.at(arena_head.page());
-
-        if (current.decompressed.empty())
-        {
-            if(current.compressed.empty())
-            {
-                current.decompressed = heap::buffer<uint8_t>(page_size);
-            }else
-            {
-                decompress(arena_head);
-            }
-        }
-        if(size == 0)
+        create_if_required(size);
+        size_t last = arena.size()-1;
+        auto &back = arena.back();
+        if (back.write_position + size >= page_size || back.decompressed.empty())
         {
             abort();
         }
-
-        //add_training_entry(data, size);
-        current.decompressed.emplace(current.write_position, size, data);
-        compressed_address address {arena_head.page(),current.write_position };
-        current.write_position += size;
-        current.modifications++;
-        current.size++;
-        if(current.modifications > current.size)
-        {
-            abort();
-        }
-
-        if (memcmp(resolve(address), data, size) != 0)
-        {
-            abort();
-        }
-        return address;
-#endif
+        //arena_head.from_page_index(arena.size()-1);
+        compressed_address ca(last,back.write_position);
+        back.write_position += size;
+        back.size++;
+        invalid(ca);
+        return ca;
     }
+
+
     size_t release_decompressed(compressed_address at)
     {
         if(arena.empty()) return 0;

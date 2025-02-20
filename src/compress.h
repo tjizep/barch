@@ -126,8 +126,8 @@ struct storage
     }
     void clear()
     {
-        compressed.clear();
-        decompressed.clear();
+        compressed.release();
+        decompressed.release();
         write_position = 0;
         modifications = 0;
         size = 0;
@@ -180,10 +180,13 @@ private:
     size_t trained_size = 0;
     std::mutex mutex {};
     heap::vector<storage> arena{};
-    heap::vector<size_t> decompressed_pages {};
+    heap::vector<size_t> releasables {};
+    heap::vector<size_t> free_pages {};
+    size_t last_page_allocated {0};
     compressed_address arena_head{0};
     compressed_address highest_reserve_address{ 0};
-    compress& operator=(const compress& ) {
+    compress& operator=(const compress& t) {
+        if(this == &t) return *this;
         return *this;
     };
 
@@ -283,14 +286,14 @@ private:
         return compressed_data;
     }
 
-    void decompress(compressed_address t)
+    void decompress_(compressed_address t)
     {
         if(arena.empty()) return;
 
         auto &s = arena.at(t.page());
         if(decompress(s))
         {
-            decompressed_pages.push_back(t.page());
+            //releasables.push_back(t.page());
         }
 
     }
@@ -309,6 +312,7 @@ private:
         }
         return decompressed;
     }
+    ;
     [[nodiscard]] bool decompress(storage & todo)
     {
         if(todo.decompressed.empty() && !todo.compressed.empty())
@@ -333,7 +337,7 @@ private:
         return (at % reserved_address) == 0;
     }
 
-    size_t last_block() const
+    [[nodiscard]] size_t last_block() const
     {
         if(arena.empty()) return 0;
         return arena.size() - 1;
@@ -344,11 +348,6 @@ private:
         {
             arena.emplace_back();
             arena.back().write_position = page_size;
-        } else if (arena.back().decompressed.empty())
-        {
-            arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
-            arena.back().write_position = 0;
-            return {arena.size()-1,arena.back()};
         }
         if (size > page_size)
         {
@@ -356,34 +355,46 @@ private:
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(size));
             return {arena.size()-1,arena.back()};
         }
-        auto &back = arena.back();
-        if (back.decompressed.empty() && !back.compressed.empty())
-        {
-            if(decompress(back))
-            {
-                decompressed_pages.push_back(arena.size()-1);
-            };
-        }
-        if (back.write_position + size >= page_size)
+
+        auto &last = arena.at(last_page_allocated);
+
+        if (last.write_position + size >= page_size)
         {
             if(!dict)
             {
-                add_training_entry(back.decompressed.begin(), back.write_position);
-            }else if (!back.decompressed.empty())
+                add_training_entry(last.decompressed.begin(), last.write_position);
+            }else if (!last.decompressed.empty())
             {
-                if(back.modifications > 0)
-                    back.compressed = std::move(compress_2_buffer(back.decompressed.begin(),page_size));
-                back.modifications = 0;
-                decompressed_pages.push_back(arena.size()-1);
-               //back.decompressed.release();
-
+                if(last.modifications > 0)
+                    last.compressed = std::move(compress_2_buffer(last.decompressed.begin(),page_size));
+                last.modifications = 0;
+                releasables.push_back(last_page_allocated);
+            }
+            if(!free_pages.empty())
+            {
+                size_t fp = free_pages.back();
+                free_pages.pop_back();
+                auto&p = arena.at(fp);
+                if (p.empty())
+                {
+                    p.decompressed = std::move(heap::buffer<uint8_t>(page_size));
+                    memset(p.decompressed.begin(),0, page_size);
+                    return {fp,p};
+                }
             }
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
             memset(arena.back().decompressed.begin(),0, page_size);
             return {arena.size()-1,arena.back()};
+
         }
-        return {arena.size()-1,arena.back()};
+        if (last.empty())
+        {
+            last.decompressed = std::move(heap::buffer<uint8_t>(page_size));
+            memset(last.decompressed.begin(),0, page_size);
+            return {last_page_allocated,last};
+        }
+        return {last_page_allocated,last};
     }
 public:
 
@@ -400,11 +411,8 @@ public:
         }
         if (t.size == 1)
         {
-            t.compressed.release();
-            t.decompressed.release();
-            t.size = 0;
-            t.write_position = 0;
-            t.modifications = 0;
+            t.clear();
+            free_pages.push_back(at.page());
         }else
         {
             t.size--;
@@ -452,7 +460,7 @@ public:
         {
             if(decompress(t))
             {
-                decompressed_pages.push_back(at.page());
+                //releasables.push_back(at.page());
             }
 
         }
@@ -463,8 +471,6 @@ public:
         if(modify)
         {
             t.modifications++;
-            if(t.modifications > 20)
-                decompressed_pages.push_back(at.page());
         }
 
         return t.decompressed.begin() + at.offset();
@@ -474,10 +480,18 @@ public:
     compressed_address new_address(size_t size)
     {
         auto at = create_if_required(size);
+        if (at.second.decompressed.empty() && !at.second.compressed.empty())
+        {
+            if(decompress(at.second))
+            {
+                //releasables.push_back(arena.size()-1);
+            };
+        }
         if (at.second.write_position + size >= page_size || at.second.decompressed.empty())
         {
             abort();
         }
+        last_page_allocated = at.first;
         compressed_address ca(at.first,at.second.write_position);
         at.second.write_position += size;
         at.second.size++;
@@ -492,16 +506,16 @@ public:
         if(arena.size() <= at) return 0;
         size_t r = 0;
         auto& t = arena.at(at);
-        if(t.modifications > 2)
+        if(t.modifications > 10)
         {
             t.compressed = std::move(compress_2_buffer(t.decompressed.begin(),page_size));
             t.modifications = 0;
         }
-        if(t.compressed.empty() && t.size > 0)
+        if(t.compressed.empty() && t.size > 0 && t.modifications == 0)
         {
             abort();
         }
-        if(!t.decompressed.empty() && t.modifications > 0)
+        if(!t.decompressed.empty() && t.modifications == 0)
         {
             r = t.decompressed.size();
             t.decompressed.release();
@@ -511,15 +525,15 @@ public:
     }
     size_t release_decompressed()
     {   size_t r = 0;
-        if(decompressed_pages.size() <  100)
+        if(releasables.size() <  100)
         {
             return r;
         }
-        for (auto at : decompressed_pages)
+        for (auto at : releasables)
         {
             r += release_decompressed(at);
         }
-        decompressed_pages.clear();
+        releasables.clear();
         return r;
     }
 };

@@ -16,7 +16,7 @@
 #include <zdict.h>
 enum
 {
-    page_size = 4096,
+    page_size = 2048,
     reserved_address = 10000000
 };
 struct compressed_address
@@ -158,7 +158,7 @@ struct compress
 {
     enum
     {
-        min_training_size = 1024*10,
+        min_training_size = 1024*100,
         compression_level = 1
     };
     compress()= default;
@@ -180,7 +180,7 @@ private:
     size_t trained_size = 0;
     std::mutex mutex {};
     heap::vector<storage> arena{};
-    heap::vector<compressed_address> decompressed {};
+    heap::vector<size_t> decompressed_pages {};
     compressed_address arena_head{0};
     compressed_address highest_reserve_address{ 0};
     compress& operator=(const compress& ) {
@@ -288,9 +288,11 @@ private:
         if(arena.empty()) return;
 
         auto &s = arena.at(t.page());
-        decompress(s);
-        //if(!s.modifications)
-            //decompressed.push_back(t);
+        if(decompress(s))
+        {
+            decompressed_pages.push_back(t.page());
+        }
+
     }
     heap::buffer<uint8_t> decompress_buffer(size_t known_decompressed_size,const heap::buffer<uint8_t>& compressed)
     {
@@ -307,14 +309,18 @@ private:
         }
         return decompressed;
     }
-    void decompress(storage & todo)
+    [[nodiscard]] bool decompress(storage & todo)
     {
-        todo.decompressed = decompress_buffer(page_size,todo.compressed);
-        if(todo.decompressed.size() != page_size)
+        if(todo.decompressed.empty() && !todo.compressed.empty())
         {
-            abort();
+            todo.decompressed = decompress_buffer(page_size, todo.compressed);
+            if(todo.decompressed.size() != page_size)
+            {
+                abort();
+            }
+            return true;
         }
-
+        return false;
     }
 
     [[nodiscard]] static bool is_null_base(const compressed_address& at)
@@ -332,7 +338,7 @@ private:
         if(arena.empty()) return 0;
         return arena.size() - 1;
     }
-    void create_if_required(size_t size)
+    std::pair<size_t,storage&> create_if_required(size_t size)
     {
         if (is_null_base(last_block()))
         {
@@ -342,18 +348,21 @@ private:
         {
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
             arena.back().write_position = 0;
-            return;
+            return {arena.size()-1,arena.back()};
         }
         if (size > page_size)
         {
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(size));
-            return;
+            return {arena.size()-1,arena.back()};
         }
         auto &back = arena.back();
         if (back.decompressed.empty() && !back.compressed.empty())
         {
-            decompress(back);
+            if(decompress(back))
+            {
+                decompressed_pages.push_back(arena.size()-1);
+            };
         }
         if (back.write_position + size >= page_size)
         {
@@ -362,15 +371,19 @@ private:
                 add_training_entry(back.decompressed.begin(), back.write_position);
             }else if (!back.decompressed.empty())
             {
-                back.compressed = std::move(compress_2_buffer(back.decompressed.begin(),page_size));
-
-                back.decompressed.release();
+                if(back.modifications > 0)
+                    back.compressed = std::move(compress_2_buffer(back.decompressed.begin(),page_size));
+                back.modifications = 0;
+                decompressed_pages.push_back(arena.size()-1);
+               //back.decompressed.release();
 
             }
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
+            memset(arena.back().decompressed.begin(),0, page_size);
+            return {arena.size()-1,arena.back()};
         }
-
+        return {arena.size()-1,arena.back()};
     }
 public:
 
@@ -391,9 +404,11 @@ public:
             t.decompressed.release();
             t.size = 0;
             t.write_position = 0;
+            t.modifications = 0;
         }else
         {
             t.size--;
+            t.modifications++;
         }
 
     }
@@ -421,63 +436,90 @@ public:
         return (T*)basic_resolve(at);
     }
 
-    uint8_t* basic_resolve(compressed_address at)
+    template<typename T>
+    T* resolve_modified(compressed_address at)
+    {   if (at.null()) return nullptr;
+        return (T*)basic_resolve(at,true);
+    }
+
+    uint8_t* basic_resolve(compressed_address at, bool modify = false)
     {
         if (at.null()) return nullptr;
         invalid(at);
-        auto& t = arena.at(at.page());
+        auto p = at.page();
+        auto& t = arena.at(p);
         if(t.decompressed.empty() && !t.compressed.empty())
         {
-            decompress(t);
+            if(decompress(t))
+            {
+                decompressed_pages.push_back(at.page());
+            }
+
         }
         if (t.decompressed.empty())
         {
             abort();
         }
+        if(modify)
+        {
+            t.modifications++;
+            if(t.modifications > 20)
+                decompressed_pages.push_back(at.page());
+        }
+
         return t.decompressed.begin() + at.offset();
 
     }
 
     compressed_address new_address(size_t size)
     {
-        create_if_required(size);
-        size_t last = arena.size()-1;
-        auto &back = arena.back();
-        if (back.write_position + size >= page_size || back.decompressed.empty())
+        auto at = create_if_required(size);
+        if (at.second.write_position + size >= page_size || at.second.decompressed.empty())
         {
             abort();
         }
-        //arena_head.from_page_index(arena.size()-1);
-        compressed_address ca(last,back.write_position);
-        back.write_position += size;
-        back.size++;
+        compressed_address ca(at.first,at.second.write_position);
+        at.second.write_position += size;
+        at.second.size++;
+        at.second.modifications++;
         invalid(ca);
         return ca;
     }
 
 
-    size_t release_decompressed(compressed_address at)
+    size_t release_decompressed(size_t at)
     {
-        if(arena.empty()) return 0;
-        auto& t = arena.at(at.page());
-        if (t.modifications) return 0; // TODO: maybe compress it ?
-        if (t.decompressed.empty()) return 0;
-        if (t.empty()) return 0;
-        if (t.compressed.empty())
+        if(arena.size() <= at) return 0;
+        size_t r = 0;
+        auto& t = arena.at(at);
+        if(t.modifications > 2)
         {
-            return 0;
-        }// weird state
-        size_t r = t.decompressed.size();
-        t.decompressed.release();
+            t.compressed = std::move(compress_2_buffer(t.decompressed.begin(),page_size));
+            t.modifications = 0;
+        }
+        if(t.compressed.empty() && t.size > 0)
+        {
+            abort();
+        }
+        if(!t.decompressed.empty() && t.modifications > 0)
+        {
+            r = t.decompressed.size();
+            t.decompressed.release();
+        }
+
         return r;
     }
     size_t release_decompressed()
     {   size_t r = 0;
-        for (auto at : decompressed)
+        if(decompressed_pages.size() <  100)
+        {
+            return r;
+        }
+        for (auto at : decompressed_pages)
         {
             r += release_decompressed(at);
         }
-        decompressed.clear();
+        decompressed_pages.clear();
         return r;
     }
 };

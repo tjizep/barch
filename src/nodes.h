@@ -97,6 +97,7 @@ struct node_ptr_t {
         return node != p.node;
     };
     node_ptr_t& operator = (const node_ptr_t& n){
+        if(&n == this) return *this;
         this->is_leaf = n.is_leaf;
         this->node = n.node;
         this->logical = n.logical;
@@ -132,7 +133,21 @@ struct node_ptr_t {
         if (!is_leaf)
             abort();
         check();
-        art_leaf * l = resolver->resolve<art_leaf>(logical);
+        auto * l = resolver->resolve_modified<art_leaf>(logical);
+        if(l == nullptr)
+        {
+            abort();
+        }
+        return l;
+    }
+    [[nodiscard]] const art_leaf* leaf() const {
+        return const_leaf();
+    }
+    [[nodiscard]] const art_leaf* const_leaf() const {
+        if (!is_leaf)
+            abort();
+        check();
+        const auto * l = resolver->resolve<const art_leaf>(logical);
         if(l == nullptr)
         {
             abort();
@@ -156,17 +171,7 @@ struct node_ptr_t {
         return node;
     }
 
-    [[nodiscard]] const art_leaf* leaf() const {
-        if (!is_leaf)
-            abort();
-        check();
-        const art_leaf * l = resolver->resolve<art_leaf>(logical);
-        if(l == nullptr)
-        {
-            abort();
-        }
-        return l;
-    }
+
     
     art_node_t * operator -> () const {
         if(is_leaf) {
@@ -284,283 +289,6 @@ struct art_leaf {
         return memcmp(this->key, key, key_len);
     }
 } ;
-
-/**
- * node content to do common things related to keys and pointers on each node
- */
-template<unsigned SIZE, unsigned KEYS>
-struct node_content : public art_node {
-    node_content() : types(0) {};
-    ~node_content() override{};
-    void set_leaf(unsigned at) final {
-        check_object();
-        if (SIZE <= at)
-            abort();
-        types.set(at, true);
-    }
-    void set_child(unsigned at, node_ptr node) final {
-        check_object();
-        if (SIZE <= at)
-            abort();
-        types.set(at, node.is_leaf);
-        if(node.is_leaf)
-        {
-            leaves[at] = node.logical;
-        }else
-        {
-            children[at] = node;
-        }
-
-    }
-    [[nodiscard]] bool is_leaf(unsigned at) const final {
-        check_object();
-        if (SIZE <= at)
-            abort();
-        bool is = types.test(at);
-        return is;
-    }
-    [[nodiscard]] bool has_child(unsigned at) const final {
-        check_object();
-        if (SIZE <= at)
-            abort();
-        return children[at] ;
-    }
-    [[nodiscard]] node_ptr expand_pointers(node_ptr&,const children_t& ) override
-    {   check_object();
-        return this;
-    };
-    [[nodiscard]] node_ptr get_node(unsigned at) const final {
-        check_object();
-        if (at < SIZE)
-            return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
-        
-        return nullptr;
-    }
-    node_ptr get_node(unsigned at) final {
-        check_object();
-        if (at < SIZE)
-            return types[at] ? node_ptr(leaves[at]) : node_ptr(children[at]);
-        
-        return nullptr;
-    }
-    
-    node_ptr get_child(unsigned at) final {
-        check_object();
-        return get_node(at);
-    }
-    [[nodiscard]] node_ptr get_child(unsigned at) const final {
-        check_object();
-        return get_node(at);
-    }
-    [[nodiscard]] bool ok_child(node_ptr ) const override
-    {   check_object();
-        return true;
-    }
-    [[nodiscard]] bool ok_children(const children_t& ) const override
-    {
-        return true;
-    }
-
-
-    // TODO: NB check where this function is used
-    [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
-        check_object();
-        unsigned i;
-        if (KEYS < num_children) {
-            return num_children;
-        }
-        if (operbits & (eq & gt) ) {
-            for (i = 0; i < num_children; ++i) {
-                if (keys[i] >= c)
-                    return i; 
-            }
-            if (operbits == (eq & gt)) return num_children;
-        }
-        if (operbits & (eq & lt) ) {
-            for (i = 0; i < num_children; ++i) {
-                if (keys[i] <= c)
-                    return i; 
-            }
-            if (operbits == (eq & lt)) return num_children;
-        }
-        if (operbits & eq) {
-            for (i = 0; i < num_children; ++i) {
-                if (keys[i] == c)
-                    return i; 
-            }
-        }
-        if (operbits & gt) {
-            for (i = 0; i < num_children; ++i) {
-                if (keys[i] > c)
-                    return i;
-            }
-        }
-        if (operbits & lt) {
-            for (i = 0; i < num_children; ++i) {
-                if (keys[i] < c)
-                    return i;
-            }
-        }
-        return num_children;
-    }
-    [[nodiscard]] unsigned index(unsigned char c) const override {
-        check_object();
-        return index(c, eq);
-    }
-    [[nodiscard]] node_ptr find(unsigned char c) const override {
-        check_object();
-        return get_child(index(c));
-    }
-    [[nodiscard]] node_ptr find(unsigned char c, unsigned operbits) const override {
-        check_object();
-        return get_child(index(c,operbits));
-    }
-    [[nodiscard]] unsigned first_index() const override {
-        check_object();
-        return 0;
-    };
-
-    unsigned char keys[KEYS]{};
-    [[nodiscard]] const unsigned char* get_keys() const override
-    {   check_object();
-        return keys;
-    }
-    [[nodiscard]] const unsigned char& get_key(unsigned at) const final {
-        check_object();
-        if(at < KEYS)
-            return keys[at];
-        abort();
-    }
-
-    void set_key(unsigned at, unsigned char k) final
-    {   check_object();
-        auto max_keys = KEYS;
-        if(at < max_keys)
-        {
-            keys[at] = k;
-            return;
-        }
-        abort();
-    }
-
-    unsigned char& get_key(unsigned at) final {
-        check_object();
-        if(at < KEYS)
-            return keys[at];
-        abort();
-    }
-
-    [[nodiscard]] bool has_any(unsigned pos) const {
-        check_object();
-        if (SIZE <= pos)
-            abort();
-        
-        return children[pos] != nullptr;
-    }
-    
-    void set_keys(const unsigned char* other_keys, unsigned count) override{
-        check_object();
-        if (KEYS < count )
-            abort();
-        memcpy(keys, other_keys, count);
-    }
-    void insert_type(unsigned pos) {
-        check_object();
-        if (SIZE <= pos)
-            abort();
-        unsigned count = num_children;
-        for (unsigned p = count; p > pos; --p) {
-            types[p] = types[p - 1]; 
-        }
-    }
-    void remove_type(unsigned pos) {
-        check_object();
-        if (SIZE <= pos)
-            abort();
-        unsigned count = num_children;
-        for (unsigned p = pos; p < count -1; ++p) {
-            types[p] = types[p + 1]; 
-        }
-    }
-    [[nodiscard]] bool child_type(unsigned at) const override
-    {   check_object();
-        return types[at];
-    }
-
-    void set_children(unsigned dpos, const art_node* other, unsigned spos, unsigned count) override {
-        check_object();
-        if (dpos < SIZE && count <= SIZE) {
-            
-            for(unsigned d = dpos; d < count; ++d )
-            {
-                children[d] = other->get_child(d+spos).node;
-            }
-            for(unsigned t = 0; t < count; ++t) {
-                types[t+dpos] = other->child_type(t+spos);
-            }
-        }else {
-            abort();
-        }
-    }
-    template<typename S>
-    void set_children(unsigned pos, const S* other, unsigned count){
-        check_object();
-        set_children(pos, other, 0, count);
-    }
-    
-    void remove_child(unsigned pos) {
-        check_object();
-        if(pos < KEYS && KEYS == SIZE) {
-            memmove(keys+pos, keys+pos+1, num_children - 1 - pos);
-            memmove(children+pos, children+pos+1, (num_children - 1 - pos)*sizeof(void*));
-            remove_type(pos);
-            children[num_children - 1] = nullptr;
-            num_children--;
-        } else {
-            abort();
-        }
-        
-        
-    }
-    void copy_header(node_ptr src) override {
-        check_object();
-        if (src->num_children > SIZE) {
-            abort();
-        }
-        this->num_children = src->num_children;
-        this->partial_len = src->partial_len;
-        memcpy(this->partial, src->partial, std::min<unsigned>(max_prefix_llength, src->partial_len));
-    }
-    void copy_from(node_ptr s) override
-    {   check_object();
-        if(s->num_children > SIZE)
-        {
-            abort();
-        }
-        this->copy_header(s);
-        set_keys(s->get_keys(), s->num_children);
-        set_children(0, s, 0, s->num_children);
-        if (num_children != s->num_children)
-        {
-            abort();
-        }
-
-    }
-    [[nodiscard]] virtual unsigned ptr_size() const
-    {   check_object();
-        return sizeof(art_leaf*);
-    };
-    std::bitset<SIZE> types;
-    //std::bitset<SIZE> encoded;
-protected:
-    
-    union
-    {
-        logical_leaf leaves[SIZE]{};
-        art_node *children[SIZE];
-    };
-};
-
 
 template<typename EncodingType>
 bool ok(const art_node* node, uintptr_t base)
@@ -734,6 +462,9 @@ struct node_array
 
 };
 
+/**
+ * node content to do common things related to keys and pointers on each node
+ */
 template<unsigned SIZE, unsigned KEYS, typename i_ptr_t>
 struct encoded_node_content : public art_node {
 

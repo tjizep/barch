@@ -143,6 +143,7 @@ extern "C" {
     * and endkey. No more than 'count' items are emitted. */
     int cmd_KEYRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        compressed_release release;
         if (argc != 4)
             return ValkeyModule_WrongArity(ctx);
 
@@ -193,6 +194,7 @@ extern "C" {
      * Set the specified key to the specified value. */
     int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
         ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
@@ -215,7 +217,7 @@ extern "C" {
      *
      * Add the specified key only if its not there, with specified value. */
     int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
-    {
+    {   compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
         ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
@@ -241,6 +243,7 @@ extern "C" {
      * is not defined. */
     int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
         size_t klen;
@@ -269,7 +272,7 @@ extern "C" {
      * Return the value of the specified key, or a null reply if the key
      * is not defined. */
     int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
-    {
+    {   compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
@@ -299,7 +302,7 @@ extern "C" {
      * Return the value of the specified key, or a null reply if the key
      * is not defined. */
     int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
-    {
+    {   compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
@@ -321,6 +324,7 @@ extern "C" {
      * is not defined. */
     int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
         size_t klen;
@@ -349,6 +353,7 @@ extern "C" {
      * remove the value associated with the key and return the key if such a key existed. */
     int cmd_RM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
         size_t klen;
@@ -373,14 +378,16 @@ extern "C" {
             return ValkeyModule_ReplyWithString(ctx, val);
         }
     }
-    /* CDICT.SIZE <key>
+    /* CDICT.SIZE
      * @return the size or o.k.a. key count. 
      */
     int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
-        if (argc !=1)
+        compressed_release release;
+        if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
-        return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)art_size(get_art(ctx)));
+        auto size = (int64_t)art_size(get_art(ctx));
+        return ValkeyModule_ReplyWithLongLong(ctx, size);
         
     }
     /* CDICT.STATISTICS
@@ -388,6 +395,7 @@ extern "C" {
      * get memory statistics. */
     int cmd_STATISTICS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
+        compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
@@ -433,7 +441,7 @@ extern "C" {
      *
      * get memory statistics. */
     int cmd_OPS_STATISTICS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
-    {
+    {   compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 

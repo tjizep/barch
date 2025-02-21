@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <fast_float/fast_float.h>
+#include "sastam.h"
 
 namespace conversion
 {
@@ -95,7 +96,7 @@ namespace conversion
         comparable_result(const char *val, size_t size)
         : size(size + 1)
         {
-            bytes = (uint8_t*)ValkeyModule_Calloc(1,this->size + 1); //.assign(val, val + size);
+            bytes = heap::allocate<uint8_t>(this->size); //.assign(val, val + size);
             memcpy(bytes + 1, val, this->size - 1);
             bytes[0] = tstring;
             data = bytes;
@@ -107,12 +108,12 @@ namespace conversion
         }
         ~comparable_result()
         {
-            if (bytes != nullptr) ValkeyModule_Free(bytes);
+            if (bytes != nullptr) heap::free(bytes, this->size);
         }
         comparable_result& operator=(const comparable_result& r)
         {
             if(this == &r) return *this;
-            bytes = (uint8_t*)ValkeyModule_Calloc(1,r.size);
+            bytes = (uint8_t*)heap::allocate<uint8_t>(r.size);
             size = r.size;
             data = bytes;
             memcpy(bytes, r.bytes, size);

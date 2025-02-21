@@ -10,6 +10,7 @@
 #include "nodes.h"
 
 #include <algorithm>
+
 uint64_t get_node_base()
 {
     static char * base_val = nullptr;
@@ -17,7 +18,7 @@ uint64_t get_node_base()
 
     if(!base_val)
     {
-        base_val = (char*)ValkeyModule_Calloc(1,4);
+        base_val = (char*)heap::allocate(4);
         base = reinterpret_cast<int64_t>(base_val);
     }
     return base;
@@ -45,10 +46,10 @@ void free_node(node_ptr n){
 void free_node(art_node *n) {
     // Break if null
     if (!n) return;
-
+    size_t alloc_size = n->alloc_size();
     n->~art_node();
     // Free ourself on the way up
-    ValkeyModule_Free(n);
+    heap::free(n,alloc_size);
 }
 /**
  * Allocates a node of the given type,
@@ -57,7 +58,7 @@ void free_node(art_node *n) {
 
 template<typename art_node_t>
 art_node* alloc_any_node() {
-    auto r =  new (ValkeyModule_Calloc(1, sizeof(art_node_t))) art_node_t();
+    auto r =  new (heap::allocate<art_node_t>(1)) art_node_t();
     return r;
 }
 art_node* alloc_node(unsigned nt, const children_t& c) {

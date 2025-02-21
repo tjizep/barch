@@ -495,6 +495,24 @@ extern "C" {
         return 0;
     }
 
+    int cmd_VACUUM(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    {
+        compressed_release release;
+        if (argc != 1)
+            return ValkeyModule_WrongArity(ctx);
+        size_t result = get_leaf_compression().vacuum();
+        return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)result);
+    }
+
+    int cmd_HEAP_BYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    {
+        compressed_release release;
+        if (argc != 1)
+            return ValkeyModule_WrongArity(ctx);
+        ;
+        return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)heap::allocated);
+    }
+
     /* This function must be present on each module. It is used in order to
      * register the commands into the server. */
     int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int)
@@ -537,6 +555,12 @@ extern "C" {
             return VALKEYMODULE_ERR;
 
         if (ValkeyModule_CreateCommand(ctx, "ODMILLIS", cmd_MILLIS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "ODVACUUM", cmd_VACUUM, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "ODHEAPBYTES", cmd_HEAP_BYTES, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
         /* Create our global dictionary. Here we'll set our keys and values. */

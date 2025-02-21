@@ -22,7 +22,12 @@ namespace heap {
         return static_cast<T*>(allocate(count * sizeof(T)));
     }
     void free(void* ptr, size_t size);
-
+    template<typename T>
+    void free(T* ptr)
+    {
+        free(ptr, sizeof(T));
+    }
+    void check_ptr(void* ptr, size_t size);
 
     template <class T>
     struct allocator : std::allocator_traits<std::allocator<T>>
@@ -112,6 +117,10 @@ T* heap::allocator<T>::allocate(const size_t n) const
         {
            release();
         }
+        [[nodiscard]] size_t byte_size() const
+        {
+            return count * sizeof(T);
+        }
         [[nodiscard]] size_t size() const
         {
             return count;
@@ -123,7 +132,6 @@ T* heap::allocator<T>::allocate(const size_t n) const
             {
                 abort();
             }
-
             ::memcpy(ptr + start, src, cnt * sizeof(T));
         }
         void emplace(size_t cnt, const T* src)
@@ -136,6 +144,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
         }
         int partial_compare(size_t part, const buffer& other) const
         {
+
             if (this == &other) return 0;
             if (ptr == nullptr && other.ptr) return -1;
             if (ptr && other.ptr == nullptr) return 1;
@@ -191,6 +200,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
                 abort();
             }
             T* tmp = ptr;
+
             clear();
             return tmp;
         }
@@ -200,6 +210,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
             {
                 abort();
             }
+
             ptr = nullptr;
             count = 0;
         }
@@ -210,7 +221,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
                 abort();
             }
             if (ptr)
-                free(ptr, count);
+                free(ptr, byte_size());
             clear();
         }
         [[nodiscard]] bool empty() const
@@ -218,8 +229,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
             return count == 0;
         }
         T& operator[](size_t idx)
-        {
-            return ptr[idx];
+        {   return ptr[idx];
         }
 
         const T& operator[](size_t idx) const
@@ -285,16 +295,17 @@ T* heap::allocator<T>::allocate(const size_t n) const
         }
         void reserve(size_t n)
         {
-            if(count > content.size())
+            if (count > content.size())
             {
                 abort();
             }
-            if(capacity() < n)
+            if (capacity() < n)
             {
                 heap::buffer<T> other(n);
                 for(size_t t = 0; t < count; ++t)
                 {
-                    other.begin()[t] = std::move(content[t]);
+                    //new (&other.ptr[t]) T();
+                    other.ptr[t] = std::move(content[t]);
                 }
                 content = std::move(other);
             }

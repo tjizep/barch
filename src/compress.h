@@ -178,7 +178,7 @@ private:
     ZSTD_CCtx*  cctx = ZSTD_createCCtx();
     ZSTD_DCtx*  dctx = ZSTD_createDCtx();
     size_t trained_size = 0;
-    std::mutex mutex {};
+    mutable std::mutex mutex {};
     heap::vector<storage> arena{};
     heap::vector<size_t> releasables {};
     heap::vector<size_t> free_pages {};
@@ -232,7 +232,7 @@ private:
             can_haz = ZSTD_createCDict(training_data.begin(), trainedSize, compression_level);
         }
 
-        //std::lock_guard guard(mutex);
+
         size_in_training = 0;
         intraining.clear();
         if(can_haz)
@@ -368,7 +368,7 @@ private:
                 if(last.modifications > 0)
                     last.compressed = std::move(compress_2_buffer(last.decompressed.begin(),page_size));
                 last.modifications = 0;
-                releasables.push_back(last_page_allocated);
+                releasables.push_back(last_page_allocated); // to schedule a buffer release
             }
             if(!free_pages.empty())
             {
@@ -396,58 +396,33 @@ private:
         }
         return {last_page_allocated,last};
     }
-public:
 
-    void free(compressed_address at, size_t size)
+    size_t release_decompressed(storage& t)
     {
-        if(at.address() == 0 || size == 0)
+        size_t r = 0;
+        if(t.modifications > 10)
+        {
+            t.compressed = std::move(compress_2_buffer(t.decompressed.begin(),page_size));
+            t.modifications = 0;
+        }
+        if(t.compressed.empty() && t.size > 0 && t.modifications == 0)
         {
             abort();
         }
-        auto& t = arena.at(at.page());
-        if(t.size == 0)
+        if(!t.decompressed.empty() && t.modifications == 0)
         {
-            abort();
-        }
-        if (t.size == 1)
-        {
-            t.clear();
-            free_pages.push_back(at.page());
-        }else
-        {
-            t.size--;
-            t.modifications++;
+            r = t.decompressed.size();
+            t.decompressed.release();
         }
 
+        return r;
     }
-    void invalid(compressed_address at) const
+
+    size_t release_decompressed(size_t at)
     {
-        if (!valid(at))
-        {
-            abort();
-        }
-    }
-    [[nodiscard]] bool valid(compressed_address at) const
-    {
-        if (at == 0) return true;
-        if (at.page() >= arena.size())
-        {
-            return false;
-        }
-        const auto& t = arena.at(at.page());
-        return t.size > 0 && t.write_position > at.offset();
-    }
-
-    template<typename T>
-    T* resolve(compressed_address at)
-    {   if (at.null()) return nullptr;
-        return (T*)basic_resolve(at);
-    }
-
-    template<typename T>
-    T* resolve_modified(compressed_address at)
-    {   if (at.null()) return nullptr;
-        return (T*)basic_resolve(at,true);
+        if(arena.size() <= at) return 0;
+        auto& t = arena.at(at);
+        return release_decompressed(t);
     }
 
     uint8_t* basic_resolve(compressed_address at, bool modify = false)
@@ -468,7 +443,7 @@ public:
         {
             abort();
         }
-        if(modify)
+        if (modify)
         {
             t.modifications++;
         }
@@ -477,8 +452,67 @@ public:
 
     }
 
+    void invalid(compressed_address at) const
+    {
+        if (!valid(at))
+        {
+            abort();
+        }
+    }
+    [[nodiscard]] bool valid(compressed_address at) const
+    {
+        if (at == 0) return true;
+        if (at.page() >= arena.size())
+        {
+            return false;
+        }
+        const auto& t = arena.at(at.page());
+        return t.size > 0 && t.write_position > at.offset();
+    }
+public:
+
+    void free(compressed_address at, size_t size)
+    {
+        //std::lock_guard guard(mutex);
+        if(at.address() == 0 || size == 0)
+        {
+            abort();
+        }
+        auto& t = arena.at(at.page());
+        if(t.size == 0)
+        {
+            abort();
+        }
+        if (t.size == 1)
+        {
+            t.clear();
+            free_pages.push_back(at.page());
+        }else
+        {
+            t.size--;
+            t.modifications++;
+        }
+
+    }
+
+
+    template<typename T>
+    T* resolve(compressed_address at)
+    {   if (at.null()) return nullptr;
+        std::lock_guard guard(mutex);
+        return (T*)basic_resolve(at);
+    }
+
+    template<typename T>
+    T* resolve_modified(compressed_address at)
+    {   if (at.null()) return nullptr;
+        std::lock_guard guard(mutex);
+        return (T*)basic_resolve(at,true);
+    }
+
     compressed_address new_address(size_t size)
     {
+        std::lock_guard guard(mutex);
         auto at = create_if_required(size);
         if (at.second.decompressed.empty() && !at.second.compressed.empty())
         {
@@ -500,31 +534,11 @@ public:
         return ca;
     }
 
-
-    size_t release_decompressed(size_t at)
-    {
-        if(arena.size() <= at) return 0;
-        size_t r = 0;
-        auto& t = arena.at(at);
-        if(t.modifications > 10)
-        {
-            t.compressed = std::move(compress_2_buffer(t.decompressed.begin(),page_size));
-            t.modifications = 0;
-        }
-        if(t.compressed.empty() && t.size > 0 && t.modifications == 0)
-        {
-            abort();
-        }
-        if(!t.decompressed.empty() && t.modifications == 0)
-        {
-            r = t.decompressed.size();
-            t.decompressed.release();
-        }
-
-        return r;
-    }
     size_t release_decompressed()
-    {   size_t r = 0;
+    {
+        std::lock_guard guard(mutex);
+
+        size_t r = 0;
         if(releasables.size() <  100)
         {
             return r;
@@ -534,6 +548,18 @@ public:
             r += release_decompressed(at);
         }
         releasables.clear();
+        return r;
+    }
+
+    size_t vacuum()
+    {
+        std::lock_guard guard(mutex);
+        releasables.clear();
+        size_t r = 0;
+        for (auto& at : arena)
+        {
+            r += release_decompressed(at);
+        }
         return r;
     }
 };

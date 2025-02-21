@@ -248,6 +248,8 @@ struct art_node {
     [[nodiscard]] virtual unsigned ptr_size() const = 0;
 
     [[nodiscard]] virtual node_ptr expand_pointers(node_ptr& ref, const children_t& child)  = 0;
+    [[nodiscard]] virtual size_t alloc_size() const = 0;
+
     void check_object() const
     {
 
@@ -797,7 +799,11 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     [[nodiscard]] uint8_t type() const override {
         return node_4;
     }
-    using this_type::copy_from;
+    [[nodiscard]] size_t alloc_size() const override
+    {
+        return sizeof(art_node4_v);
+    }
+     using this_type::copy_from;
     using this_type::remove_child;
     using this_type::set_child;
     using this_type::add_child;
@@ -926,6 +932,10 @@ encoded_node_content<16,16, IPtrType >
     }
     [[nodiscard]] uint8_t type() const override{
         return node_16;
+    }
+    [[nodiscard]] size_t alloc_size() const override
+    {
+        return sizeof(art_node16_v);
     }
     [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
         unsigned i = bits_oper16(this->keys, nuchar<16>(c), (1 << this->num_children) - 1, operbits);
@@ -1064,6 +1074,10 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
     }
     [[nodiscard]] uint8_t type() const override {
         return node_48;
+    }
+    [[nodiscard]] size_t alloc_size() const override
+    {
+        return sizeof(art_node48);
     }
     [[nodiscard]] unsigned index(unsigned char c) const override {
         unsigned  i = keys[c];
@@ -1208,6 +1222,10 @@ typedef art_node48<uintptr_t> art_node48_8;
 struct art_node256 final : public encoded_node_content<256,0,uintptr_t> {
     art_node256();
     ~art_node256() override;
+    [[nodiscard]] size_t alloc_size() const override
+    {
+        return sizeof(art_node256);
+    }
     [[nodiscard]] uint8_t type() const override ;
     [[nodiscard]] unsigned index(unsigned char c) const override ;
     

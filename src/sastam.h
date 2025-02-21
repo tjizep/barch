@@ -304,7 +304,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
                 heap::buffer<T> other(n);
                 for(size_t t = 0; t < count; ++t)
                 {
-                    //new (&other.ptr[t]) T();
+                    new (&other.ptr[t]) T();
                     other.ptr[t] = std::move(content[t]);
                 }
                 content = std::move(other);

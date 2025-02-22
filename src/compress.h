@@ -19,7 +19,8 @@ enum
     page_size = 1024,
     reserved_address = 10000000,
     min_release_size = 100,
-    vacuum_max_release = 1024*1024*1024
+    vacuum_max_release = 1024*1024*1024,
+    auto_vac = 0
 };
 struct compressed_address
 {
@@ -161,7 +162,7 @@ struct compress
     enum
     {
         min_training_size = 1024*120,
-        compression_level = 1
+        compression_level = -5
     };
     compress()= default;
     compress(const compress&) = delete;
@@ -288,17 +289,6 @@ private:
         return compressed_data;
     }
 
-    void decompress_(compressed_address t)
-    {
-        if(arena.empty()) return;
-
-        auto &s = arena.at(t.page());
-        if(decompress(s))
-        {
-            //releasables.push_back(t.page());
-        }
-
-    }
     heap::buffer<uint8_t> decompress_buffer(size_t known_decompressed_size,const heap::buffer<uint8_t>& compressed)
     {
         heap::buffer<uint8_t> decompressed = heap::buffer<uint8_t>(known_decompressed_size);
@@ -370,7 +360,7 @@ private:
                 if(last.modifications > 0)
                     last.compressed = std::move(compress_2_buffer(last.decompressed.begin(),page_size));
                 last.modifications = 0;
-                //releasables.push_back(last_page_allocated); // to schedule a buffer release
+                releasables.push_back(last_page_allocated); // to schedule a buffer release
             }
             if(!free_pages.empty())
             {
@@ -539,22 +529,23 @@ public:
 
     size_t release_decompressed()
     {
-        return 0;
-    }
-    size_t release_decompressed_()
-    {
-        std::lock_guard guard(mutex);
 
+        std::lock_guard guard(mutex);
         size_t r = 0;
+
         if(releasables.size() < min_release_size)
         {
             return r;
         }
-        for (auto at : releasables)
+        if(auto_vac != 0)
         {
-            r += release_decompressed(at);
+            for (auto at : releasables)
+            {
+                r += release_decompressed(at);
+            }
         }
         releasables.clear();
+
         return r;
     }
 

@@ -22,14 +22,24 @@ extern "C"
 #include <functional>
 
 static ValkeyModuleDict *Keyspace;
-std::shared_mutex shared;
+
+typedef std::unique_lock< std::shared_mutex >  write_lock;
+typedef std::shared_lock< std::shared_mutex >  read_lock;  // C++ 14
+
+std::shared_mutex& get_lock()
+{
+    static std::shared_mutex shared;
+    return shared;
+}
+
+
 static art_tree ad = {nullptr, 0};
 static auto startTime = std::chrono::high_resolution_clock::now();
 /// @brief  getting an initialized art tree
 /// @param ctx not used but could be 
 /// @return a once initialized art_tree
 
-static art_tree *get_art(ValkeyModuleCtx *)
+static art_tree *get_art()
 {
 
     if (ad.root == nullptr)
@@ -140,7 +150,7 @@ extern "C" {
     * Return a list of matching keys, lexicographically between startkey
     * and endkey. No more than 'count' items are emitted. */
     int cmd_KEYRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
-    {   read_lock rl(shared);
+    {   read_lock rl(get_lock());
         compressed_release release;
         if (argc != 4)
             return ValkeyModule_WrongArity(ctx);
@@ -177,7 +187,7 @@ extern "C" {
             
         };
 
-        art_range(get_art(ctx), c1.get_data(), c1.get_size(), c2.get_data(), c2.get_size(), iter, &is);
+        art_range(get_art(), c1.get_data(), c1.get_size(), c2.get_data(), c2.get_size(), iter, &is);
 
 
         ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
@@ -203,9 +213,9 @@ extern "C" {
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
-        write_lock wl(shared);
+        write_lock wl(get_lock());
 
-        art_insert(get_art(ctx), converted.get_data(), converted.get_size(), argv[2]);
+        art_insert(get_art(), converted.get_data(), converted.get_size(), argv[2]);
 
         /* We need to keep a reference to the value stored at the key, otherwise
          * it would be freed when this callback returns. */
@@ -217,7 +227,7 @@ extern "C" {
      *
      * Add the specified key only if its not there, with specified value. */
     int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
-    {   write_lock w(shared);
+    {
         compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
@@ -230,7 +240,8 @@ extern "C" {
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
-        art_insert_no_replace(get_art(ctx), converted.get_data(), converted.get_size(), argv[2]);
+        write_lock w(get_lock());
+        art_insert_no_replace(get_art(), converted.get_data(), converted.get_size(), argv[2]);
 
         /* We need to keep a reference to the value stored at the key, otherwise
          * it would be freed when this callback returns. */
@@ -244,7 +255,7 @@ extern "C" {
      * is not defined. */
     int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-        read_lock rl(shared);
+        read_lock rl(get_lock());
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -256,7 +267,7 @@ extern "C" {
         auto converted = conversion::convert(k, klen);
         trace_list trace;
         trace.reserve(klen);
-        void *r = art_search(trace, get_art(ctx), converted.get_data(), converted.get_size());
+        void *r = art_search(trace, get_art(), converted.get_data(), converted.get_size());
 
         auto *val = (ValkeyModuleString *)r;
 
@@ -274,12 +285,12 @@ extern "C" {
      * Return the value of the specified key, or a null reply if the key
      * is not defined. */
     int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
-    {   read_lock rl(shared);
+    {   read_lock rl(get_lock());
         compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        const art_leaf *r = art_minimum(get_art(ctx));
+        const art_leaf *r = art_minimum(get_art());
 
         if (r == nullptr)
         {
@@ -306,12 +317,12 @@ extern "C" {
      * is not defined. */
     int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
-        read_lock rl(shared);
+        read_lock rl(get_lock());
         compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        const art_leaf *r = art_maximum(get_art(ctx));
+        const art_leaf *r = art_maximum(get_art());
 
         if (r == nullptr)
         {
@@ -329,7 +340,7 @@ extern "C" {
      * is not defined. */
     int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-        read_lock rl(shared);
+        read_lock rl(get_lock());
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -340,7 +351,7 @@ extern "C" {
         
         auto converted = conversion::convert(k, klen);
 
-        void *r = art_lower_bound(get_art(ctx), converted.get_data(), converted.get_size());
+        void *r = art_lower_bound(get_art(), converted.get_data(), converted.get_size());
 
         ValkeyModuleString *val = (ValkeyModuleString *)r;
 
@@ -359,7 +370,7 @@ extern "C" {
      * remove the value associated with the key and return the key if such a key existed. */
     int cmd_RM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-        write_lock w(shared);
+        write_lock w(get_lock());
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -371,7 +382,7 @@ extern "C" {
         
 
         auto converted = conversion::convert(k, klen);
-        auto t = get_art(ctx);
+        auto t = get_art();
         void *r = art_delete(t, converted.get_data(), converted.get_size());
 
         auto *val = (ValkeyModuleString *)r;
@@ -390,11 +401,11 @@ extern "C" {
      */
     int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
-        read_lock rl(shared);
+        read_lock rl(get_lock());
         compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
-        auto size = (int64_t)art_size(get_art(ctx));
+        auto size = (int64_t)art_size(get_art());
         return ValkeyModule_ReplyWithLongLong(ctx, size);
         
     }
@@ -573,7 +584,7 @@ extern "C" {
 
         /* Create our global dictionary. Here we'll set our keys and values. */
         Keyspace = ValkeyModule_CreateDict(nullptr);
-        if (get_art(ctx) == nullptr)
+        if (get_art() == nullptr)
         {
             return VALKEYMODULE_ERR;
         }

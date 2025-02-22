@@ -65,22 +65,6 @@ local test = function()
     result[inc()] = {'VAC', vk.call('ODHEAPBYTES')}
 end
 
-
-local clear = function()
-    for i = 1, count do
-        local k = convert(i-1)
-        local v = i
-        if vk.call('ODREM',k) == v then
-            successes = successes + 1
-        else
-            result[inc()] = {"Failed remove result ",k, v, vk.call('ODGET',k)}
-        end
-
-    end
-    result[inc()] = {'FAILURES', failures}
-    result[inc()] = {'SUCCESSES', successes}
-end
-
 --[[ Testing ints,doubles and string key types]]
 convert = tocharsnum
 test()

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <bitset>
+#include <shared_mutex>
 #ifndef ART_H
 #define ART_H
 #include "nodes.h"
@@ -55,6 +56,8 @@ struct art_tree{
     art_tree(node_ptr root, uint64_t size) : root(root), size(size) {}
 };
 
+typedef std::unique_lock< std::shared_mutex >  write_lock;
+typedef std::shared_lock< std::shared_mutex >  read_lock;  // C++ 14
 extern "C" {
 /**
  * Initializes an ART tree

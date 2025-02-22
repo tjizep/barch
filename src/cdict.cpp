@@ -14,26 +14,23 @@ extern "C"
 #include "valkeymodule.h"
 }
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
 #include "conversion.h"
 #include "art.h"
 #include <fast_float/fast_float.h>
-#include <array>
 #include <functional>
 
 static ValkeyModuleDict *Keyspace;
+std::shared_mutex shared;
 static art_tree ad = {nullptr, 0};
 static auto startTime = std::chrono::high_resolution_clock::now();
 /// @brief  getting an initialized art tree
 /// @param ctx not used but could be 
 /// @return a once initialized art_tree
 
-static art_tree *get_art(ValkeyModuleCtx *ctx)
+static art_tree *get_art(ValkeyModuleCtx *)
 {
-    VALKEYMODULE_NOT_USED(ctx);
 
     if (ad.root == nullptr)
     {
@@ -44,6 +41,7 @@ static art_tree *get_art(ValkeyModuleCtx *ctx)
     }
     return &ad;
 }
+
 
 static int key_ok(const char * k, size_t klen){
     if (k == nullptr)
@@ -142,7 +140,7 @@ extern "C" {
     * Return a list of matching keys, lexicographically between startkey
     * and endkey. No more than 'count' items are emitted. */
     int cmd_KEYRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
-    {
+    {   read_lock rl(shared);
         compressed_release release;
         if (argc != 4)
             return ValkeyModule_WrongArity(ctx);
@@ -205,6 +203,8 @@ extern "C" {
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
+        write_lock wl(shared);
+
         art_insert(get_art(ctx), converted.get_data(), converted.get_size(), argv[2]);
 
         /* We need to keep a reference to the value stored at the key, otherwise
@@ -217,7 +217,8 @@ extern "C" {
      *
      * Add the specified key only if its not there, with specified value. */
     int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
-    {   compressed_release release;
+    {   write_lock w(shared);
+        compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
         ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
@@ -243,6 +244,7 @@ extern "C" {
      * is not defined. */
     int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        read_lock rl(shared);
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -272,7 +274,8 @@ extern "C" {
      * Return the value of the specified key, or a null reply if the key
      * is not defined. */
     int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
-    {   compressed_release release;
+    {   read_lock rl(shared);
+        compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
@@ -302,7 +305,9 @@ extern "C" {
      * Return the value of the specified key, or a null reply if the key
      * is not defined. */
     int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
-    {   compressed_release release;
+    {
+        read_lock rl(shared);
+        compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
@@ -324,6 +329,7 @@ extern "C" {
      * is not defined. */
     int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        read_lock rl(shared);
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -353,6 +359,7 @@ extern "C" {
      * remove the value associated with the key and return the key if such a key existed. */
     int cmd_RM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        write_lock w(shared);
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -383,6 +390,7 @@ extern "C" {
      */
     int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
+        read_lock rl(shared);
         compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);

@@ -364,10 +364,7 @@ public:
         {
             value = 0;
         }else
-        {
-
-            value = (reinterpret_cast<int64_t>(ptr) - base);
-
+        {   value = (reinterpret_cast<int64_t>(ptr) - base);
         }
     }
     [[nodiscard]] art_node* get_node()

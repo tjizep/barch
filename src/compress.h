@@ -16,8 +16,10 @@
 #include <zdict.h>
 enum
 {
-    page_size = 2048,
-    reserved_address = 10000000
+    page_size = 1024,
+    reserved_address = 10000000,
+    min_release_size = 100,
+    vacuum_max_release = 1024*1024*1024
 };
 struct compressed_address
 {
@@ -158,7 +160,7 @@ struct compress
 {
     enum
     {
-        min_training_size = 1024*100,
+        min_training_size = 1024*120,
         compression_level = 1
     };
     compress()= default;
@@ -368,7 +370,7 @@ private:
                 if(last.modifications > 0)
                     last.compressed = std::move(compress_2_buffer(last.decompressed.begin(),page_size));
                 last.modifications = 0;
-                releasables.push_back(last_page_allocated); // to schedule a buffer release
+                //releasables.push_back(last_page_allocated); // to schedule a buffer release
             }
             if(!free_pages.empty())
             {
@@ -400,7 +402,7 @@ private:
     size_t release_decompressed(storage& t)
     {
         size_t r = 0;
-        if(t.modifications > 10)
+        if(t.modifications > 0)
         {
             t.compressed = std::move(compress_2_buffer(t.decompressed.begin(),page_size));
             t.modifications = 0;
@@ -468,12 +470,13 @@ private:
         }
         const auto& t = arena.at(at.page());
         return t.size > 0 && t.write_position > at.offset();
+        return true;
     }
 public:
 
     void free(compressed_address at, size_t size)
     {
-        //std::lock_guard guard(mutex);
+        std::lock_guard guard(mutex);
         if(at.address() == 0 || size == 0)
         {
             abort();
@@ -536,10 +539,14 @@ public:
 
     size_t release_decompressed()
     {
+        return 0;
+    }
+    size_t release_decompressed_()
+    {
         std::lock_guard guard(mutex);
 
         size_t r = 0;
-        if(releasables.size() <  100)
+        if(releasables.size() < min_release_size)
         {
             return r;
         }
@@ -554,11 +561,15 @@ public:
     size_t vacuum()
     {
         std::lock_guard guard(mutex);
-        releasables.clear();
+        //releasables.clear();
         size_t r = 0;
         for (auto& at : arena)
         {
             r += release_decompressed(at);
+            if (r > vacuum_max_release)
+            {
+                break;
+            }
         }
         return r;
     }

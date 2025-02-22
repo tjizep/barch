@@ -150,7 +150,7 @@ static bool extend_trace_max(node_ptr root, trace_list& trace){
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-void* art_search(trace_list& trace, const art_tree *t, const unsigned char *key, unsigned key_len) {
+void* art_search(trace_list& , const art_tree *t, const unsigned char *key, unsigned key_len) {
     ++statistics::get_ops;
     node_ptr n = t->root;
     unsigned depth = 0;
@@ -174,11 +174,11 @@ void* art_search(trace_list& trace, const art_tree *t, const unsigned char *key,
                 return nullptr;
             }
         }
-        node_ptr p = n;
+        //node_ptr p = n;
         unsigned at = n->index(key[depth]);
         n = n->get_child(at);
-        trace_element te = {p,n,at, key[depth]};
-        trace.push_back(te);
+        //trace_element te = {p,n,at, key[depth]};
+        //trace.push_back(te);
         depth++;
     }
     return nullptr;
@@ -471,8 +471,8 @@ RECURSE_SEARCH:;
     node_ptr child = n->get_node(pos);
     if(!n.is_leaf)
     {
-        trace_element te = {n,child,pos, key[depth]};
-        trace.push_back(te);
+        //trace_element te = {n,child,pos, key[depth]};
+        //trace.push_back(te);
     }
     if (!child.null()) {
         node_ptr nc = child;
@@ -716,7 +716,6 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
         return -1;
     }
     
-    node_ptr child;
     node_ptr n = t->root;
     int prefix_len, depth = 0;
     while (!n.null()) {

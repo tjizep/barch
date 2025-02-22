@@ -255,7 +255,7 @@ extern "C" {
      * is not defined. */
     int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-        read_lock rl(get_lock());
+
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -267,6 +267,7 @@ extern "C" {
         auto converted = conversion::convert(k, klen);
         trace_list trace;
         trace.reserve(klen);
+        read_lock rl(get_lock());
         void *r = art_search(trace, get_art(), converted.get_data(), converted.get_size());
 
         auto *val = (ValkeyModuleString *)r;

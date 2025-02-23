@@ -780,31 +780,31 @@ uint64_t art_size(art_tree *t) {
 art_statistics art_get_statistics(){
     art_statistics as{};
     as.heap_bytes_allocated = (int64_t)heap::allocated;
-    as.leaf_nodes = statistics::leaf_nodes;
-    as.node4_nodes = statistics::n4_nodes;
-    as.node16_nodes = statistics::n16_nodes;
-    as.node256_nodes = statistics::n256_nodes;
-    as.node256_occupants = as.node256_nodes ? (statistics::node256_occupants / as.node256_nodes ) : 0ll;
-    as.node48_nodes = statistics::n48_nodes;
-    as.bytes_allocated = statistics::node_bytes_alloc;
-    as.bytes_interior = statistics::interior_bytes_alloc;
+    as.leaf_nodes = (int64_t)statistics::leaf_nodes;
+    as.node4_nodes = (int64_t)statistics::n4_nodes;
+    as.node16_nodes = (int64_t)statistics::n16_nodes;
+    as.node256_nodes = (int64_t)statistics::n256_nodes;
+    as.node256_occupants = as.node256_nodes ? ((int64_t)statistics::node256_occupants / as.node256_nodes ) : 0ll;
+    as.node48_nodes = (int64_t)statistics::n48_nodes;
+    as.bytes_allocated = (int64_t)statistics::node_bytes_alloc;
+    as.bytes_interior = (int64_t)statistics::interior_bytes_alloc;
     return as;
 }
 
 art_ops_statistics art_get_ops_statistics(){
 
     art_ops_statistics os{};
-    os.delete_ops = statistics::delete_ops;
-    os.get_ops = statistics::get_ops;
-    os.insert_ops = statistics::insert_ops;
-    os.iter_ops = statistics::iter_ops;
-    os.iter_range_ops = statistics::iter_range_ops;
-    os.lb_ops = statistics::lb_ops;
-    os.max_ops = statistics::max_ops;
-    os.min_ops = statistics::min_ops;
-    os.range_ops = statistics::range_ops;
-    os.set_ops = statistics::set_ops;
-    os.size_ops = statistics::size_ops;
+    os.delete_ops = (int64_t)statistics::delete_ops;
+    os.get_ops = (int64_t)statistics::get_ops;
+    os.insert_ops = (int64_t)statistics::insert_ops;
+    os.iter_ops = (int64_t)statistics::iter_ops;
+    os.iter_range_ops = (int64_t)statistics::iter_range_ops;
+    os.lb_ops = (int64_t)statistics::lb_ops;
+    os.max_ops = (int64_t)statistics::max_ops;
+    os.min_ops = (int64_t)statistics::min_ops;
+    os.range_ops = (int64_t)statistics::range_ops;
+    os.set_ops = (int64_t)statistics::set_ops;
+    os.size_ops = (int64_t)statistics::size_ops;
     return os;
 }
 

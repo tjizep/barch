@@ -275,7 +275,7 @@ void free_node(art_leaf *n);
  */
 struct art_leaf {
     void *value;
-    unsigned short key_len;
+    unsigned key_len;
     unsigned char key[];
     /**
      * Checks if a leaf matches

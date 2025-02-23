@@ -28,6 +28,7 @@ struct art_statistics {
     int64_t node256_occupants;
     int64_t bytes_allocated;
     int64_t bytes_interior;
+    int64_t heap_bytes_allocated;
 };
 
 struct art_ops_statistics {

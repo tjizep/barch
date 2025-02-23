@@ -124,7 +124,7 @@ namespace conversion
             return data;
         }
 
-        [[nodiscard]] size_t get_size() const
+        [[nodiscard]] unsigned get_size() const
         {
             return size;
         }

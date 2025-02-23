@@ -14,8 +14,8 @@ extern "C"
 #include "valkeymodule.h"
 }
 
-#include <ctype.h>
-#include <string.h>
+#include <cctype>
+#include <cstring>
 #include "conversion.h"
 #include "art.h"
 #include <fast_float/fast_float.h>
@@ -78,7 +78,7 @@ static int key_check(ValkeyModuleCtx *ctx, const char * k, size_t klen){
 
 static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, size_t key_len){
     double dk;
-    uint64_t ik;
+    int64_t ik;
     const char * k;
     size_t kl;
     
@@ -181,7 +181,7 @@ extern "C" {
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
         //std::function<int (void *, const unsigned char *, uint32_t , void *)>
         auto iter = [](void *data, const unsigned char *key, uint32_t key_len, void *value) -> int {
-            iter_state * is = (iter_state*)data;
+            auto * is = (iter_state*)data;
                 
             return is->iterate(key, key_len, value);
             
@@ -341,7 +341,6 @@ extern "C" {
      * is not defined. */
     int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-        read_lock rl(get_lock());
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -351,6 +350,7 @@ extern "C" {
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
+        read_lock rl(get_lock());
 
         void *r = art_lower_bound(get_art(), converted.get_data(), converted.get_size());
 
@@ -371,7 +371,7 @@ extern "C" {
      * remove the value associated with the key and return the key if such a key existed. */
     int cmd_RM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-        write_lock w(get_lock());
+
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -383,6 +383,7 @@ extern "C" {
         
 
         auto converted = conversion::convert(k, klen);
+        write_lock w(get_lock());
         auto t = get_art();
         void *r = art_delete(t, converted.get_data(), converted.get_size());
 
@@ -410,6 +411,7 @@ extern "C" {
         return ValkeyModule_ReplyWithLongLong(ctx, size);
         
     }
+
     /* CDICT.STATISTICS
      *
      * get memory statistics. */
@@ -422,38 +424,41 @@ extern "C" {
         art_statistics as = art_get_statistics();
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Total Bytes Allocated");
+        ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocates");
+        ValkeyModule_ReplyWithLongLong(ctx,as.heap_bytes_allocated);
+
+        ValkeyModule_ReplyWithSimpleString(ctx, "bytes_addressable");
         ValkeyModule_ReplyWithLongLong(ctx,as.bytes_allocated);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Interior Bytes Allocated");
+        ValkeyModule_ReplyWithSimpleString(ctx, "interior_bytes_addressable");
         ValkeyModule_ReplyWithLongLong(ctx,as.bytes_interior);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Leaf Nodes"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "leaf_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.leaf_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Size 4 Nodes"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "size_4_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node4_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Size 16 Nodes"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "size_16_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node16_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
-        ValkeyModule_ReplyWithSimpleString(ctx, "Size 48 Nodes");
+        ValkeyModule_ReplyWithSimpleString(ctx, "size_48_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node48_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Size 256 Nodes"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "size_256_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_nodes);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Size 256 Node Occupancy"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "size_256_occupancy");
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_occupants);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
-        ValkeyModule_ReplySetArrayLength(ctx, 8);
+        ValkeyModule_ReplySetArrayLength(ctx, 9);
         return 0;
     }
 
@@ -468,47 +473,47 @@ extern "C" {
         art_ops_statistics as = art_get_ops_statistics();
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Deletes");
+        ValkeyModule_ReplyWithSimpleString(ctx, "delete_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.delete_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Retrieves"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "retrieve_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.get_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Inserts"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "insert_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.insert_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Regular Iterations"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "iterations");
         ValkeyModule_ReplyWithLongLong(ctx,as.iter_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
-        ValkeyModule_ReplyWithSimpleString(ctx, "Range Iterations");
+        ValkeyModule_ReplyWithSimpleString(ctx, "range_iterations");
         ValkeyModule_ReplyWithLongLong(ctx,as.iter_range_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Lower Bounds"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "lower_bound_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.lb_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Maximums"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "maximum_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.max_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Minimums"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "minimum_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.min_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Ranges Started"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "range_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.range_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Sets"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "set_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.set_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "Size Requests"); 
+        ValkeyModule_ReplyWithSimpleString(ctx, "size_ops");
         ValkeyModule_ReplyWithLongLong(ctx,as.size_ops);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplySetArrayLength(ctx, 11);

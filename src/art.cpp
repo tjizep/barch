@@ -779,6 +779,7 @@ uint64_t art_size(art_tree *t) {
 
 art_statistics art_get_statistics(){
     art_statistics as{};
+    as.heap_bytes_allocated = (int64_t)heap::allocated;
     as.leaf_nodes = statistics::leaf_nodes;
     as.node4_nodes = statistics::n4_nodes;
     as.node16_nodes = statistics::n16_nodes;

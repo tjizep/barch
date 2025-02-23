@@ -82,9 +82,12 @@ T* heap::allocator<T>::allocate(const size_t n) const
             *this = std::move( other );
         }
 
-        explicit buffer(size_t size) : ptr(size ? allocate<T>(size) : nullptr), count(size)
+        explicit buffer(size_t size) : ptr(nullptr), count(size)
         {
-
+            if (size)
+            {
+                ptr = (T*)allocate(byte_size());
+            }
         }
 
         buffer(const buffer& other) {
@@ -107,7 +110,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
             {
                 return *this;
             }
-            ptr = allocate<T>(other.size());
+            ptr = (T*)allocate(other.byte_size());
             count = other.size();
             emplace(other.size(), other.data());
             return *this;

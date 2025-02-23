@@ -96,7 +96,7 @@ namespace conversion
         comparable_result(const char *val, size_t size)
         : size(size + 1)
         {
-            bytes = heap::allocate<uint8_t>(this->size); //.assign(val, val + size);
+            bytes = heap::allocate<uint8_t>(this->size+1); //.assign(val, val + size);
             memcpy(bytes + 1, val, this->size - 1);
             bytes[0] = tstring;
             data = bytes;
@@ -108,12 +108,12 @@ namespace conversion
         }
         ~comparable_result()
         {
-            if (bytes != nullptr) heap::free(bytes, this->size);
+            if (bytes != nullptr) heap::free(bytes, this->size+1);
         }
         comparable_result& operator=(const comparable_result& r)
         {
             if(this == &r) return *this;
-            bytes = (uint8_t*)heap::allocate<uint8_t>(r.size);
+            bytes = heap::allocate<uint8_t>(r.size+1);
             size = r.size;
             data = bytes;
             memcpy(bytes, r.bytes, size);

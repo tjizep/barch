@@ -6,7 +6,7 @@
 enum
 {
     // TODO: we still need padding = 1 byte to pass some tests, even though heap heap checks do not fail
-    padding = 1,
+    padding = 0,
     heap_checks = 1
 };
 static size_t check_size = (heap_checks != 1) ? 0 : sizeof(uint32_t);
@@ -24,16 +24,16 @@ void* heap::allocate(size_t size){
     if (!size) return nullptr;
 
 
-    auto* r = ValkeyModule_Calloc(1, size+ padding + check_size);
+    auto* r = ValkeyModule_Calloc(1, size + padding + check_size);
     if(r)
     {
         if (heap_checks)
         {
             uint32_t ax32 = get_ptr_val(r);
-            memcpy((uint8_t*)r+size+padding, &ax32, sizeof(ax32));
+            memcpy((uint8_t*)r + size + padding, &ax32, sizeof(ax32));
             check_ptr(r, size);
         }
-        allocated+=size+ padding +check_size;
+        allocated+=size + padding + check_size;
     }
     return r;
 }
@@ -54,7 +54,7 @@ void heap::free(void* ptr, size_t size){
     if(ptr){
         check_ptr(ptr, size);
         ValkeyModule_Free(ptr);
-        allocated -= size+padding+check_size;
+        allocated -= size + padding + check_size;
     }
 }
 

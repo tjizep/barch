@@ -205,7 +205,7 @@ extern "C" {
         compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
-        ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
+        //ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
         size_t klen;
         const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
         
@@ -231,7 +231,7 @@ extern "C" {
         compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
-        ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
+        //ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
         
         size_t klen;
         const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
@@ -426,7 +426,8 @@ extern "C" {
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocates");
         ValkeyModule_ReplyWithLongLong(ctx,as.heap_bytes_allocated);
-
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "bytes_addressable");
         ValkeyModule_ReplyWithLongLong(ctx,as.bytes_allocated);
         ValkeyModule_ReplySetArrayLength(ctx, 2);

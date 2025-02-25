@@ -18,9 +18,9 @@ enum
 {
     page_size = 1024,
     reserved_address = 10000000,
-    min_release_size = 100,
-    vacuum_max_release = 1024*1024*1024,
-    auto_vac = 0
+    auto_vac = 1,
+    auto_vac_thread_wait = 20,
+    auto_vac_workers = 8
 };
 struct compressed_address
 {
@@ -162,16 +162,19 @@ struct compress
     enum
     {
         min_training_size = 1024*120,
-        compression_level = -5
+        compression_level = 1
     };
     compress()= default;
     compress(const compress&) = delete;
     ~compress()
-    {
+    {   tvac_exit = true;
+        for(auto& t: tvac) t.join();
         ZSTD_freeCCtx(cctx);
     }
 private:
     std::thread tdict {};
+    std::thread tvac[auto_vac_workers] {};
+    bool tvac_exit = false;
     unsigned size_in_training = 0;
     unsigned size_to_train = 0;
     heap::buffer<uint8_t> training_data {0};
@@ -239,7 +242,28 @@ private:
         size_in_training = 0;
         intraining.clear();
         if(can_haz)
+        {
             dict = can_haz;
+            for(unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
+            {
+                tvac[ivac] = std::thread([this,ivac]()
+                {
+                    while(!tvac_exit)
+                    {
+                        if(!releasables.empty())
+                        {
+                            vacuum(ivac);
+
+                        }else
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(auto_vac_thread_wait));
+                        }
+
+                    }
+                });
+
+            }
+        }
 
     }
 
@@ -265,8 +289,8 @@ private:
             size_to_train = 0;
             if(tdict.joinable())
                 tdict.join();
-            //tdict = std::thread(&compress::train, this);
-            train();
+            tdict = std::thread(&compress::train, this);
+            //train();
         }
         return true;
     }
@@ -355,12 +379,10 @@ private:
             if(!dict)
             {
                 add_training_entry(last.decompressed.begin(), last.write_position);
-            }else if (!last.decompressed.empty())
+            }else if (!last.decompressed.empty() && auto_vac != 0)
             {
-                if(last.modifications > 0)
-                    last.compressed = std::move(compress_2_buffer(last.decompressed.begin(),page_size));
-                last.modifications = 0;
-                releasables.push_back(last_page_allocated); // to schedule a buffer release
+                if (last.modifications > 0)
+                    releasables.push_back(last_page_allocated); // to schedule a buffer release/compress
             }
             if(!free_pages.empty())
             {
@@ -389,33 +411,35 @@ private:
         return {last_page_allocated,last};
     }
 
-    size_t release_decompressed(storage& t)
+    // compression can happen in any single thread - even a worker thread
+    size_t release_decompressed(size_t at)
     {
         size_t r = 0;
-        if(t.modifications > 0)
-        {
-            t.compressed = std::move(compress_2_buffer(t.decompressed.begin(),page_size));
-            t.modifications = 0;
+        if(arena[at].modifications > 0)
+        {   auto mods = arena[at].modifications;
+            heap::buffer<uint8_t> decompressed = compress_2_buffer(arena[at].decompressed.begin(),page_size);
+            if (mods == arena[at].modifications)
+            {
+                std::lock_guard guard(mutex); // this should reduce wait time to the minimum
+                if (mods == arena[at].modifications)
+                    arena[at].compressed = std::move(decompressed);
+                arena[at].modifications = 0;
+            }
         }
-        if(t.compressed.empty() && t.size > 0 && t.modifications == 0)
+        if(arena[at].compressed.empty() && arena[at].size > 0 && arena[at].modifications == 0)
         {
             abort();
         }
-        if(!t.decompressed.empty() && t.modifications == 0)
+        if(!arena[at].decompressed.empty() && arena[at].modifications == 0)
         {
-            r = t.decompressed.size();
-            t.decompressed.release();
+            std::lock_guard guard(mutex);
+            r = arena[at].decompressed.size();
+            arena[at].decompressed.release();
         }
 
         return r;
     }
 
-    size_t release_decompressed(size_t at)
-    {
-        if(arena.size() <= at) return 0;
-        auto& t = arena.at(at);
-        return release_decompressed(t);
-    }
 
     uint8_t* basic_resolve(compressed_address at, bool modify = false)
     {
@@ -427,7 +451,7 @@ private:
         {
             if(decompress(t))
             {
-                //releasables.push_back(at.page());
+                if (auto_vac != 0) releasables.push_back(at.page());
             }
 
         }
@@ -511,7 +535,7 @@ public:
         {
             if(decompress(at.second))
             {
-                //releasables.push_back(arena.size()-1);
+                if (auto_vac != 0) releasables.push_back(arena.size()-1);
             };
         }
         if (at.second.write_position + size >= page_size || at.second.decompressed.empty())
@@ -529,38 +553,28 @@ public:
 
     size_t release_decompressed()
     {
-
-        std::lock_guard guard(mutex);
-        size_t r = 0;
-
-        if(releasables.size() < min_release_size)
-        {
-            return r;
-        }
-        if(auto_vac != 0)
-        {
-            for (auto at : releasables)
-            {
-                r += release_decompressed(at);
-            }
-        }
-        releasables.clear();
-
-        return r;
+        return 0;
     }
-
     size_t vacuum()
     {
-        std::lock_guard guard(mutex);
-        //releasables.clear();
-        size_t r = 0;
-        for (auto& at : arena)
+        return 0;
+    }
+    size_t vacuum(size_t it)
+    {
+        heap::vector<size_t> these ;
         {
-            r += release_decompressed(at);
-            if (r > vacuum_max_release)
-            {
-                break;
-            }
+
+            std::lock_guard guard(mutex);
+            these = std::move(releasables);
+        }
+
+
+        size_t r = 0;
+        for (auto& at : these)
+        {
+            if (it % at == 0)
+                r += release_decompressed(at);
+
         }
         return r;
     }

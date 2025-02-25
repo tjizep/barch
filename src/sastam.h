@@ -255,10 +255,21 @@ T* heap::allocator<T>::allocate(const size_t n) const
         {
             *this = other;
         }
+        vector(vector&& other) noexcept
+        {
+            *this = std::move(other);
+        }
         vector& operator=(const vector& other) noexcept
         {
             resize(other.size());
             std::copy(other.begin(), other.end(), begin());
+            return *this;
+        }
+        vector& operator=(vector&& other) noexcept
+        {
+            count = other.count;
+            content = std::move(other.content);
+            other.count = 0;
             return *this;
         }
         [[nodiscard]] bool empty() const

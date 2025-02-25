@@ -473,7 +473,7 @@ struct encoded_node_content : public art_node {
     typedef node_array<i_ptr_t, false, SIZE> ChildArrayType;
     typedef node_array<i_ptr_t, true, SIZE> LeafArrayType;
 
-    encoded_node_content() : types(0)
+    encoded_node_content()
     {
     };
     ~encoded_node_content() override{};
@@ -481,13 +481,13 @@ struct encoded_node_content : public art_node {
         check_object();
         if (SIZE <= at)
             abort();
-        types.set(at, true);
+        types[at] = 1;
     }
     void set_child(unsigned at, node_ptr node) final {
         check_object();
         if (SIZE <= at)
             abort();
-        types.set(at, node.is_leaf);
+        types[at] = node.is_leaf ? 1 : 0;
         if(node.is_leaf)
         {
             leaves[at] = node.logical;
@@ -501,7 +501,7 @@ struct encoded_node_content : public art_node {
         check_object();
         if (SIZE <= at)
             abort();
-        bool is = types.test(at);
+        bool is = types[at] != 0;
         return is;
     }
     [[nodiscard]] bool has_child(unsigned at) const final {
@@ -767,7 +767,7 @@ struct encoded_node_content : public art_node {
         check_object();
         return sizeof(ChildElementType);
     };
-    std::bitset<SIZE> types;
+    std::array<uint8_t,SIZE> types{};
 protected:
     union
     {

@@ -144,7 +144,7 @@ unsigned art_node256::index(unsigned char c) const {
         abort();
     }
     children[key] = nullptr;
-    types.set(key, false);
+    types[key] = 0;
     num_children--;
     --statistics::node256_occupants;
     // Resize to a node48 on underflow, not immediately to prevent

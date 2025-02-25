@@ -5,7 +5,6 @@
 #include "sastam.h"
 enum
 {
-    // TODO: we still need padding = 1 byte to pass some tests, even though heap heap checks do not fail
     padding = 0,
     heap_checks = 1
 };

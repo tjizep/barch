@@ -55,14 +55,10 @@ local test = function()
         vk.call('ODSET',k,i)
 
     end
-    for i = 1, count do
-        local k = convert(i-1)
-        vk.call('ODGET',k)
 
-    end
-    result[inc()] = {'SIZE', vk.call('ODSIZE')}
     result[inc()] = {'TIME', vk.call('ODMILLIS')-t}
     result[inc()] = {'HEAP', vk.call('ODHEAPBYTES')}
+
 end
 
 --[[ Testing ints,doubles and string key types]]

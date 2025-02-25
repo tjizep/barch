@@ -12,6 +12,7 @@
  */
 struct compressed_release
 {
+ compressed_release();
  ~compressed_release();
 };
 
@@ -29,6 +30,7 @@ struct art_statistics {
     int64_t bytes_allocated;
     int64_t bytes_interior;
     int64_t heap_bytes_allocated;
+    int64_t bytes_compressed;
 };
 
 struct art_ops_statistics {

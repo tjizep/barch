@@ -11,6 +11,7 @@ std::atomic<uint64_t> statistics::node256_occupants;
 std::atomic<uint64_t> statistics::leaf_nodes;
 std::atomic<uint64_t> statistics::node_bytes_alloc;
 std::atomic<uint64_t> statistics::interior_bytes_alloc;
+std::atomic<uint64_t> statistics::bytes_compressed;
 /**
  * ops stats
  */

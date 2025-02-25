@@ -15,9 +15,13 @@ compress & get_leaf_compression()
     return leaf_compression;
 };
 
+compressed_release::compressed_release()
+{
+    get_leaf_compression().enter_context();
+}
 compressed_release::~compressed_release()
 {
-    get_leaf_compression().release_decompressed();
+    get_leaf_compression().release_context();
 }
 extern void free_leaf_node(node_ptr n);
 /**
@@ -784,6 +788,7 @@ art_statistics art_get_statistics(){
     as.node48_nodes = (int64_t)statistics::n48_nodes;
     as.bytes_allocated = (int64_t)statistics::node_bytes_alloc;
     as.bytes_interior = (int64_t)statistics::interior_bytes_alloc;
+    as.bytes_compressed = (int64_t)statistics::bytes_compressed;
     return as;
 }
 

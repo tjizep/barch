@@ -9,31 +9,41 @@
 #include "sastam.h"
 #include <mutex>
 #include <ostream>
+#include <statistics.h>
 #include <stdexcept>
 #include <thread>
 #include <vector>
 #include <zstd.h>
 #include <zdict.h>
+
+#include "zstd.h"
+#include "zstd.h"
+
 enum
 {
-    page_size = 1024,
-    reserved_address = 10000000,
+    page_size = 4096,
+    reserved_address_base = 10000000,
     auto_vac = 1,
-    auto_vac_thread_wait = 20,
+    auto_vac_thread_wait_ms = 100,
     auto_vac_workers = 8
 };
+
 struct compressed_address
 {
-    compressed_address() =default;
-    compressed_address(const compressed_address &) = default;
-    compressed_address& operator=(const compressed_address &) = default;
+    compressed_address() = default;
+    compressed_address(const compressed_address&) = default;
+    compressed_address& operator=(const compressed_address&) = default;
 
-    explicit compressed_address(size_t index) : index(index) {}
+    explicit compressed_address(size_t index) : index(index)
+    {
+    }
+
     compressed_address(size_t p, size_t o)
     {
         from_page_offset(p, o);
     }
-    compressed_address &operator =(nullptr_t)
+
+    compressed_address& operator =(nullptr_t)
     {
         index = 0;
         return *this;
@@ -48,46 +58,57 @@ struct compressed_address
     {
         return index == other.index;
     }
+
     bool operator!=(const compressed_address& other) const
     {
         return index != other.index;
     }
+
     bool operator<(const compressed_address& other) const
     {
         return index < other.index;
     }
+
     [[nodiscard]] bool is_null_base() const
     {
-        return (page() % reserved_address) == 0;
+        return (page() % reserved_address_base) == 0;
     }
+
     void clear()
     {
         index = 0;
     }
+
     void from_page_index(size_t p)
     {
         index = p * page_size;
     }
+
     void from_page_offset(size_t p, size_t offset)
     {
         index = p * page_size + offset;
     }
+
     [[nodiscard]] size_t offset() const
     {
         return index % page_size;
     }
+
     [[nodiscard]] size_t page() const
     {
         return index / page_size;
     }
+
     [[nodiscard]] size_t address() const
     {
-        return index ;
+        return index;
     }
+
     void from_address(size_t a)
     {
         index = a;
     }
+
     bool operator==(uint32_t other) const
     {
         return index == other;
@@ -96,19 +117,24 @@ struct compressed_address
 private:
     uint32_t index = 0;
 };
+
 struct training_entry
 {
-    training_entry(const uint8_t* data, size_t size) : data(data), size(size) {}
-    const uint8_t * data;
+    training_entry(const uint8_t* data, size_t size) : data(data), size(size)
+    {
+    }
+
+    const uint8_t* data;
     size_t size;
 };
+
 struct storage
 {
     storage() : compressed(0), decompressed(0)
     {
-
     }
-    storage(storage&& other)  noexcept : compressed(0), decompressed(0)
+
+    storage(storage&& other) noexcept : compressed(0), decompressed(0)
     {
         *this = std::move(other);
     }
@@ -117,9 +143,10 @@ struct storage
     {
         *this = other;
     }
+
     storage& operator=(const storage& other)
     {
-        if(&other == this) return *this;
+        if (&other == this) return *this;
         compressed = other.compressed;
         decompressed = other.decompressed;
         write_position = other.write_position;
@@ -127,6 +154,7 @@ struct storage
         size = other.size;
         return *this;
     }
+
     void clear()
     {
         compressed.release();
@@ -135,9 +163,10 @@ struct storage
         modifications = 0;
         size = 0;
     }
+
     storage& operator=(storage&& other) noexcept
     {
-        if(&other == this) return *this;
+        if (&other == this) return *this;
         compressed = std::move(other.compressed);
         decompressed = std::move(other.decompressed);
         write_position = other.write_position;
@@ -151,54 +180,63 @@ struct storage
     {
         return size == 0 && write_position == 0 && compressed.empty() && decompressed.empty();
     }
+
     heap::buffer<uint8_t> compressed;
     heap::buffer<uint8_t> decompressed;
     uint16_t write_position = 0;
     uint16_t size = 0;
     uint16_t modifications = 0;
 };
+
 struct compress
 {
     enum
     {
-        min_training_size = 1024*120,
+        min_training_size = 1024 * 120,
         compression_level = 1
     };
-    compress()= default;
+
+    compress() = default;
     compress(const compress&) = delete;
+
     ~compress()
-    {   tvac_exit = true;
-        for(auto& t: tvac) t.join();
+    {
+        tvac_exit = true;
+        for (auto& t : tvac) t.join();
         ZSTD_freeCCtx(cctx);
     }
+
 private:
-    std::thread tdict {};
-    std::thread tvac[auto_vac_workers] {};
+    std::thread tdict{};
+    std::thread tvac[auto_vac_workers]{};
     bool tvac_exit = false;
     unsigned size_in_training = 0;
     unsigned size_to_train = 0;
-    heap::buffer<uint8_t> training_data {0};
-    std::vector<training_entry, heap::allocator<training_entry>> trainables {};
-    std::vector<training_entry, heap::allocator<training_entry>> intraining {};
-    ZSTD_CDict* dict {nullptr};
-    ZSTD_CCtx*  cctx = ZSTD_createCCtx();
-    ZSTD_DCtx*  dctx = ZSTD_createDCtx();
+    heap::buffer<uint8_t> training_data{0};
+    std::vector<training_entry, heap::allocator<training_entry>> trainables{};
+    std::vector<training_entry, heap::allocator<training_entry>> intraining{};
+    ZSTD_CDict* dict{nullptr};
+    ZSTD_CCtx* cctx = ZSTD_createCCtx();
+    ZSTD_DCtx* dctx = ZSTD_createDCtx();
     size_t trained_size = 0;
-    mutable std::mutex mutex {};
+    mutable std::mutex mutex{};
+    /// TODO: NB! the arena may reallocate while compression worker threads are running and cause instability
     heap::vector<storage> arena{};
-    heap::vector<size_t> releasables {};
-    heap::vector<size_t> free_pages {};
-    size_t last_page_allocated {0};
+    heap::vector<size_t> releasables{};
+    heap::vector<size_t> free_pages{};
+    size_t last_page_allocated{0};
     compressed_address arena_head{0};
-    compressed_address highest_reserve_address{ 0};
-    compress& operator=(const compress& t) {
-        if(this == &t) return *this;
+    compressed_address highest_reserve_address{0};
+    bool in_context = false;
+    compress& operator=(const compress& t)
+    {
+        if (this == &t) return *this;
         return *this;
     };
 
     void train()
     {
-        if(size_in_training < min_training_size)
+        if (size_in_training < min_training_size)
         {
             return;
         }
@@ -209,85 +247,83 @@ private:
 
         auto samplesBufferPtr = samplesBuffer.begin();
         auto sampleSizesPtr = sampleSizes.begin();
-        for(auto [data,size]: intraining)
+        for (auto [data,size] : intraining)
         {
             *sampleSizesPtr++ = size;
             memcpy(samplesBufferPtr, data, size);
             heap::free(const_cast<uint8_t*>(data), size);
             samplesBufferPtr += size;
         }
-        if(sampleSizesPtr - sampleSizes.begin() != sampleCount)
+        if (sampleSizesPtr - sampleSizes.begin() != sampleCount)
         {
             throw std::runtime_error("training size mismatch");
         }
-        if(samplesBufferPtr - samplesBuffer.begin() != size_in_training)
+        if (samplesBufferPtr - samplesBuffer.begin() != size_in_training)
         {
             throw std::runtime_error("training size mismatch");
         }
         ZSTD_CDict* can_haz = nullptr;
         size_t trainedSize = ZDICT_trainFromBuffer(training_data.begin(),
-            size_in_training, samplesBuffer.begin(),
-            sampleSizes.cbegin(), sampleCount);
+                                                   size_in_training, samplesBuffer.begin(),
+                                                   sampleSizes.cbegin(), sampleCount);
         if (ZDICT_isError(trainedSize))
         {
-            auto zde =ZDICT_getErrorName(trainedSize) ;
+            auto zde = ZDICT_getErrorName(trainedSize);
             std::cerr << zde << std::endl;
             // some issue - need to start again
-        }else
-        {   trained_size = trainedSize;
+        }
+        else
+        {
+            trained_size = trainedSize;
             can_haz = ZSTD_createCDict(training_data.begin(), trainedSize, compression_level);
         }
 
 
         size_in_training = 0;
         intraining.clear();
-        if(can_haz)
+        if (can_haz)
         {
             dict = can_haz;
-            for(unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
+            for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
             {
                 tvac[ivac] = std::thread([this,ivac]()
                 {
-                    while(!tvac_exit)
+                    while (!tvac_exit)
                     {
-                        if(!releasables.empty())
+                        if (!releasables.empty())
                         {
                             vacuum(ivac);
-
-                        }else
-                        {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(auto_vac_thread_wait));
                         }
-
+                        else
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(auto_vac_thread_wait_ms));
+                        }
                     }
                 });
-
             }
         }
-
     }
 
-    bool add_training_entry(const uint8_t* data, size_t size )
+    bool add_training_entry(const uint8_t* data, size_t size)
     {
-        //std::lock_guard guard(mutex);
-        if (dict || size_in_training != 0 ||size_to_train > min_training_size)
+        if (dict || size_in_training != 0 || size_to_train > min_training_size)
         {
-              return false;
+            return false;
         }
         heap::buffer<uint8_t> sample(size);
         sample.emplace(size, data);
-        training_entry t = {sample.move(),size};
+        training_entry t = {sample.move(), size};
         trainables.push_back(t);
         size_to_train += size;
 
-        if(size_to_train > min_training_size)
+        if (size_to_train > min_training_size)
         {
-            if(!intraining.empty() || size_in_training != 0)
+            if (!intraining.empty() || size_in_training != 0)
                 abort();
             intraining.swap(trainables);
             size_in_training = size_to_train;
             size_to_train = 0;
-            if(tdict.joinable())
+            if (tdict.joinable())
                 tdict.join();
             tdict = std::thread(&compress::train, this);
             //train();
@@ -296,31 +332,31 @@ private:
     }
 
 
-    heap::buffer<uint8_t> compress_2_buffer(const uint8_t* data, size_t size) const
+    static heap::buffer<uint8_t> compress_2_buffer(ZSTD_CDict* localDict, ZSTD_CCtx* cctx, const uint8_t* data,
+                                                   size_t size)
     {
-
-        if(!dict) return heap::buffer<uint8_t>(0);
+        if (!localDict) return heap::buffer<uint8_t>(0);
         size_t compressed_max_size = ZSTD_compressBound(size);
         auto compressed_data_temp = heap::buffer<uint8_t>(compressed_max_size);
         size_t compressed = ZSTD_compress_usingCDict(cctx, compressed_data_temp.begin(),
-            compressed_max_size, data, size, dict);
+                                                     compressed_max_size, data, size, localDict);
         if (ZDICT_isError(compressed))
         {
             abort();
         }
         auto compressed_data = heap::buffer<uint8_t>(compressed);
-        compressed_data.emplace( compressed, compressed_data_temp.begin());
+        compressed_data.emplace(compressed, compressed_data_temp.begin());
         return compressed_data;
     }
 
-    heap::buffer<uint8_t> decompress_buffer(size_t known_decompressed_size,const heap::buffer<uint8_t>& compressed)
+    heap::buffer<uint8_t> decompress_buffer(size_t known_decompressed_size, const heap::buffer<uint8_t>& compressed)
     {
         heap::buffer<uint8_t> decompressed = heap::buffer<uint8_t>(known_decompressed_size);
         size_t decompressed_size = ZSTD_decompress_usingDict(dctx,
-            decompressed.begin(),decompressed.size(),
-            compressed.begin(),compressed.size(),
-            training_data.begin(),trained_size);
-        if(ZDICT_isError(decompressed_size))
+                                                             decompressed.begin(), decompressed.size(),
+                                                             compressed.begin(), compressed.size(),
+                                                             training_data.begin(), trained_size);
+        if (ZDICT_isError(decompressed_size))
         {
             auto msg = ZDICT_getErrorName(decompressed_size);
             std::cerr << msg << std::endl;
@@ -329,12 +365,13 @@ private:
         return decompressed;
     }
     ;
-    [[nodiscard]] bool decompress(storage & todo)
+
+    [[nodiscard]] bool decompress(storage& todo)
     {
-        if(todo.decompressed.empty() && !todo.compressed.empty())
+        if (todo.decompressed.empty() && !todo.compressed.empty())
         {
             todo.decompressed = decompress_buffer(page_size, todo.compressed);
-            if(todo.decompressed.size() != page_size)
+            if (todo.decompressed.size() != page_size)
             {
                 abort();
             }
@@ -350,15 +387,16 @@ private:
 
     [[nodiscard]] static bool is_null_base(size_t at)
     {
-        return (at % reserved_address) == 0;
+        return (at % reserved_address_base) == 0;
     }
 
     [[nodiscard]] size_t last_block() const
     {
-        if(arena.empty()) return 0;
+        if (arena.empty()) return 0;
         return arena.size() - 1;
     }
-    std::pair<size_t,storage&> create_if_required(size_t size)
+
+    std::pair<size_t, storage&> create_if_required(size_t size)
     {
         if (is_null_base(last_block()))
         {
@@ -369,74 +407,105 @@ private:
         {
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(size));
-            return {arena.size()-1,arena.back()};
+            return {arena.size() - 1, arena.back()};
         }
 
-        auto &last = arena.at(last_page_allocated);
+        auto& last = arena.at(last_page_allocated);
 
         if (last.write_position + size >= page_size)
         {
-            if(!dict)
+            if (!dict)
             {
                 add_training_entry(last.decompressed.begin(), last.write_position);
-            }else if (!last.decompressed.empty() && auto_vac != 0)
+            }
+            else if (!last.decompressed.empty() && auto_vac != 0)
             {
                 if (last.modifications > 0)
                     releasables.push_back(last_page_allocated); // to schedule a buffer release/compress
             }
-            if(!free_pages.empty())
+            if (!free_pages.empty())
             {
                 size_t fp = free_pages.back();
                 free_pages.pop_back();
-                auto&p = arena.at(fp);
+                auto& p = arena.at(fp);
                 if (p.empty())
                 {
                     p.decompressed = std::move(heap::buffer<uint8_t>(page_size));
-                    memset(p.decompressed.begin(),0, page_size);
-                    return {fp,p};
+                    memset(p.decompressed.begin(), 0, page_size);
+                    return {fp, p};
                 }
             }
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
-            memset(arena.back().decompressed.begin(),0, page_size);
-            return {arena.size()-1,arena.back()};
-
+            memset(arena.back().decompressed.begin(), 0, page_size);
+            return {arena.size() - 1, arena.back()};
         }
         if (last.empty())
         {
             last.decompressed = std::move(heap::buffer<uint8_t>(page_size));
-            memset(last.decompressed.begin(),0, page_size);
-            return {last_page_allocated,last};
+            memset(last.decompressed.begin(), 0, page_size);
+            return {last_page_allocated, last};
         }
-        return {last_page_allocated,last};
+        return {last_page_allocated, last};
     }
 
     // compression can happen in any single thread - even a worker thread
-    size_t release_decompressed(size_t at)
+    size_t release_decompressed(ZSTD_CCtx* cctx, size_t at)
     {
         size_t r = 0;
-        if(arena[at].modifications > 0)
-        {   auto mods = arena[at].modifications;
-            heap::buffer<uint8_t> decompressed = compress_2_buffer(arena[at].decompressed.begin(),page_size);
-            if (mods == arena[at].modifications)
+        uint16_t mods = 0;
+        heap::buffer<uint8_t> compressed;
+        heap::buffer<uint8_t> decompressed;
+        heap::buffer<uint8_t> torelease;
+
+        {
+            std::lock_guard guard(mutex); // this should reduce wait time to the minimum
+
+            auto& t = arena[at];
+
+            //heap::buffer<uint8_t> decompressed;
             {
-                std::lock_guard guard(mutex); // this should reduce wait time to the minimum
-                if (mods == arena[at].modifications)
-                    arena[at].compressed = std::move(decompressed);
-                arena[at].modifications = 0;
+                if (t.modifications > 0)
+                {   decompressed = arena[at].decompressed;
+                    mods = arena[at].modifications;
+                }
             }
         }
-        if(arena[at].compressed.empty() && arena[at].size > 0 && arena[at].modifications == 0)
-        {
-            abort();
-        }
-        if(!arena[at].decompressed.empty() && arena[at].modifications == 0)
-        {
-            std::lock_guard guard(mutex);
-            r = arena[at].decompressed.size();
-            arena[at].decompressed.release();
-        }
 
+
+        if (mods > 0 && !arena[at].decompressed.empty())
+            compressed = compress_2_buffer(dict, cctx, decompressed.begin(), page_size);
+
+        {
+            std::lock_guard guard(mutex); // this should reduce wait time to the minimum
+            auto& t = arena[at];
+            if (!compressed.empty() && mods == t.modifications)
+            {
+                if(!t.compressed.empty())
+                {
+                    statistics::bytes_compressed -= t.compressed.byte_size();
+                }
+                statistics::bytes_compressed += compressed.byte_size();
+                t.compressed = std::move(compressed);
+                t.modifications = 0;
+            }
+            if (t.compressed.empty() && t.size > 0 && t.modifications == 0)
+            {
+                abort();
+            }
+            if (!t.decompressed.empty() && t.modifications == 0)
+            {
+                if (!in_context)
+                {
+                    r = t.decompressed.size();
+                    torelease = std::move(t.decompressed);
+                }else
+                {
+                    releasables.push_back(at);
+                }
+
+            }
+        }
         return r;
     }
 
@@ -447,13 +516,12 @@ private:
         invalid(at);
         auto p = at.page();
         auto& t = arena.at(p);
-        if(t.decompressed.empty() && !t.compressed.empty())
+        if (t.decompressed.empty() && !t.compressed.empty())
         {
-            if(decompress(t))
+            if (decompress(t))
             {
                 if (auto_vac != 0) releasables.push_back(at.page());
             }
-
         }
         if (t.decompressed.empty())
         {
@@ -465,7 +533,6 @@ private:
         }
 
         return t.decompressed.begin() + at.offset();
-
     }
 
     void invalid(compressed_address at) const
@@ -475,6 +542,7 @@ private:
             abort();
         }
     }
+
     [[nodiscard]] bool valid(compressed_address at) const
     {
         if (at == 0) return true;
@@ -484,19 +552,18 @@ private:
         }
         const auto& t = arena.at(at.page());
         return t.size > 0 && t.write_position > at.offset();
-        return true;
     }
-public:
 
+public:
     void free(compressed_address at, size_t size)
     {
         std::lock_guard guard(mutex);
-        if(at.address() == 0 || size == 0)
+        if (at.address() == 0 || size == 0)
         {
             abort();
         }
         auto& t = arena.at(at.page());
-        if(t.size == 0)
+        if (t.size == 0)
         {
             abort();
         }
@@ -504,27 +571,29 @@ public:
         {
             t.clear();
             free_pages.push_back(at.page());
-        }else
+        }
+        else
         {
             t.size--;
             t.modifications++;
         }
-
     }
 
 
-    template<typename T>
+    template <typename T>
     T* resolve(compressed_address at)
-    {   if (at.null()) return nullptr;
+    {
+        if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
         return (T*)basic_resolve(at);
     }
 
-    template<typename T>
+    template <typename T>
     T* resolve_modified(compressed_address at)
-    {   if (at.null()) return nullptr;
+    {
+        if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
-        return (T*)basic_resolve(at,true);
+        return (T*)basic_resolve(at, true);
     }
 
     compressed_address new_address(size_t size)
@@ -533,9 +602,9 @@ public:
         auto at = create_if_required(size);
         if (at.second.decompressed.empty() && !at.second.compressed.empty())
         {
-            if(decompress(at.second))
+            if (decompress(at.second))
             {
-                if (auto_vac != 0) releasables.push_back(arena.size()-1);
+                if (auto_vac != 0) releasables.push_back(arena.size() - 1);
             };
         }
         if (at.second.write_position + size >= page_size || at.second.decompressed.empty())
@@ -543,7 +612,7 @@ public:
             abort();
         }
         last_page_allocated = at.first;
-        compressed_address ca(at.first,at.second.write_position);
+        compressed_address ca(at.first, at.second.write_position);
         at.second.write_position += size;
         at.second.size++;
         at.second.modifications++;
@@ -551,31 +620,43 @@ public:
         return ca;
     }
 
-    size_t release_decompressed()
+    void release_context()
     {
-        return 0;
+        in_context = false;
     }
+    void enter_context()
+    {
+        in_context = true;
+    }
+
     size_t vacuum()
     {
         return 0;
     }
-    size_t vacuum(size_t it)
+
+    // NB: may only be called from auto_vac compression worker threads
+    size_t vacuum(size_t)
     {
-        heap::vector<size_t> these ;
-        {
-
-            std::lock_guard guard(mutex);
-            these = std::move(releasables);
-        }
-
-
+        ZSTD_CCtx* cctx = ZSTD_createCCtx();
         size_t r = 0;
-        for (auto& at : these)
+        while (true)
         {
-            if (it % at == 0)
-                r += release_decompressed(at);
+            size_t at = 0;
+            {
+                std::this_thread::yield();
+                std::lock_guard guard(mutex);
+                if (releasables.empty())
+                {
+                    return r;
+                }
+                at = releasables.back();
+                releasables.pop_back();
+            }
 
+            r += release_decompressed(cctx, at);
         }
+        ZSTD_freeCCtx(cctx);
+
         return r;
     }
 };

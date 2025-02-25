@@ -424,8 +424,12 @@ extern "C" {
         art_statistics as = art_get_statistics();
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocates");
+        ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
         ValkeyModule_ReplyWithLongLong(ctx,as.heap_bytes_allocated);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "bytes_compressed");
+        ValkeyModule_ReplyWithLongLong(ctx,as.bytes_compressed);
         ValkeyModule_ReplySetArrayLength(ctx, 2);
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "bytes_addressable");

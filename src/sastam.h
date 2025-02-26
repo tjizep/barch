@@ -13,6 +13,8 @@
 #include <vector>
 
 namespace heap {
+    uint64_t get_physical_memory_bytes();
+    double get_physical_memory_ratio();
     extern std::atomic<uint64_t> allocated;
     void* allocate(size_t size);
 
@@ -22,11 +24,7 @@ namespace heap {
         return static_cast<T*>(allocate(count * sizeof(T)));
     }
     void free(void* ptr, size_t size);
-    template<typename T>
-    void free(T* ptr)
-    {
-        free(ptr, sizeof(T));
-    }
+    void free(void* ptr);
     void check_ptr(void* ptr, size_t size);
 
     template <class T>

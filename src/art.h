@@ -30,7 +30,11 @@ struct art_statistics {
     int64_t bytes_allocated;
     int64_t bytes_interior;
     int64_t heap_bytes_allocated;
-    int64_t bytes_compressed;
+    int64_t page_bytes_compressed;
+    int64_t max_page_bytes_uncompressed;
+    int64_t page_bytes_uncompressed;
+    int64_t vacuums_performed;
+    int64_t last_vacuum_time;
 };
 
 struct art_ops_statistics {

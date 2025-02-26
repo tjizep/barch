@@ -12,8 +12,11 @@ namespace statistics {
     extern std::atomic<uint64_t> leaf_nodes;
     extern std::atomic<uint64_t> node_bytes_alloc;
     extern std::atomic<uint64_t> interior_bytes_alloc;
-    extern std::atomic<uint64_t> bytes_compressed;
-
+    extern std::atomic<uint64_t> page_bytes_compressed;
+    extern std::atomic<uint64_t> max_page_bytes_uncompressed;
+    extern std::atomic<uint64_t> page_bytes_uncompressed;
+    extern std::atomic<uint64_t> vacuums_performed;
+    extern std::atomic<uint64_t> last_vacuum_time;
     /**
      * ops stats
      */

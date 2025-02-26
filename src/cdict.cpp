@@ -215,8 +215,11 @@ extern "C" {
         auto converted = conversion::convert(k, klen);
         write_lock wl(get_lock());
 
-        art_insert(get_art(), converted.get_data(), converted.get_size(), argv[2]);
-
+        void * old = art_insert(get_art(), converted.get_data(), converted.get_size(), argv[2]);
+        if(old)
+        {
+            ValkeyModule_FreeString(nullptr,(ValkeyModuleString*)old);
+        }
         /* We need to keep a reference to the value stored at the key, otherwise
          * it would be freed when this callback returns. */
         ValkeyModule_RetainString(nullptr, argv[2]);
@@ -421,49 +424,66 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
+        long row_count = 0;
         art_statistics as = art_get_statistics();
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
         ValkeyModule_ReplyWithLongLong(ctx,as.heap_bytes_allocated);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-        ValkeyModule_ReplyWithSimpleString(ctx, "bytes_compressed");
-        ValkeyModule_ReplyWithLongLong(ctx,as.bytes_compressed);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplyWithSimpleString(ctx, "page_bytes_compressed");
+        ValkeyModule_ReplyWithLongLong(ctx,as.page_bytes_compressed);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "max_page_bytes_uncompressed");
+        ValkeyModule_ReplyWithLongLong(ctx,as.max_page_bytes_uncompressed);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "last_vacuum_time");
+        ValkeyModule_ReplyWithLongLong(ctx,as.last_vacuum_time);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "vacuum_count");
+        ValkeyModule_ReplyWithLongLong(ctx,as.vacuums_performed);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "page_bytes_uncompressed");
+        ValkeyModule_ReplyWithLongLong(ctx,as.page_bytes_uncompressed);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "bytes_addressable");
         ValkeyModule_ReplyWithLongLong(ctx,as.bytes_allocated);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "interior_bytes_addressable");
         ValkeyModule_ReplyWithLongLong(ctx,as.bytes_interior);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "leaf_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.leaf_nodes);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "size_4_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node4_nodes);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "size_16_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node16_nodes);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithSimpleString(ctx, "size_48_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node48_nodes);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "size_256_nodes");
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_nodes);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "size_256_occupancy");
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_occupants);
-        ValkeyModule_ReplySetArrayLength(ctx, 2);
-        ValkeyModule_ReplySetArrayLength(ctx, 9);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplySetArrayLength(ctx, row_count);
         return 0;
     }
 
@@ -536,7 +556,7 @@ extern "C" {
 
     int cmd_HEAP_BYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
-        compressed_release release;
+        //compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
         ;

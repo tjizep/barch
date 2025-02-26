@@ -72,15 +72,13 @@ art_node* alloc_node(unsigned nt, const children_t& c) {
     case node_48:
         return (art_node*)alloc_any_node<art_node48_4>()->expand_pointers(ref, c);
     case node_256:
-        return alloc_any_node<art_node256>();
+        return (art_node*)alloc_any_node<art_node256_4>()->expand_pointers(ref, c);
     default:
         abort();
     }
 
 }
 art_node* alloc_8_node(unsigned nt) {
-    node_ptr ref;
-    node_ptr n;
     switch (nt)
     {
     case node_4:
@@ -90,7 +88,7 @@ art_node* alloc_8_node(unsigned nt) {
     case node_48:
         return alloc_any_node<art_node48_8>();
     case node_256:
-        return alloc_any_node<art_node256>();
+        return alloc_any_node<art_node256_8>();
     default:
         abort();
     }
@@ -117,111 +115,5 @@ unsigned art_node::check_prefix(const unsigned char *key, unsigned key_len, unsi
     return idx;
 }
 
-art_node256::art_node256() { 
-    statistics::node_bytes_alloc += sizeof(art_node256);
-    statistics::interior_bytes_alloc += sizeof(art_node256);
-    ++statistics::n256_nodes;
-}
 
-art_node256::~art_node256() {
-    statistics::node256_occupants -= num_children;
-    statistics::node_bytes_alloc -= sizeof(art_node256);
-    statistics::interior_bytes_alloc -= sizeof(art_node256);
-    --statistics::n256_nodes;
-}
-uint8_t art_node256::type() const {
-    return node_256;
-}
-
-unsigned art_node256::index(unsigned char c) const {
-    if (children[c].exists())
-        return c;
-    return 256;
-}
-    
- void art_node256::remove(node_ptr& ref, unsigned pos, unsigned char key) {
-    if(key != pos) {
-        abort();
-    }
-    children[key] = nullptr;
-    types[key] = 0;
-    num_children--;
-    --statistics::node256_occupants;
-    // Resize to a node48 on underflow, not immediately to prevent
-    // trashing if we sit on the 48/49 boundary
-    if (num_children == 37) {
-        auto *new_node = alloc_node(node_48, {});
-        ref = new_node;
-        new_node->copy_header(this);
-    
-        pos = 0;
-        for (unsigned i = 0; i < 256; i++) {
-            if (has_any(i)) {
-                new_node->set_child(pos, get_child(i)); //[pos] = n->children[i];
-                new_node->set_key(i, pos + 1);
-                pos++;
-            }
-        }
-        
-        free_node(this);   
-    }
-}
-
-void art_node256::add_child(unsigned char c, node_ptr&, node_ptr child) {
-    if(!has_child(c)) {
-        ++statistics::node256_occupants;
-        ++num_children; // just to keep stats ok
-    }
-    set_child(c, child);
-}
-node_ptr art_node256::last() const {
-    return get_child(last_index());
-}
-unsigned art_node256::last_index() const {
-    unsigned idx = 255;
-    while (children[idx].empty()) idx--;
-    return idx;
-}
-
-unsigned art_node256::first_index() const {
-    unsigned uc = 0; // ?
-    for (; uc < 256; uc++){
-        if(children[uc].exists()) {
-            return uc;
-        }
-    }
-    return uc;
-}
-
-std::pair<trace_element, bool> art_node256::lower_bound_child(unsigned char c)
-{
-    for (unsigned i = c; i < 256; ++i) {
-        if (has_child(i)) {
-            // because nodes are ordered accordingly
-            return {{this,get_child(i), i}, (i == c)};
-        }
-    }
-    return {{nullptr,nullptr,256},false};
-}
-
-trace_element art_node256::next(const trace_element& te)
-{
-    for (unsigned i = te.child_ix+1; i < 256; ++i) { // these aren't sparse so shouldn't take long
-        if (has_child(i)) {// because nodes are ordered accordingly
-            return {this,get_child(i),i};
-        }
-    }
-    return {};
-}
-
-trace_element art_node256::previous(const trace_element& te)
-{
-    if(!te.child_ix) return {};
-    for (unsigned i = te.child_ix-1; i > 0; --i) { // these aren't sparse so shouldn't take long
-        if (has_child(i)) {// because nodes are ordered accordingly
-            return {this,get_child(i),i};
-        }
-    }
-    return {};
-}
 

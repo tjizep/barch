@@ -1216,28 +1216,150 @@ typedef art_node48<uintptr_t> art_node48_8;
 /**
  * Full node with 256 children
  */
-struct art_node256 final : public encoded_node_content<256,0,uintptr_t> {
-    art_node256();
-    ~art_node256() override;
+template<typename intptr_t>
+struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
+    typedef encoded_node_content<256,0,intptr_t> this_type;
+
+    using this_type::copy_from;
+    using this_type::remove_child;
+    using this_type::set_child;
+    using this_type::add_child;
+    using this_type::has_child;
+
+    using this_type::num_children;
+    using this_type::get_child;
+    using this_type::partial_len;
+    using this_type::partial;
+    using this_type::keys;
+    using this_type::children;
+    using this_type::types;
+    using this_type::insert_type;
+    using this_type::index;
+    using this_type::has_any;
+
     [[nodiscard]] size_t alloc_size() const override
     {
         return sizeof(art_node256);
     }
-    [[nodiscard]] uint8_t type() const override ;
-    [[nodiscard]] unsigned index(unsigned char c) const override ;
-    
-    void remove(node_ptr& ref, unsigned pos, unsigned char key) override ;
+    art_node256() {
+        statistics::node_bytes_alloc += sizeof(art_node256);
+        statistics::interior_bytes_alloc += sizeof(art_node256);
+        ++statistics::n256_nodes;
+    }
 
-    void add_child(unsigned char c, node_ptr&, node_ptr child) override ;
-    [[nodiscard]] node_ptr last() const override ;
-    [[nodiscard]] unsigned last_index() const override ;
-    [[nodiscard]] unsigned first_index() const override ;
-    [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override ;
-    [[nodiscard]] trace_element next(const trace_element& te) override;
-    [[nodiscard]] trace_element previous(const trace_element& te) override;
+    ~art_node256() override {
+        statistics::node256_occupants -= num_children;
+        statistics::node_bytes_alloc -= sizeof(art_node256);
+        statistics::interior_bytes_alloc -= sizeof(art_node256);
+        --statistics::n256_nodes;
+    }
+    [[nodiscard]] uint8_t type() const {
+        return node_256;
+    }
+
+    [[nodiscard]] unsigned index(unsigned char c) const override
+    {
+        if (children[c].exists())
+            return c;
+        return 256;
+    }
+
+     void remove(node_ptr& ref, unsigned pos, unsigned char key) override
+     {
+        if(key != pos) {
+            abort();
+        }
+        children[key] = nullptr;
+        types[key] = 0;
+        num_children--;
+        --statistics::node256_occupants;
+        // Resize to a node48 on underflow, not immediately to prevent
+        // trashing if we sit on the 48/49 boundary
+        if (num_children == 37) {
+            auto *new_node = alloc_node(node_48, {});
+            ref = new_node;
+            new_node->copy_header(this);
+
+            pos = 0;
+            for (unsigned i = 0; i < 256; i++) {
+                if (has_any(i)) {
+                    new_node->set_child(pos, get_child(i)); //[pos] = n->children[i];
+                    new_node->set_key(i, pos + 1);
+                    pos++;
+                }
+            }
+
+            free_node(this);
+        }
+    }
+
+    void add_child(unsigned char c, node_ptr&, node_ptr child) override
+    {
+        if(!has_child(c)) {
+            ++statistics::node256_occupants;
+            ++num_children; // just to keep stats ok
+        }
+        set_child(c, child);
+    }
+    [[nodiscard]] node_ptr last() const override
+    {
+        return get_child(last_index());
+    }
+    [[nodiscard]] unsigned last_index() const override
+    {
+        unsigned idx = 255;
+        while (children[idx].empty()) idx--;
+        return idx;
+    }
+
+    [[nodiscard]] unsigned first_index() const override
+    {
+        unsigned uc = 0; // ?
+        for (; uc < 256; uc++){
+            if(children[uc].exists()) {
+                return uc;
+            }
+        }
+        return uc;
+    }
+
+    std::pair<trace_element, bool> lower_bound_child(unsigned char c) override
+    {
+        for (unsigned i = c; i < 256; ++i) {
+            if (has_child(i)) {
+                // because nodes are ordered accordingly
+                return {{this,get_child(i), i}, (i == c)};
+            }
+        }
+        return {{nullptr,nullptr,256},false};
+    }
+
+    trace_element next(const trace_element& te) override
+    {
+        for (unsigned i = te.child_ix+1; i < 256; ++i) { // these aren't sparse so shouldn't take long
+            if (has_child(i)) {// because nodes are ordered accordingly
+                return {this,get_child(i),i};
+            }
+        }
+        return {};
+    }
+
+    trace_element previous(const trace_element& te) override
+    {
+        if(!te.child_ix) return {};
+        for (unsigned i = te.child_ix-1; i > 0; --i) { // these aren't sparse so shouldn't take long
+            if (has_child(i)) {// because nodes are ordered accordingly
+                return {this,get_child(i),i};
+            }
+        }
+        return {};
+    }
 
 };
-template <typename T> 
+typedef art_node256<int32_t> art_node256_4;
+typedef art_node256<uintptr_t> art_node256_8;
+
+template <typename T>
 static T* get_node(art_node* n){
     return static_cast<T*>(n);
 }

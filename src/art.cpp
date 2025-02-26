@@ -788,7 +788,11 @@ art_statistics art_get_statistics(){
     as.node48_nodes = (int64_t)statistics::n48_nodes;
     as.bytes_allocated = (int64_t)statistics::node_bytes_alloc;
     as.bytes_interior = (int64_t)statistics::interior_bytes_alloc;
-    as.bytes_compressed = (int64_t)statistics::bytes_compressed;
+    as.page_bytes_compressed = (int64_t)statistics::page_bytes_compressed;
+    as.page_bytes_uncompressed = (int64_t)statistics::page_bytes_uncompressed;
+    as.max_page_bytes_uncompressed = (int64_t)statistics::max_page_bytes_uncompressed;
+    as.vacuums_performed = (int64_t)statistics::vacuums_performed;
+    as.last_vacuum_time = (int64_t)statistics::last_vacuum_time;
     return as;
 }
 

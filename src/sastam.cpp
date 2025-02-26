@@ -3,6 +3,18 @@
 //
 #include "valkeymodule.h"
 #include "sastam.h"
+#include <sys/types.h>
+#include <sys/sysinfo.h>
+static long long physical_ram_cache = 0;
+static long long getTotalPhysicalMemory() {
+    if(!physical_ram_cache)
+    {
+        struct sysinfo memInfo;
+        sysinfo(&memInfo);
+        physical_ram_cache = memInfo.totalram * memInfo.mem_unit;
+    }
+    return physical_ram_cache;
+}
 enum
 {
     padding = 0,
@@ -32,7 +44,7 @@ void* heap::allocate(size_t size){
             memcpy((uint8_t*)r + size + padding, &ax32, sizeof(ax32));
             check_ptr(r, size);
         }
-        allocated+=size + padding + check_size;
+        allocated+= ValkeyModule_MallocSize(r);
     }
     return r;
 }
@@ -51,9 +63,33 @@ void heap::check_ptr(void* ptr, size_t size)
 }
 void heap::free(void* ptr, size_t size){
     if(ptr){
+        size_t test_size = ValkeyModule_MallocSize(ptr);
+
         check_ptr(ptr, size);
         ValkeyModule_Free(ptr);
-        allocated -= size + padding + check_size;
+        allocated -= test_size;
     }
 }
+void heap::free(void* ptr){
+    if(ptr){
+        size_t size = ValkeyModule_MallocSize(ptr);
+        free(ptr, size);
+    }
+}
+
+uint64_t heap::get_physical_memory_bytes()
+{
+    return getTotalPhysicalMemory();
+}
+double heap::get_physical_memory_ratio()
+{
+    double r = ValkeyModule_GetUsedMemoryRatio();
+    if(r == 0.0f)
+    {   auto physical = (double)get_physical_memory_bytes();
+        auto heap = (double)allocated;
+        r = heap / physical;
+    }
+    return r;
+}
+
 

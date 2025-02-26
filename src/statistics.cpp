@@ -11,7 +11,11 @@ std::atomic<uint64_t> statistics::node256_occupants;
 std::atomic<uint64_t> statistics::leaf_nodes;
 std::atomic<uint64_t> statistics::node_bytes_alloc;
 std::atomic<uint64_t> statistics::interior_bytes_alloc;
-std::atomic<uint64_t> statistics::bytes_compressed;
+std::atomic<uint64_t> statistics::page_bytes_compressed;
+std::atomic<uint64_t> statistics::page_bytes_uncompressed;
+std::atomic<uint64_t> statistics::max_page_bytes_uncompressed;
+std::atomic<uint64_t> statistics::vacuums_performed;
+std::atomic<uint64_t> statistics::last_vacuum_time;
 /**
  * ops stats
  */

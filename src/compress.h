@@ -12,6 +12,7 @@
 #include <statistics.h>
 #include <stdexcept>
 #include <thread>
+#include <valkeymodule.h>
 #include <vector>
 #include <zstd.h>
 #include <zdict.h>
@@ -23,9 +24,10 @@ enum
 {
     page_size = 4096,
     reserved_address_base = 10000000,
-    auto_vac = 1,
-    auto_vac_thread_wait_ms = 100,
-    auto_vac_workers = 8
+    enable_compression = 1,
+    auto_vac = 0,
+    auto_vac_workers = 8,
+    auto_vac_heap_threshold = 60,
 };
 
 struct compressed_address
@@ -202,13 +204,12 @@ struct compress
     ~compress()
     {
         tvac_exit = true;
-        for (auto& t : tvac) t.join();
+
         ZSTD_freeCCtx(cctx);
     }
 
 private:
     std::thread tdict{};
-    std::thread tvac[auto_vac_workers]{};
     bool tvac_exit = false;
     unsigned size_in_training = 0;
     unsigned size_to_train = 0;
@@ -222,12 +223,13 @@ private:
     mutable std::mutex mutex{};
     /// TODO: NB! the arena may reallocate while compression worker threads are running and cause instability
     heap::vector<storage> arena{};
-    heap::vector<size_t> releasables{};
     heap::vector<size_t> free_pages{};
     size_t last_page_allocated{0};
     compressed_address arena_head{0};
     compressed_address highest_reserve_address{0};
     bool in_context = false;
+    uint64_t last_heap_bytes = 0;
+    std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -284,23 +286,7 @@ private:
         if (can_haz)
         {
             dict = can_haz;
-            for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
-            {
-                tvac[ivac] = std::thread([this,ivac]()
-                {
-                    while (!tvac_exit)
-                    {
-                        if (!releasables.empty())
-                        {
-                            vacuum(ivac);
-                        }
-                        else
-                        {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(auto_vac_thread_wait_ms));
-                        }
-                    }
-                });
-            }
+
         }
     }
 
@@ -371,6 +357,7 @@ private:
         if (todo.decompressed.empty() && !todo.compressed.empty())
         {
             todo.decompressed = decompress_buffer(page_size, todo.compressed);
+            statistics::page_bytes_uncompressed += todo.decompressed.byte_size();
             if (todo.decompressed.size() != page_size)
             {
                 abort();
@@ -407,6 +394,7 @@ private:
         {
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(size));
+            statistics::page_bytes_uncompressed += arena.back().decompressed.byte_size();
             return {arena.size() - 1, arena.back()};
         }
 
@@ -420,8 +408,8 @@ private:
             }
             else if (!last.decompressed.empty() && auto_vac != 0)
             {
-                if (last.modifications > 0)
-                    releasables.push_back(last_page_allocated); // to schedule a buffer release/compress
+                // if (last.modifications > 0)
+                   // to schedule a buffer release/compress
             }
             if (!free_pages.empty())
             {
@@ -431,18 +419,21 @@ private:
                 if (p.empty())
                 {
                     p.decompressed = std::move(heap::buffer<uint8_t>(page_size));
+                    statistics::page_bytes_uncompressed += p.decompressed.byte_size();
                     memset(p.decompressed.begin(), 0, page_size);
                     return {fp, p};
                 }
             }
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
+            statistics::page_bytes_uncompressed += arena.back().decompressed.byte_size();
             memset(arena.back().decompressed.begin(), 0, page_size);
             return {arena.size() - 1, arena.back()};
         }
         if (last.empty())
         {
             last.decompressed = std::move(heap::buffer<uint8_t>(page_size));
+            statistics::page_bytes_uncompressed += last.decompressed.byte_size();
             memset(last.decompressed.begin(), 0, page_size);
             return {last_page_allocated, last};
         }
@@ -452,60 +443,47 @@ private:
     // compression can happen in any single thread - even a worker thread
     size_t release_decompressed(ZSTD_CCtx* cctx, size_t at)
     {
+        if (is_null_base(at)) return 0;
         size_t r = 0;
         uint16_t mods = 0;
         heap::buffer<uint8_t> compressed;
         heap::buffer<uint8_t> decompressed;
         heap::buffer<uint8_t> torelease;
 
-        {
-            std::lock_guard guard(mutex); // this should reduce wait time to the minimum
 
-            auto& t = arena[at];
+        auto& t = arena[at];
 
-            //heap::buffer<uint8_t> decompressed;
-            {
-                if (t.modifications > 0)
-                {   decompressed = arena[at].decompressed;
-                    mods = arena[at].modifications;
-                }
-            }
+        if (t.modifications > 0)
+        {   decompressed = arena[at].decompressed;
+            mods = arena[at].modifications;
         }
 
 
-        if (mods > 0 && !arena[at].decompressed.empty())
+        if (enable_compression != 0 && mods > 0 && !arena[at].decompressed.empty())
             compressed = compress_2_buffer(dict, cctx, decompressed.begin(), page_size);
 
+        if (!compressed.empty() && mods == t.modifications)
         {
-            std::lock_guard guard(mutex); // this should reduce wait time to the minimum
-            auto& t = arena[at];
-            if (!compressed.empty() && mods == t.modifications)
+            if(!t.compressed.empty())
             {
-                if(!t.compressed.empty())
-                {
-                    statistics::bytes_compressed -= t.compressed.byte_size();
-                }
-                statistics::bytes_compressed += compressed.byte_size();
-                t.compressed = std::move(compressed);
-                t.modifications = 0;
+                statistics::page_bytes_compressed -= t.compressed.byte_size();
             }
-            if (t.compressed.empty() && t.size > 0 && t.modifications == 0)
-            {
-                abort();
-            }
-            if (!t.decompressed.empty() && t.modifications == 0)
-            {
-                if (!in_context)
-                {
-                    r = t.decompressed.size();
-                    torelease = std::move(t.decompressed);
-                }else
-                {
-                    releasables.push_back(at);
-                }
-
-            }
+            statistics::page_bytes_compressed += compressed.byte_size();
+            t.compressed = std::move(compressed);
+            t.modifications = 0;
         }
+        if (t.compressed.empty() && t.size > 0 && t.modifications == 0)
+        {
+            abort();
+        }
+        if (!t.decompressed.empty() && t.modifications == 0)
+        {
+            r = t.decompressed.byte_size();
+
+            torelease = std::move(t.decompressed);
+            statistics::page_bytes_uncompressed -= torelease.byte_size();
+        }
+
         return r;
     }
 
@@ -519,8 +497,7 @@ private:
         if (t.decompressed.empty() && !t.compressed.empty())
         {
             if (decompress(t))
-            {
-                if (auto_vac != 0) releasables.push_back(at.page());
+            {   // we might signal this as decompressed
             }
         }
         if (t.decompressed.empty())
@@ -569,7 +546,9 @@ public:
         }
         if (t.size == 1)
         {
+            statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             t.clear();
+
             free_pages.push_back(at.page());
         }
         else
@@ -604,7 +583,7 @@ public:
         {
             if (decompress(at.second))
             {
-                if (auto_vac != 0) releasables.push_back(arena.size() - 1);
+                // we might signal this as decompressed
             };
         }
         if (at.second.write_position + size >= page_size || at.second.decompressed.empty())
@@ -623,6 +602,35 @@ public:
     void release_context()
     {
         in_context = false;
+        if (statistics::page_bytes_compressed > heap::allocated)
+        {
+            abort();
+        }
+        if (statistics::node_bytes_alloc < statistics::interior_bytes_alloc)
+        {
+            abort();
+        }
+        statistics::max_page_bytes_uncompressed = std::max<uint64_t>(statistics::page_bytes_uncompressed, statistics::max_page_bytes_uncompressed);
+        if (dict == nullptr) return;
+        auto t = std::chrono::high_resolution_clock::now();
+        auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - last_vacuum_millis);
+        double ratio = heap::get_physical_memory_ratio();
+        if ( ratio > 0.95 ||
+            (   statistics::page_bytes_uncompressed > statistics::page_bytes_compressed * 2
+                &&  d.count() > 1000 ) )
+        {
+            auto start_vac = std::chrono::high_resolution_clock::now();
+            vacuum();
+            auto end_vac = std::chrono::high_resolution_clock::now();
+            auto dvac = std::chrono::duration_cast<std::chrono::milliseconds>(end_vac - start_vac);
+            statistics::last_vacuum_time = dvac.count();
+            last_heap_bytes = statistics::page_bytes_uncompressed;
+            last_vacuum_millis = std::chrono::high_resolution_clock::now();
+
+          }
+        if(!last_heap_bytes) last_heap_bytes = statistics::page_bytes_compressed;
+
+
     }
     void enter_context()
     {
@@ -631,32 +639,25 @@ public:
 
     size_t vacuum()
     {
-        return 0;
-    }
-
-    // NB: may only be called from auto_vac compression worker threads
-    size_t vacuum(size_t)
-    {
-        ZSTD_CCtx* cctx = ZSTD_createCCtx();
-        size_t r = 0;
-        while (true)
+        std::atomic<size_t> r = 0;
+        std::lock_guard guard(mutex); // this should reduce wait time to the minimum
+        std::thread workers[auto_vac_workers];
+        for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
         {
-            size_t at = 0;
+            workers[ivac] = std::thread([this,ivac,&r]()
             {
-                std::this_thread::yield();
-                std::lock_guard guard(mutex);
-                if (releasables.empty())
+                ZSTD_CCtx* cctx = ZSTD_createCCtx();
+                for (size_t t = 1; t < arena.size(); t++)
                 {
-                    return r;
+                    if(t % auto_vac_workers == ivac)
+                        r +=release_decompressed(cctx,t);
                 }
-                at = releasables.back();
-                releasables.pop_back();
-            }
 
-            r += release_decompressed(cctx, at);
+                ZSTD_freeCCtx(cctx);
+            });
         }
-        ZSTD_freeCCtx(cctx);
-
+        for (auto& worker : workers) worker.join();
+        ++statistics::vacuums_performed;
         return r;
     }
 };

@@ -7,6 +7,7 @@ local inc = function()
     return index
 end
 
-result[inc()] = {[['ODHEAPBYTES']], vk.call('ODHEAPBYTES')}
+result[inc()] = {[[ODHEAPBYTES]], vk.call('ODHEAPBYTES')}
+result[inc()] = {[[ODSTATS]], vk.call('ODSTATS')}
 
 return result

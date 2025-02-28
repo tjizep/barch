@@ -51,8 +51,9 @@ struct art_ops_statistics {
     
 };
 
-typedef int(*art_callback)(void *data, const unsigned char *key, uint32_t key_len, void *value);
+typedef int(*art_callback)(void *data, value_type key, value_type value);
 typedef std::function<void(node_ptr l)> NodeResult;
+
 
 
 /**
@@ -90,7 +91,7 @@ uint64_t art_size(art_tree *t);
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art_tree *t, const unsigned char *key, int key_len, void *value, NodeResult fc);
+void art_insert(art_tree *t, value_type key, value_type value, NodeResult fc);
 
 /**
  * inserts a new value into the art tree (not replacing)
@@ -101,7 +102,7 @@ void art_insert(art_tree *t, const unsigned char *key, int key_len, void *value,
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art_tree *t, const unsigned char *key, int key_len, void *value, const NodeResult& fc);
+void art_insert_no_replace(art_tree *t, value_type key, value_type value, const NodeResult& fc);
 
 /**
  * Deletes a value from the ART tree
@@ -143,7 +144,7 @@ const art_leaf* art_maximum(art_tree *t);
  * @arg key_len The length of the key
  * @return the lower bound or NULL if there is no value not less than key
  */
-void* art_lower_bound(const art_tree *t, const unsigned char *key, int key_len);
+node_ptr art_lower_bound(const art_tree *t, value_type key);
 
 /**
  * Iterates through the entries pairs in the map,
@@ -175,7 +176,7 @@ int art_iter_prefix(art_tree *t, const unsigned char *prefix, int prefix_len, ar
  * the first key is located in log(n) time
  * @return 0 on success, or the return of the callback.
  */
-int art_range(const art_tree *t, const unsigned char *key, int key_len, const unsigned char *key_end, int key_end_len, art_callback cb, void *data);
+int art_range(const art_tree *t, value_type key, value_type key_end, art_callback cb, void *data);
 
 /**
  * gets per module per node type statistics for all art_node* types  

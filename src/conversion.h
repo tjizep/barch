@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <nodes.h>
 #include <fast_float/fast_float.h>
 #include "sastam.h"
 
@@ -127,6 +128,10 @@ namespace conversion
         [[nodiscard]] unsigned get_size() const
         {
             return size;
+        }
+        [[nodiscard]] value_type get_value() const
+        {
+            return {get_data(), get_size()};
         }
     };
     static const char* eat_space(const char * str, size_t l){

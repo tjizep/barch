@@ -122,16 +122,16 @@ struct iter_state {
     iter_state(const iter_state& is) = delete; 
     iter_state& operator=(const iter_state& ) = delete;
 
-    int iterate(const unsigned char *key, uint32_t key_len, void *) {
-        if(key_len == 0) { /// 
+    int iterate(value_type key, value_type) {
+        if(key.size == 0) { ///
             return -1;
         }
         
-        if (key == nullptr){
+        if (key.bytes == nullptr){
             return -1;
         }
         
-        if(0 != reply_encoded_key(ctx, key, key_len)){
+        if(0 != reply_encoded_key(ctx, key.bytes, key.size)){
             return -1;
         };
 
@@ -148,7 +148,9 @@ extern "C" {
     * Return a list of matching keys, lexicographically between startkey
     * and endkey. No more than 'count' items are emitted. */
     int cmd_KEYRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
-    {   read_lock rl(get_lock());
+    {
+        ValkeyModule_AutoMemory(ctx);
+        read_lock rl(get_lock());
         compressed_release release;
         if (argc != 4)
             return ValkeyModule_WrongArity(ctx);
@@ -178,14 +180,14 @@ extern "C" {
         /* Reply with the matching items. */
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
         //std::function<int (void *, const unsigned char *, uint32_t , void *)>
-        auto iter = [](void *data, const unsigned char *key, uint32_t key_len, void *value) -> int {
+        auto iter = [](void *data, value_type key, value_type value) -> int {
             auto * is = (iter_state*)data;
                 
-            return is->iterate(key, key_len, value);
+            return is->iterate(key, value);
             
         };
 
-        art_range(get_art(), c1.get_data(), c1.get_size(), c2.get_data(), c2.get_size(), iter, &is);
+        art_range(get_art(), {c1.get_data(), c1.get_size()}, {c2.get_data(), c2.get_size()}, iter, &is);
 
 
         ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
@@ -199,28 +201,25 @@ extern "C" {
      * Set the specified key to the specified value. */
     int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        ValkeyModule_AutoMemory(ctx);
         compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
         //ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
-        size_t klen;
+        size_t klen,vlen;
         const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
+        const char *v = ValkeyModule_StringPtrLen(argv[2], &vlen);
 
         if (key_ok(k, klen) != 0)
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
         write_lock wl(get_lock());
-        auto fc = [ctx](node_ptr l) -> void
+        auto fc = [ctx](node_ptr ) -> void
         {
-            if (ctx)
-                ValkeyModule_FreeString(nullptr,(ValkeyModuleString*)l.leaf()->value());
         };
 
-        art_insert(get_art(), converted.get_data(), converted.get_size(), argv[2], fc);
-        /* We need to keep a reference to the value stored at the key, otherwise
-         * it would be freed when this callback returns. */
-        ValkeyModule_RetainString(nullptr, argv[2]);
+        art_insert(get_art(), converted.get_value(), {v,(unsigned)vlen}, fc);
         return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 
@@ -229,24 +228,22 @@ extern "C" {
      * Add the specified key only if its not there, with specified value. */
     int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        ValkeyModule_AutoMemory(ctx);
         compressed_release release;
         if (argc != 3)
             return ValkeyModule_WrongArity(ctx);
-        //ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
-        
-        size_t klen;
+
+        size_t klen,vlen;
         const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
+        const char *v = ValkeyModule_StringPtrLen(argv[2], &vlen);
 
         if (key_ok(k, klen) != 0)
             return key_check(ctx, k, klen);
         auto fc = [](node_ptr) -> void {};
         auto converted = conversion::convert(k, klen);
         write_lock w(get_lock());
-        art_insert_no_replace(get_art(), converted.get_data(), converted.get_size(), argv[2],fc);
+        art_insert_no_replace(get_art(), converted.get_value(), {v,(unsigned)vlen},fc);
 
-        /* We need to keep a reference to the value stored at the key, otherwise
-         * it would be freed when this callback returns. */
-        ValkeyModule_RetainString(nullptr, argv[2]);
         return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 
@@ -256,7 +253,7 @@ extern "C" {
      * is not defined. */
     int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-
+        ValkeyModule_AutoMemory(ctx);
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -277,7 +274,8 @@ extern "C" {
         }
         else
         {
-            auto *val = (ValkeyModuleString *)r.const_leaf()->value();
+            auto vt = r.const_leaf()->get_value();
+            auto *val = ValkeyModule_CreateString(ctx, vt.chars(), vt.size);
 
             return ValkeyModule_ReplyWithString(ctx, val);
         }
@@ -287,7 +285,8 @@ extern "C" {
      * Return the value of the specified key, or a null reply if the key
      * is not defined. */
     int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
-    {   read_lock rl(get_lock());
+    {   ValkeyModule_AutoMemory(ctx);
+        read_lock rl(get_lock());
         compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
@@ -319,6 +318,7 @@ extern "C" {
      * is not defined. */
     int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
+        ValkeyModule_AutoMemory(ctx);
         read_lock rl(get_lock());
         compressed_release release;
         if (argc != 1)
@@ -342,6 +342,7 @@ extern "C" {
      * is not defined. */
     int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
+        ValkeyModule_AutoMemory(ctx);
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -353,17 +354,18 @@ extern "C" {
         auto converted = conversion::convert(k, klen);
         read_lock rl(get_lock());
 
-        void *r = art_lower_bound(get_art(), converted.get_data(), converted.get_size());
+        node_ptr r = art_lower_bound(get_art(), converted.get_value());
 
-        ValkeyModuleString *val = (ValkeyModuleString *)r;
 
-        if (val == nullptr)
+        if (r.null())
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
         else
         {
-            return ValkeyModule_ReplyWithString(ctx, val);
+            const auto * l = r. const_leaf();
+            auto *ms = ValkeyModule_CreateString(ctx, l->s(), l->key_len);
+            return ValkeyModule_ReplyWithString(ctx, ms);
         }
     }
 
@@ -372,7 +374,7 @@ extern "C" {
      * remove the value associated with the key and return the key if such a key existed. */
     int cmd_RM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
-
+        ValkeyModule_AutoMemory(ctx);
         compressed_release release;
         if (argc != 2)
             return ValkeyModule_WrongArity(ctx);
@@ -393,7 +395,8 @@ extern "C" {
             }
             else
             {
-                r = ValkeyModule_ReplyWithString(ctx, (ValkeyModuleString*)n.const_leaf()->value());
+                auto vt =n.const_leaf()->get_value();
+                r = ValkeyModule_ReplyWithString(ctx, ValkeyModule_CreateString(ctx, vt.chars(), vt.size));
             }
 
         };

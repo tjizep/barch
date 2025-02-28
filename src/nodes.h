@@ -37,6 +37,26 @@ enum constants
     max_alloc_children = 8u,
     initial_node = node_4
 };
+struct value_type
+{
+    const unsigned char* bytes;
+    unsigned size;
+    value_type(const char * v, unsigned l): bytes((const unsigned char*)v), size(l) {} ;
+    value_type(const unsigned char * v, unsigned l): bytes(v), size(l) {} ;
+    value_type(const unsigned char * v, size_t l): bytes(v), size(l) {} ;
+    [[nodiscard]] const char * chars() const
+    {
+        return (const char*)bytes;
+    }
+    unsigned char operator[](unsigned i) const
+    {   if (i >= size)
+        {
+            abort();
+        }
+        return bytes[i];
+    }
+
+};
 struct art_leaf;
 typedef compressed_address logical_leaf;
 extern compress& get_leaf_compression();
@@ -304,11 +324,20 @@ struct art_leaf {
     {
         return data;
     };
+    [[nodiscard]] value_type get_key() const
+    {
+        return {key(),(unsigned)key_len};
+    }
 
     void set_key(const unsigned char* k, unsigned len)
     {
         auto l = std::min<unsigned>(len, key_len);
         memcpy(data, k, l);
+    }
+    void set_key(value_type k)
+    {
+        auto l = std::min<unsigned>(k.size, key_len);
+        memcpy(data, k.bytes, l);
     }
 
     void set_value(const void* v, unsigned len)
@@ -326,6 +355,12 @@ struct art_leaf {
         auto l = std::min<unsigned>(len, val_len);
         memcpy(val(), v, l);
     }
+
+    void set_value(value_type v)
+    {
+        auto l = std::min<unsigned>(v.size, val_len);
+        memcpy(val(), v.bytes, l);
+    }
     [[nodiscard]] void* value() const
     {
         void * v;
@@ -341,10 +376,24 @@ struct art_leaf {
     {
         return (char *)val();
     }
+
+    explicit operator value_type()
+    {
+        return {s(), val_len};
+    }
+
+    [[nodiscard]] value_type get_value() const
+    {
+        return {s(), val_len};
+    }
     /**
      * Checks if a leaf matches
      * @return 0 on success.
      */
+    int compare(value_type k, unsigned depth) const
+    {
+        return compare(k.bytes, k.size, depth);
+    }
     int compare(const unsigned char *key, unsigned key_len, unsigned depth) const {
         (void)depth;
         // TODO: compare is broken will fail some edge cases - see heap::buffer::compare for correct impl

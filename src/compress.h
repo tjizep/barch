@@ -661,8 +661,13 @@ public:
         auto t = std::chrono::high_resolution_clock::now();
         auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - last_vacuum_millis);
         double ratio = heap::get_physical_memory_ratio();
+        uint64_t total_heap = heap::allocated;
         if ( ratio > 0.85 && d.count() > 200 )
         {
+            if (total_heap < statistics::page_bytes_compressed)
+            {
+                abort();
+            }
             auto start_vac = std::chrono::high_resolution_clock::now();
             inner_vacuum();
             auto end_vac = std::chrono::high_resolution_clock::now();

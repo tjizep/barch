@@ -78,12 +78,13 @@ static int key_check(ValkeyModuleCtx *ctx, const char * k, size_t klen){
     return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
 }
 
-static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, size_t key_len){
+static int reply_encoded_key(ValkeyModuleCtx* ctx, value_type key){
     double dk;
     int64_t ik;
     const char * k;
     size_t kl;
-    
+    const unsigned char * enck = key.bytes;
+    unsigned key_len = key.size;
     if( key_len == 9 && (*enck == conversion::tinteger || *enck == conversion::tdouble)){
         ik = conversion::enc_bytes_to_int(enck, key_len);
         if (*enck == 1) {
@@ -131,7 +132,7 @@ struct iter_state {
             return -1;
         }
         
-        if(0 != reply_encoded_key(ctx, key.bytes, key.size)){
+        if(0 != reply_encoded_key(ctx, key)){
             return -1;
         };
 
@@ -291,15 +292,16 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        const art_leaf *r = art_minimum(get_art());
+        node_ptr r = art_minimum(get_art());
 
-        if (r == nullptr)
+        if (r.null())
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
         else
         {
-            return reply_encoded_key(ctx, r->key(), r->key_len);
+            auto found = r.const_leaf()->get_key();
+            return reply_encoded_key(ctx, found);
         }
     }
     int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int )
@@ -324,15 +326,15 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        const art_leaf *r = art_maximum(get_art());
+        node_ptr l = art_maximum(get_art());
 
-        if (r == nullptr)
+        if (l.null())
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
         else
         {
-            return reply_encoded_key(ctx, r->key(), r->key_len);
+            return reply_encoded_key(ctx, l.const_leaf()->get_key());
         }
     }
 

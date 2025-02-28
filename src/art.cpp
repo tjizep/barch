@@ -334,21 +334,21 @@ int art_range(const art_tree *t, value_type key, value_type key_end, art_callbac
 /**
  * Returns the minimum valued leaf
  */
-const art_leaf* art_minimum(art_tree *t) {
+node_ptr art_minimum(art_tree *t) {
     ++statistics::min_ops;
     auto l = minimum(t->root);
     if(l.null()) return nullptr;
-    return l.const_leaf();
+    return l;
 }
 
 /**
  * Returns the maximum valued leaf
  */
-const art_leaf* art_maximum(art_tree *t) {
+node_ptr art_maximum(art_tree *t) {
     ++statistics::max_ops;
     auto l = maximum(t->root);
     if (l.null()) return nullptr;
-    return l.const_leaf();
+    return l;
 }
 
 static node_ptr make_leaf(value_type key, value_type v) {

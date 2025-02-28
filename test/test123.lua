@@ -5,7 +5,6 @@ local count = 1000000
 local result = {}
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
-local keylen = 16
 local index = 0
 local convert
 local tests = 0
@@ -83,7 +82,7 @@ end
 convert = tochars123
 test()
 clear()
---assert(successes==2*count, "test failures")
---assert(failures==0, "test failures")
+assert(successes==2*count, "test failures")
+assert(failures==0, "test failures")
 
 return result

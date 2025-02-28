@@ -128,13 +128,13 @@ node_ptr art_search(trace_list& trace, const art_tree *t, const unsigned char *k
  * Returns the minimum valued leaf
  * @return The minimum leaf or NULL
  */
-const art_leaf* art_minimum(art_tree *t);
+node_ptr art_minimum(art_tree *t);
 
 /**
  * Returns the maximum valued leaf
  * @return The maximum leaf or NULL
  */
-const art_leaf* art_maximum(art_tree *t);
+node_ptr art_maximum(art_tree *t);
 
 /**
  * Returns the lower bound value of a given key

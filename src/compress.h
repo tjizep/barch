@@ -227,8 +227,8 @@ private:
     size_t last_page_allocated{0};
     compressed_address arena_head{0};
     compressed_address highest_reserve_address{0};
-    bool in_context = false;
     uint64_t last_heap_bytes = 0;
+    uint64_t release_counter = 0;
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     compress& operator=(const compress& t)
     {
@@ -358,6 +358,8 @@ private:
         {
             todo.decompressed = decompress_buffer(page_size, todo.compressed);
             statistics::page_bytes_uncompressed += todo.decompressed.byte_size();
+            ++statistics::pages_uncompressed;
+
             if (todo.decompressed.size() != page_size)
             {
                 abort();
@@ -395,6 +397,8 @@ private:
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(size));
             statistics::page_bytes_uncompressed += arena.back().decompressed.byte_size();
+            ++statistics::pages_uncompressed;
+
             return {arena.size() - 1, arena.back()};
         }
 
@@ -420,6 +424,8 @@ private:
                 {
                     p.decompressed = std::move(heap::buffer<uint8_t>(page_size));
                     statistics::page_bytes_uncompressed += p.decompressed.byte_size();
+                    ++statistics::pages_uncompressed;
+
                     memset(p.decompressed.begin(), 0, page_size);
                     return {fp, p};
                 }
@@ -427,6 +433,7 @@ private:
             arena.emplace_back();
             arena.back().decompressed = std::move(heap::buffer<uint8_t>(page_size));
             statistics::page_bytes_uncompressed += arena.back().decompressed.byte_size();
+            ++statistics::pages_uncompressed;
             memset(arena.back().decompressed.begin(), 0, page_size);
             return {arena.size() - 1, arena.back()};
         }
@@ -434,6 +441,7 @@ private:
         {
             last.decompressed = std::move(heap::buffer<uint8_t>(page_size));
             statistics::page_bytes_uncompressed += last.decompressed.byte_size();
+            ++statistics::pages_uncompressed;
             memset(last.decompressed.begin(), 0, page_size);
             return {last_page_allocated, last};
         }
@@ -454,21 +462,22 @@ private:
         auto& t = arena[at];
 
         if (t.modifications > 0)
-        {   decompressed = arena[at].decompressed;
-            mods = arena[at].modifications;
+        {   decompressed = t.decompressed;
+            mods = t.modifications;
         }
 
-
-        if (enable_compression != 0 && mods > 0 && !arena[at].decompressed.empty())
+        if (enable_compression != 0 && mods > 0 && !t.decompressed.empty())
             compressed = compress_2_buffer(dict, cctx, decompressed.begin(), page_size);
 
-        if (!compressed.empty() && mods == t.modifications)
+        if (!decompressed.empty() && (compressed.empty() || mods == t.modifications))
         {
             if(!t.compressed.empty())
             {
                 statistics::page_bytes_compressed -= t.compressed.byte_size();
+                --statistics::pages_compressed;
             }
             statistics::page_bytes_compressed += compressed.byte_size();
+            ++statistics::pages_compressed;
             t.compressed = std::move(compressed);
             t.modifications = 0;
         }
@@ -482,6 +491,7 @@ private:
 
             torelease = std::move(t.decompressed);
             statistics::page_bytes_uncompressed -= torelease.byte_size();
+            --statistics::pages_uncompressed;
         }
 
         return r;
@@ -498,6 +508,12 @@ private:
         {
             if (decompress(t))
             {   // we might signal this as decompressed
+                if(modify && !t.compressed.empty())
+                {
+                    statistics::page_bytes_compressed -= t.compressed.byte_size();
+                    --statistics::pages_compressed;
+                    t.compressed.release();
+                }
             }
         }
         if (t.decompressed.empty())
@@ -531,6 +547,29 @@ private:
         return t.size > 0 && t.write_position > at.offset();
     }
 
+    size_t inner_vacuum()
+    {
+        std::atomic<size_t> r = 0;
+        std::thread workers[auto_vac_workers];
+        for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
+        {
+            workers[ivac] = std::thread([this,ivac,&r]()
+            {
+                ZSTD_CCtx* cctx = ZSTD_createCCtx();
+                for (size_t t = 1; t < arena.size(); t++)
+                {
+                    if(t % auto_vac_workers == ivac)
+                        r +=release_decompressed(cctx,t);
+                }
+
+                ZSTD_freeCCtx(cctx);
+            });
+        }
+        for (auto& worker : workers) worker.join();
+        ++statistics::vacuums_performed;
+        return r;
+    }
+
 public:
     void free(compressed_address at, size_t size)
     {
@@ -547,6 +586,8 @@ public:
         if (t.size == 1)
         {
             statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
+            if(!t.compressed.empty()) --statistics::pages_compressed;
+            if(!t.decompressed.empty())--statistics::pages_uncompressed;
             t.clear();
 
             free_pages.push_back(at.page());
@@ -583,6 +624,9 @@ public:
         {
             if (decompress(at.second))
             {
+                statistics::page_bytes_compressed -= at.second.compressed.byte_size();
+                --statistics::pages_compressed;
+                at.second.compressed.release();
                 // we might signal this as decompressed
             };
         }
@@ -601,7 +645,6 @@ public:
 
     void release_context()
     {
-        in_context = false;
         if (statistics::page_bytes_compressed > heap::allocated)
         {
             abort();
@@ -610,17 +653,18 @@ public:
         {
             abort();
         }
-        statistics::max_page_bytes_uncompressed = std::max<uint64_t>(statistics::page_bytes_uncompressed, statistics::max_page_bytes_uncompressed);
+        std::lock_guard guard(mutex);
         if (dict == nullptr) return;
+
+        statistics::max_page_bytes_uncompressed = std::max<uint64_t>(statistics::page_bytes_uncompressed, statistics::max_page_bytes_uncompressed);
+
         auto t = std::chrono::high_resolution_clock::now();
         auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - last_vacuum_millis);
         double ratio = heap::get_physical_memory_ratio();
-        if ( ratio > 0.95 ||
-            (   statistics::page_bytes_uncompressed > statistics::page_bytes_compressed * 2
-                &&  d.count() > 1000 ) )
+        if ( ratio > 0.85 && d.count() > 200 )
         {
             auto start_vac = std::chrono::high_resolution_clock::now();
-            vacuum();
+            inner_vacuum();
             auto end_vac = std::chrono::high_resolution_clock::now();
             auto dvac = std::chrono::duration_cast<std::chrono::milliseconds>(end_vac - start_vac);
             statistics::last_vacuum_time = dvac.count();
@@ -634,32 +678,21 @@ public:
     }
     void enter_context()
     {
-        in_context = true;
     }
-
     size_t vacuum()
     {
-        std::atomic<size_t> r = 0;
         std::lock_guard guard(mutex); // this should reduce wait time to the minimum
-        std::thread workers[auto_vac_workers];
-        for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
+        double ratio = heap::get_physical_memory_ratio();
+        int r = inner_vacuum();
+        double ratio_after = heap::get_physical_memory_ratio();
+        if (ratio_after > ratio)
         {
-            workers[ivac] = std::thread([this,ivac,&r]()
-            {
-                ZSTD_CCtx* cctx = ZSTD_createCCtx();
-                for (size_t t = 1; t < arena.size(); t++)
-                {
-                    if(t % auto_vac_workers == ivac)
-                        r +=release_decompressed(cctx,t);
-                }
-
-                ZSTD_freeCCtx(cctx);
-            });
+            abort();
         }
-        for (auto& worker : workers) worker.join();
-        ++statistics::vacuums_performed;
         return r;
     }
+
+
 };
 
 #endif //COMPRESS_H

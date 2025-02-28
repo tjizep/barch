@@ -3,31 +3,33 @@
 /**
  * size stats
  */
-std::atomic<uint64_t> statistics::n4_nodes;
-std::atomic<uint64_t> statistics::n16_nodes;
-std::atomic<uint64_t> statistics::n48_nodes;
-std::atomic<uint64_t> statistics::n256_nodes;
-std::atomic<uint64_t> statistics::node256_occupants;
-std::atomic<uint64_t> statistics::leaf_nodes;
-std::atomic<uint64_t> statistics::node_bytes_alloc;
-std::atomic<uint64_t> statistics::interior_bytes_alloc;
-std::atomic<uint64_t> statistics::page_bytes_compressed;
-std::atomic<uint64_t> statistics::page_bytes_uncompressed;
-std::atomic<uint64_t> statistics::max_page_bytes_uncompressed;
-std::atomic<uint64_t> statistics::vacuums_performed;
-std::atomic<uint64_t> statistics::last_vacuum_time;
+std::atomic<uint64_t> statistics::n4_nodes = 0;
+std::atomic<uint64_t> statistics::n16_nodes = 0;
+std::atomic<uint64_t> statistics::n48_nodes = 0;
+std::atomic<uint64_t> statistics::n256_nodes = 0;
+std::atomic<uint64_t> statistics::node256_occupants = 0;
+std::atomic<uint64_t> statistics::leaf_nodes = 0;
+std::atomic<uint64_t> statistics::node_bytes_alloc = 0;
+std::atomic<uint64_t> statistics::interior_bytes_alloc = 0;
+std::atomic<uint64_t> statistics::page_bytes_compressed = 0;
+std::atomic<uint64_t> statistics::page_bytes_uncompressed = 0;
+std::atomic<uint64_t> statistics::pages_uncompressed = 0;
+std::atomic<uint64_t> statistics::pages_compressed = 0;
+std::atomic<uint64_t> statistics::max_page_bytes_uncompressed = 0;
+std::atomic<uint64_t> statistics::vacuums_performed = 0;
+std::atomic<uint64_t> statistics::last_vacuum_time = 0;
 /**
  * ops stats
  */
-std::atomic<uint64_t> statistics::delete_ops;
-std::atomic<uint64_t> statistics::set_ops;
-std::atomic<uint64_t> statistics::iter_ops;
-std::atomic<uint64_t> statistics::iter_start_ops;
-std::atomic<uint64_t> statistics::iter_range_ops;
-std::atomic<uint64_t> statistics::range_ops;
-std::atomic<uint64_t> statistics::get_ops;
-std::atomic<uint64_t> statistics::lb_ops;
-std::atomic<uint64_t> statistics::size_ops;
-std::atomic<uint64_t> statistics::insert_ops;
-std::atomic<uint64_t> statistics::min_ops;
-std::atomic<uint64_t> statistics::max_ops;
+std::atomic<uint64_t> statistics::delete_ops = 0;
+std::atomic<uint64_t> statistics::set_ops = 0;
+std::atomic<uint64_t> statistics::iter_ops = 0;
+std::atomic<uint64_t> statistics::iter_start_ops = 0;
+std::atomic<uint64_t> statistics::iter_range_ops = 0;
+std::atomic<uint64_t> statistics::range_ops = 0;
+std::atomic<uint64_t> statistics::get_ops = 0;
+std::atomic<uint64_t> statistics::lb_ops = 0;
+std::atomic<uint64_t> statistics::size_ops = 0;
+std::atomic<uint64_t> statistics::insert_ops = 0;
+std::atomic<uint64_t> statistics::min_ops = 0;
+std::atomic<uint64_t> statistics::max_ops = 0;

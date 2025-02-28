@@ -274,21 +274,85 @@ void free_node(art_leaf *n);
  * of arbitrary size, as they include the key.
  */
 struct art_leaf {
-    void *value;
-    unsigned key_len;
-    unsigned char key[];
+    typedef uint16_t LeafSize;
+    art_leaf() = delete;
+    art_leaf(unsigned kl, unsigned vl) :
+        key_len(std::min<unsigned>(kl, std::numeric_limits<LeafSize>::max()))
+    ,   val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max()))
+    {
+    }
+    LeafSize key_len;
+    LeafSize val_len;
+    unsigned char data[];
+    [[nodiscard]] unsigned val_start() const
+    {
+        return key_len + 1;
+    };
+    unsigned char * val()
+    {
+        return data + val_start();
+    };
+    [[nodiscard]] const unsigned char * val() const
+    {
+        return data + val_start();
+    };
+    unsigned char * key()
+    {
+        return data ;
+    };
+    [[nodiscard]] const unsigned char * key() const
+    {
+        return data;
+    };
+
+    void set_key(const unsigned char* k, unsigned len)
+    {
+        auto l = std::min<unsigned>(len, key_len);
+        memcpy(data, k, l);
+    }
+
+    void set_value(const void* v, unsigned len)
+    {
+        auto l = std::min<unsigned>(len, val_len);
+        memcpy(val(), v, l);
+    }
+    void set_value(const unsigned char* v, unsigned len)
+    {
+        auto l = std::min<unsigned>(len, val_len);
+        memcpy(val(), v, l);
+    }
+    void set_value(const char* v, unsigned len)
+    {
+        auto l = std::min<unsigned>(len, val_len);
+        memcpy(val(), v, l);
+    }
+    [[nodiscard]] void* value() const
+    {
+        void * v;
+        memcpy(&v, val(), std::min<unsigned>(sizeof(void*),val_len));
+        return v;
+    }
+    [[nodiscard]] const char * s() const
+    {
+        return (const char *)val();
+    }
+
+    [[nodiscard]] char * s()
+    {
+        return (char *)val();
+    }
     /**
      * Checks if a leaf matches
      * @return 0 on success.
      */
     int compare(const unsigned char *key, unsigned key_len, unsigned depth) const {
         (void)depth;
-        // TODO: compare is broken will fail some edge cases
+        // TODO: compare is broken will fail some edge cases - see heap::buffer::compare for correct impl
         // Fail if the key lengths are different
         if (this->key_len != (uint32_t)key_len) return 1;
 
         // Compare the keys starting at the depth
-        return memcmp(this->key, key, key_len);
+        return memcmp(this->data, key, key_len);
     }
 } ;
 
@@ -1220,21 +1284,12 @@ template<typename intptr_t>
 struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
     typedef encoded_node_content<256,0,intptr_t> this_type;
 
-    using this_type::copy_from;
-    using this_type::remove_child;
     using this_type::set_child;
-    using this_type::add_child;
     using this_type::has_child;
-
     using this_type::num_children;
     using this_type::get_child;
-    using this_type::partial_len;
-    using this_type::partial;
-    using this_type::keys;
     using this_type::children;
     using this_type::types;
-    using this_type::insert_type;
-    using this_type::index;
     using this_type::has_any;
 
     [[nodiscard]] size_t alloc_size() const override
@@ -1242,8 +1297,9 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
         return sizeof(art_node256);
     }
     art_node256() {
-        statistics::node_bytes_alloc += sizeof(art_node256);
-        statistics::interior_bytes_alloc += sizeof(art_node256);
+        size_t size = sizeof(art_node256);
+        statistics::node_bytes_alloc += size;
+        statistics::interior_bytes_alloc += size;
         ++statistics::n256_nodes;
     }
 
@@ -1253,7 +1309,8 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
         statistics::interior_bytes_alloc -= sizeof(art_node256);
         --statistics::n256_nodes;
     }
-    [[nodiscard]] uint8_t type() const {
+    [[nodiscard]] uint8_t type() const override
+    {
         return node_256;
     }
 
@@ -1271,7 +1328,7 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
         }
         children[key] = nullptr;
         types[key] = 0;
-        num_children--;
+        --num_children;
         --statistics::node256_occupants;
         // Resize to a node48 on underflow, not immediately to prevent
         // trashing if we sit on the 48/49 boundary

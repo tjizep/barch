@@ -16,6 +16,8 @@ extern "C"
 
 #include <cctype>
 #include <cstring>
+#include <cmath>
+#include <shared_mutex>
 #include "conversion.h"
 #include "art.h"
 #include <fast_float/fast_float.h>
@@ -109,13 +111,12 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, const unsigned char * enck, s
 }
 struct iter_state {
     ValkeyModuleCtx *ctx;
-    ValkeyModuleDictIter *iter;
     ValkeyModuleString **argv;
     int64_t replylen;
     int64_t count;
 
-    iter_state(ValkeyModuleCtx *ctx, ValkeyModuleDictIter *iter, ValkeyModuleString **argv, int64_t count)
-    :   ctx(ctx), iter(iter), argv(argv), replylen(0), count(count)
+    iter_state(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int64_t count)
+    :   ctx(ctx), argv(argv), replylen(0), count(count)
     {}
 
     iter_state(const iter_state& is) = delete; 
@@ -136,10 +137,7 @@ struct iter_state {
 
         if (replylen >= count)
             return -1;
-        if (ValkeyModule_DictCompare(iter, "<=", argv[2]) == VALKEYMODULE_ERR)
-            return -1;
-        
-        
+
         replylen++;
         return 0;
     }
@@ -175,7 +173,7 @@ extern "C" {
         auto c2 = conversion::convert(k2, k2len);
         
         /* Seek the iterator. */
-        iter_state is(ctx, ValkeyModule_DictIteratorStart(Keyspace, ">=", argv[1]), argv, count);
+        iter_state is(ctx, argv, count);
         
         /* Reply with the matching items. */
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
@@ -193,7 +191,6 @@ extern "C" {
         ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
 
         /* Cleanup. */
-        ValkeyModule_DictIteratorStop(is.iter);
         return VALKEYMODULE_OK;
     }
 
@@ -208,18 +205,19 @@ extern "C" {
         //ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
         size_t klen;
         const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
-        
+
         if (key_ok(k, klen) != 0)
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
         write_lock wl(get_lock());
-
-        void * old = art_insert(get_art(), converted.get_data(), converted.get_size(), argv[2]);
-        if(old)
+        auto fc = [ctx](node_ptr l) -> void
         {
-            ValkeyModule_FreeString(nullptr,(ValkeyModuleString*)old);
-        }
+            if (ctx)
+                ValkeyModule_FreeString(nullptr,(ValkeyModuleString*)l.leaf()->value());
+        };
+
+        art_insert(get_art(), converted.get_data(), converted.get_size(), argv[2], fc);
         /* We need to keep a reference to the value stored at the key, otherwise
          * it would be freed when this callback returns. */
         ValkeyModule_RetainString(nullptr, argv[2]);
@@ -238,13 +236,13 @@ extern "C" {
         
         size_t klen;
         const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
-        
+
         if (key_ok(k, klen) != 0)
             return key_check(ctx, k, klen);
-        
+        auto fc = [](node_ptr) -> void {};
         auto converted = conversion::convert(k, klen);
         write_lock w(get_lock());
-        art_insert_no_replace(get_art(), converted.get_data(), converted.get_size(), argv[2]);
+        art_insert_no_replace(get_art(), converted.get_data(), converted.get_size(), argv[2],fc);
 
         /* We need to keep a reference to the value stored at the key, otherwise
          * it would be freed when this callback returns. */
@@ -271,16 +269,16 @@ extern "C" {
         trace_list trace;
         trace.reserve(klen);
         read_lock rl(get_lock());
-        void *r = art_search(trace, get_art(), converted.get_data(), converted.get_size());
+        node_ptr r = art_search(trace, get_art(), converted.get_data(), converted.get_size());
 
-        auto *val = (ValkeyModuleString *)r;
-
-        if (val == nullptr)
+        if (r.null())
         {
             return ValkeyModule_ReplyWithNull(ctx);
         }
         else
         {
+            auto *val = (ValkeyModuleString *)r.const_leaf()->value();
+
             return ValkeyModule_ReplyWithString(ctx, val);
         }
     }
@@ -302,7 +300,7 @@ extern "C" {
         }
         else
         {
-            return reply_encoded_key(ctx, r->key, r->key_len);
+            return reply_encoded_key(ctx, r->key(), r->key_len);
         }
     }
     int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int )
@@ -334,7 +332,7 @@ extern "C" {
         }
         else
         {
-            return reply_encoded_key(ctx, r->key, r->key_len);
+            return reply_encoded_key(ctx, r->key(), r->key_len);
         }
     }
 
@@ -386,20 +384,25 @@ extern "C" {
         
 
         auto converted = conversion::convert(k, klen);
+        int r = 0;
+        auto fc = [&r,ctx](node_ptr n) -> void
+        {
+            if (n.null())
+            {
+                r = ValkeyModule_ReplyWithNull(ctx);
+            }
+            else
+            {
+                r = ValkeyModule_ReplyWithString(ctx, (ValkeyModuleString*)n.const_leaf()->value());
+            }
+
+        };
         write_lock w(get_lock());
         auto t = get_art();
-        void *r = art_delete(t, converted.get_data(), converted.get_size());
 
-        auto *val = (ValkeyModuleString *)r;
+        art_delete(t, converted.get_data(), converted.get_size(), fc);
+        return r;
 
-        if (val == nullptr)
-        {
-            return ValkeyModule_ReplyWithNull(ctx);
-        }
-        else
-        {
-            return ValkeyModule_ReplyWithString(ctx, val);
-        }
     }
     /* CDICT.SIZE
      * @return the size or o.k.a. key count. 
@@ -482,6 +485,14 @@ extern "C" {
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "size_256_occupancy");
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_occupants);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "pages_uncompressed");
+        ValkeyModule_ReplyWithLongLong(ctx,as.pages_uncompressed);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "pages_compressed");
+        ValkeyModule_ReplyWithLongLong(ctx,as.pages_compressed);
         ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplySetArrayLength(ctx, row_count);
         return 0;

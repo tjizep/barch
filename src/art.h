@@ -1,9 +1,6 @@
 #pragma once
 #include <cstdint>
-#include <bitset>
-#include <shared_mutex>
-#ifndef ART_H
-#define ART_H
+#include <functional>
 #include "nodes.h"
 #include "compress.h"
 
@@ -31,6 +28,8 @@ struct art_statistics {
     int64_t bytes_interior;
     int64_t heap_bytes_allocated;
     int64_t page_bytes_compressed;
+    int64_t pages_uncompressed;
+    int64_t pages_compressed;
     int64_t max_page_bytes_uncompressed;
     int64_t page_bytes_uncompressed;
     int64_t vacuums_performed;
@@ -53,6 +52,8 @@ struct art_ops_statistics {
 };
 
 typedef int(*art_callback)(void *data, const unsigned char *key, uint32_t key_len, void *value);
+typedef std::function<void(node_ptr l)> NodeResult;
+
 
 /**
  * Main struct, points to root.
@@ -63,7 +64,6 @@ struct art_tree{
     art_tree(node_ptr root, uint64_t size) : root(root), size(size) {}
 };
 
-extern "C" {
 /**
  * Initializes an ART tree
  * @return 0 on success.
@@ -90,7 +90,7 @@ uint64_t art_size(art_tree *t);
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void* art_insert(art_tree *t, const unsigned char *key, int key_len, void *value);
+void art_insert(art_tree *t, const unsigned char *key, int key_len, void *value, NodeResult fc);
 
 /**
  * inserts a new value into the art tree (not replacing)
@@ -101,7 +101,7 @@ void* art_insert(art_tree *t, const unsigned char *key, int key_len, void *value
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void* art_insert_no_replace(art_tree *t, const unsigned char *key, int key_len, void *value);
+void art_insert_no_replace(art_tree *t, const unsigned char *key, int key_len, void *value, const NodeResult& fc);
 
 /**
  * Deletes a value from the ART tree
@@ -111,7 +111,7 @@ void* art_insert_no_replace(art_tree *t, const unsigned char *key, int key_len, 
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-void* art_delete(art_tree *t, const unsigned char *key, int key_len);
+void art_delete(art_tree *t, const unsigned char *key, int key_len, const NodeResult& fc);
 
 /**
  * Searches for a value in the ART tree
@@ -121,7 +121,7 @@ void* art_delete(art_tree *t, const unsigned char *key, int key_len);
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-void* art_search(trace_list& trace, const art_tree *t, const unsigned char *key, unsigned key_len);
+node_ptr art_search(trace_list& trace, const art_tree *t, const unsigned char *key, unsigned key_len);
 
 /**
  * Returns the minimum valued leaf
@@ -187,5 +187,3 @@ art_statistics art_get_statistics();
  * get statistics for each operation performed
  */
 art_ops_statistics art_get_ops_statistics();
-}
-#endif

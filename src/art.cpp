@@ -163,18 +163,18 @@ node_ptr art_search(trace_list& , const art_tree *t, value_type key) {
         if(n.is_leaf){
 
             const auto * l = n.const_leaf();
-            if (0 == l->compare(key.bytes, key.size, depth)) {
+            if (0 == l->compare(key.bytes, key.length(), depth)) {
                 return n;
             }
             return nullptr;
         }
         // Bail if the prefix does not match
         if (n->partial_len) {
-            unsigned prefix_len = n->check_prefix(key.bytes, key.size, depth);
+            unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
             if (prefix_len != std::min<unsigned>(max_prefix_llength, n->partial_len))
                 return nullptr;
             depth = depth + n->partial_len;
-            if (depth >= key.size){
+            if (depth >= key.length()){
                 return nullptr;
             }
         }
@@ -220,7 +220,7 @@ static node_ptr lower_bound(trace_list& trace, const art_tree *t, value_type key
     while (!n.null()) {
         if (n.is_leaf) {
             // Check if the expanded path matches
-            if (n.const_leaf()->compare(key.bytes, key.size, depth) >= 0) {
+            if (n.const_leaf()->compare(key.bytes, key.length(), depth) >= 0) {
                 return n;
             }
             return nullptr;
@@ -228,14 +228,14 @@ static node_ptr lower_bound(trace_list& trace, const art_tree *t, value_type key
 
         // Bail if the prefix does not match
         if (n->partial_len) {
-            int prefix_len = n->check_prefix(key.bytes, key.size, depth);
+            int prefix_len = n->check_prefix(key.bytes, key.length(), depth);
             if (prefix_len != std::min<int>(max_prefix_llength, n->partial_len))
                 break;
             depth += n->partial_len;
         }
 
 
-        trace_element te = lower_bound_child(n, key.bytes, key.size, depth, &is_equal);
+        trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
         if(!te.empty()){
             trace.push_back(te);
         }
@@ -353,7 +353,8 @@ node_ptr art_maximum(art_tree *t) {
 
 static node_ptr make_leaf(value_type key, value_type v) {
     unsigned val_len = v.size;
-    unsigned key_len = key.size;
+    unsigned key_len = key.length();
+    // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
     auto logical = get_leaf_compression().new_address(sizeof(art_leaf) + key_len + 1 + val_len);
     auto *l = new(get_leaf_compression().resolve<art_leaf>(logical)) art_leaf(key_len, val_len);
     ++statistics::leaf_nodes;
@@ -437,7 +438,7 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
     // Check if given node has a prefix
     if (n->partial_len) {
         // Determine if the prefixes differ, since we need to split
-        int prefix_diff = prefix_mismatch(n, key.bytes, key.size, depth);
+        int prefix_diff = prefix_mismatch(n, key.bytes, key.length(), depth);
         if ((uint32_t)prefix_diff >= n->partial_len) {
             depth += n->partial_len;
             goto RECURSE_SEARCH;
@@ -545,14 +546,14 @@ static void remove_child(node_ptr n, node_ptr& ref, unsigned char c, unsigned po
     n->remove(ref, pos, c);
 }
 
-static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, const unsigned char *key, int key_len, int depth) {
+static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, value_type key, int depth) {
     // Search terminated
     if (n.null()) return nullptr;
 
     // Handle hitting a leaf node
     if (n.is_leaf) {
         const art_leaf *l = n.const_leaf();
-        if (l->compare(key, key_len, depth) == 0) {
+        if (l->compare(key.bytes, key.length(), depth) == 0) {
             ref = nullptr;
             return n;
         }
@@ -561,7 +562,7 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, const unsigned
 
     // Bail if the prefix does not match
     if (n->partial_len) {
-        unsigned prefix_len = n->check_prefix(key, key_len, depth);
+        unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
         if (prefix_len != std::min<unsigned>(max_prefix_llength, n->partial_len)) {
             return nullptr;
         }
@@ -577,7 +578,7 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, const unsigned
     // If the child is leaf, delete from this node
     if (child.is_leaf) {
         const art_leaf *l = child.const_leaf();
-        if (l->compare(key, key_len, depth) == 0) {
+        if (l->compare(key.bytes, key.length(), depth) == 0) {
             remove_child(n, ref, key[depth], idx);
             return child;
         }
@@ -587,7 +588,7 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, const unsigned
     } else {
         // Recurse
         node_ptr new_child = child;
-        auto r = recursive_delete(child, new_child, key, key_len, depth+1);
+        auto r = recursive_delete(child, new_child, key, depth+1);
         if (new_child != child) {
             if(!n->ok_child(new_child))
             {
@@ -608,9 +609,9 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, const unsigned
  * @return nullptr if the item was not found, otherwise
  * the value pointer is returned.
  */
-void art_delete(art_tree *t, const unsigned char *key, int key_len, const NodeResult& fc) {
+void art_delete(art_tree *t, value_type key, const NodeResult& fc) {
     ++statistics::delete_ops;
-    node_ptr l = recursive_delete(t->root, t->root, key, key_len, 0);
+    node_ptr l = recursive_delete(t->root, t->root, key, 0);
     if (!l.null()) {
         t->size--;
         fc(l);

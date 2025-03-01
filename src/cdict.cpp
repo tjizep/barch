@@ -405,7 +405,7 @@ extern "C" {
         write_lock w(get_lock());
         auto t = get_art();
 
-        art_delete(t, converted.get_data(), converted.get_size(), fc);
+        art_delete(t, converted.get_value(), fc);
         return r;
 
     }

@@ -112,7 +112,7 @@ void art_insert_no_replace(art_tree *t, value_type key, value_type value, const 
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-void art_delete(art_tree *t, const unsigned char *key, int key_len, const NodeResult& fc);
+void art_delete(art_tree *t, value_type key, const NodeResult& fc);
 
 /**
  * Searches for a value in the ART tree

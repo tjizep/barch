@@ -44,6 +44,11 @@ struct value_type
     value_type(const char * v, unsigned l): bytes((const unsigned char*)v), size(l) {} ;
     value_type(const unsigned char * v, unsigned l): bytes(v), size(l) {} ;
     value_type(const unsigned char * v, size_t l): bytes(v), size(l) {} ;
+    [[nodiscard]] unsigned length() const
+    {
+        if(!size) return 0;
+        return size - 1; // implied in the data is a null terminator
+    }
     [[nodiscard]] const char * chars() const
     {
         return (const char*)bytes;
@@ -53,11 +58,11 @@ struct value_type
         // TODO: this is a hack fix because there's some BUG in the insert code
         // were assuming that the key has a magic 0 byte allocated after the last byte
         // however this is not so for data
-        if (i > size)
+        if (i <= size)
         {
-            abort();
+            return bytes[i];
         }
-        return bytes[i];
+        abort();
     }
 
 };
@@ -396,7 +401,7 @@ struct art_leaf {
      */
     int compare(value_type k, unsigned depth) const
     {
-        return compare(k.bytes, k.size, depth);
+        return compare(k.bytes, k.length(), depth);
     }
     int compare(const unsigned char *key, unsigned key_len, unsigned depth) const {
         (void)depth;

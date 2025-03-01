@@ -58,7 +58,7 @@ struct value_type
         // TODO: this is a hack fix because there's some BUG in the insert code
         // were assuming that the key has a magic 0 byte allocated after the last byte
         // however this is not so for data
-        if (i <= size)
+        if (i < size)
         {
             return bytes[i];
         }
@@ -310,7 +310,7 @@ struct art_leaf {
     ,   val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max()))
     {
     }
-    LeafSize key_len;
+    LeafSize key_len; // does not include null terminator (which is hidden: see make_leaf)
     LeafSize val_len;
     unsigned char data[];
     [[nodiscard]] unsigned val_start() const
@@ -335,7 +335,7 @@ struct art_leaf {
     };
     [[nodiscard]] value_type get_key() const
     {
-        return {key(),(unsigned)key_len};
+        return {key(),(unsigned)key_len+1};
     }
 
     void set_key(const unsigned char* k, unsigned len)

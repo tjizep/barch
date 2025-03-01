@@ -335,7 +335,7 @@ struct art_leaf {
     };
     [[nodiscard]] value_type get_key() const
     {
-        return {key(),(unsigned)key_len+1};
+        return {key(),(unsigned)key_len};
     }
 
     void set_key(const unsigned char* k, unsigned len)

@@ -296,8 +296,8 @@ private:
             {
                 while (!threads_exit)
                 {
-                    //if(heap::get_physical_memory_ratio() > 0.95)
-                        //context_vacuum(true);
+                    if(heap::get_physical_memory_ratio() > 0.95)
+                        context_vacuum(true);
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
             });
@@ -552,6 +552,7 @@ private:
         return t.size > 0 && t.write_position > at.offset();
     }
 
+    // TODO: put a time limit on this function because it can take long
     size_t inner_vacuum(size_t max_vac)
     {
         std::atomic<size_t> r = 0;
@@ -569,7 +570,6 @@ private:
                     {
                         if(p % auto_vac_workers == ivac)
                             r +=release_decompressed(cctx,p);
-                        if (++vac >= max_vac) break;
                     }
                 }else
                 {

@@ -170,7 +170,7 @@ int art_iter(art_tree *t, art_callback cb, void *data);
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art_tree *t, const unsigned char *prefix, int prefix_len, art_callback cb, void *data);
+int art_iter_prefix(art_tree *t, value_type prefix, art_callback cb, void *data);
 /**
  * iterates through a range from small to large from key to key_end
  * the first key is located in log(n) time

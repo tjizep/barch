@@ -379,8 +379,8 @@ static unsigned longest_common_prefix(const art_leaf *l1, const art_leaf *l2, in
  * Calculates the index at which the prefixes mismatch
  */
 ;
-static int prefix_mismatch(const node_ptr n, const unsigned char *key, int key_len, int depth) {
-    int max_cmp = std::min<int>(std::min<int>(max_prefix_llength, n->partial_len), key_len - depth);
+static int prefix_mismatch(const node_ptr n, value_type key, int depth) {
+    int max_cmp = std::min<int>(std::min<int>(max_prefix_llength, n->partial_len), key.length() - depth);
     int idx;
     for (idx=0; idx < max_cmp; idx++) {
         if (n->partial[idx] != key[depth+idx])
@@ -391,7 +391,7 @@ static int prefix_mismatch(const node_ptr n, const unsigned char *key, int key_l
     if (n->partial_len > max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
         const art_leaf *l = minimum(n).const_leaf();
-        max_cmp = std::min<unsigned short>(l->key_len, key_len) - depth;
+        max_cmp = std::min<unsigned>(l->key_len, key.length()) - depth;
         for (; idx < max_cmp; idx++) {
             if (l->key()[idx+depth] != key[depth+idx])
                 return idx;
@@ -438,7 +438,7 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
     // Check if given node has a prefix
     if (n->partial_len) {
         // Determine if the prefixes differ, since we need to split
-        int prefix_diff = prefix_mismatch(n, key.bytes, key.length(), depth);
+        int prefix_diff = prefix_mismatch(n, key, depth);
         if ((uint32_t)prefix_diff >= n->partial_len) {
             depth += n->partial_len;
             goto RECURSE_SEARCH;
@@ -691,12 +691,12 @@ int art_iter(art_tree *t, art_callback cb, void *data) {
  * Checks if a leaf prefix matches
  * @return 0 on success.
  */
-static int leaf_prefix_compare(const art_leaf *n, const unsigned char *prefix, int prefix_len) {
+static int leaf_prefix_compare(const art_leaf *n, value_type prefix) {
     // Fail if the key length is too short
-    if (n->key_len < (uint32_t)prefix_len) return 1;
+    if (n->key_len < (uint32_t)prefix.length()) return 1;
 
     // Compare the keys
-    return memcmp(n->key(), prefix, prefix_len);
+    return memcmp(n->key(), prefix.bytes, prefix.length());
 }
 
 /**
@@ -711,7 +711,7 @@ static int leaf_prefix_compare(const art_leaf *n, const unsigned char *prefix, i
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_callback cb, void *data) {
+int art_iter_prefix(art_tree *t, value_type key, art_callback cb, void *data) {
     ++statistics::iter_start_ops;
     
     if (!t) {
@@ -719,12 +719,12 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
     }
     
     node_ptr n = t->root;
-    int prefix_len, depth = 0;
+    unsigned prefix_len, depth = 0;
     while (!n.null()) {
         // Might be a leaf
         if (n.is_leaf) {
             // Check if the expanded path matches
-            if (0 == leaf_prefix_compare(n.const_leaf(), key, key_len)) {
+            if (0 == leaf_prefix_compare(n.const_leaf(), key)) {
                 const auto *l = n.const_leaf();
                 return cb(data, l->get_key(), l->get_value());
             }
@@ -732,19 +732,19 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
         }
 
         // If the depth matches the prefix, we need to handle this node
-        if (depth == key_len) {
+        if (depth == key.length()) {
             const art_leaf *l = minimum(n).const_leaf();
-            if (0 == leaf_prefix_compare(l, key, key_len))
+            if (0 == leaf_prefix_compare(l, key))
                return recursive_iter(n, cb, data);
             return 0;
         }
 
         // Bail if the prefix does not match
         if (n->partial_len) {
-            prefix_len = prefix_mismatch(n, key, key_len, depth);
+            prefix_len = prefix_mismatch(n, key, depth);
 
             // Guard if the mis-match is longer than the max_prefix_llength
-            if ((uint32_t)prefix_len > n->partial_len) {
+            if (prefix_len > n->partial_len) {
                 prefix_len = n->partial_len;
             }
 
@@ -753,7 +753,7 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
                 return 0;
 
             // If we've matched the prefix, iterate on this node
-            } else if (depth + prefix_len == key_len) {
+            } else if (depth + prefix_len == key.length()) {
                 return recursive_iter(n, cb, data);
             }
 

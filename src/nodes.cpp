@@ -30,7 +30,7 @@ void free_leaf_node(node_ptr n){
     //ValkeyModule_Free(n);
     get_leaf_compression().free(n.logical, sizeof(art_leaf) + kl + 1 + vl);
     --statistics::leaf_nodes;
-    statistics::node_bytes_alloc -= (sizeof(art_leaf) + kl + 1 + vl);
+    statistics::addressable_bytes_alloc -= (sizeof(art_leaf) + kl + 1 + vl);
 }
 
 void free_node(node_ptr n){

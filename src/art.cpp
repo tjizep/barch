@@ -154,7 +154,7 @@ static bool extend_trace_max(node_ptr root, trace_list& trace){
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-node_ptr art_search(trace_list& , const art_tree *t, const unsigned char *key, unsigned key_len) {
+node_ptr art_search(trace_list& , const art_tree *t, value_type key) {
     ++statistics::get_ops;
     node_ptr n = t->root;
     unsigned depth = 0;
@@ -163,18 +163,18 @@ node_ptr art_search(trace_list& , const art_tree *t, const unsigned char *key, u
         if(n.is_leaf){
 
             const auto * l = n.const_leaf();
-            if (0 == l->compare(key, key_len, depth)) {
+            if (0 == l->compare(key.bytes, key.size, depth)) {
                 return n;
             }
             return nullptr;
         }
         // Bail if the prefix does not match
         if (n->partial_len) {
-            unsigned prefix_len = n->check_prefix(key, key_len, depth);
+            unsigned prefix_len = n->check_prefix(key.bytes, key.size, depth);
             if (prefix_len != std::min<unsigned>(max_prefix_llength, n->partial_len))
                 return nullptr;
             depth = depth + n->partial_len;
-            if (depth >= key_len){
+            if (depth >= key.size){
                 return nullptr;
             }
         }
@@ -357,7 +357,7 @@ static node_ptr make_leaf(value_type key, value_type v) {
     auto logical = get_leaf_compression().new_address(sizeof(art_leaf) + key_len + 1 + val_len);
     auto *l = new(get_leaf_compression().resolve<art_leaf>(logical)) art_leaf(key_len, val_len);
     ++statistics::leaf_nodes;
-    statistics::node_bytes_alloc += (int64_t)(sizeof(art_leaf)+ key_len + 1 + val_len);
+    statistics::addressable_bytes_alloc += (int64_t)(sizeof(art_leaf)+ key_len + 1 + val_len);
     l->set_key(key);
     l->set_value(v);
     return logical;
@@ -413,8 +413,8 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
 
             *old = 1;
             if(replace)
-            {   art_leaf *lmod = n.leaf();
-                lmod->set_value(&value, sizeof(void*));
+            {
+                //ref = make_leaf(key, value);
             }
             return n;
         }
@@ -459,7 +459,7 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
         } else {
             n->partial_len -= (prefix_diff+1);
             const auto *l = minimum(n).const_leaf();
-            ref->add_child(l->key()[depth+prefix_diff], ref, n);
+            ref->add_child(l->get_key()[depth+prefix_diff], ref, n);
             memcpy(n->partial, l->key()+depth+prefix_diff+1,
                     std::min<int>(max_prefix_llength, n->partial_len));
         }
@@ -787,7 +787,7 @@ art_statistics art_get_statistics(){
     as.node256_nodes = (int64_t)statistics::n256_nodes;
     as.node256_occupants = as.node256_nodes ? ((int64_t)statistics::node256_occupants / as.node256_nodes ) : 0ll;
     as.node48_nodes = (int64_t)statistics::n48_nodes;
-    as.bytes_allocated = (int64_t)statistics::node_bytes_alloc;
+    as.bytes_allocated = (int64_t)statistics::addressable_bytes_alloc;
     as.bytes_interior = (int64_t)statistics::interior_bytes_alloc;
     as.page_bytes_compressed = (int64_t)statistics::page_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t)statistics::page_bytes_uncompressed;

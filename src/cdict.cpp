@@ -267,7 +267,7 @@ extern "C" {
         trace_list trace;
         trace.reserve(klen);
         read_lock rl(get_lock());
-        node_ptr r = art_search(trace, get_art(), converted.get_data(), converted.get_size());
+        node_ptr r = art_search(trace, get_art(), converted.get_value());
 
         if (r.null())
         {

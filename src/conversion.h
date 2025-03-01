@@ -18,7 +18,8 @@ namespace conversion
     {
         byte_comparable() = default;
         explicit byte_comparable(const uint8_t * data, size_t len ){
-            memcpy(&bytes[0], data, std::min(sizeof(bytes), len));
+            memcpy(&bytes[0], data, std::min(sizeof(bytes)-1, len));
+            bytes[9] = 0;
         }
         
         // probably cpp will optimize this
@@ -26,7 +27,7 @@ namespace conversion
         {
             return sizeof(bytes);
         }
-        uint8_t bytes[sizeof(I) + 1]{};
+        uint8_t bytes[sizeof(I) + 2]{}; // there's a hidden trailing 0 added
 
     };
     inline int64_t dec_bytes_to_int(const byte_comparable<int64_t> &i){
@@ -40,7 +41,6 @@ namespace conversion
         r += (i.bytes[6] & 0xFF); r <<= 8;
         r += (i.bytes[7] & 0xFF); r <<= 8;
         r += (i.bytes[8] & 0xFF);
-        
         int64_t v = (r - (1ll << 63));
         return v;
     }
@@ -68,7 +68,7 @@ namespace conversion
     {
         int64_t in;
         memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
-        return comparable_bytes(in, 1);
+        return comparable_bytes(in, tdouble);
     }
 
     struct comparable_result
@@ -97,7 +97,7 @@ namespace conversion
         comparable_result(const char *val, size_t size)
         : size(size + 1)
         {
-            bytes = heap::allocate<uint8_t>(this->size+1); //.assign(val, val + size);
+            bytes = heap::allocate<uint8_t>(this->size+1); //TODO: ?hack? a hidden trailing null pointer has to be added
             memcpy(bytes + 1, val, this->size - 1);
             bytes[0] = tstring;
             data = bytes;
@@ -114,7 +114,8 @@ namespace conversion
         comparable_result& operator=(const comparable_result& r)
         {
             if(this == &r) return *this;
-            bytes = heap::allocate<uint8_t>(r.size+1);
+            bytes = heap::allocate<uint8_t>(r.size+1); // hidden 0 byte at end
+            bytes[size] = 0;
             size = r.size;
             data = bytes;
             memcpy(bytes, r.bytes, size);

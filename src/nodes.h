@@ -48,8 +48,12 @@ struct value_type
     {
         return (const char*)bytes;
     }
-    unsigned char operator[](unsigned i) const
-    {   if (i >= size)
+    const unsigned char& operator[](unsigned i) const
+    {
+        // TODO: this is a hack fix because there's some BUG in the insert code
+        // were assuming that the key has a magic 0 byte allocated after the last byte
+        // however this is not so for data
+        if (i > size)
         {
             abort();
         }
@@ -897,12 +901,12 @@ template<typename IntegerPtr>
 struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     typedef encoded_node_content<4, 4, IntegerPtr> this_type;
     art_node4_v(){
-        statistics::node_bytes_alloc += sizeof(art_node4_v);
+        statistics::addressable_bytes_alloc += sizeof(art_node4_v);
         statistics::interior_bytes_alloc += sizeof(art_node4_v);
         ++statistics::n4_nodes;
     }
     ~art_node4_v() override{
-        statistics::node_bytes_alloc -= sizeof(art_node4_v);
+        statistics::addressable_bytes_alloc -= sizeof(art_node4_v);
         statistics::interior_bytes_alloc -= sizeof(art_node4_v);
         --statistics::n4_nodes;
     }
@@ -1031,12 +1035,12 @@ encoded_node_content<16,16, IPtrType >
 {
     typedef encoded_node_content<16,16, IPtrType > Parent;
     art_node16_v(){
-        statistics::node_bytes_alloc += sizeof(art_node16_v);
+        statistics::addressable_bytes_alloc += sizeof(art_node16_v);
         statistics::interior_bytes_alloc += sizeof(art_node16_v);
         ++statistics::n16_nodes;
     }
     ~art_node16_v() override{
-        statistics::node_bytes_alloc -= sizeof(art_node16_v);
+        statistics::addressable_bytes_alloc -= sizeof(art_node16_v);
         statistics::interior_bytes_alloc -= sizeof(art_node16_v);
         --statistics::n16_nodes;
     }
@@ -1173,12 +1177,12 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
     using this_type::index;
 
     art_node48(){
-        statistics::node_bytes_alloc += sizeof(art_node48);
+        statistics::addressable_bytes_alloc += sizeof(art_node48);
         statistics::interior_bytes_alloc += sizeof(art_node48);
         ++statistics::n48_nodes;
     }
     ~art_node48() override{
-        statistics::node_bytes_alloc -= sizeof(art_node48);
+        statistics::addressable_bytes_alloc -= sizeof(art_node48);
         statistics::interior_bytes_alloc -= sizeof(art_node48);
         --statistics::n48_nodes;
     }
@@ -1347,14 +1351,14 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
     }
     art_node256() {
         size_t size = sizeof(art_node256);
-        statistics::node_bytes_alloc += size;
+        statistics::addressable_bytes_alloc += size;
         statistics::interior_bytes_alloc += size;
         ++statistics::n256_nodes;
     }
 
     ~art_node256() override {
         statistics::node256_occupants -= num_children;
-        statistics::node_bytes_alloc -= sizeof(art_node256);
+        statistics::addressable_bytes_alloc -= sizeof(art_node256);
         statistics::interior_bytes_alloc -= sizeof(art_node256);
         --statistics::n256_nodes;
     }

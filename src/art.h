@@ -122,7 +122,7 @@ void art_delete(art_tree *t, const unsigned char *key, int key_len, const NodeRe
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-node_ptr art_search(trace_list& trace, const art_tree *t, const unsigned char *key, unsigned key_len);
+node_ptr art_search(trace_list& trace, const art_tree *t, value_type key);
 
 /**
  * Returns the minimum valued leaf

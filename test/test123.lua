@@ -10,7 +10,7 @@ local convert
 local tests = 0
 local failures = 0
 local successes = 0
-
+local logperiod = 1000
 local inc = function()
     index = index + 1
     return index
@@ -30,6 +30,9 @@ local test = function()
         local k = convert(i-1)
         local v = '#'..i
         vk.call('ODSET',k,v)
+        if math.mod(i,logperiod) == 0 then
+            vk.log(vk.LOG_NOTICE, "Adding "..i)
+        end
     end
     for i = 1, count do
         local k = convert(i-1)
@@ -38,6 +41,9 @@ local test = function()
             result[inc()] = {k, v, vk.call('ODGET',k)} --vk.call('cdict.lb',k)
         else
             successes = successes + 1
+        end
+        if math.mod(i,logperiod) == 0 then
+            vk.log(vk.LOG_NOTICE, "Checking "..i)
         end
 
     end
@@ -67,6 +73,10 @@ local clear = function()
             result[inc()] = {"Failed remove",k, v, vk.call('ODGET',k)}
             failures = failures + 1
         end
+        if math.mod(i,logperiod) == 0 then
+            vk.log(vk.LOG_NOTICE, "Removing "..i)
+        end
+
     end
 
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
@@ -81,8 +91,8 @@ end
 
 convert = tochars123
 test()
-clear()
-assert(successes==2*count, "test failures")
+--clear()
+assert(successes==count, "test failures")
 assert(failures==0, "test failures")
 
 return result

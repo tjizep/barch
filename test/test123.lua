@@ -30,6 +30,8 @@ local test = function()
         local k = convert(i-1)
         local v = '#'..i
         vk.call('ODSET',k,v)
+        vk.call('ODREM',k)
+        vk.call('ODSET',k,v)
         if math.mod(i,logperiod) == 0 then
             vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
@@ -91,8 +93,8 @@ end
 
 convert = tochars123
 test()
---clear()
-assert(successes==1*count, "test failures")
+clear()
+assert(successes==2*count, "test failures")
 assert(failures==0, "test failures")
 
 return result

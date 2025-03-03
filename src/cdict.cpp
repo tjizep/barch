@@ -100,7 +100,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, value_type key){
     } else if ( key_len >= 1  && *enck == conversion::tstring) { //&& *enck == 2 //it's a string
 
         k = (const char*) &enck[1];
-        kl = key_len-1;
+        kl = key_len - 1;
         if (ValkeyModule_ReplyWithStringBuffer(ctx, k, kl) == VALKEYMODULE_ERR) {
             return -1;
         }

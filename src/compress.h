@@ -32,6 +32,7 @@ enum
 
 struct compressed_address
 {
+    typedef uint64_t AddressIntType;
     compressed_address() = default;
     compressed_address(const compressed_address&) = default;
     compressed_address& operator=(const compressed_address&) = default;
@@ -111,13 +112,13 @@ struct compressed_address
         index = a;
     }
 
-    bool operator==(uint32_t other) const
+    bool operator==(AddressIntType other) const
     {
         return index == other;
     }
 
 private:
-    uint32_t index = 0;
+    AddressIntType index = 0;
 };
 
 struct training_entry
@@ -189,6 +190,183 @@ struct storage
     uint16_t size = 0;
     uint16_t modifications = 0;
 };
+struct free_page
+{
+    free_page(){};
+    explicit free_page(compressed_address p) : page(p.page()){};
+    std::vector<uint16_t> offsets{}; // within page
+    uint64_t page{0};
+    [[nodiscard]] bool empty() const
+    {
+        return offsets.empty();
+    }
+    compressed_address pop()
+    {
+        if (empty())
+        {
+            return compressed_address{0};
+        }
+        uint16_t r = offsets.back();
+        if (r >= page_size)
+        {
+            abort();
+        }
+        offsets.pop_back();
+        return {page,r};
+    }
+    void clear()
+    {
+        offsets.clear();
+    }
+};
+struct free_bin
+{
+    free_bin() = default;
+    explicit free_bin(unsigned size) : size(size)
+    {
+    }
+    unsigned size = 0;
+    heap::vector<size_t> page_index{};
+    heap::vector<free_page> pages{};
+    [[nodiscard]] bool empty() const
+    {
+        return pages.empty();
+    }
+    unsigned erase(size_t page)
+    {
+        if (page < page_index.size())
+        {
+            size_t at = page_index.at(page);
+            if (at != 0)
+            {
+                auto & p = pages.at(at-1);
+                if(p.page != page)
+                {
+                    abort();
+                }
+                unsigned r = p.offsets.size() * size;
+                p.clear();
+                page_index[at-1] = 0;
+                return r;
+            }
+
+        }
+        return 0;
+    }
+    void add(compressed_address address, unsigned s)
+    {
+        if (s != size)
+        {
+            abort();
+        }
+        if (page_index.size() <= address.page())
+        {
+            page_index.resize(address.page()+1);
+        }
+        size_t addr_page = address.page();
+        if (page_index[addr_page] == 0)
+        {
+            pages.emplace_back();
+            pages.back().page = address.page();
+            page_index[address.page()] = pages.size();
+        }
+        size_t page = page_index[addr_page] - 1;
+
+        pages[page].offsets.push_back(address.offset());
+    }
+
+    compressed_address pop(unsigned s)
+    {
+        if (s != size)
+        {
+            abort();
+        }
+        if (pages.empty())
+        {
+            return compressed_address(0);
+        }
+        auto & p = pages.back();
+        if (p.empty())
+        {
+            page_index[p.page] = 0;
+            pages.pop_back();
+            return compressed_address(0);
+        }
+        if (page_index[p.page] == 0)
+        {
+            return compressed_address(0);
+        }
+
+        compressed_address address = p.pop();
+        if (p.empty())
+        {
+            page_index[p.page] = 0;
+            pages.pop_back();
+        }
+        return address;
+
+    }
+};
+struct free_list
+{
+    unsigned added = 0;
+    size_t min_bin = page_size;
+    size_t max_bin = 0;
+    heap::vector<free_bin> free_bins{};
+
+    free_list()
+    {
+        for (unsigned i = 0; i < page_size; ++i)
+        {
+            free_bins.push_back(free_bin(i));
+        }
+    }
+    void add(compressed_address address, unsigned size)
+    {
+        if (size >= free_bins.size())
+        {
+            return;
+        }
+        min_bin = std::min(min_bin, (size_t)size);
+        max_bin = std::max(max_bin, (size_t)size);
+        free_bins[size].add(address, size);
+        added += size;
+    }
+    void erase(size_t page)
+    {
+        for (size_t b = min_bin; b <= max_bin; ++b)
+        {
+            auto &f = free_bins[b];
+            unsigned r = f.erase(page);
+
+            if (added >= r)
+            {
+                added -= r;
+            } else
+            {
+                abort();
+            }
+        }
+    }
+    compressed_address get(unsigned size)
+    {
+        if (size >= free_bins.size())
+        {
+            return compressed_address{0};
+        }
+        compressed_address r = free_bins[size].pop(size);
+        if (!r.null())
+        {
+            if(added < size)
+            {
+                abort();
+            }
+            added -= size;
+        }
+        return r;
+    }
+
+};
 
 struct compress
 {
@@ -236,6 +414,7 @@ private:
     uint64_t last_heap_bytes = 0;
     uint64_t release_counter = 0;
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
+    free_list emancipated{};
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -412,6 +591,7 @@ private:
     }
     std::pair<size_t, storage&> create_if_required(size_t size)
     {
+
         if (is_null_base(last_block()))
         {
             arena.emplace_back();
@@ -603,13 +783,14 @@ public:
         {
             abort();
         }
+        emancipated.add(at, size);
         if (t.size == 1)
         {
 
             if(!t.compressed.empty())
             {
                 --statistics::pages_compressed;
-                statistics::page_bytes_uncompressed -= t.compressed.byte_size();
+                statistics::page_bytes_compressed -= t.compressed.byte_size();
             }
             if(!t.decompressed.empty())
             {
@@ -617,7 +798,7 @@ public:
                 statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             }
             t.clear();
-
+            emancipated.erase(at.page());
             free_pages.push_back(at.page());
         }
         else
@@ -647,6 +828,28 @@ public:
     compressed_address new_address(size_t size)
     {
         std::lock_guard guard(mutex);
+        compressed_address r = emancipated.get(size); // TODO: try a few sizes larger
+        if(!r.null() && r.page() < arena.size() && !arena[r.page()].empty())
+        {   auto& pcheck = arena[r.page()];
+            uint16_t w = r.offset();
+            if (w + size > pcheck.write_position)
+            {
+                pcheck.write_position = w + size;
+            }
+            std::pair<size_t,storage&> at = {r.page(),pcheck};
+            if (decompress(at))
+            {
+                statistics::page_bytes_compressed -= at.second.compressed.byte_size();
+                --statistics::pages_compressed;
+                at.second.compressed.release();
+                // we might signal this as decompressed
+            };
+
+            at.second.size++;
+            at.second.modifications++;
+            invalid(r);
+            return r;
+        }
         auto at = create_if_required(size);
         if (at.second.decompressed.empty() && !at.second.compressed.empty())
         {

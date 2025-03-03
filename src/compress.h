@@ -749,14 +749,14 @@ private:
                     for (size_t p = 0; p < arena_size; ++p)
                     {
                         if(p % auto_vac_workers == ivac)
-                            r +=release_decompressed(cctx,p);
+                            r += release_decompressed(cctx,p);
                     }
                 }else
                 {
                     for (auto p: decompressed_pages)
                     {
                         if(p % auto_vac_workers == ivac)
-                            r +=release_decompressed(cctx,p);
+                            r += release_decompressed(cctx,p);
                         if (++vac >= max_vac) break;
                     }
                 }
@@ -783,7 +783,7 @@ public:
         {
             abort();
         }
-        //emancipated.add(at, size);
+        emancipated.add(at, size); // add a free allocation for later re-use
         if (t.size == 1)
         {
 

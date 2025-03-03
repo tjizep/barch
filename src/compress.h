@@ -783,7 +783,7 @@ public:
         {
             abort();
         }
-        emancipated.add(at, size);
+        //emancipated.add(at, size);
         if (t.size == 1)
         {
 

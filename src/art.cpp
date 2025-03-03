@@ -412,7 +412,7 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
         // Check if we are updating an existing value
         if (l->compare(key, depth) == 0) {
 
-            *old = 1;
+            //*old = 1;
             if(replace)
             {
                 //ref = make_leaf(key, value);

@@ -230,11 +230,19 @@ T* heap::allocator<T>::allocate(const size_t n) const
             return count == 0;
         }
         T& operator[](size_t idx)
-        {   return ptr[idx];
+        {   if(idx >= count)
+            {
+                abort();
+            }
+            return ptr[idx];
         }
 
         const T& operator[](size_t idx) const
         {
+            if(idx >= count)
+            {
+                abort();
+            }
             return ptr[idx];
         }
     };
@@ -354,6 +362,10 @@ T* heap::allocator<T>::allocate(const size_t n) const
         }
         const T& back() const
         {
+            if(empty())
+            {
+                abort();
+            }
             return content[count-1];
         }
         void pop_back()

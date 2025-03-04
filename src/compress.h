@@ -230,7 +230,15 @@ struct free_bin
     heap::vector<free_page> pages{};
     [[nodiscard]] bool empty() const
     {
-        return pages.empty();
+        if(!pages.empty())
+        {
+            return pages.back().empty();
+        }
+        return true;
+    }
+    [[nodiscard]] bool available() const
+    {
+        return !empty();
     }
     unsigned erase(size_t page)
     {
@@ -327,9 +335,10 @@ struct free_list
         {
             return;
         }
+        free_bins[size].add(address, size);
         min_bin = std::min(min_bin, (size_t)size);
         max_bin = std::max(max_bin, (size_t)size);
-        free_bins[size].add(address, size);
+
         added += size;
     }
     void erase(size_t page)
@@ -405,7 +414,7 @@ private:
     /// it must be entered and left before the allocation mutex to prevent deadlocks
     mutable std::shared_mutex vacuum_scope{};
     /// TODO: NB! the arena may reallocate while compression worker threads are running and cause instability
-    heap::vector<storage> arena{};
+    std::vector<storage,heap::allocator<storage>> arena{};
     heap::vector<size_t> free_pages{};
     heap::vector<size_t> decompressed_pages{};
     size_t last_page_allocated{0};
@@ -616,7 +625,7 @@ private:
                 // if (last.modifications > 0)
                    // to schedule a buffer release/compress
             }
-            if (!free_pages.empty())
+            while (!free_pages.empty())
             {
                 size_t fp = free_pages.back();
                 free_pages.pop_back();
@@ -626,6 +635,8 @@ private:
                     return allocate_page_at(fp);
                 }
             }
+
+
             arena.emplace_back();
             return allocate_page_at(arena.size() - 1);
         }
@@ -783,7 +794,7 @@ public:
         {
             abort();
         }
-        emancipated.add(at, size); // add a free allocation for later re-use
+        //emancipated.add(at, size); // add a free allocation for later re-use
         if (t.size == 1)
         {
 
@@ -798,7 +809,7 @@ public:
                 statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             }
             t.clear();
-            emancipated.erase(at.page());
+            //emancipated.erase(at.page());
             free_pages.push_back(at.page());
         }
         else
@@ -844,7 +855,7 @@ public:
                 at.second.compressed.release();
                 // we might signal this as decompressed
             };
-
+            // last_page_allocated should not be set here
             at.second.size++;
             at.second.modifications++;
             invalid(r);

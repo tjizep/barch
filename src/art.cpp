@@ -408,17 +408,17 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
     // If we are at a leaf, we need to replace it with a node
     if (n.is_leaf) {
         const art_leaf *l = n.const_leaf();
-        node_ptr l1 = n;
         // Check if we are updating an existing value
         if (l->compare(key, depth) == 0) {
 
             *old = 1;
-            if(replace)
+            if (replace)
             {
-                //ref = make_leaf(key, value);
+                ref = make_leaf(key, value); // create a new leaf to carry the new value
             }
             return n;
         }
+        node_ptr l1 = n;
         // Create a new leaf
         node_ptr l2 = make_leaf(key, value);
 
@@ -519,7 +519,15 @@ void art_insert(art_tree *t, value_type key, value_type value, std::function<voi
         ++statistics::set_ops;
     }
     if (!old.null())
+    {
+        if(!old.is_leaf)
+        {
+            abort();
+        }
         fc(old);
+        free_leaf_node(old);
+    }
+
 }
 
 /**

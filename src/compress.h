@@ -794,7 +794,7 @@ public:
         {
             abort();
         }
-        //emancipated.add(at, size); // add a free allocation for later re-use
+        emancipated.add(at, size); // add a free allocation for later re-use
         if (t.size == 1)
         {
 
@@ -809,7 +809,7 @@ public:
                 statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             }
             t.clear();
-            //emancipated.erase(at.page());
+            emancipated.erase(at.page());
             free_pages.push_back(at.page());
         }
         else

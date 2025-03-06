@@ -24,10 +24,10 @@ enum
 {
     page_size = 4096,
     reserved_address_base = 10000000,
-    enable_compression = 0,
+    enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 8,
-    test_memory = 0,
+    test_memory = 1,
     allocation_padding = 0
 };
 typedef uint16_t PageSizeType;
@@ -463,7 +463,7 @@ struct free_list
     size_t min_bin = page_size;
     size_t max_bin = 0;
     std::unordered_set<size_t> addresses{};
-    std::vector<simple_bin> free_bins{};
+    std::vector<free_bin> free_bins{};
 
     free_list()
     {
@@ -498,7 +498,6 @@ struct free_list
     {
         inner_add(address, size);
     }
-#if 0
     void erase(size_t page)
     {
 
@@ -526,7 +525,6 @@ struct free_list
         }
 
     }
-#endif
     compressed_address get(unsigned size)
     {
         if (size >= free_bins.size())
@@ -550,7 +548,6 @@ struct free_list
             addresses.erase(r.address());
         } else
         {
-#if 0
             coalesce_max(); // a fairly slow function - for now
             // start searching from the largest size for something that can be nibbled
             for (size_t b = max_bin; b >= size*3; --b) // don't nibble from small pages - it will create small fragments
@@ -567,7 +564,6 @@ struct free_list
                     return at; // get outta here (min and max_bin may have changed)
                 }
             }
-#endif
         }
 
 
@@ -577,7 +573,6 @@ struct free_list
 
     void coalesce_max()
     {
-#if 0
         if (added < page_size*4) return;
 
         size_t bin_max = 0;
@@ -602,7 +597,6 @@ struct free_list
             compressed_address addr {max_r.page, o.offset};
             add(addr, size);
         }
-#endif
     }
 
 
@@ -1064,11 +1058,9 @@ public:
             ++statistics::pages_uncompressed;
             statistics::page_bytes_uncompressed += t.decompressed.byte_size();
 
-            #if 0
             t.clear();
             emancipated.erase(at.page());
             free_pages.push_back(at.page());
-#endif
         }
         else
         {

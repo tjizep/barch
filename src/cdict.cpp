@@ -493,6 +493,10 @@ extern "C" {
         ValkeyModule_ReplyWithLongLong(ctx,as.node256_occupants);
         ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "leaf_nodes_replaced");
+        ValkeyModule_ReplyWithLongLong(ctx,as.leaf_nodes_replaced);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "pages_uncompressed");
         ValkeyModule_ReplyWithLongLong(ctx,as.pages_uncompressed);
         ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;

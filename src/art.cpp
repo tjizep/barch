@@ -414,9 +414,19 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
             *old = 1;
             if (replace)
             {
-                ref = make_leaf(key, value); // create a new leaf to carry the new value
+                art_leaf *dl = n.leaf();
+                if (dl->val_len == value.size)
+                {
+                    dl->set_value(value);
+                }else
+                {
+                    ref = make_leaf(key, value); // create a new leaf to carry the new value
+                    ++statistics::leaf_nodes_replaced;
+                    return n;
+                }
+
             }
-            return n;
+            return nullptr;
         }
         node_ptr l1 = n;
         // Create a new leaf
@@ -805,6 +815,7 @@ art_statistics art_get_statistics(){
     as.max_page_bytes_uncompressed = (int64_t)statistics::max_page_bytes_uncompressed;
     as.vacuums_performed = (int64_t)statistics::vacuums_performed;
     as.last_vacuum_time = (int64_t)statistics::last_vacuum_time;
+    as.leaf_nodes_replaced = (int64_t)statistics::leaf_nodes_replaced;
     return as;
 }
 

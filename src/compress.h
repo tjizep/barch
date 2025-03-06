@@ -17,19 +17,20 @@
 #include <vector>
 #include <zstd.h>
 #include <zdict.h>
-
-#include "zstd.h"
-#include "zstd.h"
+#include <functional>
+#include <unordered_set>
 
 enum
 {
     page_size = 4096,
     reserved_address_base = 10000000,
-    enable_compression = 1,
+    enable_compression = 0,
     auto_vac = 0,
-    auto_vac_workers = 8
+    auto_vac_workers = 8,
+    test_memory = 0,
+    allocation_padding = 0
 };
-
+typedef uint16_t PageSizeType;
 struct compressed_address
 {
     typedef uint64_t AddressIntType;
@@ -116,7 +117,10 @@ struct compressed_address
     {
         return index == other;
     }
-
+    explicit operator size_t() const
+    {
+        return index;
+    }
 private:
     AddressIntType index = 0;
 };
@@ -186,15 +190,20 @@ struct storage
 
     heap::buffer<uint8_t> compressed;
     heap::buffer<uint8_t> decompressed;
-    uint16_t write_position = 0;
-    uint16_t size = 0;
-    uint16_t modifications = 0;
+    PageSizeType write_position = 0;
+    PageSizeType size = 0;
+    PageSizeType modifications = 0;
+};
+struct size_offset
+{
+    PageSizeType size{};
+    PageSizeType offset{};
 };
 struct free_page
 {
-    free_page(){};
+    free_page()= default;
     explicit free_page(compressed_address p) : page(p.page()){};
-    std::vector<uint16_t> offsets{}; // within page
+    heap::vector<PageSizeType> offsets{}; // within page
     uint64_t page{0};
     [[nodiscard]] bool empty() const
     {
@@ -206,7 +215,7 @@ struct free_page
         {
             return compressed_address{0};
         }
-        uint16_t r = offsets.back();
+        PageSizeType r = offsets.back();
         if (r >= page_size)
         {
             abort();
@@ -214,9 +223,91 @@ struct free_page
         offsets.pop_back();
         return {page,r};
     }
+
     void clear()
     {
         offsets.clear();
+    }
+
+    heap::vector<size_offset> coalesce(PageSizeType size)
+    {
+        heap::vector<size_offset> r;
+        heap::vector<std::pair<ptrdiff_t, ptrdiff_t>> erasures;
+        std::sort(offsets.begin(), offsets.end());
+        PageSizeType last = page_size;
+        PageSizeType curr_size = 0;
+        size_t last_pos = 0;
+        size_t pos = 0;
+        for (auto offset :offsets)
+        {
+            if (last == page_size)
+            {
+                last_pos = pos;
+                last = offset;
+            }else if(offset - last == size)
+            {
+                curr_size += size;
+            }else
+            {
+                if (curr_size > size)
+                {
+                    erasures.push_back({last_pos, pos + 1});
+                    r.push_back({last, curr_size});
+                }
+                last = offset;
+                last_pos = pos;
+                curr_size = 0;
+            }
+            ++pos;
+        }
+        for(auto e:erasures)
+        {
+            offsets.erase(offsets.begin()+e.first, offsets.begin()+e.second);
+        }
+        if (offsets.empty()) offsets.clear();
+        return r;
+    }
+    void push(PageSizeType offset)
+    {
+        offsets.push_back(offset);
+    }
+
+    [[nodiscard]] size_t size() const
+    {
+        return offsets.size();
+    }
+};
+struct simple_bin
+{
+    heap::vector<size_t> data {};
+    size_t size = 0;
+    simple_bin() = default;
+    explicit simple_bin(size_t size) : size(size){}
+    void add(compressed_address offset, size_t size)
+    {
+        if(this->size != size)
+        {
+            abort();
+        }
+        data.push_back(offset.address());
+    }
+    [[nodiscard]] bool empty() const
+    {
+        return data.empty();
+    }
+    compressed_address pop(size_t size)
+    {
+        if(this->size != size)
+        {
+            abort();
+        }
+        if (data.empty())
+        {
+            return compressed_address{0};
+        }
+        size_t addr = data.back();
+        data.pop_back();
+        return compressed_address{addr};
     }
 };
 struct free_bin
@@ -226,21 +317,33 @@ struct free_bin
     {
     }
     unsigned size = 0;
-    heap::vector<size_t> page_index{};
+    heap::vector<uint32_t> page_index{};
     heap::vector<free_page> pages{};
+    struct page_max_t {size_t page{}; size_t size{};};
+    [[nodiscard]] page_max_t page_max() const
+    {
+        size_t sz = 0, pmax = 0;
+        for(auto& p: pages)
+        {
+            if (p.size() > sz)
+            {
+                pmax = p.page;
+                sz = p.size();
+            }
+        }
+        return {pmax, sz};
+    }
+
     [[nodiscard]] bool empty() const
     {
-        if(!pages.empty())
+        if (!pages.empty())
         {
             return pages.back().empty();
         }
         return true;
     }
-    [[nodiscard]] bool available() const
-    {
-        return !empty();
-    }
-    unsigned erase(size_t page)
+
+    void get(size_t page, std::function<void(free_page& p)> f)
     {
         if (page < page_index.size())
         {
@@ -248,18 +351,56 @@ struct free_bin
             if (at != 0)
             {
                 auto & p = pages.at(at-1);
-                if(p.page != page)
-                {
-                    abort();
-                }
-                unsigned r = p.offsets.size() * size;
-                p.clear();
-                page_index[at-1] = 0;
-                return r;
+                f(p);
             }
-
         }
-        return 0;
+    }
+
+    heap::vector<size_offset> coalesce(size_t page)
+    {
+        heap::vector<size_offset> r;
+        get(page,[&](free_page& p)
+        {
+            r = std::move(p.coalesce(size));
+        });
+        return r;
+    }
+
+    [[nodiscard]] bool available() const
+    {
+        return !empty();
+    }
+    heap::vector<size_t> get_addresses(size_t page)
+    {
+        heap::vector<size_t> r;
+        if (page < page_index.size()) {
+            size_t at = page_index.at(page);
+            if (at != 0)
+            {
+                auto & p = pages.at(at-1);
+                for (auto o : p.offsets)
+                {
+                    compressed_address ad{page, o};
+                    r.push_back(ad.address());
+                }
+            }
+        }
+        return r;
+    }
+    unsigned erase(size_t page)
+    {   unsigned r = 0;
+        get(page,[&](free_page& p) -> void
+        {
+            if (p.page != page)
+            {
+                abort();
+            }
+            r = p.offsets.size() * size;
+            p.clear();
+            page_index[p.page] = 0;
+
+        });
+        return r;
     }
     void add(compressed_address address, unsigned s)
     {
@@ -280,7 +421,8 @@ struct free_bin
         }
         size_t page = page_index[addr_page] - 1;
 
-        pages[page].offsets.push_back(address.offset());
+        pages[page].push(address.offset());
+
     }
 
     compressed_address pop(unsigned s)
@@ -320,32 +462,58 @@ struct free_list
     unsigned added = 0;
     size_t min_bin = page_size;
     size_t max_bin = 0;
-    heap::vector<free_bin> free_bins{};
+    std::unordered_set<size_t> addresses{};
+    std::vector<simple_bin> free_bins{};
 
     free_list()
     {
         for (unsigned i = 0; i < page_size; ++i)
         {
-            free_bins.push_back(free_bin(i));
+            free_bins.emplace_back(i);
         }
     }
-    void add(compressed_address address, unsigned size)
+    void inner_add(compressed_address address, unsigned size)
     {
         if (size >= free_bins.size())
         {
             return;
         }
+        if (address.is_null_base())
+        {
+            return;
+        }
+        if (addresses.count(address.address()) > 0)
+        {
+            abort();
+        }
+        addresses.insert(address.address());
         free_bins[size].add(address, size);
         min_bin = std::min(min_bin, (size_t)size);
         max_bin = std::max(max_bin, (size_t)size);
 
         added += size;
+
     }
+    void add(compressed_address address, unsigned size)
+    {
+        inner_add(address, size);
+    }
+#if 0
     void erase(size_t page)
     {
+
         for (size_t b = min_bin; b <= max_bin; ++b)
         {
             auto &f = free_bins[b];
+            auto tobe = f.get_addresses(page);
+            for (auto o : tobe)
+            {
+                if(addresses.count(o) == 0)
+                {
+                    abort();
+                }
+                addresses.erase(o);
+            }
             unsigned r = f.erase(page);
 
             if (added >= r)
@@ -356,24 +524,87 @@ struct free_list
                 abort();
             }
         }
+
     }
+#endif
     compressed_address get(unsigned size)
     {
         if (size >= free_bins.size())
         {
             return compressed_address{0};
         }
+        if (!added) return compressed_address{0};
+
         compressed_address r = free_bins[size].pop(size);
         if (!r.null())
         {
-            if(added < size)
+            if (added < size)
             {
                 abort();
             }
             added -= size;
+            if (addresses.count(r.address()) == 0)
+            {
+                abort();
+            }
+            addresses.erase(r.address());
+        } else
+        {
+#if 0
+            coalesce_max(); // a fairly slow function - for now
+            // start searching from the largest size for something that can be nibbled
+            for (size_t b = max_bin; b >= size*3; --b) // don't nibble from small pages - it will create small fragments
+            {
+                auto &f = free_bins[b];
+                if (!f.empty() && b > size) // largest are nibbled first
+                {
+                    auto bat = f.pop(b);
+                    size_t n = b - size;
+                    compressed_address at {bat.page(),bat.offset() + n};
+                    compressed_address remainder {bat.page(),bat.offset()}; // what's left of the free space pie
+                    add(remainder, n); // hopefully coalesce_max will catch these later on (NB: it may change min and max_bin)
+                    added -= size;
+                    return at; // get outta here (min and max_bin may have changed)
+                }
+            }
+#endif
         }
+
+
         return r;
     }
+
+
+    void coalesce_max()
+    {
+#if 0
+        if (added < page_size*4) return;
+
+        size_t bin_max = 0;
+        free_bin::page_max_t max_r{} ;
+
+        for (unsigned b = min_bin; b <= max_bin; ++b)
+        {
+            if (free_bins[b].empty()) continue;
+            auto pmax = free_bins[b].page_max();
+            if (max_r.size < pmax.size)
+            {
+                max_r = pmax;
+                bin_max = b;
+            }
+        }
+
+        auto &f = free_bins[bin_max];
+        auto offsets = f.coalesce(max_r.page);
+        for (auto& o:offsets)
+        {
+            size_t size = o.size;
+            compressed_address addr {max_r.page, o.offset};
+            add(addr, size);
+        }
+#endif
+    }
+
 
 };
 
@@ -403,6 +634,7 @@ private:
     unsigned size_in_training = 0;
     unsigned size_to_train = 0;
     heap::buffer<uint8_t> training_data{0};
+    //std::unordered_map<uint64_t, size_t> test{};
     std::vector<training_entry, heap::allocator<training_entry>> trainables{};
     std::vector<training_entry, heap::allocator<training_entry>> intraining{};
     ZSTD_CDict* dict{nullptr};
@@ -414,7 +646,7 @@ private:
     /// it must be entered and left before the allocation mutex to prevent deadlocks
     mutable std::shared_mutex vacuum_scope{};
     /// TODO: NB! the arena may reallocate while compression worker threads are running and cause instability
-    std::vector<storage,heap::allocator<storage>> arena{};
+    heap::vector<storage> arena{};
     heap::vector<size_t> free_pages{};
     heap::vector<size_t> decompressed_pages{};
     size_t last_page_allocated{0};
@@ -494,6 +726,10 @@ private:
 
     bool add_training_entry(const uint8_t* data, size_t size)
     {
+        if (enable_compression == 0)
+        {
+            return false;
+        }
         if (dict || size_in_training != 0 || size_to_train > min_training_size)
         {
             return false;
@@ -668,7 +904,7 @@ private:
 
         }
 
-        if (enable_compression != 0 && t.compressed.empty() && !t.decompressed.empty())
+        if (t.compressed.empty() && !t.decompressed.empty())
         {
             t.compressed = compress_2_buffer(dict, cctx, t.decompressed.begin(), page_size);
             if (t.compressed.empty())
@@ -782,35 +1018,57 @@ private:
     }
 
 public:
-    void free(compressed_address at, size_t size)
+    void free(compressed_address at, size_t sz)
     {
+        size_t size = sz + test_memory + allocation_padding;
         std::lock_guard guard(mutex);
+        uint8_t * d1 = basic_resolve(at);
+
         if (at.address() == 0 || size == 0)
         {
             abort();
         }
+        if (test_memory == 1 && d1[sz] != at.address() % 255)
+        {
+            abort();
+        }
+        if (test_memory == 1)
+            d1[sz] = 0;
         auto& t = arena.at(at.page());
         if (t.size == 0)
         {
             abort();
         }
         emancipated.add(at, size); // add a free allocation for later re-use
+
         if (t.size == 1)
         {
+            t.size = 0;
+            t.modifications = 0;
+            //t.write_position = 0;
+
 
             if(!t.compressed.empty())
             {
                 --statistics::pages_compressed;
                 statistics::page_bytes_compressed -= t.compressed.byte_size();
+                t.compressed.release();
             }
+
             if(!t.decompressed.empty())
             {
                 --statistics::pages_uncompressed;
                 statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             }
+            t.decompressed = std::move(heap::buffer<uint8_t>(page_size));
+            ++statistics::pages_uncompressed;
+            statistics::page_bytes_uncompressed += t.decompressed.byte_size();
+
+            #if 0
             t.clear();
             emancipated.erase(at.page());
             free_pages.push_back(at.page());
+#endif
         }
         else
         {
@@ -825,7 +1083,8 @@ public:
     {
         if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
-        return (T*)basic_resolve(at);
+        const uint8_t * d = basic_resolve(at);
+        return (T*)d;
     }
 
     template <typename T>
@@ -833,16 +1092,19 @@ public:
     {
         if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
-        return (T*)basic_resolve(at, true);
+        uint8_t * d = basic_resolve(at,true);
+        return (T*)d;
     }
 
-    compressed_address new_address(size_t size)
+    compressed_address new_address(size_t sz)
     {
+        size_t size = sz + test_memory + allocation_padding;
         std::lock_guard guard(mutex);
         compressed_address r = emancipated.get(size); // TODO: try a few sizes larger
         if(!r.null() && r.page() < arena.size() && !arena[r.page()].empty())
         {   auto& pcheck = arena[r.page()];
-            uint16_t w = r.offset();
+
+            PageSizeType w = r.offset();
             if (w + size > pcheck.write_position)
             {
                 pcheck.write_position = w + size;
@@ -859,6 +1121,18 @@ public:
             at.second.size++;
             at.second.modifications++;
             invalid(r);
+            auto* data = test_memory == 1 ? basic_resolve(r) : nullptr;
+            if (test_memory == 1 && data[sz] != 0)
+            {
+                abort();
+            }
+            if(test_memory == 1)
+                data[sz] = r.address() % 255;
+            if (at.second.decompressed.empty())
+            {
+                abort();
+            }
+            memset(at.second.decompressed.begin() + r.offset(), 0, sz);
             return r;
         }
         auto at = create_if_required(size);
@@ -882,6 +1156,13 @@ public:
         at.second.size++;
         at.second.modifications++;
         invalid(ca);
+        auto* data = (test_memory == 1 ) ?  basic_resolve(ca) : nullptr;
+        if (test_memory == 1 && data[sz] != 0)
+        {
+            abort();
+        }
+        if(test_memory == 1)
+            data[sz] = ca.address() % 255;
         return ca;
     }
 
@@ -890,7 +1171,7 @@ public:
 
         if (statistics::page_bytes_compressed > heap::allocated)
         {
-            //abort();
+            abort();
         }
         if (statistics::addressable_bytes_alloc < statistics::interior_bytes_alloc)
         {
@@ -905,14 +1186,14 @@ public:
         if (dict == nullptr) return 0;
         double ratio = heap::get_physical_memory_ratio();
 
-        if (!full && ratio > 0.85 && !decompressed_pages.empty())
+        if (!full && ratio > 0.95 && !decompressed_pages.empty())
         {
             size_t at = decompressed_pages.back();
             decompressed_pages.pop_back();
             return release_decompressed(cctx,at);
 
         }
-        if (!full && ratio < 0.85)
+        if (!full && ratio < 0.95)
         {
             return 0;
         }
@@ -922,7 +1203,7 @@ public:
         auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - last_vacuum_millis);
         uint64_t total_heap = heap::allocated;
         size_t result = 0;
-        if ( d.count() > 10 )
+        if ( d.count() > 50 )
         {
             // if most of the pages are already compressed theres no reason to try
             //if (statistics::pages_compressed > (9 * arena.size()/10))

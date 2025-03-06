@@ -253,6 +253,10 @@ T* heap::allocator<T>::allocate(const size_t n) const
         heap::buffer<T> content{};
         size_t count{0};
         vector() = default;
+        explicit vector(size_t r)
+        {
+            reserve(r);
+        }
         ~vector()
         {
             clear();
@@ -313,6 +317,33 @@ T* heap::allocator<T>::allocate(const size_t n) const
 
             count = n;
         }
+        bool included(const T* it) const
+        {
+            return it >= begin() && it <= end();
+        }
+        size_t index(const T* it) const
+        {
+            return it - begin();
+        }
+        void erase(ptrdiff_t from, ptrdiff_t to)
+        {
+            erase(begin() + from, begin() + to);
+        }
+        void erase(const T* from, const T* to)
+        {
+            if (!included(from) || !included(to) || from > to) return; // TODO: or abort() ?
+
+            vector other(end() - to);
+            for(auto s = to; s < end(); ++s)
+            {
+                other.push_back(*s); // copy the remainder
+            }
+            resize(size() - (end() - from));
+            for (auto &it: other)
+            {
+                push_back(std::move(it));
+            }
+        }
         void reserve(size_t n)
         {
             if (count > content.size())
@@ -326,6 +357,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
                 {
                     new (&other.ptr[t]) T();
                     other.ptr[t] = std::move(content[t]);
+                    content[t].~T();
                 }
                 content = std::move(other);
             }
@@ -355,6 +387,20 @@ T* heap::allocator<T>::allocate(const size_t n) const
         {
             auto b = count;
             resize(b + 1);
+        }
+        void append(const T* start, const T* end)
+        {
+
+            for(auto it = start; it < end; ++it)
+            {
+                push_back(*it);
+            }
+        }
+        void append(const vector& other)
+        {
+            reserve(size() + other.size());
+            append(other.cbegin(), other.cend());
+
         }
         T& back()
         {
@@ -413,6 +459,10 @@ T* heap::allocator<T>::allocate(const size_t n) const
         {
             return content.begin();
         }
+        const T* cbegin() const
+        {
+            return content.begin();
+        }
         const T* begin() const
         {
             return content.begin();
@@ -426,6 +476,14 @@ T* heap::allocator<T>::allocate(const size_t n) const
             return content.begin() + count;
         }
         const T* end() const
+        {
+            if(count > capacity())
+            {
+                abort();
+            }
+            return content.begin() + count;
+        }
+        const T* cend() const
         {
             if(count > capacity())
             {

@@ -34,6 +34,7 @@ struct art_statistics {
     int64_t page_bytes_uncompressed;
     int64_t vacuums_performed;
     int64_t last_vacuum_time;
+    int64_t leaf_nodes_replaced;
 };
 
 struct art_ops_statistics {

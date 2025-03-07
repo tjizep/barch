@@ -98,7 +98,6 @@ art_node* alloc_8_node(unsigned nt) {
 art_node::art_node () = default;
 art_node::~art_node() {
     check_object();
-    partial_len = 255;
 };
 /**
  * Returns the number of prefix characters shared between
@@ -106,10 +105,10 @@ art_node::~art_node() {
  */
 
 unsigned art_node::check_prefix(const unsigned char *key, unsigned key_len, unsigned depth) {
-    unsigned max_cmp = std::min<int>(std::min<int>(partial_len, max_prefix_llength), (int)key_len - (int)depth);
+    unsigned max_cmp = std::min<int>(std::min<int>(data().partial_len, max_prefix_llength), (int)key_len - (int)depth);
     unsigned idx;
     for (idx=0; idx < max_cmp; idx++) {
-        if (partial[idx] != key[depth+idx])
+        if (data().partial[idx] != key[depth+idx])
             return idx;
     }
     return idx;

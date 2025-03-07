@@ -26,7 +26,7 @@ namespace heap {
     void free(void* ptr, size_t size);
     void free(void* ptr);
     void check_ptr(void* ptr, size_t size);
-
+    bool valid_ptr(void* ptr, size_t size);
     template <class T>
     struct allocator : std::allocator_traits<std::allocator<T>>
     {
@@ -46,8 +46,9 @@ namespace heap {
         T* allocate(const size_t n) const;
         void deallocate(T* const p, size_t) const noexcept;
     };
+
     template <class T>
-T* heap::allocator<T>::allocate(const size_t n) const
+    T* heap::allocator<T>::allocate(const size_t n) const
     {
         if (n == 0)
         {
@@ -160,6 +161,63 @@ T* heap::allocator<T>::allocate(const size_t n) const
             return r;
         }
 
+        struct safe_iterator
+        {
+            T* ptr{nullptr};
+            size_t count{0};
+            size_t offset{0};
+            safe_iterator() noexcept = default;
+            safe_iterator(T* ptr_, size_t count, size_t offset) : ptr(ptr_),count(count),offset(offset) {};
+            operator T*()
+            {   return ptr + offset;
+            }
+            operator const T*() const
+            {   return ptr + offset;
+            }
+            T* operator ->()
+            {
+                if (!valid())
+                {
+                    abort();
+                }
+                return ptr + offset;
+            }
+            const T* operator ->() const
+            {
+                if (!valid())
+                {
+                    abort();
+                }
+                return ptr + offset;
+            }
+
+            [[nodiscard]] bool valid() const
+            {
+                if (!ptr || (offset >= count))
+                {
+                    return false;
+                };
+                return heap::valid_ptr(ptr, count);
+            }
+            bool operator==(const safe_iterator& other) const
+            {
+                return ptr == other.ptr && offset == other.offset && count == other.count;
+            }
+            bool operator!=(const safe_iterator& other) const
+            {
+                return ptr != other.ptr || offset != other.offset || count != other.count;
+            }
+            safe_iterator& operator++() { ++offset; return *this; }
+            safe_iterator& operator--() { --offset; return *this; }
+            safe_iterator operator++(int) { safe_iterator tmp = *this; ++tmp.offset; return tmp; }
+            safe_iterator operator--(int) { safe_iterator tmp = *this; --tmp.offset; return tmp; }
+            safe_iterator& operator+=(size_t n) { offset += n; return *this; }
+            safe_iterator& operator-=(size_t n) { offset -= n; return *this; }
+            safe_iterator operator+(int n) const { return safe_iterator(ptr, count, offset + n); }
+            safe_iterator operator-(int n) const { return safe_iterator(ptr, count, offset - n); }
+
+        };
+
         T* data()
         {
             return ptr;
@@ -196,6 +254,7 @@ T* heap::allocator<T>::allocate(const size_t n) const
 
         T* move()
         {
+
             if(count && !ptr)
             {
                 abort();
@@ -376,6 +435,13 @@ T* heap::allocator<T>::allocate(const size_t n) const
             auto b = count;
             resize(count + 1);
             content[b] = x;
+        }
+        template<typename... Args>
+        void emplace_back(Args && ...arg)
+        {
+            auto b = count;
+            resize(b + 1);
+            content[b] = T(std::forward<Args>(arg)...);
         }
         void emplace_back(const T& x)
         {

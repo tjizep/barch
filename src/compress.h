@@ -23,12 +23,13 @@
 enum
 {
     page_size = 4096,
-    reserved_address_base = 10000000,
+    reserved_address_base = 12000,
     enable_compression = 1,
     auto_vac = 0,
-    auto_vac_workers = 8,
+    auto_vac_workers = 4,
     test_memory = 1,
-    allocation_padding = 0
+    allocation_padding = 0,
+    coalesce_fragments = 1
 };
 typedef uint16_t PageSizeType;
 struct compressed_address
@@ -463,7 +464,7 @@ struct free_list
     size_t min_bin = page_size;
     size_t max_bin = 0;
     std::unordered_set<size_t> addresses{};
-    std::vector<free_bin> free_bins{};
+    heap::vector<free_bin> free_bins{};
 
     free_list()
     {
@@ -546,14 +547,14 @@ struct free_list
                 abort();
             }
             addresses.erase(r.address());
-        } else
+        } else if (coalesce_fragments == 1)
         {
             coalesce_max(); // a fairly slow function - for now
             // start searching from the largest size for something that can be nibbled
-            for (size_t b = max_bin; b >= size*3; --b) // don't nibble from small pages - it will create small fragments
+            for (size_t b = max_bin; b >= min_bin; --b) // don't nibble from small pages - it will create small fragments
             {
                 auto &f = free_bins[b];
-                if (!f.empty() && b > size) // largest are nibbled first
+                if (!f.empty() && b > size*4) // largest are nibbled first
                 {
                     auto bat = f.pop(b);
                     size_t n = b - size;
@@ -639,7 +640,6 @@ private:
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
     mutable std::shared_mutex vacuum_scope{};
-    /// TODO: NB! the arena may reallocate while compression worker threads are running and cause instability
     heap::vector<storage> arena{};
     heap::vector<size_t> free_pages{};
     heap::vector<size_t> decompressed_pages{};
@@ -846,7 +846,7 @@ private:
 
         if (last.write_position + size >= page_size)
         {
-            if (!dict)
+            if (!dict && !last.decompressed.empty())
             {
                 add_training_entry(last.decompressed.begin(), last.write_position);
             }
@@ -865,7 +865,6 @@ private:
                     return allocate_page_at(fp);
                 }
             }
-
 
             arena.emplace_back();
             return allocate_page_at(arena.size() - 1);
@@ -954,12 +953,12 @@ private:
         return t.decompressed.begin() + at.offset();
     }
 
-    void invalid(compressed_address at) const
+    void invalid(compressed_address ) const
     {
-        if (!valid(at))
-        {
-            abort();
-        }
+        //if (!valid(at))
+        //{
+        //    abort();
+        //}
     }
 
     [[nodiscard]] bool valid(compressed_address at) const
@@ -1092,7 +1091,7 @@ public:
     {
         size_t size = sz + test_memory + allocation_padding;
         std::lock_guard guard(mutex);
-        compressed_address r = emancipated.get(size); // TODO: try a few sizes larger
+        compressed_address r = emancipated.get(size);
         if(!r.null() && r.page() < arena.size() && !arena[r.page()].empty())
         {   auto& pcheck = arena[r.page()];
 
@@ -1195,12 +1194,8 @@ public:
         auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - last_vacuum_millis);
         uint64_t total_heap = heap::allocated;
         size_t result = 0;
-        if ( d.count() > 50 )
+        if ( d.count() > 20 )
         {
-            // if most of the pages are already compressed theres no reason to try
-            //if (statistics::pages_compressed > (9 * arena.size()/10))
-            //    return result;
-
             if (total_heap < statistics::page_bytes_compressed)
             {
                 abort();

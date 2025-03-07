@@ -17,6 +17,9 @@ namespace statistics {
     extern std::atomic<uint64_t> page_bytes_uncompressed;
     extern std::atomic<uint64_t> pages_uncompressed;
     extern std::atomic<uint64_t> pages_compressed;
+    /**
+    * internal stats
+    */
     extern std::atomic<uint64_t> vacuums_performed;
     extern std::atomic<uint64_t> last_vacuum_time;
     extern std::atomic<uint64_t> leaf_nodes_replaced;

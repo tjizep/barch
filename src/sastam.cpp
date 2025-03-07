@@ -48,6 +48,15 @@ void* heap::allocate(size_t size){
     }
     return r;
 }
+bool heap::valid_ptr(void* ptr, size_t size)
+{
+    if(!ptr) return false;
+    if(heap_checks != 1) return true;
+    uint32_t ax32 = get_ptr_val(ptr);
+    uint32_t ax32t = 0;
+    memcpy(&ax32t, (const uint8_t*)ptr + size + padding, sizeof(ax32));
+    return  ax32t == ax32;
+}
 void heap::check_ptr(void* ptr, size_t size)
 {
     if(!ptr) return;

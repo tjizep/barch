@@ -567,7 +567,7 @@ template<typename EncodedType, bool IsLeaf, int SIZE>
 struct node_array
 {
     typedef encoded_element<EncodedType, IsLeaf> ProxyType;
-    EncodedType data[SIZE];
+    EncodedType data[SIZE]{};
     [[nodiscard]] uintptr_t get_offset() const
     {
         return (uintptr_t)this;
@@ -600,28 +600,70 @@ struct encoded_node_content : public art_node {
     typedef i_ptr_t LeafElementType;
     typedef node_array<i_ptr_t, false, SIZE> ChildArrayType;
     typedef node_array<i_ptr_t, true, SIZE> LeafArrayType;
+    node_data& data() override
+    {
+        return *pdata;
+    }
+    [[nodiscard]] const node_data& data() const override
+    {
+        return *pdata;
+    }
+    struct encoded_data : node_data
+    {
+        unsigned char keys[KEYS]{};
 
+        uint8_t types[SIZE]{};
+        union
+        {
+            LeafArrayType leaves{};
+            ChildArrayType children;
+        };
+    };
+    encoded_data& nd()
+    {
+        return *pdata;
+    }
+    const encoded_data& nd() const
+    {
+        return *pdata;
+    }
+    encoded_data *pdata{};
+    //encoded_data npdata{};
+    compressed_address address{};
     encoded_node_content()
     {
+        size_t sz = sizeof(encoded_node_content);
+        size_t szd = sizeof(encoded_data);
+        if(szd < sz)
+        {
+            abort();
+        }
+        address = get_leaf_compression().new_address(sizeof(encoded_data));
+        pdata = get_leaf_compression().resolve_modified<encoded_data>(address);
     };
-    ~encoded_node_content() override{};
+    ~encoded_node_content() override
+    {
+        get_leaf_compression().free(address,sizeof(encoded_data));
+    };
+    encoded_node_content(const encoded_node_content&) = delete;
+    encoded_node_content& operator=(const encoded_node_content&) = delete;
     void set_leaf(unsigned at) final {
         check_object();
         if (SIZE <= at)
             abort();
-        nd.types[at] = 1;
+        nd().types[at] = 1;
     }
     void set_child(unsigned at, node_ptr node) final {
         check_object();
         if (SIZE <= at)
             abort();
-        nd.types[at] = node.is_leaf ? 1 : 0;
+        nd().types[at] = node.is_leaf ? 1 : 0;
         if(node.is_leaf)
         {
-            nd.leaves[at] = node.logical;
+            nd().leaves[at] = node.logical;
         }else
         {
-            nd.children[at] = node;
+            nd().children[at] = node;
         }
 
     }
@@ -629,19 +671,19 @@ struct encoded_node_content : public art_node {
         check_object();
         if (SIZE <= at)
             abort();
-        bool is = nd.types[at] != 0;
+        bool is = nd().types[at] != 0;
         return is;
     }
     [[nodiscard]] bool has_child(unsigned at) const final {
         check_object();
         if (SIZE <= at)
             abort();
-        return nd.children[at].exists() ;
+        return nd().children[at].exists() ;
     }
     [[nodiscard]] node_ptr get_node(unsigned at) const final {
         check_object();
         if (at < SIZE)
-            return nd.types[at] ? node_ptr(nd.leaves[at]) : node_ptr(nd.children[at]);
+            return nd().types[at] ? node_ptr(nd().leaves[at]) : node_ptr(nd().children[at]);
 
         return nullptr;
     }
@@ -649,7 +691,7 @@ struct encoded_node_content : public art_node {
     node_ptr get_node(unsigned at) final {
         check_object();
         if (at < SIZE)
-            return nd.types[at] ? node_ptr(nd.leaves[at]) : node_ptr(nd.children[at]);
+            return nd().types[at] ? node_ptr(nd().leaves[at]) : node_ptr(nd().children[at]);
 
         return nullptr;
     }
@@ -665,8 +707,8 @@ struct encoded_node_content : public art_node {
     [[nodiscard]] bool ok_child(node_ptr np) const override
     {   check_object();
         if(np.is_leaf)
-            return nd.leaves.ok(np);
-        return nd.children.ok(np);
+            return nd().leaves.ok(np);
+        return nd().children.ok(np);
     }
     [[nodiscard]] bool ok_children(const children_t& child) const override
     {   check_object();
@@ -675,11 +717,11 @@ struct encoded_node_content : public art_node {
             // TODO: compress leaf addresses again
             if(np.is_leaf)
             {
-               return nd.leaves.ok(np);
+               return nd().leaves.ok(np);
 
             }else
             {
-                return nd.children.ok(np);
+                return nd().children.ok(np);
             }
         }
         return true;
@@ -695,33 +737,33 @@ struct encoded_node_content : public art_node {
         }
         if (operbits & (eq & gt) ) {
             for (i = 0; i < data().num_children; ++i) {
-                if (nd.keys[i] >= c)
+                if (nd().keys[i] >= c)
                     return i;
             }
             if (operbits == (eq & gt)) return data().num_children;
         }
         if (operbits & (eq & lt) ) {
             for (i = 0; i < data().num_children; ++i) {
-                if (nd.keys[i] <= c)
+                if (nd().keys[i] <= c)
                     return i;
             }
             if (operbits == (eq & lt)) return data().num_children;
         }
         if (operbits & eq) {
             for (i = 0; i < data().num_children; ++i) {
-                if (nd.keys[i] == c)
+                if (KEYS > 0 && nd().keys[i] == c)
                     return i;
             }
         }
         if (operbits & gt) {
             for (i = 0; i < data().num_children; ++i) {
-                if (nd.keys[i] > c)
+                if (KEYS > 0 && nd().keys[i] > c)
                     return i;
             }
         }
         if (operbits & lt) {
             for (i = 0; i < data().num_children; ++i) {
-                if (nd.keys[i] < c)
+                if (KEYS > 0 && nd().keys[i] < c)
                     return i;
             }
         }
@@ -745,12 +787,12 @@ struct encoded_node_content : public art_node {
     };
     [[nodiscard]] const unsigned char* get_keys() const override
     {   check_object();
-        return nd.keys;
+        return nd().keys;
     }
     [[nodiscard]] const unsigned char& get_key(unsigned at) const final {
         check_object();
         if(at < KEYS)
-            return nd.keys[at];
+            return nd().keys[at];
         abort();
     }
 
@@ -760,7 +802,7 @@ struct encoded_node_content : public art_node {
         auto max_keys = KEYS;
         if(at < max_keys)
         {
-            nd.keys[at] = k;
+            nd().keys[at] = k;
             return;
         }
         abort();
@@ -769,7 +811,7 @@ struct encoded_node_content : public art_node {
     unsigned char& get_key(unsigned at) final {
         check_object();
         if(at < KEYS)
-            return nd.keys[at];
+            return nd().keys[at];
         abort();
     }
 
@@ -778,14 +820,14 @@ struct encoded_node_content : public art_node {
         if (SIZE <= pos)
             abort();
 
-        return nd.children[pos].exists();
+        return nd().children[pos].exists();
     }
 
     void set_keys(const unsigned char* other_keys, unsigned count) override{
         check_object();
         if (KEYS < count )
             abort();
-        memcpy(nd.keys, other_keys, count);
+        memcpy(nd().keys, other_keys, count);
     }
 
     void insert_type(unsigned pos) {
@@ -794,7 +836,7 @@ struct encoded_node_content : public art_node {
             abort();
         unsigned count = data().num_children;
         for (unsigned p = count; p > pos; --p) {
-            nd.types[p] = nd.types[p - 1];
+            nd().types[p] = nd().types[p - 1];
         }
     }
     void remove_type(unsigned pos) {
@@ -803,12 +845,12 @@ struct encoded_node_content : public art_node {
             abort();
         unsigned count = data().num_children;
         for (unsigned p = pos; p < count -1; ++p) {
-            nd.types[p] = nd.types[p + 1];
+            nd().types[p] = nd().types[p + 1];
         }
     }
     [[nodiscard]] bool child_type(unsigned at) const override
     {   check_object();
-        return nd.types[at];
+        return nd().types[at];
     }
 
     void set_children(unsigned dpos, const art_node* other, unsigned spos, unsigned count) override {
@@ -820,12 +862,12 @@ struct encoded_node_content : public art_node {
                 auto n = other->get_child(d+spos);
                 if(n.is_leaf)
                 {
-                    nd.leaves[d] = n.logical;
+                    nd().leaves[d] = n.logical;
                 }else
-                    nd.children[d] = n;
+                    nd().children[d] = n;
             }
             for(unsigned t = 0; t < count; ++t) {
-                nd.types[t+dpos] = other->child_type(t+spos);
+                nd().types[t+dpos] = other->child_type(t+spos);
             }
         }else {
             abort();
@@ -840,11 +882,11 @@ struct encoded_node_content : public art_node {
     void remove_child(unsigned pos) {
         check_object();
         if(pos < KEYS && KEYS == SIZE) {
-            memmove(nd.keys+pos, nd.keys+pos+1, data().num_children - 1 - pos);
-            memmove(nd.children.data+pos, nd.children.data+pos+1, (data().num_children - 1 - pos)*sizeof(ChildElementType));
+            memmove(nd().keys+pos, nd().keys+pos+1, data().num_children - 1 - pos);
+            memmove(nd().children.data+pos, nd().children.data+pos+1, (data().num_children - 1 - pos)*sizeof(ChildElementType));
             remove_type(pos);
-            nd.keys[data().num_children - 1] = 0;
-            nd.children[data().num_children - 1] = nullptr;
+            nd().keys[data().num_children - 1] = 0;
+            nd().children[data().num_children - 1] = nullptr;
             data().num_children--;
         } else {
             abort();
@@ -893,26 +935,7 @@ struct encoded_node_content : public art_node {
         check_object();
         return sizeof(ChildElementType);
     };
-    node_data& data() override
-    {
-        return nd;
-    }
-    [[nodiscard]] const node_data& data() const override
-    {
-        return nd;
-    }
-    struct encoded_data : node_data
-    {
-        unsigned char keys[KEYS]{};
 
-        std::array<uint8_t,SIZE> types{};
-        union
-        {
-            LeafArrayType leaves{};
-            ChildArrayType children;
-        };
-    };
-    encoded_data nd{};
 
 protected:
 
@@ -965,7 +988,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
                 // Concatenate the prefixes
                 unsigned prefix = data().partial_len;
                 if (prefix < max_prefix_llength) {
-                    data().partial[prefix] = nd.keys[0];
+                    data().partial[prefix] = nd().keys[0];
                     ++prefix;
                 }
                 if (prefix < max_prefix_llength) {
@@ -987,12 +1010,12 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     {
         unsigned idx = index(c, gt);
         // Shift to make room
-        memmove(nd.keys+idx+1, nd.keys+idx, data().num_children - idx);
-        memmove(nd.children.data+idx+1, nd.children.data+idx,
+        memmove(nd().keys+idx+1, nd().keys+idx, data().num_children - idx);
+        memmove(nd().children.data+idx+1, nd().children.data+idx,
                 (data().num_children - idx)*sizeof(IntegerPtr));
         insert_type(idx);
         // Insert element
-        nd.keys[idx] = c;
+        nd().keys[idx] = c;
         set_child(idx, child);
         data().num_children++;
     }
@@ -1004,7 +1027,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
             art_node *new_node = alloc_node(node_16, {child});
             // Copy the child pointers and the key map
             new_node->set_children(0, this, 0, data().num_children);
-            new_node->set_keys(nd.keys, data().num_children);
+            new_node->set_keys(nd().keys, data().num_children);
             new_node->copy_header(this);
             ref = new_node;
             free_node(this);
@@ -1022,8 +1045,8 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override{
         for (unsigned i=0 ; i < data().num_children; i++) {
 
-            if (nd.keys[i] >= c && has_child(i)){
-                return {{this,get_child(i),i},nd.keys[i] == c};
+            if (nd().keys[i] >= c && has_child(i)){
+                return {{this,get_child(i),i},nd().keys[i] == c};
             }
         }
         return {{nullptr,nullptr,data().num_children},false};
@@ -1074,7 +1097,7 @@ encoded_node_content<16,16, IPtrType >
         return sizeof(art_node16_v);
     }
     [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
-        unsigned i = bits_oper16(this->nd.keys, nuchar<16>(c), (1 << this->data().num_children) - 1, operbits);
+        unsigned i = bits_oper16(this->nd().keys, nuchar<16>(c), (1 << this->data().num_children) - 1, operbits);
         if (i) {
             i = __builtin_ctz(i);
             return i;
@@ -1090,7 +1113,7 @@ encoded_node_content<16,16, IPtrType >
         if (this->data().num_children == 3) {
             auto *new_node = alloc_node(node_4,{});
             new_node->copy_header(this);
-            new_node->set_keys(this->nd.keys, 3);
+            new_node->set_keys(this->nd().keys, 3);
             new_node->set_children(0, this, 0, 3);
 
             ref = new_node;
@@ -1107,15 +1130,15 @@ encoded_node_content<16,16, IPtrType >
         unsigned idx;
         if (bitfield) {
             idx = __builtin_ctz(bitfield);
-            memmove(this->nd.keys+idx+1,this->nd.keys+idx,this->data().num_children-idx);
-            memmove(this->nd.children.data+idx+1,this->nd.children.data+idx,
+            memmove(this->nd().keys+idx+1,this->nd().keys+idx,this->data().num_children-idx);
+            memmove(this->nd().children.data+idx+1,this->nd().children.data+idx,
                     (this->data().num_children-idx)*sizeof(typename Parent::ChildElementType));
         } else
             idx = this->data().num_children;
 
         this->insert_type(idx);
         // Set the child
-        this->nd.keys[idx] = c;
+        this->nd().keys[idx] = c;
         this->set_child(idx, child);
         ++this->data().num_children;
     }
@@ -1131,7 +1154,7 @@ encoded_node_content<16,16, IPtrType >
             // Copy the child pointers and populate the key map
             new_node->set_children(0, this, 0, this->data().num_children);
             for (unsigned i=0;i< this->data().num_children;i++) {
-                new_node->set_key(this->nd.keys[i], i + 1);
+                new_node->set_key(this->nd().keys[i], i + 1);
             }
             new_node->copy_header(this);
             ref = new_node;
@@ -1148,10 +1171,10 @@ encoded_node_content<16,16, IPtrType >
     }
     [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override {
         unsigned mask = (1 << this->data().num_children) - 1;
-        unsigned bf = bits_oper16(this->nd.keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt); // inverse logic
+        unsigned bf = bits_oper16(this->nd().keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt); // inverse logic
         if (bf) {
             unsigned i = __builtin_ctz(bf);
-            return {{this,this->get_child(i),i}, this->nd.keys[i]==c};
+            return {{this,this->get_child(i),i}, this->nd().keys[i]==c};
         }
         return {{nullptr,nullptr,this->data().num_children},false};
     }
@@ -1212,24 +1235,24 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         return sizeof(art_node48);
     }
     [[nodiscard]] unsigned index(unsigned char c) const override {
-        unsigned  i = nd.keys[c];
+        unsigned  i = nd().keys[c];
         if (i)
             return i-1;
         return 256;
     }
     void remove(node_ptr& ref, unsigned pos, unsigned char key) override{
-        if((unsigned)nd.keys[key] -1 != pos) {
+        if((unsigned)nd().keys[key] -1 != pos) {
             abort();
         }
-        if (nd.keys[key] == 0){
+        if (nd().keys[key] == 0){
             return;
         }
-        if (nd.children[pos].empty()) {
+        if (nd().children[pos].empty()) {
             abort();
         }
-        nd.keys[key] = 0;
-        nd.children[pos] = nullptr;
-        nd.types[pos] = false;
+        nd().keys[key] = 0;
+        nd().children[pos] = nullptr;
+        nd().types[pos] = false;
         data().num_children--;
 
         if (data().num_children == 12) {
@@ -1237,7 +1260,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
             new_node->copy_header(this);
             unsigned child = 0;
             for (unsigned i = 0; i < 256; i++) {
-                pos = nd.keys[i];
+                pos = nd().keys[i];
                 if (pos) {
                     node_ptr nn = get_child(pos - 1);
                     if (nn.null()) {
@@ -1259,7 +1282,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         while (has_child(pos)) pos++;
         // not we do not need to call insert_type an empty child is found
         set_child(pos, child);
-        nd.keys[c] = pos + 1;
+        nd().keys[c] = pos + 1;
         data().num_children++;
 
     }
@@ -1269,8 +1292,8 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         } else {
             auto *new_node = alloc_node(node_256,{});
             for (unsigned i = 0;i < 256; i++) {
-                if (nd.keys[i]) {
-                    node_ptr nc = get_child(nd.keys[i] - 1);
+                if (nd().keys[i]) {
+                    node_ptr nc = get_child(nd().keys[i] - 1);
                     if(nc.null()) {
                         abort();
                     }
@@ -1289,14 +1312,14 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
     }
     [[nodiscard]] unsigned last_index() const override{
         unsigned idx=255;
-        while (!nd.keys[idx]) idx--;
-        return nd.keys[idx] - 1;
+        while (!nd().keys[idx]) idx--;
+        return nd().keys[idx] - 1;
     }
     [[nodiscard]] unsigned first_index() const override{
         unsigned uc = 0; // ?
         unsigned i;
         for (; uc < 256;uc++){
-            i = nd.keys[uc];
+            i = nd().keys[uc];
             if(i > 0){
                 return i-1;
             }
@@ -1311,7 +1334,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         unsigned uc = c;
         unsigned i = 0;
         for (; uc < 256;uc++){
-            i = nd.keys[uc];
+            i = nd().keys[uc];
             if (i > 0) {
                 trace_element te = {this, get_child(i-1),i-1};
                 return {te, (i == c)};
@@ -1325,7 +1348,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         unsigned uc = te.child_ix, i;
 
         for (; uc > 0; --uc){
-            i = nd.keys[uc];
+            i = nd().keys[uc];
             if(i > 0){
                 return {this,get_child(i-1),i-1};
             }
@@ -1336,7 +1359,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
     [[nodiscard]] trace_element previous(const trace_element& te) override{
         unsigned uc = te.child_ix + 1, i;
         for (; uc < 256;uc++){
-            i = nd.keys[uc];
+            i = nd().keys[uc];
             if(i > 0){
                 return {this,get_child(i-1),i-1};
             }
@@ -1386,7 +1409,7 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
 
     [[nodiscard]] unsigned index(unsigned char c) const override
     {
-        if (nd.children[c].exists())
+        if (nd().children[c].exists())
             return c;
         return 256;
     }
@@ -1396,8 +1419,8 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
         if(key != pos) {
             abort();
         }
-        nd.children[key] = nullptr;
-        nd.types[key] = 0;
+        nd().children[key] = nullptr;
+        nd().types[key] = 0;
         --data().num_children;
         --statistics::node256_occupants;
         // Resize to a node48 on underflow, not immediately to prevent
@@ -1410,7 +1433,7 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
             pos = 0;
             for (unsigned i = 0; i < 256; i++) {
                 if (has_any(i)) {
-                    new_node->set_child(pos, get_child(i)); //[pos] = n->nd.children[i];
+                    new_node->set_child(pos, get_child(i)); //[pos] = n->nd().children[i];
                     new_node->set_key(i, pos + 1);
                     pos++;
                 }
@@ -1435,7 +1458,7 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
     [[nodiscard]] unsigned last_index() const override
     {
         unsigned idx = 255;
-        while (nd.children[idx].empty()) idx--;
+        while (nd().children[idx].empty()) idx--;
         return idx;
     }
 
@@ -1443,7 +1466,7 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
     {
         unsigned uc = 0; // ?
         for (; uc < 256; uc++){
-            if(nd.children[uc].exists()) {
+            if(nd().children[uc].exists()) {
                 return uc;
             }
         }

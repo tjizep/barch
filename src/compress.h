@@ -27,9 +27,9 @@ enum
     enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 4,
-    test_memory = 1,
+    test_memory = 0,
     allocation_padding = 0,
-    coalesce_fragments = 1
+    coalesce_fragments = 0
 };
 typedef uint16_t PageSizeType;
 struct compressed_address
@@ -483,11 +483,15 @@ struct free_list
         {
             return;
         }
-        if (addresses.count(address.address()) > 0)
+        if ( test_memory == 1 )
         {
-            abort();
+            if (addresses.count(address.address()) > 0)
+            {
+                abort();
+            }
+            addresses.insert(address.address());
+
         }
-        addresses.insert(address.address());
         free_bins[size].add(address, size);
         min_bin = std::min(min_bin, (size_t)size);
         max_bin = std::max(max_bin, (size_t)size);
@@ -506,13 +510,16 @@ struct free_list
         {
             auto &f = free_bins[b];
             auto tobe = f.get_addresses(page);
-            for (auto o : tobe)
+            if ( test_memory == 1 )
             {
-                if(addresses.count(o) == 0)
+                for (auto o : tobe)
                 {
-                    abort();
+                    if(addresses.count(o) == 0)
+                    {
+                        abort();
+                    }
+                    addresses.erase(o);
                 }
-                addresses.erase(o);
             }
             unsigned r = f.erase(page);
 
@@ -542,11 +549,14 @@ struct free_list
                 abort();
             }
             added -= size;
-            if (addresses.count(r.address()) == 0)
+            if ( test_memory == 1 )
             {
-                abort();
+                if (addresses.count(r.address()) == 0)
+                {
+                    abort();
+                }
+                addresses.erase(r.address());
             }
-            addresses.erase(r.address());
         } else if (coalesce_fragments == 1)
         {
             coalesce_max(); // a fairly slow function - for now

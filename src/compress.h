@@ -1036,7 +1036,7 @@ public:
     {
         size_t size = sz + test_memory + allocation_padding;
         std::lock_guard guard(mutex);
-        uint8_t * d1 = basic_resolve(at);
+        uint8_t * d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
 
         if (at.address() == 0 || size == 0)
         {
@@ -1053,7 +1053,7 @@ public:
         {
             abort();
         }
-        emancipated.add(at, size); // add a free allocation for later re-use
+
 
         if (t.size == 1)
         {
@@ -1084,6 +1084,7 @@ public:
         }
         else
         {
+            emancipated.add(at, size); // add a free allocation for later re-use
             t.size--;
             t.modifications++;
         }

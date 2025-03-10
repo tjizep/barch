@@ -27,7 +27,7 @@ enum
     enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 4,
-    test_memory = 1,
+    test_memory = 0,
     allocation_padding = 0,
     coalesce_fragments = 0
 };
@@ -1074,9 +1074,9 @@ public:
                 --statistics::pages_uncompressed;
                 statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             }
-            t.decompressed = std::move(heap::buffer<uint8_t>(page_size));
-            ++statistics::pages_uncompressed;
-            statistics::page_bytes_uncompressed += t.decompressed.byte_size();
+            //t.decompressed = std::move(heap::buffer<uint8_t>(page_size));
+            //++statistics::pages_uncompressed;
+            //statistics::page_bytes_uncompressed += t.decompressed.byte_size();
 
             t.clear();
             emancipated.erase(at.page());

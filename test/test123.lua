@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 10000
+local count = 1000000
 local result = {}
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars

@@ -3,3 +3,4 @@
 //
 
 #include "compress.h"
+uint32_t compress::flush_ticker = 0;

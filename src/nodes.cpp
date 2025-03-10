@@ -1,8 +1,5 @@
 #include <cstdlib>
 #include <cstring>
-#include <cstdio>
-#include <cassert>
-#include <vector>
 #include <atomic>
 
 #include "art.h"
@@ -11,18 +8,6 @@
 
 #include <algorithm>
 
-uint64_t get_node_base()
-{
-    static char * base_val = nullptr;
-    static int64_t base = 0;
-
-    if(!base_val)
-    {
-        base_val = (char*)heap::allocate(4);
-        base = reinterpret_cast<int64_t>(base_val);
-    }
-    return base;
-}
 void free_leaf_node(node_ptr n){
     if(n.null()) return;
     unsigned kl = n.const_leaf()->key_len;
@@ -33,72 +18,83 @@ void free_leaf_node(node_ptr n){
 }
 
 void free_node(node_ptr n){
-    if (n.is_leaf) {
-        free_leaf_node(n);
-    } else {
-        free_node(n.node);
-    }
+    n.free_from_storage();
+}
 
-}
-/**
- * free a node while updating statistics 
- */
-void free_node(art_node *n) {
-    // Break if null
-    if (!n) return;
-    size_t alloc_size = n->alloc_size();
-    n->~art_node();
-    // Free ourself on the way up
-    heap::free(n,alloc_size);
-}
 /**
  * Allocates a node of the given type,
  * initializes to zero and sets the type.
  */
-
-template<typename art_node_t>
-art_node* alloc_any_node() {
-    auto r =  new (heap::allocate<art_node_t>(1)) art_node_t();
-    return r;
+template<typename Type4, typename Type8>
+static art_node* make_node(node_ptr_storage& ptr, compressed_address a, const node_data* node)
+{
+    if (node->pointer_size == 4)
+    {
+        return ptr.emplace<Type4>(a, node);
+    }else if (node->pointer_size == 8)
+    {
+        return  ptr.emplace<Type8>(a, node);
+    }
+    abort();
 }
-art_node* alloc_node(unsigned nt, const children_t& c) {
+node_ptr resolve_node(compressed_address address)
+{
+    const node_data* node= get_leaf_compression().resolve<node_data>(address);
+    node_ptr_storage ptr;
+    switch (node->type)
+    {
+    case node_4:
+        return  make_node<art_node4_4,art_node4_8>(ptr, address, node);
+    case node_16:
+        return make_node<art_node16_4,art_node16_8>(ptr, address, node);
+    case node_48:
+        return make_node<art_node48_4,art_node48_8>(ptr, address, node);
+    case node_256:
+        return make_node<art_node256_4,art_node256_8>(ptr, address, node);
+    default:
+        abort();
+    }
+}
+node_ptr alloc_node_ptr(unsigned nt, const children_t& c)
+{
     node_ptr ref;
+
+    node_ptr_storage ptr;
     switch (nt)
     {
     case node_4:
-        return (art_node*)alloc_any_node<art_node4_4>()->expand_pointers(ref, c); // : alloc_any_node<art_node4_8>() ;
+        return ptr.emplace<art_node4_4>()->create().expand_pointers(ref, c);
     case node_16:
-        return (art_node*)alloc_any_node<art_node16_4>()->expand_pointers(ref, c); // optimize pointer sizes
+        return ptr.emplace<art_node16_4>()->create().expand_pointers(ref, c);
     case node_48:
-        return (art_node*)alloc_any_node<art_node48_4>()->expand_pointers(ref, c);
+        return ptr.emplace<art_node48_4>()->create().expand_pointers(ref, c);
     case node_256:
-        return (art_node*)alloc_any_node<art_node256_4>()->expand_pointers(ref, c);
+        return ptr.emplace<art_node256_4>()->create().expand_pointers(ref, c);
     default:
         abort();
     }
-
 }
-art_node* alloc_8_node(unsigned nt) {
+node_ptr alloc_8_node_ptr(unsigned nt)
+{
+
+    node_ptr_storage ptr;
     switch (nt)
     {
     case node_4:
-        return alloc_any_node<art_node4_8>(); // : alloc_any_node<art_node4_8>() ;
+        return ptr.emplace<art_node4_8>();
     case node_16:
-        return alloc_any_node<art_node16_8>(); // optimize pointer sizes
+        return ptr.emplace<art_node16_8>();
     case node_48:
-        return alloc_any_node<art_node48_8>();
+        return ptr.emplace<art_node48_8>();
     case node_256:
-        return alloc_any_node<art_node256_8>();
+        return ptr.emplace<art_node256_8>();
     default:
         abort();
     }
-
 }
 
 art_node::art_node () = default;
-art_node::~art_node() {
-    check_object();
-};
+art_node::~art_node() = default;
 /**
  * Returns the number of prefix characters shared between
  * the key and node.

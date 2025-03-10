@@ -70,40 +70,95 @@ struct art_leaf;
 typedef compressed_address logical_leaf;
 extern compress& get_leaf_compression();
 
+struct node_ptr_storage
+{
+    uint8_t storage[64 - sizeof(size_t)]{};
+    size_t size{};
+    node_ptr_storage() = default;
+    node_ptr_storage(const node_ptr_storage& src)
+    {
+        *this = src;
+    }
+
+    template<class T, typename... Args>
+    T* emplace(Args&&...args)
+    {
+        static_assert(sizeof(T) < sizeof(storage));
+        new (&storage[0]) T(std::forward<Args>(args)...);
+        size = sizeof(T);
+        return reinterpret_cast<T*>(&storage[0]);
+    }
+
+    node_ptr_storage& operator=(const node_ptr_storage& src)
+    {
+        if(this == &src) return *this;
+        size = src.size;
+        memcpy(storage, src.storage, sizeof(storage));
+        return *this;
+    }
+
+    template<typename T>
+    void set(const T* t)
+    {
+        static_assert(sizeof(T) < sizeof(storage));
+        size = sizeof(T);
+        memcpy(storage, t, size);
+    }
+    template<typename T>
+    T* ptr() {
+        if(null()) return nullptr;
+        static_assert(sizeof(T) < sizeof(storage));
+        return reinterpret_cast<T*>(&storage[0]);
+    }
+    [[nodiscard]] bool null() const
+    {
+        return size == 0;
+    }
+    template<typename T>
+    const T* ptr() const {
+        if(null()) return nullptr;
+        static_assert(sizeof(T) < sizeof(storage));
+        return reinterpret_cast<const T*>(&storage[0]);
+    }
+};
+
 template<typename art_node_t>
 struct node_ptr_t {
     
-    bool is_leaf;
-    node_ptr_t() : is_leaf(false), resolver(nullptr), node(nullptr) {};
-    node_ptr_t(const node_ptr_t& p) : is_leaf(p.is_leaf), resolver(p.resolver), logical(p.logical), node(p.node) {}
-    
-    explicit node_ptr_t(art_node_t* p) : is_leaf(false), resolver(nullptr), node(p) {}
-    node_ptr_t(const art_node_t* p) : is_leaf(false), resolver(nullptr), node(const_cast<art_node_t*>(p)) {}
-    //node_ptr_t(art_leaf* p) : is_leaf(true), l(p) {}
-    // TODO: maybe this mechanism should work for interior nodes - one day
+    bool is_leaf{false};
+    node_ptr_t() = default;
+    node_ptr_t(const node_ptr_storage& s) : storage(s)
+    {
+        logical = storage.ptr<art_node_t>()->get_address();
+    };
+    node_ptr_t(const node_ptr_t& p)  = default;
+
+    node_ptr_t(const art_node_t* p):  logical(p->get_address()), storage(p->get_storage())
+    {
+    }
+
     node_ptr_t(compressed_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl)
     {
     }
 
-    //node_ptr_t(const art_leaf* p) : is_leaf(true), l(const_cast<art_leaf*>(p)) {}
     node_ptr_t(std::nullptr_t) : is_leaf(false), resolver(nullptr) {}
 
-    bool null() const {
+    [[nodiscard]] bool null() const {
         if(is_leaf) return logical.null();
-        return node == nullptr;
+        return storage.null();
     }
-    compress *resolver;
+    compress *resolver{nullptr};
     compressed_address logical {};
-    art_node_t* node = nullptr;
-    void set(nullptr_t n) {
-        node = n;
+    node_ptr_storage storage{};
+    void set(nullptr_t) {
+        storage.size = 0;
         is_leaf = false;
         logical = nullptr;
         resolver = nullptr;
     }
-    void set(art_node_t* n) {
-        node = n;
-        logical = nullptr;
+    void set(const art_node_t* n) {
+        storage = n->get_storage();
+        logical = n->get_address();
         is_leaf = false;
         resolver = nullptr;
     }
@@ -117,25 +172,24 @@ struct node_ptr_t {
     bool operator == (nullptr_t) const
     {
         if(is_leaf) return logical.null();
-        return node == nullptr;
+        return storage.null();
     }
     bool operator != (const node_ptr_t& p) const
     {
-        if(is_leaf != p.is_leaf) return true;
-        if(is_leaf && logical != p.logical) return true;
-        return node != p.node;
+        return logical != p.logical;
     };
     node_ptr_t& operator = (const node_ptr_t& n){
         if(&n == this) return *this;
         this->is_leaf = n.is_leaf;
-        this->node = n.node;
+        this->storage = n.storage;
         this->logical = n.logical;
         this->resolver = n.resolver;
         check();
         return *this;
     }
+
     node_ptr_t& operator = (const art_node_t* n){
-        set(const_cast<art_node_t*>(n));
+        set(n);
         return *this;
     }
 
@@ -153,11 +207,23 @@ struct node_ptr_t {
         set(l);
         return *this;
     }
-    void check() const
+    void check() const {}
+    void free_from_storage()
     {
+        if(is_leaf)
+        {
+            free_leaf_node(*this);
+        }else if (!logical.null() && !storage.null())
+        {
+            statistics::addressable_bytes_alloc -= get_node()->alloc_size();
+            statistics::interior_bytes_alloc -= get_node()->alloc_size();
+            --statistics::n4_nodes;
 
+            get_leaf_compression().free(logical, get_node()->alloc_size());
+
+
+        }
     }
-
     art_leaf* leaf(){
         if (!is_leaf)
             abort();
@@ -189,24 +255,25 @@ struct node_ptr_t {
             abort();
         }
         check();
-        return node;
+        return storage.ptr<art_node_t>();
     }
-    const art_node_t* get_node() const
+
+    [[nodiscard]] const art_node_t* get_node() const
     {
         if(is_leaf) {
             abort();
         }
 
-        return node;
+        return storage.ptr<art_node_t>();
     }
 
+    art_node_t * operator -> () {
 
-    
-    art_node_t * operator -> () const {
-        if(is_leaf) {
-            abort();
-        }
-        return node;
+        return get_node();
+    }
+    const art_node_t * operator -> () const {
+
+        return get_node();
     }
 
     explicit operator const art_node_t* () const {
@@ -216,11 +283,12 @@ struct node_ptr_t {
     explicit operator art_node_t* () {
         return get_node();
     }
-    
 };
 
 struct node_data
 {
+    uint8_t type = 0;
+    uint8_t pointer_size = 0;
     uint8_t partial_len = 0;
     uint8_t num_children = 0;
     unsigned char partial[max_prefix_llength]{};
@@ -237,7 +305,69 @@ struct art_node {
             return parent.null() && child.null() && child_ix == 0;
         }
     };
+
     typedef std::array<node_ptr, max_alloc_children> children_t;
+    struct node_proxy {
+
+        template<typename T>
+        T* refresh_cache() const
+        {
+            if(!dcache || last_ticker != compress::flush_ticker)
+            {
+                dcache = get_leaf_compression().resolve_modified<T>(address);
+            }
+            return (T*)dcache;
+        }
+        mutable node_data *dcache= nullptr;
+        mutable uint32_t last_ticker = compress::flush_ticker;
+        compressed_address address{};
+        node_proxy(const node_proxy&) = default;
+        node_proxy() = default;
+
+        template<typename T, typename IntPtrType, uint8_t NodeType>
+        compressed_address create_data()
+        {
+            address = get_leaf_compression().new_address(sizeof(T));
+            T* r = get_leaf_compression().resolve<T>(address);
+            r->type = NodeType;
+            r->pointer_size = sizeof(IntPtrType);
+            dcache = r;
+            statistics::addressable_bytes_alloc += sizeof(T);
+            statistics::interior_bytes_alloc += sizeof(T);
+            ++statistics::n4_nodes;
+            return address;
+        }
+
+        template<typename T, typename IntPtrType, uint8_t NodeType>
+        void set(compressed_address address)
+        {
+            if (address.null())
+            {
+                abort();
+            }
+            this->address = address;
+            dcache = get_leaf_compression().resolve<T>(address);
+            if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
+            {
+                abort();
+            }
+        }
+        template<typename IntPtrType, uint8_t NodeType>
+        void set_lazy(compressed_address address, const node_data* data)
+        {
+            if (address.null())
+            {
+                abort();
+            }
+            if (data->type != NodeType || data->pointer_size != sizeof(IntPtrType))
+            {
+                abort();
+            }
+            this->address = address;
+            dcache = nullptr; // it will get loaded as required
+
+        }
+    };
 
     art_node();
     virtual ~art_node();
@@ -268,8 +398,8 @@ struct art_node {
     unsigned check_prefix(const unsigned char *, unsigned, unsigned);
     [[nodiscard]] virtual unsigned first_index() const = 0;
     [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) = 0;
-    [[nodiscard]] virtual trace_element next(const trace_element& te) = 0;
-    [[nodiscard]] virtual trace_element previous(const trace_element& te) = 0;
+    [[nodiscard]] virtual trace_element next(const trace_element& te) const = 0;
+    [[nodiscard]] virtual trace_element previous(const trace_element& te) const = 0;
     virtual void set_keys(const unsigned char* other_keys, unsigned count) = 0;
     [[nodiscard]] virtual const unsigned char* get_keys() const = 0;
     virtual void set_key(unsigned at, unsigned char k) = 0;
@@ -284,25 +414,21 @@ struct art_node {
 
     [[nodiscard]] virtual node_ptr expand_pointers(node_ptr& ref, const children_t& child)  = 0;
     [[nodiscard]] virtual size_t alloc_size() const = 0;
-
-    void check_object() const
-    {
-
-    }
+    [[nodiscard]] virtual compressed_address get_address() const = 0;
+    [[nodiscard]] virtual node_ptr_storage get_storage() const = 0;
 };
 typedef art_node::node_ptr node_ptr;
 typedef art_node::trace_element trace_element;
 typedef art_node::children_t children_t;
+node_ptr alloc_node_ptr(unsigned nt, const children_t& c);
+node_ptr alloc_8_node_ptr(unsigned nt); // magic 8 ball
+extern node_ptr resolve_node(compressed_address address);
 
-art_node* alloc_node(unsigned nt, const children_t& child);
-art_node* alloc_8_node(unsigned nt); // magic 8 ball
 
 typedef std::vector<trace_element> trace_list;
 
-uint64_t get_node_base();
-
-void free_node(art_node *n);
-void free_node(art_leaf *n);
+//void free_node(art_node *n);
+//void free_node(art_leaf *n);
 
 /**
  * Represents a leaf. These are
@@ -483,40 +609,42 @@ public:
         {
             abort();
         }
-        if(sizeof(EncodingType) == sizeof(uintptr_t))
-        {
-            value = (EncodingType)(uintptr_t)ptr;
-            return;
-        }
-        if(ptr == nullptr)
+        if (ptr == nullptr)
         {
             value = 0;
-        }else
-        {   value = (reinterpret_cast<int64_t>(ptr) - base);
+            return;
         }
-    }
-    [[nodiscard]] art_node* get_node()
-    {
-        if(IsLeaf)
-        {
-            abort();
-        }
-
         if(sizeof(EncodingType) == sizeof(uintptr_t))
         {
-            return reinterpret_cast<art_node*>(value);
+            value = ptr->get_address().address();
+            return;
         }
-        if(!value) return nullptr;
-        return reinterpret_cast<art_node*>((int64_t)value + base);
+        value = (ptr->get_address().address() - base);
+
     }
-    [[nodiscard]] const art_node* cget() const
+    [[nodiscard]] node_ptr get_node()
     {
         if(IsLeaf)
         {
             abort();
         }
-
-        return const_cast<encoded_element*>(this)->get_node();
+        if (value == 0)
+        {
+            return nullptr;
+        }
+        return resolve_node(compressed_address((int64_t)value + base));
+    }
+    [[nodiscard]] node_ptr cget() const
+    {
+        if(IsLeaf)
+        {
+            abort();
+        }
+        if (value == 0)
+        {
+            return nullptr;
+        }
+        return resolve_node(compressed_address((int64_t)value + base));
     }
 
     encoded_element& operator=(const art_node* ptr)
@@ -553,11 +681,11 @@ public:
     }
 
 
-    bool exists() const
+    [[nodiscard]] bool exists() const
     {
         return value != 0;
     }
-    bool empty() const
+    [[nodiscard]] bool empty() const
     {
         return value == 0;
     }
@@ -570,12 +698,11 @@ struct node_array
     EncodedType data[SIZE]{};
     [[nodiscard]] uintptr_t get_offset() const
     {
-        return (uintptr_t)this;
+        return 0;
     }
-    [[nodiscard]] bool ok(const node_ptr& p) const
+    [[nodiscard]] bool ok(const node_ptr& ) const
     {
-        if(p.is_leaf) return true;
-        return ::ok<EncodedType>((const art_node*)p, get_offset());
+        return true;
     }
 
     ProxyType operator[](unsigned at)
@@ -592,22 +719,26 @@ struct node_array
 /**
  * node content to do common things related to keys and pointers on each node
  */
-template<unsigned SIZE, unsigned KEYS, typename i_ptr_t>
-struct encoded_node_content : public art_node {
+template<unsigned SIZE, unsigned KEYS, uint8_t node_type, typename i_ptr_t>
+struct encoded_node_content : public art_node, private art_node::node_proxy {
 
     // test somewhere that sizeof ChildElementType == sizeof LeafElementType
+    typedef i_ptr_t IntPtrType;
     typedef i_ptr_t ChildElementType;
     typedef i_ptr_t LeafElementType;
     typedef node_array<i_ptr_t, false, SIZE> ChildArrayType;
     typedef node_array<i_ptr_t, true, SIZE> LeafArrayType;
+
     node_data& data() override
     {
-        return *pdata;
+        return *refresh_cache<encoded_data>();
     }
+
     [[nodiscard]] const node_data& data() const override
     {
-        return *pdata;
+        return *refresh_cache<encoded_data>();
     }
+
     struct encoded_data : node_data
     {
         unsigned char keys[KEYS]{};
@@ -619,34 +750,48 @@ struct encoded_node_content : public art_node {
             ChildArrayType children;
         };
     };
+
     encoded_data& nd()
     {
-        return *pdata;
+        return *refresh_cache<encoded_data>();
     }
+
     const encoded_data& nd() const
     {
-        return *pdata;
+
+        return *refresh_cache<encoded_data>();
     }
-    encoded_data *pdata{};
-    //encoded_data npdata{};
-    compressed_address address{};
-    encoded_node_content()
+
+    encoded_node_content() = default;
+    encoded_node_content& create()
     {
-        size_t sz = sizeof(encoded_node_content);
-        size_t szd = sizeof(encoded_data);
-        if(szd < sz)
-        {
-            abort();
-        }
-        address = get_leaf_compression().new_address(sizeof(encoded_data));
-        pdata = get_leaf_compression().resolve_modified<encoded_data>(address);
-    };
-    ~encoded_node_content() override
+        create_data<encoded_data, IntPtrType, node_type>();
+        return *this;
+    }
+    void from(compressed_address address)
     {
-        get_leaf_compression().free(address,sizeof(encoded_data));
+        set<encoded_data, IntPtrType, node_type>(address);
     };
-    encoded_node_content(const encoded_node_content&) = delete;
+    void from(compressed_address address,const node_data* data)
+    {
+        set_lazy<IntPtrType, node_type>(address, data);
+    };
+
+    ~encoded_node_content() override = default;
+
+    void check_object() const {}
+    encoded_node_content(const encoded_node_content& content) = default;
     encoded_node_content& operator=(const encoded_node_content&) = delete;
+
+    [[nodiscard]] compressed_address get_address() const final {
+        return address;
+    }
+
+    [[nodiscard]] size_t alloc_size() const final
+    {
+        return sizeof(encoded_data);
+    }
+
     void set_leaf(unsigned at) final {
         check_object();
         if (SIZE <= at)
@@ -657,13 +802,14 @@ struct encoded_node_content : public art_node {
         check_object();
         if (SIZE <= at)
             abort();
-        nd().types[at] = node.is_leaf ? 1 : 0;
+        auto& dat = nd();
+        dat.types[at] = node.is_leaf ? 1 : 0;
         if(node.is_leaf)
         {
-            nd().leaves[at] = node.logical;
+            dat.leaves[at] = node.logical;
         }else
         {
-            nd().children[at] = node;
+            dat.children[at] = node;
         }
 
     }
@@ -683,8 +829,10 @@ struct encoded_node_content : public art_node {
     [[nodiscard]] node_ptr get_node(unsigned at) const final {
         check_object();
         if (at < SIZE)
-            return nd().types[at] ? node_ptr(nd().leaves[at]) : node_ptr(nd().children[at]);
-
+        {
+            auto& dat = nd();
+            return dat.types[at] ? node_ptr(dat.leaves[at]) : node_ptr(dat.children[at]);
+        }
         return nullptr;
     }
 
@@ -710,7 +858,7 @@ struct encoded_node_content : public art_node {
             return nd().leaves.ok(np);
         return nd().children.ok(np);
     }
-    [[nodiscard]] bool ok_children(const children_t& child) const override
+    [[nodiscard]] bool ok_children(const children_t& child) const final
     {   check_object();
         for(auto np: child)
         {
@@ -823,7 +971,7 @@ struct encoded_node_content : public art_node {
         return nd().children[pos].exists();
     }
 
-    void set_keys(const unsigned char* other_keys, unsigned count) override{
+    void set_keys(const unsigned char* other_keys, unsigned count) final {
         check_object();
         if (KEYS < count )
             abort();
@@ -835,8 +983,9 @@ struct encoded_node_content : public art_node {
         if (SIZE <= pos)
             abort();
         unsigned count = data().num_children;
+        auto& n = nd();
         for (unsigned p = count; p > pos; --p) {
-            nd().types[p] = nd().types[p - 1];
+            n.types[p] = n.types[p - 1];
         }
     }
     void remove_type(unsigned pos) {
@@ -844,8 +993,9 @@ struct encoded_node_content : public art_node {
         if (SIZE < pos)
             abort();
         unsigned count = data().num_children;
+        auto& n = nd();
         for (unsigned p = pos; p < count -1; ++p) {
-            nd().types[p] = nd().types[p + 1];
+            n.types[p] = n.types[p + 1];
         }
     }
     [[nodiscard]] bool child_type(unsigned at) const override
@@ -856,18 +1006,19 @@ struct encoded_node_content : public art_node {
     void set_children(unsigned dpos, const art_node* other, unsigned spos, unsigned count) override {
         check_object();
         if (dpos < SIZE && count <= SIZE) {
+            auto& dat = nd();
 
             for(unsigned d = dpos; d < count; ++d )
             {
                 auto n = other->get_child(d+spos);
                 if(n.is_leaf)
                 {
-                    nd().leaves[d] = n.logical;
+                    dat.leaves[d] = n.logical;
                 }else
-                    nd().children[d] = n;
+                    dat.children[d] = n;
             }
             for(unsigned t = 0; t < count; ++t) {
-                nd().types[t+dpos] = other->child_type(t+spos);
+                dat.types[t+dpos] = other->child_type(t+spos);
             }
         }else {
             abort();
@@ -882,12 +1033,13 @@ struct encoded_node_content : public art_node {
     void remove_child(unsigned pos) {
         check_object();
         if(pos < KEYS && KEYS == SIZE) {
-            memmove(nd().keys+pos, nd().keys+pos+1, data().num_children - 1 - pos);
-            memmove(nd().children.data+pos, nd().children.data+pos+1, (data().num_children - 1 - pos)*sizeof(ChildElementType));
+            auto& dat = nd();
+            memmove(dat.keys+pos, dat.keys+pos+1, dat.num_children - 1 - pos);
+            memmove(dat.children.data+pos, dat.children.data+pos+1, (dat.num_children - 1 - pos)*sizeof(ChildElementType));
             remove_type(pos);
-            nd().keys[data().num_children - 1] = 0;
-            nd().children[data().num_children - 1] = nullptr;
-            data().num_children--;
+            dat.keys[dat.num_children - 1] = 0;
+            dat.children[dat.num_children - 1] = nullptr;
+            --dat.num_children;
         } else {
             abort();
         }
@@ -896,12 +1048,14 @@ struct encoded_node_content : public art_node {
     }
     void copy_header(node_ptr src) override {
         check_object();
-        if (src->data().num_children > SIZE) {
+        auto& dat = nd();
+        auto& sd = src->data();
+        if (sd.num_children > SIZE) {
             abort();
         }
-        this->data().num_children = src->data().num_children;
-        this->data().partial_len = src->data().partial_len;
-        memcpy(this->data().partial, src->data().partial, std::min<unsigned>(max_prefix_llength, src->data().partial_len));
+        dat.num_children = sd.num_children;
+        dat.partial_len = sd.partial_len;
+        memcpy(dat.partial, sd.partial, std::min<unsigned>(max_prefix_llength, sd.partial_len));
     }
     void copy_from(node_ptr s) override
     {
@@ -923,7 +1077,7 @@ struct encoded_node_content : public art_node {
     {
         check_object();
         if(ok_children(children)) return this;
-        node_ptr n = alloc_8_node(type());
+        node_ptr n = alloc_8_node_ptr(type());
         n->copy_from(this);
         free_node(this);
         ref = n;
@@ -946,26 +1100,29 @@ protected:
  * Small node with only 4 children
  */
 template<typename IntegerPtr>
-struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
-    typedef encoded_node_content<4, 4, IntegerPtr> this_type;
-    art_node4_v(){
-        statistics::addressable_bytes_alloc += sizeof(art_node4_v);
-        statistics::interior_bytes_alloc += sizeof(art_node4_v);
-        ++statistics::n4_nodes;
-    }
-    ~art_node4_v() override{
-        statistics::addressable_bytes_alloc -= sizeof(art_node4_v);
-        statistics::interior_bytes_alloc -= sizeof(art_node4_v);
-        --statistics::n4_nodes;
-    }
+struct art_node4_v final : public encoded_node_content<4, 4, node_4, IntegerPtr> {
+    typedef encoded_node_content<4, 4, node_4, IntegerPtr> this_type;
+
     [[nodiscard]] uint8_t type() const override {
         return node_4;
     }
-    [[nodiscard]] size_t alloc_size() const override
+    art_node4_v() = default;
+    explicit art_node4_v(compressed_address address)
     {
-        return sizeof(art_node4_v);
+        art_node4_v::from(address);
     }
-     using this_type::copy_from;
+    explicit art_node4_v(compressed_address address, const node_data* data)
+    {
+        art_node4_v::from(address,data);
+    }
+    [[nodiscard]] node_ptr_storage get_storage() const final
+    {
+        node_ptr_storage storage;
+        storage.emplace<art_node4_v>(*this);
+        return storage;
+    }
+
+    using this_type::copy_from;
     using this_type::remove_child;
     using this_type::set_child;
     using this_type::add_child;
@@ -980,26 +1137,26 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     void remove(node_ptr& ref, unsigned pos, unsigned char ) override{
 
         remove_child(pos);
-
+        auto& dat = nd();
         // Remove nodes with only a single child
-        if (data().num_children == 1) {
+        if (dat.num_children == 1) {
             node_ptr child = get_child(0);
             if (!child.is_leaf) {
                 // Concatenate the prefixes
                 unsigned prefix = data().partial_len;
                 if (prefix < max_prefix_llength) {
-                    data().partial[prefix] = nd().keys[0];
+                    dat.partial[prefix] = dat.keys[0];
                     ++prefix;
                 }
                 if (prefix < max_prefix_llength) {
                     unsigned sub_prefix = std::min<unsigned>(child->data().partial_len, max_prefix_llength - prefix);
-                    memcpy(data().partial+prefix, child->data().partial, sub_prefix);
+                    memcpy(dat.partial+prefix, child->data().partial, sub_prefix);
                     prefix += sub_prefix;
                 }
 
                 // Store the prefix in the child
-                memcpy(child->data().partial, data().partial, std::min<unsigned>(prefix, max_prefix_llength));
-                child->data().partial_len += data().partial_len + 1;
+                memcpy(child->data().partial, dat.partial, std::min<unsigned>(prefix, max_prefix_llength));
+                child->data().partial_len += dat.partial_len + 1;
             }
             ref = child;
             free_node(this);
@@ -1009,22 +1166,23 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
     void add_child_inner(unsigned char c, node_ptr child) override
     {
         unsigned idx = index(c, gt);
+        auto& dat = nd();
         // Shift to make room
-        memmove(nd().keys+idx+1, nd().keys+idx, data().num_children - idx);
-        memmove(nd().children.data+idx+1, nd().children.data+idx,
+        memmove(dat.keys+idx+1, dat.keys+idx, data().num_children - idx);
+        memmove(dat.children.data+idx+1, dat.children.data+idx,
                 (data().num_children - idx)*sizeof(IntegerPtr));
         insert_type(idx);
         // Insert element
-        nd().keys[idx] = c;
+        dat.keys[idx] = c;
         set_child(idx, child);
-        data().num_children++;
+        ++dat.num_children;
     }
     void add_child(unsigned char c, node_ptr& ref, node_ptr child) override {
 
         if (data().num_children < 4) {
             this->expand_pointers(ref, {child})->add_child_inner(c, child);
         } else {
-            art_node *new_node = alloc_node(node_16, {child});
+            auto new_node = alloc_node_ptr(node_16, {child});
             // Copy the child pointers and the key map
             new_node->set_children(0, this, 0, data().num_children);
             new_node->set_keys(nd().keys, data().num_children);
@@ -1052,14 +1210,14 @@ struct art_node4_v final : public encoded_node_content<4, 4, IntegerPtr> {
         return {{nullptr,nullptr,data().num_children},false};
     }
 
-    [[nodiscard]] trace_element next(const trace_element& te) override{
+    [[nodiscard]] trace_element next(const trace_element& te) const override{
         unsigned i = te.child_ix + 1;
         if (i < this->data().num_children) {
             return {this,this->get_child(i),i};
         }
         return {};
     }
-    [[nodiscard]] trace_element previous(const trace_element& te) override{
+    [[nodiscard]] trace_element previous(const trace_element& te) const override{
 
         unsigned i = te.child_ix;
         if (i > 0) {
@@ -1076,26 +1234,30 @@ typedef art_node4_v<uintptr_t> art_node4_8;
  */
 template<typename IPtrType>
 struct art_node16_v final : public
-encoded_node_content<16,16, IPtrType >
+encoded_node_content<16,16, node_16, IPtrType >
 {
-    typedef encoded_node_content<16,16, IPtrType > Parent;
-    art_node16_v(){
-        statistics::addressable_bytes_alloc += sizeof(art_node16_v);
-        statistics::interior_bytes_alloc += sizeof(art_node16_v);
-        ++statistics::n16_nodes;
-    }
-    ~art_node16_v() override{
-        statistics::addressable_bytes_alloc -= sizeof(art_node16_v);
-        statistics::interior_bytes_alloc -= sizeof(art_node16_v);
-        --statistics::n16_nodes;
-    }
+    typedef encoded_node_content<16,16,node_16,  IPtrType > Parent;
+    typedef encoded_node_content<16,16,node_16,  IPtrType > this_type;
+
     [[nodiscard]] uint8_t type() const override{
         return node_16;
     }
-    [[nodiscard]] size_t alloc_size() const override
+    art_node16_v() = default;
+    explicit art_node16_v(compressed_address address)
     {
-        return sizeof(art_node16_v);
+        art_node16_v::from(address);
     }
+    explicit art_node16_v(compressed_address address, const node_data* data)
+    {
+        art_node16_v::from(address,data);
+    }
+    [[nodiscard]] node_ptr_storage get_storage() const final
+    {
+        node_ptr_storage storage;
+        storage.emplace<art_node16_v>(*this);
+        return storage;
+    }
+
     [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
         unsigned i = bits_oper16(this->nd().keys, nuchar<16>(c), (1 << this->data().num_children) - 1, operbits);
         if (i) {
@@ -1111,7 +1273,7 @@ encoded_node_content<16,16, IPtrType >
         this->remove_child(pos);
 
         if (this->data().num_children == 3) {
-            auto *new_node = alloc_node(node_4,{});
+            auto new_node = alloc_node_ptr(node_4,{});
             new_node->copy_header(this);
             new_node->set_keys(this->nd().keys, 3);
             new_node->set_children(0, this, 0, 3);
@@ -1149,7 +1311,7 @@ encoded_node_content<16,16, IPtrType >
             this->expand_pointers(ref, {child})->add_child_inner(c, child);
 
         } else {
-            art_node *new_node = alloc_node(node_48,{child});
+            auto new_node = alloc_node_ptr(node_48,{child});
 
             // Copy the child pointers and populate the key map
             new_node->set_children(0, this, 0, this->data().num_children);
@@ -1178,14 +1340,14 @@ encoded_node_content<16,16, IPtrType >
         }
         return {{nullptr,nullptr,this->data().num_children},false};
     }
-    [[nodiscard]] trace_element next(const trace_element& te) override{
+    [[nodiscard]] trace_element next(const trace_element& te) const override{
         unsigned i = te.child_ix + 1;
         if (i < this->data().num_children) {
             return {this,this->get_child(i),i};// the keys are ordered so fine I think
         }
         return {};
     }
-    [[nodiscard]] trace_element previous(const trace_element& te) override{
+    [[nodiscard]] trace_element previous(const trace_element& te) const override{
         unsigned i = te.child_ix;
         if (i > 0) {
             return {this,this->get_child(i),i-1};// the keys are ordered so fine I think
@@ -1202,8 +1364,8 @@ typedef art_node16_v<uintptr_t> art_node16_8;
  * a full 256 byte field.
  */
 template <typename PtrEncodedType>
-struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
-    typedef encoded_node_content<48,256,PtrEncodedType> this_type;
+struct art_node48 final : public encoded_node_content<48,256, node_48, PtrEncodedType> {
+    typedef encoded_node_content<48,256, node_48, PtrEncodedType> this_type;
 
     using this_type::copy_from;
     using this_type::remove_child;
@@ -1216,23 +1378,24 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
     using this_type::nd;
     using this_type::insert_type;
     using this_type::index;
+    art_node48() = default;
+    explicit art_node48(compressed_address address)
+    {
+        art_node48::from(address);
+    }
+    explicit art_node48(compressed_address address, const node_data* data)
+    {
+        art_node48::from(address,data);
+    }
+    [[nodiscard]] node_ptr_storage get_storage() const final
+    {
+        node_ptr_storage storage;
+        storage.emplace<art_node48>(*this);
+        return storage;
+    }
 
-    art_node48(){
-        statistics::addressable_bytes_alloc += sizeof(art_node48);
-        statistics::interior_bytes_alloc += sizeof(art_node48);
-        ++statistics::n48_nodes;
-    }
-    ~art_node48() override{
-        statistics::addressable_bytes_alloc -= sizeof(art_node48);
-        statistics::interior_bytes_alloc -= sizeof(art_node48);
-        --statistics::n48_nodes;
-    }
     [[nodiscard]] uint8_t type() const override {
         return node_48;
-    }
-    [[nodiscard]] size_t alloc_size() const override
-    {
-        return sizeof(art_node48);
     }
     [[nodiscard]] unsigned index(unsigned char c) const override {
         unsigned  i = nd().keys[c];
@@ -1256,7 +1419,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         data().num_children--;
 
         if (data().num_children == 12) {
-            auto *new_node = alloc_node(node_16, {});
+            auto new_node = alloc_node_ptr(node_16, {});
             new_node->copy_header(this);
             unsigned child = 0;
             for (unsigned i = 0; i < 256; i++) {
@@ -1290,7 +1453,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         if (data().num_children < 48) {
             this->expand_pointers(ref, {child})->add_child_inner(c, child);
         } else {
-            auto *new_node = alloc_node(node_256,{});
+            auto new_node = alloc_node_ptr(node_256,{});
             for (unsigned i = 0;i < 256; i++) {
                 if (nd().keys[i]) {
                     node_ptr nc = get_child(nd().keys[i] - 1);
@@ -1344,7 +1507,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
 
     }
 
-    [[nodiscard]] trace_element next(const trace_element& te) override{
+    [[nodiscard]] trace_element next(const trace_element& te) const override{
         unsigned uc = te.child_ix, i;
 
         for (; uc > 0; --uc){
@@ -1356,7 +1519,7 @@ struct art_node48 final : public encoded_node_content<48,256,PtrEncodedType> {
         return {};
     }
 
-    [[nodiscard]] trace_element previous(const trace_element& te) override{
+    [[nodiscard]] trace_element previous(const trace_element& te) const override{
         unsigned uc = te.child_ix + 1, i;
         for (; uc < 256;uc++){
             i = nd().keys[uc];
@@ -1375,8 +1538,8 @@ typedef art_node48<uintptr_t> art_node48_8;
  * Full node with 256 children
  */
 template<typename intptr_t>
-struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
-    typedef encoded_node_content<256,0,intptr_t> this_type;
+struct art_node256 final : public encoded_node_content<256,0,node_256,intptr_t> {
+    typedef encoded_node_content<256,0,node_256,intptr_t> this_type;
 
     using this_type::set_child;
     using this_type::has_child;
@@ -1385,26 +1548,27 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
     using this_type::nd;
     using this_type::has_any;
 
-    [[nodiscard]] size_t alloc_size() const override
+    art_node256() = default;
+
+    explicit art_node256(compressed_address address)
     {
-        return sizeof(art_node256);
+        art_node256::from(address);
     }
-    art_node256() {
-        size_t size = sizeof(art_node256);
-        statistics::addressable_bytes_alloc += size;
-        statistics::interior_bytes_alloc += size;
-        ++statistics::n256_nodes;
+    explicit art_node256(compressed_address address, const node_data* data)
+    {
+        art_node256::from(address,data);
     }
 
-    ~art_node256() override {
-        statistics::node256_occupants -= data().num_children;
-        statistics::addressable_bytes_alloc -= sizeof(art_node256);
-        statistics::interior_bytes_alloc -= sizeof(art_node256);
-        --statistics::n256_nodes;
-    }
     [[nodiscard]] uint8_t type() const override
     {
         return node_256;
+    }
+
+    [[nodiscard]] node_ptr_storage get_storage() const
+    {
+        node_ptr_storage storage;
+        storage.emplace<art_node256>(*this);
+        return storage;
     }
 
     [[nodiscard]] unsigned index(unsigned char c) const override
@@ -1419,14 +1583,15 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
         if(key != pos) {
             abort();
         }
-        nd().children[key] = nullptr;
-        nd().types[key] = 0;
-        --data().num_children;
+        auto& dat = nd();
+        dat.children[key] = nullptr;
+        dat.types[key] = 0;
+        --dat.num_children;
         --statistics::node256_occupants;
         // Resize to a node48 on underflow, not immediately to prevent
         // trashing if we sit on the 48/49 boundary
-        if (data().num_children == 37) {
-            auto *new_node = alloc_node(node_48, {});
+        if (dat.num_children == 37) {
+            auto new_node = alloc_node_ptr(node_48, {});
             ref = new_node;
             new_node->copy_header(this);
 
@@ -1457,16 +1622,18 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
     }
     [[nodiscard]] unsigned last_index() const override
     {
+        auto& dat = nd();
         unsigned idx = 255;
-        while (nd().children[idx].empty()) idx--;
+        while (dat.children[idx].empty()) idx--;
         return idx;
     }
 
     [[nodiscard]] unsigned first_index() const override
     {
+        auto& dat = nd();
         unsigned uc = 0; // ?
         for (; uc < 256; uc++){
-            if(nd().children[uc].exists()) {
+            if(dat.children[uc].exists()) {
                 return uc;
             }
         }
@@ -1484,7 +1651,7 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
         return {{nullptr,nullptr,256},false};
     }
 
-    trace_element next(const trace_element& te) override
+    trace_element next(const trace_element& te) const override
     {
         for (unsigned i = te.child_ix+1; i < 256; ++i) { // these aren't sparse so shouldn't take long
             if (has_child(i)) {// because nodes are ordered accordingly
@@ -1494,7 +1661,7 @@ struct art_node256 final : public encoded_node_content<256,0,intptr_t> {
         return {};
     }
 
-    trace_element previous(const trace_element& te) override
+    trace_element previous(const trace_element& te) const override
     {
         if(!te.child_ix) return {};
         for (unsigned i = te.child_ix-1; i > 0; --i) { // these aren't sparse so shouldn't take long
@@ -1515,11 +1682,11 @@ static T* get_node(art_node* n){
 }
 template <typename T> 
 static T* get_node(const node_ptr& n){
-    return static_cast<T*>(n.node);
+    return static_cast<T*>(n.get_node());
 }
 template <typename T> 
 static const T* get_node(const node_ptr& n){
-    return static_cast<const T*>(n.node);
+    return static_cast<const T*>(n.get_node());
 }
 template <typename T> 
 static const T* get_node(const art_node* n) {

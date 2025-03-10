@@ -27,7 +27,7 @@ enum
     enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 4,
-    test_memory = 0,
+    test_memory = 1,
     allocation_padding = 0,
     coalesce_fragments = 0
 };
@@ -117,6 +117,10 @@ struct compressed_address
     bool operator==(AddressIntType other) const
     {
         return index == other;
+    }
+    bool operator!=(AddressIntType other) const
+    {
+        return index != other;
     }
     explicit operator size_t() const
     {
@@ -631,7 +635,7 @@ struct compress
             tpoll.join();
         ZSTD_freeCCtx(cctx);
     }
-
+    static uint32_t flush_ticker;
 private:
     std::thread tdict{};
     std::thread tpoll{};
@@ -963,12 +967,18 @@ private:
         return t.decompressed.begin() + at.offset();
     }
 
-    void invalid(compressed_address ) const
+    void invalid(compressed_address at) const
     {
-        //if (!valid(at))
-        //{
-        //    abort();
-        //}
+        if (!valid(at))
+        {
+            size_t page = at.page();
+            auto& t = arena.at(page);
+            if (t.size == 0)
+            {
+                std::cerr << "using erased page " << page << std::endl;
+            }
+            abort();
+        }
     }
 
     [[nodiscard]] bool valid(compressed_address at) const
@@ -988,6 +998,7 @@ private:
         std::atomic<size_t> r = 0;
         std::thread workers[auto_vac_workers];
         size_t arena_size = arena.size();
+        ++flush_ticker;
         for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
         {
             workers[ivac] = std::thread([this,arena_size,ivac,&r,max_vac]()
@@ -1189,6 +1200,7 @@ public:
 
         if (!full && ratio > 0.95 && !decompressed_pages.empty())
         {
+            ++flush_ticker;
             size_t at = decompressed_pages.back();
             decompressed_pages.pop_back();
             return release_decompressed(cctx,at);

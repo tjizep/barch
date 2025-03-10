@@ -263,7 +263,7 @@ static trace_element increment_te(const trace_element &te){
     if (te.parent.null()) return {nullptr, nullptr, 0};
     if (te.parent.is_leaf) return {nullptr, nullptr, 0};
 
-    art_node * n = te.parent.node;
+    const art_node * n = te.parent.get_node();
     return n->next(te);
 }
 
@@ -433,7 +433,8 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
         node_ptr l2 = make_leaf(key, value);
 
         // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
-        auto *new_node = alloc_node(initial_node, {l1, l2});
+        auto new_stored = alloc_node_ptr(initial_node, {l1, l2});
+        auto *new_node = new_stored.get_node();
         // Determine longest prefix
         unsigned longest_prefix = longest_common_prefix(l, l2.const_leaf(), depth);
         new_node->data().partial_len = longest_prefix;
@@ -457,7 +458,7 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
         // TODO: do fast child adding (by adding multiple children at once)
         // Create a new node and a new leaf
         node_ptr new_leaf = make_leaf(key, value);
-        art_node *new_node = alloc_node(initial_node, {n, new_leaf}); // pass children to get opt. ptr size
+        auto new_node = alloc_node_ptr(initial_node, {n, new_leaf}); // pass children to get opt. ptr size
         ref = new_node;
         new_node->data().partial_len = prefix_diff;
         memcpy(new_node->data().partial, n->data().partial, std::min<int>(max_prefix_llength, prefix_diff));

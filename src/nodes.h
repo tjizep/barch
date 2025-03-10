@@ -215,13 +215,7 @@ struct node_ptr_t {
             free_leaf_node(*this);
         }else if (!logical.null() && !storage.null())
         {
-            statistics::addressable_bytes_alloc -= get_node()->alloc_size();
-            statistics::interior_bytes_alloc -= get_node()->alloc_size();
-            --statistics::n4_nodes;
-
-            get_leaf_compression().free(logical, get_node()->alloc_size());
-
-
+            get_node()->free_data();
         }
     }
     art_leaf* leaf(){
@@ -310,33 +304,36 @@ struct art_node {
     struct node_proxy {
 
         template<typename T>
-        T* refresh_cache() const
+        const T* refresh_cache() const
         {
             if(!dcache || last_ticker != compress::flush_ticker)
             {
-                dcache = get_leaf_compression().resolve_modified<T>(address);
+                if (mcache)
+                {
+                    dcache = mcache;
+                } else
+                {
+                    dcache = get_leaf_compression().resolve<T>(address);
+                }
+
             }
             return (T*)dcache;
         }
+        template<typename T>
+        T* refresh_cache()
+        {
+            if(!mcache || last_ticker != compress::flush_ticker)
+            {
+                mcache = get_leaf_compression().resolve_modified<T>(address);
+            }
+            return (T*)mcache;
+        }
         mutable node_data *dcache= nullptr;
+        mutable node_data *mcache= nullptr;
         mutable uint32_t last_ticker = compress::flush_ticker;
         compressed_address address{};
         node_proxy(const node_proxy&) = default;
         node_proxy() = default;
-
-        template<typename T, typename IntPtrType, uint8_t NodeType>
-        compressed_address create_data()
-        {
-            address = get_leaf_compression().new_address(sizeof(T));
-            T* r = get_leaf_compression().resolve<T>(address);
-            r->type = NodeType;
-            r->pointer_size = sizeof(IntPtrType);
-            dcache = r;
-            statistics::addressable_bytes_alloc += sizeof(T);
-            statistics::interior_bytes_alloc += sizeof(T);
-            ++statistics::n4_nodes;
-            return address;
-        }
 
         template<typename T, typename IntPtrType, uint8_t NodeType>
         void set(compressed_address address)
@@ -416,6 +413,8 @@ struct art_node {
     [[nodiscard]] virtual size_t alloc_size() const = 0;
     [[nodiscard]] virtual compressed_address get_address() const = 0;
     [[nodiscard]] virtual node_ptr_storage get_storage() const = 0;
+    [[nodiscard]] virtual compressed_address create_data() = 0;
+    virtual void free_data() = 0;
 };
 typedef art_node::node_ptr node_ptr;
 typedef art_node::trace_element trace_element;
@@ -762,10 +761,67 @@ struct encoded_node_content : public art_node, private art_node::node_proxy {
         return *refresh_cache<encoded_data>();
     }
 
+    compressed_address create_data() final
+    {
+        address = get_leaf_compression().new_address(sizeof(encoded_data));
+        encoded_data* r = get_leaf_compression().resolve_modified<encoded_data>(address);
+        r->type = node_type;
+        r->pointer_size = sizeof(IntPtrType);
+        mcache = r;
+        statistics::addressable_bytes_alloc += sizeof(encoded_data);
+        statistics::interior_bytes_alloc += sizeof(encoded_data);
+        switch (node_type)
+        {
+        case node_4:
+            ++statistics::n4_nodes;
+            break;
+        case node_16:
+            ++statistics::n16_nodes;
+            break;
+        case node_48:
+            ++statistics::n48_nodes;
+            break;
+        case node_256:
+            ++statistics::n256_nodes;
+            break;
+        default:
+            abort();
+        }
+
+        return address;
+    }
+
+    void free_data() final
+    {
+
+        statistics::addressable_bytes_alloc -= alloc_size();
+        statistics::interior_bytes_alloc -= alloc_size();
+        switch (node_type)
+        {
+        case node_4:
+            --statistics::n4_nodes;
+            break;
+        case node_16:
+            --statistics::n16_nodes;
+            break;
+        case node_48:
+            --statistics::n48_nodes;
+            break;
+        case node_256:
+            --statistics::n256_nodes;
+            break;
+        default:
+            abort();
+        }
+        //if (address.is_null_base())
+        //    abort();
+        get_leaf_compression().free(address, alloc_size());
+    }
+
     encoded_node_content() = default;
     encoded_node_content& create()
     {
-        create_data<encoded_data, IntPtrType, node_type>();
+        create_data();
         return *this;
     }
     void from(compressed_address address)

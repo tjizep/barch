@@ -165,6 +165,7 @@ struct storage
         modifications = other.modifications;
         size = other.size;
         lru = other.lru;
+        ticker = other.ticker;
         return *this;
     }
 
@@ -175,6 +176,7 @@ struct storage
         write_position = 0;
         modifications = 0;
         size = 0;
+        ticker = 0;
         lru = lru_list::iterator();
     }
 
@@ -187,6 +189,7 @@ struct storage
         modifications = other.modifications;
         size = other.size;
         lru = other.lru;
+        ticker = other.ticker;
         other.clear();
         return *this;
     }
@@ -202,6 +205,7 @@ struct storage
     PageSizeType size = 0;
     PageSizeType modifications = 0;
     lru_list::iterator lru{};
+    uint64_t ticker = 0;
 };
 struct size_offset
 {
@@ -671,6 +675,7 @@ private:
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{};
     lru_list lru{};
+    uint64_t ticker = 1;
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -842,8 +847,9 @@ private:
     std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ps = page_size)
     {
         auto &page = arena[at];
-        lru.emplace_back(at);
-        page.lru = --lru.end();
+        //lru.emplace_back(at);
+        //page.lru = --lru.end();
+        page.ticker = ++ticker;;
         page.decompressed = std::move(heap::buffer<uint8_t>(ps));
         statistics::page_bytes_uncompressed += page.decompressed.byte_size();
         ++statistics::pages_uncompressed;
@@ -854,10 +860,11 @@ private:
     std::pair<size_t, storage&> create_if_required(size_t size)
     {
 
-        if (is_null_base(last_block()))
+        if (is_null_base(arena.size()))
         {
             arena.emplace_back();
             arena.back().write_position = page_size;
+            highest_reserve_address = {last_block(),0};
         }
         if (size > page_size)
         {
@@ -972,6 +979,8 @@ private:
         {
             t.modifications++;
         }
+        t.ticker = ++ticker;
+#if 0
         if (t.lru == lru_list::iterator())
         {
             lru.emplace_back(at);
@@ -983,6 +992,7 @@ private:
             }
             lru.splice(lru.begin(), lru, t.lru);
         }
+#endif
         return t.decompressed.begin() + at.offset();
     }
 
@@ -1096,8 +1106,8 @@ public:
             //t.decompressed = std::move(heap::buffer<uint8_t>(page_size));
             //++statistics::pages_uncompressed;
             //statistics::page_bytes_uncompressed += t.decompressed.byte_size();
-            if(t.lru != lru_list::iterator())
-                lru.erase(t.lru);
+            //if(t.lru != lru_list::iterator())
+            //    lru.erase(t.lru);
             t.clear();
             emancipated.erase(at.page());
             free_pages.push_back(at.page());
@@ -1113,10 +1123,25 @@ public:
     {
         heap::buffer<uint8_t> r;
         std::lock_guard guard(mutex);
-        if (lru.empty()) return {r,0};
-        auto last = --lru.end();
-        auto& t = arena.at(*last);
-        std::pair<size_t, storage&> dec = {*last,t};
+        uint64_t min_ticker = ticker;
+        uint64_t page = 0, min_page = 1;
+        for (page = 1; page < arena.size(); page+=31)
+        {
+            if (is_null_base(page)) continue;
+            auto &p = arena.at(page);
+
+            if (p.size > 0 && p.ticker > 0 &&
+                p.ticker < min_ticker)
+            {
+                min_page = page;
+                min_ticker = p.ticker;
+            }
+        }
+
+        if (min_page == 0) return {r, 0};
+
+        auto& t = arena.at(min_page);
+        std::pair<size_t, storage&> dec = {min_page,t};
         if (decompress(dec))
         {   // we might signal this as decompressed
             if(!t.compressed.empty())
@@ -1191,6 +1216,10 @@ public:
             return r;
         }
         auto at = create_if_required(size);
+        if (is_null_base(at.first))
+        {
+            abort();
+        }
         if (at.second.decompressed.empty() && !at.second.compressed.empty())
         {
             if (decompress(at))
@@ -1201,7 +1230,7 @@ public:
                 // we might signal this as decompressed
             };
         }
-        if (at.second.write_position + size >= page_size || at.second.decompressed.empty())
+        if (at.second.write_position + size > at.second.decompressed.size() || at.second.decompressed.empty())
         {
             abort();
         }

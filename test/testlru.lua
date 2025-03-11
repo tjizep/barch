@@ -9,7 +9,9 @@ end
 
 
 result[inc()] = {[[ODSTATS]], vk.call('ODSTATS')}
+local start = vk.call('ODMILLIS')
 result[inc()] = {[[ODEVICT]], vk.call('ODEVICT')}
+result[inc()] = {[['EVICT TIME']], vk.call('ODMILLIS') - start}
 result[inc()] = {[[ODHEAPBYTES]], vk.call('ODHEAPBYTES')}
 
 return result

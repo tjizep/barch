@@ -821,7 +821,7 @@ uint64_t art_evict_lru(art_tree *t)
             abort();
         }
         art_delete(t, l->get_key(),fc);
-        i += (l->key_len + l->val_len + 1 + sizeof(art_leaf) + test_memory);
+        i += (l->byte_size() + test_memory);
     }
     ++statistics::pages_evicted;
     return page.first.byte_size();

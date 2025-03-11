@@ -10,8 +10,12 @@
 
 void free_leaf_node(node_ptr n){
     if(n.null()) return;
-    unsigned kl = n.const_leaf()->key_len;
-    unsigned vl = n.const_leaf()->val_len;
+    auto * l = n.leaf();
+    unsigned kl = l->key_len;
+    unsigned vl = l->val_len;
+    l->key_len = 0;
+    l->val_len += kl; // set the deleted property
+
     get_leaf_compression().free(n.logical, sizeof(art_leaf) + kl + 1 + vl);
     --statistics::leaf_nodes;
     statistics::addressable_bytes_alloc -= (sizeof(art_leaf) + kl + 1 + vl);

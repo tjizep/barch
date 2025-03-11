@@ -85,7 +85,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, value_type key){
     size_t kl;
     const unsigned char * enck = key.bytes;
     unsigned key_len = key.length();
-    if( key_len == 9 && (*enck == conversion::tinteger || *enck == conversion::tdouble)){
+    if( key_len == 10 && (*enck == conversion::tinteger || *enck == conversion::tdouble)){
         ik = conversion::enc_bytes_to_int(enck, key_len);
         if (*enck == 1) {
             memcpy(&dk, &ik, sizeof(ik));

@@ -446,6 +446,10 @@ struct art_leaf {
     LeafSize key_len; // does not include null terminator (which is hidden: see make_leaf)
     LeafSize val_len;
     unsigned char data[];
+    [[nodiscard]] size_t byte_size() const
+    {
+        return key_len + 1 + val_len + sizeof(art_leaf);
+    }
     [[nodiscard]] unsigned val_start() const
     {
         return key_len + 1;

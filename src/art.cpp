@@ -14,6 +14,11 @@ compress & get_leaf_compression()
     static compress leaf_compression;
     return leaf_compression;
 };
+compress & get_node_compression()
+{
+    static compress node_compression;
+    return node_compression;
+};
 
 compressed_release::compressed_release()
 {

@@ -68,8 +68,8 @@ struct value_type
 };
 struct art_leaf;
 typedef compressed_address logical_leaf;
-extern compress& get_leaf_compression();
-
+extern compress & get_leaf_compression();
+extern compress & get_node_compression();
 struct node_ptr_storage
 {
     uint8_t storage[64 - sizeof(size_t)]{};
@@ -313,7 +313,7 @@ struct art_node {
                     dcache = mcache;
                 } else
                 {
-                    dcache = get_leaf_compression().read<T>(address);
+                    dcache = get_node_compression().read<T>(address);
                 }
 
             }
@@ -324,7 +324,7 @@ struct art_node {
         {
             if(!mcache || last_ticker != compress::flush_ticker)
             {
-                mcache = get_leaf_compression().modify<T>(address);
+                mcache = get_node_compression().modify<T>(address);
             }
             return (T*)mcache;
         }
@@ -343,7 +343,7 @@ struct art_node {
                 abort();
             }
             this->address = address;
-            dcache = get_leaf_compression().read<T>(address);
+            dcache = get_node_compression().read<T>(address);
             if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
             {
                 abort();
@@ -777,8 +777,8 @@ struct encoded_node_content : public art_node, private art_node::node_proxy {
 
     compressed_address create_data() final
     {
-        address = get_leaf_compression().new_address(sizeof(encoded_data));
-        encoded_data* r = get_leaf_compression().modify<encoded_data>(address);
+        address = get_node_compression().new_address(sizeof(encoded_data));
+        encoded_data* r = get_node_compression().modify<encoded_data>(address);
         r->type = node_type;
         r->pointer_size = sizeof(IntPtrType);
         mcache = r;
@@ -829,7 +829,7 @@ struct encoded_node_content : public art_node, private art_node::node_proxy {
         }
         //if (address.is_null_base())
         //    abort();
-        get_leaf_compression().free(address, alloc_size());
+        get_node_compression().free(address, alloc_size());
     }
 
     encoded_node_content() = default;

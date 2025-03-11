@@ -39,7 +39,7 @@ static art_node* make_node(node_ptr_storage& ptr, compressed_address a, node_dat
 }
 node_ptr resolve_read_node(compressed_address address)
 {
-    auto* node= get_leaf_compression().read<node_data>(address);
+    auto* node= get_node_compression().read<node_data>(address);
     node_ptr_storage ptr;
     switch (node->type)
     {
@@ -57,7 +57,7 @@ node_ptr resolve_read_node(compressed_address address)
 }
 node_ptr resolve_write_node(compressed_address address)
 {
-    auto* node= get_leaf_compression().modify<node_data>(address);
+    auto* node= get_node_compression().modify<node_data>(address);
     node_ptr_storage ptr;
     switch (node->type)
     {

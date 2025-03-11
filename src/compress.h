@@ -24,7 +24,7 @@ enum
 {
     page_size = 4096,
     reserved_address_base = 12000,
-    enable_compression = 1,
+    enable_compression = 0,
     auto_vac = 0,
     auto_vac_workers = 8,
     test_memory = 0,
@@ -650,10 +650,10 @@ private:
     ZSTD_CCtx* cctx = ZSTD_createCCtx();
     ZSTD_DCtx* dctx = ZSTD_createDCtx();
     size_t trained_size = 0;
-    mutable std::mutex mutex{};
+    static std::mutex mutex;
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
-    mutable std::shared_mutex vacuum_scope{};
+    static std::shared_mutex vacuum_scope;
     heap::vector<storage> arena{};
     heap::vector<size_t> free_pages{};
     heap::vector<size_t> decompressed_pages{};

@@ -11,12 +11,13 @@
 
 compress & get_leaf_compression()
 {
-    static compress leaf_compression;
+    static compress leaf_compression{true};
     return leaf_compression;
 };
+
 compress & get_node_compression()
 {
-    static compress node_compression;
+    static compress node_compression{false};
     return node_compression;
 };
 

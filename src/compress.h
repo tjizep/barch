@@ -24,7 +24,7 @@ enum
 {
     page_size = 4096,
     reserved_address_base = 12000,
-    enable_compression = 0,
+    //opt_enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 8,
     test_memory = 0,
@@ -626,6 +626,7 @@ struct compress
     };
 
     compress() = default;
+    explicit compress(bool opt_enable_compression): opt_enable_compression(opt_enable_compression){};
     compress(const compress&) = delete;
 
     ~compress()
@@ -637,6 +638,7 @@ struct compress
     }
     static uint32_t flush_ticker;
 private:
+    bool opt_enable_compression = false;
     std::thread tdict{};
     std::thread tpoll{};
     bool threads_exit = false;
@@ -724,9 +726,9 @@ private:
             {
                 while (!threads_exit)
                 {
-                    if(heap::get_physical_memory_ratio() > 0.99)
+                    if(heap::get_physical_memory_ratio() > 0.95)
                         context_vacuum(true);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(45));
                 }
             });
         }
@@ -734,7 +736,7 @@ private:
 
     bool add_training_entry(const uint8_t* data, size_t size)
     {
-        if (enable_compression == 0)
+        if (opt_enable_compression == 0)
         {
             return false;
         }
@@ -1201,10 +1203,10 @@ public:
 
         if (!full && ratio > 0.99 && !decompressed_pages.empty())
         {
-            ++flush_ticker;
-            size_t at = decompressed_pages.back();
-            decompressed_pages.pop_back();
-            return release_decompressed(cctx,at);
+            //++flush_ticker;
+            //size_t at = decompressed_pages.back();
+            //decompressed_pages.pop_back();
+            return 0; //release_decompressed(cctx,at);
 
         }
         if (!full)
@@ -1217,7 +1219,7 @@ public:
         auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - last_vacuum_millis);
         uint64_t total_heap = heap::allocated;
         size_t result = 0;
-        if ( d.count() > 80 )
+        if ( d.count() > 40 )
         {
             if (total_heap < statistics::page_bytes_compressed)
             {

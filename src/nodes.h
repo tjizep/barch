@@ -106,7 +106,7 @@ struct node_ptr_storage
     }
     template<typename T>
     T* ptr() {
-        if(null()) return nullptr;
+        //if(null()) return nullptr;
         static_assert(sizeof(T) < sizeof(storage));
         return reinterpret_cast<T*>(&storage[0]);
     }
@@ -367,8 +367,8 @@ struct art_node {
         }
     };
 
-    art_node();
-    virtual ~art_node();
+    art_node() = default;
+    virtual ~art_node() = default;
     [[nodiscard]] virtual uint8_t type() const = 0;
 
     virtual node_data& data() = 0;
@@ -1492,7 +1492,7 @@ struct art_node48 final : public encoded_node_content<48,256, node_48, PtrEncode
         nd().keys[key] = 0;
         nd().children[pos] = nullptr;
         nd().types[pos] = false;
-        data().num_children--;
+        --nd().num_children;
 
         if (data().num_children == 12) {
             auto new_node = alloc_node_ptr(node_16, {});

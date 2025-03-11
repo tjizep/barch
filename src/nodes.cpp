@@ -115,8 +115,8 @@ node_ptr alloc_8_node_ptr(unsigned nt)
     }
 }
 
-art_node::art_node () = default;
-art_node::~art_node() = default;
+
+
 /**
  * Returns the number of prefix characters shared between
  * the key and node.

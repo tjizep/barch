@@ -803,7 +803,29 @@ uint64_t art_size(art_tree *t) {
     
     return t->size;
 }
-
+uint64_t art_evict_lru(art_tree *t)
+{
+    auto page = get_leaf_compression().get_lru_page();
+    if (!page.second) return 0;
+    auto i = page.first.begin();
+    auto e = i + page.second;
+    auto fc = [](node_ptr) -> void
+    {
+        ++statistics::keys_evicted;
+    };
+    while (i != e)
+    {
+        const art_leaf *l = (art_leaf*)i;
+        if (l->key_len > page.first.byte_size())
+        {
+            abort();
+        }
+        art_delete(t, l->get_key(),fc);
+        i += (l->key_len + l->val_len + 1 + sizeof(art_leaf) + test_memory);
+    }
+    ++statistics::pages_evicted;
+    return page.first.byte_size();
+}
 art_statistics art_get_statistics(){
     art_statistics as{};
     as.heap_bytes_allocated = (int64_t)heap::allocated;
@@ -823,6 +845,8 @@ art_statistics art_get_statistics(){
     as.vacuums_performed = (int64_t)statistics::vacuums_performed;
     as.last_vacuum_time = (int64_t)statistics::last_vacuum_time;
     as.leaf_nodes_replaced = (int64_t)statistics::leaf_nodes_replaced;
+    as.pages_evicted = (int64_t)statistics::pages_evicted;
+    as.keys_evicted = (int64_t)statistics::keys_evicted;
     return as;
 }
 

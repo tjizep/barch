@@ -35,6 +35,8 @@ struct art_statistics {
     int64_t vacuums_performed;
     int64_t last_vacuum_time;
     int64_t leaf_nodes_replaced;
+    int64_t pages_evicted;
+    int64_t keys_evicted;
 };
 
 struct art_ops_statistics {
@@ -189,3 +191,8 @@ art_statistics art_get_statistics();
  * get statistics for each operation performed
  */
 art_ops_statistics art_get_ops_statistics();
+
+/**
+* evict a lru page
+*/
+uint64_t art_evict_lru(art_tree *t);

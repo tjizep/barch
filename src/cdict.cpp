@@ -504,6 +504,14 @@ extern "C" {
         ValkeyModule_ReplyWithSimpleString(ctx, "pages_compressed");
         ValkeyModule_ReplyWithLongLong(ctx,as.pages_compressed);
         ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "pages_evicted");
+        ValkeyModule_ReplyWithLongLong(ctx,as.pages_evicted);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "keys_evicted");
+        ValkeyModule_ReplyWithLongLong(ctx,as.keys_evicted);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplySetArrayLength(ctx, row_count);
         return 0;
     }
@@ -583,6 +591,15 @@ extern "C" {
         ;
         return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)heap::allocated);
     }
+    int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    {
+        compressed_release release;
+        write_lock w(get_lock());
+        if (argc != 1)
+            return ValkeyModule_WrongArity(ctx);
+        auto t = get_art();
+        return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)art_evict_lru(t));
+    }
 
     /* This function must be present on each module. It is used in order to
      * register the commands into the server. */
@@ -632,6 +649,9 @@ extern "C" {
             return VALKEYMODULE_ERR;
 
         if (ValkeyModule_CreateCommand(ctx, "ODHEAPBYTES", cmd_HEAP_BYTES, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "ODEVICT", cmd_EVICT, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
         /* Create our global dictionary. Here we'll set our keys and values. */

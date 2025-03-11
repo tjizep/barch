@@ -19,6 +19,8 @@ std::atomic<uint64_t> statistics::max_page_bytes_uncompressed = 0;
 std::atomic<uint64_t> statistics::vacuums_performed = 0;
 std::atomic<uint64_t> statistics::last_vacuum_time = 0;
 std::atomic<uint64_t> statistics::leaf_nodes_replaced = 0;
+std::atomic<uint64_t> statistics::pages_evicted = 0;
+std::atomic<uint64_t> statistics::keys_evicted = 0;
 /**
  * ops stats
  */

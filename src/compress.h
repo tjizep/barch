@@ -5,7 +5,6 @@
 #ifndef COMPRESS_H
 #define COMPRESS_H
 #include <iostream>
-
 #include "sastam.h"
 #include <mutex>
 #include <shared_mutex>
@@ -19,7 +18,7 @@
 #include <zdict.h>
 #include <functional>
 #include <unordered_set>
-
+#include <list>
 enum
 {
     page_size = 4096,
@@ -32,6 +31,7 @@ enum
     coalesce_fragments = 0
 };
 typedef uint16_t PageSizeType;
+typedef std::list<size_t, heap::allocator<size_t>> lru_list;
 struct compressed_address
 {
     typedef uint64_t AddressIntType;
@@ -164,6 +164,7 @@ struct storage
         write_position = other.write_position;
         modifications = other.modifications;
         size = other.size;
+        lru = other.lru;
         return *this;
     }
 
@@ -174,6 +175,7 @@ struct storage
         write_position = 0;
         modifications = 0;
         size = 0;
+        lru = lru_list::iterator();
     }
 
     storage& operator=(storage&& other) noexcept
@@ -184,6 +186,7 @@ struct storage
         write_position = other.write_position;
         modifications = other.modifications;
         size = other.size;
+        lru = other.lru;
         other.clear();
         return *this;
     }
@@ -198,6 +201,7 @@ struct storage
     PageSizeType write_position = 0;
     PageSizeType size = 0;
     PageSizeType modifications = 0;
+    lru_list::iterator lru{};
 };
 struct size_offset
 {
@@ -666,6 +670,7 @@ private:
     uint64_t release_counter = 0;
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{};
+    lru_list lru{};
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -837,6 +842,8 @@ private:
     std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ps = page_size)
     {
         auto &page = arena[at];
+        lru.emplace_back(at);
+        page.lru = --lru.end();
         page.decompressed = std::move(heap::buffer<uint8_t>(ps));
         statistics::page_bytes_uncompressed += page.decompressed.byte_size();
         ++statistics::pages_uncompressed;
@@ -965,7 +972,17 @@ private:
         {
             t.modifications++;
         }
-
+        if (t.lru == lru_list::iterator())
+        {
+            lru.emplace_back(at);
+            t.lru = --lru.end();
+        }else
+        {   if(*t.lru != p)
+            {
+                abort();
+            }
+            lru.splice(lru.begin(), lru, t.lru);
+        }
         return t.decompressed.begin() + at.offset();
     }
 
@@ -1079,7 +1096,8 @@ public:
             //t.decompressed = std::move(heap::buffer<uint8_t>(page_size));
             //++statistics::pages_uncompressed;
             //statistics::page_bytes_uncompressed += t.decompressed.byte_size();
-
+            if(t.lru != lru_list::iterator())
+                lru.erase(t.lru);
             t.clear();
             emancipated.erase(at.page());
             free_pages.push_back(at.page());
@@ -1091,7 +1109,29 @@ public:
             t.modifications++;
         }
     }
-
+    std::pair<heap::buffer<uint8_t>,size_t> get_lru_page()
+    {
+        heap::buffer<uint8_t> r;
+        std::lock_guard guard(mutex);
+        if (lru.empty()) return {r,0};
+        auto last = --lru.end();
+        auto& t = arena.at(*last);
+        std::pair<size_t, storage&> dec = {*last,t};
+        if (decompress(dec))
+        {   // we might signal this as decompressed
+            if(!t.compressed.empty())
+            {
+                statistics::page_bytes_compressed -= t.compressed.byte_size();
+                --statistics::pages_compressed;
+                t.compressed.release();
+            }
+        }
+        if (t.decompressed.empty())
+        {
+            abort();
+        }
+        return {t.decompressed,t.write_position};
+    }
 
     template <typename T>
     T* read(compressed_address at)
@@ -1239,6 +1279,7 @@ public:
         return result;
 
     }
+
     void enter_context()
     {
         vacuum_scope.lock_shared();

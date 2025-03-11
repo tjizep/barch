@@ -356,7 +356,7 @@ static node_ptr make_leaf(value_type key, value_type v) {
     unsigned key_len = key.length();
     // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
     auto logical = get_leaf_compression().new_address(sizeof(art_leaf) + key_len + 1 + val_len);
-    auto *l = new(get_leaf_compression().resolve<art_leaf>(logical)) art_leaf(key_len, val_len);
+    auto *l = new(get_leaf_compression().read<art_leaf>(logical)) art_leaf(key_len, val_len);
     ++statistics::leaf_nodes;
     statistics::addressable_bytes_alloc += (int64_t)(sizeof(art_leaf)+ key_len + 1 + val_len);
     l->set_key(key);

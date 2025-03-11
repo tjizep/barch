@@ -222,7 +222,7 @@ struct node_ptr_t {
         if (!is_leaf)
             abort();
         check();
-        auto * l = resolver->resolve_modified<art_leaf>(logical);
+        auto * l = resolver->modify<art_leaf>(logical);
         if(l == nullptr)
         {
             abort();
@@ -236,7 +236,7 @@ struct node_ptr_t {
         if (!is_leaf)
             abort();
         check();
-        const auto * l = resolver->resolve<const art_leaf>(logical);
+        const auto * l = resolver->read<const art_leaf>(logical);
         if(l == nullptr)
         {
             abort();
@@ -304,7 +304,7 @@ struct art_node {
     struct node_proxy {
 
         template<typename T>
-        const T* refresh_cache() const
+        const T* refresh_cache() const // read-only refresh
         {
             if(!dcache || last_ticker != compress::flush_ticker)
             {
@@ -313,7 +313,7 @@ struct art_node {
                     dcache = mcache;
                 } else
                 {
-                    dcache = get_leaf_compression().resolve<T>(address);
+                    dcache = get_leaf_compression().read<T>(address);
                 }
 
             }
@@ -324,7 +324,7 @@ struct art_node {
         {
             if(!mcache || last_ticker != compress::flush_ticker)
             {
-                mcache = get_leaf_compression().resolve_modified<T>(address);
+                mcache = get_leaf_compression().modify<T>(address);
             }
             return (T*)mcache;
         }
@@ -343,14 +343,14 @@ struct art_node {
                 abort();
             }
             this->address = address;
-            dcache = get_leaf_compression().resolve<T>(address);
+            dcache = get_leaf_compression().read<T>(address);
             if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
             {
                 abort();
             }
         }
         template<typename IntPtrType, uint8_t NodeType>
-        void set_lazy(compressed_address address, const node_data* data)
+        void set_lazy(compressed_address address, node_data* data)
         {
             if (address.null())
             {
@@ -361,7 +361,8 @@ struct art_node {
                 abort();
             }
             this->address = address;
-            dcache = nullptr; // it will get loaded as required
+            dcache = data; // it will get loaded as required
+            mcache = data;
 
         }
     };
@@ -421,7 +422,8 @@ typedef art_node::trace_element trace_element;
 typedef art_node::children_t children_t;
 node_ptr alloc_node_ptr(unsigned nt, const children_t& c);
 node_ptr alloc_8_node_ptr(unsigned nt); // magic 8 ball
-extern node_ptr resolve_node(compressed_address address);
+extern node_ptr resolve_read_node(compressed_address address);
+extern node_ptr resolve_write_node(compressed_address address);
 
 
 typedef std::vector<trace_element> trace_list;
@@ -631,7 +633,19 @@ public:
         {
             return nullptr;
         }
-        return resolve_node(compressed_address((int64_t)value + base));
+        return resolve_write_node(compressed_address((int64_t)value + base));
+    }
+    [[nodiscard]] node_ptr get_node() const
+    {
+        if(IsLeaf)
+        {
+            abort();
+        }
+        if (value == 0)
+        {
+            return nullptr;
+        }
+        return resolve_read_node(compressed_address((int64_t)value + base));
     }
     [[nodiscard]] node_ptr cget() const
     {
@@ -643,7 +657,7 @@ public:
         {
             return nullptr;
         }
-        return resolve_node(compressed_address((int64_t)value + base));
+        return resolve_read_node(compressed_address((int64_t)value + base));
     }
 
     encoded_element& operator=(const art_node* ptr)
@@ -764,7 +778,7 @@ struct encoded_node_content : public art_node, private art_node::node_proxy {
     compressed_address create_data() final
     {
         address = get_leaf_compression().new_address(sizeof(encoded_data));
-        encoded_data* r = get_leaf_compression().resolve_modified<encoded_data>(address);
+        encoded_data* r = get_leaf_compression().modify<encoded_data>(address);
         r->type = node_type;
         r->pointer_size = sizeof(IntPtrType);
         mcache = r;
@@ -824,11 +838,13 @@ struct encoded_node_content : public art_node, private art_node::node_proxy {
         create_data();
         return *this;
     }
+
     void from(compressed_address address)
     {
         set<encoded_data, IntPtrType, node_type>(address);
     };
-    void from(compressed_address address,const node_data* data)
+
+    void from(compressed_address address ,node_data* data)
     {
         set_lazy<IntPtrType, node_type>(address, data);
     };
@@ -887,7 +903,7 @@ struct encoded_node_content : public art_node, private art_node::node_proxy {
         if (at < SIZE)
         {
             auto& dat = nd();
-            return dat.types[at] ? node_ptr(dat.leaves[at]) : node_ptr(dat.children[at]);
+            return dat.types[at] ? node_ptr(dat.leaves[at]) : dat.children[at].get_node();
         }
         return nullptr;
     }
@@ -1167,7 +1183,7 @@ struct art_node4_v final : public encoded_node_content<4, 4, node_4, IntegerPtr>
     {
         art_node4_v::from(address);
     }
-    explicit art_node4_v(compressed_address address, const node_data* data)
+    explicit art_node4_v(compressed_address address, node_data* data)
     {
         art_node4_v::from(address,data);
     }
@@ -1303,7 +1319,7 @@ encoded_node_content<16,16, node_16, IPtrType >
     {
         art_node16_v::from(address);
     }
-    explicit art_node16_v(compressed_address address, const node_data* data)
+    explicit art_node16_v(compressed_address address, node_data* data)
     {
         art_node16_v::from(address,data);
     }
@@ -1439,7 +1455,7 @@ struct art_node48 final : public encoded_node_content<48,256, node_48, PtrEncode
     {
         art_node48::from(address);
     }
-    explicit art_node48(compressed_address address, const node_data* data)
+    explicit art_node48(compressed_address address, node_data* data)
     {
         art_node48::from(address,data);
     }
@@ -1610,7 +1626,7 @@ struct art_node256 final : public encoded_node_content<256,0,node_256,intptr_t> 
     {
         art_node256::from(address);
     }
-    explicit art_node256(compressed_address address, const node_data* data)
+    explicit art_node256(compressed_address address, node_data* data)
     {
         art_node256::from(address,data);
     }

@@ -26,7 +26,7 @@ enum
     reserved_address_base = 12000,
     enable_compression = 1,
     auto_vac = 0,
-    auto_vac_workers = 4,
+    auto_vac_workers = 8,
     test_memory = 0,
     allocation_padding = 0,
     coalesce_fragments = 0
@@ -724,9 +724,9 @@ private:
             {
                 while (!threads_exit)
                 {
-                    if(heap::get_physical_memory_ratio() > 0.95)
+                    if(heap::get_physical_memory_ratio() > 0.99)
                         context_vacuum(true);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
                 }
             });
         }
@@ -1092,7 +1092,7 @@ public:
 
 
     template <typename T>
-    T* resolve(compressed_address at)
+    T* read(compressed_address at)
     {
         if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
@@ -1101,7 +1101,7 @@ public:
     }
 
     template <typename T>
-    T* resolve_modified(compressed_address at)
+    T* modify(compressed_address at)
     {
         if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
@@ -1174,7 +1174,7 @@ public:
         {
             abort();
         }
-        if(test_memory == 1)
+        if (test_memory == 1)
             data[sz] = ca.address() % 255;
         return ca;
     }
@@ -1199,7 +1199,7 @@ public:
         if (dict == nullptr) return 0;
         double ratio = heap::get_physical_memory_ratio();
 
-        if (!full && ratio > 0.95 && !decompressed_pages.empty())
+        if (!full && ratio > 0.99 && !decompressed_pages.empty())
         {
             ++flush_ticker;
             size_t at = decompressed_pages.back();
@@ -1207,7 +1207,7 @@ public:
             return release_decompressed(cctx,at);
 
         }
-        if (!full && ratio < 0.95)
+        if (!full)
         {
             return 0;
         }
@@ -1217,7 +1217,7 @@ public:
         auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - last_vacuum_millis);
         uint64_t total_heap = heap::allocated;
         size_t result = 0;
-        if ( d.count() > 20 )
+        if ( d.count() > 80 )
         {
             if (total_heap < statistics::page_bytes_compressed)
             {

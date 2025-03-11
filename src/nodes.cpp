@@ -26,7 +26,7 @@ void free_node(node_ptr n){
  * initializes to zero and sets the type.
  */
 template<typename Type4, typename Type8>
-static art_node* make_node(node_ptr_storage& ptr, compressed_address a, const node_data* node)
+static art_node* make_node(node_ptr_storage& ptr, compressed_address a, node_data* node)
 {
     if (node->pointer_size == 4)
     {
@@ -37,9 +37,27 @@ static art_node* make_node(node_ptr_storage& ptr, compressed_address a, const no
     }
     abort();
 }
-node_ptr resolve_node(compressed_address address)
+node_ptr resolve_read_node(compressed_address address)
 {
-    const node_data* node= get_leaf_compression().resolve<node_data>(address);
+    auto* node= get_leaf_compression().read<node_data>(address);
+    node_ptr_storage ptr;
+    switch (node->type)
+    {
+    case node_4:
+        return  make_node<art_node4_4,art_node4_8>(ptr, address, node);
+    case node_16:
+        return make_node<art_node16_4,art_node16_8>(ptr, address, node);
+    case node_48:
+        return make_node<art_node48_4,art_node48_8>(ptr, address, node);
+    case node_256:
+        return make_node<art_node256_4,art_node256_8>(ptr, address, node);
+    default:
+        abort();
+    }
+}
+node_ptr resolve_write_node(compressed_address address)
+{
+    auto* node= get_leaf_compression().modify<node_data>(address);
     node_ptr_storage ptr;
     switch (node->type)
     {

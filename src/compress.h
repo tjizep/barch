@@ -166,6 +166,7 @@ struct storage
         size = other.size;
         lru = other.lru;
         ticker = other.ticker;
+        fragmentation = other.fragmentation;
         return *this;
     }
 
@@ -177,6 +178,7 @@ struct storage
         modifications = 0;
         size = 0;
         ticker = 0;
+        fragmentation = 0;
         lru = lru_list::iterator();
     }
 
@@ -190,6 +192,7 @@ struct storage
         size = other.size;
         lru = other.lru;
         ticker = other.ticker;
+        fragmentation = other.fragmentation;
         other.clear();
         return *this;
     }
@@ -206,6 +209,7 @@ struct storage
     PageSizeType modifications = 0;
     lru_list::iterator lru{};
     uint64_t ticker = 0;
+    uint64_t fragmentation = 0;
 };
 struct size_offset
 {
@@ -676,6 +680,8 @@ private:
     free_list emancipated{};
     lru_list lru{};
     uint64_t ticker = 1;
+    uint64_t fragmentation = 0;
+    uint64_t allocated = 0;
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -1059,14 +1065,38 @@ private:
         ++statistics::vacuums_performed;
         return r;
     }
+    std::pair<heap::buffer<uint8_t>,size_t> get_page_buffer_inner(size_t at)
+    {
+        if(is_null_base(at)) return {};
+        auto& t = arena.at(at);
+        std::pair<size_t, storage&> dec = {at,t};
+        if (decompress(dec))
+        {   // we might signal this as decompressed
+            if(!t.compressed.empty())
+            {
+                statistics::page_bytes_compressed -= t.compressed.byte_size();
+                --statistics::pages_compressed;
+                t.compressed.release();
+            }
+        }
+        if (t.decompressed.empty())
+        {
+            abort();
+        }
+        return {t.decompressed,t.write_position};
 
+    }
 public:
     void free(compressed_address at, size_t sz)
     {
         size_t size = sz + test_memory + allocation_padding;
         std::lock_guard guard(mutex);
         uint8_t * d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
-
+        if (allocated < size)
+        {
+            abort();
+        }
+        allocated -= size;
         if (at.address() == 0 || size == 0)
         {
             abort();
@@ -1103,21 +1133,84 @@ public:
                 --statistics::pages_uncompressed;
                 statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             }
-            //t.decompressed = std::move(heap::buffer<uint8_t>(page_size));
-            //++statistics::pages_uncompressed;
-            //statistics::page_bytes_uncompressed += t.decompressed.byte_size();
-            //if(t.lru != lru_list::iterator())
-            //    lru.erase(t.lru);
             t.clear();
             emancipated.erase(at.page());
             free_pages.push_back(at.page());
+            fragmentation -= t.fragmentation;
+            t.fragmentation = 0;
         }
         else
         {
             emancipated.add(at, size); // add a free allocation for later re-use
             t.size--;
             t.modifications++;
+            t.fragmentation += size;
+            fragmentation += size;
         }
+    }
+
+    heap::vector<size_t> create_fragmentation_list() const
+    {
+        heap::vector<size_t> fragmentation;
+        std::lock_guard guard(mutex);
+        heap::vector<const storage*> replay;
+        for (auto& t: arena)
+        {
+            size_t p = &t - arena.begin();
+            if(is_null_base(p)) continue;
+            replay.emplace_back(&t);
+        }
+
+        auto compare = [&](const storage* a, const storage* b) -> bool
+        {
+            return a->fragmentation >= b->fragmentation;
+        };
+        std::sort(replay.begin(), replay.end(), compare);
+        for (auto* pt : replay)
+        {
+            size_t p = pt - arena.begin();
+            fragmentation.push_back(p);
+        }
+        return fragmentation;
+    }
+    lru_list create_lru_list()
+    {   lru_list r;
+        std::lock_guard guard(mutex);
+        heap::vector<storage*> replay;
+        for (size_t p = 1; p < arena.size(); p++)
+        {
+            if(is_null_base(p)) continue;
+            replay.emplace_back(&arena.at(p));
+        }
+        auto compare = [&](storage* a, storage* b) -> bool
+        {
+            return a->ticker < b->ticker;
+        };
+        std::sort(replay.begin(), replay.end(), compare);
+        for (auto* pt : replay)
+        {
+            storage& t = *(pt);
+            size_t p = pt - arena.begin();
+            if (t.lru == lru_list::iterator())
+            {
+                lru.emplace_back(p);
+                t.lru = --lru.end();
+            }else
+            {
+                if(*t.lru != p)
+                {
+                    abort();
+                }
+                lru.splice(lru.begin(), lru, t.lru);
+            }
+        }
+        return r;
+    }
+    std::pair<heap::buffer<uint8_t>,size_t> get_page_buffer(size_t at)
+    {
+        std::lock_guard guard(mutex);
+        return get_page_buffer_inner(at);
+
     }
     std::pair<heap::buffer<uint8_t>,size_t> get_lru_page()
     {
@@ -1139,23 +1232,7 @@ public:
         }
 
         if (min_page == 0) return {r, 0};
-
-        auto& t = arena.at(min_page);
-        std::pair<size_t, storage&> dec = {min_page,t};
-        if (decompress(dec))
-        {   // we might signal this as decompressed
-            if(!t.compressed.empty())
-            {
-                statistics::page_bytes_compressed -= t.compressed.byte_size();
-                --statistics::pages_compressed;
-                t.compressed.release();
-            }
-        }
-        if (t.decompressed.empty())
-        {
-            abort();
-        }
-        return {t.decompressed,t.write_position};
+        return get_page_buffer_inner(min_page);
     }
 
     template <typename T>
@@ -1213,6 +1290,7 @@ public:
                 abort();
             }
             memset(at.second.decompressed.begin() + r.offset(), 0, sz);
+            allocated += size;
             return r;
         }
         auto at = create_if_required(size);
@@ -1247,6 +1325,7 @@ public:
         }
         if (test_memory == 1)
             data[sz] = ca.address() % 255;
+        allocated += size;
         return ca;
     }
 

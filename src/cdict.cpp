@@ -78,7 +78,7 @@ static int key_check(ValkeyModuleCtx *ctx, const char * k, size_t klen){
     return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
 }
 
-static int reply_encoded_key(ValkeyModuleCtx* ctx, value_type key){
+static int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key){
     double dk;
     int64_t ik;
     const char * k;
@@ -123,7 +123,7 @@ struct iter_state {
     iter_state(const iter_state& is) = delete; 
     iter_state& operator=(const iter_state& ) = delete;
 
-    int iterate(value_type key, value_type) {
+    int iterate(art::value_type key, art::value_type) {
         if(key.size == 0) { ///
             return -1;
         }
@@ -181,7 +181,7 @@ extern "C" {
         /* Reply with the matching items. */
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
         //std::function<int (void *, const unsigned char *, uint32_t , void *)>
-        auto iter = [](void *data, value_type key, value_type value) -> int {
+        auto iter = [](void *data, art::value_type key, art::value_type value) -> int {
             auto * is = (iter_state*)data;
                 
             return is->iterate(key, value);
@@ -216,7 +216,7 @@ extern "C" {
         
         auto converted = conversion::convert(k, klen);
         write_lock wl(get_lock());
-        auto fc = [ctx](node_ptr ) -> void
+        auto fc = [ctx](art::node_ptr ) -> void
         {
         };
 
@@ -240,7 +240,7 @@ extern "C" {
 
         if (key_ok(k, klen) != 0)
             return key_check(ctx, k, klen);
-        auto fc = [](node_ptr) -> void {};
+        auto fc = [](art::node_ptr) -> void {};
         auto converted = conversion::convert(k, klen);
         write_lock w(get_lock());
         art_insert_no_replace(get_art(), converted.get_value(), {v,(unsigned)vlen},fc);
@@ -264,10 +264,10 @@ extern "C" {
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
-        trace_list trace;
+        art::trace_list trace;
         trace.reserve(klen);
         read_lock rl(get_lock());
-        node_ptr r = art_search(trace, get_art(), converted.get_value());
+        art::node_ptr r = art_search(trace, get_art(), converted.get_value());
 
         if (r.null())
         {
@@ -292,7 +292,7 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        node_ptr r = art_minimum(get_art());
+        art::node_ptr r = art_minimum(get_art());
 
         if (r.null())
         {
@@ -327,7 +327,7 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        node_ptr l = art_maximum(get_art());
+        art::node_ptr l = art_maximum(get_art());
 
         if (l.null())
         {
@@ -357,7 +357,7 @@ extern "C" {
         auto converted = conversion::convert(k, klen);
         read_lock rl(get_lock());
 
-        node_ptr r = art_lower_bound(get_art(), converted.get_value());
+        art::node_ptr r = art_lower_bound(get_art(), converted.get_value());
 
 
         if (r.null())
@@ -390,7 +390,7 @@ extern "C" {
 
         auto converted = conversion::convert(k, klen);
         int r = 0;
-        auto fc = [&r,ctx](node_ptr n) -> void
+        auto fc = [&r,ctx](art::node_ptr n) -> void
         {
             if (n.null())
             {
@@ -579,7 +579,7 @@ extern "C" {
         compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
-        size_t result = get_leaf_compression().vacuum();
+        size_t result = art::get_leaf_compression().vacuum();
         return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)result);
     }
 

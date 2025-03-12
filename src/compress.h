@@ -986,19 +986,7 @@ private:
             t.modifications++;
         }
         t.ticker = ++ticker;
-#if 0
-        if (t.lru == lru_list::iterator())
-        {
-            lru.emplace_back(at);
-            t.lru = --lru.end();
-        }else
-        {   if(*t.lru != p)
-            {
-                abort();
-            }
-            lru.splice(lru.begin(), lru, t.lru);
-        }
-#endif
+
         return t.decompressed.begin() + at.offset();
     }
 
@@ -1148,7 +1136,13 @@ public:
             fragmentation += size;
         }
     }
-
+    float fragmentation_ratio() const
+    {
+        return (float)fragmentation/float(allocated);
+    }
+    // TODO: this function may cause to much latency when the arena is large
+    // maybe just dont iterate through everything - it doesnt need to get
+    // every page
     heap::vector<size_t> create_fragmentation_list() const
     {
         heap::vector<size_t> fragmentation;
@@ -1158,7 +1152,8 @@ public:
         {
             size_t p = &t - arena.begin();
             if(is_null_base(p)) continue;
-            replay.emplace_back(&t);
+            if (t.fragmentation > 0) // minimize the size of replay list
+                replay.emplace_back(&t);
         }
 
         auto compare = [&](const storage* a, const storage* b) -> bool
@@ -1175,6 +1170,7 @@ public:
     }
     lru_list create_lru_list()
     {   lru_list r;
+
         std::lock_guard guard(mutex);
         heap::vector<storage*> replay;
         for (size_t p = 1; p < arena.size(); p++)

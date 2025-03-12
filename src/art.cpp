@@ -9,13 +9,13 @@
 #include "statistics.h"
 #include "compress.h"
 
-compress & get_leaf_compression()
+compress & art::get_leaf_compression()
 {
     static compress leaf_compression{true};
     return leaf_compression;
 };
 
-compress & get_node_compression()
+compress & art::get_node_compression()
 {
     static compress node_compression{false};
     return node_compression;
@@ -23,13 +23,13 @@ compress & get_node_compression()
 
 compressed_release::compressed_release()
 {
-    get_leaf_compression().enter_context();
+    art::get_leaf_compression().enter_context();
 }
 compressed_release::~compressed_release()
 {
-    get_leaf_compression().release_context();
+    art::get_leaf_compression().release_context();
 }
-extern void free_leaf_node(node_ptr n);
+
 /**
  * Initializes an ART tree
  * @return 0 on success.
@@ -40,7 +40,7 @@ int art_tree_init(art_tree *t) {
     return 0;
 }
 // Recursively destroys the tree
-static void destroy_node(node_ptr n) {
+static void destroy_node(art::node_ptr n) {
     // Break if null
     if (n.null()) return;
 
@@ -51,14 +51,14 @@ static void destroy_node(node_ptr n) {
     // Handle each node type
     int i, idx;
     switch (n->type()) {
-        case node_4:
-        case node_16:
-        case node_256:
+        case art::node_4:
+        case art::node_16:
+        case art::node_256:
             for (i=0;i<n->data().num_children;i++) {
                 free_node(n->get_node(i));
             }
             break;
-        case node_48:
+        case art::node_48:
             for (i=0;i<256;i++) {
                 idx = n->get_key(i); 
                 if (!idx) continue; 
@@ -87,7 +87,7 @@ int art_tree_destroy(art_tree *t) {
 /**
  * find first not less than
  */
-static trace_element lower_bound_child(node_ptr n, const unsigned char * key, int key_len, int depth, int * is_equal) {
+static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char * key, int key_len, int depth, int * is_equal) {
 
     unsigned char c = 0x00;
     if (n.null()) return {};
@@ -99,7 +99,7 @@ static trace_element lower_bound_child(node_ptr n, const unsigned char * key, in
     return r.first;
 }
 
-static node_ptr find_child(node_ptr n, unsigned char c) {
+static art::node_ptr find_child(art::node_ptr n, unsigned char c) {
     if(n.null()) return nullptr;
     if(n.is_leaf) return nullptr;
 
@@ -111,24 +111,24 @@ static node_ptr find_child(node_ptr n, unsigned char c) {
 /**
  * return last element of trace unless its empty
  */
-static trace_element& last_el(trace_list& trace){
+static art::trace_element& last_el(art::trace_list& trace){
     if(trace.empty())
         abort();
     return *(trace.rbegin());
 }
-static trace_element first_child_off(node_ptr n);
-static trace_element last_child_off(node_ptr n);
-static node_ptr maximum(node_ptr n);
+static art::trace_element first_child_off(art::node_ptr n);
+static art::trace_element last_child_off(art::node_ptr n);
+static art::node_ptr maximum(art::node_ptr n);
 /**
  * assuming that the path to each leaf is not the same depth
  * we always have to check and extend if required
  * @return false if any non leaf node has no child 
  */
-static bool extend_trace_min(node_ptr root, trace_list& trace){
+static bool extend_trace_min(art::node_ptr root, art::trace_list& trace){
     if (trace.empty()) {
         trace.push_back(first_child_off(root));
     };
-    trace_element u = last_el(trace); 
+    art::trace_element u = last_el(trace);
     while (!u.child.is_leaf) {
         u = first_child_off(u.child);
         if(u.empty()) return false;
@@ -137,11 +137,11 @@ static bool extend_trace_min(node_ptr root, trace_list& trace){
     return true;
 }
 
-static bool extend_trace_max(node_ptr root, trace_list& trace){
+static bool extend_trace_max(art::node_ptr root, art::trace_list& trace){
     if (trace.empty()) {
         trace.push_back(last_child_off(root));
     };
-    trace_element u = last_el(trace); 
+    art::trace_element u = last_el(trace);
     while (!u.child.is_leaf) {
         u = last_child_off(u.child);
         if (u.empty()) return false;
@@ -160,9 +160,9 @@ static bool extend_trace_max(node_ptr root, trace_list& trace){
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-node_ptr art_search(trace_list& , const art_tree *t, value_type key) {
+art::node_ptr art_search(art::trace_list& , const art_tree *t, art::value_type key) {
     ++statistics::get_ops;
-    node_ptr n = t->root;
+    art::node_ptr n = t->root;
     unsigned depth = 0;
     while (!n.null()) {
         // Might be a leaf
@@ -177,7 +177,7 @@ node_ptr art_search(trace_list& , const art_tree *t, value_type key) {
         // Bail if the prefix does not match
         if (n->data().partial_len) {
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (prefix_len != std::min<unsigned>(max_prefix_llength, n->data().partial_len))
+            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, n->data().partial_len))
                 return nullptr;
             depth = depth + n->data().partial_len;
             if (depth >= key.length()){
@@ -195,7 +195,7 @@ node_ptr art_search(trace_list& , const art_tree *t, value_type key) {
 }
 
 // Find the maximum leaf under a node
-static node_ptr maximum(node_ptr n) {
+static art::node_ptr maximum(art::node_ptr n) {
     // Handle base cases
     if (n.null()) return nullptr;
     if (n.is_leaf) return n;
@@ -204,7 +204,7 @@ static node_ptr maximum(node_ptr n) {
 
 
 // Find the minimum leaf under a node
-static node_ptr minimum(const node_ptr& n) {
+static art::node_ptr minimum(const art::node_ptr& n) {
     // Handle base cases
     if (n.null()) return nullptr;
     if (n.is_leaf) return n;
@@ -219,8 +219,8 @@ static node_ptr minimum(const node_ptr& n) {
  * @return nullptr if the item was not found, otherwise
  * the leaf containing the value pointer is returned.
  */
-static node_ptr lower_bound(trace_list& trace, const art_tree *t, value_type key) {
-    node_ptr n = t->root;
+static art::node_ptr lower_bound(art::trace_list& trace, const art_tree *t, art::value_type key) {
+    art::node_ptr n = t->root;
     int depth = 0, is_equal = 0;
 
     while (!n.null()) {
@@ -235,13 +235,12 @@ static node_ptr lower_bound(trace_list& trace, const art_tree *t, value_type key
         // Bail if the prefix does not match
         if (n->data().partial_len) {
             int prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (prefix_len != std::min<int>(max_prefix_llength, n->data().partial_len))
+            if (prefix_len != std::min<int>(art::max_prefix_llength, n->data().partial_len))
                 break;
             depth += n->data().partial_len;
         }
 
-
-        trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
+        art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
         if(!te.empty()){
             trace.push_back(te);
         }
@@ -251,13 +250,13 @@ static node_ptr lower_bound(trace_list& trace, const art_tree *t, value_type key
     if (!extend_trace_max(t->root, trace)) return nullptr;
     return last_el(trace).child;
 }
-static trace_element first_child_off(node_ptr n){
+static art::trace_element first_child_off(art::node_ptr n){
     if(n.null()) return {nullptr, nullptr, 0};
     if(n.is_leaf) return {nullptr, nullptr, 0};
 
     return {n,n->get_child(n->first_index()),0};
 }
-static trace_element last_child_off(node_ptr n){
+static art::trace_element last_child_off(art::node_ptr n){
     if(n.null()) return {nullptr, nullptr, 0};
     if(n.is_leaf) return {nullptr, nullptr, 0};
     unsigned idx = n->last_index();
@@ -265,18 +264,18 @@ static trace_element last_child_off(node_ptr n){
     return {n,n->get_child(idx),idx};
 }
 
-static trace_element increment_te(const trace_element &te){
+static art::trace_element increment_te(const art::trace_element &te){
     if (te.parent.null()) return {nullptr, nullptr, 0};
     if (te.parent.is_leaf) return {nullptr, nullptr, 0};
 
-    const art_node * n = te.parent.get_node();
+    const art::node * n = te.parent.get_node();
     return n->next(te);
 }
 
 
-static bool increment_trace(const node_ptr& root, trace_list& trace){
+static bool increment_trace(const art::node_ptr& root, art::trace_list& trace){
     for(auto r = trace.rbegin(); r != trace.rend(); ++r){
-        trace_element te = increment_te(*r);
+        art::trace_element te = increment_te(*r);
         if(te.empty())
             continue; // goto the parent further back and try to increment that 
         *r = te;
@@ -298,10 +297,10 @@ static bool increment_trace(const node_ptr& root, trace_list& trace){
     return false;
 }
 
-node_ptr art_lower_bound(const art_tree *t, value_type key) {
+art::node_ptr art_lower_bound(const art_tree *t, art::value_type key) {
     ++statistics::lb_ops;
-    node_ptr al;
-    trace_list tl;
+    art::node_ptr al;
+    art::trace_list tl;
     al = lower_bound(tl, t, key);
     if (!al.null()) {
         return al;
@@ -309,17 +308,17 @@ node_ptr art_lower_bound(const art_tree *t, value_type key) {
     return nullptr;
 }
 
-int art_range(const art_tree *t, value_type key, value_type key_end, art_callback cb, void *data) {
+int art_range(const art_tree *t, art::value_type key, art::value_type key_end, art_callback cb, void *data) {
     ++statistics::range_ops;
-    trace_list tl;
+    art::trace_list tl;
     auto lb = lower_bound(tl, t, key);
     if(lb.null()) return 0;
-    const art_leaf* al = lb.const_leaf();
+    const art::leaf* al = lb.const_leaf();
     if (al) {
         do {
-            node_ptr n = last_el(tl).child;
+            art::node_ptr n = last_el(tl).child;
             if(n.is_leaf){
-                const art_leaf * leaf = n.const_leaf();
+                const art::leaf * leaf = n.const_leaf();
                 if(leaf->compare(key_end.bytes, key_end.size, 0) < 0) { // upper bound is not
                     ++statistics::iter_range_ops;
                     int r = cb(data, leaf->get_key(), leaf->get_value());
@@ -340,7 +339,7 @@ int art_range(const art_tree *t, value_type key, value_type key_end, art_callbac
 /**
  * Returns the minimum valued leaf
  */
-node_ptr art_minimum(art_tree *t) {
+art::node_ptr art_minimum(art_tree *t) {
     ++statistics::min_ops;
     auto l = minimum(t->root);
     if(l.null()) return nullptr;
@@ -350,27 +349,14 @@ node_ptr art_minimum(art_tree *t) {
 /**
  * Returns the maximum valued leaf
  */
-node_ptr art_maximum(art_tree *t) {
+art::node_ptr art_maximum(art_tree *t) {
     ++statistics::max_ops;
     auto l = maximum(t->root);
     if (l.null()) return nullptr;
     return l;
 }
 
-static node_ptr make_leaf(value_type key, value_type v) {
-    unsigned val_len = v.size;
-    unsigned key_len = key.length();
-    // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
-    auto logical = get_leaf_compression().new_address(sizeof(art_leaf) + key_len + 1 + val_len);
-    auto *l = new(get_leaf_compression().read<art_leaf>(logical)) art_leaf(key_len, val_len);
-    ++statistics::leaf_nodes;
-    statistics::addressable_bytes_alloc += (int64_t)(sizeof(art_leaf)+ key_len + 1 + val_len);
-    l->set_key(key);
-    l->set_value(v);
-    return logical;
-}
-
-static unsigned longest_common_prefix(const art_leaf *l1, const art_leaf *l2, int depth) {
+static unsigned longest_common_prefix(const art::leaf *l1, const art::leaf *l2, int depth) {
     unsigned max_cmp = std::min<unsigned>(l1->key_len, l2->key_len) - depth;
     unsigned idx;
     for (idx=0; idx < max_cmp; idx++) {
@@ -385,8 +371,8 @@ static unsigned longest_common_prefix(const art_leaf *l1, const art_leaf *l2, in
  * Calculates the index at which the prefixes mismatch
  */
 ;
-static int prefix_mismatch(const node_ptr n, value_type key, int depth) {
-    int max_cmp = std::min<int>(std::min<int>(max_prefix_llength, n->data().partial_len), key.length() - depth);
+static int prefix_mismatch(const art::node_ptr n, art::value_type key, int depth) {
+    int max_cmp = std::min<int>(std::min<int>(art::max_prefix_llength, n->data().partial_len), key.length() - depth);
     int idx;
     for (idx=0; idx < max_cmp; idx++) {
         if (n->data().partial[idx] != key[depth+idx])
@@ -394,9 +380,9 @@ static int prefix_mismatch(const node_ptr n, value_type key, int depth) {
     }
 
     // If the prefix is short we can avoid finding a leaf
-    if (n->data().partial_len > max_prefix_llength) {
+    if (n->data().partial_len > art::max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
-        const art_leaf *l = minimum(n).const_leaf();
+        const art::leaf *l = minimum(n).const_leaf();
         max_cmp = std::min<unsigned>(l->key_len, key.length()) - depth;
         for (; idx < max_cmp; idx++) {
             if (l->key()[idx+depth] != key[depth+idx])
@@ -405,22 +391,22 @@ static int prefix_mismatch(const node_ptr n, value_type key, int depth) {
     }
     return idx;
 }
-static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_type key,  value_type value, int depth, int *old, int replace) {
+static art::node_ptr recursive_insert(art_tree* t, art::node_ptr n, art::node_ptr &ref, art::value_type key,  art::value_type value, int depth, int *old, int replace) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
-        ref = make_leaf(key, value);
+        ref = art::make_leaf(key, value);
         return nullptr;
     }
     // If we are at a leaf, we need to replace it with a node
     if (n.is_leaf) {
-        const art_leaf *l = n.const_leaf();
+        const art::leaf *l = n.const_leaf();
         // Check if we are updating an existing value
         if (l->compare(key, depth) == 0) {
 
             *old = 1;
             if (replace)
             {
-                art_leaf *dl = n.leaf();
+                art::leaf *dl = n.l();
                 if (dl->val_len == value.size)
                 {
                     dl->set_value(value);
@@ -434,17 +420,17 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
             }
             return nullptr;
         }
-        node_ptr l1 = n;
+        art::node_ptr l1 = n;
         // Create a new leaf
-        node_ptr l2 = make_leaf(key, value);
+        art::node_ptr l2 = make_leaf(key, value);
 
         // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
-        auto new_stored = alloc_node_ptr(initial_node, {l1, l2});
+        auto new_stored = art::alloc_node_ptr(art::initial_node, {l1, l2});
         auto *new_node = new_stored.get_node();
         // Determine longest prefix
         unsigned longest_prefix = longest_common_prefix(l, l2.const_leaf(), depth);
         new_node->data().partial_len = longest_prefix;
-        memcpy(new_node->data().partial, key.bytes+depth, std::min<unsigned>(max_prefix_llength, longest_prefix));
+        memcpy(new_node->data().partial, key.bytes+depth, std::min<unsigned>(art::max_prefix_llength, longest_prefix));
         // Add the leafs to the new node_4
         ref = new_node;
         ref->add_child(l->key()[depth+longest_prefix], ref, l1);
@@ -463,23 +449,23 @@ static node_ptr recursive_insert(art_tree* t, node_ptr n, node_ptr &ref, value_t
 
         // TODO: do fast child adding (by adding multiple children at once)
         // Create a new node and a new leaf
-        node_ptr new_leaf = make_leaf(key, value);
-        auto new_node = alloc_node_ptr(initial_node, {n, new_leaf}); // pass children to get opt. ptr size
+        art::node_ptr new_leaf = make_leaf(key, value);
+        auto new_node = art::alloc_node_ptr(art::initial_node, {n, new_leaf}); // pass children to get opt. ptr size
         ref = new_node;
         new_node->data().partial_len = prefix_diff;
-        memcpy(new_node->data().partial, n->data().partial, std::min<int>(max_prefix_llength, prefix_diff));
+        memcpy(new_node->data().partial, n->data().partial, std::min<int>(art::max_prefix_llength, prefix_diff));
         // Adjust the prefix of the old node
-        if (n->data().partial_len <= max_prefix_llength) {
+        if (n->data().partial_len <= art::max_prefix_llength) {
             ref->add_child(n->data().partial[prefix_diff], ref, n);
             n->data().partial_len -= (prefix_diff+1);
             memmove(n->data().partial, n->data().partial+prefix_diff+1,
-                    std::min<int>(max_prefix_llength, n->data().partial_len));
+                    std::min<int>(art::max_prefix_llength, n->data().partial_len));
         } else {
             n->data().partial_len -= (prefix_diff+1);
             const auto *l = minimum(n).const_leaf();
             ref->add_child(l->get_key()[depth+prefix_diff], ref, n);
             memcpy(n->data().partial, l->key()+depth+prefix_diff+1,
-                    std::min<int>(max_prefix_llength, n->data().partial_len));
+                    std::min<int>(art::max_prefix_llength, n->data().partial_len));
         }
 
         // Insert the new leaf (safely considering optimal pointer sizes)
@@ -493,14 +479,14 @@ RECURSE_SEARCH:;
 
     // Find a child to recurse to
     unsigned pos = n->index(key[depth]);
-    node_ptr child = n->get_node(pos);
+    art::node_ptr child = n->get_node(pos);
     if(!n.is_leaf)
     {
         //trace_element te = {n,child,pos, key[depth]};
         //trace.push_back(te);
     }
     if (!child.null()) {
-        node_ptr nc = child;
+        art::node_ptr nc = child;
 
         auto r = recursive_insert(t, child, nc, key, value, depth+1, old, replace);
         if (nc != child) {
@@ -511,7 +497,7 @@ RECURSE_SEARCH:;
     }
 
     // No child, node goes within us
-    node_ptr l = make_leaf(key, value);
+    art::node_ptr l = make_leaf(key, value);
     n->add_child(key[depth], ref, l);
     return nullptr;
 }
@@ -525,10 +511,10 @@ RECURSE_SEARCH:;
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art_tree *t, value_type key, value_type value, std::function<void(node_ptr l)> fc) {
+void art_insert(art_tree *t, art::value_type key, art::value_type value, std::function<void(art::node_ptr l)> fc) {
     
     int old_val = 0;
-    node_ptr old = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 1);
+    art::node_ptr old = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 1);
     if (!old_val){
         t->size++;
         ++statistics::insert_ops;
@@ -556,10 +542,10 @@ void art_insert(art_tree *t, value_type key, value_type value, std::function<voi
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art_tree *t, value_type key, value_type value, const NodeResult& fc) {
+void art_insert_no_replace(art_tree *t, art::value_type key, art::value_type value, const NodeResult& fc) {
     ++statistics::insert_ops;
     int old_val = 0;
-    node_ptr r = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 0);
+    art::node_ptr r = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 0);
     if (r.null()){
          t->size++;     
     }
@@ -567,17 +553,17 @@ void art_insert_no_replace(art_tree *t, value_type key, value_type value, const 
 }
 
 
-static void remove_child(node_ptr n, node_ptr& ref, unsigned char c, unsigned pos) {
+static void remove_child(art::node_ptr n, art::node_ptr& ref, unsigned char c, unsigned pos) {
     n->remove(ref, pos, c);
 }
 
-static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, value_type key, int depth) {
+static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr &ref, art::value_type key, int depth) {
     // Search terminated
     if (n.null()) return nullptr;
 
     // Handle hitting a leaf node
     if (n.is_leaf) {
-        const art_leaf *l = n.const_leaf();
+        const art::leaf *l = n.const_leaf();
         if (l->compare(key.bytes, key.length(), depth) == 0) {
             ref = nullptr;
             return n;
@@ -588,7 +574,7 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, value_type key
     // Bail if the prefix does not match
     if (n->data().partial_len) {
         unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-        if (prefix_len != std::min<unsigned>(max_prefix_llength, n->data().partial_len)) {
+        if (prefix_len != std::min<unsigned>(art::max_prefix_llength, n->data().partial_len)) {
             return nullptr;
         }
         depth = depth + n->data().partial_len;
@@ -596,13 +582,13 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, value_type key
 
     // Find child node
     unsigned idx = n->index(key[depth]);
-    node_ptr child = n->get_node(idx);
+    art::node_ptr child = n->get_node(idx);
     if (child.null())
         return nullptr;
 
     // If the child is leaf, delete from this node
     if (child.is_leaf) {
-        const art_leaf *l = child.const_leaf();
+        const art::leaf *l = child.const_leaf();
         if (l->compare(key.bytes, key.length(), depth) == 0) {
             remove_child(n, ref, key[depth], idx);
             return child;
@@ -612,7 +598,7 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, value_type key
 
     } else {
         // Recurse
-        node_ptr new_child = child;
+        art::node_ptr new_child = child;
         auto r = recursive_delete(child, new_child, key, depth+1);
         if (new_child != child) {
             if(!n->ok_child(new_child))
@@ -634,9 +620,9 @@ static const node_ptr recursive_delete(node_ptr n, node_ptr &ref, value_type key
  * @return nullptr if the item was not found, otherwise
  * the value pointer is returned.
  */
-void art_delete(art_tree *t, value_type key, const NodeResult& fc) {
+void art_delete(art_tree *t, art::value_type key, const NodeResult& fc) {
     ++statistics::delete_ops;
-    node_ptr l = recursive_delete(t->root, t->root, key, 0);
+    art::node_ptr l = recursive_delete(t->root, t->root, key, 0);
     if (!l.null()) {
         t->size--;
         fc(l);
@@ -645,32 +631,32 @@ void art_delete(art_tree *t, value_type key, const NodeResult& fc) {
 }
 
 // Recursively iterates over the tree
-static int recursive_iter(node_ptr n, art_callback cb, void *data) {
+static int recursive_iter(art::node_ptr n, art_callback cb, void *data) {
     // Handle base cases
     if (n.null()) return 0;
     if (n.is_leaf) {
-        const art_leaf *l = n.const_leaf();
+        const art::leaf *l = n.const_leaf();
         ++statistics::iter_ops;
         return cb(data, l->get_key(), l->get_value());
     }
 
     int idx, res;
     switch (n->type()) {
-        case node_4:
+        case art::node_4:
             for (int i=0; i < n->data().num_children; i++) {
                 res = recursive_iter(n->get_child(i), cb, data);
                 if (res) return res;
             }
             break;
 
-        case node_16:
+        case art::node_16:
             for (int i=0; i < n->data().num_children; i++) {
                 res = recursive_iter(n->get_child(i), cb, data);
                 if (res) return res;
             }
             break;
 
-        case node_48:
+        case art::node_48:
             for (int i=0; i < 256; i++) {
                 idx = n->get_key(i);
                 if (!idx) continue;
@@ -680,7 +666,7 @@ static int recursive_iter(node_ptr n, art_callback cb, void *data) {
             }
             break;
 
-        case node_256:
+        case art::node_256:
             for (int i=0; i < 256; i++) {
                 if (!n->has_child(i)) continue;
                 res = recursive_iter(n->get_child(i), cb, data);
@@ -716,7 +702,7 @@ int art_iter(art_tree *t, art_callback cb, void *data) {
  * Checks if a leaf prefix matches
  * @return 0 on success.
  */
-static int leaf_prefix_compare(const art_leaf *n, value_type prefix) {
+static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
     // Fail if the key length is too short
     if (n->key_len < (uint32_t)prefix.length()) return 1;
 
@@ -736,14 +722,14 @@ static int leaf_prefix_compare(const art_leaf *n, value_type prefix) {
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art_tree *t, value_type key, art_callback cb, void *data) {
+int art_iter_prefix(art_tree *t, art::value_type key, art_callback cb, void *data) {
     ++statistics::iter_start_ops;
     
     if (!t) {
         return -1;
     }
     
-    node_ptr n = t->root;
+    art::node_ptr n = t->root;
     unsigned prefix_len, depth = 0;
     while (!n.null()) {
         // Might be a leaf
@@ -758,7 +744,7 @@ int art_iter_prefix(art_tree *t, value_type key, art_callback cb, void *data) {
 
         // If the depth matches the prefix, we need to handle this node
         if (depth == key.length()) {
-            const art_leaf *l = minimum(n).const_leaf();
+            const art::leaf *l = minimum(n).const_leaf();
             if (0 == leaf_prefix_compare(l, key))
                return recursive_iter(n, cb, data);
             return 0;
@@ -805,17 +791,17 @@ uint64_t art_size(art_tree *t) {
 }
 uint64_t art_evict_lru(art_tree *t)
 {
-    auto page = get_leaf_compression().get_lru_page();
+    auto page = art::get_leaf_compression().get_lru_page();
     if (!page.second) return 0;
     auto i = page.first.begin();
     auto e = i + page.second;
-    auto fc = [](node_ptr) -> void
+    auto fc = [](art::node_ptr) -> void
     {
         ++statistics::keys_evicted;
     };
     while (i != e)
     {
-        const art_leaf *l = (art_leaf*)i;
+        const art::leaf *l = (art::leaf*)i;
         if (l->key_len > page.first.byte_size())
         {
             abort();

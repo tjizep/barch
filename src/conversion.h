@@ -130,7 +130,7 @@ namespace conversion
         {
             return size;
         }
-        [[nodiscard]] value_type get_value() const
+        [[nodiscard]] art::value_type get_value() const
         {
             return {get_data(), get_size() + 1}; // include the null terminator for this case
         }

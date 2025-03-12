@@ -34,7 +34,7 @@ compressed_release::~compressed_release()
  * Initializes an ART tree
  * @return 0 on success.
  */
-int art_tree_init(art_tree *t) {
+int art_tree_init(art::tree *t) {
     t->root = nullptr;
     t->size = 0;
     return 0;
@@ -79,7 +79,7 @@ static void destroy_node(art::node_ptr n) {
  * Destroys an ART tree
  * @return 0 on success.
  */
-int art_tree_destroy(art_tree *t) {
+int art_tree_destroy(art::tree *t) {
     destroy_node(t->root);
     return 0;
 }
@@ -160,7 +160,7 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list& trace){
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-art::node_ptr art_search(art::trace_list& , const art_tree *t, art::value_type key) {
+art::node_ptr art_search(art::trace_list& , const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     art::node_ptr n = t->root;
     unsigned depth = 0;
@@ -219,7 +219,7 @@ static art::node_ptr minimum(const art::node_ptr& n) {
  * @return nullptr if the item was not found, otherwise
  * the leaf containing the value pointer is returned.
  */
-static art::node_ptr lower_bound(art::trace_list& trace, const art_tree *t, art::value_type key) {
+static art::node_ptr lower_bound(art::trace_list& trace, const art::tree *t, art::value_type key) {
     art::node_ptr n = t->root;
     int depth = 0, is_equal = 0;
 
@@ -297,7 +297,7 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace){
     return false;
 }
 
-art::node_ptr art_lower_bound(const art_tree *t, art::value_type key) {
+art::node_ptr art_lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
     art::node_ptr al;
     art::trace_list tl;
@@ -308,7 +308,7 @@ art::node_ptr art_lower_bound(const art_tree *t, art::value_type key) {
     return nullptr;
 }
 
-int art_range(const art_tree *t, art::value_type key, art::value_type key_end, art_callback cb, void *data) {
+int art_range(const art::tree *t, art::value_type key, art::value_type key_end, art_callback cb, void *data) {
     ++statistics::range_ops;
     art::trace_list tl;
     auto lb = lower_bound(tl, t, key);
@@ -339,7 +339,7 @@ int art_range(const art_tree *t, art::value_type key, art::value_type key_end, a
 /**
  * Returns the minimum valued leaf
  */
-art::node_ptr art_minimum(art_tree *t) {
+art::node_ptr art_minimum(art::tree *t) {
     ++statistics::min_ops;
     auto l = minimum(t->root);
     if(l.null()) return nullptr;
@@ -349,7 +349,7 @@ art::node_ptr art_minimum(art_tree *t) {
 /**
  * Returns the maximum valued leaf
  */
-art::node_ptr art_maximum(art_tree *t) {
+art::node_ptr art_maximum(art::tree *t) {
     ++statistics::max_ops;
     auto l = maximum(t->root);
     if (l.null()) return nullptr;
@@ -391,7 +391,7 @@ static int prefix_mismatch(const art::node_ptr n, art::value_type key, int depth
     }
     return idx;
 }
-static art::node_ptr recursive_insert(art_tree* t, art::node_ptr n, art::node_ptr &ref, art::value_type key,  art::value_type value, int depth, int *old, int replace) {
+static art::node_ptr recursive_insert(art::tree* t, art::node_ptr n, art::node_ptr &ref, art::value_type key,  art::value_type value, int depth, int *old, int replace) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
         ref = art::make_leaf(key, value);
@@ -511,7 +511,7 @@ RECURSE_SEARCH:;
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art_tree *t, art::value_type key, art::value_type value, std::function<void(art::node_ptr l)> fc) {
+void art_insert(art::tree *t, art::value_type key, art::value_type value, std::function<void(art::node_ptr l)> fc) {
     
     int old_val = 0;
     art::node_ptr old = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 1);
@@ -542,7 +542,7 @@ void art_insert(art_tree *t, art::value_type key, art::value_type value, std::fu
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art_tree *t, art::value_type key, art::value_type value, const NodeResult& fc) {
+void art_insert_no_replace(art::tree *t, art::value_type key, art::value_type value, const NodeResult& fc) {
     ++statistics::insert_ops;
     int old_val = 0;
     art::node_ptr r = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 0);
@@ -620,7 +620,7 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr &ref,
  * @return nullptr if the item was not found, otherwise
  * the value pointer is returned.
  */
-void art_delete(art_tree *t, art::value_type key, const NodeResult& fc) {
+void art_delete(art::tree *t, art::value_type key, const NodeResult& fc) {
     ++statistics::delete_ops;
     art::node_ptr l = recursive_delete(t->root, t->root, key, 0);
     if (!l.null()) {
@@ -690,7 +690,7 @@ static int recursive_iter(art::node_ptr n, art_callback cb, void *data) {
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter(art_tree *t, art_callback cb, void *data) {
+int art_iter(art::tree *t, art_callback cb, void *data) {
     ++statistics::iter_start_ops;
     if (!t) {
         return -1;
@@ -722,7 +722,7 @@ static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art_tree *t, art::value_type key, art_callback cb, void *data) {
+int art_iter_prefix(art::tree *t, art::value_type key, art_callback cb, void *data) {
     ++statistics::iter_start_ops;
     
     if (!t) {
@@ -781,7 +781,7 @@ int art_iter_prefix(art_tree *t, art::value_type key, art_callback cb, void *dat
 /**
  * just return the size
  */
-uint64_t art_size(art_tree *t) {
+uint64_t art_size(art::tree *t) {
     ++statistics::size_ops;
 
     if(t == nullptr)
@@ -789,7 +789,7 @@ uint64_t art_size(art_tree *t) {
     
     return t->size;
 }
-uint64_t art_evict_lru(art_tree *t)
+uint64_t art_evict_lru(art::tree *t)
 {
     auto page = art::get_leaf_compression().get_lru_page();
     if (!page.second) return 0;

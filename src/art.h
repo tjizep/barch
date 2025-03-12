@@ -9,15 +9,16 @@
  */
 struct compressed_release
 {
- compressed_release();
- ~compressed_release();
+    compressed_release();
+    ~compressed_release();
 };
 
 /**
  * global statistics
  */
 
-struct art_statistics {
+struct art_statistics
+{
     int64_t leaf_nodes;
     int64_t node4_nodes;
     int64_t node16_nodes;
@@ -39,7 +40,8 @@ struct art_statistics {
     int64_t keys_evicted;
 };
 
-struct art_ops_statistics {
+struct art_ops_statistics
+{
     int64_t delete_ops;
     int64_t set_ops;
     int64_t iter_ops;
@@ -51,39 +53,50 @@ struct art_ops_statistics {
     int64_t insert_ops;
     int64_t min_ops;
     int64_t max_ops;
-    
 };
 
-typedef int(*art_callback)(void *data, art::value_type key, art::value_type value);
+typedef int (*art_callback)(void* data, art::value_type key, art::value_type value);
 typedef std::function<void(art::node_ptr l)> NodeResult;
-
 
 
 /**
  * Main struct, points to root.
  */
-struct art_tree{
-    art::node_ptr root = nullptr;
-    uint64_t size = 0;
-    art_tree(art::node_ptr root, uint64_t size) : root(root), size(size) {}
-};
+namespace art
+{
+ struct tree
+ {
+  bool mexit = false;
+  std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
+  art::node_ptr root = nullptr;
+  uint64_t size = 0;
+  void start_maintain();
+  tree(art::node_ptr root, uint64_t size) : root(root), size(size)
+  {
+   start_maintain();
+  }
+
+  ~tree();
+ };
+
+}
 
 /**
  * Initializes an ART tree
  * @return 0 on success.
  */
-int art_tree_init(art_tree *t);
+int art_tree_init(art::tree* t);
 
 /**
  * Destroys an ART tree
  * @return 0 on success.
  */
-int art_tree_destroy(art_tree *t);
+int art_tree_destroy(art::tree* t);
 
 /**
  * Returns the size of the ART tree.
  */
-uint64_t art_size(art_tree *t);
+uint64_t art_size(art::tree* t);
 
 /**
  * inserts a new value into the art tree
@@ -94,7 +107,7 @@ uint64_t art_size(art_tree *t);
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art_tree *t, art::value_type key, art::value_type value, NodeResult fc);
+void art_insert(art::tree* t, art::value_type key, art::value_type value, NodeResult fc);
 
 /**
  * inserts a new value into the art tree (not replacing)
@@ -105,7 +118,7 @@ void art_insert(art_tree *t, art::value_type key, art::value_type value, NodeRes
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art_tree *t, art::value_type key, art::value_type value, const NodeResult& fc);
+void art_insert_no_replace(art::tree* t, art::value_type key, art::value_type value, const NodeResult& fc);
 
 /**
  * Deletes a value from the ART tree
@@ -115,7 +128,7 @@ void art_insert_no_replace(art_tree *t, art::value_type key, art::value_type val
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-void art_delete(art_tree *t, art::value_type key, const NodeResult& fc);
+void art_delete(art::tree* t, art::value_type key, const NodeResult& fc);
 
 /**
  * Searches for a value in the ART tree
@@ -125,19 +138,19 @@ void art_delete(art_tree *t, art::value_type key, const NodeResult& fc);
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-art::node_ptr art_search(art::trace_list& trace, const art_tree *t, art::value_type key);
+art::node_ptr art_search(art::trace_list& trace, const art::tree* t, art::value_type key);
 
 /**
  * Returns the minimum valued leaf
  * @return The minimum leaf or NULL
  */
-art::node_ptr art_minimum(art_tree *t);
+art::node_ptr art_minimum(art::tree* t);
 
 /**
  * Returns the maximum valued leaf
  * @return The maximum leaf or NULL
  */
-art::node_ptr art_maximum(art_tree *t);
+art::node_ptr art_maximum(art::tree* t);
 
 /**
  * Returns the lower bound value of a given key
@@ -147,7 +160,7 @@ art::node_ptr art_maximum(art_tree *t);
  * @arg key_len The length of the key
  * @return the lower bound or NULL if there is no value not less than key
  */
-art::node_ptr art_lower_bound(const art_tree *t, art::value_type key);
+art::node_ptr art_lower_bound(const art::tree* t, art::value_type key);
 
 /**
  * Iterates through the entries pairs in the map,
@@ -159,7 +172,7 @@ art::node_ptr art_lower_bound(const art_tree *t, art::value_type key);
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter(art_tree *t, art_callback cb, void *data);
+int art_iter(art::tree* t, art_callback cb, void* data);
 
 /**
  * Iterates through the entries pairs in the map,
@@ -173,17 +186,17 @@ int art_iter(art_tree *t, art_callback cb, void *data);
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art_tree *t, art::value_type prefix, art_callback cb, void *data);
+int art_iter_prefix(art::tree* t, art::value_type prefix, art_callback cb, void* data);
 /**
  * iterates through a range from small to large from key to key_end
  * the first key is located in log(n) time
  * @return 0 on success, or the return of the callback.
  */
-int art_range(const art_tree *t, art::value_type key, art::value_type key_end, art_callback cb, void *data);
+int art_range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data);
 
 /**
- * gets per module per node type statistics for all art_node* types  
- * @return art_statistics 
+ * gets per module per node type statistics for all art_node* types
+ * @return art_statistics
  */
 art_statistics art_get_statistics();
 
@@ -195,4 +208,4 @@ art_ops_statistics art_get_ops_statistics();
 /**
 * evict a lru page
 */
-uint64_t art_evict_lru(art_tree *t);
+uint64_t art_evict_lru(art::tree* t);

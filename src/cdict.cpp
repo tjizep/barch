@@ -35,13 +35,13 @@ std::shared_mutex& get_lock()
 }
 
 
-static art_tree ad = {nullptr, 0};
+static art::tree ad = {nullptr, 0};
 static auto startTime = std::chrono::high_resolution_clock::now();
 /// @brief  getting an initialized art tree
 /// @param ctx not used but could be 
 /// @return a once initialized art_tree
 
-static art_tree *get_art()
+static art::tree *get_art()
 {
 
     if (ad.root == nullptr)

@@ -23,7 +23,7 @@ art::node_ptr art::make_leaf(value_type key, value_type v) {
 }
 
 
-void free_leaf_node(art::leaf* l, compressed_address logical){
+void art::free_leaf_node(art::leaf* l, compressed_address logical){
     if(l == nullptr) return;
     unsigned kl = l->key_len;
     l->key_len = 0;
@@ -150,5 +150,22 @@ unsigned art::node::check_prefix(const unsigned char *key, unsigned key_len, uns
     return idx;
 }
 
+art::tree::~tree()
+{
+    mexit = true;
+    if(tmaintain.joinable())
+        tmaintain.join();
+}
+
+void art::tree::start_maintain()
+{
+    tmaintain = std::thread([&]() -> void
+    {
+        while (!this->mexit)
+        {
+
+        }
+    });
+}
 
 

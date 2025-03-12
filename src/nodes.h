@@ -68,10 +68,8 @@ namespace art
 
     };
     struct leaf;
-}
 
-void free_leaf_node(art::leaf* l, compressed_address logical);
-namespace art {
+    void free_leaf_node(art::leaf* l, compressed_address logical);
     typedef compressed_address logical_leaf;
     extern compress & get_leaf_compression();
     extern compress & get_node_compression();

@@ -806,6 +806,10 @@ uint64_t art_evict_lru(art::tree *t)
         {
             abort();
         }
+        if (l->deleted())
+        {   i += (l->byte_size() + test_memory);
+            continue;
+        }
         art_delete(t, l->get_key(),fc);
         i += (l->byte_size() + test_memory);
     }

@@ -114,7 +114,7 @@ art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
         abort();
     }
 }
-art::node_ptr alloc_8_node_ptr(unsigned nt)
+art::node_ptr art::alloc_8_node_ptr(unsigned nt)
 {
 
     art::node_ptr_storage ptr;
@@ -156,6 +156,65 @@ art::tree::~tree()
     if(tmaintain.joinable())
         tmaintain.join();
 }
+/**
+ * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys and adds them back again
+ * this function isnt supposed to run a lot
+ */
+void run_defrag(art::tree* t)
+{
+    auto &lc = art::get_leaf_compression();
+    if(lc.fragmentation_ratio() > 0.5)
+    {
+        auto fl = lc.create_fragmentation_list();
+        for(auto p : fl)
+        {
+            {
+                write_lock lock(get_lock());
+                size_t deleted = 0;
+                auto page = lc.get_page_buffer(p);
+                auto e = page.first.begin() + page.second;
+                auto fc = [](art::node_ptr) -> void
+                {
+                };
+                for (auto i = page.first.begin();i != e;)
+                {
+                    const art::leaf *l = (art::leaf*)i;
+                    if (l->key_len > page.first.byte_size())
+                    {
+                        abort();
+                    }
+                    if (l->deleted())
+                    {   ++deleted;
+                        i += (l->byte_size() + test_memory); // skip the bytes of the deleted keys
+                        continue;
+                    }
+                    art_delete(t, l->get_key(),fc);
+                    i += (l->byte_size() + test_memory);
+                }
+
+                for (auto i = page.first.begin();i != e;)
+                {
+                    const art::leaf *l = (art::leaf*)i;
+                    if (l->key_len > page.first.byte_size())
+                    {
+                        abort();
+                    }
+                    if (l->deleted())
+                    {
+                        i += (l->byte_size() + test_memory);
+                        continue;
+                    }
+                    art_insert(t, l->get_key(),l->get_value(),fc);
+                    i += (l->byte_size() + test_memory);
+                }
+            }
+
+            if (lc.fragmentation_ratio() < 1.0) return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // chill a little we've worked hard
+    }
+
+}
 
 void art::tree::start_maintain()
 {
@@ -163,7 +222,10 @@ void art::tree::start_maintain()
     {
         while (!this->mexit)
         {
-
+            // TODO: erase evicted keys if memory is pressured - if its configured
+            run_defrag(this); // periodic
+            // we should wait on a join signal not just sleep else server wont stop quickly
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
 }

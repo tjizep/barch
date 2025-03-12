@@ -453,6 +453,10 @@ namespace art
         {
             return key_len + 1 + val_len + sizeof(leaf);
         }
+        [[nodiscard]] bool deleted() const
+        {
+            return key_len == 0;
+        }
         [[nodiscard]] unsigned val_start() const
         {
             return key_len + 1;

@@ -4,6 +4,10 @@
 #include "nodes.h"
 #include "compress.h"
 
+typedef std::unique_lock< std::shared_mutex >  write_lock;
+typedef std::shared_lock< std::shared_mutex >  read_lock;  // C++ 14
+
+std::shared_mutex& get_lock();
 /**
  * context management
  */

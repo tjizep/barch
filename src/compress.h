@@ -476,7 +476,7 @@ struct free_bin
 };
 struct free_list
 {
-    unsigned added = 0;
+    size_t added = 0;
     size_t min_bin = page_size;
     size_t max_bin = 0;
     std::unordered_set<size_t> addresses{};
@@ -680,7 +680,6 @@ private:
     free_list emancipated{};
     lru_list lru{};
     uint64_t ticker = 1;
-    uint64_t fragmentation = 0;
     uint64_t allocated = 0;
     compress& operator=(const compress& t)
     {
@@ -1124,7 +1123,6 @@ public:
             t.clear();
             emancipated.erase(at.page());
             free_pages.push_back(at.page());
-            fragmentation -= t.fragmentation;
             t.fragmentation = 0;
         }
         else
@@ -1133,12 +1131,13 @@ public:
             t.size--;
             t.modifications++;
             t.fragmentation += size;
-            fragmentation += size;
         }
     }
     float fragmentation_ratio() const
     {
-        return (float)fragmentation/float(allocated);
+        std::lock_guard guard(mutex);
+
+        return (float)emancipated.added/float(allocated);
     }
     // TODO: this function may cause to much latency when the arena is large
     // maybe just dont iterate through everything - it doesnt need to get
@@ -1147,7 +1146,7 @@ public:
     {
         heap::vector<size_t> fragmentation;
         std::lock_guard guard(mutex);
-        heap::vector<const storage*> replay;
+        std::vector<const storage*> replay;
         for (auto& t: arena)
         {
             size_t p = &t - arena.begin();

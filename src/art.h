@@ -99,7 +99,7 @@ int art_tree_init(art::tree* t);
  * Destroys an ART tree
  * @return 0 on success.
  */
-int art_tree_destroy(art::tree* t);
+int tree_destroy(art::tree* t);
 
 /**
  * Returns the size of the ART tree.
@@ -158,7 +158,9 @@ art::node_ptr art_minimum(art::tree* t);
  * Returns the maximum valued leaf
  * @return The maximum leaf or NULL
  */
-art::node_ptr art_maximum(art::tree* t);
+namespace art
+{
+art::node_ptr maximum(art::tree* t);
 
 /**
  * Returns the lower bound value of a given key
@@ -168,7 +170,9 @@ art::node_ptr art_maximum(art::tree* t);
  * @arg key_len The length of the key
  * @return the lower bound or NULL if there is no value not less than key
  */
-art::node_ptr art_lower_bound(const art::tree* t, art::value_type key);
+
+ node_ptr lower_bound(const art::tree* t, art::value_type key);
+}
 
 /**
  * Iterates through the entries pairs in the map,
@@ -200,7 +204,10 @@ int art_iter_prefix(art::tree* t, art::value_type prefix, art_callback cb, void*
  * the first key is located in log(n) time
  * @return 0 on success, or the return of the callback.
  */
-int art_range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data);
+namespace art
+{
+ int range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data);
+}
 
 /**
  * gets per module per node type statistics for all art_node* types

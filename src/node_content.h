@@ -414,42 +414,42 @@ namespace art {
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
             check_object();
             unsigned i;
-            if (KEYS < data().num_children) {
-                return data().num_children;
+            if (KEYS < data().occupants) {
+                return data().occupants;
             }
             if (operbits & (eq & gt) ) {
-                for (i = 0; i < data().num_children; ++i) {
+                for (i = 0; i < data().occupants; ++i) {
                     if (nd().keys[i] >= c)
                         return i;
                 }
-                if (operbits == (eq & gt)) return data().num_children;
+                if (operbits == (eq & gt)) return data().occupants;
             }
             if (operbits & (eq & lt) ) {
-                for (i = 0; i < data().num_children; ++i) {
+                for (i = 0; i < data().occupants; ++i) {
                     if (nd().keys[i] <= c)
                         return i;
                 }
-                if (operbits == (eq & lt)) return data().num_children;
+                if (operbits == (eq & lt)) return data().occupants;
             }
             if (operbits & eq) {
-                for (i = 0; i < data().num_children; ++i) {
+                for (i = 0; i < data().occupants; ++i) {
                     if (KEYS > 0 && nd().keys[i] == c)
                         return i;
                 }
             }
             if (operbits & gt) {
-                for (i = 0; i < data().num_children; ++i) {
+                for (i = 0; i < data().occupants; ++i) {
                     if (KEYS > 0 && nd().keys[i] > c)
                         return i;
                 }
             }
             if (operbits & lt) {
-                for (i = 0; i < data().num_children; ++i) {
+                for (i = 0; i < data().occupants; ++i) {
                     if (KEYS > 0 && nd().keys[i] < c)
                         return i;
                 }
             }
-            return data().num_children;
+            return data().occupants;
         }
         [[nodiscard]] unsigned index(unsigned char c) const override {
             check_object();
@@ -516,7 +516,7 @@ namespace art {
             check_object();
             if (SIZE <= pos)
                 abort();
-            unsigned count = data().num_children;
+            unsigned count = data().occupants;
             auto& n = nd();
             for (unsigned p = count; p > pos; --p) {
                 n.types[p] = n.types[p - 1];
@@ -526,7 +526,7 @@ namespace art {
             check_object();
             if (SIZE < pos)
                 abort();
-            unsigned count = data().num_children;
+            unsigned count = data().occupants;
             auto& n = nd();
             for (unsigned p = pos; p < count -1; ++p) {
                 n.types[p] = n.types[p + 1];
@@ -568,12 +568,12 @@ namespace art {
             check_object();
             if(pos < KEYS && KEYS == SIZE) {
                 auto& dat = nd();
-                memmove(dat.keys+pos, dat.keys+pos+1, dat.num_children - 1 - pos);
-                memmove(dat.children.data+pos, dat.children.data+pos+1, (dat.num_children - 1 - pos)*sizeof(ChildElementType));
+                memmove(dat.keys+pos, dat.keys+pos+1, dat.occupants - 1 - pos);
+                memmove(dat.children.data+pos, dat.children.data+pos+1, (dat.occupants - 1 - pos)*sizeof(ChildElementType));
                 remove_type(pos);
-                dat.keys[dat.num_children - 1] = 0;
-                dat.children[dat.num_children - 1] = nullptr;
-                --dat.num_children;
+                dat.keys[dat.occupants - 1] = 0;
+                dat.children[dat.occupants - 1] = nullptr;
+                --dat.occupants;
             } else {
                 abort();
             }
@@ -584,24 +584,24 @@ namespace art {
             check_object();
             auto& dat = nd();
             auto& sd = src->data();
-            if (sd.num_children > SIZE) {
+            if (sd.occupants > SIZE) {
                 abort();
             }
-            dat.num_children = sd.num_children;
+            dat.occupants = sd.occupants;
             dat.partial_len = sd.partial_len;
             memcpy(dat.partial, sd.partial, std::min<unsigned>(max_prefix_llength, sd.partial_len));
         }
         void copy_from(node_ptr s) override
         {
             check_object();
-            if(s->data().num_children > SIZE)
+            if(s->data().occupants > SIZE)
             {
                 abort();
             }
             this->copy_header(s);
-            set_keys(s->get_keys(), s->data().num_children);
-            set_children(0, (node*)s, 0, s->data().num_children);
-            if (data().num_children != s->data().num_children)
+            set_keys(s->get_keys(), s->data().occupants);
+            set_children(0, (node*)s, 0, s->data().occupants);
+            if (data().occupants != s->data().occupants)
             {
                 abort();
             }

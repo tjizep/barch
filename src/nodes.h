@@ -287,7 +287,7 @@ namespace art
         uint8_t type = 0;
         uint8_t pointer_size = 0;
         uint8_t partial_len = 0;
-        uint8_t num_children = 0;
+        uint8_t occupants = 0;
         unsigned char partial[max_prefix_llength]{};
     };
 

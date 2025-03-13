@@ -188,7 +188,7 @@ extern "C" {
             
         };
 
-        art_range(get_art(), {c1.get_data(), c1.get_size()}, {c2.get_data(), c2.get_size()}, iter, &is);
+        art::range(get_art(), {c1.get_data(), c1.get_size()}, {c2.get_data(), c2.get_size()}, iter, &is);
 
 
         ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
@@ -327,7 +327,7 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        art::node_ptr l = art_maximum(get_art());
+        art::node_ptr l = art::maximum(get_art());
 
         if (l.null())
         {
@@ -357,7 +357,7 @@ extern "C" {
         auto converted = conversion::convert(k, klen);
         read_lock rl(get_lock());
 
-        art::node_ptr r = art_lower_bound(get_art(), converted.get_value());
+        art::node_ptr r = art::lower_bound(get_art(), converted.get_value());
 
 
         if (r.null())

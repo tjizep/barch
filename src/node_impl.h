@@ -60,7 +60,7 @@ namespace art
             remove_child(pos);
             auto& dat = nd();
             // Remove nodes with only a single child
-            if (dat.num_children == 1)
+            if (dat.occupants == 1)
             {
                 node_ptr child = get_child(0);
                 if (!child.is_leaf)
@@ -94,19 +94,19 @@ namespace art
             unsigned idx = index(c, gt);
             auto& dat = nd();
             // Shift to make room
-            memmove(dat.keys + idx + 1, dat.keys + idx, data().num_children - idx);
+            memmove(dat.keys + idx + 1, dat.keys + idx, data().occupants - idx);
             memmove(dat.children.data + idx + 1, dat.children.data + idx,
-                    (data().num_children - idx) * sizeof(IntegerPtr));
+                    (data().occupants - idx) * sizeof(IntegerPtr));
             insert_type(idx);
             // Insert element
             dat.keys[idx] = c;
             set_child(idx, child);
-            ++dat.num_children;
+            ++dat.occupants;
         }
 
         void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
-            if (data().num_children < 4)
+            if (data().occupants < 4)
             {
                 this->expand_pointers(ref, {child})->add_child_inner(c, child);
             }
@@ -114,8 +114,8 @@ namespace art
             {
                 auto new_node = alloc_node_ptr(node_16, {child});
                 // Copy the child pointers and the key map
-                new_node->set_children(0, this, 0, data().num_children);
-                new_node->set_keys(nd().keys, data().num_children);
+                new_node->set_children(0, this, 0, data().occupants);
+                new_node->set_keys(nd().keys, data().occupants);
                 new_node->copy_header(this);
                 ref = new_node;
                 free_node(this);
@@ -125,31 +125,31 @@ namespace art
 
         [[nodiscard]] node_ptr last() const override
         {
-            unsigned idx = data().num_children - 1;
+            unsigned idx = data().occupants - 1;
             return get_child(idx);
         }
 
         [[nodiscard]] unsigned last_index() const override
         {
-            return data().num_children - 1;
+            return data().occupants - 1;
         }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override
         {
-            for (unsigned i = 0; i < data().num_children; i++)
+            for (unsigned i = 0; i < data().occupants; i++)
             {
                 if (nd().keys[i] >= c && has_child(i))
                 {
                     return {{this, get_child(i), i}, nd().keys[i] == c};
                 }
             }
-            return {{nullptr, nullptr, data().num_children}, false};
+            return {{nullptr, nullptr, data().occupants}, false};
         }
 
         [[nodiscard]] trace_element next(const trace_element& te) const override
         {
             unsigned i = te.child_ix + 1;
-            if (i < this->data().num_children)
+            if (i < this->data().occupants)
             {
                 return {this, this->get_child(i), i};
             }
@@ -205,13 +205,13 @@ namespace art
 
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
         {
-            unsigned i = bits_oper16(this->nd().keys, nuchar<16>(c), (1 << this->data().num_children) - 1, operbits);
+            unsigned i = bits_oper16(this->nd().keys, nuchar<16>(c), (1 << this->data().occupants) - 1, operbits);
             if (i)
             {
                 i = __builtin_ctz(i);
                 return i;
             }
-            return this->data().num_children;
+            return this->data().occupants;
         }
 
 
@@ -220,7 +220,7 @@ namespace art
         {
             this->remove_child(pos);
 
-            if (this->data().num_children == 3)
+            if (this->data().occupants == 3)
             {
                 auto new_node = alloc_node_ptr(node_4, {});
                 new_node->copy_header(this);
@@ -234,7 +234,7 @@ namespace art
 
         void add_child_inner(unsigned char c, node_ptr child) override
         {
-            unsigned mask = (1 << this->data().num_children) - 1;
+            unsigned mask = (1 << this->data().occupants) - 1;
 
             unsigned bitfield = bits_oper16(nuchar<16>(c), this->get_keys(), mask, lt);
 
@@ -243,23 +243,23 @@ namespace art
             if (bitfield)
             {
                 idx = __builtin_ctz(bitfield);
-                memmove(this->nd().keys + idx + 1, this->nd().keys + idx, this->data().num_children - idx);
+                memmove(this->nd().keys + idx + 1, this->nd().keys + idx, this->data().occupants - idx);
                 memmove(this->nd().children.data + idx + 1, this->nd().children.data + idx,
-                        (this->data().num_children - idx) * sizeof(typename Parent::ChildElementType));
+                        (this->data().occupants - idx) * sizeof(typename Parent::ChildElementType));
             }
             else
-                idx = this->data().num_children;
+                idx = this->data().occupants;
 
             this->insert_type(idx);
             // Set the child
             this->nd().keys[idx] = c;
             this->set_child(idx, child);
-            ++this->data().num_children;
+            ++this->data().occupants;
         }
 
         void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
-            if (this->data().num_children < 16)
+            if (this->data().occupants < 16)
             {
                 this->expand_pointers(ref, {child})->add_child_inner(c, child);
             }
@@ -268,8 +268,8 @@ namespace art
                 auto new_node = alloc_node_ptr(node_48, {child});
 
                 // Copy the child pointers and populate the key map
-                new_node->set_children(0, this, 0, this->data().num_children);
-                for (unsigned i = 0; i < this->data().num_children; i++)
+                new_node->set_children(0, this, 0, this->data().occupants);
+                for (unsigned i = 0; i < this->data().occupants; i++)
                 {
                     new_node->set_key(this->nd().keys[i], i + 1);
                 }
@@ -282,17 +282,17 @@ namespace art
 
         [[nodiscard]] node_ptr last() const override
         {
-            return this->get_child(this->data().num_children - 1);
+            return this->get_child(this->data().occupants - 1);
         }
 
         [[nodiscard]] unsigned last_index() const override
         {
-            return this->data().num_children - 1;
+            return this->data().occupants - 1;
         }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override
         {
-            unsigned mask = (1 << this->data().num_children) - 1;
+            unsigned mask = (1 << this->data().occupants) - 1;
             unsigned bf = bits_oper16(this->nd().keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt);
             // inverse logic
             if (bf)
@@ -300,13 +300,13 @@ namespace art
                 unsigned i = __builtin_ctz(bf);
                 return {{this, this->get_child(i), i}, this->nd().keys[i] == c};
             }
-            return {{nullptr, nullptr, this->data().num_children}, false};
+            return {{nullptr, nullptr, this->data().occupants}, false};
         }
 
         [[nodiscard]] trace_element next(const trace_element& te) const override
         {
             unsigned i = te.child_ix + 1;
-            if (i < this->data().num_children)
+            if (i < this->data().occupants)
             {
                 return {this, this->get_child(i), i}; // the keys are ordered so fine I think
             }
@@ -395,9 +395,9 @@ namespace art
             nd().keys[key] = 0;
             nd().children[pos] = nullptr;
             nd().types[pos] = false;
-            --nd().num_children;
+            --nd().occupants;
 
-            if (data().num_children == 12)
+            if (data().occupants == 12)
             {
                 auto new_node = alloc_node_ptr(node_16, {});
                 new_node->copy_header(this);
@@ -429,12 +429,12 @@ namespace art
             // not we do not need to call insert_type an empty child is found
             set_child(pos, child);
             nd().keys[c] = pos + 1;
-            data().num_children++;
+            data().occupants++;
         }
 
         void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
-            if (data().num_children < 48)
+            if (data().occupants < 48)
             {
                 this->expand_pointers(ref, {child})->add_child_inner(c, child);
             }
@@ -454,7 +454,7 @@ namespace art
                     }
                 }
                 new_node->copy_header(this);
-                statistics::node256_occupants += new_node->data().num_children;
+                statistics::node256_occupants += new_node->data().occupants;
                 ref = new_node;
                 free_node(this);
                 new_node->add_child(c, ref, child);
@@ -595,11 +595,11 @@ namespace art
             auto& dat = nd();
             dat.children[key] = nullptr;
             dat.types[key] = 0;
-            --dat.num_children;
+            --dat.occupants;
             --statistics::node256_occupants;
             // Resize to a node48 on underflow, not immediately to prevent
             // trashing if we sit on the 48/49 boundary
-            if (dat.num_children == 37)
+            if (dat.occupants == 37)
             {
                 auto new_node = alloc_node_ptr(node_48, {});
                 ref = new_node;
@@ -625,7 +625,7 @@ namespace art
             if (!has_child(c))
             {
                 ++statistics::node256_occupants;
-                ++data().num_children; // just to keep stats ok
+                ++data().occupants; // just to keep stats ok
             }
             set_child(c, child);
         }

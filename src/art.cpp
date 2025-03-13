@@ -77,7 +77,7 @@ static void destroy_node(art::node_ptr n) {
         case art::node_4:
         case art::node_16:
         case art::node_256:
-            for (i=0;i<n->data().num_children;i++) {
+            for (i=0;i<n->data().occupants;i++) {
                 free_node(n->get_node(i));
             }
             break;
@@ -102,7 +102,7 @@ static void destroy_node(art::node_ptr n) {
  * Destroys an ART tree
  * @return 0 on success.
  */
-int art_tree_destroy(art::tree *t) {
+int tree_destroy(art::tree *t) {
     destroy_node(t->root);
     return 0;
 }
@@ -141,7 +141,7 @@ static art::trace_element& last_el(art::trace_list& trace){
 }
 static art::trace_element first_child_off(art::node_ptr n);
 static art::trace_element last_child_off(art::node_ptr n);
-static art::node_ptr maximum(art::node_ptr n);
+static art::node_ptr inner_maximum(art::node_ptr n);
 /**
  * assuming that the path to each leaf is not the same depth
  * we always have to check and extend if required
@@ -218,11 +218,11 @@ art::node_ptr art_search(art::trace_list& , const art::tree *t, art::value_type 
 }
 
 // Find the maximum leaf under a node
-static art::node_ptr maximum(art::node_ptr n) {
+static art::node_ptr inner_maximum(art::node_ptr n) {
     // Handle base cases
     if (n.null()) return nullptr;
     if (n.is_leaf) return n;
-    return maximum(n->last());
+    return inner_maximum(n->last());
 }
 
 
@@ -242,7 +242,7 @@ static art::node_ptr minimum(const art::node_ptr& n) {
  * @return nullptr if the item was not found, otherwise
  * the leaf containing the value pointer is returned.
  */
-static art::node_ptr lower_bound(art::trace_list& trace, const art::tree *t, art::value_type key) {
+static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree *t, art::value_type key) {
     art::node_ptr n = t->root;
     int depth = 0, is_equal = 0;
 
@@ -320,21 +320,21 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace){
     return false;
 }
 
-art::node_ptr art_lower_bound(const art::tree *t, art::value_type key) {
+art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
     art::node_ptr al;
     art::trace_list tl;
-    al = lower_bound(tl, t, key);
+    al = inner_lower_bound(tl, t, key);
     if (!al.null()) {
         return al;
     }
     return nullptr;
 }
 
-int art_range(const art::tree *t, art::value_type key, art::value_type key_end, art_callback cb, void *data) {
+int art::range(const art::tree *t, art::value_type key, art::value_type key_end, art_callback cb, void *data) {
     ++statistics::range_ops;
     art::trace_list tl;
-    auto lb = lower_bound(tl, t, key);
+    auto lb = inner_lower_bound(tl, t, key);
     if(lb.null()) return 0;
     const art::leaf* al = lb.const_leaf();
     if (al) {
@@ -372,9 +372,9 @@ art::node_ptr art_minimum(art::tree *t) {
 /**
  * Returns the maximum valued leaf
  */
-art::node_ptr art_maximum(art::tree *t) {
+art::node_ptr art::maximum(art::tree *t) {
     ++statistics::max_ops;
-    auto l = maximum(t->root);
+    auto l = inner_maximum(t->root);
     if (l.null()) return nullptr;
     return l;
 }
@@ -666,14 +666,14 @@ static int recursive_iter(art::node_ptr n, art_callback cb, void *data) {
     int idx, res;
     switch (n->type()) {
         case art::node_4:
-            for (int i=0; i < n->data().num_children; i++) {
+            for (int i=0; i < n->data().occupants; i++) {
                 res = recursive_iter(n->get_child(i), cb, data);
                 if (res) return res;
             }
             break;
 
         case art::node_16:
-            for (int i=0; i < n->data().num_children; i++) {
+            for (int i=0; i < n->data().occupants; i++) {
                 res = recursive_iter(n->get_child(i), cb, data);
                 if (res) return res;
             }

@@ -8,17 +8,39 @@
 #include "valkeymodule.h"
 #include "statistics.h"
 #include "compress.h"
+#include "configuration.h"
+static compress* node_compression = nullptr;
+static compress* leaf_compression = nullptr;
+bool art::has_leaf_compression()
+{
+    return leaf_compression != nullptr;
+}
+bool art::has_node_compression()
+{
+    return node_compression != nullptr;
+}
+
+bool art::init_leaf_compression(ValkeyModuleCtx* ctx)
+{
+    leaf_compression = new compress(get_compression_enabled(ctx), get_lru_evict_enabled(ctx));
+    return leaf_compression != nullptr;
+}
+
+bool art::init_node_compression(ValkeyModuleCtx* ctx)
+{
+    node_compression = new compress(get_compression_enabled(ctx), get_lru_evict_enabled(ctx));
+    return node_compression != nullptr;
+}
 
 compress & art::get_leaf_compression()
 {
-    static compress leaf_compression{true};
-    return leaf_compression;
+    return *leaf_compression;
 };
 
 compress & art::get_node_compression()
 {
-    static compress node_compression{false};
-    return node_compression;
+
+    return *node_compression;
 };
 
 compressed_release::compressed_release()
@@ -37,6 +59,7 @@ compressed_release::~compressed_release()
 int art_tree_init(art::tree *t) {
     t->root = nullptr;
     t->size = 0;
+
     return 0;
 }
 // Recursively destroys the tree

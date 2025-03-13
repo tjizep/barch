@@ -68,6 +68,10 @@ typedef std::function<void(art::node_ptr l)> NodeResult;
  */
 namespace art
 {
+ bool has_leaf_compression();
+ bool has_node_compression();
+ bool init_leaf_compression(ValkeyModuleCtx* ctx);
+ bool init_node_compression(ValkeyModuleCtx* ctx);
  struct tree
  {
   bool mexit = false;

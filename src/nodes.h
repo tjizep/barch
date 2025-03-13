@@ -10,7 +10,7 @@
 
 #include <array>
 #include "compress.h"
-
+#define unused_arg
 namespace art
 {
     template<typename I>
@@ -119,7 +119,7 @@ namespace art
         }
         template<typename T>
         const T* ptr() const {
-            if(null()) return nullptr;
+            //if(null()) return nullptr;
             static_assert(sizeof(T) < sizeof(storage));
             return reinterpret_cast<const T*>(&storage[0]);
         }

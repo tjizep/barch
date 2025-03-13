@@ -162,6 +162,8 @@ art::tree::~tree()
  */
 void run_defrag(art::tree* t)
 {
+    if(!art::has_leaf_compression()) return;
+
     auto &lc = art::get_leaf_compression();
     if(lc.fragmentation_ratio() > 0.5)
     {

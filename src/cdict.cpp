@@ -34,6 +34,7 @@ std::shared_mutex& get_lock()
 
 static art::tree ad = {nullptr, 0};
 static auto startTime = std::chrono::high_resolution_clock::now();
+
 /// @brief  getting an initialized art tree
 /// @param ctx not used but could be 
 /// @return a once initialized art_tree
@@ -657,6 +658,12 @@ extern "C" {
         {
             return VALKEYMODULE_ERR;
         }
+        if(!art::init_leaf_compression(ctx))
+            return VALKEYMODULE_ERR;
+
+        if(!art::init_node_compression(ctx))
+            return VALKEYMODULE_ERR;
+
         return VALKEYMODULE_OK;
     }
 }

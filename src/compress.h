@@ -638,7 +638,7 @@ struct compress
     };
 
     compress() = default;
-    explicit compress(bool opt_enable_compression): opt_enable_compression(opt_enable_compression){};
+    explicit compress(bool opt_enable_compression, bool opt_enable_lru): opt_enable_compression(opt_enable_compression), opt_enable_lru(opt_enable_lru){};
     compress(const compress&) = delete;
 
     ~compress()
@@ -651,6 +651,7 @@ struct compress
     static uint32_t flush_ticker;
 private:
     bool opt_enable_compression = false;
+    bool opt_enable_lru = false;
     std::thread tdict{};
     std::thread tpoll{};
     bool threads_exit = false;
@@ -849,12 +850,38 @@ private:
         if (arena.empty()) return 0;
         return arena.size() - 1;
     }
+    void add_to_lru(size_t at, storage& page)
+    {
+        if(opt_enable_lru)
+        {
+            lru.emplace_back(at);
+            page.lru = --lru.end();
+            page.ticker = ++ticker;;
+        }
+    }
+    void update_lru(size_t at, storage& page)
+    {
+        if (opt_enable_lru)
+        {
+            if (page.lru == lru_list::iterator())
+            {
+                lru.emplace_back(at);
+                page.lru = --lru.end();
+            }else
+            {
+                if(*page.lru != at)
+                {
+                    abort();
+                }
+                lru.splice(lru.begin(), lru, page.lru);
+            }
+        }
+    }
     std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ps = page_size)
     {
         auto &page = arena[at];
-        //lru.emplace_back(at);
-        //page.lru = --lru.end();
-        page.ticker = ++ticker;;
+
+        add_to_lru(at, page);
         page.decompressed = std::move(heap::buffer<uint8_t>(ps));
         statistics::page_bytes_uncompressed += page.decompressed.byte_size();
         ++statistics::pages_uncompressed;
@@ -984,7 +1011,7 @@ private:
         {
             t.modifications++;
         }
-        t.ticker = ++ticker;
+        update_lru(at.page(), t);
 
         return t.decompressed.begin() + at.offset();
     }
@@ -1137,7 +1164,7 @@ public:
     {
         std::lock_guard guard(mutex);
 
-        return (float)emancipated.added/float(allocated);
+        return (float)emancipated.added/(float(allocated)+0.0001f);
     }
     // TODO: this function may cause to much latency when the arena is large
     // maybe just dont iterate through everything - it doesnt need to get
@@ -1168,38 +1195,9 @@ public:
         return fragmentation;
     }
     lru_list create_lru_list()
-    {   lru_list r;
-
+    {
         std::lock_guard guard(mutex);
-        heap::vector<storage*> replay;
-        for (size_t p = 1; p < arena.size(); p++)
-        {
-            if(is_null_base(p)) continue;
-            replay.emplace_back(&arena.at(p));
-        }
-        auto compare = [&](storage* a, storage* b) -> bool
-        {
-            return a->ticker < b->ticker;
-        };
-        std::sort(replay.begin(), replay.end(), compare);
-        for (auto* pt : replay)
-        {
-            storage& t = *(pt);
-            size_t p = pt - arena.begin();
-            if (t.lru == lru_list::iterator())
-            {
-                lru.emplace_back(p);
-                t.lru = --lru.end();
-            }else
-            {
-                if(*t.lru != p)
-                {
-                    abort();
-                }
-                lru.splice(lru.begin(), lru, t.lru);
-            }
-        }
-        return r;
+        return lru;
     }
     std::pair<heap::buffer<uint8_t>,size_t> get_page_buffer(size_t at)
     {
@@ -1209,25 +1207,15 @@ public:
     }
     std::pair<heap::buffer<uint8_t>,size_t> get_lru_page()
     {
-        heap::buffer<uint8_t> r;
         std::lock_guard guard(mutex);
-        uint64_t min_ticker = ticker;
-        uint64_t page = 0, min_page = 1;
-        for (page = 1; page < arena.size(); page+=31)
+        if (opt_enable_lru)
         {
-            if (is_null_base(page)) continue;
-            auto &p = arena.at(page);
-
-            if (p.size > 0 && p.ticker > 0 &&
-                p.ticker < min_ticker)
+            if(!lru.empty())
             {
-                min_page = page;
-                min_ticker = p.ticker;
+                return get_page_buffer_inner(*(--lru.end()));
             }
         }
-
-        if (min_page == 0) return {r, 0};
-        return get_page_buffer_inner(min_page);
+        return {heap::buffer<uint8_t>(), 0};
     }
 
     template <typename T>

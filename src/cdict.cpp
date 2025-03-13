@@ -20,8 +20,10 @@ extern "C"
 #include <shared_mutex>
 #include "conversion.h"
 #include "art.h"
+#include "configuration.h"
 #include <fast_float/fast_float.h>
 #include <functional>
+
 
 static ValkeyModuleDict *Keyspace;
 
@@ -652,18 +654,33 @@ extern "C" {
         if (ValkeyModule_CreateCommand(ctx, "ODEVICT", cmd_EVICT, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
+
         /* Create our global dictionary. Here we'll set our keys and values. */
         Keyspace = ValkeyModule_CreateDict(nullptr);
         if (get_art() == nullptr)
         {
             return VALKEYMODULE_ERR;
         }
-        if(!art::init_leaf_compression(ctx))
+        if (art::register_valkey_configuration(ctx)!=0)
+        {
+            return VALKEYMODULE_ERR;
+        };
+        if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR)
+        {
+            return VALKEYMODULE_ERR;
+        }
+
+        if(!art::init_leaf_compression())
             return VALKEYMODULE_ERR;
 
-        if(!art::init_node_compression(ctx))
+        if(!art::init_node_compression())
             return VALKEYMODULE_ERR;
 
+        return VALKEYMODULE_OK;
+    }
+
+    int ValkeyModule_OnUnload(void *unused_arg)
+    {
         return VALKEYMODULE_OK;
     }
 }

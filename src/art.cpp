@@ -20,15 +20,15 @@ bool art::has_node_compression()
     return node_compression != nullptr;
 }
 
-bool art::init_leaf_compression(ValkeyModuleCtx* ctx)
+bool art::init_leaf_compression()
 {
-    leaf_compression = new compress(get_compression_enabled(ctx), get_lru_evict_enabled(ctx));
+    leaf_compression = new (heap::allocate<compress>(1)) compress(get_compression_enabled(), get_lru_evict_enabled());
     return leaf_compression != nullptr;
 }
 
-bool art::init_node_compression(ValkeyModuleCtx* ctx)
+bool art::init_node_compression()
 {
-    node_compression = new compress(get_compression_enabled(ctx), get_lru_evict_enabled(ctx));
+    node_compression = new (heap::allocate<compress>(1))compress(get_compression_enabled(), get_lru_evict_enabled());
     return node_compression != nullptr;
 }
 

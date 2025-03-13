@@ -752,10 +752,6 @@ private:
 
     bool add_training_entry(const uint8_t* data, size_t size)
     {
-        if (opt_enable_compression == 0)
-        {
-            return false;
-        }
         if (dict || size_in_training != 0 || size_to_train > min_training_size)
         {
             return false;
@@ -1101,6 +1097,10 @@ private:
 
     }
 public:
+    void set_opt_enable_compression(bool opt_compression)
+    {
+        this->opt_enable_compression = opt_compression;
+    }
     void free(compressed_address at, size_t sz)
     {
         size_t size = sz + test_memory + allocation_padding;
@@ -1329,7 +1329,7 @@ public:
     {
         std::unique_lock scope(vacuum_scope);
         std::lock_guard guard(mutex);
-        if (dict == nullptr) return 0;
+        if (!opt_enable_compression) return 0;
         double ratio = heap::get_physical_memory_ratio();
 
         if (!full && ratio > 0.99 && !decompressed_pages.empty())

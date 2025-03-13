@@ -70,8 +70,8 @@ namespace art
 {
  bool has_leaf_compression();
  bool has_node_compression();
- bool init_leaf_compression(ValkeyModuleCtx* ctx);
- bool init_node_compression(ValkeyModuleCtx* ctx);
+ bool init_leaf_compression();
+ bool init_node_compression();
  struct tree
  {
   bool mexit = false;

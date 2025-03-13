@@ -156,16 +156,18 @@ art::tree::~tree()
     if(tmaintain.joinable())
         tmaintain.join();
 }
+#include "configuration.h"
 /**
- * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys and adds them back again
- * this function isnt supposed to run a lot
+ * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those
+ * then adds them back again
+ * this function isn't supposed to run a lot
  */
 void run_defrag(art::tree* t)
 {
     if(!art::has_leaf_compression()) return;
 
     auto &lc = art::get_leaf_compression();
-    if(lc.fragmentation_ratio() > 0.5)
+    if(lc.fragmentation_ratio() > art::get_min_fragmentation_ratio())
     {
         auto fl = lc.create_fragmentation_list();
         for(auto p : fl)
@@ -218,6 +220,7 @@ void run_defrag(art::tree* t)
 
 }
 
+
 void art::tree::start_maintain()
 {
     tmaintain = std::thread([&]() -> void
@@ -225,7 +228,8 @@ void art::tree::start_maintain()
         while (!this->mexit)
         {
             // TODO: erase evicted keys if memory is pressured - if its configured
-            run_defrag(this); // periodic
+            if (art::get_active_defrag())
+                run_defrag(this); // periodic
             // we should wait on a join signal not just sleep else server wont stop quickly
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }

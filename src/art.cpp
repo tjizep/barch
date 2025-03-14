@@ -343,17 +343,19 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
             art::node_ptr n = last_el(tl).child;
             if(n.is_leaf){
                 const art::leaf * leaf = n.const_leaf();
-                if(!leaf->expired())
-                {
-                    if (leaf->compare(key_end.bytes, key_end.length(), 0) < 0) { // upper bound is not
+                if (leaf->compare(key_end.bytes, key_end.length(), 0) < 0) { // upper bound is not
+                    if(!leaf->expired())
+                    {
                         ++statistics::iter_range_ops;
                         int r = cb(data, leaf->get_key(), leaf->get_value());
                         if( r != 0)
                             return r;
-                    } else {
-                        return 0;
-                    }
-                } //skip this one if it's expired
+                    } //skip this one if it's expired
+                } else {
+                    return 0;
+                }
+
+
             } else {
                 abort();
             }

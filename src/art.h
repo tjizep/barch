@@ -79,7 +79,7 @@ namespace art
   art::node_ptr root = nullptr;
   uint64_t size = 0;
   void start_maintain();
-  tree(art::node_ptr root, uint64_t size) : root(root), size(size)
+  tree(const art::node_ptr& root, uint64_t size) : root(root), size(size)
   {
    start_maintain();
   }

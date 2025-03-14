@@ -10,12 +10,18 @@
 */
 namespace art
 {
-    bool get_lru_evict_enabled();
-    bool get_lfu_evict_enabled();
     bool get_compression_enabled();
     float get_module_memory_ratio();
     float get_min_fragmentation_ratio();
     bool get_active_defrag();
     int register_valkey_configuration(ValkeyModuleCtx* ctx);
+    bool get_evict_volatile_lru();
+    bool get_evict_allkeys_lru();
+    bool get_evict_volatile_lfu();
+    bool get_evict_allkeys_lfu();
+    bool get_evict_volatile_random();
+    bool get_evict_allkeys_random();
+    bool get_evict_volatile_ttl();
+
 }
 #endif //CONFIGURATION_H

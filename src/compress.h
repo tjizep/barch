@@ -1147,6 +1147,9 @@ public:
                 --statistics::pages_uncompressed;
                 statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
             }
+
+            if(!lru.empty())
+                lru.erase(t.lru);
             t.clear();
             emancipated.erase(at.page());
             free_pages.push_back(at.page());

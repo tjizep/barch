@@ -34,7 +34,7 @@ std::shared_mutex& get_lock()
 }
 
 
-static art::tree ad = {nullptr, 0};
+static art::tree * ad {};
 static auto startTime = std::chrono::high_resolution_clock::now();
 
 /// @brief  getting an initialized art tree
@@ -43,15 +43,15 @@ static auto startTime = std::chrono::high_resolution_clock::now();
 
 static art::tree *get_art()
 {
-
-    if (ad.root == nullptr)
+    if (ad == nullptr)
     {
-        if (art_tree_init(&ad) != 0)
+        if (ad == nullptr)
         {
-            return nullptr;
+            ad = new (heap::allocate<art::tree>(1)) art::tree(nullptr, 0);
         }
+
     }
-    return &ad;
+    return ad;
 }
 
 
@@ -657,15 +657,16 @@ extern "C" {
 
         /* Create our global dictionary. Here we'll set our keys and values. */
         Keyspace = ValkeyModule_CreateDict(nullptr);
-        if (get_art() == nullptr)
-        {
-            return VALKEYMODULE_ERR;
-        }
         if (art::register_valkey_configuration(ctx)!=0)
         {
             return VALKEYMODULE_ERR;
         };
         if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR)
+        {
+            return VALKEYMODULE_ERR;
+        }
+
+        if (get_art() == nullptr)
         {
             return VALKEYMODULE_ERR;
         }

@@ -9,14 +9,15 @@
 
 #include <algorithm>
 
-art::node_ptr art::make_leaf(value_type key, value_type v) {
+art::node_ptr art::make_leaf(value_type key, value_type v, uint64_t ttl, bool is_volatile) {
     unsigned val_len = v.size;
     unsigned key_len = key.length();
+    size_t leaf_size = sizeof(leaf) + key_len + (ttl > 0 ? sizeof(ttl):0) + 1 + val_len;
     // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
-    auto logical = art::get_leaf_compression().new_address(sizeof(leaf) + key_len + 1 + val_len);
-    auto *l = new(get_leaf_compression().read<leaf>(logical)) leaf(key_len, val_len);
+    auto logical = art::get_leaf_compression().new_address(leaf_size);
+    auto *l = new(get_leaf_compression().read<leaf>(logical)) leaf(key_len, val_len, ttl, is_volatile);
     ++statistics::leaf_nodes;
-    statistics::addressable_bytes_alloc += (int64_t)(sizeof(leaf)+ key_len + 1 + val_len);
+    statistics::addressable_bytes_alloc += leaf_size;
     l->set_key(key);
     l->set_value(v);
     return logical;
@@ -25,10 +26,7 @@ art::node_ptr art::make_leaf(value_type key, value_type v) {
 
 void art::free_leaf_node(art::leaf* l, compressed_address logical){
     if(l == nullptr) return;
-    unsigned kl = l->key_len;
-    l->key_len = 0;
-    l->val_len += kl; // set the deleted property
-
+    l->set_deleted();
     art::get_leaf_compression().free(logical, l->byte_size());
     --statistics::leaf_nodes;
     statistics::addressable_bytes_alloc -= (l->byte_size());
@@ -157,6 +155,27 @@ art::tree::~tree()
         tmaintain.join();
 }
 #include "configuration.h"
+#include <functional>
+
+void page_iterator (const heap::buffer<uint8_t>& page, unsigned size, std::function<void(const art::leaf* )> cb)
+{
+    if(!size) return;
+
+    auto e = page.begin() + size;
+
+    for (auto i = page.begin();i != e;)
+    {
+        const art::leaf *l = (art::leaf*)i;
+        if (l->key_len > page.byte_size())
+        {
+            abort();
+        }
+        if (!l->deleted())
+            cb(l);
+        i += (l->byte_size() + test_memory);
+    }
+}
+
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those
  * then adds them back again
@@ -165,7 +184,7 @@ art::tree::~tree()
 void run_defrag(art::tree* t)
 {
     if(!art::has_leaf_compression()) return;
-
+    auto fc = [](const art::node_ptr& unused(n)) -> void{};
     auto &lc = art::get_leaf_compression();
     if(lc.fragmentation_ratio() > art::get_min_fragmentation_ratio())
     {
@@ -174,43 +193,20 @@ void run_defrag(art::tree* t)
         {
             {
                 write_lock lock(get_lock());
-                size_t deleted = 0;
-                auto page = lc.get_page_buffer(p);
-                auto e = page.first.begin() + page.second;
-                auto fc = [](art::node_ptr) -> void
-                {
-                };
-                for (auto i = page.first.begin();i != e;)
-                {
-                    const art::leaf *l = (art::leaf*)i;
-                    if (l->key_len > page.first.byte_size())
-                    {
-                        abort();
-                    }
-                    if (l->deleted())
-                    {   ++deleted;
-                        i += (l->byte_size() + test_memory); // skip the bytes of the deleted keys
-                        continue;
-                    }
-                    art_delete(t, l->get_key(),fc);
-                    i += (l->byte_size() + test_memory);
-                }
 
-                for (auto i = page.first.begin();i != e;)
+
+                auto page = lc.get_page_buffer(p);
+
+                page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
                 {
-                    const art::leaf *l = (art::leaf*)i;
-                    if (l->key_len > page.first.byte_size())
-                    {
-                        abort();
-                    }
-                    if (l->deleted())
-                    {
-                        i += (l->byte_size() + test_memory);
-                        continue;
-                    }
-                    art_insert(t, l->get_key(),l->get_value(),fc);
-                    i += (l->byte_size() + test_memory);
-                }
+                    art_delete(t, l->get_key(),fc);
+                });
+
+                page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
+                {
+                    art_insert(t, l->get_key(), l->get_value(),fc);
+                });
+
             }
 
             if (lc.fragmentation_ratio() < 1.0) return;
@@ -219,7 +215,64 @@ void run_defrag(art::tree* t)
     }
 
 }
+void abstract_eviction(art::tree* t,
+    const std::function<bool(const art::leaf* l)>& predicate,
+    const std::function<std::pair<heap::buffer<uint8_t>,size_t> ()>& src)
+{
+    if(heap::get_physical_memory_ratio() < art::get_module_memory_ratio()) return;
+    auto fc = [](const art::node_ptr& unused(n)) -> void{};
+    auto page = src();
+    write_lock lock(get_lock());
+    page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf* l)
+    {
+        if (predicate(l))
+            art_delete(t, l->get_key(),fc);
+    });
+}
 
+void abstract_lru_eviction(art::tree* t, const std::function<bool(const art::leaf* l)>& predicate)
+{
+    if(heap::get_physical_memory_ratio() < art::get_module_memory_ratio()) return;
+    auto &lc = art::get_leaf_compression();
+    abstract_eviction(t,predicate,[&lc](){return lc.get_lru_page();});
+}
+
+void abstract_lfu_eviction(art::tree* t, const std::function<bool(const art::leaf* l)>& predicate)
+{
+    if(heap::get_physical_memory_ratio() < art::get_module_memory_ratio()) return;
+    auto &lc = art::get_leaf_compression();
+    abstract_eviction(t,predicate,[&lc](){return lc.get_lru_page();});
+}
+
+void run_evict_all_keys_lru(art::tree* t)
+{
+    if (!art::get_evict_allkeys_lru()) return;
+    abstract_lru_eviction(t, [](const art::leaf* unused(l)) -> bool {return true;});
+}
+
+void run_evict_volatile_keys_lru(art::tree* t)
+{
+    if (!art::get_evict_volatile_lru()) return;
+    abstract_lru_eviction(t, [](const art::leaf* l) -> bool {return l->is_volatile();});
+}
+
+void run_evict_all_keys_lfu(art::tree* t)
+{
+    if (!art::get_evict_allkeys_lfu()) return;
+    abstract_lfu_eviction(t, [](const art::leaf* unused(l)) -> bool {return true;});
+}
+
+void run_evict_volatile_keys_lfu(art::tree* t)
+{
+    if (!art::get_evict_volatile_lfu()) return;
+    abstract_lfu_eviction(t, [](const art::leaf* l) -> bool {return l->is_volatile();});
+}
+
+void run_evict_expired_keys(art::tree* t)
+{
+    if (!art::get_evict_volatile_ttl()) return;
+    abstract_lru_eviction(t, [](const art::leaf* l) -> bool {return l->expired();});
+}
 
 void art::tree::start_maintain()
 {
@@ -227,9 +280,15 @@ void art::tree::start_maintain()
     {
         while (!this->mexit)
         {
+            run_evict_all_keys_lru(this);
+            run_evict_all_keys_lfu(this);
+            run_evict_volatile_keys_lru(this);
+            run_evict_volatile_keys_lfu(this);
+            run_evict_expired_keys(this);
             // TODO: erase evicted keys if memory is pressured - if its configured
             if (art::get_active_defrag())
                 run_defrag(this); // periodic
+
             // we should wait on a join signal not just sleep else server wont stop quickly
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }

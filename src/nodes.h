@@ -11,6 +11,7 @@
 #include <array>
 #include "compress.h"
 #define unused_arg
+#define unused(x)
 namespace art
 {
     template<typename I>
@@ -37,6 +38,12 @@ namespace art
         max_prefix_llength = 10u,
         max_alloc_children = 8u,
         initial_node = node_4
+    };
+    enum
+    {
+        leaf_ttl_flag = 1,
+        leaf_volatile_flag = 2,
+        leaf_deleted_flag = 4
     };
     struct value_type
     {
@@ -441,22 +448,62 @@ namespace art
     struct leaf {
         typedef uint16_t LeafSize;
         leaf() = delete;
-        leaf(unsigned kl, unsigned vl) :
+        leaf(unsigned kl, unsigned vl, uint64_t ttl, bool is_volatile) :
             key_len(std::min<unsigned>(kl, std::numeric_limits<LeafSize>::max()))
         ,   val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max()))
         {
+            if(ttl > 0) set_ttl();
+            if(is_volatile) set_volatile();
+            set_ttl(ttl);
         }
-        LeafSize key_len; // does not include null terminator (which is hidden: see make_leaf)
-        LeafSize val_len;
+        uint8_t flags {};
+        LeafSize key_len ; // does not include null terminator (which is hidden: see make_leaf)
+        LeafSize val_len ;
+        //uint64_t exp {};
         unsigned char data[];
+        void set_volatile()
+        {
+            flags |= (uint8_t)leaf_volatile_flag;
+        }
+        void set_deleted()
+        {
+            flags |= (uint8_t)leaf_deleted_flag;
+        }
+        void unset_volatile()
+        {
+            flags &= ~(uint8_t)leaf_volatile_flag;
+        }
+        [[nodiscard]] bool is_volatile() const
+        {
+            return (flags & (uint8_t)leaf_volatile_flag) == (uint8_t)leaf_volatile_flag;
+        }
+        [[nodiscard]] bool is_ttl() const
+        {
+            return (flags & (uint8_t)leaf_ttl_flag) == (uint8_t)leaf_ttl_flag;
+        }
+        void set_ttl()
+        {
+            flags |= (uint8_t)leaf_ttl_flag;
+        }
+        void unset_ttl()
+        {
+            flags &= ~(uint8_t)leaf_ttl_flag;
+        }
+
         [[nodiscard]] size_t byte_size() const
         {
-            return key_len + 1 + val_len + sizeof(leaf);
+            return key_len + 1 + val_len + ((is_ttl())? sizeof(uint64_t):0) + sizeof(leaf);
+        }
+        [[nodiscard]] bool expired() const
+        {
+            // TODO: compare ttl to now()
+            return (ttl() != 0);
         }
         [[nodiscard]] bool deleted() const
         {
-            return key_len == 0;
+            return (flags & (uint8_t)leaf_deleted_flag) == (uint8_t)leaf_deleted_flag;
         }
+
         [[nodiscard]] unsigned val_start() const
         {
             return key_len + 1;
@@ -508,6 +555,20 @@ namespace art
             auto l = std::min<unsigned>(len, val_len);
             memcpy(val(), v, l);
         }
+        [[nodiscard]] uint64_t ttl() const
+        {
+            if(!is_ttl()) return 0;
+            uint64_t r = 0;
+            memcpy(&r, val()+val_len, sizeof(uint64_t));
+            return r;
+        }
+
+        bool set_ttl(uint64_t v)
+        {
+            if(!is_ttl()) return false;
+            memcpy(val()+val_len,&v , sizeof(uint64_t));
+            return true;
+        }
 
         void set_value(value_type v)
         {
@@ -543,12 +604,11 @@ namespace art
          * Checks if a leaf matches
          * @return 0 on success.
          */
-        int compare(value_type k, unsigned depth) const
+        [[nodiscard]] int compare(value_type k, unsigned depth) const
         {
             return compare(k.bytes, k.length(), depth);
         }
-        int compare(const unsigned char *key, unsigned key_len, unsigned depth) const {
-            (void)depth;
+        int compare(const unsigned char *key, unsigned key_len, unsigned unused(depth)) const {
             // TODO: compare is broken will fail some edge cases - see heap::buffer::compare for correct impl
             // Fail if the key lengths are different
             if (this->key_len != (uint32_t)key_len) return 1;
@@ -582,7 +642,7 @@ namespace art
      */
 
     void free_node(node_ptr n);
-    node_ptr make_leaf(value_type key, value_type v);
+    node_ptr make_leaf(value_type key, value_type v, uint64_t ttl = 0, bool is_volatile = false);
 
 
     void free_leaf_node(art::node_ptr n);

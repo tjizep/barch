@@ -22,13 +22,13 @@ bool art::has_node_compression()
 
 bool art::init_leaf_compression()
 {
-    leaf_compression = new (heap::allocate<compress>(1)) compress(get_compression_enabled(), get_lru_evict_enabled());
+    leaf_compression = new (heap::allocate<compress>(1)) compress(get_compression_enabled(), get_evict_allkeys_lru()||get_evict_volatile_lru());
     return leaf_compression != nullptr;
 }
 
 bool art::init_node_compression()
 {
-    node_compression = new (heap::allocate<compress>(1))compress(get_compression_enabled(), get_lru_evict_enabled());
+    node_compression = new (heap::allocate<compress>(1))compress(get_compression_enabled(), false);
     return node_compression != nullptr;
 }
 
@@ -56,9 +56,8 @@ compressed_release::~compressed_release()
  * Initializes an ART tree
  * @return 0 on success.
  */
-int art_tree_init(art::tree *t) {
-    t->root = nullptr;
-    t->size = 0;
+int art_tree_init(art::tree *unused(t)) {
+
 
     return 0;
 }
@@ -192,6 +191,8 @@ art::node_ptr art_search(art::trace_list& , const art::tree *t, art::value_type 
         if(n.is_leaf){
 
             const auto * l = n.const_leaf();
+            if (l->expired()) return nullptr;
+
             if (0 == l->compare(key.bytes, key.length(), depth)) {
                 return n;
             }
@@ -342,14 +343,17 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
             art::node_ptr n = last_el(tl).child;
             if(n.is_leaf){
                 const art::leaf * leaf = n.const_leaf();
-                if(leaf->compare(key_end.bytes, key_end.size, 0) < 0) { // upper bound is not
-                    ++statistics::iter_range_ops;
-                    int r = cb(data, leaf->get_key(), leaf->get_value());
-                    if( r != 0) 
-                        return r;
-                } else {
-                    return 0;
-                }
+                if(!leaf->expired())
+                {
+                    if (leaf->compare(key_end.bytes, key_end.length(), 0) < 0) { // upper bound is not
+                        ++statistics::iter_range_ops;
+                        int r = cb(data, leaf->get_key(), leaf->get_value());
+                        if( r != 0)
+                            return r;
+                    } else {
+                        return 0;
+                    }
+                } //skip this one if it's expired
             } else {
                 abort();
             }

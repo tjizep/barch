@@ -354,8 +354,6 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
                 } else {
                     return 0;
                 }
-
-
             } else {
                 abort();
             }
@@ -654,7 +652,8 @@ void art_delete(art::tree *t, art::value_type key, const NodeResult& fc) {
     art::node_ptr l = recursive_delete(t->root, t->root, key, 0);
     if (!l.null()) {
         t->size--;
-        fc(l);
+        if(!l.const_leaf()->expired())
+            fc(l);
         free_node(l);
     }
 }

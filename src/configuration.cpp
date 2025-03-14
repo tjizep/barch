@@ -11,7 +11,7 @@
 static std::mutex config_mutex {};
 static std::string compression_type {};
 static std::string eviction_type {};
-static std::string max_memory_ratio {};
+static std::string max_memory_bytes {};
 static std::string min_fragmentation_ratio {};
 static std::string active_defrag {};
 // Many eviction settings
@@ -25,13 +25,13 @@ static bool evict_volatile_ttl {false};
 
 static ValkeyModuleString *GetMaxMemoryRatio(const char *unused_arg, void *unused_arg) {
     std::unique_lock lock(config_mutex);
-    return  ValkeyModule_CreateString(nullptr, max_memory_ratio.c_str(),max_memory_ratio.length());;
+    return  ValkeyModule_CreateString(nullptr, max_memory_bytes.c_str(),max_memory_bytes.length());;
 }
 
 static int SetMaxMemoryRatio(const char *unused_arg, ValkeyModuleString *val, void *unused_arg, ValkeyModuleString **unused_arg)
 {
     std::unique_lock lock(config_mutex);
-    max_memory_ratio = ValkeyModule_StringPtrLen(val, nullptr);;
+    max_memory_bytes = ValkeyModule_StringPtrLen(val, nullptr);;
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -123,7 +123,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
     int ret = 0;
     ret |= ValkeyModule_RegisterStringConfig(ctx,  "compression","none",   VALKEYMODULE_CONFIG_DEFAULT, GetCompressionType, SetCompressionType,  ApplyCompressionType, NULL);
     ret |= ValkeyModule_RegisterStringConfig(ctx,  "eviction_policy","none",   VALKEYMODULE_CONFIG_DEFAULT, GetEvictionType, SetEvictionType,  NULL, NULL);
-    ret |= ValkeyModule_RegisterStringConfig(ctx,  "max_memory_ratio","0.95",   VALKEYMODULE_CONFIG_DEFAULT, GetMaxMemoryRatio, SetMaxMemoryRatio,  NULL, NULL);
+    ret |= ValkeyModule_RegisterStringConfig(ctx,  "max_memory_bytes","52428800",   VALKEYMODULE_CONFIG_DEFAULT, GetMaxMemoryRatio, SetMaxMemoryRatio,  NULL, NULL);
     ret |= ValkeyModule_RegisterStringConfig(ctx,  "min_fragmentation_ratio","0.5",   VALKEYMODULE_CONFIG_DEFAULT, GetMinFragmentation, SetMinFragmentation,  ApplyMinFragmentation, NULL);
     ret |= ValkeyModule_RegisterStringConfig(ctx,  "active_defrag","off",   VALKEYMODULE_CONFIG_DEFAULT, GetActiveDefragType, SetActiveDefragType,  ApplyActiveDefragType, NULL);
     return ret;
@@ -135,12 +135,12 @@ bool art::get_compression_enabled()
     if (compression_type.empty()) return false;
     return compression_type == "zstd";
 }
-float art::get_module_memory_ratio()
+uint64_t art::get_max_module_memory()
 {
     std::unique_lock lock(config_mutex);
-    if (max_memory_ratio.empty()) return 0.55;
+    if (max_memory_bytes.empty()) return 0.55;
 
-    return std::stof(max_memory_ratio);
+    return std::atoll(max_memory_bytes.c_str());
 
 }
 float art::get_min_fragmentation_ratio()

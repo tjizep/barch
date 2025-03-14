@@ -11,7 +11,7 @@
 namespace art
 {
     bool get_compression_enabled();
-    float get_module_memory_ratio();
+    uint64_t get_max_module_memory();
     float get_min_fragmentation_ratio();
     bool get_active_defrag();
     int register_valkey_configuration(ValkeyModuleCtx* ctx);

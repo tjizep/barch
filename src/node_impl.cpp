@@ -219,7 +219,7 @@ void abstract_eviction(art::tree* t,
     const std::function<bool(const art::leaf* l)>& predicate,
     const std::function<std::pair<heap::buffer<uint8_t>,size_t> ()>& src)
 {
-    if(heap::get_physical_memory_ratio() < art::get_module_memory_ratio()) return;
+    if(heap::allocated < art::get_max_module_memory()) return;
     auto fc = [](const art::node_ptr& unused(n)) -> void{};
     auto page = src();
     write_lock lock(get_lock());
@@ -232,14 +232,14 @@ void abstract_eviction(art::tree* t,
 
 void abstract_lru_eviction(art::tree* t, const std::function<bool(const art::leaf* l)>& predicate)
 {
-    if(heap::get_physical_memory_ratio() < art::get_module_memory_ratio()) return;
+    if (heap::allocated < art::get_max_module_memory()) return;
     auto &lc = art::get_leaf_compression();
     abstract_eviction(t,predicate,[&lc](){return lc.get_lru_page();});
 }
 
 void abstract_lfu_eviction(art::tree* t, const std::function<bool(const art::leaf* l)>& predicate)
 {
-    if(heap::get_physical_memory_ratio() < art::get_module_memory_ratio()) return;
+    if (heap::allocated < art::get_max_module_memory()) return;
     auto &lc = art::get_leaf_compression();
     abstract_eviction(t,predicate,[&lc](){return lc.get_lru_page();});
 }

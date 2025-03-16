@@ -24,6 +24,9 @@ local test = function()
 
     tests = tests + 1
     result[inc()] = {"running test "..tests}
+    result[inc()] = vk.call("ODCONFIG", "SET","max_memory_bytes", "35m")
+    result[inc()] = vk.call("ODCONFIG", "SET","active_defrag", "on")
+    result[inc()] = vk.call("ODCONFIG", "SET","compression", "none")
     result[inc()] = vk.call('ODLB',"abaachcd")
 
     for i = 1, count do

@@ -601,6 +601,26 @@ extern "C" {
         return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)art_evict_lru(t));
     }
 
+    /* CDICT.SET <key> <value>
+     *
+     * Set the specified key to the specified value. */
+    int cmd_CONFIG(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
+    {
+        ValkeyModule_AutoMemory(ctx);
+        compressed_release release;
+        if (argc != 4)
+            return ValkeyModule_WrongArity(ctx);
+        write_lock w(get_lock());
+        size_t slen;
+        const char *s = ValkeyModule_StringPtrLen(argv[1], &slen);
+        if (strncmp("set",s,slen) == 0 || strncmp("SET",s,slen) == 0 )
+        {
+            return art::set_configuration_value(argv[2],argv[3]);
+        }
+        return VALKEYMODULE_ERR;
+    }
+
+
     /* This function must be present on each module. It is used in order to
      * register the commands into the server. */
     int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int)
@@ -652,6 +672,9 @@ extern "C" {
             return VALKEYMODULE_ERR;
 
         if (ValkeyModule_CreateCommand(ctx, "ODEVICT", cmd_EVICT, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, "ODCONFIG", cmd_CONFIG, "write", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
 

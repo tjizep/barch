@@ -13,7 +13,7 @@ template<unsigned N, typename C = unsigned char>
 struct nuchar {
     C data[N];
     nuchar(C c){
-        memset(data, c, sizeof(data));
+        memset(data, c, sizeof(data)); // hopefully this uses simd anyway (if available)
     }
     operator const C* () const {
         return data;

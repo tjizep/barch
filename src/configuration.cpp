@@ -10,6 +10,7 @@
 #include "art.h"
 
 #define unused_arg
+// these values are kept for reflection
 static std::mutex config_mutex{};
 static std::string compression_type{};
 static std::string eviction_type{};

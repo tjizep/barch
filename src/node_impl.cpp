@@ -9,7 +9,7 @@
 
 #include <algorithm>
 
-art::node_ptr art::make_leaf(value_type key, value_type v, uint64_t ttl, bool is_volatile) {
+art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
     unsigned val_len = v.size;
     unsigned key_len = key.length();
     size_t leaf_size = sizeof(leaf) + key_len + (ttl > 0 ? sizeof(ttl):0) + 1 + val_len;
@@ -77,20 +77,20 @@ art::node_ptr art::resolve_read_node(compressed_address address)
 }
 art::node_ptr art::resolve_write_node(compressed_address address)
 {
-    auto* node= art::get_node_compression().modify<art::node_data>(address);
-    art::node_ptr_storage ptr;
+    auto* node= get_node_compression().modify<node_data>(address);
+    node_ptr_storage ptr;
     switch (node->type)
     {
     case art::node_4:
-        return  make_node<art::node4_4,art::node4_8>(ptr, address, node);
+        return  make_node<node4_4,node4_8>(ptr, address, node);
     case art::node_16:
-        return make_node<art::node16_4,art::node16_8>(ptr, address, node);
+        return make_node<node16_4,node16_8>(ptr, address, node);
     case art::node_48:
-        return make_node<art::node48_4,art::node48_8>(ptr, address, node);
+        return make_node<node48_4,node48_8>(ptr, address, node);
     case art::node_256:
-        return make_node<art::node256_4,art::node256_8>(ptr, address, node);
+        return make_node<node256_4,node256_8>(ptr, address, node);
     default:
-        abort();
+        throw std::runtime_error("Unknown node type");
     }
 }
 art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
@@ -109,7 +109,7 @@ art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
     case art::node_256:
         return ptr.emplace<art::node256_4>()->create().expand_pointers(ref, c);
     default:
-        abort();
+        throw std::runtime_error("Unknown node type");
     }
 }
 art::node_ptr art::alloc_8_node_ptr(unsigned nt)
@@ -127,7 +127,7 @@ art::node_ptr art::alloc_8_node_ptr(unsigned nt)
     case art::node_256:
         return ptr.emplace<art::node256_8>();
     default:
-        abort();
+        throw std::runtime_error("Unknown node type");
     }
 }
 
@@ -162,7 +162,7 @@ void page_iterator (const heap::buffer<uint8_t>& page, unsigned size, std::funct
     if(!size) return;
 
     auto e = page.begin() + size;
-
+    size_t deleted = 0;
     for (auto i = page.begin();i != e;)
     {
         const art::leaf *l = (art::leaf*)i;
@@ -170,8 +170,13 @@ void page_iterator (const heap::buffer<uint8_t>& page, unsigned size, std::funct
         {
             abort();
         }
-        if (!l->deleted())
+        if (l->deleted())
+        {
+            deleted++;
+        }else
+        {
             cb(l);
+        }
         i += (l->byte_size() + test_memory);
     }
 }
@@ -186,34 +191,48 @@ void run_defrag(art::tree* t)
     if(!art::has_leaf_compression()) return;
     auto fc = [](const art::node_ptr& unused(n)) -> void{};
     auto &lc = art::get_leaf_compression();
-    if(lc.fragmentation_ratio() > art::get_min_fragmentation_ratio())
+
+
+    try
     {
-        auto fl = lc.create_fragmentation_list();
-        for(auto p : fl)
+        if(lc.fragmentation_ratio() > -1)  //art::get_min_fragmentation_ratio())
         {
+            auto fl = lc.create_fragmentation_list();
+
+            for(auto p : fl)
             {
+                //compressed_release releaser;
                 write_lock lock(get_lock());
-
-
                 auto page = lc.get_page_buffer(p);
 
+                size_t before = t->size;
                 page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
                 {
                     art_delete(t, l->get_key(),fc);
                 });
-
+                //;
                 page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
                 {
                     art_insert(t, l->get_key(), l->get_value(),fc);
                 });
-
+                if (before != t->size)
+                {
+                    abort();
+                }
+                ++statistics::pages_defragged;
+                ++lc.flush_ticker;
+                //if (lc.fragmentation_ratio() < 1.0)
+                //return;
             }
 
-            if (lc.fragmentation_ratio() < 1.0) return;
+
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // chill a little we've worked hard
+    }catch (std::exception& )
+    {
+        ++statistics::exceptions_raised;
     }
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(40)); // chill a little we've worked hard
 }
 void abstract_eviction(art::tree* t,
     const std::function<bool(const art::leaf* l)>& predicate,
@@ -290,7 +309,7 @@ void art::tree::start_maintain()
                 run_defrag(this); // periodic
 
             // we should wait on a join signal not just sleep else server wont stop quickly
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
 }

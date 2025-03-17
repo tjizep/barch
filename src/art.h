@@ -7,7 +7,7 @@
 typedef std::unique_lock< std::shared_mutex >  write_lock;
 typedef std::shared_lock< std::shared_mutex >  read_lock;  // C++ 14
 
-std::shared_mutex& get_lock();
+extern std::shared_mutex& get_lock();
 /**
  * context management
  */
@@ -42,6 +42,8 @@ struct art_statistics
     int64_t leaf_nodes_replaced;
     int64_t pages_evicted;
     int64_t keys_evicted;
+    int64_t pages_defragged;
+    int64_t exceptions_raised;
 };
 
 struct art_ops_statistics
@@ -72,6 +74,8 @@ namespace art
  bool has_node_compression();
  bool init_leaf_compression();
  bool init_node_compression();
+ void destroy_node_compression();
+ void destroy_leaf_compression();
  struct tree
  {
   bool mexit = false;
@@ -79,6 +83,7 @@ namespace art
   art::node_ptr root = nullptr;
   uint64_t size = 0;
   void start_maintain();
+  tree(const tree&) = delete;
   tree(const art::node_ptr& root, uint64_t size) : root(root), size(size)
   {
    start_maintain();

@@ -25,7 +25,24 @@ bool art::init_leaf_compression()
     leaf_compression = new (heap::allocate<compress>(1)) compress(get_compression_enabled(), get_evict_allkeys_lru()||get_evict_volatile_lru());
     return leaf_compression != nullptr;
 }
-
+void art::destroy_node_compression()
+{
+    if (node_compression != nullptr)
+    {
+        node_compression->~compress();
+        heap::free(node_compression);
+        node_compression = nullptr;
+    }
+}
+void art::destroy_leaf_compression()
+{
+    if (leaf_compression != nullptr)
+    {
+        leaf_compression->~compress();
+        heap::free(leaf_compression);
+        leaf_compression = nullptr;
+    }
+}
 bool art::init_node_compression()
 {
     node_compression = new (heap::allocate<compress>(1))compress(get_compression_enabled(), false);
@@ -50,6 +67,7 @@ compressed_release::compressed_release()
 compressed_release::~compressed_release()
 {
     art::get_leaf_compression().release_context();
+
 }
 
 /**
@@ -184,36 +202,42 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list& trace){
  */
 art::node_ptr art_search(art::trace_list& , const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
-    art::node_ptr n = t->root;
-    unsigned depth = 0;
-    while (!n.null()) {
-        // Might be a leaf
-        if(n.is_leaf){
+    try
+    {
+        art::node_ptr n = t->root;
+        unsigned depth = 0;
+        while (!n.null()) {
+            // Might be a leaf
+            if(n.is_leaf){
 
-            const auto * l = n.const_leaf();
-            if (l->expired()) return nullptr;
+                const auto * l = n.const_leaf();
+                if (l->expired()) return nullptr;
 
-            if (0 == l->compare(key.bytes, key.length(), depth)) {
-                return n;
-            }
-            return nullptr;
-        }
-        // Bail if the prefix does not match
-        if (n->data().partial_len) {
-            unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, n->data().partial_len))
-                return nullptr;
-            depth = depth + n->data().partial_len;
-            if (depth >= key.length()){
+                if (0 == l->compare(key)) {
+                    return n;
+                }
                 return nullptr;
             }
+            // Bail if the prefix does not match
+            if (n->data().partial_len) {
+                unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
+                if (prefix_len != std::min<unsigned>(art::max_prefix_llength, n->data().partial_len))
+                    return nullptr;
+                depth = depth + n->data().partial_len;
+                if (depth >= key.length()){
+                    return nullptr;
+                }
+            }
+            //node_ptr p = n;
+            unsigned at = n->index(key[depth]);
+            n = n->get_child(at);
+            //trace_element te = {p,n,at, key[depth]};
+            //trace.push_back(te);
+            depth++;
         }
-        //node_ptr p = n;
-        unsigned at = n->index(key[depth]);
-        n = n->get_child(at);
-        //trace_element te = {p,n,at, key[depth]};
-        //trace.push_back(te);
-        depth++;
+    }catch (std::exception& )
+    {
+        ++statistics::exceptions_raised;
     }
     return nullptr;
 }
@@ -323,43 +347,55 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace){
 
 art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
-    art::node_ptr al;
-    art::trace_list tl;
-    al = inner_lower_bound(tl, t, key);
-    if (!al.null()) {
-        return al;
+    try
+    {
+        art::node_ptr al;
+        art::trace_list tl;
+        al = inner_lower_bound(tl, t, key);
+        if (!al.null()) {
+            return al;
+        }
+    }catch (std::exception& )
+    {
+        ++statistics::exceptions_raised;
     }
     return nullptr;
 }
 
 int art::range(const art::tree *t, art::value_type key, art::value_type key_end, art_callback cb, void *data) {
     ++statistics::range_ops;
-    art::trace_list tl;
-    auto lb = inner_lower_bound(tl, t, key);
-    if(lb.null()) return 0;
-    const art::leaf* al = lb.const_leaf();
-    if (al) {
-        do {
-            art::node_ptr n = last_el(tl).child;
-            if(n.is_leaf){
-                const art::leaf * leaf = n.const_leaf();
-                if (leaf->compare(key_end.bytes, key_end.length(), 0) < 0) { // upper bound is not
-                    if(!leaf->expired())
-                    {
-                        ++statistics::iter_range_ops;
-                        int r = cb(data, leaf->get_key(), leaf->get_value());
-                        if( r != 0)
-                            return r;
-                    } //skip this one if it's expired
+    try
+    {
+        art::trace_list tl;
+        auto lb = inner_lower_bound(tl, t, key);
+        if(lb.null()) return 0;
+        const art::leaf* al = lb.const_leaf();
+        if (al) {
+            do {
+                art::node_ptr n = last_el(tl).child;
+                if(n.is_leaf){
+                    const art::leaf * leaf = n.const_leaf();
+                    if (leaf->compare(key_end) < 0) { // upper bound is not
+                        if(!leaf->expired())
+                        {
+                            ++statistics::iter_range_ops;
+                            int r = cb(data, leaf->get_key(), leaf->get_value());
+                            if( r != 0)
+                                return r;
+                        } //skip this one if it's expired
+                    } else {
+                        return 0;
+                    }
                 } else {
-                    return 0;
+                    abort();
                 }
-            } else {
-                abort();
-            }
-        
-        } while(increment_trace(t->root,tl));
-        
+
+            } while(increment_trace(t->root,tl));
+
+        }
+    }catch (std::exception& )
+    {
+        ++statistics::exceptions_raised;
     }
     return 0;
 }
@@ -368,9 +404,16 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
  */
 art::node_ptr art_minimum(art::tree *t) {
     ++statistics::min_ops;
-    auto l = minimum(t->root);
-    if(l.null()) return nullptr;
-    return l;
+    try
+    {
+        auto l = minimum(t->root);
+        if(l.null()) return nullptr;
+        return l;
+    }catch (std::exception& )
+    {
+        ++statistics::exceptions_raised;
+    }
+    return nullptr;
 }
 
 /**
@@ -378,9 +421,16 @@ art::node_ptr art_minimum(art::tree *t) {
  */
 art::node_ptr art::maximum(art::tree *t) {
     ++statistics::max_ops;
-    auto l = inner_maximum(t->root);
-    if (l.null()) return nullptr;
-    return l;
+    try
+    {
+        auto l = inner_maximum(t->root);
+        if (l.null()) return nullptr;
+        return l;
+    }catch (std::exception& )
+    {
+        ++statistics::exceptions_raised;
+    }
+    return nullptr;
 }
 
 static unsigned longest_common_prefix(const art::leaf *l1, const art::leaf *l2, int depth) {
@@ -428,7 +478,7 @@ static art::node_ptr recursive_insert(art::tree* t, art::node_ptr n, art::node_p
     if (n.is_leaf) {
         const art::leaf *l = n.const_leaf();
         // Check if we are updating an existing value
-        if (l->compare(key, depth) == 0) {
+        if (l->compare(key) == 0) {
 
             *old = 1;
             if (replace)
@@ -539,25 +589,29 @@ RECURSE_SEARCH:;
  * the old value pointer is returned.
  */
 void art_insert(art::tree *t, art::value_type key, art::value_type value, std::function<void(art::node_ptr l)> fc) {
-    
-    int old_val = 0;
-    art::node_ptr old = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 1);
-    if (!old_val){
-        t->size++;
-        ++statistics::insert_ops;
-    } else {
-        ++statistics::set_ops;
-    }
-    if (!old.null())
+    try
     {
-        if(!old.is_leaf)
-        {
-            abort();
+        int old_val = 0;
+        art::node_ptr old = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 1);
+        if (!old_val){
+            t->size++;
+            ++statistics::insert_ops;
+        } else {
+            ++statistics::set_ops;
         }
-        fc(old);
-        free_leaf_node(old);
+        if (!old.null())
+        {
+            if(!old.is_leaf)
+            {
+                abort();
+            }
+            fc(old);
+            free_leaf_node(old);
+        }
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
     }
-
 }
 
 /**
@@ -571,12 +625,18 @@ void art_insert(art::tree *t, art::value_type key, art::value_type value, std::f
  */
 void art_insert_no_replace(art::tree *t, art::value_type key, art::value_type value, const NodeResult& fc) {
     ++statistics::insert_ops;
-    int old_val = 0;
-    art::node_ptr r = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 0);
-    if (r.null()){
-         t->size++;     
+    try
+    {
+        int old_val = 0;
+        art::node_ptr r = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 0);
+        if (r.null()){
+            t->size++;
+        }
+        if (!r.null()) fc(r);
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
     }
-    if (!r.null()) fc(r);
 }
 
 
@@ -649,12 +709,18 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr &ref,
  */
 void art_delete(art::tree *t, art::value_type key, const NodeResult& fc) {
     ++statistics::delete_ops;
-    art::node_ptr l = recursive_delete(t->root, t->root, key, 0);
-    if (!l.null()) {
-        t->size--;
-        if(!l.const_leaf()->expired())
-            fc(l);
-        free_node(l);
+    try
+    {
+        art::node_ptr l = recursive_delete(t->root, t->root, key, 0);
+        if (!l.null()) {
+            t->size--;
+            if(!l.const_leaf()->expired())
+                fc(l);
+            free_node(l);
+        }
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
     }
 }
 
@@ -720,10 +786,17 @@ static int recursive_iter(art::node_ptr n, art_callback cb, void *data) {
  */
 int art_iter(art::tree *t, art_callback cb, void *data) {
     ++statistics::iter_start_ops;
-    if (!t) {
+    try
+    {
+        if (!t) {
+            return -1;
+        }
+        return recursive_iter(t->root, cb, data);
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
         return -1;
     }
-    return recursive_iter(t->root, cb, data);
 }
 
 /**
@@ -752,57 +825,62 @@ static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
  */
 int art_iter_prefix(art::tree *t, art::value_type key, art_callback cb, void *data) {
     ++statistics::iter_start_ops;
-    
-    if (!t) {
-        return -1;
-    }
-    
-    art::node_ptr n = t->root;
-    unsigned prefix_len, depth = 0;
-    while (!n.null()) {
-        // Might be a leaf
-        if (n.is_leaf) {
-            // Check if the expanded path matches
-            if (0 == leaf_prefix_compare(n.const_leaf(), key)) {
-                const auto *l = n.const_leaf();
-                return cb(data, l->get_key(), l->get_value());
-            }
-            return 0;
+    try
+    {
+        if (!t) {
+            return -1;
         }
 
-        // If the depth matches the prefix, we need to handle this node
-        if (depth == key.length()) {
-            const art::leaf *l = minimum(n).const_leaf();
-            if (0 == leaf_prefix_compare(l, key))
-               return recursive_iter(n, cb, data);
-            return 0;
-        }
-
-        // Bail if the prefix does not match
-        if (n->data().partial_len) {
-            prefix_len = prefix_mismatch(n, key, depth);
-
-            // Guard if the mis-match is longer than the max_prefix_llength
-            if (prefix_len > n->data().partial_len) {
-                prefix_len = n->data().partial_len;
-            }
-
-            // If there is no match, search is terminated
-            if (!prefix_len) {
+        art::node_ptr n = t->root;
+        unsigned prefix_len, depth = 0;
+        while (!n.null()) {
+            // Might be a leaf
+            if (n.is_leaf) {
+                // Check if the expanded path matches
+                if (0 == leaf_prefix_compare(n.const_leaf(), key)) {
+                    const auto *l = n.const_leaf();
+                    return cb(data, l->get_key(), l->get_value());
+                }
                 return 0;
-
-            // If we've matched the prefix, iterate on this node
-            } else if (depth + prefix_len == key.length()) {
-                return recursive_iter(n, cb, data);
             }
 
-            // if there is a full match, go deeper
-            depth = depth + n->data().partial_len;
-        }
+            // If the depth matches the prefix, we need to handle this node
+            if (depth == key.length()) {
+                const art::leaf *l = minimum(n).const_leaf();
+                if (0 == leaf_prefix_compare(l, key))
+                    return recursive_iter(n, cb, data);
+                return 0;
+            }
 
-        // Recursively search
-        n = find_child(n, key[depth]);
-        depth++;
+            // Bail if the prefix does not match
+            if (n->data().partial_len) {
+                prefix_len = prefix_mismatch(n, key, depth);
+
+                // Guard if the mis-match is longer than the max_prefix_llength
+                if (prefix_len > n->data().partial_len) {
+                    prefix_len = n->data().partial_len;
+                }
+
+                // If there is no match, search is terminated
+                if (!prefix_len) {
+                    return 0;
+
+                    // If we've matched the prefix, iterate on this node
+                } else if (depth + prefix_len == key.length()) {
+                    return recursive_iter(n, cb, data);
+                }
+
+                // if there is a full match, go deeper
+                depth = depth + n->data().partial_len;
+            }
+
+            // Recursively search
+            n = find_child(n, key[depth]);
+            depth++;
+        }
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
     }
     return 0;
 }
@@ -811,38 +889,51 @@ int art_iter_prefix(art::tree *t, art::value_type key, art_callback cb, void *da
  */
 uint64_t art_size(art::tree *t) {
     ++statistics::size_ops;
+    try
+    {
+        if(t == nullptr)
+            return 0;
 
-    if(t == nullptr)
-        return 0;
-    
-    return t->size;
+        return t->size;
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
+    }
+    return 0;
 }
 uint64_t art_evict_lru(art::tree *t)
 {
-    auto page = art::get_leaf_compression().get_lru_page();
-    if (!page.second) return 0;
-    auto i = page.first.begin();
-    auto e = i + page.second;
-    auto fc = [](art::node_ptr) -> void
+    try
     {
-        ++statistics::keys_evicted;
-    };
-    while (i != e)
-    {
-        const art::leaf *l = (art::leaf*)i;
-        if (l->key_len > page.first.byte_size())
+        auto page = art::get_leaf_compression().get_lru_page();
+        if (!page.second) return 0;
+        auto i = page.first.begin();
+        auto e = i + page.second;
+        auto fc = [](art::node_ptr) -> void
         {
-            abort();
+            ++statistics::keys_evicted;
+        };
+        while (i != e)
+        {
+            const art::leaf *l = (art::leaf*)i;
+            if (l->key_len > page.first.byte_size())
+            {
+                abort();
+            }
+            if (l->deleted())
+            {   i += (l->byte_size() + test_memory);
+                continue;
+            }
+            art_delete(t, l->get_key(),fc);
+            i += (l->byte_size() + test_memory);
         }
-        if (l->deleted())
-        {   i += (l->byte_size() + test_memory);
-            continue;
-        }
-        art_delete(t, l->get_key(),fc);
-        i += (l->byte_size() + test_memory);
+        ++statistics::pages_evicted;
+        return page.first.byte_size();
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
     }
-    ++statistics::pages_evicted;
-    return page.first.byte_size();
+    return 0;
 }
 art_statistics art_get_statistics(){
     art_statistics as{};
@@ -865,6 +956,8 @@ art_statistics art_get_statistics(){
     as.leaf_nodes_replaced = (int64_t)statistics::leaf_nodes_replaced;
     as.pages_evicted = (int64_t)statistics::pages_evicted;
     as.keys_evicted = (int64_t)statistics::keys_evicted;
+    as.pages_defragged = (int64_t)statistics::pages_defragged;
+    as.exceptions_raised = (int64_t)statistics::exceptions_raised;
     return as;
 }
 

@@ -25,11 +25,11 @@ extern "C"
 #include <functional>
 
 
-static ValkeyModuleDict *Keyspace;
+static ValkeyModuleDict *Keyspace{};
+static std::shared_mutex shared{};
 
 std::shared_mutex& get_lock()
 {
-    static std::shared_mutex shared;
     return shared;
 }
 
@@ -151,8 +151,9 @@ extern "C" {
     int cmd_KEYRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
         ValkeyModule_AutoMemory(ctx);
-        read_lock rl(get_lock());
         compressed_release release;
+
+        read_lock rl(get_lock());
         if (argc != 4)
             return ValkeyModule_WrongArity(ctx);
 
@@ -188,7 +189,7 @@ extern "C" {
             
         };
 
-        art::range(get_art(), {c1.get_data(), c1.get_size()}, {c2.get_data(), c2.get_size()}, iter, &is);
+        art::range(get_art(), c1.get_value(), c2.get_value(), iter, &is);
 
 
         ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
@@ -268,7 +269,6 @@ extern "C" {
         trace.reserve(klen);
         read_lock rl(get_lock());
         art::node_ptr r = art_search(trace, get_art(), converted.get_value());
-
         if (r.null())
         {
             return ValkeyModule_ReplyWithNull(ctx);
@@ -287,8 +287,8 @@ extern "C" {
      * is not defined. */
     int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {   ValkeyModule_AutoMemory(ctx);
-        read_lock rl(get_lock());
         compressed_release release;
+        read_lock rl(get_lock());
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
@@ -305,12 +305,12 @@ extern "C" {
             return reply_encoded_key(ctx, found);
         }
     }
+
     int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int )
     {
 
         auto t = std::chrono::high_resolution_clock::now();
-        auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - startTime);
-
+        const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - startTime);
         return ValkeyModule_ReplyWithLongLong(ctx,d.count());
 
     }
@@ -322,8 +322,8 @@ extern "C" {
     int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
         ValkeyModule_AutoMemory(ctx);
-        read_lock rl(get_lock());
         compressed_release release;
+        read_lock rl(get_lock());
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
@@ -415,8 +415,9 @@ extern "C" {
      */
     int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
-        read_lock rl(get_lock());
         compressed_release release;
+        read_lock rl(get_lock());
+
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
         auto size = (int64_t)art_size(get_art());
@@ -511,6 +512,14 @@ extern "C" {
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "keys_evicted");
         ValkeyModule_ReplyWithLongLong(ctx,as.keys_evicted);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "pages_defragged");
+        ValkeyModule_ReplyWithLongLong(ctx,as.pages_defragged);
+        ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        ValkeyModule_ReplyWithSimpleString(ctx, "exceptions_raised");
+        ValkeyModule_ReplyWithLongLong(ctx,as.exceptions_raised);
         ValkeyModule_ReplySetArrayLength(ctx, 2);++row_count;
         ValkeyModule_ReplySetArrayLength(ctx, row_count);
         return 0;
@@ -705,6 +714,8 @@ extern "C" {
 
     int ValkeyModule_OnUnload(void *unused_arg)
     {
+        art::destroy_leaf_compression();
+        art::destroy_node_compression();
         return VALKEYMODULE_OK;
     }
 }

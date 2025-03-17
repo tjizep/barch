@@ -38,6 +38,7 @@ void* heap::allocate(size_t size){
     auto* r = ValkeyModule_Calloc(1, size + padding + check_size);
     if(r)
     {
+        memset(r, 0, size + padding + check_size);
         if (heap_checks)
         {
             uint32_t ax32 = get_ptr_val(r);

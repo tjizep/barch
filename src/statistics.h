@@ -19,6 +19,8 @@ namespace statistics {
     extern std::atomic<uint64_t> pages_compressed;
     extern std::atomic<uint64_t> pages_evicted;
     extern std::atomic<uint64_t> keys_evicted;
+    extern std::atomic<uint64_t> pages_defragged;
+    extern std::atomic<uint64_t> exceptions_raised;
     /**
     * internal stats
     */

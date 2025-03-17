@@ -70,7 +70,7 @@ namespace art
             {
                 return bytes[i];
             }
-            abort();
+            throw std::out_of_range("index out of range");
         }
 
     };
@@ -246,7 +246,7 @@ namespace art
             if (!is_leaf)
                 abort();
             check();
-            const auto * l = resolver->read<const leaf>(logical);
+            const auto * l = resolver->modify<leaf>(logical);
             if(l == nullptr)
             {
                 abort();
@@ -316,30 +316,25 @@ namespace art
             template<typename T>
             const T* refresh_cache() const // read-only refresh
             {
+
                 if(!dcache || last_ticker != compress::flush_ticker)
                 {
-                    if (mcache)
-                    {
-                        dcache = mcache;
-                    } else
-                    {
-                        dcache = get_node_compression().read<T>(address);
-                    }
+                    //dcache = get_node_compression().modify<T>(address);
 
                 }
-                return (T*)dcache;
+                return (T*)get_node_compression().modify<T>(address);
             }
             template<typename T>
             T* refresh_cache()
             {
-                if(!mcache || last_ticker != compress::flush_ticker)
+                if(!dcache || last_ticker != compress::flush_ticker)
                 {
-                    mcache = get_node_compression().modify<T>(address);
+                    //dcache = get_node_compression().modify<T>(address);
                 }
-                return (T*)mcache;
+                return (T*)get_node_compression().modify<T>(address);//dcache;
             }
             mutable node_data *dcache= nullptr;
-            mutable node_data *mcache= nullptr;
+            //mutable node_data *mcache= nullptr;
             mutable uint32_t last_ticker = compress::flush_ticker;
             compressed_address address{};
             node_proxy(const node_proxy&) = default;
@@ -353,11 +348,11 @@ namespace art
                     abort();
                 }
                 this->address = address;
-                dcache = get_node_compression().read<T>(address);
-                if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
-                {
-                    abort();
-                }
+                //dcache = get_node_compression().modify<T>(address);
+                //if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
+                //{
+                //    abort();
+                //}
             }
             template<typename IntPtrType, uint8_t NodeType>
             void set_lazy(compressed_address address, node_data* data)
@@ -371,8 +366,8 @@ namespace art
                     abort();
                 }
                 this->address = address;
-                dcache = data; // it will get loaded as required
-                mcache = data;
+                //dcache = data; // it will get loaded as required
+                //mcache = data;
 
             }
         };
@@ -447,6 +442,7 @@ namespace art
      */
     struct leaf {
         typedef uint16_t LeafSize;
+        typedef long ExpiryType;
         leaf() = delete;
         leaf(unsigned kl, unsigned vl, uint64_t ttl, bool is_volatile) :
             key_len(std::min<unsigned>(kl, std::numeric_limits<LeafSize>::max()))
@@ -496,8 +492,10 @@ namespace art
         }
         [[nodiscard]] bool expired() const
         {
-            // TODO: compare ttl to now()
-            return (ttl() != 0);
+            long expiry = ttl();
+            if(!expiry) return false;
+            auto n = std::chrono::steady_clock::now().time_since_epoch().count();
+            return n > expiry;
         }
         [[nodiscard]] bool deleted() const
         {
@@ -555,18 +553,18 @@ namespace art
             auto l = std::min<unsigned>(len, val_len);
             memcpy(val(), v, l);
         }
-        [[nodiscard]] uint64_t ttl() const
+        [[nodiscard]] ExpiryType ttl() const
         {
             if(!is_ttl()) return 0;
-            uint64_t r = 0;
-            memcpy(&r, val()+val_len, sizeof(uint64_t));
+            ExpiryType r = 0;
+            memcpy(&r, val()+val_len, sizeof(ExpiryType));
             return r;
         }
 
-        bool set_ttl(uint64_t v)
+        bool set_ttl(ExpiryType v)
         {
             if(!is_ttl()) return false;
-            memcpy(val()+val_len,&v , sizeof(uint64_t));
+            memcpy(val()+val_len,&v , sizeof(ExpiryType));
             return true;
         }
 
@@ -604,14 +602,14 @@ namespace art
          * Checks if a leaf matches
          * @return 0 on success.
          */
-        [[nodiscard]] int compare(value_type k, unsigned depth) const
+        [[nodiscard]] int compare(value_type k) const
         {
-            return compare(k.bytes, k.length(), depth);
+            return compare(k.bytes, k.length(), 0);
         }
         int compare(const unsigned char *key, unsigned key_len, unsigned unused(depth)) const {
             // TODO: compare is broken will fail some edge cases - see heap::buffer::compare for correct impl
             // Fail if the key lengths are different
-            if (this->key_len != (uint32_t)key_len) return 1;
+            if (this->key_len != (LeafSize)key_len) return 1;
 
             // Compare the keys starting at the depth
             return memcmp(this->data, key, key_len);
@@ -642,7 +640,7 @@ namespace art
      */
 
     void free_node(node_ptr n);
-    node_ptr make_leaf(value_type key, value_type v, uint64_t ttl = 0, bool is_volatile = false);
+    node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
 
 
     void free_leaf_node(art::node_ptr n);

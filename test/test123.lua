@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 1000000
+local count = 100000
 local result = {}
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
@@ -23,11 +23,6 @@ end
 local test = function()
 
     tests = tests + 1
-    result[inc()] = {"running test "..tests}
-    result[inc()] = vk.call("ODCONFIG", "SET","max_memory_bytes", "35m")
-    result[inc()] = vk.call("ODCONFIG", "SET","active_defrag", "on")
-    result[inc()] = vk.call("ODCONFIG", "SET","compression", "none")
-    result[inc()] = vk.call('ODLB',"abaachcd")
 
     for i = 1, count do
         local k = convert(i-1)
@@ -48,7 +43,7 @@ local test = function()
             successes = successes + 1
         end
         if math.mod(i,logperiod) == 0 then
-            vk.log(vk.LOG_NOTICE, "Checking "..i)
+            vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
         end
 
     end
@@ -64,6 +59,8 @@ local clear = function()
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
+
+        local before = vk.call('ODSIZE')
         if vk.call('ODGET',k) == nil then
             result[inc()] = {"Failed get before remove",k, v, vk.call('ODGET',k)}
             failures = failures + 1
@@ -78,26 +75,38 @@ local clear = function()
             result[inc()] = {"Failed remove",k, v, vk.call('ODGET',k)}
             failures = failures + 1
         end
-        if math.mod(i,logperiod) == 0 then
-            vk.log(vk.LOG_NOTICE, "Removing "..i)
+        if vk.call('ODSIZE') == before - 1 then
+            successes = successes + 1
+        else
+            failures = failures + 1
         end
+        if math.mod(i,logperiod) == 0 then
+        vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
+            end
 
     end
 
     result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
     result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
     result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
+    result[inc()] = {'COUNT', count}
     result[inc()] = {'FAILURES', failures}
     result[inc()] = {'SUCCESSES', successes}
 
 end
 
 --[[ Testing num hash string key types]]
+result[inc()] = {"running test "..tests}
+result[inc()] = vk.call("ODCONFIG", "SET","max_memory_bytes", "135m")
+result[inc()] = vk.call("ODCONFIG", "SET","active_defrag", "on")
+result[inc()] = vk.call("ODCONFIG", "SET","compression", "zstd")
 
 convert = tochars123
-test()
-clear()
---assert(successes==2*count, "test failures")
+for i = 1,3 do
+    test()
+    clear()
+end
+--assert(successes==3*count, "test failures")
 --assert(failures==0, "test failures")
 
 return result

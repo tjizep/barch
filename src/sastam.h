@@ -48,7 +48,7 @@ namespace heap {
     };
 
     template <class T>
-    T* heap::allocator<T>::allocate(const size_t n) const
+    T* allocator<T>::allocate(const size_t n) const
     {
         if (n == 0)
         {

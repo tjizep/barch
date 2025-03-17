@@ -243,7 +243,7 @@ namespace art {
             encoded_data* r = get_node_compression().modify<encoded_data>(address);
             r->type = node_type;
             r->pointer_size = sizeof(IntPtrType);
-            mcache = r;
+            //dcache = r;
             statistics::addressable_bytes_alloc += sizeof(encoded_data);
             statistics::interior_bytes_alloc += sizeof(encoded_data);
             switch (node_type)

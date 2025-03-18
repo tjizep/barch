@@ -1,0 +1,25 @@
+name: Ubuntu 24.04 CI (GCC 13)
+
+on: [push, pull_request]
+
+jobs:
+  ubuntu-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use cmake
+        run: |
+          set -xe
+          cmake -B build \
+             -DTEST_OD=ON \
+             -DCMAKE_CXX_FLAGS=' -Werror -Wall -Wextra -Weffc++ '
+          cmake --build build --parallel
+          ( cd build ; ctest --output-on-failure )
+      - name: Use cmake CXX23
+        run: |
+          set -xe
+          cmake -B build20 \
+             -DTEST_OD=ON \
+             -DCMAKE_CXX_FLAGS=' -Werror -Wall -Wextra -Weffc++ '
+          cmake --build build20 --parallel
+          ( cd build20 ; ctest --output-on-failure )

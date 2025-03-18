@@ -1,0 +1,69 @@
+language: cpp
+
+dist: bionic
+
+cache:
+  directories:
+    - $HOME/.dep_cache
+
+env:
+  global:
+    - az_DEPENDENCY_CACHE_DIR=$HOME/.dep_cache
+
+services:
+  - docker
+
+matrix:
+  include:
+    - arch: amd64
+      os: linux
+
+    - arch: amd64
+      os: linux
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-10
+      env:
+        - COMPILER="CC=gcc-10 && CXX=g++-10"
+      compiler: gcc-10
+
+    - arch: amd64
+      os: linux
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-10
+      env:
+        - COMPILER="CC=gcc-10 && CXX=g++-10"
+        - SANITIZE="on"
+      compiler: gcc-10-sanitize
+
+before_install:
+  - eval "${COMPILER}"
+  - |
+    if [ "$TOOLCHAIN" != "" ] ; then
+      docker pull ahuszagh/cross:"$TOOLCHAIN"
+    fi
+
+install:
+  - |    
+  - echo ${PATH}
+  - which cmake
+  - cmake --version
+  - which ${CC}
+  - ${CC} --version
+  - which ${CXX}
+  - ${CXX} --version
+
+script:
+  - |
+    if [ "$TOOLCHAIN" != "" ] ; then
+      docker run -v "$(pwd)":/ff ahuszagh/cross:"$TOOLCHAIN" /bin/bash -c "cd ff && ci/script.sh $TOOLCHAIN"
+    else
+      ci/script.sh
+    fi

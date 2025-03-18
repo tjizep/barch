@@ -246,7 +246,7 @@ namespace art
             if (!is_leaf)
                 abort();
             check();
-            const auto * l = resolver->modify<leaf>(logical);
+            const auto * l = resolver->read<leaf>(logical);
             if(l == nullptr)
             {
                 abort();
@@ -319,19 +319,19 @@ namespace art
 
                 if(!dcache || last_ticker != compress::flush_ticker)
                 {
-                    //dcache = get_node_compression().modify<T>(address);
+                    dcache = get_node_compression().modify<T>(address);
 
                 }
-                return (T*)get_node_compression().modify<T>(address);
+                return (T*)dcache;
             }
             template<typename T>
             T* refresh_cache()
             {
-                if(!dcache || last_ticker != compress::flush_ticker)
+                if(last_ticker != compress::flush_ticker)
                 {
-                    //dcache = get_node_compression().modify<T>(address);
+                    dcache = get_node_compression().modify<T>(address);
                 }
-                return (T*)get_node_compression().modify<T>(address);//dcache;
+                return (T*)dcache;
             }
             mutable node_data *dcache= nullptr;
             //mutable node_data *mcache= nullptr;
@@ -348,11 +348,11 @@ namespace art
                     abort();
                 }
                 this->address = address;
-                //dcache = get_node_compression().modify<T>(address);
-                //if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
-                //{
-                //    abort();
-                //}
+                dcache = get_node_compression().modify<T>(address);
+                if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
+                {
+                    abort();
+                }
             }
             template<typename IntPtrType, uint8_t NodeType>
             void set_lazy(compressed_address address, node_data* data)
@@ -366,7 +366,7 @@ namespace art
                     abort();
                 }
                 this->address = address;
-                //dcache = data; // it will get loaded as required
+                dcache = data; // it will get loaded as required
                 //mcache = data;
 
             }

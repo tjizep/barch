@@ -61,11 +61,10 @@ int main(int argc, char *argv[]) {
         }
     };
     std::thread t(run_server);
-
-    cout << "waiting to start valkey...";
     std::string test_cmd = valkey_cli + " -e --eval ../" + luatest;
     std::cout << test_cmd << std::endl;
 
+    cout << "waiting to start valkey...";
     if (wait_to_start() !=0) return -1;
     int r = 0;
     if(std::system(test_cmd.c_str()) != 0)

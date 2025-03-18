@@ -203,12 +203,18 @@ void run_defrag(art::tree* t)
             {
                 //compressed_release releaser;
                 write_lock lock(get_lock());
+
                 auto page = lc.get_page_buffer(p);
 
                 size_t before = t->size;
                 page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
                 {
+                    size_t c1 = t->size;
                     art_delete(t, l->get_key(),fc);
+                    if (c1-1 != t->size)
+                    {
+                        abort();
+                    }
                 });
                 //;
                 page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)

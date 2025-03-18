@@ -629,7 +629,199 @@ struct free_list
 
 };
 
-struct compress
+struct vector_arena
+{
+private:
+    std::vector<storage> hidden_arena{};
+    std::unordered_set<size_t> freed_pages{};
+public:
+    // arena virtualization functions
+    void expand_address_space()
+    {
+        hidden_arena.emplace_back();
+    }
+    [[nodiscard]] size_t page_count() const
+    {
+        return hidden_arena.size();
+    }
+    [[nodiscard]] size_t max_logical_address() const
+    {
+        if (hidden_arena.empty()) return 0;
+        return hidden_arena.size() - 1;
+    }
+    void free_page(size_t at)
+    {
+        if (freed_pages.count(at))
+        {
+            throw std::runtime_error("page already free");
+        };
+        freed_pages.insert(at);
+    }
+    bool is_free(size_t at) const
+    {
+        return freed_pages.count(at) > 0;
+    }
+    bool has_free() const
+    {
+        return !freed_pages.empty();
+    }
+    size_t emancipate()
+    {
+        if(!has_free())
+        {
+            throw std::runtime_error("no free pages available");
+        }
+        size_t to = *freed_pages.begin();
+        recover_free(to);
+        return to;
+    }
+    void recover_free(size_t at)
+    {
+        if(!is_free(at))
+        {
+            throw std::runtime_error("page not free");
+        }
+        if (at <= max_logical_address())
+        {
+            throw std::runtime_error("invalid address");
+        }
+        freed_pages.erase(at);
+    }
+    storage& retrieve_page(size_t at)
+    {
+        if (at >= hidden_arena.size())
+        {
+            throw std::runtime_error("invalid page");
+        }
+        return hidden_arena.at(at);
+    }
+    [[nodiscard]] const storage& retrieve_page(size_t at) const
+    {
+        if (at >= hidden_arena.size())
+        {
+            throw std::runtime_error("invalid page");
+        }
+        return hidden_arena.at(at);
+    }
+};
+
+struct hash_arena
+{
+private:
+    std::unordered_map<size_t,storage> hidden_arena{};
+    size_t top = 0;
+    size_t free_pages = 0;
+public:
+    hash_arena() = default;
+    // arena virtualization functions
+    void expand_address_space()
+    {
+        if (hidden_arena.empty() && top == 0)
+        {
+            hidden_arena[top] = storage{};
+        }else
+        {
+            hidden_arena[++top] = storage{};
+        }
+    }
+
+    size_t page_count() const
+    {
+        return hidden_arena.size();
+    }
+    size_t max_logical_address() const
+    {
+        return top;
+    }
+    void free_page(size_t at)
+    {
+        if (hidden_arena.empty())
+        {
+            throw std::runtime_error("no pages left to free");
+        }
+        auto pi = hidden_arena.find(at);
+        if (pi == hidden_arena.end())
+        {
+            throw std::runtime_error("page already free");
+        }
+        hidden_arena.erase(pi);
+        ++free_pages;
+    }
+    bool is_free(size_t at) const
+    {
+        return hidden_arena.count(at) == 0;
+    }
+
+    bool has_free() const
+    {
+        return free_pages > 1;
+    }
+    size_t emancipate()
+    {
+        if(!has_free())
+        {
+            throw std::runtime_error("no free pages available");
+        }
+        for(size_t to = 1; to < top; ++to)
+        {
+            if (is_free(to))
+            {
+                recover_free(to);
+                return to;
+            }
+        }
+        throw std::runtime_error("no free pages found");
+    }
+    void recover_free(size_t at)
+    {
+        if(!is_free(at))
+        {
+            throw std::runtime_error("page not free");
+        }
+        if (at > max_logical_address())
+        {
+            throw std::runtime_error("invalid address");
+        }
+        if (!has_free())
+        {
+            throw std::runtime_error("no free pages available");
+        }
+        hidden_arena[at] = storage{};
+        --free_pages;
+    }
+    bool has_page(size_t at) const
+    {
+        return hidden_arena.count(at) != 0;
+    }
+
+    storage& retrieve_page(size_t at)
+    {
+        if (at > top)
+        {
+            throw std::runtime_error("invalid page");
+        }
+        auto pi = hidden_arena.find(at);
+        if (pi==hidden_arena.end())
+        {
+            throw std::runtime_error("missing page");
+        }
+        return pi->second;
+    }
+    const storage& retrieve_page(size_t at) const
+    {
+        if (at > top)
+        {
+            throw std::runtime_error("missing page");
+        }
+        auto pi = hidden_arena.find(at);
+        if (pi==hidden_arena.end())
+        {
+            throw std::runtime_error("invalid page");
+        }
+        return pi->second;    }
+};
+
+struct compress : hash_arena
 {
     enum
     {
@@ -670,8 +862,6 @@ private:
     static std::mutex mutex;
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
-    std::vector<storage> arena{};
-    std::vector<size_t> free_pages{};
     heap::vector<size_t> decompressed_pages{};
     size_t last_page_allocated{0};
     compressed_address arena_head{0};
@@ -684,7 +874,7 @@ private:
     uint64_t ticker = 1;
     uint64_t allocated = 0;
     size_t fragmentation = 0;
-    std::unordered_set<size_t> freed_pages{};
+
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -846,8 +1036,7 @@ private:
 
     [[nodiscard]] size_t last_block() const
     {
-        if (arena.empty()) return 0;
-        return arena.size() - 1;
+        return max_logical_address();
     }
     void add_to_lru(size_t at, storage& page)
     {
@@ -878,7 +1067,7 @@ private:
     }
     std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ps = page_size)
     {
-        auto &page = arena.at(at);
+        auto &page = retrieve_page(at);
         add_to_lru(at, page);
         page.decompressed = std::move(heap::buffer<uint8_t>(ps));
         statistics::page_bytes_uncompressed += page.decompressed.byte_size();
@@ -887,43 +1076,43 @@ private:
         decompressed_pages.push_back(at);
         return {at,page};
     }
+    std::pair<size_t, storage&>  expand_over_null_base(size_t ps = page_size)
+    {
+        expand_address_space();
+        if (is_null_base(max_logical_address()))
+        {
+            retrieve_page(max_logical_address()).write_position = page_size;
+            highest_reserve_address = {last_block(),0};
+            expand_address_space();
+        }
+        last_page_allocated = max_logical_address();
+        return allocate_page_at(max_logical_address(),ps);
+    }
     std::pair<size_t, storage&> create_if_required(size_t size)
     {
 
-        if (is_null_base(arena.size()))
+        if(max_logical_address() == 0)
         {
-            arena.emplace_back();
-            arena.back().write_position = page_size;
-            highest_reserve_address = {last_block(),0};
+            return expand_over_null_base();
+
         }
 
         if (size > page_size)
         {
-            arena.emplace_back();
-            return allocate_page_at(arena.size() - 1, size);
+            return expand_over_null_base(size);
         }
-        if (freed_pages.count(last_page_allocated))
+        if (is_free(last_page_allocated))
         {
-            freed_pages.erase(last_page_allocated);
+            recover_free(last_page_allocated);
             return allocate_page_at(last_page_allocated);
         }
-        if (!freed_pages.empty())
+
+        auto& last = retrieve_page(last_page_allocated);
+        if (last.empty())
         {
-            //freed_pages.clear();
-
-            auto fp = *freed_pages.begin();
-            if (!arena.at(fp).empty())
-            {
-                abort();
-            }
-            freed_pages.erase(fp);
-
-            return allocate_page_at(fp);
-#if 0
-#endif
+            abort();
         }
-        auto& last = arena.at(last_page_allocated);
-        if (last.write_position + size >= page_size || last.empty())
+        if (last.write_position + size >= page_size)
         {
             if (!dict && !last.decompressed.empty())
             {
@@ -934,16 +1123,18 @@ private:
                 // if (last.modifications > 0)
                    // to schedule a buffer release/compress
             }
+            if (has_free())
+            {
 
+                //auto at = emancipate();
+                //last_page_allocated = at;
+                //return allocate_page_at(at);
+            }
 
-            arena.emplace_back();
-            return allocate_page_at(arena.size() - 1);
+            return expand_over_null_base();
         }
 
-        if (last.empty())
-        {
-            abort();
-        }
+
         return {last_page_allocated, last};
     }
 
@@ -954,7 +1145,7 @@ private:
         size_t r = 0;
         heap::buffer<uint8_t> torelease;
 
-        auto& t = arena[at];
+        auto& t = retrieve_page(at);
 
         if (t.modifications && !t.compressed.empty())
         {
@@ -998,7 +1189,7 @@ private:
         if (at.null()) return nullptr;
         invalid(at);
         auto p = at.page();
-        auto& t = arena.at(p);
+        auto& t = retrieve_page(p);
         if (t.decompressed.empty() && !t.compressed.empty())
         {
             std::pair<size_t, storage&> dec = {p,t};
@@ -1035,15 +1226,15 @@ private:
     {
         if (at == 0) return ;
         auto pg = at.page();
-        if (pg >= arena.size())
+        if (pg > max_logical_address())
         {
             throw std::runtime_error("invalid page");
         }
-        if (freed_pages.count(pg))
+        if (is_free(pg))
         {
             throw std::runtime_error("deleted page");
         }
-        const auto& t = arena.at(at.page());
+        const auto& t = retrieve_page(at.page());
         if (t.size == 0)
         {
             throw std::runtime_error("invalid page size");
@@ -1060,7 +1251,7 @@ private:
     {
         std::atomic<size_t> r = 0;
         std::thread workers[auto_vac_workers];
-        size_t arena_size = arena.size();
+        size_t arena_size = max_logical_address();
         ++flush_ticker;
         for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
         {
@@ -1096,7 +1287,8 @@ private:
     std::pair<heap::buffer<uint8_t>,size_t> get_page_buffer_inner(size_t at)
     {
         if(is_null_base(at)) return {};
-        auto& t = arena.at(at);
+        if(!has_page(at)) return {};
+        auto& t = retrieve_page(at);
         if (t.empty()) return {};
         valid({at,0});
         std::pair<size_t, storage&> dec = {at,t};
@@ -1116,6 +1308,7 @@ private:
         return {t.decompressed,t.write_position};
 
     }
+
 public:
     void set_opt_enable_compression(bool opt_compression)
     {
@@ -1141,7 +1334,7 @@ public:
         }
         if (test_memory == 1)
             d1[sz] = 0;
-        auto& t = arena.at(at.page());
+        auto& t = retrieve_page(at.page());
         if (t.size == 0)
         {
             abort();
@@ -1151,7 +1344,7 @@ public:
         if (t.size == 1)
         {
             auto tp = at.page();
-            if (freed_pages.count(tp))
+            if (is_free(tp))
             {
                 abort();
             }
@@ -1186,13 +1379,8 @@ public:
                 lru.erase(t.lru);
             t.clear();
             //emancipated.erase(at.page());
-            freed_pages.insert(at.page());
+            free_page(at.page());
             //free_pages.push_back(at.page());
-
-            if (free_pages.size() > arena.size())
-            {
-                abort();
-            }
 
             if (fragmentation < t.fragmentation)
             {
@@ -1220,15 +1408,16 @@ public:
     // TODO: this function may cause to much latency when the arena is large
     // maybe just dont iterate through everything - it doesnt need to get
     // every page
-    heap::vector<size_t> create_fragmentation_list() const
+    std::vector<size_t> create_fragmentation_list() const
     {
-        heap::vector<size_t> fragmentation;
+        std::vector<size_t> fragmentation;
         std::lock_guard guard(mutex);
         std::vector<const storage*> replay;
-        for (size_t p = 1; p < arena.size();++p)
+        for (size_t p = 1; p < max_logical_address();++p)
         {
             if(is_null_base(p)) continue;
-            auto& t = arena.at(p);
+            if(is_free(p)) continue;
+            auto& t = retrieve_page(p);
 
             if (t.fragmentation > t.write_position)
             {
@@ -1243,7 +1432,7 @@ public:
             if (fragmentation.size() > 15)
                 return fragmentation;
         }
-
+#if 0
         auto compare = [&](const storage* a, const storage* b) -> bool
         {
             return a->fragmentation >= b->fragmentation;
@@ -1254,6 +1443,7 @@ public:
             size_t p = pt - &*arena.begin();
             fragmentation.push_back(p);
         }
+#endif
         return fragmentation;
     }
     lru_list create_lru_list()
@@ -1303,8 +1493,8 @@ public:
         size_t size = sz + test_memory + allocation_padding;
         std::lock_guard guard(mutex);
         compressed_address r = emancipated.get(size);
-        if(!r.null() && r.page() < arena.size() && !arena[r.page()].empty())
-        {   auto& pcheck = arena[r.page()];
+        if(!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty())
+        {   auto& pcheck = retrieve_page(r.page());
 
             PageSizeType w = r.offset();
             if (w + size > pcheck.write_position)
@@ -1421,7 +1611,7 @@ public:
                 abort();
             }
             auto start_vac = std::chrono::high_resolution_clock::now();
-            result = inner_vacuum(full ? arena.size() : arena.size()/2);
+            result = inner_vacuum(full ? max_logical_address() : max_logical_address()/2);
             auto end_vac = std::chrono::high_resolution_clock::now();
             auto dvac = std::chrono::duration_cast<std::chrono::milliseconds>(end_vac - start_vac);
             statistics::last_vacuum_time = dvac.count();

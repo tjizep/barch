@@ -70,9 +70,6 @@ endif ()
 if (NOT TEST_OD)
     message("Testing not enabled tests not generated :Use -DTEST_OD=ON")
 else()
-    add_test(NAME TestIntegers
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testintegers.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
 
     add_test(NAME TestIntegers
             COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testintegers.lua

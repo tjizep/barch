@@ -186,7 +186,7 @@ void page_iterator (const heap::buffer<uint8_t>& page, unsigned size, std::funct
  * then adds them back again
  * this function isn't supposed to run a lot
  */
-void run_defrag(art::tree* t)
+void art::tree::run_defrag()
 {
     if(!art::has_leaf_compression()) return;
     auto fc = [](const art::node_ptr& unused(n)) -> void{};
@@ -206,21 +206,21 @@ void run_defrag(art::tree* t)
                 write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);
 
-                page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
+                page_iterator(page.first, page.second,[&fc,this](const art::leaf* l)
                 {
-                    size_t c1 = t->size;
-                    art_delete(t, l->get_key(),fc);
-                    if (c1-1 != t->size)
+                    size_t c1 = this->size;
+                    art_delete(this, l->get_key(),fc);
+                    if (c1-1 != this->size)
                     {
                         abort();
                     }
                 });
 
-                page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
+                page_iterator(page.first, page.second,[&fc,this](const art::leaf* l)
                 {
-                    size_t c1 = t->size;
-                    art_insert(t, l->get_key(), l->get_value(),fc);
-                    if (c1+1 != t->size)
+                    size_t c1 = this->size;
+                    art_insert(this, l->get_key(), l->get_value(),fc);
+                    if (c1+1 != this->size)
                     {
                         abort();
                     }

@@ -76,6 +76,7 @@ namespace art
  bool init_node_compression();
  void destroy_node_compression();
  void destroy_leaf_compression();
+
  struct tree
  {
   bool mexit = false;
@@ -90,6 +91,7 @@ namespace art
   }
 
   ~tree();
+  void run_defrag();
  };
 
 }

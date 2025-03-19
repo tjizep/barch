@@ -106,7 +106,7 @@ for i = 1,3 do
     test()
     clear()
 end
---assert(successes==3*count, "test failures")
---assert(failures==0, "test failures")
+assert(successes==9*count, "test failures")
+assert(failures==0, "test failures")
 
 return result

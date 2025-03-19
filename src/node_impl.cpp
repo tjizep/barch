@@ -311,8 +311,8 @@ void art::tree::start_maintain()
             run_evict_volatile_keys_lfu(this);
             run_evict_expired_keys(this);
             // TODO: erase evicted keys if memory is pressured - if its configured
-            if (art::get_active_defrag())
-                run_defrag(this); // periodic
+            //if (art::get_active_defrag())
+            //    run_defrag(this); // periodic
 
             // we should wait on a join signal not just sleep else server wont stop quickly
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

@@ -1093,7 +1093,14 @@ private:
 
         if(max_logical_address() == 0)
         {
-            return expand_over_null_base();
+            if (size > page_size)
+            {
+                return expand_over_null_base(size);
+            }else
+            {
+                return expand_over_null_base();
+            }
+
 
         }
 
@@ -1126,9 +1133,12 @@ private:
             if (has_free())
             {
 
-                //auto at = emancipate();
-                //last_page_allocated = at;
-                //return allocate_page_at(at);
+                auto at = emancipate();
+                if (!is_null_base(at))
+                {
+                    last_page_allocated = at;
+                    return allocate_page_at(at);
+                }
             }
 
             return expand_over_null_base();

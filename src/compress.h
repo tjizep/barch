@@ -74,9 +74,14 @@ struct compressed_address
         return index < other.index;
     }
 
+    [[nodiscard]] static bool is_null_base(size_t page)
+    {
+        return (page % reserved_address_base) == 0;
+    }
+
     [[nodiscard]] bool is_null_base() const
     {
-        return (page() % reserved_address_base) == 0;
+        return is_null_base(page());
     }
 
     void clear()
@@ -764,7 +769,7 @@ public:
         }
         for(size_t to = 1; to < top; ++to)
         {
-            if (is_free(to))
+            if (is_free(to) && !compressed_address::is_null_base(to))
             {
                 recover_free(to);
                 return to;
@@ -1026,12 +1031,12 @@ private:
 
     [[nodiscard]] static bool is_null_base(const compressed_address& at)
     {
-        return is_null_base(at.page());
+        return at.is_null_base();
     }
 
     [[nodiscard]] static bool is_null_base(size_t at)
     {
-        return (at % reserved_address_base) == 0;
+        return compressed_address::is_null_base(at);
     }
 
     [[nodiscard]] size_t last_block() const
@@ -1108,10 +1113,11 @@ private:
         {
             return expand_over_null_base(size);
         }
-        if (is_free(last_page_allocated))
+        if (last_page_allocated == 0)
         {
-            recover_free(last_page_allocated);
-            return allocate_page_at(last_page_allocated);
+            //recover_free(last_page_allocated);
+            //return allocate_page_at(last_page_allocated);
+            return expand_over_null_base();
         }
 
         auto& last = retrieve_page(last_page_allocated);
@@ -1132,13 +1138,9 @@ private:
             }
             if (has_free())
             {
-
                 auto at = emancipate();
-                if (!is_null_base(at))
-                {
-                    last_page_allocated = at;
-                    return allocate_page_at(at);
-                }
+                last_page_allocated = at;
+                return allocate_page_at(at);
             }
 
             return expand_over_null_base();

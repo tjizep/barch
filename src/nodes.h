@@ -316,7 +316,7 @@ namespace art
             template<typename T>
             const T* refresh_cache() const // read-only refresh
             {
-                //dcache = nullptr;
+                dcache = nullptr;
                 if(!dcache || last_ticker != compress::flush_ticker)
                 {
                     dcache = get_node_compression().modify<T>(address);
@@ -327,7 +327,7 @@ namespace art
             template<typename T>
             T* refresh_cache()
             {
-                //dcache = nullptr;
+                dcache = nullptr;
                 if(!dcache || last_ticker != compress::flush_ticker)
                 {
                     dcache = get_node_compression().modify<T>(address);

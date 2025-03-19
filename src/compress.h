@@ -874,7 +874,7 @@ private:
     uint64_t ticker = 1;
     uint64_t allocated = 0;
     size_t fragmentation = 0;
-
+    std::unordered_set<size_t> fragmented{};
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -1390,6 +1390,7 @@ public:
             t.clear();
             //emancipated.erase(at.page());
             free_page(at.page());
+            fragmented.erase(at.page());
             //free_pages.push_back(at.page());
 
             if (fragmentation < t.fragmentation)
@@ -1408,6 +1409,7 @@ public:
             }
             t.fragmentation += size;
             fragmentation += size;
+            fragmented.insert(at.page());
         }
     }
     float fragmentation_ratio() const
@@ -1420,41 +1422,10 @@ public:
     // every page
     std::vector<size_t> create_fragmentation_list() const
     {
-        std::vector<size_t> fragmentation;
         std::lock_guard guard(mutex);
         std::vector<const storage*> replay;
-        for (size_t p = 1; p < max_logical_address();++p)
-        {
-            if(is_null_base(p)) continue;
-            if(is_free(p)) continue;
-            auto& t = retrieve_page(p);
-
-            if (t.fragmentation > t.write_position)
-            {
-                abort();
-            }
-            if (t.fragmentation > 0)
-            {
-                // minimize the size of replay list
-                replay.emplace_back(&t);
-                fragmentation.push_back(p);
-            }
-            if (fragmentation.size() > 15)
-                return fragmentation;
-        }
-#if 0
-        auto compare = [&](const storage* a, const storage* b) -> bool
-        {
-            return a->fragmentation >= b->fragmentation;
-        };
-        std::sort(replay.begin(), replay.end(), compare);
-        for (auto* pt : replay)
-        {
-            size_t p = pt - &*arena.begin();
-            fragmentation.push_back(p);
-        }
-#endif
-        return fragmentation;
+        if (fragmented.empty()) return {};
+        return {*fragmented.begin()};
     }
     lru_list create_lru_list()
     {

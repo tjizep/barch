@@ -202,11 +202,10 @@ void run_defrag(art::tree* t)
             for(auto p : fl)
             {
                 //compressed_release releaser;
-                write_lock lock(get_lock());
 
+                write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);
 
-                size_t before = t->size;
                 page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
                 {
                     size_t c1 = t->size;
@@ -216,17 +215,17 @@ void run_defrag(art::tree* t)
                         abort();
                     }
                 });
-                //;
+
                 page_iterator(page.first, page.second,[&fc,t](const art::leaf* l)
                 {
+                    size_t c1 = t->size;
                     art_insert(t, l->get_key(), l->get_value(),fc);
+                    if (c1+1 != t->size)
+                    {
+                        abort();
+                    }
                 });
-                if (before != t->size)
-                {
-                    abort();
-                }
                 ++statistics::pages_defragged;
-                ++lc.flush_ticker;
                 //if (lc.fragmentation_ratio() < 1.0)
                 //return;
             }

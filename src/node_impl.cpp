@@ -197,13 +197,13 @@ void art::tree::run_defrag()
     {
         if(lc.fragmentation_ratio() > -1)  //art::get_min_fragmentation_ratio())
         {
+            write_lock lock(get_lock());
             auto fl = lc.create_fragmentation_list();
 
             for(auto p : fl)
             {
                 //compressed_release releaser;
 
-                write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);
 
                 page_iterator(page.first, page.second,[&fc,this](const art::leaf* l)
@@ -310,8 +310,8 @@ void art::tree::start_maintain()
             run_evict_volatile_keys_lfu(this);
             run_evict_expired_keys(this);
             // TODO: erase evicted keys if memory is pressured - if its configured
-            //if (art::get_active_defrag())
-            //    run_defrag(this); // periodic
+            if (art::get_active_defrag())
+                run_defrag(); // periodic
 
             // we should wait on a join signal not just sleep else server wont stop quickly
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

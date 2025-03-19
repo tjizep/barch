@@ -407,6 +407,11 @@ extern "C" {
         auto t = get_art();
 
         art_delete(t, converted.get_value(), fc);
+
+        if (t->size %1000 == 0)
+        {
+            //t->run_defrag();
+        }
         return r;
 
     }

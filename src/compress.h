@@ -1138,9 +1138,9 @@ private:
             }
             if (has_free())
             {
-                auto at = emancipate();
-                last_page_allocated = at;
-                return allocate_page_at(at);
+                //auto at = emancipate();
+                //last_page_allocated = at;
+                //return allocate_page_at(at);
             }
 
             return expand_over_null_base();

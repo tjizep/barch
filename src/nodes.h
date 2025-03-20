@@ -178,7 +178,6 @@ namespace art
             if(!resolver) resolver = &get_leaf_compression();
             is_leaf = true;
         }
-        bool operator == (const node_ptr_t& p) const = delete;
         bool operator == (nullptr_t) const
         {
             if(is_leaf) return logical.null();
@@ -186,7 +185,11 @@ namespace art
         }
         bool operator != (const node_ptr_t& p) const
         {
-            return logical != p.logical;
+            return !(*this == p);
+        };
+        bool operator == (const node_ptr_t& p) const
+        {
+            return is_leaf == p.is_leaf && logical == p.logical;
         };
         node_ptr_t& operator = (const node_ptr_t& n){
             if(&n == this) return *this;
@@ -316,7 +319,7 @@ namespace art
             template<typename T>
             const T* refresh_cache() const // read-only refresh
             {
-                dcache = nullptr;
+                //dcache = nullptr;
                 if(!dcache || last_ticker != compress::flush_ticker)
                 {
                     dcache = get_node_compression().modify<T>(address);
@@ -327,14 +330,14 @@ namespace art
             template<typename T>
             T* refresh_cache()
             {
-                dcache = nullptr;
+                //dcache = nullptr;
                 if(!dcache || last_ticker != compress::flush_ticker)
                 {
                     dcache = get_node_compression().modify<T>(address);
                 }
                 return (T*)dcache;
             }
-            mutable node_data *dcache= nullptr;
+            mutable node_data *dcache = nullptr;
             //mutable node_data *mcache= nullptr;
             mutable uint32_t last_ticker = compress::flush_ticker;
             compressed_address address{};

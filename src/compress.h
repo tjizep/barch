@@ -22,7 +22,7 @@
 enum
 {
     page_size = 4096,
-    reserved_address_base = 12000,
+    reserved_address_base = 12000000,
     //opt_enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 8,
@@ -209,9 +209,9 @@ struct storage
 
     heap::buffer<uint8_t> compressed;
     heap::buffer<uint8_t> decompressed;
-    PageSizeType write_position = 0;
-    PageSizeType size = 0;
-    PageSizeType modifications = 0;
+    unsigned write_position = 0;
+    unsigned size = 0;
+    unsigned modifications = 0;
     lru_list::iterator lru{};
     uint64_t ticker = 0;
     uint64_t fragmentation = 0;
@@ -251,44 +251,6 @@ struct free_page
         offsets.clear();
     }
 
-    heap::vector<size_offset> coalesce(PageSizeType size)
-    {
-        heap::vector<size_offset> r;
-        std::vector<std::pair<ptrdiff_t, ptrdiff_t>> erasures;
-        std::sort(offsets.begin(), offsets.end());
-        PageSizeType last = page_size;
-        PageSizeType curr_size = 0;
-        size_t last_pos = 0;
-        size_t pos = 0;
-        for (auto offset :offsets)
-        {
-            if (last == page_size)
-            {
-                last_pos = pos;
-                last = offset;
-            }else if(offset - last == size)
-            {
-                curr_size += size;
-            }else
-            {
-                if (curr_size > size)
-                {
-                    erasures.push_back({last_pos, pos + 1});
-                    r.push_back({last, curr_size});
-                }
-                last = offset;
-                last_pos = pos;
-                curr_size = 0;
-            }
-            ++pos;
-        }
-        for(auto e:erasures)
-        {
-            offsets.erase(offsets.begin()+e.first, offsets.begin()+e.second);
-        }
-        if (offsets.empty()) offsets.clear();
-        return r;
-    }
     void push(PageSizeType offset)
     {
         offsets.push_back(offset);
@@ -297,39 +259,6 @@ struct free_page
     [[nodiscard]] size_t size() const
     {
         return offsets.size();
-    }
-};
-struct simple_bin
-{
-    heap::vector<size_t> data {};
-    size_t size = 0;
-    simple_bin() = default;
-    explicit simple_bin(size_t size) : size(size){}
-    void add(compressed_address offset, size_t size)
-    {
-        if(this->size != size)
-        {
-            abort();
-        }
-        data.push_back(offset.address());
-    }
-    [[nodiscard]] bool empty() const
-    {
-        return data.empty();
-    }
-    compressed_address pop(size_t size)
-    {
-        if(this->size != size)
-        {
-            abort();
-        }
-        if (data.empty())
-        {
-            return compressed_address{0};
-        }
-        size_t addr = data.back();
-        data.pop_back();
-        return compressed_address{addr};
     }
 };
 struct free_bin
@@ -365,7 +294,7 @@ struct free_bin
         return true;
     }
 
-    void get(size_t page, std::function<void(free_page& p)> f)
+    void get(size_t page, const std::function<void(free_page& p)> &f)
     {
         if (page < page_index.size())
         {
@@ -376,16 +305,6 @@ struct free_bin
                 f(p);
             }
         }
-    }
-
-    heap::vector<size_offset> coalesce(size_t page)
-    {
-        heap::vector<size_offset> r;
-        get(page,[&](free_page& p)
-        {
-            r = std::move(p.coalesce(size));
-        });
-        return r;
     }
 
     [[nodiscard]] bool available() const
@@ -578,24 +497,6 @@ struct free_list
                 }
                 addresses.erase(r.address());
             }
-        } else if (coalesce_fragments == 1)
-        {
-            coalesce_max(); // a fairly slow function - for now
-            // start searching from the largest size for something that can be nibbled
-            for (size_t b = max_bin; b >= min_bin; --b) // don't nibble from small pages - it will create small fragments
-            {
-                auto &f = free_bins[b];
-                if (!f.empty() && b > size*4) // largest are nibbled first
-                {
-                    auto bat = f.pop(b);
-                    size_t n = b - size;
-                    compressed_address at {bat.page(),bat.offset() + n};
-                    compressed_address remainder {bat.page(),bat.offset()}; // what's left of the free space pie
-                    add(remainder, n); // hopefully coalesce_max will catch these later on (NB: it may change min and max_bin)
-                    added -= size;
-                    return at; // get outta here (min and max_bin may have changed)
-                }
-            }
         }
 
 
@@ -603,33 +504,6 @@ struct free_list
     }
 
 
-    void coalesce_max()
-    {
-        if (added < page_size*4) return;
-
-        size_t bin_max = 0;
-        free_bin::page_max_t max_r{} ;
-
-        for (unsigned b = min_bin; b <= max_bin; ++b)
-        {
-            if (free_bins[b].empty()) continue;
-            auto pmax = free_bins[b].page_max();
-            if (max_r.size < pmax.size)
-            {
-                max_r = pmax;
-                bin_max = b;
-            }
-        }
-
-        auto &f = free_bins[bin_max];
-        auto offsets = f.coalesce(max_r.page);
-        for (auto& o:offsets)
-        {
-            size_t size = o.size;
-            compressed_address addr {max_r.page, o.offset};
-            add(addr, size);
-        }
-    }
 
 
 };
@@ -714,8 +588,28 @@ struct hash_arena
 {
 private:
     std::unordered_map<size_t,storage> hidden_arena{};
-    size_t top = 0;
-    size_t free_pages = 0;
+    heap::vector<size_t> free_address_list {};
+    size_t top = 10000000;
+    size_t free_pages = top;
+    size_t last_allocated = 0;
+    void recover_free(size_t at)
+    {
+        if(!is_free(at))
+        {
+            throw std::runtime_error("page not free");
+        }
+        if (at > max_logical_address())
+        {
+            free_pages += at - max_logical_address();
+            top = at;
+        }
+        if (!has_free())
+        {
+            throw std::runtime_error("no free pages available");
+        }
+        hidden_arena[at] = storage{};
+        --free_pages;
+    }
 public:
     hash_arena() = default;
     // arena virtualization functions
@@ -751,6 +645,7 @@ public:
         }
         hidden_arena.erase(pi);
         ++free_pages;
+        free_address_list.emplace_back(at);
     }
     bool is_free(size_t at) const
     {
@@ -761,39 +656,40 @@ public:
     {
         return free_pages > 1;
     }
-    size_t emancipate()
+    size_t allocate()
     {
         if(!has_free())
         {
             throw std::runtime_error("no free pages available");
         }
+        if (!free_address_list.empty())
+        {
+            size_t at = free_address_list.back();
+            free_address_list.pop_back();
+            recover_free(at);
+            return at;
+        }
+        if (last_allocated > 0)
+        {
+            if (is_free(last_allocated+1))
+            {
+               ++last_allocated;
+                recover_free(last_allocated);
+                return last_allocated;
+            }
+        }
         for(size_t to = 1; to < top; ++to)
         {
             if (is_free(to) && !compressed_address::is_null_base(to))
             {
+                last_allocated = to;
                 recover_free(to);
                 return to;
             }
         }
         throw std::runtime_error("no free pages found");
     }
-    void recover_free(size_t at)
-    {
-        if(!is_free(at))
-        {
-            throw std::runtime_error("page not free");
-        }
-        if (at > max_logical_address())
-        {
-            throw std::runtime_error("invalid address");
-        }
-        if (!has_free())
-        {
-            throw std::runtime_error("no free pages available");
-        }
-        hidden_arena[at] = storage{};
-        --free_pages;
-    }
+
     bool has_page(size_t at) const
     {
         return hidden_arena.count(at) != 0;
@@ -835,7 +731,7 @@ struct compress : hash_arena
     };
 
     compress() = default;
-    explicit compress(bool opt_enable_compression, bool opt_enable_lru): opt_enable_compression(opt_enable_compression), opt_enable_lru(opt_enable_lru){};
+    explicit compress(bool opt_enable_compression, bool opt_enable_lru, std::string name): opt_enable_compression(opt_enable_compression), opt_enable_lru(opt_enable_lru),name(std::move(name)){};
     compress(const compress&) = delete;
 
     ~compress()
@@ -851,6 +747,7 @@ struct compress : hash_arena
 private:
     bool opt_enable_compression = false;
     bool opt_enable_lru = false;
+    bool opt_validate_addresses = true;
     std::thread tdict{};
     std::thread tpoll{};
     bool threads_exit = false;
@@ -880,6 +777,8 @@ private:
     uint64_t allocated = 0;
     size_t fragmentation = 0;
     std::unordered_set<size_t> fragmented{};
+    std::unordered_set<size_t> erased{};
+    std::string name;
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -1083,31 +982,13 @@ private:
     }
     std::pair<size_t, storage&>  expand_over_null_base(size_t ps = page_size)
     {
-        expand_address_space();
-        if (is_null_base(max_logical_address()))
-        {
-            retrieve_page(max_logical_address()).write_position = page_size;
-            highest_reserve_address = {last_block(),0};
-            expand_address_space();
-        }
-        last_page_allocated = max_logical_address();
-        return allocate_page_at(max_logical_address(),ps);
+        auto at = allocate();
+        last_page_allocated = at;
+        return allocate_page_at(at,ps);
+
     }
     std::pair<size_t, storage&> create_if_required(size_t size)
     {
-
-        if(max_logical_address() == 0)
-        {
-            if (size > page_size)
-            {
-                return expand_over_null_base(size);
-            }else
-            {
-                return expand_over_null_base();
-            }
-
-
-        }
 
         if (size > page_size)
         {
@@ -1115,8 +996,6 @@ private:
         }
         if (last_page_allocated == 0)
         {
-            //recover_free(last_page_allocated);
-            //return allocate_page_at(last_page_allocated);
             return expand_over_null_base();
         }
 
@@ -1136,16 +1015,9 @@ private:
                 // if (last.modifications > 0)
                    // to schedule a buffer release/compress
             }
-            if (has_free())
-            {
-                //auto at = emancipate();
-                //last_page_allocated = at;
-                //return allocate_page_at(at);
-            }
 
             return expand_over_null_base();
         }
-
 
         return {last_page_allocated, last};
     }
@@ -1200,6 +1072,14 @@ private:
     {
         if (at.null()) return nullptr;
         invalid(at);
+        if (test_memory)
+        {
+            if (erased.count(at.address()))
+            {
+                std::cerr << "allocator '" << name << "' is accessing memory after free ( at: " << at.address() << ")" << std::endl;
+                throw std::runtime_error("memory erased");
+            }
+        }
         auto p = at.page();
         auto& t = retrieve_page(p);
         if (t.decompressed.empty() && !t.compressed.empty())
@@ -1236,6 +1116,8 @@ private:
 
     void valid(compressed_address at) const
     {
+        if(!opt_validate_addresses) return;
+
         if (at == 0) return ;
         auto pg = at.page();
         if (pg > max_logical_address())
@@ -1330,6 +1212,7 @@ public:
     {
         size_t size = sz + test_memory + allocation_padding;
         std::lock_guard guard(mutex);
+
         uint8_t * d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size)
         {
@@ -1351,11 +1234,23 @@ public:
         {
             abort();
         }
-
+        if (test_memory == 1)
+        {
+            memset(d1,0, size);
+        }
+        if (test_memory)
+        {
+            if (erased.count(at.address()))
+            {
+                throw std::runtime_error("memory erased");
+            }
+            erased.insert(at.address());
+        }
 
         if (t.size == 1)
         {
             auto tp = at.page();
+
             if (is_free(tp))
             {
                 abort();
@@ -1392,6 +1287,7 @@ public:
             t.clear();
             //emancipated.erase(at.page());
             free_page(at.page());
+
             fragmented.erase(at.page());
             //free_pages.push_back(at.page());
 
@@ -1538,6 +1434,10 @@ public:
         at.second.size++;
         at.second.modifications++;
         invalid(ca);
+        if (test_memory)
+        {
+            erased.erase(ca.address());
+        }
         auto* data = (test_memory == 1 ) ?  basic_resolve(ca) : nullptr;
         if (test_memory == 1 && data[sz] != 0)
         {
@@ -1546,6 +1446,7 @@ public:
         if (test_memory == 1)
             data[sz] = ca.address() % 255;
         allocated += size;
+
         return ca;
     }
 

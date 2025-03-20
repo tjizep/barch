@@ -197,13 +197,12 @@ void art::tree::run_defrag()
     {
         if(lc.fragmentation_ratio() > -1)  //art::get_min_fragmentation_ratio())
         {
-            write_lock lock(get_lock());
             auto fl = lc.create_fragmentation_list();
 
             for(auto p : fl)
             {
                 //compressed_release releaser;
-
+                write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);
 
                 page_iterator(page.first, page.second,[&fc,this](const art::leaf* l)

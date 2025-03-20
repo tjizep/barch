@@ -22,7 +22,7 @@ bool art::has_node_compression()
 
 bool art::init_leaf_compression()
 {
-    leaf_compression = new (heap::allocate<compress>(1)) compress(get_compression_enabled(), get_evict_allkeys_lru()||get_evict_volatile_lru());
+    leaf_compression = new (heap::allocate<compress>(1)) compress(get_compression_enabled(), get_evict_allkeys_lru()||get_evict_volatile_lru(),"leaf");
     return leaf_compression != nullptr;
 }
 void art::destroy_node_compression()
@@ -45,7 +45,7 @@ void art::destroy_leaf_compression()
 }
 bool art::init_node_compression()
 {
-    node_compression = new (heap::allocate<compress>(1))compress(get_compression_enabled(), false);
+    node_compression = new (heap::allocate<compress>(1))compress(get_compression_enabled(), false, "node");
     return node_compression != nullptr;
 }
 

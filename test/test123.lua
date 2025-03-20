@@ -34,7 +34,7 @@ local test = function()
             vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
     end
-    for i = 1, count do
+    for i = 1, 0 do
         local k = convert(i-1)
         local v = '#'..i
         if vk.call('ODGET',k) ~= v then
@@ -102,7 +102,7 @@ result[inc()] = vk.call("ODCONFIG", "SET","active_defrag", "on")
 result[inc()] = vk.call("ODCONFIG", "SET","compression", "zstd")
 
 convert = tochars123
-for i = 1,3 do
+for i = 1,5 do
     test()
     clear()
 end

@@ -4,7 +4,7 @@
 
 # Features
 1. Ordered: minimum, lower-bound and maximum operations are constant time
-2. Low memory foot print: Half that of standard hash map while providing similar single threaded latency 
+2. Low memory footprint: Half that of standard hash map while providing similar single threaded latency 
 3. Compression: Memory use can be lowered even further using zstd compression at the expense of latency
 4. Dynamic config: All options can be configured at runtime without restarts or reload
 5. Scalability: All reads are concurrent and scales linearly with core count
@@ -17,14 +17,14 @@
 5. Constant time access priority queue
 
 # Commands and API
-1. `B.ADD K V` add a key and value
-2. `B.SET K V` set a key overriding existing value
-3. `B.GET K` retrieve a key, returns nil if no key exists
-4. `B.REM K` removes a key, returns value if success
+1. `B.ADD K V` add a key and value (more)[./ADD.MD]
+2. `B.SET K V` set a key overriding existing value (more)[./SET.MD]
+3. `B.GET K` retrieve a key, returns nil if no key exists (more)[./GET.MD]
+4. `B.REM K` removes a key, returns value if success (more)[./REM.MD]
 5. `B.MAX` returns largest key - numbers are less than text
-6. `B.MIN` returns smallest key
-7. `B.KEYRANGE K1 K2 count` returns an array of maximum count 
-8. `B.LB K1` lower bound: first key not less than K1
+6. `B.MIN` returns smallest keyor (nil) if there are no keys
+7. `B.KEYRANGE K1 K2 count` returns an array of maximum count containing the keys 
+8. `B.LB K1` lower bound: first key not less than K1 
 9. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys
 10. `B.HEAPBYTES` bytes allocated by `BARCH` alone
 11. `B.STATS` lots of statistics on internal datastructures, node count, defrag, pages etc.

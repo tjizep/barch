@@ -17,10 +17,10 @@
 5. Constant time access priority queue
 
 # Commands and API
-1. `B.ADD K V` add a key and value [more](https://github.com/tjizep/barch/ADD.md)
-2. `B.SET K V` set a key overriding existing value [more](https://github.com/tjizep/barch/SET.md)
-3. `B.GET K` retrieve a key, returns nil if no key exists [more](https://github.com/tjizep/barch/GET.md)
-4. `B.REM K` removes a key, returns value if success [more](https://github.com/tjizep/barch/REM.md)
+1. `B.ADD K V` add a key and value [more](https://github.com/tjizep/barch/blob/main/ADD.md)
+2. `B.SET K V` set a key overriding existing value [more](https://github.com/tjizep/barch/blob/main/SET.md)
+3. `B.GET K` retrieve a key, returns nil if no key exists [more](https://github.com/tjizep/barch/blob/main/GET.md)
+4. `B.REM K` removes a key, returns value if success [more](https://github.com/tjizep/barch/blob/main/REM.md)
 5. `B.MAX` returns largest key - numbers are less than text
 6. `B.MIN` returns smallest keyor (nil) if there are no keys
 7. `B.KEYRANGE K1 K2 count` returns an array of maximum count containing the keys 

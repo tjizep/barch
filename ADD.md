@@ -35,4 +35,4 @@ Different types will not mix in the overall order, however,
 keys of different types can be added in the same database.
 
 Each key contains a 1 byte prefix determining the type.
-See [more](https://github.com/tjizep/barch/SET.md)
+See [more](https://github.com/tjizep/barch/blob/main/SET.md)

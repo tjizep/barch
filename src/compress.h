@@ -19,6 +19,7 @@
 #include <functional>
 #include <unordered_set>
 #include <list>
+#include "configuration.h"
 enum
 {
     page_size = 4096,
@@ -502,10 +503,6 @@ struct free_list
 
         return r;
     }
-
-
-
-
 };
 
 struct vector_arena
@@ -586,6 +583,10 @@ public:
 
 struct hash_arena
 {
+    enum
+    {
+        cache_size = 1024
+    };
 private:
     std::unordered_map<size_t,storage> hidden_arena{};
     heap::vector<size_t> free_address_list {};
@@ -719,8 +720,27 @@ public:
         {
             throw std::runtime_error("invalid page");
         }
-        return pi->second;    }
-};
+        return pi->second;
+    }
+    void iterate_arena(const std::function<bool(size_t, storage&)>& iter)
+    {
+        for(auto&[at,str] : hidden_arena)
+        {
+            if(!iter(at, str))
+            {
+                return;
+            }
+
+        }
+    }
+
+    void iterate_arena(const std::function<void(size_t, storage&)>& iter)
+    {
+        for(auto&[at,str] : hidden_arena)
+        {
+            iter(at, str);
+        }
+    }};
 
 struct compress : hash_arena
 {
@@ -754,7 +774,6 @@ private:
     unsigned size_in_training = 0;
     unsigned size_to_train = 0;
     heap::buffer<uint8_t> training_data{0};
-    //std::unordered_map<uint64_t, size_t> test{};
     std::vector<training_entry, heap::allocator<training_entry>> trainables{};
     std::vector<training_entry, heap::allocator<training_entry>> intraining{};
     ZSTD_CDict* dict{nullptr};
@@ -777,7 +796,7 @@ private:
     uint64_t allocated = 0;
     size_t fragmentation = 0;
     std::unordered_set<size_t> fragmented{};
-    std::unordered_set<size_t> erased{};
+    std::unordered_set<size_t> erased{}; // for runtime use after free tests
     std::string name;
     compress& operator=(const compress& t)
     {
@@ -839,8 +858,8 @@ private:
             {
                 while (!threads_exit)
                 {
-                    if(heap::get_physical_memory_ratio() > 0.95)
-                        context_vacuum(true);
+                    if(heap::get_physical_memory_ratio() > 0.95 || heap::allocated > art::get_max_module_memory())
+                        full_vacuum();
                     std::this_thread::sleep_for(std::chrono::milliseconds(45));
                 }
             });
@@ -1141,7 +1160,7 @@ private:
     }
 
     // TODO: put a time limit on this function because it can take long
-    size_t inner_vacuum(size_t max_vac)
+    size_t inner_vacuum()
     {
         std::atomic<size_t> r = 0;
         std::thread workers[auto_vac_workers];
@@ -1149,31 +1168,20 @@ private:
         ++flush_ticker;
         for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
         {
-            workers[ivac] = std::thread([this,arena_size,ivac,&r,max_vac]()
+            workers[ivac] = std::thread([this,arena_size,ivac,&r]()
             {
                 ZSTD_CCtx* cctx = ZSTD_createCCtx();
-                size_t vac = 0;
-                if (max_vac == arena_size)
+                iterate_arena([&](size_t p,storage&) -> void
                 {
-                    for (size_t p = 0; p < arena_size; ++p)
-                    {
-                        if(p % auto_vac_workers == ivac)
-                            r += release_decompressed(cctx,p);
-                    }
-                }else
-                {
-                    for (auto p: decompressed_pages)
-                    {
-                        if(p % auto_vac_workers == ivac)
-                            r += release_decompressed(cctx,p);
-                        if (++vac >= max_vac) break;
-                    }
-                }
+                    if(p % auto_vac_workers == ivac)
+                        r += release_decompressed(cctx,p);
+                });
 
                 ZSTD_freeCCtx(cctx);
             });
         }
         for (auto& worker : workers) worker.join();
+
         decompressed_pages.clear();
         ++statistics::vacuums_performed;
         return r;
@@ -1285,7 +1293,7 @@ public:
             if(!lru.empty())
                 lru.erase(t.lru);
             t.clear();
-            //emancipated.erase(at.page());
+            emancipated.erase(at.page());
             free_page(at.page());
 
             fragmented.erase(at.page());
@@ -1298,7 +1306,7 @@ public:
         }
         else
         {
-            //emancipated.add(at, size); // add a free allocation for later re-use
+            emancipated.add(at, size); // add a free allocation for later re-use
             t.size--;
             t.modifications++;
             if (t.fragmentation + size > t.write_position)
@@ -1318,12 +1326,20 @@ public:
     // TODO: this function may cause to much latency when the arena is large
     // maybe just dont iterate through everything - it doesnt need to get
     // every page
-    std::vector<size_t> create_fragmentation_list() const
+    heap::vector<size_t> create_fragmentation_list(size_t max_pages) const
     {
         std::lock_guard guard(mutex);
-        std::vector<const storage*> replay;
+        heap::vector<size_t> pages;
         if (fragmented.empty()) return {};
-        return {*fragmented.begin()};
+        for(auto page : fragmented)
+        {
+            pages.push_back(page);
+            if (pages.size() >= max_pages)
+            {
+                return pages;
+            }
+        }
+        return pages;
     }
     lru_list create_lru_list()
     {
@@ -1463,25 +1479,9 @@ public:
         }
         context_vacuum();
     }
-    size_t context_vacuum(bool full = false)
+    size_t full_vacuum()
     {
-        std::unique_lock scope(vacuum_scope);
         std::lock_guard guard(mutex);
-        if (!opt_enable_compression) return 0;
-        double ratio = heap::get_physical_memory_ratio();
-
-        if (!full && ratio > 0.99 && !decompressed_pages.empty())
-        {
-            //++flush_ticker;
-            //size_t at = decompressed_pages.back();
-            //decompressed_pages.pop_back();
-            return 0; //release_decompressed(cctx,at);
-
-        }
-        if (!full)
-        {
-            return 0;
-        }
         statistics::max_page_bytes_uncompressed = std::max<uint64_t>(statistics::page_bytes_uncompressed, statistics::max_page_bytes_uncompressed);
 
         auto t = std::chrono::high_resolution_clock::now();
@@ -1495,7 +1495,7 @@ public:
                 abort();
             }
             auto start_vac = std::chrono::high_resolution_clock::now();
-            result = inner_vacuum(full ? max_logical_address() : max_logical_address()/2);
+            result = inner_vacuum();
             auto end_vac = std::chrono::high_resolution_clock::now();
             auto dvac = std::chrono::duration_cast<std::chrono::milliseconds>(end_vac - start_vac);
             statistics::last_vacuum_time = dvac.count();
@@ -1508,6 +1508,26 @@ public:
         return result;
 
     }
+    size_t context_vacuum()
+    {
+        std::unique_lock scope(vacuum_scope);
+        std::lock_guard guard(mutex);
+        if (!opt_enable_compression) return 0;
+        double ratio = heap::get_physical_memory_ratio();
+        bool heap_overflow = heap::allocated > art::get_max_module_memory();
+        if ((heap_overflow || ratio > 0.99) && !decompressed_pages.empty())
+        {
+            //++flush_ticker;
+            //size_t at = decompressed_pages.back();
+            //decompressed_pages.pop_back();
+            return 0; //release_decompressed(cctx,at);
+
+        }
+
+        return 0;
+
+
+    }
 
     void enter_context()
     {
@@ -1516,7 +1536,7 @@ public:
     size_t vacuum()
     {
         vacuum_scope.unlock_shared();
-        size_t r = context_vacuum(true);
+        size_t r = full_vacuum();
         vacuum_scope.lock_shared();
         return r;
     }

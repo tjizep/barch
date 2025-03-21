@@ -10,15 +10,18 @@
 #include "art.h"
 
 #define unused_arg
+art::configuration_record record;
 // these values are kept for reflection
 static std::mutex config_mutex{};
 static std::string compression_type{};
 static std::string eviction_type{};
 static std::string max_memory_bytes{};
 static std::string min_fragmentation_ratio{};
+static std::string max_defrag_page_count{};
+static std::string maintenance_poll_delay{};
 static std::string active_defrag{};
 
-art::configuration_record record;
+
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
 };
@@ -113,6 +116,62 @@ static int ApplyCompressionType(ValkeyModuleCtx*unused_arg, void*unused_arg, Val
 {
     art::get_leaf_compression().set_opt_enable_compression(art::get_compression_enabled());
     art::get_node_compression().set_opt_enable_compression(art::get_compression_enabled());
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+static ValkeyModuleString* GetMaxDefragPageCount(const char*unused_arg, void*unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, max_defrag_page_count.c_str(), max_defrag_page_count.length());
+}
+
+static int SetMaxDefragPageCount(const char*unused_arg, ValkeyModuleString* val, void*unused_arg,
+                              ValkeyModuleString**unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    std::string test_max_defrag_page_count = ValkeyModule_StringPtrLen(val, nullptr);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_max_defrag_page_count, check))
+    {
+        return VALKEYMODULE_ERR;
+    }
+    maintenance_poll_delay = test_max_defrag_page_count;
+    char* ep = nullptr;
+    record.max_defrag_page_count = std::strtoll(test_max_defrag_page_count.c_str(),&ep,10);
+    return VALKEYMODULE_OK;
+}
+
+static int ApplyMaxDefragPageCount(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
+{
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+static ValkeyModuleString* GetMaintenancePollDelay(const char*unused_arg, void*unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, maintenance_poll_delay.c_str(), maintenance_poll_delay.length());
+}
+
+static int SetMaintenancePollDelay(const char*unused_arg, ValkeyModuleString* val, void*unused_arg,
+                              ValkeyModuleString**unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    std::string test_maintenance_poll_delay = ValkeyModule_StringPtrLen(val, nullptr);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_maintenance_poll_delay, check))
+    {
+        return VALKEYMODULE_ERR;
+    }
+    maintenance_poll_delay = test_maintenance_poll_delay;
+    char* ep = nullptr;
+    record.maintenance_poll_delay = std::strtoll(test_maintenance_poll_delay.c_str(),&ep,10);
+    return VALKEYMODULE_OK;
+}
+
+static int ApplyMaintenancePollDelay(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
+{
     return VALKEYMODULE_OK;
 }
 
@@ -218,6 +277,10 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "active_defrag", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetActiveDefragType, SetActiveDefragType, ApplyActiveDefragType, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "maintenance_poll_delay", "10", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetMaintenancePollDelay, SetMaintenancePollDelay, ApplyMaintenancePollDelay, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_defrag_page_count", "10", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetMaxDefragPageCount, SetMaxDefragPageCount, ApplyMaxDefragPageCount, nullptr);
     return ret;
 }
 
@@ -321,4 +384,15 @@ art::configuration_record art::get_configuration()
 {
     std::unique_lock lock(config_mutex);
     return record;
+}
+
+uint64_t art::get_maintenance_poll_delay()
+{
+    std::unique_lock lock(config_mutex);
+    return record.max_defrag_page_count;
+}
+uint64_t art::get_max_defrag_page_count()
+{
+    std::unique_lock lock(config_mutex);
+    return record.max_defrag_page_count;
 }

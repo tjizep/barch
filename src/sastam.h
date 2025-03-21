@@ -314,7 +314,7 @@ namespace heap {
         vector() = default;
         explicit vector(size_t r)
         {
-            reserve(r);
+            resize(r);
         }
         ~vector()
         {
@@ -357,7 +357,7 @@ namespace heap {
         {
             if(count > content.size())
             {
-                abort();
+                abort(); // your hitting this because multiple threads are using this instance concurrently without a lock
             }
             if(capacity() < n)
             {
@@ -402,6 +402,7 @@ namespace heap {
             {
                 push_back(std::move(it));
             }
+
         }
         void reserve(size_t n)
         {

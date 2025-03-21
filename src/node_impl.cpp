@@ -197,7 +197,7 @@ void art::tree::run_defrag()
     {
         if(lc.fragmentation_ratio() > -1)  //art::get_min_fragmentation_ratio())
         {
-            auto fl = lc.create_fragmentation_list();
+            auto fl = lc.create_fragmentation_list(art::get_max_defrag_page_count());
 
             for(auto p : fl)
             {
@@ -242,7 +242,8 @@ void abstract_eviction(art::tree* t,
     const std::function<bool(const art::leaf* l)>& predicate,
     const std::function<std::pair<heap::buffer<uint8_t>,size_t> ()>& src)
 {
-    if(heap::allocated < art::get_max_module_memory()) return;
+    if (heap::get_physical_memory_ratio() < 0.99)
+        if (heap::allocated < art::get_max_module_memory()) return;
     auto fc = [](const art::node_ptr& unused(n)) -> void{};
     auto page = src();
     write_lock lock(get_lock());
@@ -313,7 +314,7 @@ void art::tree::start_maintain()
                 run_defrag(); // periodic
 
             // we should wait on a join signal not just sleep else server wont stop quickly
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
         }
     });
 }

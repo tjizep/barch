@@ -97,7 +97,7 @@ end
 
 --[[ Testing num hash string key types]]
 result[inc()] = {"running test "..tests}
-result[inc()] = vk.call("ODCONFIG", "SET","max_memory_bytes", "135m")
+result[inc()] = vk.call("ODCONFIG", "SET","max_memory_bytes", "50m")
 result[inc()] = vk.call("ODCONFIG", "SET","active_defrag", "on")
 result[inc()] = vk.call("ODCONFIG", "SET","compression", "zstd")
 
@@ -107,6 +107,6 @@ for i = 1,5 do
     clear()
 end
 --assert(successes==9*count, "test failures")
---assert(failures==0, "test failures")
+assert(failures==0, "test failures")
 
 return result

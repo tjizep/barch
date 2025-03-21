@@ -23,6 +23,7 @@ extern "C"
 #include "configuration.h"
 #include <fast_float/fast_float.h>
 #include <functional>
+#include "keyspec.h"
 
 static ValkeyModuleDict *Keyspace{};
 static std::shared_mutex shared{};

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.9)
-project(cdict VERSION 0.0.1 LANGUAGES CXX)
+project(barch VERSION 0.0.1 LANGUAGES CXX)
 enable_testing()
 if (NOT ADD_ZSTD_COMPRESSION)
     set(ADD_ZSTD_COMPRESSION ON)
@@ -65,10 +65,10 @@ file(GLOB SOURCES
     "src/*.c" "src/*.cpp"
 )
 
-add_library(cdict SHARED ${SOURCES})
+add_library(barch SHARED ${SOURCES})
 
 if (ADD_ZSTD_COMPRESSION)
-    target_link_libraries(cdict PRIVATE libzstd_static)
+    target_link_libraries(barch PRIVATE libzstd_static)
 endif ()
 
 if (NOT TEST_OD)

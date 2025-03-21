@@ -41,20 +41,20 @@ int wait_to_start() {
 int main(int argc, char *argv[]) {
     if(argc != 3)
     {
-        std::cerr << "Usage: " << argv[0] << " <directory containing libcdict.so> <lua test file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <directory containing libbarch.so> <lua test file>" << std::endl;
         return -1;
     }
     if ( 0 != wait_to_stop()) return -1;
 
     std::string bindir = argv[1];
     std::string luatest = argv[2];
-    std::cout << "directory for : libcdict.so " << bindir << std::endl;
+    std::cout << "directory for : libbarch.so " << bindir << std::endl;
     auto run_server = [&]()
     {
         cout << "server start" << endl;
         std::string server_cmd = "_deps/valkey-src/src/valkey-server --loadmodule ";
         server_cmd += bindir + "/";
-        server_cmd += "libcdict.so &";
+        server_cmd += "libbarch.so &";
         cout << server_cmd << endl;
         if (0 != std::system(server_cmd.c_str())) {
           std::cerr << failed << server_cmd << std::endl;

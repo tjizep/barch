@@ -49,20 +49,20 @@ end
 local test = function()
 
     tests = tests + 1
-    local t = vk.call('ODMILLIS')
+    local t = vk.call('B.MILLIS')
     for i = 1, count do
         local k = convert(i-1)
-        vk.call('ODSET',k,i)
+        vk.call('B.SET',k,i)
 
     end
     for i = 1, count do
         local k = convert(i-1)
-        vk.call('ODGET',k)
+        vk.call('B.GET',k)
 
     end
-    result[inc()] = {'SIZE', vk.call('ODSIZE')}
-    result[inc()] = {'TIME', vk.call('ODMILLIS')-t}
-    result[inc()] = {'HEAP', vk.call('ODHEAPBYTES')}
+    result[inc()] = {'SIZE', vk.call('B.SIZE')}
+    result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
+    result[inc()] = {'HEAP', vk.call('B.HEAPBYTES')}
 end
 
 --[[ Testing ints,doubles and string key types]]

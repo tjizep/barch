@@ -7,11 +7,11 @@ local inc = function()
     return index
 end
 
-result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
-result[inc()] = {[['ODHEAPBYTES']], vk.call('ODHEAPBYTES')}
-local start = vk.call('ODMILLIS')
-result[inc()] = {[['ODVACUUM']], vk.call('ODVACUUM')}
-result[inc()] = {[['VAC TIME']], vk.call('ODMILLIS') - start}
-result[inc()] = {[['ODHEAPBYTES']], vk.call('ODHEAPBYTES')}
+result[inc()] = {[['B.STATS']], vk.call('B.STATS')}
+result[inc()] = {[['B.HEAPBYTES']], vk.call('B.HEAPBYTES')}
+local start = vk.call('B.MILLIS')
+result[inc()] = {[['B.VACUUM']], vk.call('B.VACUUM')}
+result[inc()] = {[['VAC TIME']], vk.call('B.MILLIS') - start}
+result[inc()] = {[['B.HEAPBYTES']], vk.call('B.HEAPBYTES')}
 
 return result

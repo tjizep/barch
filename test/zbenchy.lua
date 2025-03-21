@@ -49,15 +49,15 @@ end
 local test = function()
 
     tests = tests + 1
-    local t = vk.call('ODMILLIS')
+    local t = vk.call('B.MILLIS')
     for i = 1, count do
         local k = convert(i-1)
-        vk.call('ODSET',k,i)
+        vk.call('B.SET',k,i)
 
     end
 
-    result[inc()] = {'TIME', vk.call('ODMILLIS')-t}
-    result[inc()] = {'HEAP', vk.call('ODHEAPBYTES')}
+    result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
+    result[inc()] = {'HEAP', vk.call('B.HEAPBYTES')}
 
 end
 result[inc()] = vk.call("ODCONFIG", "SET","max_memory_bytes", "47m")

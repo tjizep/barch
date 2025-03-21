@@ -24,23 +24,23 @@ local test = function()
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
-        vk.call('ODSET',k,v)
+        vk.call('B.SET',k,v)
 
     end
-    local rtest = vk.call('ODRANGE',convert(2), convert(8), 6)
+    local rtest = vk.call('B.RANGE',convert(2), convert(8), 6)
     if #rtest == 6 then
         successes = successes + 1
     end
-    if vk.call('ODMIN') == 'a' then
+    if vk.call('B.MIN') == 'a' then
         successes = successes + 1
     end
-    if vk.call('ODMAX') == 'j' then
+    if vk.call('B.MAX') == 'j' then
         successes = successes + 1
     end
-    result[inc()] = {"'ODRANGE',convert(2), convert(8), 6", rtest}
-    result[inc()] = {[['ODMIN']], vk.call('ODMIN')}
+    result[inc()] = {"'B.RANGE',convert(2), convert(8), 6", rtest}
+    result[inc()] = {[['B.MIN']], vk.call('B.MIN')}
 
-    result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
+    result[inc()] = {[['B.MAX']], vk.call('B.MAX')}
     result[inc()] = {"succeses for test "..tests..": "..successes}
 end
 

@@ -24,7 +24,6 @@ extern "C"
 #include <fast_float/fast_float.h>
 #include <functional>
 
-
 static ValkeyModuleDict *Keyspace{};
 static std::shared_mutex shared{};
 
@@ -148,7 +147,7 @@ extern "C" {
     *
     * Return a list of matching keys, lexicographically between startkey
     * and endkey. No more than 'count' items are emitted. */
-    int cmd_KEYRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
+    int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
         ValkeyModule_AutoMemory(ctx);
         compressed_release release;
@@ -372,10 +371,10 @@ extern "C" {
         }
     }
 
-    /* CDICT.RM <key>
+    /* B.RM <key>
      *
      * remove the value associated with the key and return the key if such a key existed. */
-    int cmd_RM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
+    int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     {
         ValkeyModule_AutoMemory(ctx);
         compressed_release release;
@@ -411,7 +410,7 @@ extern "C" {
         return r;
 
     }
-    /* CDICT.SIZE
+    /* B.SIZE
      * @return the size or o.k.a. key count. 
      */
     int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
@@ -426,10 +425,10 @@ extern "C" {
         
     }
 
-    /* CDICT.STATISTICS
+    /* B.STATISTICS
      *
      * get memory statistics. */
-    int cmd_STATISTICS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
         compressed_release release;
         if (argc != 1)
@@ -526,10 +525,10 @@ extern "C" {
         return 0;
     }
 
-    /* CDICT.STATISTICS
+    /* B.STATISTICS
      *
      * get memory statistics. */
-    int cmd_OPS_STATISTICS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {   compressed_release release;
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
@@ -593,7 +592,7 @@ extern "C" {
         return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)result);
     }
 
-    int cmd_HEAP_BYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
+    int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc)
     {
         //compressed_release release;
         if (argc != 1)
@@ -611,7 +610,7 @@ extern "C" {
         return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)art_evict_lru(t));
     }
 
-    /* CDICT.SET <key> <value>
+    /* B.SET <key> <value>
      *
      * Set the specified key to the specified value. */
     int cmd_CONFIG(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
@@ -630,61 +629,62 @@ extern "C" {
         return VALKEYMODULE_ERR;
     }
 
+#define NAME(x) "B." #x , cmd_##x
 
     /* This function must be present on each module. It is used in order to
      * register the commands into the server. */
     int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int)
     {
 
-        if (ValkeyModule_Init(ctx, "OD", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
+        if (ValkeyModule_Init(ctx, "B", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODSET", cmd_SET, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(SET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
         
-        if (ValkeyModule_CreateCommand(ctx, "ODADD", cmd_ADD, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(ADD), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODGET", cmd_GET, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(GET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
         
-        if (ValkeyModule_CreateCommand(ctx, "ODLB", cmd_LB, "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(LB), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODREM", cmd_RM, "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(REM), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODRANGE", cmd_KEYRANGE, "readonly", 1, 2, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(RANGE), "readonly", 1, 2, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODSIZE", cmd_SIZE, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(SIZE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODSTATS", cmd_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(STATS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
         
-        if (ValkeyModule_CreateCommand(ctx, "ODOPS", cmd_OPS_STATISTICS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(OPS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODMAX", cmd_MAX, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(MAX), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODMIN", cmd_MIN, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(MIN), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODMILLIS", cmd_MILLIS, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(MILLIS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODVACUUM", cmd_VACUUM, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(VACUUM), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODHEAPBYTES", cmd_HEAP_BYTES, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(HEAPBYTES), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODEVICT", cmd_EVICT, "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(EVICT), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
-        if (ValkeyModule_CreateCommand(ctx, "ODCONFIG", cmd_CONFIG, "write", 1, 1, 0) == VALKEYMODULE_ERR)
+        if (ValkeyModule_CreateCommand(ctx, NAME(CONFIG), "write", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
 
 

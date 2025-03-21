@@ -8,10 +8,10 @@ local inc = function()
 end
 
 
-result[inc()] = {[[ODSTATS]], vk.call('ODSTATS')}
-local start = vk.call('ODMILLIS')
-result[inc()] = {[[ODEVICT]], vk.call('ODEVICT')}
-result[inc()] = {[['EVICT TIME']], vk.call('ODMILLIS') - start}
-result[inc()] = {[[ODHEAPBYTES]], vk.call('ODHEAPBYTES')}
+result[inc()] = {[[ODSTATS]], vk.call('B.STATS')}
+local start = vk.call('B.MILLIS')
+result[inc()] = {[[ODEVICT]], vk.call('B.EVICT')}
+result[inc()] = {[['EVICT TIME']], vk.call('B.MILLIS') - start}
+result[inc()] = {[[ODHEAPBYTES]], vk.call('B.HEAPBYTES')}
 
 return result

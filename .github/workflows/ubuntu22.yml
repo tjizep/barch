@@ -11,6 +11,6 @@ jobs:
         run: |
           mkdir build &&
           cd build &&
-          cmake -DFASTFLOAT_TEST=ON  ..  &&
+          cmake -DTEST_OD=ON  ..  &&
           cmake --build .   &&
           ctest --output-on-failure

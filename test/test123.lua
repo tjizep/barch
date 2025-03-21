@@ -27,9 +27,9 @@ local test = function()
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
-        vk.call('ODSET',k,v)
-        vk.call('ODREM',k)
-        vk.call('ODSET',k,v)
+        vk.call('B.SET',k,v)
+        vk.call('B.REM',k)
+        vk.call('B.SET',k,v)
         if math.mod(i,logperiod) == 0 then
             vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
@@ -37,8 +37,8 @@ local test = function()
     for i = 1, 0 do
         local k = convert(i-1)
         local v = '#'..i
-        if vk.call('ODGET',k) ~= v then
-            result[inc()] = {k, v, vk.call('ODGET',k)} --vk.call('cdict.lb',k)
+        if vk.call('B.GET',k) ~= v then
+            result[inc()] = {k, v, vk.call('B.GET',k)} --vk.call('cdict.lb',k)
         else
             successes = successes + 1
         end
@@ -47,11 +47,11 @@ local test = function()
         end
 
     end
-    result[inc()] = {"'ODRANGE',convert(2), convert(count-2), 10", vk.call('ODRANGE',convert(2), convert(count-2), 4)}
-    result[inc()] = {[['ODMIN']], vk.call('ODMIN')}
-    result[inc()] = {[['ODMAX']], vk.call('ODMAX')}
-    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
-    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
+    result[inc()] = {"'B.RANGE',convert(2), convert(count-2), 10", vk.call('B.RANGE',convert(2), convert(count-2), 4)}
+    result[inc()] = {[['B.MIN']], vk.call('B.MIN')}
+    result[inc()] = {[['B.MAX']], vk.call('B.MAX')}
+    result[inc()] = {[['B.STATS']], vk.call('B.STATS')}
+    result[inc()] = {[['B.SIZE']], vk.call('B.SIZE')}
     result[inc()] = {"succeses for test "..tests..": "..successes}
 end
 
@@ -60,22 +60,22 @@ local clear = function()
         local k = convert(i-1)
         local v = '#'..i
 
-        local before = vk.call('ODSIZE')
-        if vk.call('ODGET',k) == nil then
-            result[inc()] = {"Failed get before remove",k, v, vk.call('ODGET',k)}
+        local before = vk.call('B.SIZE')
+        if vk.call('B.GET',k) == nil then
+            result[inc()] = {"Failed get before remove",k, v, vk.call('B.GET',k)}
             failures = failures + 1
         end
-        if vk.call('ODREM',k) == v then
+        if vk.call('B.REM',k) == v then
             successes = successes + 1
         else
-            result[inc()] = {"Failed remove result ",k, v, vk.call('ODGET',k)}
+            result[inc()] = {"Failed remove result ",k, v, vk.call('B.GET',k)}
         end
 
-        if vk.call('ODGET',k) then
-            result[inc()] = {"Failed remove",k, v, vk.call('ODGET',k)}
+        if vk.call('B.GET',k) then
+            result[inc()] = {"Failed remove",k, v, vk.call('B.GET',k)}
             failures = failures + 1
         end
-        if vk.call('ODSIZE') == before - 1 then
+        if vk.call('B.SIZE') == before - 1 then
             successes = successes + 1
         else
             failures = failures + 1
@@ -86,9 +86,9 @@ local clear = function()
 
     end
 
-    result[inc()] = {[['ODSTATS']], vk.call('ODSTATS')}
-    result[inc()] = {[['ODSIZE']], vk.call('ODSIZE')}
-    result[inc()] = {[['ODOPS']], vk.call('ODOPS')}
+    result[inc()] = {[['B.STATS']], vk.call('B.STATS')}
+    result[inc()] = {[['B.SIZE']], vk.call('B.SIZE')}
+    result[inc()] = {[['B.OPS']], vk.call('B.OPS')}
     result[inc()] = {'COUNT', count}
     result[inc()] = {'FAILURES', failures}
     result[inc()] = {'SUCCESSES', successes}
@@ -97,9 +97,9 @@ end
 
 --[[ Testing num hash string key types]]
 result[inc()] = {"running test "..tests}
-result[inc()] = vk.call("ODCONFIG", "SET","max_memory_bytes", "50m")
-result[inc()] = vk.call("ODCONFIG", "SET","active_defrag", "on")
-result[inc()] = vk.call("ODCONFIG", "SET","compression", "zstd")
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "50m")
+result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "on")
+result[inc()] = vk.call("B.CONFIG", "SET","compression", "zstd")
 
 convert = tochars123
 for i = 1,5 do

@@ -29,6 +29,7 @@
 10. `B.HEAPBYTES` bytes allocated by `BARCH` alone
 11. `B.STATS` lots of statistics on internal datastructures, node count, defrag, pages etc.
 12. `B.OPS` operation counts of various `BARCH` api commands
+12. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
 
 # Installation
 1. Checkout and build on (linux only) with gcc 10 or above

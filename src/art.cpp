@@ -9,6 +9,8 @@
 #include "statistics.h"
 #include "compress.h"
 #include "configuration.h"
+#include "glob.h"
+
 static compress* node_compression = nullptr;
 static compress* leaf_compression = nullptr;
 bool art::has_leaf_compression()
@@ -938,7 +940,45 @@ uint64_t art_evict_lru(art::tree *t)
     }
     return 0;
 }
-art_statistics art_get_statistics(){
+void art::glob(tree* unused(t), const keys_spec &spec, value_type pattern, const std::function<bool(const leaf& l)>& cb)
+{
+    try
+    {
+        int64_t counter = 0;
+        get_leaf_compression().iterate_pages([&](size_t size, const heap::buffer<uint8_t> & page)->bool
+        {
+
+            if(!size) return true;
+            auto i = page.begin();
+            auto e = i + size;
+            while (i != e)
+            {
+                const leaf *l = (const leaf*)i;
+                if (l->key_len > page.byte_size())
+                {
+                    throw std::runtime_error("art::glob: key too long");
+                }
+                if (!(l->deleted() || l->expired()))
+                {
+                    if (!spec.count && ++counter > spec.max_count) return false;
+                    if( 1 == glob::stringmatchlen(pattern, l->get_clean_key(), 0))
+                    {
+                        if(!cb(*l)) return false;
+                    }
+                }
+                i += (l->byte_size() + test_memory);
+            }
+
+            return true;
+        });
+
+    }catch (std::exception &)
+    {
+        ++statistics::exceptions_raised;
+    }
+}
+
+art_statistics art::get_statistics(){
     art_statistics as{};
     as.heap_bytes_allocated = (int64_t)heap::allocated;
     as.leaf_nodes = (int64_t)statistics::leaf_nodes;
@@ -964,7 +1004,7 @@ art_statistics art_get_statistics(){
     return as;
 }
 
-art_ops_statistics art_get_ops_statistics(){
+art_ops_statistics art::get_ops_statistics(){
 
     art_ops_statistics os{};
     os.delete_ops = (int64_t)statistics::delete_ops;

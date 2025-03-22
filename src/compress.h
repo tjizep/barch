@@ -593,6 +593,8 @@ private:
     size_t top = 10000000;
     size_t free_pages = top;
     size_t last_allocated = 0;
+    size_t max_address_accessed = 0;
+
     void recover_free(size_t at)
     {
         if(!is_free(at))
@@ -609,9 +611,11 @@ private:
             throw std::runtime_error("no free pages available");
         }
         hidden_arena[at] = storage{};
+        max_address_accessed = std::max(max_address_accessed, at);
         --free_pages;
     }
 public:
+
     hash_arena() = default;
     // arena virtualization functions
     void expand_address_space()
@@ -623,6 +627,7 @@ public:
         {
             hidden_arena[++top] = storage{};
         }
+        max_address_accessed = std::max(max_address_accessed, top);
     }
 
     size_t page_count() const
@@ -645,6 +650,7 @@ public:
             throw std::runtime_error("page already free");
         }
         hidden_arena.erase(pi);
+        max_address_accessed = std::max(max_address_accessed, at);
         ++free_pages;
         free_address_list.emplace_back(at);
     }
@@ -674,7 +680,7 @@ public:
         {
             if (is_free(last_allocated+1))
             {
-               ++last_allocated;
+                ++last_allocated;
                 recover_free(last_allocated);
                 return last_allocated;
             }
@@ -740,7 +746,12 @@ public:
         {
             iter(at, str);
         }
-    }};
+    }
+    size_t get_max_address_accessed() const
+    {
+        return max_address_accessed;
+    }
+};
 
 struct compress : hash_arena
 {
@@ -1065,13 +1076,13 @@ private:
         if (t.compressed.empty() && !t.decompressed.empty())
         {
             t.compressed = compress_2_buffer(dict, cctx, t.decompressed.begin(), page_size);
-            if (t.compressed.empty())
+            if (!t.compressed.empty())
             {
-                abort();
+                statistics::page_bytes_compressed += t.compressed.size();
+                ++statistics::pages_compressed;
+                t.modifications = 0;
+
             }
-            statistics::page_bytes_compressed += t.compressed.size();
-            ++statistics::pages_compressed;
-            t.modifications = 0;
         }
 
         if (!t.decompressed.empty() && !t.compressed.empty() && t.modifications == 0)
@@ -1195,18 +1206,21 @@ private:
         valid({at,0});
         std::pair<size_t, storage&> dec = {at,t};
         if (decompress(dec))
-        {   // we might signal this as decompressed
-            if(!t.compressed.empty())
+        {   // release the decompreseed page again
+            heap::buffer<uint8_t> decompressed = std::move(t.decompressed);
+            if (!decompressed.empty())
             {
-                statistics::page_bytes_compressed -= t.compressed.byte_size();
-                --statistics::pages_compressed;
-                t.compressed.release();
+                statistics::page_bytes_uncompressed -= decompressed.byte_size();
+                --statistics::pages_uncompressed;
+                return {decompressed,t.write_position};
+
             }
         }
         if (t.decompressed.empty())
         {
             return {heap::buffer<uint8_t>(),0};
         }
+
         return {t.decompressed,t.write_position};
 
     }
@@ -1540,7 +1554,18 @@ public:
         vacuum_scope.lock_shared();
         return r;
     }
+    void iterate_pages(const std::function<bool(size_t, const heap::buffer<uint8_t>&)>& found_page)
+    {
+        for(size_t page = 0; page <= get_max_address_accessed(); ++page)
+        {
+            auto pb = get_page_buffer(page);
+            if (!found_page(pb.second, pb.first))
+            {
+                return;
+            }
 
+        }
+    }
 
 };
 

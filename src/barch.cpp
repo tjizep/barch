@@ -132,7 +132,7 @@ struct iter_state {
             return -1;
         }
         
-        if(0 != reply_encoded_key(ctx, key)){
+        if (0 != reply_encoded_key(ctx, key)){
             return -1;
         };
 
@@ -195,6 +195,57 @@ extern "C" {
         ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
 
         /* Cleanup. */
+        return VALKEYMODULE_OK;
+    }
+    /* CDICT.KEYS
+ *
+ * match against all keys using a glob pattern
+ * */
+    int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc)
+    {
+        ValkeyModule_AutoMemory(ctx);
+
+        if (argc < 2 || argc > 4)
+            return ValkeyModule_WrongArity(ctx);
+
+        art::keys_spec spec(argv,argc);
+        if (spec.parse_keys_options() != VALKEYMODULE_OK)
+        {
+            return ValkeyModule_WrongArity(ctx);
+        }
+        int64_t replies = 0;
+        size_t plen;
+        const char *cpat = ValkeyModule_StringPtrLen(argv[1], &plen);
+        art::value_type pattern{cpat,(unsigned)plen};
+        if (spec.count)
+        {
+            art::glob(get_art(), spec, pattern,[&](const art::leaf& unused(l)) -> bool
+            {
+               ++replies;
+               return true;
+            });
+            return ValkeyModule_ReplyWithLongLong(ctx, replies);
+        }else
+        {
+            /* Reply with the matching items. */
+            ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
+
+
+            art::glob(get_art(), spec, pattern,[&](const art::leaf& l) -> bool
+            {
+                if (0 != reply_encoded_key(ctx, l.get_key())){
+                    return false;
+                };
+                ++replies;
+                return true;
+            });
+
+
+            ValkeyModule_ReplySetArrayLength(ctx, replies);
+
+            /* Cleanup. */
+
+        }
         return VALKEYMODULE_OK;
     }
 
@@ -338,7 +389,6 @@ extern "C" {
         return ValkeyModule_ReplyWithLongLong(ctx,d.count());
 
     }
-
     /* CDICT.MAXIMUM
      *
      * Return the value of the specified key, or a null reply if the key
@@ -460,7 +510,7 @@ extern "C" {
             return ValkeyModule_WrongArity(ctx);
 
         long row_count = 0;
-        art_statistics as = art_get_statistics();
+        art_statistics as = art::get_statistics();
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
@@ -558,7 +608,7 @@ extern "C" {
         if (argc != 1)
             return ValkeyModule_WrongArity(ctx);
 
-        art_ops_statistics as = art_get_ops_statistics();
+        art_ops_statistics as = art::get_ops_statistics();
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN); 
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
         ValkeyModule_ReplyWithSimpleString(ctx, "delete_ops");
@@ -649,7 +699,12 @@ extern "C" {
         const char *s = ValkeyModule_StringPtrLen(argv[1], &slen);
         if (strncmp("set",s,slen) == 0 || strncmp("SET",s,slen) == 0 )
         {
-            return art::set_configuration_value(argv[2],argv[3]);
+            int r = art::set_configuration_value(argv[2],argv[3]);
+            if (r == VALKEYMODULE_OK)
+            {
+                return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+            }
+            return r;
         }
         return VALKEYMODULE_ERR;
     }
@@ -671,6 +726,9 @@ extern "C" {
             return VALKEYMODULE_ERR;
 
         if (ValkeyModule_CreateCommand(ctx, NAME(GET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
+        if (ValkeyModule_CreateCommand(ctx, NAME(KEYS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
             return VALKEYMODULE_ERR;
         
         if (ValkeyModule_CreateCommand(ctx, NAME(LB), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

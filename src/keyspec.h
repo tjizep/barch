@@ -15,19 +15,12 @@ extern "C"
 #include <regex>
 #include <chrono>
 namespace art {
-    struct key_spec {
+    struct base_key_spec
+    {
         ValkeyModuleString *const*argv{};
         static std::regex integer;
         int argc = 0;
         int r = 0;
-
-        bool none = false;
-        bool get = false;
-        bool nx = false;
-        bool xx = false;
-        bool keepttl = false;
-        int64_t ttl = 0;
-
         mutable std::string s{};
         int64_t now() const
         {
@@ -83,6 +76,18 @@ namespace art {
             std::transform(s.begin(), s.end(), s.begin(), ::tolower);
             return s == what;
         }
+
+    };
+
+    struct key_spec : base_key_spec {
+
+        bool none = false;
+        bool get = false;
+        bool nx = false;
+        bool xx = false;
+        bool keepttl = false;
+        int64_t ttl = 0;
+
         key_spec() = default;
         key_spec(ValkeyModuleString **argvz, int argcz) {
           argv = argvz;
@@ -151,6 +156,41 @@ namespace art {
                 keepttl = true;
                 ++spos;
             }
+            if (argc == spos) // all known arguments should be consumed
+                return VALKEYMODULE_OK;
+
+            return VALKEYMODULE_ERR;
+        }
+
+    };
+    struct keys_spec : base_key_spec
+    {
+        keys_spec& operator=(ValkeyModuleString **) = delete;
+        keys_spec& operator=(const keys_spec&) = delete;
+        keys_spec(const keys_spec&) = delete;
+        keys_spec(ValkeyModuleString **argvz, int argcz) {
+            argv = argvz;
+            argc = argcz;
+        }
+        bool count = false;
+        int64_t max_count = 0;
+        int parse_keys_options()
+        {
+            int spos = 2; // the pattern is the first one
+            if (argc < 3)
+            {   return VALKEYMODULE_OK;
+            }
+            if (has("count",spos))
+            {
+                count = true;
+                ++spos;
+            }
+            if (has("max",spos))
+            {
+                max_count = tol(++spos);
+                ++spos;
+            }
+
             if (argc == spos) // all known arguments should be consumed
                 return VALKEYMODULE_OK;
 

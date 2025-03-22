@@ -4,6 +4,7 @@
 #include "nodes.h"
 #include "compress.h"
 #include "keyspec.h"
+#include "value_type.h"
 typedef std::unique_lock< std::shared_mutex >  write_lock;
 typedef std::shared_lock< std::shared_mutex >  read_lock;  // C++ 14
 
@@ -216,18 +217,29 @@ namespace art
  int range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data);
 }
 
-/**
- * gets per module per node type statistics for all art_node* types
- * @return art_statistics
- */
-art_statistics art_get_statistics();
 
-/**
- * get statistics for each operation performed
- */
-art_ops_statistics art_get_ops_statistics();
 
 /**
 * evict a lru page
 */
 uint64_t art_evict_lru(art::tree* t);
+
+namespace art
+{
+ /**
+  * gets per module per node type statistics for all art_node* types
+  * @return art_statistics
+  */
+ art_statistics get_statistics();
+
+ /**
+  * get statistics for each operation performed
+  */
+ art_ops_statistics get_ops_statistics();
+
+ /**
+  * glob match all the key value pairs except the deleted ones
+  */
+void glob(tree* t, const keys_spec &spec, value_type pattern, const std::function<bool(const leaf&)>& cb);
+
+}

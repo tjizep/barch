@@ -10,6 +10,7 @@
 
 #include <array>
 #include "compress.h"
+#include "value_type.h"
 #define unused_arg
 #define unused(x)
 namespace art
@@ -44,35 +45,6 @@ namespace art
         leaf_ttl_flag = 1,
         leaf_volatile_flag = 2,
         leaf_deleted_flag = 4
-    };
-    struct value_type
-    {
-        const unsigned char* bytes;
-        unsigned size;
-        value_type(const char * v, unsigned l): bytes((const unsigned char*)v), size(l) {} ;
-        value_type(const unsigned char * v, unsigned l): bytes(v), size(l) {} ;
-        value_type(const unsigned char * v, size_t l): bytes(v), size(l) {} ;
-        [[nodiscard]] unsigned length() const
-        {
-            if(!size) return 0;
-            return size - 1; // implied in the data is a null terminator
-        }
-        [[nodiscard]] const char * chars() const
-        {
-            return (const char*)bytes;
-        }
-        const unsigned char& operator[](unsigned i) const
-        {
-            // TODO: this is a hack fix because there's some BUG in the insert code
-            // were assuming that the key has a magic 0 byte allocated after the last byte
-            // however this is not so for data
-            if (i < size)
-            {
-                return bytes[i];
-            }
-            throw std::out_of_range("index out of range");
-        }
-
     };
     struct leaf;
 
@@ -529,6 +501,10 @@ namespace art
         [[nodiscard]] value_type get_key() const
         {
             return {key(),(unsigned)key_len + 1};
+        }
+        [[nodiscard]] value_type get_clean_key() const
+        {
+            return {key()+1,(unsigned)key_len};
         }
 
         void set_key(const unsigned char* k, unsigned len)

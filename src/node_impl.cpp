@@ -12,7 +12,8 @@
 art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
     unsigned val_len = v.size;
     unsigned key_len = key.length();
-    size_t leaf_size = sizeof(leaf) + key_len + (ttl > 0 ? sizeof(ttl):0) + 1 + val_len;
+    unsigned ttl_size = ttl > 0 ? sizeof(ttl):0;
+    size_t leaf_size = sizeof(leaf) + key_len + ttl_size + 1 + val_len;
     // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
     auto logical = art::get_leaf_compression().new_address(leaf_size);
     auto *l = new(get_leaf_compression().read<leaf>(logical)) leaf(key_len, val_len, ttl, is_volatile);
@@ -198,7 +199,7 @@ void art::tree::run_defrag()
         if(lc.fragmentation_ratio() > -1)  //art::get_min_fragmentation_ratio())
         {
             auto fl = lc.create_fragmentation_list(art::get_max_defrag_page_count());
-
+            art::key_spec options;
             for(auto p : fl)
             {
                 //compressed_release releaser;
@@ -215,10 +216,11 @@ void art::tree::run_defrag()
                     }
                 });
 
-                page_iterator(page.first, page.second,[&fc,this](const art::leaf* l)
+                page_iterator(page.first, page.second,[&fc,&options,this](const art::leaf* l)
                 {
                     size_t c1 = this->size;
-                    art_insert(this, l->get_key(), l->get_value(),fc);
+                    options.ttl = l->ttl();
+                    art_insert(this, options, l->get_key(), l->get_value(),fc);
                     if (c1+1 != this->size)
                     {
                         abort();

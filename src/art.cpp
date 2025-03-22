@@ -468,10 +468,10 @@ static int prefix_mismatch(const art::node_ptr n, art::value_type key, int depth
     }
     return idx;
 }
-static art::node_ptr recursive_insert(art::tree* t, art::node_ptr n, art::node_ptr &ref, art::value_type key,  art::value_type value, int depth, int *old, int replace) {
+static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options, art::node_ptr n, art::node_ptr &ref, art::value_type key,  art::value_type value, int depth, int *old, int replace) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
-        ref = art::make_leaf(key, value);
+        ref = art::make_leaf(key, value, options.ttl);
         return nullptr;
     }
     // If we are at a leaf, we need to replace it with a node
@@ -484,12 +484,12 @@ static art::node_ptr recursive_insert(art::tree* t, art::node_ptr n, art::node_p
             if (replace)
             {
                 art::leaf *dl = n.l();
-                if (dl->val_len == value.size)
+                if (dl->val_len == value.size && !l->expired())
                 {
                     dl->set_value(value);
                 }else
                 {
-                    ref = make_leaf(key, value); // create a new leaf to carry the new value
+                    ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl); // create a new leaf to carry the new value
                     ++statistics::leaf_nodes_replaced;
                     return n;
                 }
@@ -565,7 +565,7 @@ RECURSE_SEARCH:;
     if (!child.null()) {
         art::node_ptr nc = child;
 
-        auto r = recursive_insert(t, child, nc, key, value, depth+1, old, replace);
+        auto r = recursive_insert(t, options, child, nc, key, value, depth+1, old, replace);
         if (nc != child) {
             n = n->expand_pointers(ref, {nc});
             n->set_child(pos, nc);
@@ -588,11 +588,11 @@ RECURSE_SEARCH:;
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art::tree *t, art::value_type key, art::value_type value, std::function<void(art::node_ptr l)> fc) {
+void art_insert(art::tree *t, const art::key_spec& options, art::value_type key, art::value_type value, std::function<void(art::node_ptr l)> fc) {
     try
     {
         int old_val = 0;
-        art::node_ptr old = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 1);
+        art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 1);
         if (!old_val){
             t->size++;
             ++statistics::insert_ops;
@@ -607,6 +607,9 @@ void art_insert(art::tree *t, art::value_type key, art::value_type value, std::f
             }
             fc(old);
             free_leaf_node(old);
+        } else if (old_val == 1)
+        {
+            fc(old);
         }
     }catch (std::exception &)
     {
@@ -623,12 +626,12 @@ void art_insert(art::tree *t, art::value_type key, art::value_type value, std::f
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree *t, art::value_type key, art::value_type value, const NodeResult& fc) {
+void art_insert_no_replace(art::tree *t, const art::key_spec& options, art::value_type key, art::value_type value, const NodeResult& fc) {
     ++statistics::insert_ops;
     try
     {
         int old_val = 0;
-        art::node_ptr r = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 0);
+        art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0);
         if (r.null()){
             t->size++;
         }

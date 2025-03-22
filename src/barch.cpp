@@ -205,7 +205,7 @@ extern "C" {
     {
         ValkeyModule_AutoMemory(ctx);
         compressed_release release;
-        if (argc != 3)
+        if (argc < 3)
             return ValkeyModule_WrongArity(ctx);
         //ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
         size_t klen,vlen;
@@ -216,13 +216,37 @@ extern "C" {
             return key_check(ctx, k, klen);
         
         auto converted = conversion::convert(k, klen);
-        write_lock wl(get_lock());
-        auto fc = [ctx](art::node_ptr ) -> void
+        art::key_spec spec(argv,argc);
+        if (spec.parse_options() != VALKEYMODULE_OK)
         {
+            return ValkeyModule_WrongArity(ctx);
+        }
+        write_lock wl(get_lock());
+        ValkeyModuleString * reply = nullptr;
+        auto fc = [&](art::node_ptr ) -> void
+        {
+            if (spec.get)
+            {
+                auto vt = converted.get_value();
+                reply = ValkeyModule_CreateString(ctx, vt.chars() + 1, vt.length()-1);
+            }
         };
 
-        art_insert(get_art(), converted.get_value(), {v,(unsigned)vlen}, fc);
-        return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        art_insert(get_art(), spec, converted.get_value(), {v,(unsigned)vlen}, fc);
+        if (spec.get)
+        {
+            if (reply)
+            {
+                return ValkeyModule_ReplyWithString(ctx, reply);
+            }else
+            {
+                return ValkeyModule_ReplyWithNull(ctx);
+            }
+        }else
+        {
+            return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        }
+
     }
 
     /* CDICT.ADD <key> <value>
@@ -243,8 +267,9 @@ extern "C" {
             return key_check(ctx, k, klen);
         auto fc = [](art::node_ptr) -> void {};
         auto converted = conversion::convert(k, klen);
+        art::key_spec spec(argv,argc);
         write_lock w(get_lock());
-        art_insert_no_replace(get_art(), converted.get_value(), {v,(unsigned)vlen},fc);
+        art_insert_no_replace(get_art(), spec, converted.get_value(), {v,(unsigned)vlen},fc);
 
         return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }

@@ -1,5 +1,6 @@
 ## GET Command
 Retrieves the value associated with a specific key. If the key does not exist (nil) is returned.
+#### Time Complexity O(1) (O(k) where k represents keylength)
 
 ## Example
 

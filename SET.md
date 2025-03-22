@@ -19,7 +19,7 @@ The SET command supports a set of options that modify its behavior:
 - NX -- Only set the key if it does not already exist.
 - XX -- Only set the key if it already exists.
 - KEEPTTL - Keep the time to live associated with the key.
-- GET -- Return the old string stored at key, or nil if key did not exist. The key is converted to a string if it is not.
+- GET - Return the old string stored at key, or nil if key did not exist. The key is converted to a string if it is not.
 ### Example
 
 ```redis

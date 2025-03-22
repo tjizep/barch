@@ -222,22 +222,21 @@ extern "C" {
             return ValkeyModule_WrongArity(ctx);
         }
         write_lock wl(get_lock());
-        ValkeyModuleString * reply = nullptr;
+        art::value_type reply{"",0};
         auto fc = [&](art::node_ptr ) -> void
         {
             if (spec.get)
             {
-                auto vt = converted.get_value();
-                reply = ValkeyModule_CreateString(ctx, vt.chars() + 1, vt.length()-1);
+                reply = converted.get_value();
             }
         };
 
         art_insert(get_art(), spec, converted.get_value(), {v,(unsigned)vlen}, fc);
         if (spec.get)
         {
-            if (reply)
+            if (reply.size)
             {
-                return ValkeyModule_ReplyWithString(ctx, reply);
+                return reply_encoded_key(ctx, reply);
             }else
             {
                 return ValkeyModule_ReplyWithNull(ctx);

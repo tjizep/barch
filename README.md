@@ -2,6 +2,8 @@
 
 `BARCH` is a low memory, dynamically configurable, constant access time ordered key value store for [valkey](https://valkey.io/)
 
+[![Ubuntu 22.04 CI (GCC 11)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
+
 # Features
 1. Ordered: minimum, lower-bound and maximum operations are constant time
 2. Low memory footprint: Half that of standard hash map while providing similar single threaded latency 

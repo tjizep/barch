@@ -18,6 +18,7 @@ static std::string eviction_type{};
 static std::string max_memory_bytes{};
 static std::string min_fragmentation_ratio{};
 static std::string max_defrag_page_count{};
+static std::string iteration_worker_count{};
 static std::string maintenance_poll_delay{};
 static std::string active_defrag{};
 
@@ -136,13 +137,40 @@ static int SetMaxDefragPageCount(const char*unused_arg, ValkeyModuleString* val,
     {
         return VALKEYMODULE_ERR;
     }
-    maintenance_poll_delay = test_max_defrag_page_count;
+    max_defrag_page_count = test_max_defrag_page_count;
     char* ep = nullptr;
     record.max_defrag_page_count = std::strtoll(test_max_defrag_page_count.c_str(),&ep,10);
     return VALKEYMODULE_OK;
 }
 
 static int ApplyMaxDefragPageCount(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
+{
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString* GetIterationWorkerCount(const char*unused_arg, void*unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, iteration_worker_count.c_str(), iteration_worker_count.length());
+}
+
+static int SetIterationWorkerCount(const char*unused_arg, ValkeyModuleString* val, void*unused_arg,
+                              ValkeyModuleString**unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    std::string test_iteration_worker_count = ValkeyModule_StringPtrLen(val, nullptr);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_iteration_worker_count, check))
+    {
+        return VALKEYMODULE_ERR;
+    }
+    iteration_worker_count = test_iteration_worker_count;
+    char* ep = nullptr;
+    record.iteration_worker_count = std::strtoll(test_iteration_worker_count.c_str(),&ep,10);
+    return VALKEYMODULE_OK;
+}
+
+static int ApplyIterationWorkerCount(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
 {
     return VALKEYMODULE_OK;
 }
@@ -281,6 +309,8 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
                                              GetMaintenancePollDelay, SetMaintenancePollDelay, ApplyMaintenancePollDelay, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_defrag_page_count", "10", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxDefragPageCount, SetMaxDefragPageCount, ApplyMaxDefragPageCount, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetIterationWorkerCount, SetIterationWorkerCount, ApplyIterationWorkerCount, nullptr);
     return ret;
 }
 
@@ -289,7 +319,12 @@ int art::set_configuration_value(ValkeyModuleString* Name, ValkeyModuleString* V
     std::string name = ValkeyModule_StringPtrLen(Name, nullptr);
     if (name == "compression")
     {
-        return SetCompressionType(nullptr, Value, nullptr, nullptr);
+        int r = SetCompressionType(nullptr, Value, nullptr, nullptr);
+        if (r == VALKEYMODULE_OK)
+        {
+            return ApplyCompressionType(nullptr,nullptr,nullptr);
+        }
+        return r;
     }
     else if (name == "eviction_policy")
     {
@@ -306,6 +341,10 @@ int art::set_configuration_value(ValkeyModuleString* Name, ValkeyModuleString* V
     else if (name == "active_defrag")
     {
         return SetActiveDefragType(nullptr, Value, nullptr, nullptr);
+    }
+    else if (name == "iteration_worker_count")
+    {
+        return SetIterationWorkerCount(nullptr, Value, nullptr, nullptr);
     }
     else
     {
@@ -395,4 +434,9 @@ uint64_t art::get_max_defrag_page_count()
 {
     std::unique_lock lock(config_mutex);
     return record.max_defrag_page_count;
+}
+unsigned art::get_iteration_worker_count()
+{
+    std::unique_lock lock(config_mutex);
+    return record.iteration_worker_count;
 }

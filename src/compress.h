@@ -23,10 +23,11 @@
 enum
 {
     page_size = 4096,
-    reserved_address_base = 12000000,
+    reserved_address_base = 12000,
     //opt_enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 8,
+    iterate_workers = 4,
     test_memory = 0,
     allocation_padding = 0,
     coalesce_fragments = 0
@@ -210,12 +211,12 @@ struct storage
 
     heap::buffer<uint8_t> compressed;
     heap::buffer<uint8_t> decompressed;
-    unsigned write_position = 0;
-    unsigned size = 0;
-    unsigned modifications = 0;
+    uint16_t write_position = 0;
+    uint16_t size = 0;
+    uint16_t modifications = 0;
     lru_list::iterator lru{};
     uint64_t ticker = 0;
-    uint64_t fragmentation = 0;
+    uint16_t fragmentation = 0;
 };
 struct size_offset
 {
@@ -814,6 +815,8 @@ private:
     bool opt_enable_compression = false;
     bool opt_enable_lru = false;
     bool opt_validate_addresses = false;
+    bool opt_move_decompressed_pages = true;
+    unsigned opt_iterate_workers = 4;
     std::thread tdict{};
     std::thread tpoll{};
     bool threads_exit = false;
@@ -957,10 +960,10 @@ private:
         return compressed_data;
     }
 
-    heap::buffer<uint8_t> decompress_buffer(size_t known_decompressed_size, const heap::buffer<uint8_t>& compressed)
+    heap::buffer<uint8_t> decompress_buffer(ZSTD_DCtx *d_ctx,size_t known_decompressed_size, const heap::buffer<uint8_t>& compressed)
     {
         heap::buffer<uint8_t> decompressed = heap::buffer<uint8_t>(known_decompressed_size);
-        size_t decompressed_size = ZSTD_decompress_usingDict(dctx,
+        size_t decompressed_size = ZSTD_decompress_usingDict(d_ctx,
                                                              decompressed.begin(), decompressed.size(),
                                                              compressed.begin(), compressed.size(),
                                                              training_data.begin(), trained_size);
@@ -971,6 +974,11 @@ private:
             abort();
         }
         return decompressed;
+    }
+    heap::buffer<uint8_t> decompress_buffer(size_t known_decompressed_size, const heap::buffer<uint8_t>& compressed)
+    {
+        return decompress_buffer(dctx, known_decompressed_size, compressed);
+
     }
     ;
 
@@ -1141,7 +1149,7 @@ private:
         {
             if (erased.count(at.address()))
             {
-                std::cerr << "allocator '" << name << "' is accessing memory after free ( at: " << at.address() << ")" << std::endl;
+                std::cerr << "allocator '" << name << "' is accessing memory after it was freed ( at: " << at.address() << " )" << std::endl;
                 throw std::runtime_error("memory erased");
             }
         }
@@ -1243,14 +1251,18 @@ private:
         std::pair<size_t, storage&> dec = {at,t};
         if (decompress(dec))
         {   // release the decompreseed page again
-            heap::buffer<uint8_t> decompressed = std::move(t.decompressed);
-            if (!decompressed.empty())
+            if (opt_move_decompressed_pages)
             {
-                statistics::page_bytes_uncompressed -= decompressed.byte_size();
-                --statistics::pages_uncompressed;
-                return {decompressed,t.write_position};
+                heap::buffer<uint8_t> decompressed = std::move(t.decompressed);
+                if (!decompressed.empty())
+                {
+                    statistics::page_bytes_uncompressed -= decompressed.byte_size();
+                    --statistics::pages_uncompressed;
+                    return {decompressed,t.write_position};
 
+                }
             }
+
         }
         if (t.decompressed.empty())
         {
@@ -1366,6 +1378,7 @@ public:
             t.fragmentation += size;
             fragmentation += size;
             fragmented.insert(at.page());
+
         }
     }
     float fragmentation_ratio() const
@@ -1439,7 +1452,12 @@ public:
         std::lock_guard guard(mutex);
         compressed_address r = emancipated.get(size);
         if(!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty())
-        {   auto& pcheck = retrieve_page(r.page());
+        {
+            if (test_memory)
+            {
+                erased.erase(r.address());
+            }
+            auto& pcheck = retrieve_page(r.page());
 
             PageSizeType w = r.offset();
             if (w + size > pcheck.write_position)
@@ -1532,6 +1550,7 @@ public:
     size_t full_vacuum()
     {
         std::lock_guard guard(mutex);
+        if (!opt_enable_compression) return 0;
         statistics::max_page_bytes_uncompressed = std::max<uint64_t>(statistics::page_bytes_uncompressed, statistics::max_page_bytes_uncompressed);
 
         auto t = std::chrono::high_resolution_clock::now();
@@ -1590,17 +1609,57 @@ public:
         vacuum_scope.lock_shared();
         return r;
     }
+
     void iterate_pages(const std::function<bool(size_t, const heap::buffer<uint8_t>&)>& found_page)
     {
-        for(size_t page = 0; page <= get_max_address_accessed(); ++page)
+        opt_iterate_workers = art::get_iteration_worker_count();
+        std::atomic<size_t> r = 0;
+        std::thread workers[opt_iterate_workers];
+        std::atomic<bool> stop = false;
+        for (unsigned iwork = 0; iwork < opt_iterate_workers; iwork++)
         {
-            auto pb = get_page_buffer(page);
-            if (!found_page(pb.second, pb.first))
+            workers[iwork] = std::thread([this,iwork,&found_page,&stop]()
             {
-                return;
-            }
+                ZSTD_DCtx* dctx = ZSTD_createDCtx();
+                iterate_arena([&](size_t page,storage& data) -> void
+                {
+                    if (stop) return;
+                    if (is_null_base(page)) return;
+                    if(page % iterate_workers == iwork)
+                    {
+                        heap::buffer<uint8_t> decompressed ;
+                        heap::buffer<uint8_t> compressed ;
+                        unsigned wp = 0;
+                        {
+                            // copy under lock
+                            std::lock_guard guard(mutex);
+                            if (!is_free(page))
+                            {
+                                wp = data.write_position;
+                                decompressed = data.decompressed;
+                                compressed = data.compressed;
+                            }
+                        }
+                        if (decompressed.empty() && !compressed.empty())
+                        {
+                            // TODO: it must be different for non page sizes
+                            decompressed = decompress_buffer(dctx,std::max<unsigned>(page_size,wp),compressed);
+                        }
+                        if (!decompressed.empty())
+                        {
+                            stop = !found_page(wp, decompressed);
+                            return;
+                        }
 
+                        auto pb = get_page_buffer(page);
+                        stop = !found_page(pb.second, pb.first);
+                    }
+                });
+
+                ZSTD_freeDCtx(dctx);
+            });
         }
+        for (auto& worker : workers) worker.join();
     }
 
 };

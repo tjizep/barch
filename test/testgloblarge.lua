@@ -24,18 +24,22 @@ local test = function()
 
     tests = tests + 1
 
-    for i = 1, count do
-        local k = convert(i-1)
-        local v = '#'..i
-        vk.call('B.SET',k,v)
-        if math.mod(i,logperiod) == 0 then
-            vk.log(vk.LOG_NOTICE, "Adding "..i)
+    if vk.call('B.SIZE') < count then
+        for i = 1, count do
+            local k = convert(i-1)
+            local v = '#'..i
+            vk.call('B.SET',k,v)
+            if math.mod(i,logperiod) == 0 then
+                vk.log(vk.LOG_NOTICE, "Adding "..i)
+            end
         end
+
+        vk.call('B.SET','akeyofmineb',1)
+        vk.call('B.SET','zkeyofminea',2)
     end
-    result[inc()] = {'B.VACUUM',vk.call('B.VACUUM')}
+
     result[inc()] = {'B.HEAPBYTES', vk.call('B.HEAPBYTES')}
-    vk.call('B.SET','akeyofmineb',1)
-    vk.call('B.SET','zkeyofminea',2)
+
     local q = '?key*'
     result[inc()] = {'QUERY', q}
     local t = vk.call('B.MILLIS')
@@ -47,40 +51,27 @@ local test = function()
     result[inc()] = {"succeses for test "..tests..": "..successes}
 end
 
-local clear = function()
-    for i = 1, count do
-        local k = convert(i-1)
-        local v = '#'..i
-
-
-        if vk.call('B.REM',k) == v then
-            successes = successes + 1
-        else
-            result[inc()] = {"Failed remove result ",k, v, vk.call('B.GET',k)}
-        end
-
-        if math.mod(i,logperiod) == 0 then
-            vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
-        end
-
-    end
-
-    result[inc()] = {'COUNT', count}
-    result[inc()] = {'FAILURES', failures}
-    result[inc()] = {'SUCCESSES', successes}
-
-end
-
 --[[ Testing num hash string key types]]
 result[inc()] = {"running test "..tests}
 result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "60m")
-result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
-result[inc()] = vk.call("B.CONFIG", "SET","compression", "zstd")
+result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "on")
+result[inc()] = vk.call("B.CONFIG", "SET","compression", "none")
+local cfg = vk.call("B.CONFIG", "SET","iteration_worker_count", 4)
+if cfg then
+    successes = successes + 1
+end
+result[inc()] = cfg
 
 convert = tochars123
 test()
+result[inc()] = {"'B.CONFIG', 'SET','compression', 'zstd'", vk.call('B.CONFIG', 'SET','compression', 'zstd')}
+local before = vk.call('B.HEAPBYTES')
+result[inc()] = {'B.VACUUM',vk.call('B.VACUUM')}
+if before > vk.call('B.HEAPBYTES') then
+    successes = successes + 1
+end
 --clear()
-assert(successes==2, "test failures")
+assert(successes==3, "test failures")
 assert(failures==0, "test failures")
 
 return result

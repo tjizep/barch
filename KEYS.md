@@ -8,7 +8,8 @@ KEYS pattern [COUNT count the keys matching instead of returning them] | [MAX in
 
 Returns all keys matching pattern in an array.
 
-While the time complexity for this operation is O(N), the constant times are fairly low. For example, *BARCH* running on an older laptop can scan a 1 million key database in 5 milliseconds.
+While the time complexity for this operation is O(N), the constant times are fairly low. 
+For example, *BARCH* running on an older laptop can scan a 1 million key database in 5 milliseconds.
 
 *Note*: Unlike valkey this command will not block any other access to the database, it will run in it's own thread. 
 However, each reply does take some memory so care should be taken to not choose a pattern to return to many results. 

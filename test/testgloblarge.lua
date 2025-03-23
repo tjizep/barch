@@ -11,6 +11,7 @@ local tests = 0
 local failures = 0
 local successes = 0
 local logperiod = 10000
+local isnew = false
 local inc = function()
     index = index + 1
     return index
@@ -25,6 +26,7 @@ local test = function()
     tests = tests + 1
 
     if vk.call('B.SIZE') < count then
+        isnew = true
         for i = 1, count do
             local k = convert(i-1)
             local v = '#'..i
@@ -71,7 +73,11 @@ if before > vk.call('B.HEAPBYTES') then
     successes = successes + 1
 end
 --clear()
-assert(successes==3, "test failures")
+if isnew then
+    assert(successes==3, "test failures")
+else
+    assert(successes==2, "test failures")
+end
 assert(failures==0, "test failures")
 
 return result

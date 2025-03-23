@@ -294,7 +294,7 @@ namespace art
                 //dcache = nullptr;
                 if(!dcache || last_ticker != compress::flush_ticker)
                 {
-                    dcache = get_node_compression().modify<T>(address);
+                    dcache = get_node_compression().read<T>(address);
 
                 }
                 return (T*)dcache;

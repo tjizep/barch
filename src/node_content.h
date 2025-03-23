@@ -15,7 +15,7 @@ namespace art {
         if(n == nullptr) return true;
         if(sizeof(EncodingType) == sizeof(uintptr_t)) return true;
 
-        auto uval = reinterpret_cast<int64_t>(n);
+        auto uval = n->get_address().address();
 
         int64_t ival = uval-base ;
         int64_t imax = i64max<EncodingType>();
@@ -243,7 +243,7 @@ namespace art {
             encoded_data* r = get_node_compression().modify<encoded_data>(address);
             r->type = node_type;
             r->pointer_size = sizeof(IntPtrType);
-            //dcache = r;
+            dcache = r;
             statistics::addressable_bytes_alloc += sizeof(encoded_data);
             statistics::interior_bytes_alloc += sizeof(encoded_data);
             switch (node_type)

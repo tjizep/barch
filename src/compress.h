@@ -510,12 +510,9 @@ struct vector_arena
 private:
     std::vector<storage> hidden_arena{};
     std::unordered_set<size_t> freed_pages{};
+    size_t max_allocated = 0;
 public:
     // arena virtualization functions
-    void expand_address_space()
-    {
-        hidden_arena.emplace_back();
-    }
     [[nodiscard]] size_t page_count() const
     {
         return hidden_arena.size();
@@ -557,17 +554,55 @@ public:
         {
             throw std::runtime_error("page not free");
         }
-        if (at <= max_logical_address())
-        {
-            throw std::runtime_error("invalid address");
-        }
         freed_pages.erase(at);
+    }
+    size_t allocate()
+    {
+        if (!has_free())
+        {
+            size_t end = max_allocated + 100;
+            for (; max_allocated < end; ++max_allocated)
+            {
+                if (!compressed_address::is_null_base(max_allocated))
+                    freed_pages.insert(max_allocated);
+            }
+        }
+        return emancipate();
+    }
+    void iterate_arena(const std::function<bool(size_t, storage&)>& iter)
+    {
+        size_t at = 0;
+        for(auto&page : hidden_arena)
+        {
+            if(!iter(at, page))
+            {
+                return;
+            }
+            ++at;
+        }
+    }
+    size_t get_max_address_accessed() const
+    {
+        return max_allocated;
+    }
+    bool has_page(size_t at) const
+    {
+        if (at>= hidden_arena.size()) return false;
+        return !hidden_arena[at].empty();
+    }
+    void iterate_arena(const std::function<void(size_t, storage&)>& iter)
+    {
+        size_t at = 0;
+        for(auto&page : hidden_arena)
+        {
+            iter(at++, page);
+        }
     }
     storage& retrieve_page(size_t at)
     {
         if (at >= hidden_arena.size())
         {
-            throw std::runtime_error("invalid page");
+            hidden_arena.resize(at + 100);
         }
         return hidden_arena.at(at);
     }
@@ -753,7 +788,7 @@ public:
     }
 };
 
-struct compress : hash_arena
+struct compress : vector_arena
 {
     enum
     {
@@ -778,7 +813,7 @@ struct compress : hash_arena
 private:
     bool opt_enable_compression = false;
     bool opt_enable_lru = false;
-    bool opt_validate_addresses = true;
+    bool opt_validate_addresses = false;
     std::thread tdict{};
     std::thread tpoll{};
     bool threads_exit = false;
@@ -1140,6 +1175,7 @@ private:
 
     void invalid(compressed_address at) const
     {
+        if(!opt_validate_addresses) return;
         valid(at);
 
     }

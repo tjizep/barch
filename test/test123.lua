@@ -34,7 +34,7 @@ local test = function()
             vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
     end
-    for i = 1, 0 do
+    for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
         if vk.call('B.GET',k) ~= v then

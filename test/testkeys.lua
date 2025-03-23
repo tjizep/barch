@@ -22,39 +22,52 @@ local test = function()
     result[inc()] = {"running test "..tests}
     local call = 1
     local res = vk.call('B.SET','a',1,'px',10)
-    result[inc()] = {call, res, successes}
     if res then
         successes = successes + 1
+        result[inc()] = {call, res, successes, 'ok'}
+    else
+        result[inc()] = {call, res, successes, 'faile'}
     end
     call = call + 1
     res = vk.call('B.SET','j',1,'get','keepttl')
-    result[inc()] = {call, res, successes}
-    if not res  then
+
+    if res ~= 'j'  then
         successes = successes + 1
+        result[inc()] = {call, res, successes, 'ok'}
+    else
+        result[inc()] = {call, res, successes,'fail'}
     end
     call = call + 1
     res = vk.call('B.SET','j',1,'get','px',10)
-    result[inc()] = {call, res, successes}
     if  res == 'j' then
         successes = successes + 1
+        result[inc()] = {call, res, successes, 'ok'}
+    else
+        result[inc()] = {call, res, successes, 'fail'}
     end
     call = call + 1
     res = vk.call('B.SET','j',1,'get','px',10,"keepttl")
-    result[inc()] = {call, res, successes}
     if res == 'j' then
         successes = successes + 1
+        result[inc()] = {call, res, successes, 'ok'}
+    else
+        result[inc()] = {call, res, successes, 'fail'}
     end
     call = call + 1
     res = vk.call('B.MIN')
-    result[inc()] = {call, res, successes}
     if  res == 'a' then
         successes = successes + 1
+        result[inc()] = {call, res, successes, 'ok'}
+    else
+        result[inc()] = {call, res, successes, 'fail'}
     end
     call = call + 1
     res = vk.call('B.MAX')
-    result[inc()] = {call, res, successes}
     if res == 'j' then
         successes = successes + 1
+        result[inc()] = {call, res, successes, 'ok'}
+    else
+        result[inc()] = {call, res, successes, 'fail'}
     end
 
     result[inc()] = {"succeses for test "..tests..": "..successes}

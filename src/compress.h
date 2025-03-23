@@ -789,7 +789,7 @@ public:
     }
 };
 
-struct compress : vector_arena
+struct compress : hash_arena
 {
     enum
     {

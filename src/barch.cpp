@@ -441,8 +441,8 @@ extern "C" {
         else
         {
             const auto * l = r. const_leaf();
-            auto *ms = ValkeyModule_CreateString(ctx, l->s(), l->key_len);
-            return ValkeyModule_ReplyWithString(ctx, ms);
+            auto k = l->get_key();
+            return reply_encoded_key(ctx, k);
         }
     }
 

@@ -587,12 +587,16 @@ namespace art
             return compare(k.bytes, k.length(), 0);
         }
         int compare(const unsigned char *key, unsigned key_len, unsigned unused(depth)) const {
-            // TODO: compare is broken will fail some edge cases - see heap::buffer::compare for correct impl
-            // Fail if the key lengths are different
-            if (this->key_len != (LeafSize)key_len) return 1;
-
-            // Compare the keys starting at the depth
-            return memcmp(this->data, key, key_len);
+            unsigned left_len = this->key_len;
+            unsigned right_len = key_len;
+            int r = memcmp(this->data, key, std::min<unsigned>(left_len,right_len));
+            if (r == 0)
+            {
+                if(left_len < right_len) return -1;
+                if(left_len > right_len) return 1;
+                return 0;
+            }
+            return r;
         }
     } ;
 

@@ -173,7 +173,7 @@ namespace art {
             argc = argcz;
         }
         bool count = false;
-        int64_t max_count = 0;
+        int64_t max_count {std::numeric_limits<int64_t>::max()};
         int parse_keys_options()
         {
             int spos = 2; // the pattern is the first one

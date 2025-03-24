@@ -123,7 +123,7 @@ uint64_t art_size(art::tree* t);
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value, NodeResult fc);
+void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value, const NodeResult& fc);
 
 /**
  * inserts a new value into the art tree (not replacing)

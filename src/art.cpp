@@ -166,7 +166,7 @@ static art::node_ptr inner_maximum(art::node_ptr n);
  * we always have to check and extend if required
  * @return false if any non leaf node has no child 
  */
-static bool extend_trace_min(art::node_ptr root, art::trace_list& trace){
+static bool extend_trace_min(const art::node_ptr& root, art::trace_list& trace){
     if (trace.empty()) {
         trace.push_back(first_child_off(root));
     };
@@ -450,8 +450,9 @@ static unsigned longest_common_prefix(const art::leaf *l1, const art::leaf *l2, 
  * Calculates the index at which the prefixes mismatch
  */
 ;
-static int prefix_mismatch(const art::node_ptr n, art::value_type key, int depth) {
-    int max_cmp = std::min<int>(std::min<int>(art::max_prefix_llength, n->data().partial_len), key.length() - depth);
+static int prefix_mismatch(const art::node_ptr& n, art::value_type key, unsigned depth) {
+    int kd = key.length() - depth; // this can be negative ?
+    int max_cmp = std::min<int>(std::min<int>(art::max_prefix_llength, n->data().partial_len), kd);
     int idx;
     for (idx=0; idx < max_cmp; idx++) {
         if (n->data().partial[idx] != key[depth+idx])
@@ -462,7 +463,7 @@ static int prefix_mismatch(const art::node_ptr n, art::value_type key, int depth
     if (n->data().partial_len > art::max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
         const art::leaf *l = minimum(n).const_leaf();
-        max_cmp = std::min<unsigned>(l->key_len, key.length()) - depth;
+        max_cmp = std::min<unsigned>(l->key_len, key.length()) - depth; // may be negative
         for (; idx < max_cmp; idx++) {
             if (l->key()[idx+depth] != key[depth+idx])
                 return idx;
@@ -590,7 +591,7 @@ RECURSE_SEARCH:;
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art::tree *t, const art::key_spec& options, art::value_type key, art::value_type value, std::function<void(art::node_ptr l)> fc) {
+void art_insert(art::tree *t, const art::key_spec& options, art::value_type key, art::value_type value, const NodeResult& fc) {
     try
     {
         int old_val = 0;

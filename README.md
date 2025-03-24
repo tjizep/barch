@@ -48,6 +48,13 @@
 1. amd64+sse
 2. arm+neon
 
+# Toolchain Compatibility
+1. Debian + gcc 13
+2. any compiler that supports C++ 20
+
+# Server Environment
+1. Valkey v. 8.0
+
 # Configuration
 1. Set max memory use to any value lower than valkey maxmemory if it's higher it will be ignored. postfix with k,m or g for kilo,mega or giga -bytes
 ```redis

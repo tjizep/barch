@@ -26,7 +26,7 @@
 4. `B.REM K` removes a key, returns value if success [more](https://github.com/tjizep/barch/blob/main/REM.md)
 5. `B.MAX` returns largest key  (or nil) - numbers are less than text
 6. `B.MIN` returns smallest key (or nil) if there are no keys
-7. `B.KEYRANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://github.com/tjizep/barch/blob/main/USECASE.md)
+7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://github.com/tjizep/barch/blob/main/USECASE.md)
 8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://github.com/tjizep/barch/blob/main/USECASE.md) 
 9. `B.LB K1` lower bound: first key not less than K1 
 10. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys

@@ -38,7 +38,7 @@ void art::logger::log(const std::string& message)
 }
 
 template<typename... Args>
-void art::logger::log(Args&&... args)
+void log(Args&&... args)
 {
     std::string message = fmtcat(args...);
     auto now = std::chrono::system_clock::now();

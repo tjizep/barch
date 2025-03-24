@@ -15,8 +15,8 @@ namespace art
         static void log(const std::string& message, const std::exception& e);
         static void log(const std::exception& e, const std::string& file, int line);
         static void log(const std::string& message);
-        template<typename... Args>
-        static void log(Args&&... args);
+        //template<typename... Args>
+        //static void log(Args&&... args);
     };
 }
 

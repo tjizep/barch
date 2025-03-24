@@ -62,7 +62,7 @@ struct art_ops_statistics
     int64_t max_ops;
 };
 
-typedef int (*art_callback)(void* data, art::value_type key, art::value_type value);
+typedef std::function<int(void* data, art::value_type key, art::value_type value)> CallBack;
 typedef std::function<void(art::node_ptr l)> NodeResult;
 
 
@@ -194,7 +194,7 @@ namespace art
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter(art::tree* t, art_callback cb, void* data);
+int art_iter(art::tree* t, CallBack cb, void* data);
 
 /**
  * Iterates through the entries pairs in the map,
@@ -208,7 +208,7 @@ int art_iter(art::tree* t, art_callback cb, void* data);
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art::tree* t, art::value_type prefix, art_callback cb, void* data);
+int art_iter_prefix(art::tree* t, art::value_type prefix, CallBack cb, void* data);
 /**
  * iterates through a range from small to large from key to key_end
  * the first key is located in log(n) time
@@ -216,7 +216,7 @@ int art_iter_prefix(art::tree* t, art::value_type prefix, art_callback cb, void*
  */
 namespace art
 {
-    int range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data);
+    int range(const art::tree* t, art::value_type key, art::value_type key_end, CallBack cb, void* data);
 }
 
 

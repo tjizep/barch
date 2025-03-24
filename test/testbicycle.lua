@@ -17,9 +17,10 @@ vk.call('B.SET', 'eyes:yours', 1)
 vk.call('B.SET', 'eyes:mine', 1)
 vk.call('B.SET', 'eyes:theirs', 1)
 
-assert(vk.call('B.LB', 'bic') == "bicycle:yours")
+assert(vk.call('B.LB', 'bic') == "bicycle:mine")
 assert(#vk.call('B.RANGE', 'bicycle:', 'bicycle:~', 1000000) == 3)
 assert(#vk.call('B.RANGE', 'cat:', 'cat:~', 1000000) == 3)
+assert(vk.call('B.COUNT', 'cat:', 'cat:~') == 3)
 assert(#vk.call('B.KEYS', 'cat:*') == 3)
 assert(#vk.call('B.KEYS', 'eyes:*') == 3)
 

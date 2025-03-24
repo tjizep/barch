@@ -174,7 +174,7 @@ static art::trace_element& last_el(art::trace_list& trace)
 }
 
 static art::trace_element first_child_off(art::node_ptr n);
-static art::trace_element last_child_off(art::node_ptr n);
+//static art::trace_element last_child_off(art::node_ptr n);
 static art::node_ptr inner_maximum(art::node_ptr n);
 /**
  * assuming that the path to each leaf is not the same depth
@@ -197,6 +197,7 @@ static bool extend_trace_min(const art::node_ptr& root, art::trace_list& trace)
     return true;
 }
 
+#if 0
 static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
 {
     if (trace.empty())
@@ -212,7 +213,7 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
     }
     return true;
 }
-
+#endif
 
 /**
  * Searches for a value in the ART tree
@@ -244,12 +245,13 @@ art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type k
                 return nullptr;
             }
             // Bail if the prefix does not match
-            if (n->data().partial_len)
+            auto& d = n->data();
+            if (d.partial_len)
             {
                 unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-                if (prefix_len != std::min<unsigned>(art::max_prefix_llength, n->data().partial_len))
+                if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
                     return nullptr;
-                depth = depth + n->data().partial_len;
+                depth += d.partial_len;
                 if (depth >= key.length())
                 {
                     return nullptr;
@@ -314,14 +316,15 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
             }
             return nullptr;
         }
-
-        // Bail if the prefix does not match
-        if (n->data().partial_len)
+        auto& d = n->data();
+        if (d.partial_len)
         {
-            int prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (prefix_len != std::min<int>(art::max_prefix_llength, n->data().partial_len))
+            unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
+            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
+            {
                 break;
-            depth += n->data().partial_len;
+            }
+            depth += d.partial_len;
         }
 
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
@@ -332,7 +335,7 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         n = te.child;
         depth++;
     }
-    if (!extend_trace_max(t->root, trace)) return nullptr;
+    if (!extend_trace_min(t->root, trace)) return nullptr;
     return last_el(trace).child;
 }
 
@@ -344,6 +347,7 @@ static art::trace_element first_child_off(art::node_ptr n)
     return {n, n->get_child(n->first_index()), 0};
 }
 
+#if 0
 static art::trace_element last_child_off(art::node_ptr n)
 {
     if (n.null()) return {nullptr, nullptr, 0};
@@ -352,6 +356,7 @@ static art::trace_element last_child_off(art::node_ptr n)
 
     return {n, n->get_child(idx), idx};
 }
+#endif
 
 static art::trace_element increment_te(const art::trace_element& te)
 {
@@ -365,19 +370,26 @@ static art::trace_element increment_te(const art::trace_element& te)
 
 static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
 {
+    // TODO: theres probably something still wrong with this code
     for (auto r = trace.rbegin(); r != trace.rend(); ++r)
     {
         art::trace_element te = increment_te(*r);
         if (te.empty())
             continue; // goto the parent further back and try to increment that
         *r = te;
+        if (te.child.is_leaf)
+        {
+            while(!trace.empty() && trace.rbegin() != r) trace.pop_back();
+            return true;
+        }
         if (r != trace.rbegin())
         {
             auto u = r;
-            // go forward
+            // go forward/down in the tree
             do
             {
                 --u;
+
                 te = first_child_off(te.child);
                 if (te.empty())
                     return false;
@@ -411,7 +423,7 @@ art::node_ptr art::lower_bound(const art::tree* t, art::value_type key)
     return nullptr;
 }
 
-int art::range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data)
+int art::range(const art::tree* t, art::value_type key, art::value_type key_end, CallBack cb, void* data)
 {
     ++statistics::range_ops;
     try
@@ -428,7 +440,7 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
                 if (n.is_leaf)
                 {
                     const art::leaf* leaf = n.const_leaf();
-                    if (leaf->compare(key_end) < 0)
+                    if (leaf->compare(key_end) <= 0)
                     {
                         // upper bound is not
                         if (!leaf->expired())
@@ -768,14 +780,15 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref,
     }
 
     // Bail if the prefix does not match
-    if (n->data().partial_len)
+    auto& d = n->data();
+    if (d.partial_len)
     {
         unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-        if (prefix_len != std::min<unsigned>(art::max_prefix_llength, n->data().partial_len))
+        if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
         {
             return nullptr;
         }
-        depth = depth + n->data().partial_len;
+        depth += d.partial_len;
     }
 
     // Find child node
@@ -844,7 +857,7 @@ void art_delete(art::tree* t, art::value_type key, const NodeResult& fc)
 }
 
 // Recursively iterates over the tree
-static int recursive_iter(art::node_ptr n, art_callback cb, void* data)
+static int recursive_iter(art::node_ptr n, CallBack cb, void* data)
 {
     // Handle base cases
     if (n.null()) return 0;
@@ -910,7 +923,7 @@ static int recursive_iter(art::node_ptr n, art_callback cb, void* data)
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter(art::tree* t, art_callback cb, void* data)
+int art_iter(art::tree* t, CallBack cb, void* data)
 {
     ++statistics::iter_start_ops;
     try
@@ -954,7 +967,7 @@ static int leaf_prefix_compare(const art::leaf* n, art::value_type prefix)
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art::tree* t, art::value_type key, art_callback cb, void* data)
+int art_iter_prefix(art::tree* t, art::value_type key, CallBack cb, void* data)
 {
     ++statistics::iter_start_ops;
     try

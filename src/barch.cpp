@@ -163,7 +163,7 @@ struct iter_state
 };
 
 extern "C" {
-/* CDICT.KEYRANGE <startkey> <endkey> <count>
+/* CDICT.RANGE <startkey> <endkey> <count>
 *
 * Return a list of matching keys, lexicographically between startkey
 * and endkey. No more than 'count' items are emitted. */
@@ -216,6 +216,52 @@ int cmd_RANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     /* Cleanup. */
     return VALKEYMODULE_OK;
 }
+    /* CDICT.RANGE <startkey> <endkey> <count>
+    *
+    * Return a count of matching keys, lexicographically or numericallyordered between startkey
+    * and endkey. No more than 'count' items are emitted. */
+    int cmd_COUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+    {
+        ValkeyModule_AutoMemory(ctx);
+        compressed_release release;
+
+        read_lock rl(get_lock());
+        if (argc != 3)
+            return ValkeyModule_WrongArity(ctx);
+
+
+        size_t k1len;
+        size_t k2len;
+        const char* k1 = ValkeyModule_StringPtrLen(argv[1], &k1len);
+        const char* k2 = ValkeyModule_StringPtrLen(argv[2], &k2len);
+
+        if (key_ok(k1, k1len) != 0)
+            return key_check(ctx, k1, k1len);
+        if (key_ok(k2, k2len) != 0)
+            return key_check(ctx, k2, k2len);
+
+        auto c1 = conversion::convert(k1, k1len);
+        auto c2 = conversion::convert(k2, k2len);
+
+        /* Seek the iterator. */
+        iter_state is(ctx, argv, std::numeric_limits<int64_t>::max());
+
+        /* Reply with the matching items. */
+        int64_t count = 0;
+        //std::function<int (void *, const unsigned char *, uint32_t , void *)>
+        auto iter = [&count](void* unused(data), art::value_type unused(key), art::value_type unused(value)) -> int
+        {
+            ++count;
+            return 0;
+        };
+
+        art::range(get_art(), c1.get_value(), c2.get_value(), iter, &is);
+
+        ValkeyModule_ReplyWithLongLong(ctx, count);
+
+        /* Cleanup. */
+        return VALKEYMODULE_OK;
+    }
 
 /* CDICT.KEYS
 *
@@ -784,6 +830,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(RANGE), "readonly", 1, 2, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(COUNT), "readonly", 1, 2, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(SIZE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)

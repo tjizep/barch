@@ -1,10 +1,10 @@
-name: Ubuntu 22.04 CI (GCC 11)
+name: Ubuntu 24.04 CI Sanitized (GCC 13)
 
 on: [push, pull_request]
 
 jobs:
   ubuntu-build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Use cmake

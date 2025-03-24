@@ -19,22 +19,20 @@ namespace art
 
     struct configuration_record
     {
-
         int compression = compression_none;
-        uint64_t n_max_memory_bytes {std::numeric_limits<uint64_t>::max()};
-        uint64_t maintenance_poll_delay {10};
-        uint64_t max_defrag_page_count {1};
-        unsigned iteration_worker_count {2};
+        uint64_t n_max_memory_bytes{std::numeric_limits<uint64_t>::max()};
+        uint64_t maintenance_poll_delay{10};
+        uint64_t max_defrag_page_count{1};
+        unsigned iteration_worker_count{2};
         float min_fragmentation_ratio = 0.6f;
         bool active_defrag = false;
-        bool evict_volatile_lru {false};
-        bool evict_allkeys_lru {false};
-        bool evict_volatile_lfu {false};
-        bool evict_allkeys_lfu {false};
-        bool evict_volatile_random {false};
-        bool evict_allkeys_random {false};
-        bool evict_volatile_ttl {false};
-
+        bool evict_volatile_lru{false};
+        bool evict_allkeys_lru{false};
+        bool evict_volatile_lfu{false};
+        bool evict_allkeys_lfu{false};
+        bool evict_volatile_random{false};
+        bool evict_allkeys_random{false};
+        bool evict_volatile_ttl{false};
     };
 
     int register_valkey_configuration(ValkeyModuleCtx* ctx);
@@ -55,7 +53,6 @@ namespace art
     bool get_evict_allkeys_random();
     bool get_evict_volatile_ttl();
 
-    int set_configuration_value(ValkeyModuleString* name,ValkeyModuleString* value);
-
+    int set_configuration_value(ValkeyModuleString* name, ValkeyModuleString* value);
 }
 #endif //CONFIGURATION_H

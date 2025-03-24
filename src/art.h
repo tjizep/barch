@@ -5,8 +5,8 @@
 #include "compress.h"
 #include "keyspec.h"
 #include "value_type.h"
-typedef std::unique_lock< std::shared_mutex >  write_lock;
-typedef std::shared_lock< std::shared_mutex >  read_lock;  // C++ 14
+typedef std::unique_lock<std::shared_mutex> write_lock;
+typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
 
 extern std::shared_mutex& get_lock();
 /**
@@ -71,30 +71,30 @@ typedef std::function<void(art::node_ptr l)> NodeResult;
  */
 namespace art
 {
- bool has_leaf_compression();
- bool has_node_compression();
- bool init_leaf_compression();
- bool init_node_compression();
- void destroy_node_compression();
- void destroy_leaf_compression();
+    bool has_leaf_compression();
+    bool has_node_compression();
+    bool init_leaf_compression();
+    bool init_node_compression();
+    void destroy_node_compression();
+    void destroy_leaf_compression();
 
- struct tree
- {
-  bool mexit = false;
-  std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
-  art::node_ptr root = nullptr;
-  uint64_t size = 0;
-  void start_maintain();
-  tree(const tree&) = delete;
-  tree(const art::node_ptr& root, uint64_t size) : root(root), size(size)
-  {
-   start_maintain();
-  }
+    struct tree
+    {
+        bool mexit = false;
+        std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
+        art::node_ptr root = nullptr;
+        uint64_t size = 0;
+        void start_maintain();
+        tree(const tree&) = delete;
 
-  ~tree();
-  void run_defrag();
- };
+        tree(const art::node_ptr& root, uint64_t size) : root(root), size(size)
+        {
+            start_maintain();
+        }
 
+        ~tree();
+        void run_defrag();
+    };
 }
 
 /**
@@ -123,7 +123,8 @@ uint64_t art_size(art::tree* t);
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value, const NodeResult& fc);
+void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
+                const NodeResult& fc);
 
 /**
  * inserts a new value into the art tree (not replacing)
@@ -134,7 +135,8 @@ void art_insert(art::tree* t, const art::key_spec& options, art::value_type key,
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value, const NodeResult& fc);
+void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
+                           const NodeResult& fc);
 
 /**
  * Deletes a value from the ART tree
@@ -168,18 +170,18 @@ art::node_ptr art_minimum(art::tree* t);
  */
 namespace art
 {
-art::node_ptr maximum(art::tree* t);
+    art::node_ptr maximum(art::tree* t);
 
-/**
- * Returns the lower bound value of a given key
- * lower bound is defined as first value not less than the key parameter
- * @arg t The tree
- * @arg key The key
- * @arg key_len The length of the key
- * @return the lower bound or NULL if there is no value not less than key
- */
+    /**
+     * Returns the lower bound value of a given key
+     * lower bound is defined as first value not less than the key parameter
+     * @arg t The tree
+     * @arg key The key
+     * @arg key_len The length of the key
+     * @return the lower bound or NULL if there is no value not less than key
+     */
 
- node_ptr lower_bound(const art::tree* t, art::value_type key);
+    node_ptr lower_bound(const art::tree* t, art::value_type key);
 }
 
 /**
@@ -214,9 +216,8 @@ int art_iter_prefix(art::tree* t, art::value_type prefix, art_callback cb, void*
  */
 namespace art
 {
- int range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data);
+    int range(const art::tree* t, art::value_type key, art::value_type key_end, art_callback cb, void* data);
 }
-
 
 
 /**
@@ -226,21 +227,20 @@ uint64_t art_evict_lru(art::tree* t);
 
 namespace art
 {
- /**
-  * gets per module per node type statistics for all art_node* types
-  * @return art_statistics
-  */
- art_statistics get_statistics();
+    /**
+     * gets per module per node type statistics for all art_node* types
+     * @return art_statistics
+     */
+    art_statistics get_statistics();
 
- /**
-  * get statistics for each operation performed
-  */
- art_ops_statistics get_ops_statistics();
+    /**
+     * get statistics for each operation performed
+     */
+    art_ops_statistics get_ops_statistics();
 
- /**
-  * glob match all the key value pairs except the deleted ones
-  * This is a multi threaded iterator and care should be taken
-  */
-void glob(tree* t, const keys_spec &spec, value_type pattern, const std::function<bool(const leaf&)>& cb);
-
+    /**
+     * glob match all the key value pairs except the deleted ones
+     * This is a multi threaded iterator and care should be taken
+     */
+    void glob(tree* t, const keys_spec& spec, value_type pattern, const std::function<bool(const leaf&)>& cb);
 }

@@ -5,8 +5,7 @@
 #ifndef SET_H
 #define SET_H
 
-extern "C"
-{
+extern "C" {
 #include "valkeymodule.h"
 }
 
@@ -14,25 +13,29 @@ extern "C"
 #include <vector>
 #include <regex>
 #include <chrono>
-namespace art {
+
+namespace art
+{
     struct base_key_spec
     {
-        ValkeyModuleString *const*argv{};
+        ValkeyModuleString* const* argv{};
         static std::regex integer;
         int argc = 0;
         int r = 0;
         mutable std::string s{};
+
         int64_t now() const
         {
             return std::chrono::steady_clock::now().time_since_epoch().count();
         }
+
         const std::string& tos(int at) const
         {
             s.clear();
             if (at >= argc) return s;
             size_t vlen = 0;
-            const char * val = ValkeyModule_StringPtrLen(argv[at], &vlen);
-            if(val == nullptr)
+            const char* val = ValkeyModule_StringPtrLen(argv[at], &vlen);
+            if (val == nullptr)
             {
                 return s;
             }
@@ -40,14 +43,15 @@ namespace art {
             s.append(val, vlen);
             return s;
         }
+
         std::string& tos(int at)
         {
             s.clear();
             if (at >= argc) return s;
 
             size_t vlen = 0;
-            const char * val = ValkeyModule_StringPtrLen(argv[at], &vlen);
-            if(val == nullptr)
+            const char* val = ValkeyModule_StringPtrLen(argv[at], &vlen);
+            if (val == nullptr)
             {
                 return s;
             }
@@ -55,12 +59,13 @@ namespace art {
             s.append(val, vlen);
             return s;
         }
+
         // integer
         int64_t tol(int at) const
         {
             if (at >= argc) return 0;
 
-            auto &scheck = tos(at);
+            auto& scheck = tos(at);
             if (!std::regex_match(scheck, integer))
             {
                 return 0;
@@ -68,19 +73,20 @@ namespace art {
             auto val = std::stoll(scheck);
             return val;
         }
-        bool has(const char * what, int at) const {
+
+        bool has(const char* what, int at) const
+        {
             if (at >= argc) return false;
 
-            const std::string &it = tos(at);
+            const std::string& it = tos(at);
             if (it.empty()) return false;
             std::transform(s.begin(), s.end(), s.begin(), ::tolower);
             return s == what;
         }
-
     };
 
-    struct key_spec : base_key_spec {
-
+    struct key_spec : base_key_spec
+    {
         bool none = false;
         bool get = false;
         bool nx = false;
@@ -89,33 +95,39 @@ namespace art {
         int64_t ttl = 0;
 
         key_spec() = default;
-        key_spec(ValkeyModuleString **argvz, int argcz) {
-          argv = argvz;
-          argc = argcz;
+
+        key_spec(ValkeyModuleString** argvz, int argcz)
+        {
+            argv = argvz;
+            argc = argcz;
         }
-        key_spec& operator=(ValkeyModuleString **) = delete;
+
+        key_spec& operator=(ValkeyModuleString**) = delete;
         key_spec& operator=(const key_spec&) = delete;
         key_spec(const key_spec&) = delete;
-        int parse_options(){
+
+        int parse_options()
+        {
             if (argc < 3)
-            {   none = true;
+            {
+                none = true;
                 return VALKEYMODULE_OK;
             }
             int spos = 3; // the keys are one and two
-            get = has("get",spos);
+            get = has("get", spos);
             if (get) ++spos;
 
             if (argc <= spos)
                 return VALKEYMODULE_OK;
 
-            nx = has("nx",spos);
+            nx = has("nx", spos);
 
             if (!nx)
             {
-                xx = has("xx",spos);
+                xx = has("xx", spos);
                 if (xx) ++spos;
-
-            } else
+            }
+            else
             {
                 ++spos;
             }
@@ -123,35 +135,37 @@ namespace art {
             if (argc <= spos)
                 return VALKEYMODULE_OK;
 
-            if (has("ex",spos) || has("px",spos))
-            {
-                if (argc <= spos+1)
-                    return VALKEYMODULE_ERR;
-
-                if (has("ex",spos))
-                {
-                    ttl = tol(++spos)*1000 + now();
-                } else
-                {
-                    ttl = tol(++spos) + now();
-                }
-                ++spos;
-
-            } else if (has("exat",spos) || has("pxat",spos))
+            if (has("ex", spos) || has("px", spos))
             {
                 if (argc <= spos + 1)
                     return VALKEYMODULE_ERR;
 
-                if (has("exat",spos))
+                if (has("ex", spos))
                 {
-                    ttl = tol(++spos)*1000;
-                } else
+                    ttl = tol(++spos) * 1000 + now();
+                }
+                else
+                {
+                    ttl = tol(++spos) + now();
+                }
+                ++spos;
+            }
+            else if (has("exat", spos) || has("pxat", spos))
+            {
+                if (argc <= spos + 1)
+                    return VALKEYMODULE_ERR;
+
+                if (has("exat", spos))
+                {
+                    ttl = tol(++spos) * 1000;
+                }
+                else
                 {
                     ttl = tol(++spos);
                 }
                 ++spos;
             }
-            if (has("keepttl",spos))
+            if (has("keepttl", spos))
             {
                 keepttl = true;
                 ++spos;
@@ -161,31 +175,36 @@ namespace art {
 
             return VALKEYMODULE_ERR;
         }
-
     };
+
     struct keys_spec : base_key_spec
     {
-        keys_spec& operator=(ValkeyModuleString **) = delete;
+        keys_spec& operator=(ValkeyModuleString**) = delete;
         keys_spec& operator=(const keys_spec&) = delete;
         keys_spec(const keys_spec&) = delete;
-        keys_spec(ValkeyModuleString **argvz, int argcz) {
+
+        keys_spec(ValkeyModuleString** argvz, int argcz)
+        {
             argv = argvz;
             argc = argcz;
         }
+
         bool count = false;
-        int64_t max_count {std::numeric_limits<int64_t>::max()};
+        int64_t max_count{std::numeric_limits<int64_t>::max()};
+
         int parse_keys_options()
         {
             int spos = 2; // the pattern is the first one
             if (argc < 3)
-            {   return VALKEYMODULE_OK;
+            {
+                return VALKEYMODULE_OK;
             }
-            if (has("count",spos))
+            if (has("count", spos))
             {
                 count = true;
                 ++spos;
             }
-            if (has("max",spos))
+            if (has("max", spos))
             {
                 max_count = tol(++spos);
                 ++spos;

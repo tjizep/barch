@@ -8,67 +8,78 @@
 #include "statistics.h"
 #include "simd.h"
 
-namespace art {
-    template<typename EncodingType>
+namespace art
+{
+    template <typename EncodingType>
     bool ok(const node* n, uintptr_t base)
     {
-        if(n == nullptr) return true;
-        if(sizeof(EncodingType) == sizeof(uintptr_t)) return true;
+        if (n == nullptr) return true;
+        if (sizeof(EncodingType) == sizeof(uintptr_t)) return true;
 
         auto uval = n->get_address().address();
 
-        int64_t ival = uval-base ;
+        int64_t ival = uval - base;
         int64_t imax = i64max<EncodingType>();
         int64_t imin = i64min<EncodingType>();
-        return (ival > imin && ival < imax  );
+        return (ival > imin && ival < imax);
     }
-    template<typename EncodingType, bool IsLeaf>
-    struct encoded_element {
+
+    template <typename EncodingType, bool IsLeaf>
+    struct encoded_element
+    {
     private:
-        EncodingType &value;
+        EncodingType& value;
         uintptr_t base;
+
     public:
-        encoded_element(EncodingType &value, uintptr_t base) : value(value), base(base) {}
+        encoded_element(EncodingType& value, uintptr_t base) : value(value), base(base)
+        {
+        }
 
         encoded_element& operator=(nullptr_t)
         {
             value = 0;
             return *this;
         }
+
         encoded_element& operator=(const node_ptr& t)
         {
-            if(t.is_leaf != IsLeaf)
+            if (t.is_leaf != IsLeaf)
             {
                 abort();
             }
-            if(t.is_leaf)
+            if (t.is_leaf)
             {
                 set_leaf(t.logical);
-            }else
+            }
+            else
             {
                 set_node(t.get_node());
             }
             return *this;
         }
+
         void set_leaf(const logical_leaf& ptr)
         {
-            if(!IsLeaf)
+            if (!IsLeaf)
             {
                 abort();
             }
             value = ptr.null() ? 0 : ptr.address();
         }
+
         [[nodiscard]] logical_leaf get_leaf() const
         {
-            if(!IsLeaf)
+            if (!IsLeaf)
             {
                 abort();
             }
             return logical_leaf(value);
         }
+
         void set_node(const node* ptr)
         {
-            if(IsLeaf)
+            if (IsLeaf)
             {
                 abort();
             }
@@ -77,17 +88,17 @@ namespace art {
                 value = 0;
                 return;
             }
-            if(sizeof(EncodingType) == sizeof(uintptr_t))
+            if (sizeof(EncodingType) == sizeof(uintptr_t))
             {
                 value = ptr->get_address().address();
                 return;
             }
             value = (ptr->get_address().address() - base);
-
         }
+
         [[nodiscard]] node_ptr get_node()
         {
-            if(IsLeaf)
+            if (IsLeaf)
             {
                 abort();
             }
@@ -97,9 +108,10 @@ namespace art {
             }
             return resolve_write_node(compressed_address((int64_t)value + base));
         }
+
         [[nodiscard]] node_ptr get_node() const
         {
-            if(IsLeaf)
+            if (IsLeaf)
             {
                 abort();
             }
@@ -109,9 +121,10 @@ namespace art {
             }
             return resolve_read_node(compressed_address((int64_t)value + base));
         }
+
         [[nodiscard]] node_ptr cget() const
         {
-            if(IsLeaf)
+            if (IsLeaf)
             {
                 abort();
             }
@@ -127,6 +140,7 @@ namespace art {
             set_node(ptr);
             return *this;
         }
+
         encoded_element& operator=(const compressed_address ptr)
         {
             set_leaf(ptr);
@@ -137,9 +151,10 @@ namespace art {
         {
             return get_leaf();
         }
+
         explicit operator node_ptr()
         {
-            if(IsLeaf)
+            if (IsLeaf)
             {
                 return node_ptr(get_leaf());
             }
@@ -148,7 +163,7 @@ namespace art {
 
         explicit operator node_ptr() const
         {
-            if(IsLeaf)
+            if (IsLeaf)
             {
                 return node_ptr(get_leaf());
             }
@@ -160,22 +175,25 @@ namespace art {
         {
             return value != 0;
         }
+
         [[nodiscard]] bool empty() const
         {
             return value == 0;
         }
     };
 
-    template<typename EncodedType, bool IsLeaf, int SIZE>
+    template <typename EncodedType, bool IsLeaf, int SIZE>
     struct node_array
     {
         typedef encoded_element<EncodedType, IsLeaf> ProxyType;
         EncodedType data[SIZE]{};
+
         [[nodiscard]] uintptr_t get_offset() const
         {
             return 0;
         }
-        [[nodiscard]] bool ok(const node_ptr& ) const
+
+        [[nodiscard]] bool ok(const node_ptr&) const
         {
             return true;
         }
@@ -184,19 +202,19 @@ namespace art {
         {
             return ProxyType(data[at], get_offset());
         }
+
         ProxyType operator[](unsigned at) const
         {
             return ProxyType(const_cast<EncodedType&>(data[at]), get_offset());
         }
-
     };
 
     /**
      * node content to do common things related to keys and pointers on each node
      */
-    template<unsigned SIZE, unsigned KEYS, uint8_t node_type, typename i_ptr_t>
-    struct encoded_node_content : public node, private node::node_proxy {
-
+    template <unsigned SIZE, unsigned KEYS, uint8_t node_type, typename i_ptr_t>
+    struct encoded_node_content : public node, private node::node_proxy
+    {
         // test somewhere that sizeof ChildElementType == sizeof LeafElementType
         typedef i_ptr_t IntPtrType;
         typedef i_ptr_t ChildElementType;
@@ -219,6 +237,7 @@ namespace art {
             unsigned char keys[KEYS]{};
 
             uint8_t types[SIZE]{};
+
             union
             {
                 LeafArrayType leaves{};
@@ -233,7 +252,6 @@ namespace art {
 
         const encoded_data& nd() const
         {
-
             return *refresh_cache<encoded_data>();
         }
 
@@ -269,7 +287,6 @@ namespace art {
 
         void free_data() final
         {
-
             statistics::addressable_bytes_alloc -= alloc_size();
             statistics::interior_bytes_alloc -= alloc_size();
             switch (node_type)
@@ -295,6 +312,7 @@ namespace art {
         }
 
         encoded_node_content() = default;
+
         encoded_node_content& create()
         {
             create_data();
@@ -306,18 +324,22 @@ namespace art {
             set<encoded_data, IntPtrType, node_type>(address);
         };
 
-        void from(compressed_address address ,node_data* data)
+        void from(compressed_address address, node_data* data)
         {
             set_lazy<IntPtrType, node_type>(address, data);
         };
 
         ~encoded_node_content() override = default;
 
-        void check_object() const {}
+        void check_object() const
+        {
+        }
+
         encoded_node_content(const encoded_node_content& content) = default;
         encoded_node_content& operator=(const encoded_node_content&) = delete;
 
-        [[nodiscard]] compressed_address get_address() const final {
+        [[nodiscard]] compressed_address get_address() const final
+        {
             return address;
         }
 
@@ -326,41 +348,50 @@ namespace art {
             return sizeof(encoded_data);
         }
 
-        void set_leaf(unsigned at) final {
+        void set_leaf(unsigned at) final
+        {
             check_object();
             if (SIZE <= at)
                 abort();
             nd().types[at] = 1;
         }
-        void set_child(unsigned at, node_ptr node) final {
+
+        void set_child(unsigned at, node_ptr node) final
+        {
             check_object();
             if (SIZE <= at)
                 abort();
             auto& dat = nd();
             dat.types[at] = node.is_leaf ? 1 : 0;
-            if(node.is_leaf)
+            if (node.is_leaf)
             {
                 dat.leaves[at] = node.logical;
-            }else
+            }
+            else
             {
                 dat.children[at] = node;
             }
-
         }
-        [[nodiscard]] bool is_leaf(unsigned at) const final {
+
+        [[nodiscard]] bool is_leaf(unsigned at) const final
+        {
             check_object();
             if (SIZE <= at)
                 abort();
             bool is = nd().types[at] != 0;
             return is;
         }
-        [[nodiscard]] bool has_child(unsigned at) const final {
+
+        [[nodiscard]] bool has_child(unsigned at) const final
+        {
             check_object();
             if (SIZE <= at)
                 abort();
-            return nd().children[at].exists() ;
+            return nd().children[at].exists();
         }
-        [[nodiscard]] node_ptr get_node(unsigned at) const final {
+
+        [[nodiscard]] node_ptr get_node(unsigned at) const final
+        {
             check_object();
             if (at < SIZE)
             {
@@ -370,7 +401,8 @@ namespace art {
             return nullptr;
         }
 
-        node_ptr get_node(unsigned at) final {
+        node_ptr get_node(unsigned at) final
+        {
             check_object();
             if (at < SIZE)
                 return nd().types[at] ? node_ptr(nd().leaves[at]) : node_ptr(nd().children[at]);
@@ -378,30 +410,37 @@ namespace art {
             return nullptr;
         }
 
-        node_ptr get_child(unsigned at) final {
+        node_ptr get_child(unsigned at) final
+        {
             check_object();
             return get_node(at);
         }
-        [[nodiscard]] node_ptr get_child(unsigned at) const final {
+
+        [[nodiscard]] node_ptr get_child(unsigned at) const final
+        {
             check_object();
             return get_node(at);
         }
+
         [[nodiscard]] bool ok_child(node_ptr np) const override
-        {   check_object();
-            if(np.is_leaf)
+        {
+            check_object();
+            if (np.is_leaf)
                 return nd().leaves.ok(np);
             return nd().children.ok(np);
         }
+
         [[nodiscard]] bool ok_children(const children_t& child) const final
-        {   check_object();
-            for(auto np: child)
+        {
+            check_object();
+            for (auto np : child)
             {
                 // TODO: compress leaf addresses again
-                if(np.is_leaf)
+                if (np.is_leaf)
                 {
                     return nd().leaves.ok(np);
-
-                }else
+                }
+                else
                 {
                     return nd().children.ok(np);
                 }
@@ -411,78 +450,103 @@ namespace art {
 
 
         // TODO: NB check where this function is used
-        [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
+        [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
+        {
             check_object();
             unsigned i;
-            if (KEYS < data().occupants) {
+            if (KEYS < data().occupants)
+            {
                 return data().occupants;
             }
-            if (operbits & (eq & gt) ) {
-                for (i = 0; i < data().occupants; ++i) {
+            if (operbits & (eq & gt))
+            {
+                for (i = 0; i < data().occupants; ++i)
+                {
                     if (nd().keys[i] >= c)
                         return i;
                 }
                 if (operbits == (eq & gt)) return data().occupants;
             }
-            if (operbits & (eq & lt) ) {
-                for (i = 0; i < data().occupants; ++i) {
+            if (operbits & (eq & lt))
+            {
+                for (i = 0; i < data().occupants; ++i)
+                {
                     if (nd().keys[i] <= c)
                         return i;
                 }
                 if (operbits == (eq & lt)) return data().occupants;
             }
-            if (operbits & eq) {
-                for (i = 0; i < data().occupants; ++i) {
+            if (operbits & eq)
+            {
+                for (i = 0; i < data().occupants; ++i)
+                {
                     if (KEYS > 0 && nd().keys[i] == c)
                         return i;
                 }
             }
-            if (operbits & gt) {
-                for (i = 0; i < data().occupants; ++i) {
+            if (operbits & gt)
+            {
+                for (i = 0; i < data().occupants; ++i)
+                {
                     if (KEYS > 0 && nd().keys[i] > c)
                         return i;
                 }
             }
-            if (operbits & lt) {
-                for (i = 0; i < data().occupants; ++i) {
+            if (operbits & lt)
+            {
+                for (i = 0; i < data().occupants; ++i)
+                {
                     if (KEYS > 0 && nd().keys[i] < c)
                         return i;
                 }
             }
             return data().occupants;
         }
-        [[nodiscard]] unsigned index(unsigned char c) const override {
+
+        [[nodiscard]] unsigned index(unsigned char c) const override
+        {
             check_object();
             return index(c, eq);
         }
-        [[nodiscard]] node_ptr find(unsigned char c) const override {
+
+        [[nodiscard]] node_ptr find(unsigned char c) const override
+        {
             check_object();
             return get_child(index(c));
         }
-        [[nodiscard]] node_ptr find(unsigned char c, unsigned operbits) const override {
+
+        [[nodiscard]] node_ptr find(unsigned char c, unsigned operbits) const override
+        {
             check_object();
-            return get_child(index(c,operbits));
+            return get_child(index(c, operbits));
         }
-        [[nodiscard]] unsigned first_index() const override {
+
+        [[nodiscard]] unsigned first_index() const override
+        {
             check_object();
             return 0;
         };
+
         [[nodiscard]] const unsigned char* get_keys() const override
-        {   check_object();
+        {
+            check_object();
             return nd().keys;
         }
-        [[nodiscard]] const unsigned char& get_key(unsigned at) const final {
+
+        [[nodiscard]] const unsigned char& get_key(unsigned at) const final
+        {
             check_object();
-            if(at < KEYS)
+            if (at < KEYS)
                 return nd().keys[at];
             abort();
         }
 
         void set_key(unsigned at, unsigned char k) final
-        {   check_object();
+        {
+            check_object();
 
             auto max_keys = KEYS;
-            if(at < max_keys)
+            if (at < max_keys)
             {
                 nd().keys[at] = k;
                 return;
@@ -490,14 +554,16 @@ namespace art {
             abort();
         }
 
-        unsigned char& get_key(unsigned at) final {
+        unsigned char& get_key(unsigned at) final
+        {
             check_object();
-            if(at < KEYS)
+            if (at < KEYS)
                 return nd().keys[at];
             abort();
         }
 
-        bool has_any(unsigned pos){
+        bool has_any(unsigned pos)
+        {
             check_object();
             if (SIZE <= pos)
                 abort();
@@ -505,96 +571,119 @@ namespace art {
             return nd().children[pos].exists();
         }
 
-        void set_keys(const unsigned char* other_keys, unsigned count) final {
+        void set_keys(const unsigned char* other_keys, unsigned count) final
+        {
             check_object();
-            if (KEYS < count )
+            if (KEYS < count)
                 abort();
             memcpy(nd().keys, other_keys, count);
         }
 
-        void insert_type(unsigned pos) {
+        void insert_type(unsigned pos)
+        {
             check_object();
             if (SIZE <= pos)
                 abort();
             unsigned count = data().occupants;
             auto& n = nd();
-            for (unsigned p = count; p > pos; --p) {
+            for (unsigned p = count; p > pos; --p)
+            {
                 n.types[p] = n.types[p - 1];
             }
         }
-        void remove_type(unsigned pos) {
+
+        void remove_type(unsigned pos)
+        {
             check_object();
             if (SIZE < pos)
                 abort();
             unsigned count = data().occupants;
             auto& n = nd();
-            for (unsigned p = pos; p < count -1; ++p) {
+            for (unsigned p = pos; p < count - 1; ++p)
+            {
                 n.types[p] = n.types[p + 1];
             }
         }
+
         [[nodiscard]] bool child_type(unsigned at) const override
-        {   check_object();
+        {
+            check_object();
             return nd().types[at];
         }
 
-        void set_children(unsigned dpos, const node* other, unsigned spos, unsigned count) override {
+        void set_children(unsigned dpos, const node* other, unsigned spos, unsigned count) override
+        {
             check_object();
-            if (dpos < SIZE && count <= SIZE) {
+            if (dpos < SIZE && count <= SIZE)
+            {
                 auto& dat = nd();
 
-                for(unsigned d = dpos; d < count; ++d )
+                for (unsigned d = dpos; d < count; ++d)
                 {
-                    auto n = other->get_child(d+spos);
-                    if(n.is_leaf)
+                    auto n = other->get_child(d + spos);
+                    if (n.is_leaf)
                     {
                         dat.leaves[d] = n.logical;
-                    }else
+                    }
+                    else
                         dat.children[d] = n;
                 }
-                for(unsigned t = 0; t < count; ++t) {
-                    dat.types[t+dpos] = other->child_type(t+spos);
+                for (unsigned t = 0; t < count; ++t)
+                {
+                    dat.types[t + dpos] = other->child_type(t + spos);
                 }
-            }else {
+            }
+            else
+            {
                 abort();
             }
         }
-        template<typename S>
-        void set_children(unsigned pos, const S* other, unsigned count){
+
+        template <typename S>
+        void set_children(unsigned pos, const S* other, unsigned count)
+        {
             check_object();
             set_children(pos, other, 0, count);
         }
 
-        void remove_child(unsigned pos) {
+        void remove_child(unsigned pos)
+        {
             check_object();
-            if(pos < KEYS && KEYS == SIZE) {
+            if (pos < KEYS && KEYS == SIZE)
+            {
                 auto& dat = nd();
-                memmove(dat.keys+pos, dat.keys+pos+1, dat.occupants - 1 - pos);
-                memmove(dat.children.data+pos, dat.children.data+pos+1, (dat.occupants - 1 - pos)*sizeof(ChildElementType));
+                memmove(dat.keys + pos, dat.keys + pos + 1, dat.occupants - 1 - pos);
+                memmove(dat.children.data + pos, dat.children.data + pos + 1,
+                        (dat.occupants - 1 - pos) * sizeof(ChildElementType));
                 remove_type(pos);
                 dat.keys[dat.occupants - 1] = 0;
                 dat.children[dat.occupants - 1] = nullptr;
                 --dat.occupants;
-            } else {
+            }
+            else
+            {
                 abort();
             }
-
-
         }
-        void copy_header(node_ptr src) override {
+
+        void copy_header(node_ptr src) override
+        {
             check_object();
             auto& dat = nd();
             auto& sd = src->data();
-            if (sd.occupants > SIZE) {
+            if (sd.occupants > SIZE)
+            {
                 abort();
             }
             dat.occupants = sd.occupants;
             dat.partial_len = sd.partial_len;
             memcpy(dat.partial, sd.partial, std::min<unsigned>(max_prefix_llength, sd.partial_len));
         }
+
         void copy_from(node_ptr s) override
         {
             check_object();
-            if(s->data().occupants > SIZE)
+            if (s->data().occupants > SIZE)
             {
                 abort();
             }
@@ -605,29 +694,26 @@ namespace art {
             {
                 abort();
             }
-
         }
+
         [[nodiscard]] node_ptr expand_pointers(node_ptr& ref, const children_t& children) override
         {
             check_object();
-            if(ok_children(children)) return this;
+            if (ok_children(children)) return this;
             node_ptr n = alloc_8_node_ptr(type());
             n->copy_from(this);
             free_node(this);
             ref = n;
             return n;
-
         }
+
         [[nodiscard]] unsigned ptr_size() const override
         {
             check_object();
             return sizeof(ChildElementType);
         };
 
-
     protected:
-
     };
-
 }
 #endif //NODE_ABSTRACT_H

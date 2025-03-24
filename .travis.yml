@@ -25,10 +25,10 @@ matrix:
           sources:
             - ubuntu-toolchain-r-test
           packages:
-            - g++-10
+            - g++-12
       env:
-        - COMPILER="CC=gcc-10 && CXX=g++-10"
-      compiler: gcc-10
+        - COMPILER="CC=gcc-12 && CXX=g++-12"
+      compiler: gcc-12
 
     - arch: amd64
       os: linux
@@ -37,11 +37,11 @@ matrix:
           sources:
             - ubuntu-toolchain-r-test
           packages:
-            - g++-10
+            - g++-12
       env:
-        - COMPILER="CC=gcc-10 && CXX=g++-10"
+        - COMPILER="CC=gcc-12 && CXX=g++-10"
         - SANITIZE="on"
-      compiler: gcc-10-sanitize
+      compiler: gcc-12-sanitize
 
 before_install:
   - eval "${COMPILER}"

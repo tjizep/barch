@@ -2,7 +2,7 @@
 
 `BARCH` is a low memory, dynamically configurable, constant access time ordered key value store for [valkey](https://valkey.io/)
 
-[![Ubuntu 22.04 CI (GCC 11)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
+[![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 
 # Features
 1. Ordered: minimum, lower-bound and maximum operations are constant time
@@ -12,11 +12,12 @@
 5. Scalability: All reads are concurrent and scales linearly with core count
 
 # Use Cases
-1. Prefix-cache for fast loading of hints  
-2. Z-Order/Morton code range queries for quick spatial bounds checking
-3. Fast and accurate counting of small ranges (age, population etc)
-4. Many small key value pairs in small footprint with minimal overhead
-5. Constant time access priority queue
+1. [Fast Ranged Queries, Prefix Queries and Aggregates](https://github.com/tjizep/barch/blob/main/USECASE.md)
+2. Prefix-cache for fast loading of hints  
+3. Z-Order/Morton code range queries for quick spatial bounds checking
+4. Fast and accurate counting of small ranges (age, population etc)
+5. Many small key value pairs in small footprint with minimal overhead
+6. Constant time access priority queue
 
 # Commands and API
 1. `B.ADD K V` add a key and value [more](https://github.com/tjizep/barch/blob/main/ADD.md)
@@ -25,13 +26,15 @@
 4. `B.REM K` removes a key, returns value if success [more](https://github.com/tjizep/barch/blob/main/REM.md)
 5. `B.MAX` returns largest key  (or nil) - numbers are less than text
 6. `B.MIN` returns smallest key (or nil) if there are no keys
-7. `B.KEYRANGE K1 K2 count` returns an array of maximum count containing the keys 
-8. `B.LB K1` lower bound: first key not less than K1 
-9. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys
-10. `B.HEAPBYTES` bytes allocated by `BARCH` alone
-11. `B.STATS` lots of statistics on internal datastructures, node count, defrag, pages etc.
-12. `B.OPS` operation counts of various `BARCH` api commands
-13. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
+7. `B.KEYRANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://github.com/tjizep/barch/blob/main/USECASE.md)
+8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://github.com/tjizep/barch/blob/main/USECASE.md) 
+9. `B.LB K1` lower bound: first key not less than K1 
+10. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys
+11. `B.HEAPBYTES` bytes allocated by `BARCH` alone
+12. `B.STATS` lots of statistics on internal datastructures, node count, defrag, pages etc.
+13. `B.OPS` operation counts of various `BARCH` api commands
+14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
+15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
 
 # Installation
 1. Checkout and build on (linux only) with gcc 10 or above

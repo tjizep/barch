@@ -1,18 +1,12 @@
 #pragma once
 #include <cstdint>
-#include <nodes.h>
+#include "nodes.h"
 #include <fast_float/fast_float.h>
 #include "sastam.h"
 
 namespace conversion
 {
-    enum
-    {
-        tinteger = 0,
-        tdouble = 1,
-        tstring = 2
 
-    };
     template <typename I>
     struct byte_comparable
     {
@@ -68,7 +62,7 @@ namespace conversion
     {
         int64_t in;
         memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
-        return comparable_bytes(in, tdouble);
+        return comparable_bytes(in, art::tdouble);
     }
 
     struct comparable_result
@@ -82,13 +76,13 @@ namespace conversion
 
         explicit comparable_result(int64_t value)
         : data(&integer.bytes[0])
-        , integer (comparable_bytes(value, tinteger)) // numbers are ordered before most ascii strings unless they start with 0x01
+        , integer (comparable_bytes(value, art::tinteger)) // numbers are ordered before most ascii strings unless they start with 0x01
         , size(integer.get_size())
         {}
 
         explicit comparable_result(double value)
         : data(&integer.bytes[0])
-        , integer(comparable_bytes(value, tdouble))
+        , integer(comparable_bytes(value, art::tdouble))
         , size(integer.get_size())
         {
             size = integer.get_size();
@@ -99,7 +93,7 @@ namespace conversion
         {
             bytes = heap::allocate<uint8_t>(this->size+1); //TODO: ?hack? a hidden trailing null pointer has to be added
             memcpy(bytes + 1, val, this->size - 1);
-            bytes[0] = tstring;
+            bytes[0] = art::tstring;
             data = bytes;
 
         }

@@ -239,6 +239,7 @@ namespace art
 
  /**
   * glob match all the key value pairs except the deleted ones
+  * This is a multi threaded iterator and care should be taken
   */
 void glob(tree* t, const keys_spec &spec, value_type pattern, const std::function<bool(const leaf&)>& cb);
 

@@ -24,7 +24,6 @@ enum
 {
     page_size = 4096,
     reserved_address_base = 12000,
-    //opt_enable_compression = 1,
     auto_vac = 0,
     auto_vac_workers = 8,
     iterate_workers = 4,

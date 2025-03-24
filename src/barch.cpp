@@ -85,7 +85,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key){
     size_t kl;
     const unsigned char * enck = key.bytes;
     unsigned key_len = key.length();
-    if( key_len == 10 && (*enck == conversion::tinteger || *enck == conversion::tdouble)){
+    if( key_len == 10 && (*enck == art::tinteger || *enck == art::tdouble)){
         ik = conversion::enc_bytes_to_int(enck, key_len);
         if (*enck == 1) {
             memcpy(&dk, &ik, sizeof(ik));
@@ -97,7 +97,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key){
                 return -1;    
             }
         }
-    } else if ( key_len >= 1  && *enck == conversion::tstring) { //&& *enck == 2 //it's a string
+    } else if ( key_len >= 1  && *enck == art::tstring) { //&& *enck == 2 //it's a string
 
         k = (const char*) &enck[1];
         kl = key_len - 1;
@@ -213,6 +213,7 @@ extern "C" {
         {
             return ValkeyModule_WrongArity(ctx);
         }
+        std::mutex vklock{};
         int64_t replies = 0;
         size_t plen;
         const char *cpat = ValkeyModule_StringPtrLen(argv[1], &plen);
@@ -233,6 +234,7 @@ extern "C" {
 
             art::glob(get_art(), spec, pattern,[&](const art::leaf& l) -> bool
             {
+                std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
                 if (0 != reply_encoded_key(ctx, l.get_key())){
                     return false;
                 };

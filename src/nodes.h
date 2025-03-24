@@ -25,7 +25,13 @@ namespace art
     {
         return std::numeric_limits<I>::min();
     }
+    enum key_types
+    {
+        tinteger = 0,
+        tdouble = 1,
+        tstring = 2
 
+    };
     enum node_kind
     {
         node_4 = 1u,

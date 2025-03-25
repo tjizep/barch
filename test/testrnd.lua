@@ -110,6 +110,8 @@ end
 --[[ Testing ints,doubles and string key types]]
 convert = tocharsnum
 test()
+result[inc()] = {'B.SAVE', vk.call('B.SAVE')}
+result[inc()] = {'B.LOAD', vk.call('B.LOAD')}
 clear()
 assert(successes==count*2, "test failures")
 assert(failures==0, "test failures")

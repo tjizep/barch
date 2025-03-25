@@ -5,6 +5,7 @@
 #ifndef COMPRESS_H
 #define COMPRESS_H
 #include <iostream>
+#include<fstream>
 #include "sastam.h"
 #include <mutex>
 #include <shared_mutex>
@@ -19,6 +20,8 @@
 #include <functional>
 #include <unordered_set>
 #include <list>
+#include <logger.h>
+
 #include "configuration.h"
 
 enum
@@ -30,7 +33,8 @@ enum
     iterate_workers = 4,
     test_memory = 0,
     allocation_padding = 0,
-    coalesce_fragments = 0
+    coalesce_fragments = 0,
+    storage_version = 3
 };
 
 typedef uint16_t PageSizeType;
@@ -829,11 +833,31 @@ public:
             iter(at, str);
         }
     }
+    void iterate_arena(const std::function<void(size_t, const storage&) >& iter) const
+    {
+        for (auto& [at,str] : hidden_arena)
+        {
+            iter(at, str);
+        }
+    }
 
     size_t get_max_address_accessed() const
     {
         return max_address_accessed;
     }
+    template <typename T>
+    void writep(std::ofstream& of,const T& data) const
+    {
+        of.write(reinterpret_cast<const char*>(&data),sizeof(data));
+    }
+    template <typename T>
+    void readp(std::ifstream& in,T& data) const
+    {
+        in.read(reinterpret_cast<char*>(&data),sizeof(data));
+    }
+    bool save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const;
+    bool load(const std::string& filename, const std::function<void(std::ifstream&)>& extra);
+    static bool arena_read(hash_arena& arena, const std::function<void(std::ifstream&)>& extra, const std::string& filename) ;
 };
 
 struct compress : hash_arena
@@ -864,16 +888,7 @@ struct compress : hash_arena
     static std::shared_mutex vacuum_scope;
 
 private:
-    bool opt_enable_compression = false;
-    bool opt_enable_lru = false;
-    bool opt_validate_addresses = false;
-    bool opt_move_decompressed_pages = true;
-    unsigned opt_iterate_workers = 4;
-    std::thread tdict{};
-    std::thread tpoll{};
-    bool threads_exit = false;
-    unsigned size_in_training = 0;
-    unsigned size_to_train = 0;
+
     heap::buffer<uint8_t> training_data{0};
     std::vector<training_entry, heap::allocator<training_entry>> trainables{};
     std::vector<training_entry, heap::allocator<training_entry>> intraining{};
@@ -884,21 +899,34 @@ private:
     static std::mutex mutex;
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
-    heap::vector<size_t> decompressed_pages{};
+    std::thread tdict{};
+    std::thread tpoll{};
+
+    bool opt_enable_compression = false;
+    bool opt_enable_lru = false;
+    bool opt_validate_addresses = false;
+    bool opt_move_decompressed_pages = true;
+    unsigned opt_iterate_workers = 4;
+
+    bool threads_exit = false;
+    unsigned size_in_training = 0;
+    unsigned size_to_train = 0;
     size_t last_page_allocated{0};
     compressed_address arena_head{0};
     compressed_address highest_reserve_address{0};
     uint64_t last_heap_bytes = 0;
     uint64_t release_counter = 0;
-    std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
-    free_list emancipated{};
-    lru_list lru{};
     uint64_t ticker = 1;
     uint64_t allocated = 0;
     size_t fragmentation = 0;
+    std::string name;
+
+    heap::vector<size_t> decompressed_pages{};
+    std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
+    free_list emancipated{};
+    lru_list lru{};
     std::unordered_set<size_t> fragmented{};
     std::unordered_set<size_t> erased{}; // for runtime use after free tests
-    std::string name;
 
     compress& operator=(const compress& t)
     {
@@ -1720,6 +1748,100 @@ public:
             });
         }
         for (auto& worker : workers) worker.join();
+    }
+private:
+
+public:
+    compressed_address root{};
+    bool is_leaf {false};
+    size_t t_size {false};
+    bool save_extra(const std::string &filename) const
+    {
+        std::lock_guard guard(mutex);
+        auto writer = [&](std::ofstream& of) -> void
+        {
+            long ts = trained_size;
+            writep(of,ts);
+            if (trained_size)
+                of.write((const char*)training_data.data(), ts);
+
+            writep(of, opt_enable_compression);
+            writep(of, opt_enable_lru);
+            writep(of, opt_validate_addresses);
+            writep(of, opt_move_decompressed_pages);
+            writep(of, opt_iterate_workers);
+
+            writep(of, last_page_allocated);
+            writep(of, arena_head);
+            writep(of, highest_reserve_address);
+            writep(of, last_heap_bytes);
+            writep(of, release_counter);
+            writep(of, ticker);
+            writep(of, allocated);
+            writep(of, fragmentation);
+            writep(of, root);
+            writep(of, is_leaf);
+            writep(of, t_size);
+
+        };
+        return save(filename,writer);
+    }
+
+    bool load_extra(const std::string& filenname)
+    {
+        std::lock_guard guard(mutex);
+        auto reader = [&](std::ifstream& in) -> void
+        {
+            if (dict)
+            {
+                ZSTD_freeCDict(dict);
+            }
+            dict = nullptr;
+            long ts = 0;
+            readp(in,ts);
+            if (ts)
+            {
+                training_data = heap::buffer<uint8_t>(ts);
+                in.read((char*)training_data.data(), ts);
+                trained_size = ts;
+                dict = ZSTD_createCDict(training_data.begin(), trained_size, compression_level);
+                if (!dict)
+                {
+                    throw std::runtime_error("failed to load dictionary");
+                }
+            }
+
+
+            readp(in, opt_enable_compression);
+            readp(in, opt_enable_lru);
+            readp(in, opt_validate_addresses);
+            readp(in, opt_move_decompressed_pages);
+            readp(in, opt_iterate_workers);
+
+            readp(in, last_page_allocated);
+            readp(in, arena_head);
+            readp(in, highest_reserve_address);
+            readp(in, last_heap_bytes);
+            readp(in, release_counter);
+            readp(in, ticker);
+            readp(in, allocated);
+            readp(in, fragmentation);
+            readp(in, root);
+            readp(in, is_leaf);
+            readp(in, t_size);
+
+        };
+        try
+        {
+            return load(filenname,reader);
+        }catch (std::exception& e)
+        {
+            art::logger::log(e,__FILE__,__LINE__);
+            ++statistics::exceptions_raised;
+        }
+
+        return false;
+
     }
 };
 

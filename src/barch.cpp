@@ -86,7 +86,7 @@ static int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key)
     unsigned key_len = key.length();
     if (key_len == 10 && (*enck == art::tinteger || *enck == art::tdouble))
     {
-        ik = conversion::enc_bytes_to_int(enck, key_len);
+        ik = conversion::enc_bytes_to_int(enck, key_len - 1);
         if (*enck == 1)
         {
             memcpy(&dk, &ik, sizeof(ik));
@@ -571,6 +571,69 @@ int cmd_SIZE(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
     return ValkeyModule_ReplyWithLongLong(ctx, size);
 }
 
+/* B.SAVE
+ * saves the data to files called leaf_data.dat and node_data.dat in the current directory
+ * @return OK if successful
+ */
+int cmd_SAVE(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
+{
+    compressed_release release;
+    read_lock rl(get_lock());
+
+    if (argc != 1)
+        return ValkeyModule_WrongArity(ctx);
+    if (!art::get_leaf_compression().save_extra("leaf_data.dat"))
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    auto *t = get_art();
+    auto &nc = art::get_node_compression();
+    nc.root = compressed_address(t->root.logical);
+    nc.is_leaf = t->root.is_leaf;
+    nc.t_size = t->size;
+    if (!art::get_node_compression().save_extra("node_data.dat"))
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
+/* B.LOAD
+ * loads and overwrites the data from files called leaf_data.dat and node_data.dat in the current directory
+ * @return OK if successful
+ */
+int cmd_LOAD(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
+{
+    compressed_release release;
+    write_lock rl(get_lock());
+
+    if (argc != 1)
+        return ValkeyModule_WrongArity(ctx);
+
+    if (!art::get_leaf_compression().load_extra("leaf_data.dat"))
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    if (!art::get_node_compression().load_extra("node_data.dat"))
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+
+    auto *t = get_art();
+    auto &nc = art::get_node_compression();
+
+    if (nc.is_leaf)
+    {
+        t->root = art::node_ptr{nc.root};
+    }else
+    {
+        t->root = art::resolve_read_node(nc.root);
+    }
+    t->size = nc.t_size;
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
 /* B.STATISTICS
  *
  * get memory statistics. */
@@ -865,6 +928,11 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
     if (ValkeyModule_CreateCommand(ctx, NAME(CONFIG), "write", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(SAVE), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(LOAD), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
 
     /* Create our global dictionary. Here we'll set our keys and values. */
     Keyspace = ValkeyModule_CreateDict(nullptr);

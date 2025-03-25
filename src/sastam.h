@@ -158,6 +158,23 @@ namespace heap
         {
             return emplace(0, cnt, src);
         }
+        size_t read(size_t start, const buffer& src)
+        {
+            if (src.empty()) return 0;
+
+            return read(src.data(), start, src.size());
+        }
+        size_t read(const T* src, size_t start, size_t cnt)
+        {
+            if (!src) return 0;
+            if (start + cnt > size())
+            {
+                abort();
+            }
+            memcpy(data() + start, src, cnt);
+            return cnt;
+        }
+        ;
 
         int compare(const buffer& other) const
         {
@@ -547,6 +564,12 @@ namespace heap
         {
             auto b = count;
             resize(b + 1);
+        }
+        void emplace_back(const T* data, size_t n)
+        {
+            auto b = count;
+            reserve(b + n);
+            append(data, size);
         }
 
         void append(const T* start, const T* end)

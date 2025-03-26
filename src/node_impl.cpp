@@ -67,6 +67,10 @@ art::node_ptr art::resolve_read_node(compressed_address address)
 {
     auto* node = art::get_node_compression().read<art::node_data>(address);
     art::node_ptr_storage ptr;
+    if (node == nullptr)
+    {
+        return art::node_ptr{nullptr};
+    }
     switch (node->type)
     {
     case art::node_4:

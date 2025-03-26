@@ -16,11 +16,11 @@ std::shared_mutex compress::vacuum_scope{};
 /// file io
 bool hash_arena::save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const
 {
-    art::logger::log("writing to " + filename);
+    art::log("writing to " + filename);
     std::ofstream out{filename,std::ios::out|std::ios::binary};
     if (!out.is_open())
     {
-        art::logger::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
+        art::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
 
         return false;
     }
@@ -42,7 +42,7 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
     {
         if (out.fail())
         {
-            art::logger::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
+            art::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
             return;
         }
 
@@ -65,25 +65,25 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
     });
     if (out.fail())
     {
-        art::logger::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
+        art::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
         return false; // usually disk full at this stage
     }
     out.seekp(0);
     completed = storage_version;
     out.write((const char*)&completed, sizeof(completed));
     out.flush();
-    art::logger::log("completed writing to " + filename);
+    art::log("completed writing to " + filename);
 
     return !out.fail();
 
 }
 bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifstream&)>& extra, const std::string& filename)
 {
-    art::logger::log("reading from" + filename);
+    art::log("reading from " + filename);
     std::ifstream in{filename,std::ios::in|std::ios::binary};
     if(!in.is_open())
     {
-        art::logger::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
+        art::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
         return false;
     }
     uint64_t completed = 0;
@@ -91,14 +91,14 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
     in.read((char*)&completed, sizeof(completed));
     if (completed != storage_version)
     {
-        art::logger::log(std::runtime_error("file format is invalid"),__FILE__,__LINE__);
+        art::log(std::runtime_error("file format is invalid"),__FILE__,__LINE__);
 
         return false;
     }
     in.read((char*)&arena.max_address_accessed, sizeof(arena.max_address_accessed));
     if (in.fail())
     {
-        art::logger::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
+        art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
         return false;
     }
     in.read((char*)&arena.last_allocated, sizeof(arena.last_allocated));
@@ -112,7 +112,7 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
         size_t page = 0;
         if (heap::allocated > art::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)
         {
-            art::logger::log(std::runtime_error("module or server out of memory"),__FILE__,__LINE__);
+            art::log(std::runtime_error("module or server out of memory"),__FILE__,__LINE__);
             return false;
         }
         long bsize = 0;
@@ -137,16 +137,16 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
         arena.hidden_arena[page] = s;
         if (in.fail())
         {
-            art::logger::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
+            art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
             return false;
         }
     };
     if (in.fail())
     {
-        art::logger::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
+        art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
         return false;
     }
-    art::logger::log("complete reading from" + filename);
+    art::log("complete reading from " + filename);
     return true;
 }
 

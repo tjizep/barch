@@ -67,7 +67,7 @@ typedef std::function<void(art::node_ptr l)> NodeResult;
 
 
 /**
- * Main struct, points to root.
+ * art tree and company
  */
 namespace art
 {

@@ -34,7 +34,7 @@ enum
     test_memory = 0,
     allocation_padding = 0,
     coalesce_fragments = 0,
-    storage_version = 3
+    storage_version = 4
 };
 
 typedef uint16_t PageSizeType;
@@ -1752,10 +1752,7 @@ public:
 private:
 
 public:
-    compressed_address root{};
-    bool is_leaf {false};
-    size_t t_size {false};
-    bool save_extra(const std::string &filename) const
+    bool save_extra(const std::string &filename, const std::function<void(std::ofstream& of)>& extra1) const
     {
         std::lock_guard guard(mutex);
         auto writer = [&](std::ofstream& of) -> void
@@ -1779,15 +1776,12 @@ public:
             writep(of, ticker);
             writep(of, allocated);
             writep(of, fragmentation);
-            writep(of, root);
-            writep(of, is_leaf);
-            writep(of, t_size);
-
+            extra1(of);
         };
         return save(filename,writer);
     }
 
-    bool load_extra(const std::string& filenname)
+    bool load_extra(const std::string& filenname, const std::function<void(std::ifstream& of)>& extra1)
     {
         std::lock_guard guard(mutex);
         auto reader = [&](std::ifstream& in) -> void
@@ -1826,17 +1820,15 @@ public:
             readp(in, ticker);
             readp(in, allocated);
             readp(in, fragmentation);
-            readp(in, root);
-            readp(in, is_leaf);
-            readp(in, t_size);
 
+            extra1(in);
         };
         try
         {
             return load(filenname,reader);
         }catch (std::exception& e)
         {
-            art::logger::log(e,__FILE__,__LINE__);
+            art::log(e,__FILE__,__LINE__);
             ++statistics::exceptions_raised;
         }
 

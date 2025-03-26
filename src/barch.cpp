@@ -23,6 +23,7 @@ extern "C" {
 #include <fast_float/fast_float.h>
 #include <functional>
 #include "keyspec.h"
+#include "ioutil.h"
 
 static ValkeyModuleDict* Keyspace{};
 static std::shared_mutex shared{};
@@ -582,20 +583,48 @@ int cmd_SAVE(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
 
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    if (!art::get_leaf_compression().save_extra("leaf_data.dat"))
+    auto save_stats_and_root = [&](std::ofstream& of)
     {
-        return ValkeyModule_ReplyWithNull(ctx);
-    }
-    auto *t = get_art();
-    auto &nc = art::get_node_compression();
-    nc.root = compressed_address(t->root.logical);
-    nc.is_leaf = t->root.is_leaf;
-    nc.t_size = t->size;
-    if (!art::get_node_compression().save_extra("node_data.dat"))
+        writep(of, statistics::n4_nodes);
+        writep(of, statistics::n16_nodes);
+        writep(of, statistics::n48_nodes);
+        writep(of, statistics::n256_nodes);
+        writep(of, statistics::node256_occupants);
+        writep(of, statistics::leaf_nodes);
+        writep(of, statistics::addressable_bytes_alloc);
+        writep(of, statistics::interior_bytes_alloc);
+        writep(of, statistics::page_bytes_compressed);
+        writep(of, statistics::page_bytes_uncompressed);
+        writep(of, statistics::pages_uncompressed);
+        writep(of, statistics::pages_compressed);
+        writep(of, statistics::max_page_bytes_uncompressed);
+
+        auto *t = get_art();
+        auto root = compressed_address(t->root.logical);
+        writep(of, root);
+        writep(of, t->root.is_leaf);
+        writep(of, t->size);
+
+    };
+
+    auto st = std::chrono::high_resolution_clock::now();
+
+    if (!art::get_leaf_compression().save_extra("leaf_data.dat", save_stats_and_root))
     {
         return ValkeyModule_ReplyWithNull(ctx);
     }
 
+
+    if (!art::get_node_compression().save_extra("node_data.dat", [&](std::ofstream&){}))
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+
+    auto t = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - st);
+    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(t - st);
+
+    art::std_log("saved barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
@@ -610,27 +639,54 @@ int cmd_LOAD(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
 
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-
-    if (!art::get_leaf_compression().load_extra("leaf_data.dat"))
-    {
-        return ValkeyModule_ReplyWithNull(ctx);
-    }
-    if (!art::get_node_compression().load_extra("node_data.dat"))
-    {
-        return ValkeyModule_ReplyWithNull(ctx);
-    }
-
     auto *t = get_art();
-    auto &nc = art::get_node_compression();
-
-    if (nc.is_leaf)
+    compressed_address root;
+    bool is_leaf = false;
+    // save stats in the leaf storage
+    auto load_stats_and_root = [&](std::ifstream& in)
     {
-        t->root = art::node_ptr{nc.root};
+        readp(in, statistics::n4_nodes);
+        readp(in, statistics::n16_nodes);
+        readp(in, statistics::n48_nodes);
+        readp(in, statistics::n256_nodes);
+        readp(in, statistics::node256_occupants);
+        readp(in, statistics::leaf_nodes);
+        readp(in, statistics::addressable_bytes_alloc);
+        readp(in, statistics::interior_bytes_alloc);
+        readp(in, statistics::page_bytes_compressed);
+        readp(in, statistics::page_bytes_uncompressed);
+        readp(in, statistics::pages_uncompressed);
+        readp(in, statistics::pages_compressed);
+        readp(in, statistics::max_page_bytes_uncompressed);
+
+        readp(in, root);
+        readp(in, is_leaf);
+        readp(in, t->size);
+
+    };
+    auto st = std::chrono::high_resolution_clock::now();
+
+    if (!art::get_node_compression().load_extra("node_data.dat",[&](std::ifstream&){}))
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    if (!art::get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root))
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+
+    if (is_leaf)
+    {
+        t->root = art::node_ptr{root};
     }else
     {
-        t->root = art::resolve_read_node(nc.root);
+        t->root = art::resolve_read_node(root);
     }
-    t->size = nc.t_size;
+    auto now = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
+    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
+
+    art::std_log("loaded barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 

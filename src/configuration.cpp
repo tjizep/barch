@@ -321,6 +321,8 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
 int art::set_configuration_value(ValkeyModuleString* Name, ValkeyModuleString* Value)
 {
     std::string name = ValkeyModule_StringPtrLen(Name, nullptr);
+    art::log(name);
+
     if (name == "compression")
     {
         int r = SetCompressionType(nullptr, Value, nullptr, nullptr);

@@ -94,6 +94,8 @@ namespace art
 
         ~tree();
         void run_defrag();
+        bool save();
+        bool load();
     };
 }
 

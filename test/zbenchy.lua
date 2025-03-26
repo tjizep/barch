@@ -49,14 +49,24 @@ end
 local test = function()
 
     tests = tests + 1
-    local t = vk.call('B.MILLIS')
-    for i = 1, count do
-        local k = convert(i-1)
-        vk.call('B.SET',k,i)
+    local t
+    if vk.call('B.SIZE') == 0 then
+        t = vk.call('B.MILLIS')
+        for i = 1, count do
+            local k = convert(i-1)
+            vk.call('B.SET',k,i)
+        end
+        result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
+    else
+        t = vk.call('B.MILLIS')
+        for i = 1, count do
+            local k = convert(i-1)
+            vk.call('B.GET',k)
+        end
+        result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
 
     end
 
-    result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'HEAP', vk.call('B.HEAPBYTES')}
 
 end

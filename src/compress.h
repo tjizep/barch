@@ -5,7 +5,7 @@
 #ifndef COMPRESS_H
 #define COMPRESS_H
 #include <iostream>
-#include<fstream>
+#include <fstream>
 #include "sastam.h"
 #include <mutex>
 #include <shared_mutex>
@@ -27,13 +27,14 @@
 enum
 {
     page_size = 4096,
-    reserved_address_base = 12000,
+    reserved_address_base = 120000,
     auto_vac = 0,
-    auto_vac_workers = 8,
+    auto_vac_workers = 4,
     iterate_workers = 4,
     test_memory = 0,
     allocation_padding = 0,
-    coalesce_fragments = 0,
+    use_last_page_caching = 0,
+    initialize_memory = 1,
     storage_version = 4
 };
 
@@ -659,7 +660,7 @@ public:
         return hidden_arena.at(at);
     }
 };
-
+#include <ankerl/unordered_dense.h>
 struct hash_arena
 {
     enum
@@ -668,7 +669,10 @@ struct hash_arena
     };
 
 private:
-    std::unordered_map<size_t, storage> hidden_arena{};
+    // seems to make a small difference
+    typedef ankerl::unordered_dense::map<size_t, storage> hash_type ;
+    //typedef std::unordered_map<size_t, storage> hash_type ;
+    hash_type hidden_arena{};
     heap::vector<size_t> free_address_list{};
     size_t top = 10000000;
     size_t free_pages = top;
@@ -927,7 +931,8 @@ private:
     lru_list lru{};
     std::unordered_set<size_t> fragmented{};
     std::unordered_set<size_t> erased{}; // for runtime use after free tests
-
+    size_t last_created_page{};
+    uint8_t* last_page_ptr{};
     compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
@@ -1077,7 +1082,7 @@ private:
             {
                 abort();
             }
-            decompressed_pages.push_back(param.first);
+            //decompressed_pages.push_back(param.first);
             return true;
         }
         return false;
@@ -1135,7 +1140,11 @@ private:
         page.decompressed = std::move(heap::buffer<uint8_t>(ps));
         statistics::page_bytes_uncompressed += page.decompressed.byte_size();
         ++statistics::pages_uncompressed;
-        memset(page.decompressed.begin(), 0, ps);
+        if (initialize_memory == 1)
+        {
+            memset(page.decompressed.begin(), 0, ps);
+        }
+
         decompressed_pages.push_back(at);
         return {at, page};
     }
@@ -1389,9 +1398,9 @@ public:
         {
             abort();
         }
-        if (test_memory == 1)
+        if (initialize_memory == 1)
         {
-            memset(d1, 0, size);
+            //memset(d1, 0, size);
         }
         if (test_memory)
         {
@@ -1519,6 +1528,17 @@ public:
     template <typename T>
     T* read(compressed_address at)
     {
+        if (use_last_page_caching == 1)
+        {
+            if (last_created_page == at.page())
+            {
+                //last_page_ptr->modifications++;
+                uint8_t* d = last_page_ptr;
+                d += at.offset();
+                return (T*)d;
+            }
+        }
+
         if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
         const uint8_t* d = basic_resolve(at);
@@ -1528,8 +1548,20 @@ public:
     template <typename T>
     T* modify(compressed_address at)
     {
+
+        if (use_last_page_caching == 1)
+        {
+            if (last_created_page == at.page())
+            {
+                //last_page_ptr->modifications++;
+                uint8_t* d = last_page_ptr;
+                d += at.offset();
+                return (T*)d;
+            }
+        }
         if (at.null()) return nullptr;
         std::lock_guard guard(mutex);
+
         uint8_t* d = basic_resolve(at, true);
         return (T*)d;
     }
@@ -1577,8 +1609,18 @@ public:
             {
                 abort();
             }
-            memset(at.second.decompressed.begin() + r.offset(), 0, sz);
+            if (initialize_memory == 1)
+            {
+                memset(at.second.decompressed.begin() + r.offset(), 0, sz);
+            }
             allocated += size;
+
+            if (use_last_page_caching == 1)
+            {
+                last_created_page = r.page();
+                storage& p = at.second;
+                last_page_ptr = p.decompressed.begin();
+            }
             return r;
         }
         auto at = create_if_required(size);
@@ -1605,9 +1647,15 @@ public:
         at.second.write_position += size;
         at.second.size++;
         at.second.modifications++;
-        invalid(ca);
-        if (test_memory)
+        if (use_last_page_caching == 1)
         {
+            storage& p = at.second;
+            last_page_ptr = p.decompressed.begin();
+            last_created_page = ca.page();
+
+        }
+        if (test_memory)
+        {   invalid(ca);
             erased.erase(ca.address());
         }
         auto* data = (test_memory == 1) ? basic_resolve(ca) : nullptr;
@@ -1624,8 +1672,14 @@ public:
 
     void release_context()
     {
-        vacuum_scope.unlock_shared();
 
+        if (use_last_page_caching == 1)
+        {
+            last_created_page = 0;
+            last_page_ptr = nullptr;
+
+        }
+        vacuum_scope.unlock_shared();
         if (statistics::page_bytes_compressed > heap::allocated)
         {
             abort();

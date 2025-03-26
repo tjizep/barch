@@ -47,6 +47,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++ -std=c++2
 set(CMAKE_CPP_STANDARD 20)
 
 include_directories(src)
+include_directories(external/include)
 include_directories(${fast_float_SOURCE_DIR}/include)
 include_directories(${zstd_SOURCE_DIR}/lib)
 

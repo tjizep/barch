@@ -1187,3 +1187,104 @@ art_ops_statistics art::get_ops_statistics()
     os.size_ops = (int64_t)statistics::size_ops;
     return os;
 }
+#include "ioutil.h"
+bool art::tree::save()
+{
+    auto *t = this;
+    auto save_stats_and_root = [&](std::ofstream& of)
+    {
+        writep(of, statistics::n4_nodes);
+        writep(of, statistics::n16_nodes);
+        writep(of, statistics::n48_nodes);
+        writep(of, statistics::n256_nodes);
+        writep(of, statistics::node256_occupants);
+        writep(of, statistics::leaf_nodes);
+        writep(of, statistics::addressable_bytes_alloc);
+        writep(of, statistics::interior_bytes_alloc);
+        writep(of, statistics::page_bytes_compressed);
+        writep(of, statistics::page_bytes_uncompressed);
+        writep(of, statistics::pages_uncompressed);
+        writep(of, statistics::pages_compressed);
+        writep(of, statistics::max_page_bytes_uncompressed);
+
+
+        auto root = compressed_address(t->root.logical);
+        writep(of, root);
+        writep(of, t->root.is_leaf);
+        writep(of, t->size);
+
+    };
+
+    auto st = std::chrono::high_resolution_clock::now();
+
+    if (!art::get_leaf_compression().save_extra("leaf_data.dat", save_stats_and_root))
+    {
+        return false;
+    }
+
+
+    if (!art::get_node_compression().save_extra("node_data.dat", [&](std::ofstream&){}))
+    {
+        return false;
+    }
+
+    auto current = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
+    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
+
+    art::std_log("saved barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
+    return true;
+}
+bool art::tree::load()
+{
+    auto *t = this;
+    compressed_address root;
+    bool is_leaf = false;
+    // save stats in the leaf storage
+    auto load_stats_and_root = [&](std::ifstream& in)
+    {
+        readp(in, statistics::n4_nodes);
+        readp(in, statistics::n16_nodes);
+        readp(in, statistics::n48_nodes);
+        readp(in, statistics::n256_nodes);
+        readp(in, statistics::node256_occupants);
+        readp(in, statistics::leaf_nodes);
+        readp(in, statistics::addressable_bytes_alloc);
+        readp(in, statistics::interior_bytes_alloc);
+        readp(in, statistics::page_bytes_compressed);
+        readp(in, statistics::page_bytes_uncompressed);
+        readp(in, statistics::pages_uncompressed);
+        readp(in, statistics::pages_compressed);
+        readp(in, statistics::max_page_bytes_uncompressed);
+
+        readp(in, root);
+        readp(in, is_leaf);
+        readp(in, t->size);
+
+    };
+    auto st = std::chrono::high_resolution_clock::now();
+
+    if (!art::get_node_compression().load_extra("node_data.dat",[&](std::ifstream&){}))
+    {
+        return false;
+    }
+    if (!art::get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root))
+    {
+        return false;
+    }
+
+    if (is_leaf)
+    {
+        t->root = art::node_ptr{root};
+    }else
+    {
+        t->root = art::resolve_read_node(root);
+    }
+    auto now = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
+    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
+
+    art::std_log("loaded barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
+    art::std_log("db memory when created",(float)heap::allocated/(1024*1024),"Mb");
+    return true;
+}

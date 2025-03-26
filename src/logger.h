@@ -22,7 +22,7 @@ namespace art
         size_t tid = getpid();
         auto now = std::chrono::system_clock::now();
         // %d %b %Y %H:%M:%OS
-        std::string logged = std::format("{}:M {:%d %b %Y %H:%M:%OS.3} * ",tid, now);
+        std::string logged = std::format("{}:M {:%d %b %Y %H:%M:%OS} * ",tid, now);
         logged += std::vformat(users_fmt, args);
         std::clog <<  logged << '\n';
     }

@@ -4,8 +4,7 @@
 
 #ifndef STORAGE_H
 #define STORAGE_H
-#include <limits.h>
-#include <inttypes.h>
+#include <cinttypes>
 #include <list>
 #include "sastam.h"
 typedef std::list<size_t, heap::allocator<size_t>> lru_list;

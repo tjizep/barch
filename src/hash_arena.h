@@ -49,25 +49,12 @@ private:
 public:
     hash_arena() = default;
     // arena virtualization functions
-    void expand_address_space()
-    {
-        if (hidden_arena.empty() && top == 0)
-        {
-            hidden_arena[top] = storage{};
-        }
-        else
-        {
-            hidden_arena[++top] = storage{};
-        }
-        max_address_accessed = std::max(max_address_accessed, top);
-    }
-
-    size_t page_count() const
+    [[nodiscard]] size_t page_count() const
     {
         return hidden_arena.size();
     }
 
-    size_t max_logical_address() const
+    [[nodiscard]] size_t max_logical_address() const
     {
         return top;
     }
@@ -89,12 +76,12 @@ public:
         free_address_list.emplace_back(at);
     }
 
-    bool is_free(size_t at) const
+    [[nodiscard]] bool is_free(size_t at) const
     {
         return hidden_arena.count(at) == 0;
     }
 
-    bool has_free() const
+    [[nodiscard]] bool has_free() const
     {
         return free_pages > 1;
     }
@@ -133,7 +120,7 @@ public:
         throw std::runtime_error("no free pages found");
     }
 
-    bool has_page(size_t at) const
+    [[nodiscard]] bool has_page(size_t at) const
     {
         return hidden_arena.count(at) != 0;
     }
@@ -152,7 +139,7 @@ public:
         return pi->second;
     }
 
-    const storage& retrieve_page(size_t at) const
+    [[nodiscard]] const storage& retrieve_page(size_t at) const
     {
         if (at > top)
         {
@@ -196,16 +183,7 @@ public:
     {
         return max_address_accessed;
     }
-    template <typename T>
-    void writep(std::ofstream& of,const T& data) const
-    {
-        of.write(reinterpret_cast<const char*>(&data),sizeof(data));
-    }
-    template <typename T>
-    void readp(std::ifstream& in,T& data) const
-    {
-        in.read(reinterpret_cast<char*>(&data),sizeof(data));
-    }
+
     bool save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const;
     bool load(const std::string& filename, const std::function<void(std::ifstream&)>& extra);
     static bool arena_read(hash_arena& arena, const std::function<void(std::ifstream&)>& extra, const std::string& filename) ;

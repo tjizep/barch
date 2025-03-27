@@ -3,10 +3,6 @@
 //
 
 #include "compress.h"
-#include<iostream>
-#include<fstream>
-#include <logger.h>
-#include <bits/fs_fwd.h>
 
 uint32_t compress::flush_ticker = 0;
 std::mutex compress::mutex{};

@@ -21,131 +21,14 @@
 #include <unordered_set>
 #include <list>
 #include <logger.h>
-
+#include "ioutil.h"
 #include "configuration.h"
-
-enum
-{
-    page_size = 4096,
-    reserved_address_base = 120000,
-    auto_vac = 0,
-    auto_vac_workers = 4,
-    iterate_workers = 4,
-    test_memory = 0,
-    allocation_padding = 0,
-    use_last_page_caching = 0,
-    initialize_memory = 1,
-    storage_version = 4
-};
+#include "compressed_address.h"
+#include "constants.h"
+#include "storage.h"
+#include "hash_arena.h"
 
 typedef uint16_t PageSizeType;
-typedef std::list<size_t, heap::allocator<size_t>> lru_list;
-
-struct compressed_address
-{
-    typedef uint64_t AddressIntType;
-    compressed_address() = default;
-    compressed_address(const compressed_address&) = default;
-    compressed_address& operator=(const compressed_address&) = default;
-
-    explicit compressed_address(size_t index) : index(index)
-    {
-    }
-
-    compressed_address(size_t p, size_t o)
-    {
-        from_page_offset(p, o);
-    }
-
-    compressed_address& operator =(nullptr_t)
-    {
-        index = 0;
-        return *this;
-    }
-
-    [[nodiscard]] bool null() const
-    {
-        return index == 0;
-    }
-
-    bool operator==(const compressed_address& other) const
-    {
-        return index == other.index;
-    }
-
-    bool operator!=(const compressed_address& other) const
-    {
-        return index != other.index;
-    }
-
-    bool operator<(const compressed_address& other) const
-    {
-        return index < other.index;
-    }
-
-    [[nodiscard]] static bool is_null_base(size_t page)
-    {
-        return (page % reserved_address_base) == 0;
-    }
-
-    [[nodiscard]] bool is_null_base() const
-    {
-        return is_null_base(page());
-    }
-
-    void clear()
-    {
-        index = 0;
-    }
-
-    void from_page_index(size_t p)
-    {
-        index = p * page_size;
-    }
-
-    void from_page_offset(size_t p, size_t offset)
-    {
-        index = p * page_size + offset;
-    }
-
-    [[nodiscard]] size_t offset() const
-    {
-        return index % page_size;
-    }
-
-    [[nodiscard]] size_t page() const
-    {
-        return index / page_size;
-    }
-
-    [[nodiscard]] size_t address() const
-    {
-        return index;
-    }
-
-    void from_address(size_t a)
-    {
-        index = a;
-    }
-
-    bool operator==(AddressIntType other) const
-    {
-        return index == other;
-    }
-
-    bool operator!=(AddressIntType other) const
-    {
-        return index != other;
-    }
-
-    explicit operator size_t() const
-    {
-        return index;
-    }
-
-private:
-    AddressIntType index = 0;
-};
 
 struct training_entry
 {
@@ -157,77 +40,6 @@ struct training_entry
     size_t size;
 };
 
-struct storage
-{
-    storage() : compressed(0), decompressed(0)
-    {
-    }
-
-    storage(storage&& other) noexcept : compressed(0), decompressed(0)
-    {
-        *this = std::move(other);
-    }
-
-    storage(const storage& other) : compressed(0), decompressed(0)
-    {
-        *this = other;
-    }
-
-    storage& operator=(const storage& other)
-    {
-        if (&other == this) return *this;
-        compressed = other.compressed;
-        decompressed = other.decompressed;
-        write_position = other.write_position;
-        modifications = other.modifications;
-        size = other.size;
-        lru = other.lru;
-        ticker = other.ticker;
-        fragmentation = other.fragmentation;
-        return *this;
-    }
-
-    void clear()
-    {
-        compressed.release();
-        decompressed.release();
-        write_position = 0;
-        modifications = 0;
-        size = 0;
-        ticker = 0;
-        fragmentation = 0;
-        lru = lru_list::iterator();
-    }
-
-    storage& operator=(storage&& other) noexcept
-    {
-        if (&other == this) return *this;
-        compressed = std::move(other.compressed);
-        decompressed = std::move(other.decompressed);
-        write_position = other.write_position;
-        modifications = other.modifications;
-        size = other.size;
-        lru = other.lru;
-        ticker = other.ticker;
-        fragmentation = other.fragmentation;
-        other.clear();
-        return *this;
-    }
-
-    [[nodiscard]] bool empty() const
-    {
-        return size == 0 && write_position == 0 && compressed.empty() && decompressed.empty();
-    }
-
-    heap::buffer<uint8_t> compressed;
-    heap::buffer<uint8_t> decompressed;
-    uint16_t write_position = 0;
-    uint16_t size = 0;
-    uint16_t modifications = 0;
-    lru_list::iterator lru{};
-    uint64_t ticker = 0;
-    uint16_t fragmentation = 0;
-};
 
 struct size_offset
 {
@@ -536,335 +348,8 @@ struct free_list
     }
 };
 
-struct vector_arena
-{
-private:
-    std::vector<storage> hidden_arena{};
-    std::unordered_set<size_t> freed_pages{};
-    size_t max_allocated = 0;
 
-public:
-    // arena virtualization functions
-    [[nodiscard]] size_t page_count() const
-    {
-        return hidden_arena.size();
-    }
-
-    [[nodiscard]] size_t max_logical_address() const
-    {
-        if (hidden_arena.empty()) return 0;
-        return hidden_arena.size() - 1;
-    }
-
-    void free_page(size_t at)
-    {
-        if (freed_pages.count(at))
-        {
-            throw std::runtime_error("page already free");
-        };
-        freed_pages.insert(at);
-    }
-
-    bool is_free(size_t at) const
-    {
-        return freed_pages.count(at) > 0;
-    }
-
-    bool has_free() const
-    {
-        return !freed_pages.empty();
-    }
-
-    size_t emancipate()
-    {
-        if (!has_free())
-        {
-            throw std::runtime_error("no free pages available");
-        }
-        size_t to = *freed_pages.begin();
-        recover_free(to);
-        return to;
-    }
-
-    void recover_free(size_t at)
-    {
-        if (!is_free(at))
-        {
-            throw std::runtime_error("page not free");
-        }
-        freed_pages.erase(at);
-    }
-
-    size_t allocate()
-    {
-        if (!has_free())
-        {
-            size_t end = max_allocated + 100;
-            for (; max_allocated < end; ++max_allocated)
-            {
-                if (!compressed_address::is_null_base(max_allocated))
-                    freed_pages.insert(max_allocated);
-            }
-        }
-        return emancipate();
-    }
-
-    void iterate_arena(const std::function<bool(size_t, storage&)>& iter)
-    {
-        size_t at = 0;
-        for (auto& page : hidden_arena)
-        {
-            if (!iter(at, page))
-            {
-                return;
-            }
-            ++at;
-        }
-    }
-
-    size_t get_max_address_accessed() const
-    {
-        return max_allocated;
-    }
-
-    bool has_page(size_t at) const
-    {
-        if (at >= hidden_arena.size()) return false;
-        return !hidden_arena[at].empty();
-    }
-
-    void iterate_arena(const std::function<void(size_t, storage&)>& iter)
-    {
-        size_t at = 0;
-        for (auto& page : hidden_arena)
-        {
-            iter(at++, page);
-        }
-    }
-
-    storage& retrieve_page(size_t at)
-    {
-        if (at >= hidden_arena.size())
-        {
-            hidden_arena.resize(at + 100);
-        }
-        return hidden_arena.at(at);
-    }
-
-    [[nodiscard]] const storage& retrieve_page(size_t at) const
-    {
-        if (at >= hidden_arena.size())
-        {
-            throw std::runtime_error("invalid page");
-        }
-        return hidden_arena.at(at);
-    }
-};
-#include <ankerl/unordered_dense.h>
-struct hash_arena
-{
-    enum
-    {
-        cache_size = 1024
-    };
-
-private:
-    // seems to make a small difference
-    typedef ankerl::unordered_dense::map<size_t, storage> hash_type ;
-    //typedef std::unordered_map<size_t, storage> hash_type ;
-    hash_type hidden_arena{};
-    heap::vector<size_t> free_address_list{};
-    size_t top = 10000000;
-    size_t free_pages = top;
-    size_t last_allocated = 0;
-    size_t max_address_accessed = 0;
-
-    void recover_free(size_t at)
-    {
-        if (!is_free(at))
-        {
-            throw std::runtime_error("page not free");
-        }
-        if (at > max_logical_address())
-        {
-            free_pages += at - max_logical_address();
-            top = at;
-        }
-        if (!has_free())
-        {
-            throw std::runtime_error("no free pages available");
-        }
-        hidden_arena[at] = storage{};
-        max_address_accessed = std::max(max_address_accessed, at);
-        --free_pages;
-    }
-
-public:
-    hash_arena() = default;
-    // arena virtualization functions
-    void expand_address_space()
-    {
-        if (hidden_arena.empty() && top == 0)
-        {
-            hidden_arena[top] = storage{};
-        }
-        else
-        {
-            hidden_arena[++top] = storage{};
-        }
-        max_address_accessed = std::max(max_address_accessed, top);
-    }
-
-    size_t page_count() const
-    {
-        return hidden_arena.size();
-    }
-
-    size_t max_logical_address() const
-    {
-        return top;
-    }
-
-    void free_page(size_t at)
-    {
-        if (hidden_arena.empty())
-        {
-            throw std::runtime_error("no pages left to free");
-        }
-        auto pi = hidden_arena.find(at);
-        if (pi == hidden_arena.end())
-        {
-            throw std::runtime_error("page already free");
-        }
-        hidden_arena.erase(pi);
-        max_address_accessed = std::max(max_address_accessed, at);
-        ++free_pages;
-        free_address_list.emplace_back(at);
-    }
-
-    bool is_free(size_t at) const
-    {
-        return hidden_arena.count(at) == 0;
-    }
-
-    bool has_free() const
-    {
-        return free_pages > 1;
-    }
-
-    size_t allocate()
-    {
-        if (!has_free())
-        {
-            throw std::runtime_error("no free pages available");
-        }
-        if (!free_address_list.empty())
-        {
-            size_t at = free_address_list.back();
-            free_address_list.pop_back();
-            recover_free(at);
-            return at;
-        }
-        if (last_allocated > 0)
-        {
-            if (is_free(last_allocated + 1))
-            {
-                ++last_allocated;
-                recover_free(last_allocated);
-                return last_allocated;
-            }
-        }
-        for (size_t to = 1; to < top; ++to)
-        {
-            if (is_free(to) && !compressed_address::is_null_base(to))
-            {
-                last_allocated = to;
-                recover_free(to);
-                return to;
-            }
-        }
-        throw std::runtime_error("no free pages found");
-    }
-
-    bool has_page(size_t at) const
-    {
-        return hidden_arena.count(at) != 0;
-    }
-
-    storage& retrieve_page(size_t at)
-    {
-        if (at > top)
-        {
-            throw std::runtime_error("invalid page");
-        }
-        auto pi = hidden_arena.find(at);
-        if (pi == hidden_arena.end())
-        {
-            throw std::runtime_error("missing page");
-        }
-        return pi->second;
-    }
-
-    const storage& retrieve_page(size_t at) const
-    {
-        if (at > top)
-        {
-            throw std::runtime_error("missing page");
-        }
-        auto pi = hidden_arena.find(at);
-        if (pi == hidden_arena.end())
-        {
-            throw std::runtime_error("invalid page");
-        }
-        return pi->second;
-    }
-
-    void iterate_arena(const std::function<bool(size_t, storage&)>& iter)
-    {
-        for (auto& [at,str] : hidden_arena)
-        {
-            if (!iter(at, str))
-            {
-                return;
-            }
-        }
-    }
-
-    void iterate_arena(const std::function<void(size_t, storage&)>& iter)
-    {
-        for (auto& [at,str] : hidden_arena)
-        {
-            iter(at, str);
-        }
-    }
-    void iterate_arena(const std::function<void(size_t, const storage&) >& iter) const
-    {
-        for (auto& [at,str] : hidden_arena)
-        {
-            iter(at, str);
-        }
-    }
-
-    size_t get_max_address_accessed() const
-    {
-        return max_address_accessed;
-    }
-    template <typename T>
-    void writep(std::ofstream& of,const T& data) const
-    {
-        of.write(reinterpret_cast<const char*>(&data),sizeof(data));
-    }
-    template <typename T>
-    void readp(std::ifstream& in,T& data) const
-    {
-        in.read(reinterpret_cast<char*>(&data),sizeof(data));
-    }
-    bool save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const;
-    bool load(const std::string& filename, const std::function<void(std::ifstream&)>& extra);
-    static bool arena_read(hash_arena& arena, const std::function<void(std::ifstream&)>& extra, const std::string& filename) ;
-};
-
-struct compress : hash_arena
+struct compress
 {
     enum
     {
@@ -901,6 +386,7 @@ private:
     ZSTD_DCtx* dctx = ZSTD_createDCtx();
     size_t trained_size = 0;
     static std::mutex mutex;
+    hash_arena main {};
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
     std::thread tdict{};
@@ -1045,7 +531,48 @@ private:
         compressed_data.emplace(compressed, compressed_data_temp.begin());
         return compressed_data;
     }
-
+    // arena virtualization start
+    storage& retrieve_page(size_t page)
+    {
+        return main.retrieve_page(page);
+    }
+    const storage& retrieve_page(size_t page) const
+    {
+        return main.retrieve_page(page);
+    }
+    size_t max_logical_address() const
+    {
+        return main.max_logical_address();
+    }
+    size_t allocate()
+    {
+        return main.allocate();
+    }
+    bool has_free() const
+    {
+        return main.has_free();
+    }
+    bool is_free(size_t page) const
+    {
+        return main.is_free(page);
+    }
+    void free_page(size_t page)
+    {
+        main.free_page(page);
+    }
+    bool has_page(size_t page)
+    {
+        return main.has_page(page);
+    }
+    void iterate_arena(const std::function<void(size_t, storage&)>& iter)
+    {
+        main.iterate_arena(iter);
+    }
+    void iterate_arena(const std::function<void(size_t, const storage&) >& iter) const
+    {
+        main.iterate_arena(iter);
+    }
+    // arena virtualization end
     heap::buffer<uint8_t> decompress_buffer(ZSTD_DCtx* d_ctx, size_t known_decompressed_size,
                                             const heap::buffer<uint8_t>& compressed)
     {
@@ -1100,7 +627,7 @@ private:
 
     [[nodiscard]] size_t last_block() const
     {
-        return max_logical_address();
+        return main.max_logical_address();
     }
 
     void add_to_lru(size_t at, storage& page)
@@ -1135,7 +662,7 @@ private:
 
     std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ps = page_size)
     {
-        auto& page = retrieve_page(at);
+        auto& page = main.retrieve_page(at);
         add_to_lru(at, page);
         page.decompressed = std::move(heap::buffer<uint8_t>(ps));
         statistics::page_bytes_uncompressed += page.decompressed.byte_size();
@@ -1832,7 +1359,7 @@ public:
             writep(of, fragmentation);
             extra1(of);
         };
-        return save(filename,writer);
+        return main.save(filename,writer);
     }
 
     bool load_extra(const std::string& filenname, const std::function<void(std::ifstream& of)>& extra1)
@@ -1879,7 +1406,7 @@ public:
         };
         try
         {
-            return load(filenname,reader);
+            return main.load(filenname,reader);
         }catch (std::exception& e)
         {
             art::log(e,__FILE__,__LINE__);

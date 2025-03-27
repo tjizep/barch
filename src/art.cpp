@@ -1283,6 +1283,7 @@ bool art::tree::load()
     auto now = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
+    art::std_log("Done loading BARCH, keys loaded:",t->size,"");
 
     art::std_log("loaded barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
     art::std_log("db memory when created",(float)heap::allocated/(1024*1024),"Mb");

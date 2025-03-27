@@ -3,6 +3,33 @@
 //
 #include "hash_arena.h"
 #include "art.h"
+void append(std::ofstream& out, size_t page, const storage& s)
+{
+    if (out.fail())
+    {
+        art::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
+        return;
+    }
+
+    long size = 0;
+    writep(out,page);
+    writep(out,s.fragmentation);
+    writep(out,s.modifications);
+    writep(out,s.size);
+    writep(out,s.ticker);
+    writep(out,s.write_position);
+    size = s.compressed.byte_size();
+    writep(out,size);
+    if (size)
+        out.write((const char*)s.compressed.begin(), size);
+    size = s.decompressed.byte_size();
+    writep(out,size);
+    if (size)
+        out.write((const char*)s.decompressed.begin(), size);
+
+}
+static const uint64_t alloc_record_size = sizeof(uint64_t)*2;
+
 /// file io
 bool hash_arena::save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const
 {
@@ -21,37 +48,34 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
     writep(out, last_allocated);
     writep(out, free_pages);
     writep(out, top);
-    writep(out, size);
     extra(out);
-
+    writep(out, size);
     if (out.fail())
     {
         return false;
     }
-    iterate_arena([&out](size_t page, const storage& s)
+    uint64_t alloc_table_start = out.tellp();
+    // write the initial allocation table
+    iterate_arena([&out](size_t page, const storage& )
     {
-        if (out.fail())
-        {
-            art::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
-            return;
-        }
+        uint64_t p = page;
+        uint64_t a = 0;
 
-        long size = 0;
-        writep(out,page);
-        writep(out,s.fragmentation);
-        writep(out,s.modifications);
-        writep(out,s.size);
-        writep(out,s.ticker);
-        writep(out,s.write_position);
-        size = s.compressed.byte_size();
-        writep(out,size);
-        if (size)
-            out.write((const char*)s.compressed.begin(), size);
-        size = s.decompressed.byte_size();
-        writep(out,size);
-        if (size)
-            out.write((const char*)s.decompressed.begin(), size);
+        writep(out, p);
+        writep(out, a);
 
+    });
+    size_t record_pos = 0;
+    iterate_arena([&](size_t page, const storage& s)
+    {
+        uint64_t start =out.tellp();
+        append(out,page,s);
+        uint64_t finish = out.tellp();
+        // write the allocation record
+        out.seekp(alloc_table_start + alloc_record_size*record_pos + sizeof(uint64_t),std::ios::beg);
+        writep(out, start);
+        out.seekp(finish, std::ios::beg);
+        ++record_pos;
     });
     if (out.fail())
     {
@@ -76,6 +100,9 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
         art::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
         return false;
     }
+    in.seekg(0,std::ios::end);
+    uint64_t eof = in.tellg();
+    in.seekg(0,std::ios::beg);
     uint64_t completed = 0;
     size_t size = 0;
     in.read((char*)&completed, sizeof(completed));
@@ -94,44 +121,74 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
     readp(in,arena.last_allocated);
     readp(in,arena.free_pages);
     readp(in,arena.top);
-    readp(in,size);
     extra(in);
-    for (size_t i = 0; i < size; i++)
+    uint64_t where =0;
+    do
     {
-        storage s{};
-        size_t page = 0;
-        if (heap::allocated > art::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)
+        size = 0;
+        readp(in,size);
+        uint64_t alloc_table_start = in.tellg();
+        in.seekg(alloc_table_start+size*alloc_record_size);
+
+        for (size_t i = 0; i < size; i++)
         {
-            art::log(std::runtime_error("module or server out of memory"),__FILE__,__LINE__);
-            return false;
-        }
-        long bsize = 0;
-        readp(in,page);
-        readp(in,s.fragmentation);
-        readp(in,s.modifications);
-        readp(in,s.size);
-        readp(in,s.ticker);
-        readp(in,s.write_position);
-        readp(in,bsize);
-        if (bsize)
-        {
-            s.compressed = heap::buffer<uint8_t>(bsize);
-            in.read((char*)s.compressed.begin(), bsize);
-        }
-        readp(in,bsize);
-        if (bsize)
-        {
-            s.decompressed = heap::buffer<uint8_t>(bsize);
-            in.read((char*)s.decompressed.begin(), bsize);
-        }
-        arena.hidden_arena[page] = s;
-        if (in.fail())
-        {
-            art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
-            return false;
-        }
-    };
-    if (in.fail())
+            storage s{};
+            size_t page = 0;
+            if (heap::allocated > art::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)
+            {
+                art::log(std::runtime_error("module or server out of memory"),__FILE__,__LINE__);
+                return false;
+            }
+            long bsize = 0;
+
+            uint64_t start = in.tellg();
+            readp(in,page);
+            readp(in,s.fragmentation);
+            readp(in,s.modifications);
+            readp(in,s.size);
+            readp(in,s.ticker);
+            readp(in,s.write_position);
+            readp(in,bsize);
+            if (bsize)
+            {
+                s.compressed = heap::buffer<uint8_t>(bsize);
+                in.read((char*)s.compressed.begin(), bsize);
+            }
+            readp(in,bsize);
+            if (bsize)
+            {
+                s.decompressed = heap::buffer<uint8_t>(bsize);
+                in.read((char*)s.decompressed.begin(), bsize);
+            }
+            arena.hidden_arena[page] = s;
+            if (in.fail())
+            {
+                art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
+                return false;
+            }
+            uint64_t finish = in.tellg();
+            // write the allocation record
+            in.seekg(alloc_table_start + alloc_record_size*i);
+            uint64_t tp = 0;
+
+            readp(in, tp);
+            if (tp != page)
+            {
+                art::log(std::runtime_error("invalid or incomplete BARCH data file"),__FILE__,__LINE__);
+                return false;
+            }
+            readp(in, s.physical);
+            if (s.physical != start)
+            {
+                art::log(std::runtime_error("invalid or incomplete BARCH data file"),__FILE__,__LINE__);
+                return false;
+            }
+            in.seekg(finish, std::ios::beg);
+        };
+        where = in.tellg();
+    }while (eof > where);
+
+    if (!in.eof() && in.fail())
     {
         art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
         return false;

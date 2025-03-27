@@ -15,6 +15,6 @@ enum
     allocation_padding = 0,
     use_last_page_caching = 0,
     initialize_memory = 1,
-    storage_version = 4
+    storage_version = 6
 };
 #endif //CONSTANTS_H

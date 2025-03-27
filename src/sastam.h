@@ -35,10 +35,12 @@ namespace heap
     {
         typedef T value_type;
         allocator() noexcept = default; //default ctor not required by C++ Standard Library
+        // allocator(const allocator&) noexcept = default; //default ctor not required by C++ Standard Library
 
         // A converting copy constructor:
+        // adding explicit causes compilation to fail
         template <class U>
-        explicit allocator(const allocator<U>&) noexcept
+        allocator(const allocator<U>&) noexcept
         {
         }
 
@@ -75,7 +77,7 @@ namespace heap
     }
 
     template <class T>
-    void heap::allocator<T>::deallocate(T* const p, size_t n) const noexcept
+    void allocator<T>::deallocate(T* const p, size_t n) const noexcept
     {
         heap::free(p, n * sizeof(T));
     }

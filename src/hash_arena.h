@@ -16,16 +16,16 @@ struct hash_arena
     };
 
 private:
-    // seems to make a small difference
-    //typedef heap::allocator<std::pair<size_t,storage>> allocator_type;
-    typedef std::allocator<std::pair<size_t,storage>> allocator_type;
+    // ankerl hash seems to make a small difference
+    typedef heap::allocator<std::pair<size_t,storage>> allocator_type;
+    //typedef std::allocator<std::pair<size_t,storage>> allocator_type;
 
     typedef ankerl::unordered_dense::map<
-        size_t,
-        storage,
-        ankerl::unordered_dense::hash<size_t>,
-        std::equal_to<size_t>,
-        allocator_type> hash_type ;
+        size_t
+    ,   storage
+    ,   ankerl::unordered_dense::hash<size_t>
+    ,   std::equal_to<size_t>
+    ,   allocator_type> hash_type ;
 
     //typedef std::unordered_map<size_t, storage> hash_type ;
     hash_type hidden_arena{};

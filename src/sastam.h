@@ -54,8 +54,8 @@ namespace heap
             return false;
         }
 
-        T* allocate(const size_t n) const;
-        void deallocate(T* const p, size_t) const noexcept;
+        T* allocate(size_t n) const;
+        void deallocate(T* p, size_t) const noexcept;
     };
 
     template <class T>

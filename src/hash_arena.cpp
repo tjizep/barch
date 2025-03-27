@@ -16,12 +16,12 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
     }
     uint64_t completed = 0;
     size_t size = hidden_arena.size();
-    out.write((const char*)&completed, sizeof(completed));
-    out.write((const char*)&max_address_accessed, sizeof(max_address_accessed));
-    out.write((const char*)&last_allocated, sizeof(last_allocated));
-    out.write((const char*)&free_pages, sizeof(free_pages));
-    out.write((const char*)&top, sizeof(top));
-    out.write((const char*)&size, sizeof(size));
+    writep(out, completed);
+    writep(out, max_address_accessed);
+    writep(out, last_allocated);
+    writep(out, free_pages);
+    writep(out, top);
+    writep(out, size);
     extra(out);
 
     if (out.fail())
@@ -37,18 +37,18 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
         }
 
         long size = 0;
-        out.write((const char*)&page, sizeof(page));
-        out.write((const char*)&s.fragmentation, sizeof(s.fragmentation));
-        out.write((const char*)&s.modifications, sizeof(s.modifications));
-        out.write((const char*)&s.size, sizeof(s.size));
-        out.write((const char*)&s.ticker, sizeof(s.ticker));
-        out.write((const char*)&s.write_position, sizeof(s.write_position));
+        writep(out,page);
+        writep(out,s.fragmentation);
+        writep(out,s.modifications);
+        writep(out,s.size);
+        writep(out,s.ticker);
+        writep(out,s.write_position);
         size = s.compressed.byte_size();
-        out.write((const char*)&size, sizeof(size));
+        writep(out,size);
         if (size)
             out.write((const char*)s.compressed.begin(), size);
         size = s.decompressed.byte_size();
-        out.write((const char*)&size, sizeof(size));
+        writep(out,size);
         if (size)
             out.write((const char*)s.decompressed.begin(), size);
 
@@ -60,7 +60,7 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
     }
     out.seekp(0);
     completed = storage_version;
-    out.write((const char*)&completed, sizeof(completed));
+    writep(out,completed);
     out.flush();
     art::log("completed writing to " + filename);
 
@@ -91,10 +91,10 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
         art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
         return false;
     }
-    in.read((char*)&arena.last_allocated, sizeof(arena.last_allocated));
-    in.read((char*)&arena.free_pages, sizeof(arena.free_pages));
-    in.read((char*)&arena.top, sizeof(arena.top));
-    in.read((char*)&size, sizeof(size));
+    readp(in,arena.last_allocated);
+    readp(in,arena.free_pages);
+    readp(in,arena.top);
+    readp(in,size);
     extra(in);
     for (size_t i = 0; i < size; i++)
     {
@@ -106,19 +106,19 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
             return false;
         }
         long bsize = 0;
-        in.read((char*)&page, sizeof(page));
-        in.read((char*)&s.fragmentation, sizeof(s.fragmentation));
-        in.read((char*)&s.modifications, sizeof(s.modifications));
-        in.read((char*)&s.size, sizeof(s.size));
-        in.read((char*)&s.ticker, sizeof(s.ticker));
-        in.read((char*)&s.write_position, sizeof(s.write_position));
-        in.read((char*)&bsize, sizeof(bsize));
+        readp(in,page);
+        readp(in,s.fragmentation);
+        readp(in,s.modifications);
+        readp(in,s.size);
+        readp(in,s.ticker);
+        readp(in,s.write_position);
+        readp(in,bsize);
         if (bsize)
         {
             s.compressed = heap::buffer<uint8_t>(bsize);
             in.read((char*)s.compressed.begin(), bsize);
         }
-        in.read((char*)&bsize, sizeof(bsize));
+        readp(in,bsize);
         if (bsize)
         {
             s.decompressed = heap::buffer<uint8_t>(bsize);

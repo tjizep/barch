@@ -363,13 +363,11 @@ namespace art
             template <typename T>
             T* refresh_cache()
             {
-                if (is_reader || !dcache || last_ticker != compress::flush_ticker)
+                if (is_reader || !dcache || last_ticker != compress::flush_ticker) 
                 {
                     dcache = get_node_compression().modify<T>(address);
-                    if (is_reader == 0x01)
-                    {
-                        is_reader = 0x00;
-                    }
+                    is_reader = 0x00;
+
                 }
                 return (T*)dcache;
             }

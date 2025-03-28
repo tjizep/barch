@@ -414,7 +414,7 @@ private:
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{};
     lru_list lru{};
-    std::unordered_set<size_t> fragmented{};
+    ankerl::unordered_dense::set<size_t> fragmented{};
     std::unordered_set<size_t> erased{}; // for runtime use after free tests
     size_t last_created_page{};
     uint8_t* last_page_ptr{};

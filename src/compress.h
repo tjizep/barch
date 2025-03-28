@@ -374,8 +374,7 @@ struct compress
     }
 
     static uint32_t flush_ticker;
-    static std::shared_mutex vacuum_scope;
-
+    static std::shared_mutex mutex;
 private:
 
     heap::buffer<uint8_t> training_data{0};
@@ -385,7 +384,7 @@ private:
     ZSTD_CCtx* cctx = ZSTD_createCCtx();
     ZSTD_DCtx* dctx = ZSTD_createDCtx();
     size_t trained_size = 0;
-    static std::mutex mutex;
+
     hash_arena main {};
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
@@ -902,7 +901,6 @@ public:
     void free(compressed_address at, size_t sz)
     {
         size_t size = sz + test_memory + allocation_padding;
-        std::lock_guard guard(mutex);
 
         uint8_t* d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size)
@@ -1004,7 +1002,6 @@ public:
 
     float fragmentation_ratio() const
     {
-        std::lock_guard guard(mutex);
         return (float)fragmentation / (float(allocated) + 0.0001f);
     }
 
@@ -1013,7 +1010,6 @@ public:
     // every page
     heap::vector<size_t> create_fragmentation_list(size_t max_pages) const
     {
-        std::lock_guard guard(mutex);
         heap::vector<size_t> pages;
         if (fragmented.empty()) return {};
         for (auto page : fragmented)
@@ -1029,19 +1025,16 @@ public:
 
     lru_list create_lru_list()
     {
-        std::lock_guard guard(mutex);
         return lru;
     }
 
     std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer(size_t at)
     {
-        std::lock_guard guard(mutex);
         return get_page_buffer_inner(at);
     }
 
     std::pair<heap::buffer<uint8_t>, size_t> get_lru_page()
     {
-        std::lock_guard guard(mutex);
         if (opt_enable_lru)
         {
             if (!lru.empty())
@@ -1055,6 +1048,9 @@ public:
     template <typename T>
     T* read(compressed_address at)
     {
+
+        if (at.null()) return nullptr;
+        //std::lock_guard guard(mutex);
         if (use_last_page_caching == 1)
         {
             if (last_created_page == at.page())
@@ -1065,9 +1061,6 @@ public:
                 return (T*)d;
             }
         }
-
-        if (at.null()) return nullptr;
-        std::lock_guard guard(mutex);
         const uint8_t* d = basic_resolve(at);
         return (T*)d;
     }
@@ -1075,7 +1068,6 @@ public:
     template <typename T>
     T* modify(compressed_address at)
     {
-
         if (use_last_page_caching == 1)
         {
             if (last_created_page == at.page())
@@ -1087,7 +1079,7 @@ public:
             }
         }
         if (at.null()) return nullptr;
-        std::lock_guard guard(mutex);
+        //std::lock_guard guard(mutex);
 
         uint8_t* d = basic_resolve(at, true);
         return (T*)d;
@@ -1096,7 +1088,7 @@ public:
     compressed_address new_address(size_t sz)
     {
         size_t size = sz + test_memory + allocation_padding;
-        std::lock_guard guard(mutex);
+        //std::lock_guard guard(mutex);
         compressed_address r = emancipated.get(size);
         if (!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty())
         {
@@ -1196,17 +1188,24 @@ public:
 
         return ca;
     }
-
+    void enter_context()
+    {
+        mutex.lock();
+    }
+    void enter_read_context()
+    {
+        mutex.lock_shared();
+    }
     void release_context()
     {
 
+        mutex.unlock();
         if (use_last_page_caching == 1)
         {
             last_created_page = 0;
             last_page_ptr = nullptr;
 
         }
-        vacuum_scope.unlock_shared();
         if (statistics::page_bytes_compressed > heap::allocated)
         {
             abort();
@@ -1215,12 +1214,12 @@ public:
         {
             abort();
         }
+        std::unique_lock guard(mutex);
         context_vacuum();
     }
 
     size_t full_vacuum()
     {
-        std::lock_guard guard(mutex);
         if (!opt_enable_compression) return 0;
         statistics::max_page_bytes_uncompressed = std::max<uint64_t>(statistics::page_bytes_uncompressed,
                                                                      statistics::max_page_bytes_uncompressed);
@@ -1250,8 +1249,6 @@ public:
 
     size_t context_vacuum()
     {
-        std::unique_lock scope(vacuum_scope);
-        std::lock_guard guard(mutex);
         if (!opt_enable_compression) return 0;
         double ratio = heap::get_physical_memory_ratio();
         bool heap_overflow = heap::allocated > art::get_max_module_memory();
@@ -1266,16 +1263,11 @@ public:
         return 0;
     }
 
-    void enter_context()
-    {
-        vacuum_scope.lock_shared();
-    }
+
 
     size_t vacuum()
     {
-        vacuum_scope.unlock_shared();
         size_t r = full_vacuum();
-        vacuum_scope.lock_shared();
         return r;
     }
 
@@ -1335,7 +1327,7 @@ private:
 public:
     bool save_extra(const std::string &filename, const std::function<void(std::ofstream& of)>& extra1) const
     {
-        std::lock_guard guard(mutex);
+        std::unique_lock guard(mutex);
         auto writer = [&](std::ofstream& of) -> void
         {
             long ts = trained_size;
@@ -1364,7 +1356,7 @@ public:
 
     bool load_extra(const std::string& filenname, const std::function<void(std::ifstream& of)>& extra1)
     {
-        std::lock_guard guard(mutex);
+        std::unique_lock guard(mutex);
         auto reader = [&](std::ifstream& in) -> void
         {
             if (dict)

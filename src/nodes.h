@@ -351,10 +351,11 @@ namespace art
             template <typename T>
             const T* refresh_cache() const // read-only refresh
             {
-                //dcache = nullptr;
                 if (!dcache || last_ticker != compress::flush_ticker)
                 {
                     dcache = get_node_compression().read<T>(address);
+                    is_reader = 0x01;
+
                 }
                 return (T*)dcache;
             }
@@ -362,35 +363,23 @@ namespace art
             template <typename T>
             T* refresh_cache()
             {
-                //dcache = nullptr;
-                if (!dcache || last_ticker != compress::flush_ticker)
+                if (is_reader || !dcache || last_ticker != compress::flush_ticker)
                 {
                     dcache = get_node_compression().modify<T>(address);
+                    if (is_reader == 0x01)
+                    {
+                        is_reader = 0x00;
+                    }
                 }
                 return (T*)dcache;
             }
 
             mutable node_data* dcache = nullptr;
-            //mutable node_data *mcache= nullptr;
+            mutable char is_reader = 0x00;
             mutable uint32_t last_ticker = compress::flush_ticker;
             compressed_address address{};
             node_proxy(const node_proxy&) = default;
             node_proxy() = default;
-
-            template <typename T, typename IntPtrType, uint8_t NodeType>
-            void set(compressed_address address)
-            {
-                if (address.null())
-                {
-                    abort();
-                }
-                this->address = address;
-                dcache = get_node_compression().modify<T>(address);
-                if (dcache->type != NodeType || dcache->pointer_size != sizeof(IntPtrType))
-                {
-                    abort();
-                }
-            }
 
             template <typename IntPtrType, uint8_t NodeType>
             void set_lazy(compressed_address address, node_data* data)
@@ -405,7 +394,7 @@ namespace art
                 }
                 this->address = address;
                 dcache = data; // it will get loaded as required
-                //mcache = data;
+                is_reader = 0x01;
             }
         };
 

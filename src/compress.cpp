@@ -5,7 +5,4 @@
 #include "compress.h"
 
 uint32_t compress::flush_ticker = 0;
-std::mutex compress::mutex{};
-/// prevents other threads from allocating memory while vacuum is taking place
-/// it must be entered and left before the allocation mutex to prevent deadlocks
-std::shared_mutex compress::vacuum_scope{};
+std::shared_mutex compress::mutex{};

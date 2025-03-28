@@ -319,11 +319,6 @@ namespace art
             return *this;
         }
 
-        void from(compressed_address address)
-        {
-            set<encoded_data, IntPtrType, node_type>(address);
-        };
-
         void from(compressed_address address, node_data* data)
         {
             set_lazy<IntPtrType, node_type>(address, data);

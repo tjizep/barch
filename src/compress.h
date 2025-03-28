@@ -1199,7 +1199,7 @@ public:
     void release_context()
     {
 
-        mutex.unlock();
+
         if (use_last_page_caching == 1)
         {
             last_created_page = 0;
@@ -1214,8 +1214,8 @@ public:
         {
             abort();
         }
-        std::unique_lock guard(mutex);
         context_vacuum();
+        mutex.unlock();
     }
 
     size_t full_vacuum()
@@ -1356,7 +1356,6 @@ public:
 
     bool load_extra(const std::string& filenname, const std::function<void(std::ifstream& of)>& extra1)
     {
-        std::unique_lock guard(mutex);
         auto reader = [&](std::ifstream& in) -> void
         {
             if (dict)

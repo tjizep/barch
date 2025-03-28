@@ -379,6 +379,7 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
         *r = te;
         if (te.child.is_leaf)
         {
+            // cleanup if this node is nearer to the root
             while(!trace.empty() && trace.rbegin() != r) trace.pop_back();
             return true;
         }

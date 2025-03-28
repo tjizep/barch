@@ -149,7 +149,7 @@ art::node_ptr art::alloc_8_node_ptr(unsigned nt)
  * the key and node.
  */
 
-unsigned art::node::check_prefix(const unsigned char* key, unsigned key_len, unsigned depth)
+unsigned art::node::check_prefix(const unsigned char* key, unsigned key_len, unsigned depth) const
 {
     unsigned max_cmp = std::min<int>(std::min<int>(data().partial_len, max_prefix_llength), (int)key_len - (int)depth);
     unsigned idx;

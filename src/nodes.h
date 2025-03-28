@@ -242,7 +242,7 @@ namespace art
             }
             else if (!logical.null() && !storage.null())
             {
-                get_node()->free_data();
+                modify()->free_data();
             }
         }
 
@@ -277,7 +277,7 @@ namespace art
             return l;
         }
 
-        node_t* get_node()
+        node_t* modify()
         {
             if (is_leaf)
             {
@@ -296,12 +296,12 @@ namespace art
 
             return storage.ptr<node_t>();
         }
-
+#if 0
         node_t* operator ->()
         {
             return get_node();
         }
-
+#endif
         const node_t* operator ->() const
         {
             return get_node();
@@ -314,7 +314,7 @@ namespace art
 
         explicit operator node_t*()
         {
-            return get_node();
+            return modify();
         }
     };
 
@@ -422,7 +422,7 @@ namespace art
         [[nodiscard]] virtual bool has_child(unsigned at) const = 0;
         virtual node_ptr get_node(unsigned at) = 0;
         [[nodiscard]] virtual node_ptr get_node(unsigned at) const = 0;
-        virtual node_ptr get_child(unsigned at) = 0;
+        //virtual node_ptr get_child(unsigned at) = 0;
         [[nodiscard]] virtual node_ptr get_child(unsigned at) const = 0;
         [[nodiscard]] virtual unsigned index(unsigned char, unsigned operbits) const = 0;
         [[nodiscard]] virtual unsigned index(unsigned char c) const = 0;
@@ -439,9 +439,9 @@ namespace art
 
         [[nodiscard]] virtual const unsigned char& get_key(unsigned at) const = 0;
         virtual unsigned char& get_key(unsigned at) = 0;
-        unsigned check_prefix(const unsigned char*, unsigned, unsigned);
+        unsigned check_prefix(const unsigned char*, unsigned, unsigned) const;
         [[nodiscard]] virtual unsigned first_index() const = 0;
-        [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) = 0;
+        [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) const = 0;
         [[nodiscard]] virtual trace_element next(const trace_element& te) const = 0;
         [[nodiscard]] virtual trace_element previous(const trace_element& te) const = 0;
         virtual void set_keys(const unsigned char* other_keys, unsigned count) = 0;

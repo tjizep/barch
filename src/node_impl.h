@@ -81,8 +81,8 @@ namespace art
                     }
 
                     // Store the prefix in the child
-                    memcpy(child->data().partial, dat.partial, std::min<unsigned>(prefix, max_prefix_llength));
-                    child->data().partial_len += dat.partial_len + 1;
+                    memcpy(child.modify()->data().partial, dat.partial, std::min<unsigned>(prefix, max_prefix_llength));
+                    child.modify()->data().partial_len += dat.partial_len + 1;
                 }
                 ref = child;
                 free_node(this);
@@ -108,18 +108,18 @@ namespace art
         {
             if (data().occupants < 4)
             {
-                this->expand_pointers(ref, {child})->add_child_inner(c, child);
+                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
                 auto new_node = alloc_node_ptr(node_16, {child});
                 // Copy the child pointers and the key map
-                new_node->set_children(0, this, 0, data().occupants);
-                new_node->set_keys(nd().keys, data().occupants);
-                new_node->copy_header(this);
+                new_node.modify()->set_children(0, this, 0, data().occupants);
+                new_node.modify()->set_keys(nd().keys, data().occupants);
+                new_node.modify()->copy_header(this);
                 ref = new_node;
                 free_node(this);
-                new_node->add_child(c, ref, child);
+                new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -134,7 +134,7 @@ namespace art
             return data().occupants - 1;
         }
 
-        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
             for (unsigned i = 0; i < data().occupants; i++)
             {
@@ -223,9 +223,9 @@ namespace art
             if (this->data().occupants == 3)
             {
                 auto new_node = alloc_node_ptr(node_4, {});
-                new_node->copy_header(this);
-                new_node->set_keys(this->nd().keys, 3);
-                new_node->set_children(0, this, 0, 3);
+                new_node.modify()->copy_header(this);
+                new_node.modify()->set_keys(this->nd().keys, 3);
+                new_node.modify()->set_children(0, this, 0, 3);
 
                 ref = new_node;
                 free_node(this); // ???
@@ -261,22 +261,22 @@ namespace art
         {
             if (this->data().occupants < 16)
             {
-                this->expand_pointers(ref, {child})->add_child_inner(c, child);
+                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
                 auto new_node = alloc_node_ptr(node_48, {child});
 
                 // Copy the child pointers and populate the key map
-                new_node->set_children(0, this, 0, this->data().occupants);
+                new_node.modify()->set_children(0, this, 0, this->data().occupants);
                 for (unsigned i = 0; i < this->data().occupants; i++)
                 {
-                    new_node->set_key(this->nd().keys[i], i + 1);
+                    new_node.modify()->set_key(this->nd().keys[i], i + 1);
                 }
-                new_node->copy_header(this);
+                new_node.modify()->copy_header(this);
                 ref = new_node;
                 free_node(this);
-                new_node->add_child(c, ref, child);
+                new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -290,7 +290,7 @@ namespace art
             return this->data().occupants - 1;
         }
 
-        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
             unsigned mask = (1 << this->data().occupants) - 1;
             unsigned bf = bits_oper16(this->nd().keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt);
@@ -400,7 +400,7 @@ namespace art
             if (data().occupants == 12)
             {
                 auto new_node = alloc_node_ptr(node_16, {});
-                new_node->copy_header(this);
+                new_node.modify()->copy_header(this);
                 unsigned child = 0;
                 for (unsigned i = 0; i < 256; i++)
                 {
@@ -412,8 +412,8 @@ namespace art
                         {
                             abort();
                         }
-                        new_node->set_key(child, i);
-                        new_node->set_child(child, nn);
+                        new_node.modify()->set_key(child, i);
+                        new_node.modify()->set_child(child, nn);
                         child++;
                     }
                 }
@@ -436,7 +436,7 @@ namespace art
         {
             if (data().occupants < 48)
             {
-                this->expand_pointers(ref, {child})->add_child_inner(c, child);
+                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
@@ -450,14 +450,14 @@ namespace art
                         {
                             abort();
                         }
-                        new_node->set_child(i, nc);
+                        new_node.modify()->set_child(i, nc);
                     }
                 }
-                new_node->copy_header(this);
+                new_node.modify()->copy_header(this);
                 statistics::node256_occupants += new_node->data().occupants;
                 ref = new_node;
                 free_node(this);
-                new_node->add_child(c, ref, child);
+                new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -488,7 +488,7 @@ namespace art
             return uc;
         }
 
-        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) override
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
             /*
             * find first not less than
@@ -603,15 +603,15 @@ namespace art
             {
                 auto new_node = alloc_node_ptr(node_48, {});
                 ref = new_node;
-                new_node->copy_header(this);
+                new_node.modify()->copy_header(this);
 
                 pos = 0;
                 for (unsigned i = 0; i < 256; i++)
                 {
                     if (has_any(i))
                     {
-                        new_node->set_child(pos, get_child(i)); //[pos] = n->nd().children[i];
-                        new_node->set_key(i, pos + 1);
+                        new_node.modify()->set_child(pos, get_child(i)); //[pos] = n->nd().children[i];
+                        new_node.modify()->set_key(i, pos + 1);
                         pos++;
                     }
                 }
@@ -657,7 +657,7 @@ namespace art
             return uc;
         }
 
-        std::pair<trace_element, bool> lower_bound_child(unsigned char c) override
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
             for (unsigned i = c; i < 256; ++i)
             {

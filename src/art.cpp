@@ -245,7 +245,7 @@ art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type k
                 return nullptr;
             }
             // Bail if the prefix does not match
-            auto& d = n->data();
+            const auto& d = n->data();
             if (d.partial_len)
             {
                 unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
@@ -596,7 +596,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
 
         // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
         auto new_stored = art::alloc_node_ptr(art::initial_node, {l1, l2});
-        auto* new_node = new_stored.get_node();
+        auto* new_node = new_stored.modify();
         // Determine longest prefix
         unsigned longest_prefix = longest_common_prefix(l, l2.const_leaf(), depth);
         new_node->data().partial_len = longest_prefix;
@@ -604,8 +604,8 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
                std::min<unsigned>(art::max_prefix_llength, longest_prefix));
         // Add the leafs to the new node_4
         ref = new_node;
-        ref->add_child(l->key()[depth + longest_prefix], ref, l1);
-        ref->add_child(l2.const_leaf()->key()[depth + longest_prefix], ref, l2);
+        ref.modify()->add_child(l->key()[depth + longest_prefix], ref, l1);
+        ref.modify()->add_child(l2.const_leaf()->key()[depth + longest_prefix], ref, l2);
         return nullptr;
     }
 
@@ -625,28 +625,28 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         art::node_ptr new_leaf = make_leaf(key, value);
         auto new_node = art::alloc_node_ptr(art::initial_node, {n, new_leaf}); // pass children to get opt. ptr size
         ref = new_node;
-        new_node->data().partial_len = prefix_diff;
-        memcpy(new_node->data().partial, n->data().partial, std::min<int>(art::max_prefix_llength, prefix_diff));
+        new_node.modify()->data().partial_len = prefix_diff;
+        memcpy(new_node.modify()->data().partial, n->data().partial, std::min<int>(art::max_prefix_llength, prefix_diff));
         // Adjust the prefix of the old node
         if (n->data().partial_len <= art::max_prefix_llength)
         {
-            ref->add_child(n->data().partial[prefix_diff], ref, n);
-            n->data().partial_len -= (prefix_diff + 1);
-            memmove(n->data().partial, n->data().partial + prefix_diff + 1,
+            ref.modify()->add_child(n->data().partial[prefix_diff], ref, n);
+            n.modify()->data().partial_len -= (prefix_diff + 1);
+            memmove(n.modify()->data().partial, n->data().partial + prefix_diff + 1,
                     std::min<int>(art::max_prefix_llength, n->data().partial_len));
         }
         else
         {
-            n->data().partial_len -= (prefix_diff + 1);
+            n.modify()->data().partial_len -= (prefix_diff + 1);
             const auto* l = minimum(n).const_leaf();
-            ref->add_child(l->get_key()[depth + prefix_diff], ref, n);
-            memcpy(n->data().partial, l->key() + depth + prefix_diff + 1,
+            ref.modify()->add_child(l->get_key()[depth + prefix_diff], ref, n);
+            memcpy(n.modify()->data().partial, l->key() + depth + prefix_diff + 1,
                    std::min<int>(art::max_prefix_llength, n->data().partial_len));
         }
 
         // Insert the new leaf (safely considering optimal pointer sizes)
 
-        ref->add_child(key[depth + prefix_diff], ref, new_leaf);
+        ref.modify()->add_child(key[depth + prefix_diff], ref, new_leaf);
 
         return nullptr;
     }
@@ -668,15 +668,15 @@ RECURSE_SEARCH:;
         auto r = recursive_insert(t, options, child, nc, key, value, depth + 1, old, replace);
         if (nc != child)
         {
-            n = n->expand_pointers(ref, {nc});
-            n->set_child(pos, nc);
+            n = n.modify()->expand_pointers(ref, {nc});
+            n.modify()->set_child(pos, nc);
         }
         return r;
     }
 
     // No child, node goes within us
     art::node_ptr l = make_leaf(key, value);
-    n->add_child(key[depth], ref, l);
+    n.modify()->add_child(key[depth], ref, l);
     return nullptr;
 }
 
@@ -759,7 +759,7 @@ void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::valu
 
 static void remove_child(art::node_ptr n, art::node_ptr& ref, unsigned char c, unsigned pos)
 {
-    n->remove(ref, pos, c);
+    n.modify()->remove(ref, pos, c);
 }
 
 static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref, art::value_type key, int depth)
@@ -817,11 +817,11 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref,
         {
             if (!n->ok_child(new_child))
             {
-                ref = n->expand_pointers(ref, {new_child});
-                ref->set_child(idx, new_child);
+                ref = n.modify()->expand_pointers(ref, {new_child});
+                ref.modify()->set_child(idx, new_child);
             }
             else
-                n->set_child(idx, new_child);
+                n.modify()->set_child(idx, new_child);
         }
         return r;
     }

@@ -96,7 +96,7 @@ namespace art
             value = (ptr->get_address().address() - base);
         }
 
-        [[nodiscard]] node_ptr get_node()
+        [[nodiscard]] node_ptr modify()
         {
             if (IsLeaf)
             {
@@ -409,13 +409,13 @@ namespace art
 
             return nullptr;
         }
-
+#if 0
         node_ptr get_child(unsigned at) final
         {
             check_object();
             return get_node(at);
         }
-
+#endif
         [[nodiscard]] node_ptr get_child(unsigned at) const final
         {
             check_object();
@@ -701,7 +701,7 @@ namespace art
             check_object();
             if (ok_children(children)) return this;
             node_ptr n = alloc_8_node_ptr(type());
-            n->copy_from(this);
+            n.modify()->copy_from(this);
             free_node(this);
             ref = n;
             return n;

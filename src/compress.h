@@ -1327,7 +1327,6 @@ private:
 public:
     bool save_extra(const std::string &filename, const std::function<void(std::ofstream& of)>& extra1) const
     {
-        std::unique_lock guard(mutex);
         auto writer = [&](std::ofstream& of) -> void
         {
             long ts = trained_size;

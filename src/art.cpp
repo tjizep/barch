@@ -1171,16 +1171,19 @@ art_statistics art::get_statistics()
     as.exceptions_raised = (int64_t)statistics::exceptions_raised;
     return as;
 }
+extern art::tree* get_art();
 struct transaction {
+    bool was_transacted = false;
     transaction()
     {
-        art::get_leaf_compression().begin();
-        art::get_node_compression().begin();
+        was_transacted = get_art()->transacted;
+        if (!was_transacted)
+            get_art()->begin();
     }
     ~transaction()
     {
-        art::get_node_compression().commit();
-        art::get_leaf_compression().commit();
+        if (!was_transacted)
+            get_art()->commit();
 
     }
 };
@@ -1229,7 +1232,7 @@ bool art::tree::save()
     };
 
     auto st = std::chrono::high_resolution_clock::now();
-    transaction tx;
+    transaction tx; // stabilize main while saving
 
     if (!art::get_leaf_compression().save_extra("leaf_data.dat", save_stats_and_root))
     {

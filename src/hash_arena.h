@@ -7,6 +7,7 @@
 #include "storage.h"
 #include "compressed_address.h"
 #include <fstream>
+#include <page_modifications.h>
 #include <ankerl/unordered_dense.h>
 namespace arena {
     struct base_hash_arena
@@ -179,6 +180,7 @@ namespace arena {
             if (pi == hidden_arena.end())
             {
                 if (source) {
+                    page_modifications::inc_ticker(at);
                     hidden_arena[at] = source->read(at);
                     return hidden_arena[at];
                 }
@@ -308,6 +310,7 @@ namespace arena {
             if (source) {
                 for (auto& [at,str] : hidden_arena)
                 {
+                    page_modifications::inc_ticker(at);
                     source->hidden_arena[at] = std::move(str);
                 }
                 source->free_address_list = free_address_list;

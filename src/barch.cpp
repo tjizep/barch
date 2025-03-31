@@ -41,7 +41,7 @@ static auto startTime = std::chrono::high_resolution_clock::now();
 /// @param ctx not used but could be
 /// @return a once initialized art_tree
 
-static art::tree* get_art()
+art::tree* get_art()
 {
     if (ad == nullptr)
     {

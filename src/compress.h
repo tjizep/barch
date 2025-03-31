@@ -27,6 +27,7 @@
 #include "constants.h"
 #include "storage.h"
 #include "hash_arena.h"
+#include "page_modifications.h"
 
 typedef uint16_t PageSizeType;
 
@@ -373,7 +374,6 @@ struct compress
         ZSTD_freeCCtx(cctx);
     }
 
-    static uint32_t flush_ticker;
     static std::shared_mutex mutex;
 private:
 
@@ -728,7 +728,7 @@ private:
         heap::buffer<uint8_t> torelease;
 
         auto& t = retrieve_page(at);
-
+        page_modifications::inc_ticker(at);
         if (t.modifications && !t.compressed.empty())
         {
             if (t.decompressed.empty())
@@ -844,7 +844,6 @@ private:
         std::atomic<size_t> r = 0;
         std::thread workers[auto_vac_workers];
         size_t arena_size = max_logical_address();
-        ++flush_ticker;
         for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
         {
             workers[ivac] = std::thread([this,arena_size,ivac,&r]()

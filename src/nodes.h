@@ -351,9 +351,10 @@ namespace art
             template <typename T>
             const T* refresh_cache() const // read-only refresh
             {
-                if (!dcache || last_ticker != compress::flush_ticker)
+                if (!dcache || last_ticker != page_modifications::get_ticker(address.page()))
                 {
                     dcache = get_node_compression().read<T>(address);
+                    last_ticker = page_modifications::get_ticker(address.page());
                     is_reader = 0x01;
 
                 }
@@ -363,9 +364,10 @@ namespace art
             template <typename T>
             T* refresh_cache()
             {
-                if (is_reader || !dcache || last_ticker != compress::flush_ticker) 
+                if (is_reader || !dcache || last_ticker != page_modifications::get_ticker(address.page()))
                 {
                     dcache = get_node_compression().modify<T>(address);
+                    last_ticker = page_modifications::get_ticker(address.page());
                     is_reader = 0x00;
 
                 }
@@ -374,7 +376,7 @@ namespace art
 
             mutable node_data* dcache = nullptr;
             mutable char is_reader = 0x00;
-            mutable uint32_t last_ticker = compress::flush_ticker;
+            mutable uint32_t last_ticker = page_modifications::get_ticker(0);
             compressed_address address{};
             node_proxy(const node_proxy&) = default;
             node_proxy() = default;
@@ -391,6 +393,7 @@ namespace art
                     abort();
                 }
                 this->address = address;
+                last_ticker = page_modifications::get_ticker(address.page());
                 dcache = data; // it will get loaded as required
                 is_reader = 0x01;
             }

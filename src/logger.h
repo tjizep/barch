@@ -6,6 +6,7 @@
 #define LOGGER_H
 #include <string>
 #include <exception>
+#include <array>
 #include <chrono>
 namespace art
 {

@@ -3,6 +3,7 @@
 //
 #include "hash_arena.h"
 #include "art.h"
+
 void append(std::ofstream& out, size_t page, const storage& s)
 {
     if (out.fail())
@@ -31,8 +32,9 @@ void append(std::ofstream& out, size_t page, const storage& s)
 static const uint64_t alloc_record_size = sizeof(uint64_t)*2;
 
 /// file io
-bool hash_arena::save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const
+bool arena::base_hash_arena::save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const
 {
+
     art::log("writing to " + filename);
     std::ofstream out{filename,std::ios::out|std::ios::binary};
     if (!out.is_open())
@@ -68,14 +70,18 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
     size_t record_pos = 0;
     iterate_arena([&](size_t page, const storage& s)
     {
-        uint64_t start =out.tellp();
-        append(out,page,s);
+        storage cpy = s; // copy buffer under lock
+        compress::mutex.unlock();
+        uint64_t start = out.tellp();
+        append(out,page,cpy);
         uint64_t finish = out.tellp();
         // write the allocation record
         out.seekp(alloc_table_start + alloc_record_size*record_pos + sizeof(uint64_t),std::ios::beg);
         writep(out, start);
         out.seekp(finish, std::ios::beg);
         ++record_pos;
+        compress::mutex.lock();
+
     });
     if (out.fail())
     {
@@ -91,7 +97,7 @@ bool hash_arena::save(const std::string& filename, const std::function<void(std:
     return !out.fail();
 
 }
-bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifstream&)>& extra, const std::string& filename)
+bool arena::base_hash_arena::arena_read(base_hash_arena& arena, const std::function<void(std::ifstream&)>& extra, const std::string& filename)
 {
     art::log("reading from " + filename);
     std::ifstream in{filename,std::ios::in|std::ios::binary};
@@ -197,9 +203,9 @@ bool hash_arena::arena_read(hash_arena& arena, const std::function<void(std::ifs
     return true;
 }
 
-bool hash_arena::load(const std::string& filename, const std::function<void(std::ifstream&)>& extra)
+bool arena::base_hash_arena::load(const std::string& filename, const std::function<void(std::ifstream&)>& extra)
 {
-    hash_arena anew_one;
+    base_hash_arena anew_one;
     if(arena_read(anew_one, extra, filename))
     {
         *this = anew_one; // only update if successfull

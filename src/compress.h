@@ -385,7 +385,7 @@ private:
     ZSTD_DCtx* dctx = ZSTD_createDCtx();
     size_t trained_size = 0;
 
-    hash_arena main {};
+    arena::hash_arena main {};
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
     std::thread tdict{};
@@ -531,13 +531,17 @@ private:
         return compressed_data;
     }
     // arena virtualization start
-    storage& retrieve_page(size_t page)
+    storage& retrieve_page(size_t page, bool modify = false)
     {
-        return main.retrieve_page(page);
+        if (modify) {
+            return main.modify(page);
+        }
+        return main.read(page);
     }
+
     const storage& retrieve_page(size_t page) const
     {
-        return main.retrieve_page(page);
+        return main.read(page);
     }
     size_t max_logical_address() const
     {
@@ -661,7 +665,7 @@ private:
 
     std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ps = page_size)
     {
-        auto& page = main.retrieve_page(at);
+        auto& page = main.read(at);
         add_to_lru(at, page);
         page.decompressed = std::move(heap::buffer<uint8_t>(ps));
         statistics::page_bytes_uncompressed += page.decompressed.byte_size();
@@ -693,7 +697,7 @@ private:
             return expand_over_null_base();
         }
 
-        auto& last = retrieve_page(last_page_allocated);
+        auto& last = retrieve_page(last_page_allocated,false);
         if (last.empty())
         {
             abort();
@@ -774,7 +778,7 @@ private:
             }
         }
         auto p = at.page();
-        auto& t = retrieve_page(p);
+        auto& t = retrieve_page(p, modify);
         if (t.decompressed.empty() && !t.compressed.empty())
         {
             std::pair<size_t, storage&> dec = {p, t};
@@ -1405,6 +1409,15 @@ public:
 
         return false;
 
+    }
+    void begin()
+    {
+        main.begin();
+    }
+
+    void commit()
+    {
+        main.commit();
     }
 };
 

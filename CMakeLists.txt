@@ -8,6 +8,7 @@ if (NOT TEST_OD)
     set(TEST_OD OFF)
 endif ()
 
+set(CMAKE_CPP_STANDARD 17)
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -22,9 +23,9 @@ if (ADD_ZSTD_COMPRESSION)
 
     FetchContent_Declare(
             zstd
-            URL "https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz"
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
             SOURCE_SUBDIR build/cmake
+            URL "https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz"
     )
 else ()
     message("ZSTD compression not used use -DADD_ZSTD_COMPRESSION=ON")
@@ -43,10 +44,8 @@ endif ()
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++")
-set(CMAKE_CPP_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++ -std=c++17")
+
 
 include_directories(src)
 include_directories(external/include)

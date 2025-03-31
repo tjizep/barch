@@ -267,7 +267,7 @@ art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type k
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -418,7 +418,7 @@ art::node_ptr art::lower_bound(const art::tree* t, art::value_type key)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -467,7 +467,7 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -487,7 +487,7 @@ art::node_ptr art_minimum(art::tree* t)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -507,7 +507,7 @@ art::node_ptr art::maximum(art::tree* t)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -722,7 +722,7 @@ void art_insert(art::tree* t, const art::key_spec& options, art::value_type key,
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }
@@ -752,7 +752,7 @@ void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::valu
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }
@@ -852,7 +852,7 @@ void art_delete(art::tree* t, art::value_type key, const NodeResult& fc)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }
@@ -937,7 +937,7 @@ int art_iter(art::tree* t, CallBack cb, void* data)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
         return -1;
     }
@@ -1037,7 +1037,7 @@ int art_iter_prefix(art::tree* t, art::value_type key, CallBack cb, void* data)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -1058,7 +1058,7 @@ uint64_t art_size(art::tree* t)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -1096,7 +1096,7 @@ uint64_t art_evict_lru(art::tree* t)
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -1140,7 +1140,7 @@ void art::glob(tree* unused(t), const keys_spec& spec, value_type pattern, const
     }
     catch (std::exception& e)
     {
-        art::log(e, __FILE_NAME__, __LINE__);
+        art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }

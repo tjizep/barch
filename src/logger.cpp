@@ -9,6 +9,8 @@
 #include <string>
 #include <string_view>
 
+#if __cplusplus >= 202002L
+
 void art::raw_write_to_log(std::string_view users_fmt, std::format_args&& args)
 {
     size_t tid = gettid();
@@ -20,19 +22,37 @@ void art::raw_write_to_log(std::string_view users_fmt, std::format_args&& args)
     std::clog <<  logged << '\n';
 }
 
-
 void art::log(const std::string& message, const std::exception& e)
 {
+
     std_log(message, e.what());
 }
 
 void art::log(const std::exception& e, const std::string& file, int line)
 {
+
     std_log(e.what(), file, line);
 }
-
 void art::log(const std::string& message)
 {
     std_log(message);
 }
+#else
+
+
+void art::log(const std::string& message, const std::exception& e)
+{
+    std::clog << message << " " << e.what() << '\n';
+}
+
+void art::log(const std::exception& e, const std::string& file, int line)
+{
+    std::clog << e.what() << " " <<  file << " " << line << '\n';
+}
+void art::log(const std::string& message)
+{
+    std::clog << message << '\n';
+}
+#endif
+
 

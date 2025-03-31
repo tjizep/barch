@@ -607,6 +607,38 @@ int cmd_LOAD(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
     }
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
+int cmd_BEGIN(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
+{
+    compressed_release release;
+    write_lock rl(get_lock());
+
+    if (argc != 1)
+        return ValkeyModule_WrongArity(ctx);
+    get_art()->begin();
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
+int cmd_COMMIT(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
+{
+    compressed_release release;
+    write_lock rl(get_lock());
+
+    if (argc != 1)
+        return ValkeyModule_WrongArity(ctx);
+    get_art()->commit();
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+int cmd_ROLLBACK(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
+{
+    compressed_release release;
+    write_lock rl(get_lock());
+
+    if (argc != 1)
+        return ValkeyModule_WrongArity(ctx);
+    get_art()->rollback();
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
 
 /* B.STATISTICS
  *
@@ -907,6 +939,16 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
 
     if (ValkeyModule_CreateCommand(ctx, NAME(LOAD), "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(BEGIN), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(COMMIT), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(ROLLBACK), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
 
     /* Create our global dictionary. Here we'll set our keys and values. */
     Keyspace = ValkeyModule_CreateDict(nullptr);

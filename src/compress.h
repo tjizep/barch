@@ -1419,6 +1419,10 @@ public:
     {
         main.commit();
     }
+    void rollback()
+    {
+        main.rollback();
+    }
 };
 
 #endif //COMPRESS_H

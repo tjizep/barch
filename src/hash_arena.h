@@ -112,8 +112,7 @@ namespace arena {
 
         [[nodiscard]] bool is_free(size_t at) const
         {
-            if (source && source->is_free_no_source(at)) return true;
-            return is_free_no_source(at);
+           return is_free_no_source(at);
         }
 
         [[nodiscard]] bool has_free_no_source() const
@@ -121,7 +120,8 @@ namespace arena {
             return free_pages > 1;
         }
         [[nodiscard]] bool has_free() const
-        {   if (source && source->has_free_no_source()) return true;
+        {
+            //if (source && source->has_free_no_source()) return true;
             return has_free_no_source();
         }
 
@@ -287,10 +287,18 @@ namespace arena {
         }
         void set_source(base_hash_arena* src) {
             source = src;
+/**
+            free_address_list.clear();
+            top = 10000000;
+            free_pages = top;
+            last_allocated = 0;
+            max_address_accessed = 0;
+*/
             max_address_accessed = src->max_address_accessed;
             top = src->top;
             free_address_list = src->free_address_list;
             free_pages = src->free_pages;
+            last_allocated = src->last_allocated;
 
         }
         [[nodiscard]] bool has_source() const {
@@ -298,9 +306,10 @@ namespace arena {
         }
         void move_to_source() {
             if (source) {
-                iterate_arena([&](size_t at, storage& s) {
-                    source->hidden_arena[at] = s;
-                });
+                for (auto& [at,str] : hidden_arena)
+                {
+                    source->hidden_arena[at] = std::move(str);
+                }
                 source->free_address_list = free_address_list;
                 source->top = top;
                 source->free_pages = free_pages;

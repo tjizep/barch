@@ -23,7 +23,7 @@ end
 local test = function()
 
     tests = tests + 1
-
+    vk.call('B.BEGIN')
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
@@ -34,6 +34,8 @@ local test = function()
             vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
     end
+    vk.call('B.COMMIT')
+    vk.call('B.BEGIN')
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
@@ -45,6 +47,7 @@ local test = function()
         if math.mod(i,logperiod) == 0 then
             vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
         end
+        vk.call('B.ROLLBACK')
 
     end
     result[inc()] = {"'B.RANGE',convert(2), convert(count-2), 10", vk.call('B.RANGE',convert(2), convert(count-2), 4)}

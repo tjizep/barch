@@ -81,9 +81,14 @@ namespace art
     struct tree
     {
         bool mexit = false;
+        bool transacted = false;
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
         art::node_ptr root = nullptr;
         uint64_t size = 0;
+        // to support a transaction
+        art::node_ptr save_root = nullptr;
+        uint64_t save_size = 0;
+
         void start_maintain();
         tree(const tree&) = delete;
 
@@ -96,6 +101,9 @@ namespace art
         void run_defrag();
         bool save();
         bool load();
+        void begin();
+        void commit();
+        void rollback();
     };
 }
 

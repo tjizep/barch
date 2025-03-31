@@ -1303,3 +1303,28 @@ bool art::tree::load()
     art::std_log("db memory when created",(float)heap::allocated/(1024*1024),"Mb");
     return true;
 }
+
+void art::tree::begin() {
+    if (transacted) return;
+    save_root = root;
+    save_size = size;
+    get_leaf_compression().begin();
+    get_node_compression().begin();
+    transacted = true;
+}
+void art::tree::commit() {
+    if (!transacted) return;
+    get_leaf_compression().commit();
+    get_node_compression().commit();
+    transacted = false;
+
+}
+void art::tree::rollback() {
+    if (!transacted) return;
+    get_leaf_compression().rollback();
+    get_node_compression().rollback();
+    root = save_root;
+    size = save_size;
+    transacted = false;
+
+}

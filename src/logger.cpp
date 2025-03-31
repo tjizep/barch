@@ -4,12 +4,12 @@
 #include <sys/unistd.h>
 #include "logger.h"
 #include <chrono>
-#include <format>
 #include <iostream>
 #include <string>
 #include <string_view>
 
 #if __cplusplus >= 202002L
+#include <format>
 
 void art::raw_write_to_log(std::string_view users_fmt, std::format_args&& args)
 {

@@ -4,6 +4,11 @@ enable_testing()
 if (NOT ADD_ZSTD_COMPRESSION)
     set(ADD_ZSTD_COMPRESSION ON)
 endif ()
+
+if (NOT ADD_FMT)
+    set(ADD_FMT ON)
+endif ()
+
 if (NOT TEST_OD)
     set(TEST_OD OFF)
 endif ()

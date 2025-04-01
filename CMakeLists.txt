@@ -9,6 +9,7 @@ if (NOT TEST_OD)
 endif ()
 
 set(CMAKE_CPP_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -38,14 +39,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fast_float)
 
-FetchContent_Declare(
-        fmt
-        GIT_REPOSITORY https://github.com/fmtlib/fmt
-        GIT_TAG        e69e5f977d458f2650bb346dadf2ad30c5320281) # 10.2.1
-SET(BUILD_SHARED_LIBS FALSE)
-SET(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
-FetchContent_MakeAvailable(fmt)
+if (ADD_FMT)
 
+    FetchContent_Declare(
+            fmt
+            GIT_REPOSITORY https://github.com/fmtlib/fmt
+            GIT_TAG        e69e5f977d458f2650bb346dadf2ad30c5320281) # 10.2.1
+    SET(BUILD_SHARED_LIBS FALSE)
+    SET(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+    FetchContent_MakeAvailable(fmt)
+endif ()
 
 if (ADD_ZSTD_COMPRESSION)
     FetchContent_MakeAvailable(zstd)
@@ -85,7 +88,9 @@ if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
 endif ()
 
-target_link_libraries(barch PRIVATE fmt::fmt)
+if (ADD_FMT)
+    target_link_libraries(barch PRIVATE fmt::fmt)
+endif ()
 
 if (NOT TEST_OD)
     message("Testing not enabled tests not generated :Use -DTEST_OD=ON")

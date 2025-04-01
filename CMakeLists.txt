@@ -38,6 +38,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fast_float)
 
+FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt
+        GIT_TAG        e69e5f977d458f2650bb346dadf2ad30c5320281) # 10.2.1
+SET(BUILD_SHARED_LIBS FALSE)
+SET(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+FetchContent_MakeAvailable(fmt)
+
+
 if (ADD_ZSTD_COMPRESSION)
     FetchContent_MakeAvailable(zstd)
 endif ()
@@ -75,6 +84,8 @@ add_library(barch SHARED ${SOURCES})
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
 endif ()
+
+target_link_libraries(barch PRIVATE fmt::fmt)
 
 if (NOT TEST_OD)
     message("Testing not enabled tests not generated :Use -DTEST_OD=ON")

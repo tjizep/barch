@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.9)
+cmake_minimum_required(VERSION 3.22)
 project(barch VERSION 0.0.1 LANGUAGES CXX)
 enable_testing()
 if (NOT ADD_ZSTD_COMPRESSION)

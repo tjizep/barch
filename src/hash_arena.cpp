@@ -92,6 +92,7 @@ bool arena::base_hash_arena::save(const std::string& filename, const std::functi
     completed = storage_version;
     writep(out,completed);
     out.flush();
+
     art::log("completed writing to " + filename);
 
     return !out.fail();

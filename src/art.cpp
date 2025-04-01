@@ -1204,24 +1204,52 @@ art_ops_statistics art::get_ops_statistics()
     return os;
 }
 #include "ioutil.h"
+
+template<typename OutStream>
+static void stats_to_stream(OutStream& of) {
+    writep(of, statistics::n4_nodes);
+    writep(of, statistics::n16_nodes);
+    writep(of, statistics::n48_nodes);
+    writep(of, statistics::n256_nodes);
+    writep(of, statistics::node256_occupants);
+    writep(of, statistics::leaf_nodes);
+    writep(of, statistics::addressable_bytes_alloc);
+    writep(of, statistics::interior_bytes_alloc);
+    writep(of, statistics::page_bytes_compressed);
+    writep(of, statistics::page_bytes_uncompressed);
+    writep(of, statistics::pages_uncompressed);
+    writep(of, statistics::pages_compressed);
+    writep(of, statistics::max_page_bytes_uncompressed);
+    if (!of.good()) {
+        throw std::runtime_error("art::stats_to_stream: bad output stream");
+    }
+}
+template<typename InStream>
+static void stream_to_stats(InStream& in) {
+    if (!in.good()) {
+        throw std::runtime_error("art::stream_to_stats: bad output stream");
+    }
+    readp(in, statistics::n4_nodes);
+    readp(in, statistics::n16_nodes);
+    readp(in, statistics::n48_nodes);
+    readp(in, statistics::n256_nodes);
+    readp(in, statistics::node256_occupants);
+    readp(in, statistics::leaf_nodes);
+    readp(in, statistics::addressable_bytes_alloc);
+    readp(in, statistics::interior_bytes_alloc);
+    readp(in, statistics::page_bytes_compressed);
+    readp(in, statistics::page_bytes_uncompressed);
+    readp(in, statistics::pages_uncompressed);
+    readp(in, statistics::pages_compressed);
+    readp(in, statistics::max_page_bytes_uncompressed);
+
+}
 bool art::tree::save()
 {
     auto *t = this;
     auto save_stats_and_root = [&](std::ofstream& of)
     {
-        writep(of, statistics::n4_nodes);
-        writep(of, statistics::n16_nodes);
-        writep(of, statistics::n48_nodes);
-        writep(of, statistics::n256_nodes);
-        writep(of, statistics::node256_occupants);
-        writep(of, statistics::leaf_nodes);
-        writep(of, statistics::addressable_bytes_alloc);
-        writep(of, statistics::interior_bytes_alloc);
-        writep(of, statistics::page_bytes_compressed);
-        writep(of, statistics::page_bytes_uncompressed);
-        writep(of, statistics::pages_uncompressed);
-        writep(of, statistics::pages_compressed);
-        writep(of, statistics::max_page_bytes_uncompressed);
+        stats_to_stream(of);
 
 
         auto root = compressed_address(t->root.logical);
@@ -1260,19 +1288,7 @@ bool art::tree::load()
     // save stats in the leaf storage
     auto load_stats_and_root = [&](std::ifstream& in)
     {
-        readp(in, statistics::n4_nodes);
-        readp(in, statistics::n16_nodes);
-        readp(in, statistics::n48_nodes);
-        readp(in, statistics::n256_nodes);
-        readp(in, statistics::node256_occupants);
-        readp(in, statistics::leaf_nodes);
-        readp(in, statistics::addressable_bytes_alloc);
-        readp(in, statistics::interior_bytes_alloc);
-        readp(in, statistics::page_bytes_compressed);
-        readp(in, statistics::page_bytes_uncompressed);
-        readp(in, statistics::pages_uncompressed);
-        readp(in, statistics::pages_compressed);
-        readp(in, statistics::max_page_bytes_uncompressed);
+        stream_to_stats(in);
 
         readp(in, root);
         readp(in, is_leaf);
@@ -1311,6 +1327,8 @@ void art::tree::begin() {
     if (transacted) return;
     save_root = root;
     save_size = size;
+    save_stats.clear();
+    stats_to_stream(save_stats);
     get_leaf_compression().begin();
     get_node_compression().begin();
     transacted = true;
@@ -1328,6 +1346,8 @@ void art::tree::rollback() {
     get_node_compression().rollback();
     root = save_root;
     size = save_size;
+    save_stats.seek(0);
+    stream_to_stats(save_stats);
     transacted = false;
 
 }

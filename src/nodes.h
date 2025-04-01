@@ -480,7 +480,7 @@ namespace art
 
         leaf(unsigned kl, unsigned vl, uint64_t ttl, bool is_volatile) :
             key_len(std::min<unsigned>(kl, std::numeric_limits<LeafSize>::max()))
-            , val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max()))
+        ,   val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max()))
         {
             if (ttl > 0) set_ttl();
             if (is_volatile) set_volatile();
@@ -490,7 +490,6 @@ namespace art
         uint8_t flags{};
         LeafSize key_len; // does not include null terminator (which is hidden: see make_leaf)
         LeafSize val_len;
-        //uint64_t exp {};
         unsigned char data[];
 
         void set_volatile()

@@ -5,9 +5,11 @@
 #include "compress.h"
 #include "keyspec.h"
 #include "value_type.h"
+#include "vector_stream.h"
+
 typedef std::unique_lock<std::shared_mutex> write_lock;
 typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
-
+//!typedef basic_ovectorstream<std::vector<char> >    ovectorstream;
 extern std::shared_mutex& get_lock();
 /**
  * context management
@@ -88,7 +90,7 @@ namespace art
         // to support a transaction
         art::node_ptr save_root = nullptr;
         uint64_t save_size = 0;
-
+        vector_stream save_stats{};
         void start_maintain();
         tree(const tree&) = delete;
 

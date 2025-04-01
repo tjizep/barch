@@ -219,8 +219,8 @@ void art::tree::run_defrag()
             art::key_spec options;
             for (auto p : fl)
             {
-                //compressed_release releaser;
-                write_lock lock(get_lock());
+                compressed_release releaser;
+                //write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);
 
                 page_iterator(page.first, page.second, [&fc,this](const art::leaf* l)

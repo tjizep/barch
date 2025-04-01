@@ -638,6 +638,16 @@ int cmd_ROLLBACK(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
     get_art()->rollback();
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
+int cmd_CLEAR(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
+{
+    compressed_release release;
+    //write_lock rl(get_lock());
+
+    if (argc != 1)
+        return ValkeyModule_WrongArity(ctx);
+    get_art()->clear();
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
 
 
 /* B.STATISTICS
@@ -949,6 +959,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
     if (ValkeyModule_CreateCommand(ctx, NAME(ROLLBACK), "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(CLEAR), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
 
     /* Create our global dictionary. Here we'll set our keys and values. */
     Keyspace = ValkeyModule_CreateDict(nullptr);
@@ -971,6 +984,14 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
 
     if (!art::init_node_compression())
         return VALKEYMODULE_ERR;
+    try
+    {
+        get_art()->load();
+    }catch (std::exception& e)
+    {
+        art::std_log(e.what());
+        return VALKEYMODULE_ERR;
+    }
 
     return VALKEYMODULE_OK;
 }

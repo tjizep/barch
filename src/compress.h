@@ -534,6 +534,7 @@ private:
     storage& retrieve_page(size_t page, bool modify = false)
     {
         if (modify) {
+            page_modifications::inc_ticker(page);
             return main.modify(page);
         }
         return main.read(page);
@@ -843,10 +844,9 @@ private:
     {
         std::atomic<size_t> r = 0;
         std::thread workers[auto_vac_workers];
-        size_t arena_size = max_logical_address();
         for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++)
         {
-            workers[ivac] = std::thread([this,arena_size,ivac,&r]()
+            workers[ivac] = std::thread([this,ivac,&r]()
             {
                 ZSTD_CCtx* cctx = ZSTD_createCCtx();
                 iterate_arena([&](size_t p, storage&) -> void
@@ -921,6 +921,7 @@ public:
         }
         if (test_memory == 1)
             d1[sz] = 0;
+        page_modifications::inc_ticker(at.page());
         auto& t = retrieve_page(at.page());
         if (t.size == 0)
         {
@@ -1421,6 +1422,30 @@ public:
     void rollback()
     {
         main.rollback();
+    }
+    void clear()
+    {
+        main.rollback();
+        main = arena::hash_arena{};
+        size_in_training = 0;
+        size_to_train = 0;
+        last_page_allocated = {0};
+        arena_head = {0};
+        highest_reserve_address = {0};
+        last_heap_bytes = 0;
+        release_counter = 0;
+        ticker = 1;
+        allocated = 0;
+        fragmentation = 0;
+
+        decompressed_pages = {};
+        last_vacuum_millis = std::chrono::high_resolution_clock::now();;
+        emancipated = {};
+        lru = {};
+        fragmented = {};
+        erased = {}; // for runtime use after free tests
+        last_created_page = {};
+        last_page_ptr = {};
     }
 };
 

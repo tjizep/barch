@@ -91,6 +91,7 @@ namespace art
         art::node_ptr save_root = nullptr;
         uint64_t save_size = 0;
         vector_stream save_stats{};
+        std::shared_mutex save_load_mutex{};
         void start_maintain();
         tree(const tree&) = delete;
 
@@ -106,6 +107,7 @@ namespace art
         void begin();
         void commit();
         void rollback();
+        void clear();
     };
 }
 

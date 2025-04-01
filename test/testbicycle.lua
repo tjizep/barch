@@ -1,6 +1,6 @@
 local vk
 vk = redis
-
+vk.call('B.CLEAR')
 vk.call('B.SET', 'bicycle:yours', 1)
 vk.call('B.SET', 'bicycle:mine', 1)
 vk.call('B.SET', 'bicycle:theirs', 1)

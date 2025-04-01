@@ -29,6 +29,7 @@ end
 
 
 --[[ Testing num hash string key types]]
+vk.call('B.CLEAR')
 
 test()
 assert(successes==2, "test failures")

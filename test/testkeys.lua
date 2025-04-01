@@ -76,6 +76,7 @@ local test = function()
 
 
 --[[ Testing num hash string key types]]
+vk.call('B.CLEAR')
 
 convert = tochars123
 test()

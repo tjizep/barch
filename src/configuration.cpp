@@ -21,7 +21,8 @@ static std::string max_defrag_page_count{};
 static std::string iteration_worker_count{};
 static std::string maintenance_poll_delay{};
 static std::string active_defrag{};
-
+static std::string save_interval{};
+static std::string max_modifications_before_save{};
 
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
@@ -175,6 +176,60 @@ static int ApplyIterationWorkerCount(ValkeyModuleCtx*unused_arg, void*unused_arg
 {
     return VALKEYMODULE_OK;
 }
+// ===========================================================================================================
+static ValkeyModuleString* GetSaveInterval(const char*unused_arg, void*unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, save_interval.c_str(), save_interval.length());
+}
+
+static int SetSaveInterval(const char*unused_arg, ValkeyModuleString* val, void*unused_arg,
+                                   ValkeyModuleString**unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    std::string test_save_interval = ValkeyModule_StringPtrLen(val, nullptr);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_save_interval, check))
+    {
+        return VALKEYMODULE_ERR;
+    }
+    maintenance_poll_delay = test_save_interval;
+    char* ep = nullptr;
+    record.save_interval = std::strtoll(test_save_interval.c_str(), &ep, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int ApplySaveInterval(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
+{
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString* GetMaxModificationsBeforeSave(const char*unused_arg, void*unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, max_modifications_before_save.c_str(), max_modifications_before_save.length());
+}
+
+static int SetMaxModificationsBeforeSave(const char*unused_arg, ValkeyModuleString* val, void*unused_arg,
+                                   ValkeyModuleString**unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    std::string test_max_modifications_before_save = ValkeyModule_StringPtrLen(val, nullptr);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_max_modifications_before_save, check))
+    {
+        return VALKEYMODULE_ERR;
+    }
+    maintenance_poll_delay = test_max_modifications_before_save;
+    char* ep = nullptr;
+    record.max_modifications_before_save = std::strtoll(test_max_modifications_before_save.c_str(), &ep, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int ApplyMaxModificationsBeforeSave(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
+{
+    return VALKEYMODULE_OK;
+}
 
 // ===========================================================================================================
 static ValkeyModuleString* GetMaintenancePollDelay(const char*unused_arg, void*unused_arg)
@@ -315,6 +370,12 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
     ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "360000", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetSaveInterval, SetSaveInterval,
+                                             ApplySaveInterval, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "1300000", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetMaxModificationsBeforeSave, SetMaxModificationsBeforeSave,
+                                             ApplyMaxModificationsBeforeSave, nullptr);
     return ret;
 }
 
@@ -352,6 +413,21 @@ int art::set_configuration_value(ValkeyModuleString* Name, ValkeyModuleString* V
     else if (name == "iteration_worker_count")
     {
         return SetIterationWorkerCount(nullptr, Value, nullptr, nullptr);
+    }
+    else if (name == "maintenance_poll_delay")
+    {
+        return SetMaintenancePollDelay(nullptr, Value, nullptr, nullptr);
+    }  else if (name == "max_defrag_page_count")
+    {
+        return SetMaxDefragPageCount(nullptr, Value, nullptr, nullptr);
+    }
+    else if (name == "save_interval")
+    {
+        return SetSaveInterval(nullptr, Value, nullptr, nullptr);
+    }
+    else if (name == "max_modifications_before_save")
+    {
+        return SetMaxModificationsBeforeSave(nullptr, Value, nullptr, nullptr);
     }
     else
     {
@@ -448,4 +524,14 @@ unsigned art::get_iteration_worker_count()
 {
     std::unique_lock lock(config_mutex);
     return record.iteration_worker_count;
+}
+uint64_t art::get_save_interval()
+{
+    std::unique_lock lock(config_mutex);
+    return record.save_interval;
+}
+uint64_t art::get_max_modifications_before_save()
+{
+    std::unique_lock lock(config_mutex);
+    return record.max_modifications_before_save;
 }

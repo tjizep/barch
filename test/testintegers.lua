@@ -85,6 +85,8 @@ local clear = function()
 end
 
 --[[ Testing ints,doubles and string key types]]
+vk.call('B.CLEAR')
+
 convert = tocharsnum
 test()
 clear()

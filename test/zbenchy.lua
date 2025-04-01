@@ -70,9 +70,12 @@ local test = function()
     result[inc()] = {'HEAP', vk.call('B.HEAPBYTES')}
 
 end
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "47m")
+vk.call('B.CLEAR')
 
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "64m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
+result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
+result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "1000000")
 --[[ Testing ints,doubles and string key types]]
 convert = tocharsnum
 test()

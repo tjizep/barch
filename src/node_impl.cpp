@@ -318,11 +318,30 @@ void run_evict_expired_keys(art::tree* t)
     if (!art::get_evict_volatile_ttl()) return;
     abstract_lru_eviction(t, [](const art::leaf* l) -> bool { return l->expired(); });
 }
+static uint64_t get_modifications()
+{
+    return statistics::insert_ops + statistics::delete_ops + statistics::set_ops;
+}
+template<typename T>
+static uint64_t millis(std::chrono::time_point<T> a,std::chrono::time_point<T> b)
+{
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(a - b);
+    uint64_t count =  duration.count();
+    return count;
+}
+template<typename T>
+static uint64_t millis(std::chrono::time_point<T> a)
+{
+    return millis(std::chrono::high_resolution_clock::now(), a);
+}
 
 void art::tree::start_maintain()
 {
     tmaintain = std::thread([&]() -> void
     {
+        auto start_save_time = std::chrono::high_resolution_clock::now();
+        auto mods = get_modifications();
+
         while (!this->mexit)
         {
             run_evict_all_keys_lru(this);
@@ -330,10 +349,20 @@ void art::tree::start_maintain()
             run_evict_volatile_keys_lru(this);
             run_evict_volatile_keys_lfu(this);
             run_evict_expired_keys(this);
-            // TODO: erase evicted keys if memory is pressured - if its configured
+            // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
             if (art::get_active_defrag())
                 run_defrag(); // periodic
-
+            if (millis(start_save_time) > get_save_interval()
+                || get_modifications() - mods > get_max_modifications_before_save())
+            {
+                if (get_modifications() - mods > 0)
+                {
+                    compressed_release releaser;
+                    this->save();
+                    start_save_time = std::chrono::high_resolution_clock::now();
+                    mods = get_modifications();
+                }
+            }
             // we should wait on a join signal not just sleep else server wont stop quickly
             std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
         }

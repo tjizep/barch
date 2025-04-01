@@ -1,5 +1,7 @@
 local vk
 vk = redis
+vk.call('B.CLEAR')
+
 local chars= {'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z'}
 local count = 10
 local result = {}

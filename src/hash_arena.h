@@ -32,6 +32,7 @@ namespace arena {
         //typedef std::unordered_map<size_t, storage> hash_type ;
         hash_type hidden_arena{};
         heap::vector<size_t> free_address_list{};
+        heap::vector<size_t> buffered_free{};
         size_t top = 10000000;
         size_t free_pages = top;
         size_t last_allocated = 0;
@@ -62,8 +63,9 @@ namespace arena {
         base_hash_arena(const arena::base_hash_arena&) = default;
         base_hash_arena& operator=(const arena::base_hash_arena&) = default;
         void clear() {
-            hidden_arena.clear();
-            free_address_list.clear();
+            hidden_arena = hash_type{};
+            free_address_list = heap::vector<size_t>{};
+            buffered_free = heap::vector<size_t>{};
             top = 10000000;
             free_pages = top;
             last_allocated = 0;
@@ -101,10 +103,15 @@ namespace arena {
             {
                 throw std::runtime_error("page already free");
             }
+
             hidden_arena.erase(pi);
             max_address_accessed = std::max(max_address_accessed, at);
             ++free_pages;
             free_address_list.emplace_back(at);
+            if (source)
+            {
+                buffered_free.emplace_back(at);
+            }
         }
         [[nodiscard]] bool is_free_no_source(size_t at) const
         {
@@ -296,6 +303,7 @@ namespace arena {
             last_allocated = 0;
             max_address_accessed = 0;
 */
+            buffered_free.clear();
             max_address_accessed = src->max_address_accessed;
             top = src->top;
             free_address_list = src->free_address_list;
@@ -308,6 +316,10 @@ namespace arena {
         }
         void move_to_source() {
             if (source) {
+                for (auto f : buffered_free)
+                {
+                    source->hidden_arena.erase(f);
+                }
                 for (auto& [at,str] : hidden_arena)
                 {
                     page_modifications::inc_ticker(at);
@@ -316,7 +328,7 @@ namespace arena {
                 source->free_address_list = free_address_list;
                 source->top = top;
                 source->free_pages = free_pages;
-                source->last_allocated= last_allocated;
+                source->last_allocated = last_allocated;
                 source->max_address_accessed = max_address_accessed;
                 clear();
             }

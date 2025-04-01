@@ -71,9 +71,11 @@ bool arena::base_hash_arena::save(const std::string& filename, const std::functi
     iterate_arena([&](size_t page, const storage& s)
     {
         storage cpy = s; // copy buffer under lock
-        compress::mutex.unlock();
+        compress::mutex.unlock(); // let other things happen while io is being done
+
         uint64_t start = out.tellp();
-        append(out,page,cpy);
+        append(out, page, cpy);
+
         uint64_t finish = out.tellp();
         // write the allocation record
         out.seekp(alloc_table_start + alloc_record_size*record_pos + sizeof(uint64_t),std::ios::beg);

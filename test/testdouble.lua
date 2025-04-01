@@ -81,6 +81,7 @@ local clear = function()
 end
 
 --[[ Testing doubles]]
+vk.call('B.CLEAR')
 
 convert = tocharsdbl
 test()

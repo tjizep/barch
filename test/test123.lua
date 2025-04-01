@@ -100,9 +100,12 @@ end
 
 --[[ Testing num hash string key types]]
 result[inc()] = {"running test "..tests}
+vk.call('B.CLEAR')
 result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "50m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "on")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "zstd")
+result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "1000")
+result[inc()] = vk.call("B.CONFIG", "SET","max_modifications_before_save", "1000")
 
 convert = tochars123
 for i = 1,5 do

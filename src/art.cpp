@@ -1246,6 +1246,7 @@ static void stream_to_stats(InStream& in) {
 }
 bool art::tree::save()
 {
+    std::lock_guard guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
     auto save_stats_and_root = [&](std::ofstream& of)
     {
@@ -1277,11 +1278,12 @@ bool art::tree::save()
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
 
-    art::std_log("saved barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
+    art::std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
     return true;
 }
 bool art::tree::load()
 {
+    std::lock_guard guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
     compressed_address root;
     bool is_leaf = false;
@@ -1350,4 +1352,25 @@ void art::tree::rollback() {
     stream_to_stats(save_stats);
     transacted = false;
 
+}
+void art::tree::clear()
+{
+    root = {nullptr};
+    size = 0;
+    transacted = false;
+    get_leaf_compression().clear();
+    get_node_compression().clear();
+    statistics::n4_nodes = 0;
+    statistics::n16_nodes = 0;
+    statistics::n48_nodes = 0;
+    statistics::n256_nodes = 0;
+    statistics::node256_occupants = 0;
+    statistics::leaf_nodes = 0;
+    statistics::addressable_bytes_alloc = 0;
+    statistics::interior_bytes_alloc = 0;
+    statistics::page_bytes_compressed = 0;
+    statistics::page_bytes_uncompressed = 0;
+    statistics::pages_uncompressed = 0;
+    statistics::pages_compressed = 0;
+    statistics::max_page_bytes_uncompressed = 0;
 }

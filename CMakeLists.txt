@@ -50,7 +50,7 @@ if (ADD_FMT)
     FetchContent_Declare(
             fmt
             GIT_REPOSITORY https://github.com/fmtlib/fmt
-            GIT_TAG        e69e5f977d458f2650bb346dadf2ad30c5320281) # 10.2.1
+            GIT_TAG        123913715afeb8a437e6388b4473fcc4753e1c9a) # 11.4
     SET(BUILD_SHARED_LIBS FALSE)
     SET(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
     FetchContent_MakeAvailable(fmt)

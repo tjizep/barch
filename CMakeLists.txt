@@ -60,8 +60,8 @@ if (ADD_ZSTD_COMPRESSION)
 endif ()
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++")
+#-Weffc++ is removed else fmtlib does not compile - because it's a little ...s
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra")
 
 
 include_directories(src)

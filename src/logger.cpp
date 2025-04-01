@@ -53,7 +53,7 @@ void art::raw_write_to_log(fmt::string_view users_fmt, fmt::format_args&& args)
     // %d %b %Y %H:%M:%OS
     auto header_color = fg(fmt::color::orange) | fmt::emphasis::italic;
     auto text_color = fg(fmt::color::light_blue) | fmt::emphasis::italic;
-    std::string logged = fmt::format(header_color,"{}:M {:%d %b %Y %H:%M:%S} * BARCH ",tid, now);
+    std::string logged = fmt::format(header_color,"{}:M {:%d %b %Y %H:%M:%S} * BARCH ",tid, std::chrono::floor<std::chrono::milliseconds>(now));
     logged += fmt::vformat(text_color, users_fmt, args);
     std::clog <<  logged << '\n';
 }

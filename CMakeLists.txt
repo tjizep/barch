@@ -13,8 +13,9 @@ if (NOT TEST_OD)
     set(TEST_OD OFF)
 endif ()
 
-set(CMAKE_CPP_STANDARD 20)
+set(CMAKE_CPP_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra")
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -61,7 +62,6 @@ endif ()
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
 #-Weffc++ is removed else fmtlib does not compile - because it's a little ...s
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra")
 
 
 include_directories(src)

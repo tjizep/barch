@@ -26,7 +26,7 @@ if (ADD_ZSTD_COMPRESSION)
             zstd
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
             SOURCE_SUBDIR build/cmake
-            URL "https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz"
+            URL "https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz"
     )
 else ()
     message("ZSTD compression not used use -DADD_ZSTD_COMPRESSION=ON")

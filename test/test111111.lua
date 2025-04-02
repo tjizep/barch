@@ -17,7 +17,7 @@ local inc = function()
 end
 
 local tocharsnum = function(num)
-    return num * 10
+    return num..'not'
 end
 
 local test = function()
@@ -31,9 +31,12 @@ local test = function()
     end
     result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'SIZE', vk.call('B.SIZE')}
+    result[inc()] = {'HEAP', vk.call('B.HEAPBYTES')}
+    local cnt = vk.call('B.KEYS', '3*n*', 'COUNT')
+    result[inc()] = {'B.KEYS 3*n*', cnt}
     --vk.call('B.CLEAR')
     result[inc()] = {'HEAP', vk.call('B.HEAPBYTES')}
-
+    assert(cnt==111111)
 end
 
 

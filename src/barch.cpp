@@ -45,10 +45,7 @@ art::tree* get_art()
 {
     if (ad == nullptr)
     {
-        if (ad == nullptr)
-        {
-            ad = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0);
-        }
+        ad = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0);
     }
     return ad;
 }

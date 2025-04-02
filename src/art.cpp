@@ -60,11 +60,19 @@ bool art::init_node_compression()
 
 compress& art::get_leaf_compression()
 {
+    if (!has_leaf_compression())
+    {
+        init_leaf_compression();
+    }
     return *leaf_compression;
 };
 
 compress& art::get_node_compression()
 {
+    if (!has_node_compression())
+    {
+        init_node_compression();
+    }
     return *node_compression;
 };
 
@@ -1383,4 +1391,6 @@ void art::tree::clear()
     statistics::pages_uncompressed = 0;
     statistics::pages_compressed = 0;
     statistics::max_page_bytes_uncompressed = 0;
+    //destroy_leaf_compression();
+    //destroy_node_compression();
 }

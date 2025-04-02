@@ -20,6 +20,8 @@
 #include <functional>
 #include <list>
 #include <logger.h>
+#include <unordered_set>
+
 #include "ioutil.h"
 #include "configuration.h"
 #include "compressed_address.h"
@@ -30,7 +32,10 @@
 
 typedef uint16_t PageSizeType;
 typedef ankerl::unordered_dense::set<
-        size_t,ankerl::unordered_dense::hash<size_t>,std::equal_to<size_t>,heap::allocator<size_t>> address_set;
+            size_t
+        ,   ankerl::unordered_dense::hash<size_t>
+        ,   std::equal_to<size_t>
+        ,   heap::allocator<size_t>> address_set;
 
 struct training_entry
 {
@@ -411,7 +416,7 @@ private:
     size_t fragmentation = 0;
     std::string name;
 
-    heap::vector<size_t> decompressed_pages{};
+    std::vector<size_t,heap::allocator<size_t>> decompressed_pages{};
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{};
     lru_list lru{};
@@ -490,7 +495,11 @@ private:
 
     bool add_training_entry(const uint8_t* data, size_t size)
     {
-        if (dict || size_in_training != 0 || size_to_train > min_training_size)
+        if (!art::get_compression_enabled())
+        {
+            return false;
+        }
+        if (min_training_size == 0 || dict || size_in_training != 0 || size_to_train > min_training_size)
         {
             return false;
         }
@@ -519,7 +528,7 @@ private:
     static heap::buffer<uint8_t> compress_2_buffer(ZSTD_CDict* localDict, ZSTD_CCtx* cctx, const uint8_t* data,
                                                    size_t size)
     {
-        if (!localDict) return heap::buffer<uint8_t>(0);
+        if (!localDict || !cctx) return heap::buffer<uint8_t>(0);
         size_t compressed_max_size = ZSTD_compressBound(size);
         auto compressed_data_temp = heap::buffer<uint8_t>(compressed_max_size);
         size_t compressed = ZSTD_compress_usingCDict(cctx, compressed_data_temp.begin(),
@@ -726,6 +735,7 @@ private:
     // compression can happen in any single thread - even a worker thread
     size_t release_decompressed(ZSTD_CCtx* cctx, size_t at)
     {
+        if (!cctx) return 0;
         if (is_null_base(at)) return 0;
         size_t r = 0;
         heap::buffer<uint8_t> torelease;
@@ -861,7 +871,8 @@ private:
                         r += release_decompressed(cctx, p);
                 });
 
-                ZSTD_freeCCtx(cctx);
+                if (cctx)
+                    ZSTD_freeCCtx(cctx);
             });
         }
         for (auto& worker : workers) worker.join();
@@ -984,7 +995,7 @@ public:
             if (!lru.empty())
                 lru.erase(t.lru);
             t.clear();
-            //emancipated.erase(at.page());
+            emancipated.erase(at.page());
             free_page(at.page());
 
             fragmented.erase(at.page());
@@ -997,7 +1008,7 @@ public:
         }
         else
         {
-            //emancipated.add(at, size); // add a free allocation for later re-use
+            emancipated.add(at, size); // add a free allocation for later re-use
             t.size--;
             t.modifications++;
             if (t.fragmentation + size > t.write_position)
@@ -1328,7 +1339,8 @@ public:
                     }
                 });
 
-                ZSTD_freeDCtx(dctx);
+                if (dctx)
+                    ZSTD_freeDCtx(dctx);
             });
         }
         for (auto& worker : workers) worker.join();
@@ -1453,6 +1465,13 @@ public:
         erased = {}; // for runtime use after free tests
         last_created_page = {};
         last_page_ptr = {};
+
+        if (dict)
+        {
+            ZSTD_freeCDict(dict);
+            dict = nullptr;
+        };
+
     }
 };
 

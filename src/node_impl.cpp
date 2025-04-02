@@ -353,7 +353,8 @@ void art::tree::start_maintain()
             if (art::get_active_defrag())
                 run_defrag(); // periodic
             if (millis(start_save_time) > get_save_interval()
-                || get_modifications() - mods > get_max_modifications_before_save())
+                || get_modifications() - mods > get_max_modifications_before_save()
+                )
             {
                 if (get_modifications() - mods > 0)
                 {

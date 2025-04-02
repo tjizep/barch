@@ -1108,11 +1108,12 @@ void art::glob(tree* unused(t), const keys_spec& spec, value_type pattern, const
     {
         int64_t counter = 0;
         // this is a multi-threaded iterator and care should be taken
-        get_leaf_compression().iterate_pages([&](size_t size, const heap::buffer<uint8_t>& page)-> bool
+        get_leaf_compression().iterate_pages([&](size_t size,size_t unused(padd), const heap::buffer<uint8_t>& page)-> bool
         {
             if (!size) return true;
             auto i = page.begin();
             auto e = i + size;
+            uint64_t misses = 0;
             while (i != e)
             {
                 const leaf* l = (const leaf*)i;
@@ -1122,14 +1123,23 @@ void art::glob(tree* unused(t), const keys_spec& spec, value_type pattern, const
                 }
                 if (!(l->deleted() || l->expired()))
                 {
-                    if (!spec.count && ++counter > spec.max_count) return false;
+                    if (!spec.count && ++counter > spec.max_count)
+                    {
+                        return false;
+                    }
                     if (tstring != *l->key()) // glob on string keys only
                     {
                         return true;
                     }
                     if (1 == glob::stringmatchlen(pattern, l->get_clean_key(), 0))
                     {
-                        if (!cb(*l)) return false;
+                        if (!cb(*l))
+                        {
+                            return false;
+                        }
+                    } else
+                    {
+                        ++misses;
                     }
                 }
                 i += (l->byte_size() + test_memory);

@@ -6,7 +6,7 @@
 #define CONSTANTS_H
 enum
 {
-    page_size = 4096,
+    page_size = 5100,
     reserved_address_base = 120000,
     auto_vac = 0,
     auto_vac_workers = 4,

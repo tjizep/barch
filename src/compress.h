@@ -18,7 +18,6 @@
 #include <zstd.h>
 #include <zdict.h>
 #include <functional>
-#include <unordered_set>
 #include <list>
 #include <logger.h>
 #include "ioutil.h"
@@ -30,6 +29,8 @@
 #include "page_modifications.h"
 
 typedef uint16_t PageSizeType;
+typedef ankerl::unordered_dense::set<
+        size_t,ankerl::unordered_dense::hash<size_t>,std::equal_to<size_t>,heap::allocator<size_t>> address_set;
 
 struct training_entry
 {
@@ -55,7 +56,7 @@ struct free_page
     explicit free_page(compressed_address p) : page(p.page())
     {
     };
-    heap::vector<PageSizeType> offsets{}; // within page
+    std::vector<PageSizeType, heap::allocator<PageSizeType>> offsets{}; // within page
     uint64_t page{0};
 
     [[nodiscard]] bool empty() const
@@ -103,8 +104,8 @@ struct free_bin
     }
 
     unsigned size = 0;
-    heap::vector<uint32_t> page_index{};
-    heap::vector<free_page> pages{};
+    std::vector<uint32_t, heap::allocator<uint32_t>> page_index{};
+    std::vector<free_page, heap::allocator<free_page>> pages{};
 
     struct page_max_t
     {
@@ -247,7 +248,7 @@ struct free_list
     size_t added = 0;
     size_t min_bin = page_size;
     size_t max_bin = 0;
-    std::unordered_set<size_t> addresses{};
+    address_set addresses{};
     heap::vector<free_bin> free_bins{};
 
     free_list()
@@ -354,7 +355,7 @@ struct compress
 {
     enum
     {
-        min_training_size = 1024 * 120,
+        min_training_size = 1024 * 70,
         compression_level = 1
     };
 
@@ -395,7 +396,7 @@ private:
     bool opt_enable_lru = false;
     bool opt_validate_addresses = false;
     bool opt_move_decompressed_pages = true;
-    unsigned opt_iterate_workers = 4;
+    unsigned opt_iterate_workers = 1;
 
     bool threads_exit = false;
     unsigned size_in_training = 0;
@@ -414,8 +415,9 @@ private:
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{};
     lru_list lru{};
-    ankerl::unordered_dense::set<size_t> fragmented{};
-    std::unordered_set<size_t> erased{}; // for runtime use after free tests
+
+    address_set fragmented{};
+    address_set erased{}; // for runtime use after free tests
     size_t last_created_page{};
     uint8_t* last_page_ptr{};
     compress& operator=(const compress& t)
@@ -767,6 +769,10 @@ private:
 
     uint8_t* basic_resolve(compressed_address at, bool modify = false)
     {
+        if (art::get_log_page_access_trace())
+        {
+            art::std_log("page trace:",at.address(),at.page(),at.offset(),modify);
+        }
         if (at.null()) return nullptr;
         invalid(at);
         if (test_memory)
@@ -978,7 +984,7 @@ public:
             if (!lru.empty())
                 lru.erase(t.lru);
             t.clear();
-            emancipated.erase(at.page());
+            //emancipated.erase(at.page());
             free_page(at.page());
 
             fragmented.erase(at.page());
@@ -991,7 +997,7 @@ public:
         }
         else
         {
-            emancipated.add(at, size); // add a free allocation for later re-use
+            //emancipated.add(at, size); // add a free allocation for later re-use
             t.size--;
             t.modifications++;
             if (t.fragmentation + size > t.write_position)
@@ -1275,7 +1281,7 @@ public:
         return r;
     }
 
-    void iterate_pages(const std::function<bool(size_t, const heap::buffer<uint8_t>&)>& found_page)
+    void iterate_pages(const std::function<bool(size_t,size_t, const heap::buffer<uint8_t>&)>& found_page)
     {
         opt_iterate_workers = art::get_iteration_worker_count();
         std::atomic<size_t> r = 0;
@@ -1290,8 +1296,9 @@ public:
                 {
                     if (stop) return;
                     if (is_null_base(page)) return;
-                    if (page % iterate_workers == iwork)
+                    if (page % opt_iterate_workers == iwork)
                     {
+
                         heap::buffer<uint8_t> decompressed;
                         heap::buffer<uint8_t> compressed;
                         unsigned wp = 0;
@@ -1312,12 +1319,12 @@ public:
                         }
                         if (!decompressed.empty())
                         {
-                            stop = !found_page(wp, decompressed);
+                            stop = !found_page(wp,page, decompressed);
                             return;
                         }
 
                         auto pb = get_page_buffer(page);
-                        stop = !found_page(pb.second, pb.first);
+                        stop = !found_page(pb.second,page, pb.first);
                     }
                 });
 

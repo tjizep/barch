@@ -35,6 +35,7 @@ namespace art
         bool evict_volatile_random{false};
         bool evict_allkeys_random{false};
         bool evict_volatile_ttl{false};
+        bool log_page_access_trace{false};
     };
 
     int register_valkey_configuration(ValkeyModuleCtx* ctx);
@@ -56,6 +57,7 @@ namespace art
     bool get_evict_volatile_random();
     bool get_evict_allkeys_random();
     bool get_evict_volatile_ttl();
+    bool get_log_page_access_trace();
 
     int set_configuration_value(ValkeyModuleString* name, ValkeyModuleString* value);
 }

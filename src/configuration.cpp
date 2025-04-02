@@ -21,6 +21,7 @@ static std::string max_defrag_page_count{};
 static std::string iteration_worker_count{};
 static std::string maintenance_poll_delay{};
 static std::string active_defrag{};
+static std::string log_page_access_trace{};
 static std::string save_interval{};
 static std::string max_modifications_before_save{};
 
@@ -310,6 +311,36 @@ static int ApplyActiveDefragType(ValkeyModuleCtx*unused_arg, void*unused_arg, Va
 {
     return VALKEYMODULE_OK;
 }
+// ===========================================================================================================
+static ValkeyModuleString* GetEnablePageTrace(const char*unused_arg, void*unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, log_page_access_trace.c_str(), log_page_access_trace.length());
+}
+
+static int SetEnablePageTrace(const char*unused_arg, ValkeyModuleString* val, void*unused_arg,
+                               ValkeyModuleString**unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    std::string test_log_page_access_trace = ValkeyModule_StringPtrLen(val, nullptr);
+    std::transform(test_log_page_access_trace.begin(), test_log_page_access_trace.end(), test_log_page_access_trace.begin(), ::tolower);
+
+    if (!check_type(test_log_page_access_trace, valid_defrag))
+    {
+        return VALKEYMODULE_ERR;
+    }
+
+    log_page_access_trace = test_log_page_access_trace;
+    record.log_page_access_trace =
+        log_page_access_trace == "on" || log_page_access_trace == "true" || log_page_access_trace == "yes";
+
+    return VALKEYMODULE_OK;
+}
+
+static int ApplyEnablePageTrace(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
+{
+    return VALKEYMODULE_OK;
+}
 
 // ===========================================================================================================
 static ValkeyModuleString* GetEvictionType(const char*unused_arg, void*unused_arg)
@@ -376,6 +407,9 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "1300000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxModificationsBeforeSave, SetMaxModificationsBeforeSave,
                                              ApplyMaxModificationsBeforeSave, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetEnablePageTrace, SetEnablePageTrace,
+                                             ApplyEnablePageTrace, nullptr);
     return ret;
 }
 
@@ -428,6 +462,10 @@ int art::set_configuration_value(ValkeyModuleString* Name, ValkeyModuleString* V
     else if (name == "max_modifications_before_save")
     {
         return SetMaxModificationsBeforeSave(nullptr, Value, nullptr, nullptr);
+    }
+    else if (name == "log_page_access_trace")
+    {
+        return SetEnablePageTrace(nullptr, Value, nullptr, nullptr);
     }
     else
     {
@@ -534,4 +572,9 @@ uint64_t art::get_max_modifications_before_save()
 {
     std::unique_lock lock(config_mutex);
     return record.max_modifications_before_save;
+}
+bool art::get_log_page_access_trace()
+{
+    std::unique_lock lock(config_mutex);
+    return record.log_page_access_trace;
 }

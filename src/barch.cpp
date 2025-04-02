@@ -281,7 +281,7 @@ int cmd_KEYS(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         return ValkeyModule_WrongArity(ctx);
     }
     std::mutex vklock{};
-    int64_t replies = 0;
+    std::atomic<int64_t> replies = 0;
     size_t plen;
     const char* cpat = ValkeyModule_StringPtrLen(argv[1], &plen);
     art::value_type pattern{cpat, (unsigned)plen};

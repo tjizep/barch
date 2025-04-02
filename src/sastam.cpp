@@ -5,6 +5,7 @@
 #include "sastam.h"
 #include <sys/types.h>
 #include <sys/sysinfo.h>
+#include "logger.h"
 static long long physical_ram_cache = 0;
 
 static long long getTotalPhysicalMemory()
@@ -44,14 +45,19 @@ void* heap::allocate(size_t size)
     auto* r = ValkeyModule_Calloc(1, size + padding + check_size);
     if (r)
     {
-        memset(r, 0, size + padding + check_size);
+        if (size < 8000)
+            memset(r, 0, size + padding + check_size);
+
         if (heap_checks)
         {
             uint32_t ax32 = get_ptr_val(r);
             memcpy((uint8_t*)r + size + padding, &ax32, sizeof(ax32));
             check_ptr(r, size);
         }
-        allocated += ValkeyModule_MallocSize(r);
+        auto actual = ValkeyModule_MallocSize(r);
+        //if (size > 8 && actual > size*1.2)
+        //    art::std_log((size_t)allocated,"allocated:",actual,"vs:",size,"requested");
+        allocated += actual;
     }
     return r;
 }
@@ -83,11 +89,14 @@ void heap::free(void* ptr, size_t size)
 {
     if (ptr)
     {
-        size_t test_size = ValkeyModule_MallocSize(ptr);
+        size_t actual = ValkeyModule_MallocSize(ptr);
 
         check_ptr(ptr, size);
         ValkeyModule_Free(ptr);
-        allocated -= test_size;
+        allocated -= actual;
+        //if (size > 8 && actual > size*1.2)
+        //    art::std_log((size_t)allocated,"freed:",actual,"vs:",size,"requested");
+
     }
 }
 

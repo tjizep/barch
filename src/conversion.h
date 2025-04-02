@@ -209,7 +209,7 @@ namespace conversion
 
         auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
 
-        if (fanswer.ec == std::errc())
+        if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen)
         {
             return comparable_result(d);
         }

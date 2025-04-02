@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 1000000
+local count = 10000000
 local result = {}
 local i = 1
 local index = 0
@@ -11,41 +11,15 @@ local failures = 0
 local successes = 0
 local numbers = {}
 local mem = {}
-local window = 100
+local window = 10
 local random = math.random
 local inc = function()
     index = index + 1
     return index
 end
-local shuffle = function(array)
-    -- Fisher-Yates
-    local output = {}
-    local random = math.random
-
-    for index = 1, #array do
-        local offset = index - 1
-        local value = array[index]
-        local randomIndex = offset * random()
-        local flooredIndex = randomIndex - randomIndex % 1
-
-        if flooredIndex == offset then
-            output[#output + 1] = value
-        else
-            output[#output + 1] = output[flooredIndex + 1]
-            output[flooredIndex + 1] = value
-        end
-    end
-
-    return output
-end
-
-for i = 1, window do
-    numbers[i] = count - i
-end
-numbers = shuffle(numbers)
 
 local tocharsnum = function(num)
-    return num * numbers[math.mod(num,window) + 1]
+    return num * window
 end
 
 local test = function()
@@ -59,6 +33,7 @@ local test = function()
 	end
 	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'SIZE', vk.call('DBSIZE')}
+
     result[inc()] = {'VK STATS', vk.call('MEMORY', 'STATS')[4]}
     result[inc()] = {'CLEAR VALKEY', vk.call('FLUSHALL')}
 

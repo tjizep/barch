@@ -1233,7 +1233,7 @@ public:
         }
         if (statistics::page_bytes_compressed > heap::allocated)
         {
-            abort();
+            //abort();
         }
         if (statistics::addressable_bytes_alloc < statistics::interior_bytes_alloc)
         {

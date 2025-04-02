@@ -76,7 +76,7 @@ if before > vk.call('B.HEAPBYTES') then
 end
 --clear()
 if isnew then
-    assert(successes==2, "test failures")
+    assert(successes==3, "test failures")
 else
     assert(successes==2, "test failures")
 end

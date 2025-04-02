@@ -22,7 +22,7 @@ static long long getTotalPhysicalMemory()
 enum
 {
     padding = 0,
-    heap_checks = 0,
+    heap_checks = 1,
     use_malloc = 0
 };
 
@@ -56,8 +56,7 @@ void* heap::allocate(size_t size)
 
     if (r)
     {
-        if (size < 8000)
-            memset(r, 0, size + padding + check_size);
+        memset(r, 0, size + padding + check_size);
 
         if (heap_checks)
         {
@@ -68,7 +67,7 @@ void* heap::allocate(size_t size)
         auto actual = size;
         if (use_malloc!=1)
         {
-            ValkeyModule_MallocSize(r);
+            //ValkeyModule_MallocSize(r);
         }
         //if (size > 8 && actual > size*1.2)
         //    art::std_log((size_t)allocated,"allocated:",actual,"vs:",size,"requested");
@@ -109,7 +108,7 @@ void heap::free(void* ptr, size_t size)
         size_t actual = size;
         if (use_malloc != 1)
         {
-            actual = ValkeyModule_MallocSize(ptr);
+            //actual = ValkeyModule_MallocSize(ptr);
         }
         check_ptr(ptr, size);
         if (use_malloc == 1)
@@ -135,7 +134,7 @@ void heap::free(void* ptr)
         size_t size = 0;
         if (use_malloc != 1)
         {
-            size = ValkeyModule_MallocSize(ptr);
+            //size = ValkeyModule_MallocSize(ptr);
         }
 
         free(ptr, size);

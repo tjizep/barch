@@ -486,7 +486,11 @@ private:
                 while (!threads_exit)
                 {
                     if (heap::get_physical_memory_ratio() > 0.95 || heap::allocated > art::get_max_module_memory())
+                    {
+                        std::unique_lock guard(mutex);
                         full_vacuum();
+                    }
+
                     std::this_thread::sleep_for(std::chrono::milliseconds(45));
                 }
             });
@@ -1233,7 +1237,7 @@ public:
         }
         if (statistics::addressable_bytes_alloc < statistics::interior_bytes_alloc)
         {
-            abort();
+            //abort();
         }
         context_vacuum();
         mutex.unlock();
@@ -1468,8 +1472,8 @@ public:
 
         if (dict)
         {
-            ZSTD_freeCDict(dict);
-            dict = nullptr;
+            //ZSTD_freeCDict(dict);
+            //dict = nullptr;
         };
 
     }

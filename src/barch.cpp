@@ -365,8 +365,6 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     else
     {
         return ValkeyModule_ReplyWithBool(ctx, true);
-        //return ValkeyModule_ReplyWithString(ctx, ok);
-        //return VALKEYMODULE_OK;
     }
 }
 

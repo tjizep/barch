@@ -369,6 +369,7 @@ struct compress
     explicit compress(bool opt_enable_compression, bool opt_enable_lru, std::string name):
         opt_enable_compression(opt_enable_compression), opt_enable_lru(opt_enable_lru), name(std::move(name))
     {
+        opt_page_trace = art::get_log_page_access_trace();
     };
     compress(const compress&) = delete;
 
@@ -397,6 +398,7 @@ private:
     std::thread tdict{};
     std::thread tpoll{};
 
+    bool opt_page_trace = false;
     bool opt_enable_compression = false;
     bool opt_enable_lru = false;
     bool opt_validate_addresses = false;
@@ -783,7 +785,7 @@ private:
 
     uint8_t* basic_resolve(compressed_address at, bool modify = false)
     {
-        if (art::get_log_page_access_trace())
+        if (opt_page_trace)
         {
             art::std_log("page trace:",at.address(),at.page(),at.offset(),modify);
         }

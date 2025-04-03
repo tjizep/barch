@@ -411,7 +411,7 @@ int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
     auto converted = conversion::convert(k, klen);
     art::trace_list trace;
-    trace.reserve(klen);
+    //trace.reserve(klen);
     //read_lock rl(get_lock());
     art::node_ptr r = art_search(trace, get_art(), converted.get_value());
     if (r.null())
@@ -421,9 +421,7 @@ int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     else
     {
         auto vt = r.const_leaf()->get_value();
-        auto* val = ValkeyModule_CreateString(ctx, vt.chars(), vt.size);
-
-        return ValkeyModule_ReplyWithString(ctx, val);
+        return ValkeyModule_ReplyWithStringBuffer(ctx,vt.chars(), vt.size);
     }
 }
 

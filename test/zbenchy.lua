@@ -54,14 +54,12 @@ local test = function()
     end
 
     local valids = 0
---[[
     for i = 1, count do
 	    local k = convert(i)
 	    if vk.call('B.GET',k) == ""..i then
             valids = valids + 1
         end
 	end
-]]
 	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'VALIDS', valids}
     result[inc()] = {'B MEM', vk.call('B.HEAPBYTES')}

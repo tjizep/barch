@@ -56,7 +56,7 @@ void* heap::allocate(size_t size)
 
     if (r)
     {
-        //memset(r, 0, size + padding + check_size);
+        memset(r, 0, size + padding + check_size);
 
         if (heap_checks)
         {

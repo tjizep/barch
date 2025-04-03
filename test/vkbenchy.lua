@@ -39,13 +39,13 @@ local shuffle = function(array)
     return output
 end
 
-for i = 1, window do
-    numbers[i] = count - i
+for i = 1, count do
+    numbers[i] = i
 end
 numbers = shuffle(numbers)
 
 local tocharsnum = function(num)
-    return num * numbers[math.mod(num,window) + 1]
+    return numbers[num]
 end
 
 local test = function()
@@ -54,12 +54,20 @@ local test = function()
     local t
 	t = vk.call('B.MILLIS')
 	for i = 1, count do
-	    local k = convert(i-1)
+	    local k = convert(i)
 	    vk.call('SET',k,i)
 	end
+    local valids = 0
+    for i = 1, count do
+	    local k = convert(i)
+	    if vk.call('GET',k) == ""..i then
+            valids = valids + 1
+        end
+	end
 	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
+	result[inc()] = {'VALIDS', valids}
     result[inc()] = {'SIZE', vk.call('DBSIZE')}
-    result[inc()] = {'VK STATS', vk.call('MEMORY', 'STATS')[4]}
+    result[inc()] = {'VK MEM', vk.call('MEMORY', 'STATS')[4]}
     result[inc()] = {'CLEAR VALKEY', vk.call('FLUSHALL')}
 
 end

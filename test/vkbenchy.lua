@@ -3,16 +3,10 @@ vk = redis
 
 local count = 1000000
 local result = {}
-local i = 1
 local index = 0
 local convert
 local tests = 0
-local failures = 0
-local successes = 0
 local numbers = {}
-local mem = {}
-local window = 100
-local random = math.random
 local inc = function()
     index = index + 1
     return index

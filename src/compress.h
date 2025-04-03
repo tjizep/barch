@@ -1274,9 +1274,9 @@ public:
         return result;
     }
 
-    size_t context_vacuum()
+    void context_vacuum()
     {
-        if (!opt_enable_compression) return 0;
+        if (!opt_enable_compression) return;
         double ratio = heap::get_physical_memory_ratio();
         bool heap_overflow = heap::allocated > art::get_max_module_memory();
         if ((heap_overflow || ratio > 0.99) && !decompressed_pages.empty())
@@ -1284,10 +1284,9 @@ public:
             //++flush_ticker;
             //size_t at = decompressed_pages.back();
             //decompressed_pages.pop_back();
-            return 0; //release_decompressed(cctx,at);
+            return; //release_decompressed(cctx,at);
         }
 
-        return 0;
     }
 
 

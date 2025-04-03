@@ -25,7 +25,8 @@ extern "C" {
 #include "keyspec.h"
 #include "ioutil.h"
 
-static ValkeyModuleDict* Keyspace{};
+//static ValkeyModuleDict* Keyspace{};
+static ValkeyModuleString * ok = nullptr;
 static std::shared_mutex shared{};
 
 std::shared_mutex& get_lock()
@@ -321,11 +322,10 @@ int cmd_KEYS(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
  * Set the specified key to the specified value. */
 int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
-    ValkeyModule_AutoMemory(ctx);
+
     compressed_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
-    //ValkeyModule_DictSet(Keyspace, argv[1], argv[2]);
     size_t klen, vlen;
     const char* k = ValkeyModule_StringPtrLen(argv[1], &klen);
     const char* v = ValkeyModule_StringPtrLen(argv[2], &vlen);
@@ -354,6 +354,7 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     {
         if (reply.size)
         {
+            ValkeyModule_AutoMemory(ctx);
             return reply_encoded_key(ctx, reply);
         }
         else
@@ -363,7 +364,8 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     }
     else
     {
-        return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        return ValkeyModule_ReplyWithString(ctx, ok);
+        //return VALKEYMODULE_OK;
     }
 }
 
@@ -391,7 +393,7 @@ int cmd_ADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     write_lock w(get_lock());
     art_insert_no_replace(get_art(), spec, converted.get_value(), {v, (unsigned)vlen}, fc);
 
-    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+    return ValkeyModule_ReplyWithString(ctx,ok);
 }
 
 /* CDICT.GET <key>
@@ -957,9 +959,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
     if (ValkeyModule_CreateCommand(ctx, NAME(CLEAR), "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
-
-    /* Create our global dictionary. Here we'll set our keys and values. */
-    Keyspace = ValkeyModule_CreateDict(nullptr);
+    ok = ValkeyModule_CreateString(ctx, "OK", 2);
+    // valkey should free this I hope
     if (art::register_valkey_configuration(ctx) != 0)
     {
         return VALKEYMODULE_ERR;

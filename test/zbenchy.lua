@@ -3,15 +3,10 @@ vk = redis
 
 local count = 1000000
 local result = {}
-local i = 1
 local index = 0
 local convert
 local tests = 0
-local failures = 0
-local successes = 0
 local numbers = {}
-local mem = {}
-local window = 100
 local inc = function()
     index = index + 1
     return index
@@ -57,14 +52,17 @@ local test = function()
         local k = convert(i)
         vk.call('B.SET',k,i)
     end
+
     local valids = 0
+
     for i = 1, count do
 	    local k = convert(i)
 	    if vk.call('B.GET',k) == ""..i then
             valids = valids + 1
         end
 	end
-    result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
+
+	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'VALIDS', valids}
     result[inc()] = {'B MEM', vk.call('B.HEAPBYTES')}
     result[inc()] = {'SIZE', vk.call('B.SIZE')}

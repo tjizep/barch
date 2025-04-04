@@ -339,6 +339,9 @@ static int SetEnablePageTrace(const char*unused_arg, ValkeyModuleString* val, vo
 
 static int ApplyEnablePageTrace(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
 {
+    std::unique_lock lock(config_mutex);
+    art::get_leaf_compression().set_opt_trace_page(record.log_page_access_trace);
+    art::get_node_compression().set_opt_trace_page(record.log_page_access_trace);
     return VALKEYMODULE_OK;
 }
 

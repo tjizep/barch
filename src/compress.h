@@ -787,7 +787,7 @@ private:
     {
         if (opt_page_trace)
         {
-            art::std_log("page trace:",at.address(),at.page(),at.offset(),modify);
+            art::std_log("page trace[",name,"]:",at.address(),at.page(),at.offset(),modify);
         }
         if (at.null()) return nullptr;
         invalid(at);
@@ -919,9 +919,15 @@ private:
     }
 
 public:
+
+    void set_opt_trace_page(bool value)
+    {
+        opt_page_trace = value;
+    }
+
     void set_opt_enable_compression(bool opt_compression)
     {
-        this->opt_enable_compression = opt_compression;
+        opt_enable_compression = opt_compression;
     }
 
     void free(compressed_address at, size_t sz)

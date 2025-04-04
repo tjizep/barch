@@ -35,12 +35,13 @@ local test = function()
         end
     end
     vk.call('B.COMMIT')
-    vk.call('B.BEGIN')
+
     for i = 1, count do
+        vk.call('B.BEGIN')
         local k = convert(i-1)
         local v = '#'..i
         if vk.call('B.GET',k) ~= v then
-            result[inc()] = {k, v, vk.call('B.GET',k)} --vk.call('cdict.lb',k)
+            result[inc()] = {k, v, vk.call('B.GET',k)}
         else
             successes = successes + 1
         end
@@ -48,8 +49,8 @@ local test = function()
             vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
         end
         vk.call('B.ROLLBACK')
-
     end
+
     result[inc()] = {"'B.RANGE',convert(2), convert(count-2), 10", vk.call('B.RANGE',convert(2), convert(count-2), 4)}
     result[inc()] = {[['B.MIN']], vk.call('B.MIN')}
     result[inc()] = {[['B.MAX']], vk.call('B.MAX')}
@@ -84,8 +85,8 @@ local clear = function()
             failures = failures + 1
         end
         if math.mod(i,logperiod) == 0 then
-        vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
-            end
+            vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
+        end
 
     end
 
@@ -95,7 +96,7 @@ local clear = function()
     result[inc()] = {'COUNT', count}
     result[inc()] = {'FAILURES', failures}
     result[inc()] = {'SUCCESSES', successes}
-    --vk.call('B.CLEAR')
+    vk.call('B.CLEAR')
 
 end
 

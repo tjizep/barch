@@ -257,13 +257,11 @@ namespace art
 
         compressed_address create_data() final
         {
-            address = get_node_compression().new_address(sizeof(encoded_data));
+            address = get_node_compression().new_address(alloc_size());
             encoded_data* r = get_node_compression().modify<encoded_data>(address);
             r->type = node_type;
             r->pointer_size = sizeof(IntPtrType);
             dcache = r;
-            statistics::addressable_bytes_alloc += sizeof(encoded_data);
-            statistics::interior_bytes_alloc += sizeof(encoded_data);
             switch (node_type)
             {
             case node_4:
@@ -287,8 +285,6 @@ namespace art
 
         void free_data() final
         {
-            statistics::addressable_bytes_alloc -= alloc_size();
-            statistics::interior_bytes_alloc -= alloc_size();
             switch (node_type)
             {
             case node_4:

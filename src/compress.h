@@ -929,7 +929,10 @@ public:
     {
         opt_enable_compression = opt_compression;
     }
-
+    [[nodiscard]] uint64_t get_allocated() const
+    {
+        return allocated;
+    }
     void free(compressed_address at, size_t sz)
     {
         size_t size = sz + test_memory + allocation_padding;
@@ -1243,10 +1246,6 @@ public:
         {
             //abort();
         }
-        if (statistics::addressable_bytes_alloc < statistics::interior_bytes_alloc)
-        {
-            //abort();
-        }
         context_vacuum();
         mutex.unlock();
     }
@@ -1477,6 +1476,7 @@ public:
         erased = {}; // for runtime use after free tests
         last_created_page = {};
         last_page_ptr = {};
+
 
         if (dict)
         {

@@ -52,12 +52,14 @@ local test = function()
 	    vk.call('SET',k,i)
 	end
     local valids = 0
+
     for i = 1, count do
 	    local k = convert(i)
 	    if vk.call('GET',k) == ""..i then
             valids = valids + 1
         end
 	end
+
 	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
 	result[inc()] = {'VALIDS', valids}
     result[inc()] = {'SIZE', vk.call('DBSIZE')}

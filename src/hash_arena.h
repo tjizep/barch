@@ -18,9 +18,7 @@ namespace arena {
         };
 
     protected:
-        // ankerl hash seems to make a small difference
         typedef heap::allocator<std::pair<size_t,storage>> allocator_type;
-        //typedef std::allocator<std::pair<size_t,storage>> allocator_type;
 
         typedef ankerl::unordered_dense::map<
             size_t
@@ -29,7 +27,6 @@ namespace arena {
         ,   std::equal_to<size_t>
         ,   allocator_type> hash_type ;
 
-        //typedef std::unordered_map<size_t, storage> hash_type ;
         hash_type hidden_arena{};
         heap::vector<size_t> free_address_list{};
         heap::vector<size_t> buffered_free{};
@@ -62,7 +59,9 @@ namespace arena {
     public:
         base_hash_arena(const arena::base_hash_arena&) = default;
         base_hash_arena& operator=(const arena::base_hash_arena&) = default;
-        void clear() {
+
+        void clear()
+        {
             hidden_arena = hash_type{};
             free_address_list = heap::vector<size_t>{};
             buffered_free = heap::vector<size_t>{};
@@ -71,7 +70,6 @@ namespace arena {
             last_allocated = 0;
             max_address_accessed = 0;
             source = nullptr;
-
         }
         base_hash_arena() = default;
         // arena virtualization functions

@@ -1173,8 +1173,8 @@ art_statistics art::get_statistics()
     as.node256_nodes = (int64_t)statistics::n256_nodes;
     as.node256_occupants = as.node256_nodes ? ((int64_t)statistics::node256_occupants / as.node256_nodes) : 0ll;
     as.node48_nodes = (int64_t)statistics::n48_nodes;
-    as.bytes_allocated = (int64_t)statistics::addressable_bytes_alloc;
-    as.bytes_interior = (int64_t)statistics::interior_bytes_alloc;
+    as.bytes_allocated = (int64_t)get_leaf_compression().get_allocated() + get_node_compression().get_allocated(); //statistics::addressable_bytes_alloc;
+    as.bytes_interior = (int64_t)get_node_compression().get_allocated();
     as.page_bytes_compressed = (int64_t)statistics::page_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t)statistics::page_bytes_uncompressed;
     as.pages_uncompressed = (int64_t)statistics::pages_uncompressed;
@@ -1231,8 +1231,6 @@ static void stats_to_stream(OutStream& of) {
     writep(of, statistics::n256_nodes);
     writep(of, statistics::node256_occupants);
     writep(of, statistics::leaf_nodes);
-    writep(of, statistics::addressable_bytes_alloc);
-    writep(of, statistics::interior_bytes_alloc);
     writep(of, statistics::page_bytes_compressed);
     writep(of, statistics::page_bytes_uncompressed);
     writep(of, statistics::pages_uncompressed);
@@ -1253,8 +1251,6 @@ static void stream_to_stats(InStream& in) {
     readp(in, statistics::n256_nodes);
     readp(in, statistics::node256_occupants);
     readp(in, statistics::leaf_nodes);
-    readp(in, statistics::addressable_bytes_alloc);
-    readp(in, statistics::interior_bytes_alloc);
     readp(in, statistics::page_bytes_compressed);
     readp(in, statistics::page_bytes_uncompressed);
     readp(in, statistics::pages_uncompressed);
@@ -1384,8 +1380,6 @@ void art::tree::clear()
     statistics::n256_nodes = 0;
     statistics::node256_occupants = 0;
     statistics::leaf_nodes = 0;
-    statistics::addressable_bytes_alloc = 0;
-    statistics::interior_bytes_alloc = 0;
     statistics::page_bytes_compressed = 0;
     statistics::page_bytes_uncompressed = 0;
     statistics::pages_uncompressed = 0;

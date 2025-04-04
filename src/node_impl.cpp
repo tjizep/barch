@@ -19,9 +19,13 @@ art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl,
     auto logical = art::get_leaf_compression().new_address(leaf_size);
     auto* l = new(get_leaf_compression().read<leaf>(logical)) leaf(key_len, val_len, ttl, is_volatile);
     ++statistics::leaf_nodes;
-    statistics::addressable_bytes_alloc += leaf_size;
     l->set_key(key);
     l->set_value(v);
+    if (l->byte_size() != leaf_size)
+    {
+        abort();
+    }
+
     return logical;
 }
 
@@ -32,7 +36,6 @@ void art::free_leaf_node(art::leaf* l, compressed_address logical)
     l->set_deleted();
     art::get_leaf_compression().free(logical, l->byte_size());
     --statistics::leaf_nodes;
-    statistics::addressable_bytes_alloc -= (l->byte_size());
 }
 
 void art::free_leaf_node(art::node_ptr n)
@@ -215,16 +218,20 @@ void art::tree::run_defrag()
     {
         if (lc.fragmentation_ratio() > -1) //art::get_min_fragmentation_ratio())
         {
+            compressed_release releaser;
+            // for some reason we have to not do this while a transaction is active
+            if (transacted) return;
             auto fl = lc.create_fragmentation_list(art::get_max_defrag_page_count());
             art::key_spec options;
             for (auto p : fl)
             {
-                compressed_release releaser;
+
                 //write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);
 
                 page_iterator(page.first, page.second, [&fc,this](const art::leaf* l)
                 {
+                    if (l->deleted()) return;
                     size_t c1 = this->size;
                     art_delete(this, l->get_key(), fc);
                     if (c1 - 1 != this->size)
@@ -235,6 +242,7 @@ void art::tree::run_defrag()
 
                 page_iterator(page.first, page.second, [&fc,&options,this](const art::leaf* l)
                 {
+                    if (l->deleted()) return;
                     size_t c1 = this->size;
                     options.ttl = l->ttl();
                     art_insert(this, options, l->get_key(), l->get_value(), fc);

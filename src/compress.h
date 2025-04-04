@@ -569,11 +569,11 @@ private:
     {
         return main.allocate();
     }
-    bool has_free() const
+    [[nodiscard]] bool has_free() const
     {
         return main.has_free();
     }
-    bool is_free(size_t page) const
+    [[nodiscard]] bool is_free(size_t page) const
     {
         return main.is_free(page);
     }

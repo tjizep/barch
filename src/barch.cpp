@@ -367,6 +367,58 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         return ValkeyModule_ReplyWithBool(ctx, true);
     }
 }
+int cmd_MSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc < 3)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    for (int n = 2; n < argc; n+=2)
+    {
+        size_t klen, vlen;
+        const char* k = ValkeyModule_StringPtrLen(argv[n], &klen);
+        const char* v = ValkeyModule_StringPtrLen(argv[n + 1], &vlen);
+
+        if (key_ok(k, klen) != 0)
+        {
+            ValkeyModule_ReplyWithNull(ctx);
+            ++responses;
+            continue;
+        }
+
+        auto converted = conversion::convert(k, klen);
+        art::key_spec spec;//(argv, argc);
+        art::value_type reply{"", 0};
+        auto fc = [&](art::node_ptr) -> void
+        {
+            if (spec.get)
+            {
+                reply = converted.get_value();
+            }
+        };
+
+        art_insert(get_art(), spec, converted.get_value(), {v, (unsigned)vlen}, fc);
+        if (spec.get)
+        {
+            if (reply.size)
+            {
+                reply_encoded_key(ctx, reply);
+            }
+            else
+            {
+                ValkeyModule_ReplyWithNull(ctx);
+            }
+        }
+        else
+        {
+            ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        }
+        ++responses;
+    }
+    ValkeyModule_ReplySetArrayLength(ctx, responses);
+    return VALKEYMODULE_OK;
+}
 
 /* CDICT.ADD <key> <value>
  *
@@ -424,6 +476,50 @@ int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         auto vt = r.const_leaf()->get_value();
         return ValkeyModule_ReplyWithStringBuffer(ctx,vt.chars(), vt.size);
     }
+}
+/* CDICT.MGET <keys>
+ *
+ * Return the value of the specified key, or a null reply if the key
+ * is not defined. */
+int cmd_MGET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc != 2)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+    for (int arg = 2; arg < argc; ++arg)
+    {
+        size_t klen;
+        const char* k = ValkeyModule_StringPtrLen(argv[arg], &klen);
+        if (key_ok(k, klen) != 0)
+        {
+            ValkeyModule_ReplyWithNull(ctx);
+        }else
+        {
+            auto converted = conversion::convert(k, klen);
+            art::trace_list trace;
+            trace.reserve(klen);
+            //read_lock rl(get_lock());
+            art::node_ptr r = art_search(trace, get_art(), converted.get_value());
+            if (r.null())
+            {
+                ValkeyModule_ReplyWithNull(ctx);
+            }
+            else
+            {
+                auto vt = r.const_leaf()->get_value();
+                auto* val = ValkeyModule_CreateString(ctx, vt.chars(), vt.size);
+
+                ValkeyModule_ReplyWithString(ctx, val);
+            }
+            ++responses;
+        }
+
+    }
+    ValkeyModule_ReplySetArrayLength(ctx, responses);
+    return VALKEYMODULE_OK;
 }
 
 /* CDICT.MINIMUM
@@ -889,10 +985,16 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
     if (ValkeyModule_CreateCommand(ctx, NAME(SET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(MSET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(ADD), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(GET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(MGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(KEYS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

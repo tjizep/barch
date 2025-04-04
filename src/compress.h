@@ -1259,7 +1259,8 @@ public:
         {
             if (total_heap < statistics::page_bytes_compressed)
             {
-                abort();
+                //abort();
+                art::std_log("Warning",(long long)total_heap, "<", (long long)statistics::page_bytes_compressed);
             }
             auto start_vac = std::chrono::high_resolution_clock::now();
             result = inner_vacuum();

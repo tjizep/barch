@@ -374,7 +374,8 @@ int cmd_MSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
-    for (int n = 2; n < argc; n+=2)
+    int r = VALKEYMODULE_OK;
+    for (int n = 1; n < argc; n+=2)
     {
         size_t klen, vlen;
         const char* k = ValkeyModule_StringPtrLen(argv[n], &klen);
@@ -382,7 +383,7 @@ int cmd_MSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
         if (key_ok(k, klen) != 0)
         {
-            ValkeyModule_ReplyWithNull(ctx);
+            r |= ValkeyModule_ReplyWithNull(ctx);
             ++responses;
             continue;
         }
@@ -392,32 +393,14 @@ int cmd_MSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         art::value_type reply{"", 0};
         auto fc = [&](art::node_ptr) -> void
         {
-            if (spec.get)
-            {
-                reply = converted.get_value();
-            }
         };
 
         art_insert(get_art(), spec, converted.get_value(), {v, (unsigned)vlen}, fc);
-        if (spec.get)
-        {
-            if (reply.size)
-            {
-                reply_encoded_key(ctx, reply);
-            }
-            else
-            {
-                ValkeyModule_ReplyWithNull(ctx);
-            }
-        }
-        else
-        {
-            ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-        }
+
         ++responses;
     }
-    ValkeyModule_ReplySetArrayLength(ctx, responses);
-    return VALKEYMODULE_OK;
+    ValkeyModule_ReplyWithBool(ctx, true);
+    return 0;
 }
 
 /* CDICT.ADD <key> <value>
@@ -485,11 +468,11 @@ int cmd_MGET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
     ValkeyModule_AutoMemory(ctx);
     compressed_release release;
-    if (argc != 2)
+    if (argc < 2)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    for (int arg = 2; arg < argc; ++arg)
+    for (int arg = 1; arg < argc; ++arg)
     {
         size_t klen;
         const char* k = ValkeyModule_StringPtrLen(argv[arg], &klen);

@@ -398,7 +398,7 @@ namespace heap
         }
     };
 
-    /// since the std::vector seems to not work in valkey
+    /// a checked vector with automatic heap allocator
     template <typename T>
     struct vector
     {

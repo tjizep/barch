@@ -598,10 +598,6 @@ namespace heap
 
         T* begin()
         {
-            if (empty())
-            {
-                throw std::out_of_range("begin()");
-            }
             return content.begin();
         }
 

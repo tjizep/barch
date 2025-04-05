@@ -84,6 +84,7 @@ namespace conversion
         return comparable_bytes(in, art::tdouble);
     }
 
+
     struct comparable_result
     {
     private:
@@ -163,8 +164,7 @@ namespace conversion
         {
             if (*s == ' ')
                 continue;
-            else
-                break;
+            break;
         }
         return s;
     }
@@ -190,6 +190,24 @@ namespace conversion
         return true;
     }
 
+    bool convert_value(int64_t& i, art::value_type v)
+    {
+        if (is_integer(v.chars(), v.size))
+        {
+            auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
+
+            if (ianswer.ec == std::errc())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static art::value_type to_value(const std::string& s)
+    {
+        return {s.c_str(),(unsigned)s.length()};
+    }
     // take a string and convert to a number as bytes or leave it alone
     // and return the bytes directly. the bytes will be copied
     static comparable_result convert(const char* v, size_t vlen)

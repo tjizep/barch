@@ -15,6 +15,7 @@ extern "C" {
 
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <shared_mutex>
 #include "conversion.h"
@@ -367,6 +368,62 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         return ValkeyModule_ReplyWithBool(ctx, true);
     }
 }
+static int BarchMofifyInteger(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc,const std::function<int64_t(int64_t in)>& modify)
+{
+    compressed_release release;
+    if (argc != 2)
+        return ValkeyModule_WrongArity(ctx);
+    size_t klen;
+    const char* k = ValkeyModule_StringPtrLen(argv[1], &klen);
+    art::key_spec spec;
+    if (key_ok(k, klen) != 0)
+        return key_check(ctx, k, klen);
+
+    auto converted = conversion::convert(k, klen);
+    //write_lock wl(get_lock());
+    int r = VALKEYMODULE_ERR;
+    int64_t l;
+    auto updater = [&](const art::node_ptr& value) -> art::node_ptr
+    {
+        const art::leaf * leaf = value.const_leaf();
+        if (conversion::convert_value(l,leaf->get_value())){
+
+            l = modify(l);
+            auto s = std::to_string(l);
+            r = VALKEYMODULE_OK;
+            return make_leaf
+            (   leaf->get_key()
+            ,   conversion::to_value(s)
+            ,   leaf->ttl()
+            ,   leaf->is_volatile()
+            );
+        }
+
+        return nullptr;
+    };
+    art::update(get_art(), converted.get_value(),updater);
+    if (r == VALKEYMODULE_OK)
+    {
+        return ValkeyModule_ReplyWithLongLong(ctx, l);
+    }else
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+
+}
+
+int cmd_INCR(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    auto incr = [](int64_t in) -> int64_t {return in + 1;};
+    return BarchMofifyInteger(ctx, argv, argc, incr);
+}
+
+int cmd_DECR(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    auto incr = [](int64_t in) -> int64_t {return in - 1;};
+    return BarchMofifyInteger(ctx, argv, argc, incr);
+}
+
 int cmd_MSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
     ValkeyModule_AutoMemory(ctx);
@@ -966,6 +1023,12 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(SET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(INCR), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(DECR), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(MSET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)

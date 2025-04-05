@@ -570,6 +570,10 @@ namespace art
             return data;
         };
 
+        [[nodiscard]] value_type get_raw_key() const
+        {
+            return {key(), (unsigned)key_len};
+        }
         [[nodiscard]] value_type get_key() const
         {
             return {key(), (unsigned)key_len + 1};

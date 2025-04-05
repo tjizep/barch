@@ -184,6 +184,15 @@ art::node_ptr art_minimum(art::tree* t);
  */
 namespace art
 {
+    /**
+     * call 'updater' if key exists. updater can return a new leaf to replace the existing one.
+     * if 'updater' returns null then nothing is updated
+     * @param t the art tree with root node
+     * @param key key to find
+     * @param updater function to call for supplying modified key
+     */
+    void update(tree* t, value_type key, const std::function<node_ptr(const node_ptr& leaf)>& updater);
+
     art::node_ptr maximum(art::tree* t);
 
     /**

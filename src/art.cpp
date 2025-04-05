@@ -280,6 +280,63 @@ art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type k
     }
     return nullptr;
 }
+void art::update(tree* t, value_type key, const std::function<node_ptr(const node_ptr& leaf)>& updater)
+{
+    ++statistics::get_ops;
+    try
+    {
+        art::node_ptr n = t->root;
+        unsigned depth = 0;
+        art::node_ptr last = t->root;
+        unsigned last_index = 0;
+        while (!n.null())
+        {
+            // Might be a leaf
+            if (n.is_leaf)
+            {
+                const auto* l = n.const_leaf();
+                if (l->expired()) return;
+
+                if (0 == l->compare(key))
+                {
+                    auto updated_child = updater(n);
+                    if (updated_child.null()) return;
+                    if (last.is_leaf)
+                    {
+                        t->root = updated_child;
+                    }else
+                    {
+                        last = last.modify()->expand_pointers(last, {updated_child});
+                        last.modify()->set_child(last_index, updated_child);
+                    }
+
+                }
+                return ;
+            }
+            const auto& d = n->data();
+            if (d.partial_len)
+            {
+                unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
+                if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
+                    return ;
+                depth += d.partial_len;
+                if (depth >= key.length())
+                {
+                    return ;
+                }
+            }
+            last = n;
+            last_index = n->index(key[depth]);
+            n = n->get_child(last_index);
+            depth++;
+        }
+    }
+    catch (std::exception& e)
+    {
+        art::log(e, __FILE__, __LINE__);
+        ++statistics::exceptions_raised;
+    }
+}
 
 // Find the maximum leaf under a node
 static art::node_ptr inner_maximum(art::node_ptr n)

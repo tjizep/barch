@@ -10,6 +10,7 @@
 #include <cstring> // for memcpy
 #include <new> // bad_alloc, bad_array_new_length
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace heap
@@ -401,8 +402,7 @@ namespace heap
     template <typename T>
     struct vector
     {
-        heap::buffer<T> content{};
-        size_t count{0};
+        std::vector<T, allocator<T>> content{};
         vector() = default;
 
         explicit vector(size_t r)
@@ -427,57 +427,34 @@ namespace heap
 
         vector& operator=(const vector& other) noexcept
         {
-            resize(other.size());
-            std::copy(other.begin(), other.end(), begin());
+            content = other.content;
             return *this;
         }
 
         vector& operator=(vector&& other) noexcept
         {
-            count = other.count;
             content = std::move(other.content);
-            other.count = 0;
             return *this;
         }
 
         [[nodiscard]] bool empty() const
         {
-            return count == 0;
+            return content.empty();
         }
 
         [[nodiscard]] size_t capacity() const
         {
-            return content.size();
+            return content.capacity();
         };
 
         [[nodiscard]] size_t size() const
         {
-            return count;
+            return content.size();
         }
 
         void resize(size_t n)
         {
-            if (count > content.size())
-            {
-                abort();
-                // your hitting this because multiple threads are using this instance concurrently without a lock
-            }
-            if (capacity() < n)
-            {
-                reserve(n * 2);
-            }
-
-            for (auto t = count; t < n; ++t)
-            {
-                new(&content[t]) T();
-            }
-
-            for (auto t = n; t < count; ++t)
-            {
-                content[t].~T();
-            }
-
-            count = n;
+            content.resize(n);
         }
 
         bool included(const T* it) const
@@ -498,115 +475,78 @@ namespace heap
         void erase(const T* from, const T* to)
         {
             if (!included(from) || !included(to) || from > to) return; // TODO: or abort() ?
-
-            vector other(end() - to);
-            for (auto s = to; s < end(); ++s)
-            {
-                other.push_back(*s); // copy the remainder
-            }
-            resize(size() - (end() - from));
-            for (auto& it : other)
-            {
-                push_back(std::move(it));
-            }
+            content.erase(from, to);
         }
 
         void reserve(size_t n)
         {
-            if (count > content.size())
-            {
-                abort();
-            }
-            if (capacity() < n)
-            {
-                heap::buffer<T> other(n);
-                for (size_t t = 0; t < count; ++t)
-                {
-                    new(&other.ptr[t]) T();
-                    other.ptr[t] = std::move(content[t]);
-                    content[t].~T();
-                }
-                content = std::move(other);
-            }
+            content.reserve(n);
         }
 
         void clear()
         {
-            for (size_t t = 0; t < count; ++t)
-            {
-                content[t].~T();
-            }
-            count = 0;
-            content.release();
+            content.clear();
         }
 
         void push_back(const T& x)
         {
-            auto b = count;
-            resize(count + 1);
-            content[b] = x;
+            content.emplace_back(x);
         }
 
         template <typename... Args>
         void emplace_back(Args&&... arg)
         {
-            auto b = count;
-            resize(b + 1);
-            content[b] = T(std::forward<Args>(arg)...);
+            content.emplace_back(std::forward<Args>(arg)...);
         }
 
         void emplace_back(const T& x)
         {
-            auto b = count;
-            resize(b + 1);
-            content[b] = x;
+            content.emplace_back(x);
         }
 
         void emplace_back()
         {
-            auto b = count;
-            resize(b + 1);
+            content.emplace_back();
         }
         void emplace_back(const T* data, size_t n)
         {
-            auto b = count;
-            reserve(b + n);
-            append(data, size);
+            for (size_t i = 0; i < n; ++i)
+                content.emplace_back(data+i);
         }
 
         void append(const T* start, const T* end)
         {
-            for (auto it = start; it < end; ++it)
-            {
-                push_back(*it);
-            }
+            content.insert(content.end(), start, end);
         }
 
         void append(const vector& other)
         {
-            reserve(size() + other.size());
             append(other.cbegin(), other.cend());
         }
 
         T& back()
         {
-            return content[count - 1];
+            if (content.size() == 0)
+            {
+                throw std::out_of_range("back()");
+            }
+            return content.back();
         }
 
         const T& back() const
         {
             if (empty())
             {
-                abort();
+                throw std::out_of_range("back()");
             }
-            return content[count - 1];
+            return content.back();
         }
 
         void pop_back()
         {
-            if (count > 0)
+            if (!empty())
             {
-                resize(count - 1);
+                content.pop_back();
             }
         }
 
@@ -622,72 +562,80 @@ namespace heap
 
         T& at(size_t ix)
         {
-            if (ix >= count)
+            if (ix >= size())
             {
-                abort();
+                throw std::out_of_range("at()");
             }
             return content[ix];
         }
 
         const T& at(size_t ix) const
         {
-            if (ix >= count)
+            if (ix >= size())
             {
-                abort();
+                throw std::out_of_range("at()");
             }
             return content[ix];
         }
 
         T* data()
         {
+            if (empty())
+            {
+                throw std::out_of_range("data()");
+            }
             return content.data();
         }
 
         const T* data() const
         {
+            if (empty())
+            {
+                throw std::out_of_range("data()");
+            }
             return content.data();
         }
 
         T* begin()
         {
+            if (empty())
+            {
+                throw std::out_of_range("begin()");
+            }
             return content.begin();
         }
 
         const T* cbegin() const
         {
+            if (empty())
+            {
+                throw std::out_of_range("cbegin()");
+            }
             return content.begin();
         }
 
         const T* begin() const
         {
+            if (empty())
+            {
+                throw std::out_of_range("begin()");
+            }
             return content.begin();
         }
 
         T* end()
         {
-            if (count > capacity())
-            {
-                abort();
-            }
-            return content.begin() + count;
+            return content.end();
         }
 
         const T* end() const
         {
-            if (count > capacity())
-            {
-                abort();
-            }
-            return content.begin() + count;
+            return content.end();
         }
 
         const T* cend() const
         {
-            if (count > capacity())
-            {
-                abort();
-            }
-            return content.begin() + count;
+            return content.end();
         }
     };
 }

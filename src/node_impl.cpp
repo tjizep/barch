@@ -218,13 +218,13 @@ void art::tree::run_defrag()
     {
         if (lc.fragmentation_ratio() > -1) //art::get_min_fragmentation_ratio())
         {
-            compressed_release releaser;
-            // for some reason we have to not do this while a transaction is active
-            if (transacted) return;
             auto fl = lc.create_fragmentation_list(art::get_max_defrag_page_count());
             art::key_spec options;
             for (auto p : fl)
             {
+                compressed_release releaser;
+                // for some reason we have to not do this while a transaction is active
+                if (transacted) continue;
 
                 //write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);

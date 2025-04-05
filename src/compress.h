@@ -159,9 +159,9 @@ struct free_bin
         return !empty();
     }
 
-    heap::vector<size_t> get_addresses(size_t page)
+    std::vector<size_t, heap::allocator<size_t>> get_addresses(size_t page)
     {
-        heap::vector<size_t> r;
+        std::vector<size_t, heap::allocator<size_t>> r;
         if (page < page_index.size())
         {
             size_t at = page_index.at(page);
@@ -255,6 +255,7 @@ struct free_list
     size_t max_bin = 0;
     address_set addresses{};
     heap::vector<free_bin> free_bins{};
+    //heap::vector<free_bin> free_bins{};
 
     free_list()
     {
@@ -402,7 +403,7 @@ private:
     bool opt_enable_compression = false;
     bool opt_enable_lru = false;
     bool opt_validate_addresses = false;
-    bool opt_move_decompressed_pages = true;
+    bool opt_move_decompressed_pages = false;
     unsigned opt_iterate_workers = 1;
 
     bool threads_exit = false;
@@ -1044,9 +1045,9 @@ public:
     // TODO: this function may cause to much latency when the arena is large
     // maybe just dont iterate through everything - it doesnt need to get
     // every page
-    heap::vector<size_t> create_fragmentation_list(size_t max_pages) const
+    std::vector<size_t, heap::allocator<size_t>> create_fragmentation_list(size_t max_pages) const
     {
-        heap::vector<size_t> pages;
+        std::vector<size_t, heap::allocator<size_t>> pages;
         if (fragmented.empty()) return {};
         for (auto page : fragmented)
         {

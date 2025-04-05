@@ -40,5 +40,8 @@ namespace statistics {
     extern std::atomic<uint64_t> insert_ops;
     extern std::atomic<uint64_t> min_ops;
     extern std::atomic<uint64_t> max_ops;
+    extern std::atomic<uint64_t> incr_ops;
+    extern std::atomic<uint64_t> decr_ops;
+    extern std::atomic<uint64_t> update_ops;
 
 }

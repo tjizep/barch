@@ -282,7 +282,7 @@ art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type k
 }
 void art::update(tree* t, value_type key, const std::function<node_ptr(const node_ptr& leaf)>& updater)
 {
-    ++statistics::get_ops;
+    ++statistics::update_ops;
     try
     {
         art::node_ptr n = t->root;

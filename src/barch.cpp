@@ -414,12 +414,14 @@ static int BarchMofifyInteger(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, i
 
 int cmd_INCR(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
+    ++statistics::incr_ops;
     auto incr = [](int64_t in) -> int64_t {return in + 1;};
     return BarchMofifyInteger(ctx, argv, argc, incr);
 }
 
 int cmd_DECR(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
+    ++statistics::decr_ops;
     auto incr = [](int64_t in) -> int64_t {return in - 1;};
     return BarchMofifyInteger(ctx, argv, argc, incr);
 }

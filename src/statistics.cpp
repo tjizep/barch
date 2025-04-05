@@ -36,3 +36,6 @@ std::atomic<uint64_t> statistics::size_ops = 0;
 std::atomic<uint64_t> statistics::insert_ops = 0;
 std::atomic<uint64_t> statistics::min_ops = 0;
 std::atomic<uint64_t> statistics::max_ops = 0;
+std::atomic<uint64_t> statistics::incr_ops = 0;
+std::atomic<uint64_t> statistics::decr_ops = 0;
+std::atomic<uint64_t> statistics::update_ops = 0;

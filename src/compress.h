@@ -109,8 +109,8 @@ struct free_bin
     }
 
     unsigned size = 0;
-    std::vector<uint32_t, heap::allocator<uint32_t>> page_index{};
-    std::vector<free_page, heap::allocator<free_page>> pages{};
+    heap::vector<uint32_t> page_index{};
+    heap::vector<free_page> pages{};
 
     struct page_max_t
     {

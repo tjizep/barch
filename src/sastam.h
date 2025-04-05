@@ -620,7 +620,7 @@ namespace heap
             {
                 throw std::out_of_range("begin()");
             }
-            return content.begin();
+            return &*(content.begin());
         }
 
         T* end()
@@ -630,12 +630,12 @@ namespace heap
 
         const T* end() const
         {
-            return content.end();
+            return begin() + size();
         }
 
         const T* cend() const
         {
-            return content.end();
+            return begin() + size();
         }
     };
 }

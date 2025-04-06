@@ -303,13 +303,14 @@ void art::update(tree* t, value_type key, const std::function<node_ptr(const nod
                     if (updated_child.null()) return;
                     if (last.is_leaf)
                     {
+
                         t->root = updated_child;
                     }else
                     {
                         last = last.modify()->expand_pointers(last, {updated_child});
                         last.modify()->set_child(last_index, updated_child);
                     }
-
+                    free_leaf_node(n);
                 }
                 return ;
             }

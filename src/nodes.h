@@ -547,8 +547,7 @@ namespace art
         {
             long expiry = ttl();
             if (!expiry) return false;
-            auto n = now();
-            return n > expiry;
+            return now() > expiry;
         }
 
         [[nodiscard]] bool deleted() const

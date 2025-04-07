@@ -285,6 +285,7 @@ void art::update(tree* t, value_type key, const std::function<node_ptr(const nod
     ++statistics::update_ops;
     try
     {
+        art::node_ptr r;
         art::node_ptr n = t->root;
         unsigned depth = 0;
         art::node_ptr last = t->root;
@@ -295,8 +296,11 @@ void art::update(tree* t, value_type key, const std::function<node_ptr(const nod
             if (n.is_leaf)
             {
                 const auto* l = n.const_leaf();
-                if (l->expired()) return;
-
+                if (l->expired())
+                {
+                    r = updater(r);
+                    return;
+                }
                 if (0 == l->compare(key))
                 {
                     auto updated_child = updater(n);
@@ -311,6 +315,9 @@ void art::update(tree* t, value_type key, const std::function<node_ptr(const nod
                         last.modify()->set_child(last_index, updated_child);
                     }
                     free_leaf_node(n);
+                }else
+                {
+                    r = updater(r);
                 }
                 return ;
             }
@@ -319,10 +326,15 @@ void art::update(tree* t, value_type key, const std::function<node_ptr(const nod
             {
                 unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
                 if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
+                {
+                    r = updater(r);
                     return ;
+                }
+
                 depth += d.partial_len;
                 if (depth >= key.length())
                 {
+                    r = updater(r);
                     return ;
                 }
             }
@@ -331,6 +343,7 @@ void art::update(tree* t, value_type key, const std::function<node_ptr(const nod
             n = n->get_child(last_index);
             depth++;
         }
+        r = updater(r);
     }
     catch (std::exception& e)
     {

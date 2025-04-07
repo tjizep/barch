@@ -487,6 +487,329 @@ int cmd_MSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     ValkeyModule_ReplyWithBool(ctx, true);
     return 0;
 }
+int cmd_HSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc < 4)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    int r = VALKEYMODULE_OK;
+    size_t nlen;
+    thread_local heap::vector<conversion::comparable_result> composite;
+    thread_local heap::vector<uint8_t> key_buffer;
+    composite.clear();
+    key_buffer.clear();
+    composite.push_back(art::ts_composite);
+    art::key_spec spec;
+    int64_t updated = 0;
+
+    auto fc = [&](art::node_ptr) -> void
+    {
+        ++updated;
+    };
+    const char* n = ValkeyModule_StringPtrLen(argv[1], &nlen);
+    if (key_ok(n, nlen) != 0)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    composite.push_back(conversion::convert(n, nlen));
+
+    for (int n = 2; n < argc; n+=2)
+    {
+        size_t klen, vlen;
+        const char* k = ValkeyModule_StringPtrLen(argv[n], &klen);
+        const char* v = ValkeyModule_StringPtrLen(argv[n + 1], &vlen);
+
+        if (key_ok(k, klen) != 0)
+        {
+            r |= ValkeyModule_ReplyWithNull(ctx);
+            ++responses;
+            continue;
+        }
+
+        auto converted = conversion::convert(k, klen);
+        composite.push_back(converted);
+
+        art::value_type key = get_table_bytes(key_buffer, composite);
+
+        art_insert(get_art(), spec, key, {v, (unsigned)vlen}, fc);
+        composite.pop_back();
+        ++responses;
+    }
+    ValkeyModule_ReplyWithBool(ctx, updated > 0 ? 0 : 1);
+    return 0;
+}
+int cmd_HEXPIRE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc < 4)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    int r = VALKEYMODULE_OK;
+    size_t nlen;
+    thread_local heap::vector<conversion::comparable_result> composite;
+    thread_local heap::vector<uint8_t> key_buffer;
+    composite.clear();
+    key_buffer.clear();
+    composite.push_back(art::ts_composite);
+    art::key_spec spec;
+
+    const char* n = ValkeyModule_StringPtrLen(argv[1], &nlen);
+    if (key_ok(n, nlen) != 0)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    composite.push_back(conversion::convert(n, nlen));
+    art::hexpire_spec ex_spec(argv, argc);
+    if (ex_spec.parse_options() != VALKEYMODULE_OK)
+    {
+        return ValkeyModule_ReplyWithSimpleString(ctx,"ERR");
+    }
+    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+    for (int n = ex_spec.fields_start; n < argc; ++n)
+    {
+        size_t klen;
+        const char* k = ValkeyModule_StringPtrLen(argv[n], &klen);
+
+        if (key_ok(k, klen) != 0)
+        {
+            r |= ValkeyModule_ReplyWithNull(ctx);
+            ++responses;
+            continue;
+        }
+
+        auto converted = conversion::convert(k, klen);
+        composite.push_back(converted);
+        auto updater = [&](const art::node_ptr& leaf) -> art::node_ptr
+        {
+            if (leaf.null())
+            {
+                r |= ValkeyModule_ReplyWithLongLong(ctx, -2);
+            }else
+            {
+                auto l = leaf.const_leaf();
+                auto n = art::now();
+                auto ttl = n + 1000*ex_spec.seconds;
+                bool do_set = false;
+                if (ex_spec.NX)
+                {
+                    do_set =  !l->is_ttl();
+                }
+                if (ex_spec.XX)
+                {
+                    do_set =  l->is_ttl();
+                }
+                if (ex_spec.GT)
+                {
+                    do_set = (l->ttl() > 0 && l->ttl() < ttl);
+                }
+                if (ex_spec.LT)
+                {
+                    do_set = (l->ttl() > 0 && l->ttl() >= ttl);
+                }
+                if (do_set)
+                {
+                    r |= ValkeyModule_ReplyWithLongLong(ctx, 1);
+                    return art::make_leaf(l->get_key(),l->get_value(),ttl,l->is_volatile());
+
+                }else
+                {
+                    r |= ValkeyModule_ReplyWithLongLong(ctx, 0);
+                }
+            }
+            return nullptr;
+        };
+
+        art::value_type key = get_table_bytes(key_buffer, composite);
+        art::update(get_art(), key, updater);
+        composite.pop_back();
+        ++responses;
+    }
+    ValkeyModule_ReplySetArrayLength(ctx, responses);
+    return 0;
+}
+
+int cmd_HDEL(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc < 4)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    size_t nlen;
+    thread_local heap::vector<conversion::comparable_result> composite;
+    thread_local heap::vector<uint8_t> key_buffer;
+    composite.clear();
+    key_buffer.clear();
+    composite.push_back(art::ts_composite);
+    art::key_spec spec;
+    const char* n = ValkeyModule_StringPtrLen(argv[1], &nlen);
+    if (key_ok(n, nlen) != 0)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    composite.push_back(conversion::convert(n, nlen));
+    auto del_report = [&](art::node_ptr) -> void
+    {
+        ++responses;
+    };
+    for (int n = 2; n < argc; ++n)
+    {
+        size_t klen = 0;
+        const char* k = ValkeyModule_StringPtrLen(argv[n], &klen);
+
+        if (key_ok(k, klen) != 0)
+        {
+            continue;
+        }
+
+        auto converted = conversion::convert(k, klen);
+        composite.push_back(converted);
+
+        art::value_type key = get_table_bytes(key_buffer, composite);
+        art_delete(get_art(), key, del_report);
+        composite.pop_back();
+    }
+    ValkeyModule_ReplyWithLongLong(ctx, responses);
+    return 0;
+}
+
+int cmd_HGET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc < 3)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    thread_local heap::vector<conversion::comparable_result> composite;
+    thread_local heap::vector<uint8_t> key_buffer;
+    composite.clear();
+    key_buffer.clear();
+    composite.push_back(art::ts_composite);
+    size_t nlen = 0;
+    const char* n = ValkeyModule_StringPtrLen(argv[1], &nlen);
+    if (key_ok(n, nlen) != 0)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    composite.push_back(conversion::convert(n, nlen));
+    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+    for (int arg = 2; arg < argc; ++arg)
+    {
+        size_t klen;
+        const char* k = ValkeyModule_StringPtrLen(argv[arg], &klen);
+        if (key_ok(k, klen) != 0)
+        {
+            ValkeyModule_ReplyWithNull(ctx);
+        }else
+        {
+            auto converted = conversion::convert(k, klen);
+            composite.push_back(converted);
+            conversion::get_table_bytes(key_buffer, composite);
+            art::value_type search_key(key_buffer);
+            art::trace_list trace;
+            art::node_ptr r = art_search(trace, get_art(), search_key);
+            if (r.null())
+            {
+                ValkeyModule_ReplyWithNull(ctx);
+            }
+            else
+            {
+                auto vt = r.const_leaf()->get_value();
+                auto* val = ValkeyModule_CreateString(ctx, vt.chars(), vt.size);
+
+                ValkeyModule_ReplyWithString(ctx, val);
+            }
+            ++responses;
+        }
+
+    }
+    ValkeyModule_ReplySetArrayLength(ctx, responses);
+    return VALKEYMODULE_OK;
+}
+int cmd_HGETALL(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc != 2)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    thread_local heap::vector<conversion::comparable_result> composite;
+    thread_local heap::vector<uint8_t> key_buffer;
+    key_buffer.clear();
+    composite.clear();
+    composite.push_back(art::ts_composite);
+    size_t nlen = 0;
+    const char* n = ValkeyModule_StringPtrLen(argv[1], &nlen);
+    if (key_ok(n, nlen) != 0)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    composite.push_back(conversion::convert(n, nlen));
+    composite.push_back(art::ts_end);
+    get_table_bytes(key_buffer, composite);
+    art::value_type search_end(key_buffer);
+    art::value_type search_start = conversion::get_table_prefix(2, key_buffer, composite);
+    art::value_type table_key = conversion::get_table_prefix(2, key_buffer, composite);
+    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+    auto table_iter = [&](void*,art::value_type key,art::value_type value)-> int
+    {
+        if (!key.starts_with(table_key))
+        {
+            return -1;
+        }
+        reply_encoded_key(ctx, art::value_type{key.bytes+table_key.size,key.size-table_key.size});
+        auto* val = ValkeyModule_CreateString(ctx, value.chars(), value.size);
+        ValkeyModule_ReplyWithString(ctx, val);
+        responses+=2;
+
+        return 0;
+    };
+    art::range(get_art(),search_start, search_end, table_iter,nullptr);
+
+    ValkeyModule_ReplySetArrayLength(ctx, responses);
+    return VALKEYMODULE_OK;
+}
+
+int cmd_HEXISTS(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc != 2)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    thread_local heap::vector<conversion::comparable_result> composite;
+    thread_local heap::vector<uint8_t> key_buffer;
+    key_buffer.clear();
+    composite.clear();
+    composite.push_back(art::ts_composite);
+    size_t nlen = 0;
+    const char* n = ValkeyModule_StringPtrLen(argv[1], &nlen);
+    if (key_ok(n, nlen) != 0)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    composite.push_back(conversion::convert(n, nlen));
+    composite.push_back(art::ts_end);
+    get_table_bytes(key_buffer, composite);
+    art::value_type search_end(key_buffer);
+    art::value_type search_start = conversion::get_table_prefix(2, key_buffer, composite);
+    art::value_type table_key = conversion::get_table_prefix(2, key_buffer, composite);
+    auto table_iter = [&](void*,art::value_type key,art::value_type unused(value))-> int
+    {
+        if (!key.starts_with(table_key))
+        {
+            return -1;
+        }
+        ++responses;
+        return -1;
+    };
+    art::range(get_art(),search_start, search_end, table_iter,nullptr);
+
+    return ValkeyModule_ReplyWithBool(ctx, responses > 0 ? 1 : 0);
+}
 
 /* CDICT.ADD <key> <value>
  *
@@ -1075,6 +1398,24 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(MGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HSET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HEXPIRE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HDEL), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HGETALL), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HEXISTS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(KEYS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

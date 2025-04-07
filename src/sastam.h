@@ -402,7 +402,8 @@ namespace heap
     template <typename T>
     struct vector
     {
-        std::vector<T, allocator<T>> content{};
+        typedef std::vector<T, allocator<T>> vtype;
+        vtype content{};
         vector() = default;
 
         explicit vector(size_t r)
@@ -596,37 +597,28 @@ namespace heap
             return content.data();
         }
 
-        T* begin()
+        typename vtype::iterator begin()
         {
             return content.begin();
         }
-
-        const T* cbegin() const
+        typename vtype::const_iterator begin() const
         {
-            if (empty())
-            {
-                throw std::out_of_range("cbegin()");
-            }
             return content.begin();
         }
-
-        const T* begin() const
+        typename vtype::const_iterator cbegin()
         {
-            if (empty())
-            {
-                throw std::out_of_range("begin()");
-            }
-            return &*(content.begin());
+            return content.cbegin();
         }
 
-        T* end()
+
+        typename vtype::iterator end()
         {
             return content.end();
         }
 
-        const T* end() const
+        typename vtype::const_iterator end() const
         {
-            return begin() + size();
+            return content.end();
         }
 
         const T* cend() const

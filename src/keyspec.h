@@ -10,12 +10,20 @@ extern "C" {
 }
 
 #include <string>
-#include <vector>
 #include <regex>
 #include <chrono>
-
+#include <initializer_list>
 namespace art
 {
+    /**
+         * the current time in milliseconds
+         */
+    static int64_t now()
+    {
+        using namespace std::chrono;
+        return std::chrono::duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    }
+
     struct base_key_spec
     {
         ValkeyModuleString* const* argv{};
@@ -24,10 +32,7 @@ namespace art
         int r = 0;
         mutable std::string s{};
 
-        int64_t now() const
-        {
-            return std::chrono::steady_clock::now().time_since_epoch().count();
-        }
+
 
         const std::string& tos(int at) const
         {
@@ -60,6 +65,13 @@ namespace art
             return s;
         }
 
+        bool is_integer(int at)
+        {
+            if (at >= argc) return 0;
+
+            auto& scheck = tos(at);
+            return  std::regex_match(scheck, integer);
+        }
         // integer
         int64_t tol(int at) const
         {
@@ -72,6 +84,35 @@ namespace art
             }
             auto val = std::stoll(scheck);
             return val;
+        }
+        static std::string& to_lower(std::string& s)
+        {
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            return s;
+        }
+        static std::string to_lower(const std::string& s)
+        {
+            std::string l = s;
+            std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+
+            return l;
+        }
+
+        int has_enum(const std::initializer_list<std::string>& names,int at)
+        {
+            const std::string& it = tos(at);
+            if (it.empty()) return false;
+            to_lower(s);
+            int found = 0;
+            for (auto& n : names)
+            {
+                if (to_lower(n) == s)
+                {
+                    return found;
+                }
+                ++found;
+            }
+            return found;
         }
 
         bool has(const char* what, int at) const
@@ -214,6 +255,78 @@ namespace art
                 return VALKEYMODULE_OK;
 
             return VALKEYMODULE_ERR;
+        }
+    };
+    struct hexpire_spec : base_key_spec
+    {
+        hexpire_spec& operator=(ValkeyModuleString**) = delete;
+        hexpire_spec& operator=(const keys_spec&) = delete;
+        hexpire_spec(const hexpire_spec&) = delete;
+
+        hexpire_spec(ValkeyModuleString** argvz, int argcz)
+        {
+            argv = argvz;
+            argc = argcz;
+        }
+        bool NX{false};
+        bool XX{false};
+        bool GT{false};
+        bool LT{false};
+        int64_t which_flag{4};
+        int64_t fields{0};
+        int64_t seconds{0};
+        int fields_start{0};
+        int parse_options()
+        {
+            int spos = 2; // the pattern is the first one
+            if (argc < 3)
+            {
+                return VALKEYMODULE_OK;
+            }
+            if (is_integer(spos))
+            {
+                seconds = tol(spos++);
+            }
+
+            which_flag = has_enum({"nx","xx","gt","lt"}, spos);
+            if (which_flag < 4)
+            {
+                switch (which_flag)
+                {
+                    case 0:
+                        NX = true;
+                        break;
+                    case 1:
+                        XX = true;
+                        break;
+                    case 2:
+                        GT = true;
+                        break;
+                    case 3:
+                        LT = true;
+                        break;
+                    default:
+                        break;
+                }
+                ++spos;
+            }
+            if (has("fields",spos))
+            {
+                if (!is_integer(++spos))
+                {
+                    return VALKEYMODULE_ERR;
+                }
+                fields = tol(spos++);
+                if (fields != argc - spos)
+                {
+                    return VALKEYMODULE_ERR;
+                }
+                fields_start = spos;
+            }else
+            {
+                return VALKEYMODULE_ERR;
+            }
+            return VALKEYMODULE_OK;
         }
     };
 };

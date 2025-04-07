@@ -88,10 +88,11 @@ namespace conversion
     struct comparable_result
     {
     private:
+        uint8_t storage[32]{};
         uint8_t* data = nullptr; // this may point to the integer or another externally allocated variable
         byte_comparable<int64_t> integer{};
         size_t size = 0; // the size as initialized - only changed on construction
-        uint8_t* bytes = nullptr;
+        uint8_t* bytes = nullptr; // NB! this gets freed
 
     public:
         explicit comparable_result(int64_t value)
@@ -109,15 +110,30 @@ namespace conversion
         {
             size = integer.get_size();
         }
-
+        comparable_result(const art::composite_type& ct)
+            : size(2)
+        {
+            storage[0] = ct.id;
+            storage[1] = 0x00;
+            data = storage;
+        }
         comparable_result(const char* val, size_t size)
             : size(size + 1)
         {
-            bytes = heap::allocate<uint8_t>(this->size + 1);
-            //TODO: ?hack? a hidden trailing null pointer has to be added
-            memcpy(bytes + 1, val, this->size - 1);
-            bytes[0] = art::tstring;
-            data = bytes;
+            if (this->size < sizeof(storage)-1)
+            {
+                memcpy(storage + 1, val, this->size - 1);
+                storage[0] = art::tstring;
+                data = storage;
+            }else
+            {
+                bytes = heap::allocate<uint8_t>(this->size + 1);
+                //TODO: ?hack? a hidden trailing null pointer has to be added
+                memcpy(bytes + 1, val, this->size - 1);
+                bytes[0] = art::tstring;
+                data = bytes;
+            }
+
         }
 
         comparable_result(const comparable_result& r)
@@ -133,11 +149,26 @@ namespace conversion
         comparable_result& operator=(const comparable_result& r)
         {
             if (this == &r) return *this;
-            bytes = heap::allocate<uint8_t>(r.size + 1); // hidden 0 byte at end
-            bytes[size] = 0;
+            if (bytes != nullptr) heap::free(bytes, this->size + 1);
+            bytes = nullptr;
             size = r.size;
-            data = bytes;
-            memcpy(bytes, r.bytes, size);
+            if (r.bytes != nullptr)
+            {
+                bytes = heap::allocate<uint8_t>(r.size + 1); // hidden 0 byte at end
+                data = bytes;
+            }else if (r.data==&r.integer.bytes[0])
+            {
+                data = &integer.bytes[0];
+            }else
+            {
+                if (size >= sizeof(storage)-1)
+                {
+                    abort();
+                }
+                data = storage;
+            }
+            memcpy(data, r.data, size);
+            data[size] = 0;
             return *this;
         }
 
@@ -219,7 +250,7 @@ namespace conversion
         {
             auto ianswer = fast_float::from_chars(v, v + vlen, i); // check if it's an integer first
 
-            if (ianswer.ec == std::errc())
+            if (ianswer.ec == std::errc() && ianswer.ptr == v + vlen)
             {
                 return comparable_result(i);
             }
@@ -243,5 +274,40 @@ namespace conversion
         byte_comparable<int64_t> dec(bytes, len);
 
         return dec_bytes_to_int(dec);
+    }
+    typedef heap::vector<comparable_result> comparable_vector;
+    template<typename VT>
+    static art::value_type get_table_prefix(size_t end, const heap::vector<uint8_t> & bytes, const VT& v)
+    {
+        size_t count = 0;
+        size_t at = 0;
+        for (const auto& i : v)
+        {
+            art::value_type k = i.get_value();
+            count += k.size;
+            ++at;
+            if (at == end) break;
+        }
+        return {bytes.data() ,count};
+    }
+
+    template<typename VT>
+    static art::value_type get_table_bytes(heap::vector<uint8_t> & result, const VT& v)
+    {
+        size_t count = 0;
+        for (const auto& i : v)
+        {
+            art::value_type k = i.get_value();
+            count += k.size;
+        }
+        result.resize(count);
+        auto p = result.data();
+        for (const auto& i : v)
+        {
+            art::value_type k = i.get_value();
+            memcpy(p, k.bytes, k.size);
+            p += k.size;
+        }
+        return art::value_type(result);
     }
 }

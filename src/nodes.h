@@ -11,6 +11,7 @@
 #include <array>
 #include "compress.h"
 #include "value_type.h"
+#include "keyspec.h"
 #define unused_arg
 #define unused(x)
 
@@ -32,8 +33,18 @@ namespace art
     {
         tinteger = 0,
         tdouble = 1,
-        tstring = 2
+        tstring = 2,
+        tcomposite = 3,
+        tend = 255
     };
+    struct composite_type
+    {
+        uint8_t id{};
+        composite_type(int id) : id(id) {}
+    };
+
+    static composite_type ts_composite {tcomposite};
+    static composite_type ts_end {tend};
 
     enum node_kind
     {
@@ -536,7 +547,7 @@ namespace art
         {
             long expiry = ttl();
             if (!expiry) return false;
-            auto n = std::chrono::steady_clock::now().time_since_epoch().count();
+            auto n = now();
             return n > expiry;
         }
 

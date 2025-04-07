@@ -385,6 +385,10 @@ static int BarchMofifyInteger(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, i
     int64_t l;
     auto updater = [&](const art::node_ptr& value) -> art::node_ptr
     {
+        if (value.null())
+        {
+            return nullptr;
+        }
         const art::leaf * leaf = value.const_leaf();
         if (conversion::convert_value(l,leaf->get_value())){
 

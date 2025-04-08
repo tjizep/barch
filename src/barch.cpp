@@ -908,8 +908,8 @@ int HGETEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, const std:
         return ValkeyModule_ReplyWithNull(ctx);
     }
     composite.push_back(conversion::convert(n, nlen));
-    art::value_type any_key = conversion::build_key(key_buffer, composite);
-    art::node_ptr lb = art::lower_bound(get_art(), any_key);
+    art::value_type any_key = build_key(key_buffer, composite);
+    art::node_ptr lb = lower_bound(get_art(), any_key);
     if (lb.null())
     {
         return ValkeyModule_ReplyWithNull(ctx);
@@ -1059,6 +1059,7 @@ int cmd_HGETALL(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     int responses = 0;
     thread_local heap::vector<conversion::comparable_result> composite;
     thread_local heap::vector<uint8_t> key_buffer;
+
     key_buffer.clear();
     composite.clear();
     composite.push_back(art::ts_composite);
@@ -1070,13 +1071,33 @@ int cmd_HGETALL(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     }
     composite.push_back(conversion::convert(n, nlen));
     composite.push_back(art::ts_end);
-    get_table_bytes(key_buffer, composite);
-    art::value_type search_end(key_buffer);
-    art::value_type search_start = conversion::get_table_prefix(2, key_buffer, composite);
-    art::value_type table_key = conversion::get_table_prefix(2, key_buffer, composite);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    auto table_iter = [&](void*,art::value_type key,art::value_type value)-> int
+
+    art::value_type search_end = build_key(key_buffer, composite);
+    art::value_type search_start = get_table_prefix(2, key_buffer, composite);
+    art::value_type table_key = get_table_prefix(2, key_buffer, composite);
+    bool exists = false;
+    auto table_counter = [&](art::node_ptr leaf)-> int
     {
+        auto l = leaf.const_leaf();
+        if (!l->get_key().starts_with(table_key))
+        {
+            return -1;
+        }
+        exists = true;
+        return -1;
+
+    };
+    art::range(get_art(),search_start, search_end, table_counter);
+    if (!exists)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+    auto table_iter = [&](const art::node_ptr& leaf)-> int
+    {
+        auto l = leaf.const_leaf();
+        auto key = l->get_key();
+        auto value = l->get_value();
         if (!key.starts_with(table_key))
         {
             return -1;
@@ -1088,7 +1109,7 @@ int cmd_HGETALL(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
         return 0;
     };
-    art::range(get_art(),search_start, search_end, table_iter,nullptr);
+    art::range(get_art(),search_start, search_end, table_iter);
 
     ValkeyModule_ReplySetArrayLength(ctx, responses);
     return VALKEYMODULE_OK;

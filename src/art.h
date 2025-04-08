@@ -65,7 +65,8 @@ struct art_ops_statistics
 };
 
 typedef std::function<int(void* data, art::value_type key, art::value_type value)> CallBack;
-typedef std::function<void(const art::node_ptr& l)> NodeResult;
+typedef std::function<int(const art::node_ptr&)> LeafCallBack;
+typedef std::function<void(const art::node_ptr&)> NodeResult;
 
 
 /**
@@ -160,6 +161,7 @@ void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::valu
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
+void art_delete(art::tree* t, art::value_type key);
 void art_delete(art::tree* t, art::value_type key, const NodeResult& fc);
 
 /**
@@ -239,7 +241,8 @@ int art_iter_prefix(art::tree* t, art::value_type prefix, CallBack cb, void* dat
  */
 namespace art
 {
-    int range(const art::tree* t, art::value_type key, art::value_type key_end, CallBack cb, void* data);
+    int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);
+    int range(const tree* t, value_type key, value_type key_end, LeafCallBack cb);
 }
 
 

@@ -390,7 +390,13 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         {
             // Check if the expanded path matches
             auto l = n.const_leaf();
-            if (!l->expired() && l->compare(key.bytes, key.length(), depth) >= 0)
+            if (l->expired())
+            {
+                art_delete((art::tree*)t, l->get_key());
+                n = t->root;
+                continue;
+            }
+            if (l->compare(key.bytes, key.length(), depth) >= 0)
             {
 
                 return n;
@@ -539,6 +545,54 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
                         {
                             ++statistics::iter_range_ops;
                             int r = cb(data, leaf->get_key(), leaf->get_value());
+                            if (r != 0)
+                                return r;
+                        } //skip this one if it's expired
+                    }
+                    else
+                    {
+                        return 0;
+                    }
+                }
+                else
+                {
+                    abort();
+                }
+            }
+            while (increment_trace(t->root, tl));
+        }
+    }
+    catch (std::exception& e)
+    {
+        art::log(e, __FILE__, __LINE__);
+        ++statistics::exceptions_raised;
+    }
+    return 0;
+}
+int art::range(const art::tree* t, art::value_type key, art::value_type key_end, LeafCallBack cb)
+{
+    ++statistics::range_ops;
+    try
+    {
+        art::trace_list tl;
+        auto lb = inner_lower_bound(tl, t, key);
+        if (lb.null()) return 0;
+        const art::leaf* al = lb.const_leaf();
+        if (al)
+        {
+            do
+            {
+                art::node_ptr n = last_el(tl).child;
+                if (n.is_leaf)
+                {
+                    const art::leaf* leaf = n.const_leaf();
+                    if (leaf->compare(key_end) <= 0)
+                    {
+                        // upper bound is not
+                        if (!leaf->expired())
+                        {
+                            ++statistics::iter_range_ops;
+                            int r = cb(n);
                             if (r != 0)
                                 return r;
                         } //skip this one if it's expired
@@ -927,6 +981,9 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref,
  * @return nullptr if the item was not found, otherwise
  * the value pointer is returned.
  */
+void art_delete(art::tree* t, art::value_type key)
+{   art_delete(t,key,[](const art::node_ptr& unused(n)){});
+}
 void art_delete(art::tree* t, art::value_type key, const NodeResult& fc)
 {
     ++statistics::delete_ops;

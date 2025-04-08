@@ -67,7 +67,7 @@ namespace art
 
         bool is_integer(int at)
         {
-            if (at >= argc) return 0;
+            if (at >= argc) return false;
 
             auto& scheck = tos(at);
             return  std::regex_match(scheck, integer);
@@ -329,5 +329,123 @@ namespace art
             return VALKEYMODULE_OK;
         }
     };
+    struct hgetex_spec : base_key_spec
+    {
+        hgetex_spec& operator=(ValkeyModuleString**) = delete;
+        hgetex_spec& operator=(const hgetex_spec&) = delete;
+        hgetex_spec(const hgetex_spec&) = delete;
+
+        hgetex_spec(ValkeyModuleString** argvz, int argcz)
+        {
+            argv = argvz;
+            argc = argcz;
+        }
+        bool EX{false};
+        bool PX{false};
+        bool EXAT{false};
+        bool PXAT{false};
+        bool PERSIST{false};
+        int64_t which_flag{5};
+        int64_t fields{0};
+        int64_t time_val{0};
+        int fields_start{0};
+        int parse_options()
+        {
+            int spos = 2; // the hash name is the first one
+            if (argc < 3)
+            {
+                return VALKEYMODULE_OK;
+            }
+
+            which_flag = has_enum({"ex","px","exat","pxat", "persist"}, spos);
+            if (which_flag < 5)
+            {
+                switch (which_flag)
+                {
+                    case 0:
+                        EX = true;
+                        break;
+                    case 1:
+                        PX = true;
+                        break;
+                    case 2:
+                        EX = true;
+                        break;
+                    case 3:
+                        EXAT = true;
+                        break;
+                    case 4:
+                        PERSIST = true;
+                    default:
+                        break;
+                }
+                if (is_integer(++spos))
+                {
+                    time_val = tol(spos);
+                    ++spos;
+                }
+
+            }
+            if (has("fields",spos))
+            {
+                if (!is_integer(++spos))
+                {
+                    return VALKEYMODULE_ERR;
+                }
+                fields = tol(spos++);
+                if (fields != argc - spos)
+                {
+                    return VALKEYMODULE_ERR;
+                }
+                fields_start = spos;
+            }else
+            {
+                return VALKEYMODULE_ERR;
+            }
+            return VALKEYMODULE_OK;
+        }
+    };
+    struct httl_spec : base_key_spec
+    {
+        httl_spec& operator=(ValkeyModuleString**) = delete;
+        httl_spec& operator=(const httl_spec&) = delete;
+        httl_spec(const hgetex_spec&) = delete;
+
+        httl_spec(ValkeyModuleString** argvz, int argcz)
+        {
+            argv = argvz;
+            argc = argcz;
+        }
+        int64_t fields{0};
+        int64_t time_val{0};
+        int fields_start{0};
+        int parse_options()
+        {
+            int spos = 2; // the hash name is the first one
+            if (argc < 3)
+            {
+                return VALKEYMODULE_OK;
+            }
+
+            if (has("fields",spos))
+            {
+                if (!is_integer(++spos))
+                {
+                    return VALKEYMODULE_ERR;
+                }
+                fields = tol(spos++);
+                if (fields != argc - spos)
+                {
+                    return VALKEYMODULE_ERR;
+                }
+                fields_start = spos;
+            }else
+            {
+                return VALKEYMODULE_ERR;
+            }
+            return VALKEYMODULE_OK;
+        }
+    };
+
 };
 #endif //SET_H

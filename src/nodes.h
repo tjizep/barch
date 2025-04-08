@@ -680,6 +680,10 @@ namespace art
         {
             return compare(k.bytes, k.length(), 0);
         }
+        [[nodiscard]] int prefix(value_type k) const
+        {
+            return prefix(k.bytes, k.length());
+        }
 
         int compare(const unsigned char* key, unsigned key_len, unsigned unused(depth)) const
         {
@@ -694,6 +698,15 @@ namespace art
             }
             return r;
         }
+        int prefix(const unsigned char* key, unsigned key_len) const
+        {
+            unsigned left_len = this->key_len;
+            unsigned right_len = key_len;
+            if (left_len < right_len) return -1;
+            int r = memcmp(this->data, key, std::min<unsigned>(left_len, right_len));
+            return r;
+        }
+
     };
 
 

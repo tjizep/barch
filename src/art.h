@@ -65,7 +65,7 @@ struct art_ops_statistics
 };
 
 typedef std::function<int(void* data, art::value_type key, art::value_type value)> CallBack;
-typedef std::function<void(art::node_ptr l)> NodeResult;
+typedef std::function<void(const art::node_ptr& l)> NodeResult;
 
 
 /**

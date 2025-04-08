@@ -389,8 +389,10 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         if (n.is_leaf)
         {
             // Check if the expanded path matches
-            if (n.const_leaf()->compare(key.bytes, key.length(), depth) >= 0)
+            auto l = n.const_leaf();
+            if (!l->expired() && l->compare(key.bytes, key.length(), depth) >= 0)
             {
+
                 return n;
             }
             return nullptr;
@@ -415,7 +417,17 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         depth++;
     }
     if (!extend_trace_min(t->root, trace)) return nullptr;
-    return last_el(trace).child;
+    n = last_el(trace).child;
+    if (n.is_leaf)
+    {
+        auto l = n.const_leaf();
+
+        if (!l->expired() && l->compare(key) >= 0)
+        {
+            return n;
+        }
+    }
+    return nullptr;
 }
 
 static art::trace_element first_child_off(art::node_ptr n)

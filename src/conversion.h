@@ -221,17 +221,41 @@ namespace conversion
         return true;
     }
 
-    bool convert_value(int64_t& i, art::value_type v)
+    bool convert_value(long long & i, art::value_type v)
     {
         if (is_integer(v.chars(), v.size))
         {
             auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
 
-            if (ianswer.ec == std::errc())
+            if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size)
             {
                 return true;
             }
         }
+        return false;
+    }
+    bool convert_value(int64_t & i, art::value_type v)
+    {
+        if (is_integer(v.chars(), v.size))
+        {
+            auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
+
+            if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    bool convert_value(double& i, art::value_type v)
+    {
+        auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
+
+        if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size)
+        {
+            return true;
+        }
+
         return false;
     }
 
@@ -293,6 +317,25 @@ namespace conversion
 
     template<typename VT>
     static art::value_type get_table_bytes(heap::vector<uint8_t> & result, const VT& v)
+    {
+        size_t count = 0;
+        for (const auto& i : v)
+        {
+            art::value_type k = i.get_value();
+            count += k.size;
+        }
+        result.resize(count);
+        auto p = result.data();
+        for (const auto& i : v)
+        {
+            art::value_type k = i.get_value();
+            memcpy(p, k.bytes, k.size);
+            p += k.size;
+        }
+        return art::value_type(result);
+    }
+    template<typename VT>
+    static art::value_type build_key(heap::vector<uint8_t> & result, const VT& v)
     {
         size_t count = 0;
         for (const auto& i : v)

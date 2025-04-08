@@ -20,5 +20,6 @@ assert(vk.call('B.HEXPIRE','tires','50000','LT','FIELDS','1','pirelli')[1] == 0)
 assert(vk.call('B.HGETEX','tires','EX',120,'FIELDS','1','pirelli')[1] == "p2")
 assert(vk.call('B.HTTL','tires','FIELDS',1,'pirelli')[1] <= 120)
 assert(vk.call('B.HGETEX','tires','PERSIST','FIELDS','2','pirelli','x')[1] == "p2")
-assert(vk.call('B.HLEN','tires') == 2)
+assert(vk.call('B.HLEN','tires') == #vk.call('B.HKEYS','tires'))
+
 return {"OK"}

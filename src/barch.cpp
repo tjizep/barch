@@ -1094,6 +1094,48 @@ int cmd_HGETALL(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     return VALKEYMODULE_OK;
 }
 
+int cmd_HKEYS(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+    ValkeyModule_AutoMemory(ctx);
+    compressed_release release;
+    if (argc != 2)
+        return ValkeyModule_WrongArity(ctx);
+    int responses = 0;
+    thread_local heap::vector<conversion::comparable_result> composite;
+    thread_local heap::vector<uint8_t> key_buffer;
+    key_buffer.clear();
+    composite.clear();
+    composite.push_back(art::ts_composite);
+    size_t nlen = 0;
+    const char* n = ValkeyModule_StringPtrLen(argv[1], &nlen);
+    if (key_ok(n, nlen) != 0)
+    {
+        return ValkeyModule_ReplyWithNull(ctx);
+    }
+    composite.push_back(conversion::convert(n, nlen));
+    composite.push_back(art::ts_end);
+    get_table_bytes(key_buffer, composite);
+    art::value_type search_end(key_buffer);
+    art::value_type search_start = conversion::get_table_prefix(2, key_buffer, composite);
+    art::value_type table_key = conversion::get_table_prefix(2, key_buffer, composite);
+    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+    auto table_iter = [&](void*,art::value_type key,art::value_type unused(value))-> int
+    {
+        if (!key.starts_with(table_key))
+        {
+            return -1;
+        }
+        reply_encoded_key(ctx, art::value_type{key.bytes+table_key.size,key.size-table_key.size});
+        responses+=1;
+
+        return 0;
+    };
+    art::range(get_art(),search_start, search_end, table_iter,nullptr);
+
+    ValkeyModule_ReplySetArrayLength(ctx, responses);
+    return VALKEYMODULE_OK;
+}
+
 int cmd_HEXISTS(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
     ValkeyModule_AutoMemory(ctx);
@@ -1761,6 +1803,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(HGETALL), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HKEYS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(HEXISTS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

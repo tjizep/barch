@@ -188,40 +188,10 @@ namespace conversion
         }
     };
 
-    static const char* eat_space(const char* str, size_t l)
-    {
-        const char* s = str;
-        for (; s != str + l; ++s) // eat continuous initial spaces
-        {
-            if (*s == ' ')
-                continue;
-            break;
-        }
-        return s;
-    }
-
-    static bool is_integer(const char* str, size_t l)
-    {
-        const char* s = eat_space(str, l);
-        if (s == str + l)
-        {
-            return false;
-        }
-        if (*s == '-')
-        {
-            ++s;
-        }
-        s = eat_space(s, l - (s - str));
-
-        for (; s != str + l; ++s)
-        {
-            if (!fast_float::is_integer(*s))
-                return false;
-        }
-        return true;
-    }
-
-    bool convert_value(long long & i, art::value_type v)
+    const char* eat_space(const char* str, size_t l);
+    bool is_integer(const char* str, size_t l);
+    template<typename IntType>
+    static bool convert_value(IntType & i, art::value_type v)
     {
         if (is_integer(v.chars(), v.size))
         {
@@ -234,61 +204,12 @@ namespace conversion
         }
         return false;
     }
-    bool convert_value(int64_t & i, art::value_type v)
-    {
-        if (is_integer(v.chars(), v.size))
-        {
-            auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
 
-            if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-    bool convert_value(double& i, art::value_type v)
-    {
-        auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
 
-        if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size)
-        {
-            return true;
-        }
-
-        return false;
-    }
-
-    static art::value_type to_value(const std::string& s)
-    {
-        return {s.c_str(),(unsigned)s.length()};
-    }
+    art::value_type to_value(const std::string& s);
     // take a string and convert to a number as bytes or leave it alone
     // and return the bytes directly. the bytes will be copied
-    static comparable_result convert(const char* v, size_t vlen)
-    {
-        int64_t i;
-        double d;
-
-        if (is_integer(v, vlen))
-        {
-            auto ianswer = fast_float::from_chars(v, v + vlen, i); // check if it's an integer first
-
-            if (ianswer.ec == std::errc() && ianswer.ptr == v + vlen)
-            {
-                return comparable_result(i);
-            }
-        }
-
-        auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
-
-        if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen)
-        {
-            return comparable_result(d);
-        }
-
-        return {v, vlen};
-    }
+    comparable_result convert(const char* v, size_t vlen);
 
     inline int64_t enc_bytes_to_int(const uint8_t* bytes, size_t len)
     {

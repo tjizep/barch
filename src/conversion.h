@@ -299,58 +299,5 @@ namespace conversion
 
         return dec_bytes_to_int(dec);
     }
-    typedef heap::vector<comparable_result> comparable_vector;
-    template<typename VT>
-    static art::value_type get_table_prefix(size_t end, const heap::vector<uint8_t> & bytes, const VT& v)
-    {
-        size_t count = 0;
-        size_t at = 0;
-        for (const auto& i : v)
-        {
-            art::value_type k = i.get_value();
-            count += k.size;
-            ++at;
-            if (at == end) break;
-        }
-        return {bytes.data() ,count};
-    }
 
-    template<typename VT>
-    static art::value_type get_table_bytes(heap::vector<uint8_t> & result, const VT& v)
-    {
-        size_t count = 0;
-        for (const auto& i : v)
-        {
-            art::value_type k = i.get_value();
-            count += k.size;
-        }
-        result.resize(count);
-        auto p = result.data();
-        for (const auto& i : v)
-        {
-            art::value_type k = i.get_value();
-            memcpy(p, k.bytes, k.size);
-            p += k.size;
-        }
-        return art::value_type(result);
-    }
-    template<typename VT>
-    static art::value_type build_key(heap::vector<uint8_t> & result, const VT& v)
-    {
-        size_t count = 0;
-        for (const auto& i : v)
-        {
-            art::value_type k = i.get_value();
-            count += k.size;
-        }
-        result.resize(count);
-        auto p = result.data();
-        for (const auto& i : v)
-        {
-            art::value_type k = i.get_value();
-            memcpy(p, k.bytes, k.size);
-            p += k.size;
-        }
-        return art::value_type(result);
-    }
 }

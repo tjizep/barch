@@ -114,6 +114,23 @@ namespace art
             }
             return found;
         }
+        template<class T>
+        int has_enum(const T& names,int at)
+        {
+            const std::string& it = tos(at);
+            if (it.empty()) return false;
+            to_lower(s);
+            int found = 0;
+            for (auto& n : names)
+            {
+                if (to_lower(n) == s)
+                {
+                    return found;
+                }
+                ++found;
+            }
+            return found;
+        }
 
         bool has(const char* what, int at) const
         {
@@ -132,7 +149,7 @@ namespace art
         bool get = false;
         bool nx = false;
         bool xx = false;
-        bool keepttl = false;
+        bool keepttl = true;
         int64_t ttl = 0;
 
         key_spec() = default;
@@ -446,6 +463,176 @@ namespace art
             return VALKEYMODULE_OK;
         }
     };
+    struct zadd_spec : base_key_spec
+    {
+        zadd_spec& operator=(ValkeyModuleString**) = delete;
+        zadd_spec& operator=(const zadd_spec&) = delete;
+        zadd_spec(const zadd_spec&) = delete;
 
+        zadd_spec(ValkeyModuleString** argvz, int argcz)
+        {
+            argv = argvz;
+            argc = argcz;
+        }
+        bool NX{false};
+        bool XX{false};
+        bool GT{false};
+        bool LT{false};
+        bool CH{false};
+
+        int64_t which_flag_n{3};
+        int64_t which_flag_g{3};
+
+        int fields_start{0};
+        int parse_options()
+        {
+            int spos = 2; // the key is the first one
+            if (argc < 3)
+            {
+                return VALKEYMODULE_OK;
+            }
+
+            which_flag_n = has_enum({"nx","xx"}, spos);
+            if (which_flag_n < 2)
+            {
+                switch (which_flag_n)
+                {
+                    case 0:
+                        NX = true;
+                        break;
+                    case 1:
+                        XX = true;
+                        break;
+                    default:
+                        break;
+                }
+                ++spos;
+
+            }
+            which_flag_g = has_enum({"gt","lt"}, spos);
+            if (which_flag_g < 2)
+            {
+                switch (which_flag_g)
+                {
+                case 0:
+                    GT = true;
+                    break;
+                case 1:
+                    LT = true;
+                    break;
+                default:
+                    break;
+                }
+                ++spos;
+
+            }
+            if (has("ch",spos))
+            {
+                CH = true;
+                spos++;
+            }
+            fields_start = spos;
+            return VALKEYMODULE_OK;
+        }
+    };
+    struct zops_spec : base_key_spec
+    {
+        zops_spec& operator=(ValkeyModuleString**) = delete;
+        zops_spec& operator=(const zops_spec&) = delete;
+        zops_spec(const zops_spec&) = delete;
+
+        zops_spec(ValkeyModuleString** argvz, int argcz)
+        {
+            argv = argvz;
+            argc = argcz;
+        }
+        int64_t fields_start{0};
+        size_t numkeys{0};
+        std::vector<std::string> keys{};
+        std::vector<double> weight_values{};
+        std::vector<std::string> keywords = {"weights","aggregate","withscores"};
+        std::vector<std::string> aggregate_types = {"sum","min","max", "avg"};
+
+        enum keyword_index
+        {
+            weights = 0,
+            aggregate = 1,
+            withscores = 2
+        };
+        enum aggregate_index
+        {
+            sum = 0,
+            min = 1,
+            max = 2,
+            avg = 3,
+            agg_none = 4
+        };
+        aggregate_index aggr{agg_none};
+        aggregate_index map_aggr(int ix)
+        {
+            switch (ix)
+            {
+                case 0:
+                    return sum;
+                case 1:
+                    return min;
+                case 2:
+                    return max;
+            }
+            return agg_none;
+        }
+        int parse_options()
+        {
+            int spos = 1; // the key is the first one
+            if (argc < 4)
+            {
+                return VALKEYMODULE_ERR;
+            }
+            if (is_integer(spos))
+            {
+                numkeys = tol(spos++);
+            }else
+            {
+                return VALKEYMODULE_ERR;
+            }
+
+            while (has_enum(keywords,spos) == 3 && keys.size() < numkeys)
+            {
+                keys.push_back(tos(spos++));
+            }
+            if (keys.size() != numkeys)
+            {
+                return VALKEYMODULE_ERR;
+            }
+            if (spos == argc)
+            {
+                return VALKEYMODULE_OK;
+            }
+            do
+            {
+                int which = has_enum(keywords,spos);
+                switch (which)
+                {
+                case weights:
+                    ++spos;
+                    while (is_integer(spos))
+                    {
+                        weight_values.push_back(tol(spos++));
+                    }
+
+                    break;
+                case aggregate:
+                    aggr = map_aggr(has_enum(aggregate_types,++spos));
+                    ++spos;
+                    break;
+                case withscores:
+                    break;
+                default:
+                    return VALKEYMODULE_ERR;
+                }
+            } while (spos < argc);
+            return VALKEYMODULE_OK;
+        }
+    };
 };
 #endif //SET_H

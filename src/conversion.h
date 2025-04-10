@@ -95,6 +95,7 @@ namespace conversion
         uint8_t* bytes = nullptr; // NB! this gets freed
 
     public:
+        explicit comparable_result() = default;
         explicit comparable_result(int64_t value)
             : data(&integer.bytes[0])
               , integer(comparable_bytes(value, art::tinteger))
@@ -186,6 +187,12 @@ namespace conversion
         {
             return {get_data(), get_size() + 1}; // include the null terminator for this case
         }
+        int ctype() const
+        {
+            if (get_size() == 0) return art::tnone;
+
+            return get_data()[0];
+        }
     };
 
     const char* eat_space(const char* str, size_t l);
@@ -209,16 +216,38 @@ namespace conversion
     art::value_type to_value(const std::string& s);
     // take a string and convert to a number as bytes or leave it alone
     // and return the bytes directly. the bytes will be copied
-    comparable_result convert(const char* v, size_t vlen);
+    comparable_result convert(const char* v, size_t vlen, bool noint = false);
+    comparable_result convert(const std::string& str, bool noint = false);
 
     inline int64_t enc_bytes_to_int(const uint8_t* bytes, size_t len)
     {
         int64_t r = 0;
-        if (len != 9)
+        if (len != numeric_key_size)
             return r;
         byte_comparable<int64_t> dec(bytes, len);
 
         return dec_bytes_to_int(dec);
+    }
+    inline int64_t enc_bytes_to_int(art::value_type value)
+    {
+        int64_t r = 0;
+        if (value.size != numeric_key_size)
+            return r;
+
+        if (*value.bytes != art::tdouble && *value.bytes != art::tinteger)
+            return r;
+
+        byte_comparable<int64_t> dec(value.bytes, value.size);
+
+        r = dec_bytes_to_int(dec);
+        return r;
+    }
+    inline double enc_bytes_to_dbl(art::value_type value)
+    {
+        int64_t r = enc_bytes_to_int(value);
+        double dbl = 0;
+        memcpy(&dbl, &r, sizeof(int64_t));
+        return dbl;
     }
 
 }

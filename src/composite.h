@@ -66,6 +66,11 @@ struct composite
     {
 	    comp.pop_back();
     }
+	void pop(size_t n)
+    {
+    	size_t count = comp.size();
+    	comp.resize(count - std::min(count,n));
+    }
 	art::value_type create()
     {
     	return build_key(key_buffer, comp);

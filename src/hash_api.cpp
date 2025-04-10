@@ -20,7 +20,7 @@ int cmd_HSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     int r = VALKEYMODULE_OK;
     size_t nlen;
     thread_local composite query;
-    art::key_spec spec;
+    //art::key_spec spec;
     int64_t updated = 0;
 
     auto fc = [&](art::node_ptr) -> void
@@ -50,8 +50,9 @@ int cmd_HSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         auto field = conversion::convert(k, klen);
         query.push(field);
         art::value_type key = query.create();
+        art::value_type val = {v, (unsigned)vlen};
 
-        art_insert(get_art(), spec, key, {v, (unsigned)vlen}, fc);
+        art_insert(get_art(), {}, key, val, fc);
         query.pop_back();
         ++responses;
     }

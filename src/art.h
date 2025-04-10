@@ -138,8 +138,21 @@ uint64_t art_size(art::tree* t);
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
-                const NodeResult& fc);
+void art_insert
+(   art::tree* t
+,   const art::key_spec& options
+,   art::value_type key
+,   art::value_type value
+,   const NodeResult& fc
+);
+
+void art_insert
+(   art::tree* t
+,   const art::key_spec& options
+,   art::value_type key
+,   art::value_type value
+,   bool replace
+,   const NodeResult& fc);
 
 /**
  * inserts a new value into the art tree (not replacing)
@@ -241,8 +254,37 @@ int art_iter_prefix(art::tree* t, art::value_type prefix, CallBack cb, void* dat
  */
 namespace art
 {
+
+    struct iterator
+    {
+        tree *t;
+        trace_list tl{};
+        node_ptr c{};
+        /**
+         * performs a lower-bound search and returns an iterator that may not always be valid
+         * the life-time of the iterator must not exceed that of the t or key parameters
+         * @param t the art tree
+         * @param key iterator will start at keys not less than key
+         * @return an iterator
+         */
+
+        explicit iterator(value_type key);
+        iterator(const iterator& it) = default;
+        iterator(iterator&& it) = default;
+        iterator& operator=(iterator&& it) = default;
+        iterator& operator=(const iterator& it) = default;
+        bool next();
+        [[nodiscard]] const leaf* l() const;
+        [[nodiscard]] value_type key() const;
+        [[nodiscard]] value_type value() const;
+        [[nodiscard]] bool end() const;
+        [[nodiscard]] bool ok() const;
+        [[nodiscard]] node_ptr current() const;
+    };
+    node_ptr find(value_type key);
     int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);
     int range(const tree* t, value_type key, value_type key_end, LeafCallBack cb);
+
 }
 
 

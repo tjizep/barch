@@ -37,10 +37,10 @@ int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key)
 	size_t kl;
 	const unsigned char* enck = key.bytes;
 	unsigned key_len = key.length();
-	if (key_len == 10 && (*enck == art::tinteger || *enck == art::tdouble))
+	if (key_len == numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble))
 	{
-		ik = conversion::enc_bytes_to_int(enck, key_len - 1);
-		if (*enck == 1)
+		ik = conversion::enc_bytes_to_int(enck, key_len);
+		if (*enck == art::tdouble)
 		{
 			memcpy(&dk, &ik, sizeof(ik));
 			if (ValkeyModule_ReplyWithDouble(ctx, dk) == VALKEYMODULE_ERR)

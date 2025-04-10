@@ -35,7 +35,8 @@ namespace art
         tdouble = 1,
         tstring = 2,
         tcomposite = 3,
-        tend = 255
+        tend = 255,
+        tnone = 65536
     };
     struct composite_type
     {
@@ -287,7 +288,10 @@ namespace art
             }
             return l;
         }
-
+        [[nodiscard]] const leaf* cl() const
+        {
+            return const_leaf();
+        }
         node_t* modify()
         {
             if (is_leaf)

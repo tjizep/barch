@@ -4,13 +4,11 @@
 
 #ifndef ORDERED_API_H
 #define ORDERED_API_H
-
-
-
-class ordered_api {
-
-};
-
-
+#include "valkeymodule.h"
+int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZCARD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZDIFF(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 
 #endif //ORDERED_API_H

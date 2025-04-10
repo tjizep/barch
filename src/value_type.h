@@ -17,6 +17,9 @@ namespace art
         const unsigned char* bytes;
         unsigned size;
 
+        explicit value_type(nullptr_t): bytes(nullptr), size(0)
+        {
+        }
         explicit value_type(const heap::buffer<uint8_t>& value): bytes(value.begin()), size(value.byte_size())
         {
         }
@@ -51,6 +54,53 @@ namespace art
         {
             if (size < other.size) return false;
             return memcmp(bytes, other.bytes, other.size) == 0;
+        }
+        [[nodiscard]] int compare(value_type other) const
+        {
+
+            auto mins = std::min(size, other.size);
+            int r = memcmp(bytes, other.bytes, mins);
+            if ( r==0 )
+            {
+                if (size < other.size) return -1;
+                if (size > other.size) return 1;
+                return 0;
+            }
+            return r ;
+        }
+        bool operator < (const value_type& other) const
+        {
+            return compare(other) < 0;
+        }
+        bool operator > (const value_type& other) const
+        {
+            return compare(other) > 0;
+        }
+        bool operator != (const value_type& other) const
+        {
+            return compare(other) != 0;
+        }
+        bool operator == (const value_type& other) const
+        {
+            return compare(other) == 0;
+        }
+        bool operator <= (const value_type& other) const
+        {
+            return compare(other) <= 0;
+        }
+        bool operator >= (const value_type& other) const
+        {
+            return compare(other) >= 0;
+        }
+        [[nodiscard]] value_type sub(size_t start) const
+        {
+            if (start >= size) return value_type(nullptr);
+            return {bytes + start, size - start};
+        }
+        [[nodiscard]] value_type sub(size_t start, size_t length) const
+        {
+            if (start + length >= size) return sub(start);
+            return {bytes + start, length};
         }
         const unsigned char& operator[](unsigned i) const
         {

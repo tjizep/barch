@@ -180,6 +180,20 @@ static art::trace_element& last_el(art::trace_list& trace)
         abort();
     return *(trace.rbegin());
 }
+#if 0
+static const art::trace_element& last_el(const art::trace_list& trace)
+{
+    if (trace.empty())
+        abort();
+    return *(trace.rbegin());
+}
+#endif
+static art::node_ptr last_node(const art::trace_list& trace)
+{
+    if (trace.empty())
+        return nullptr;
+    return trace.rbegin()->child;
+}
 
 static art::trace_element first_child_off(art::node_ptr n);
 //static art::trace_element last_child_off(art::node_ptr n);
@@ -280,6 +294,7 @@ art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type k
     }
     return nullptr;
 }
+
 void art::update(tree* t, value_type key, const std::function<node_ptr(const node_ptr& leaf)>& updater)
 {
     ++statistics::update_ops;
@@ -569,6 +584,7 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
     }
     return 0;
 }
+
 int art::range(const art::tree* t, art::value_type key, art::value_type key_end, LeafCallBack cb)
 {
     ++statistics::range_ops;
@@ -616,6 +632,122 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
         ++statistics::exceptions_raised;
     }
     return 0;
+}
+extern art::tree* get_art();
+art::node_ptr art::find(value_type key)
+{
+    const tree* t = get_art();
+    ++statistics::get_ops;
+    try
+    {
+        node_ptr n = t->root;
+        unsigned depth = 0;
+        while (!n.null())
+        {
+            // Might be a leaf
+            if (n.is_leaf)
+            {
+                const auto* l = n.const_leaf();
+                if (l->expired()) return nullptr;
+
+                if (0 == l->compare(key))
+                {
+                    return n;
+                }
+                return nullptr;
+            }
+            // Bail if the prefix does not match
+            const auto& d = n->data();
+            if (d.partial_len)
+            {
+                unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
+                if (prefix_len != std::min<unsigned>(max_prefix_llength, d.partial_len))
+                    return nullptr;
+                depth += d.partial_len;
+                if (depth >= key.length())
+                {
+                    return nullptr;
+                }
+            }
+            unsigned at = n->index(key[depth]);
+            n = n->get_child(at);
+            depth++;
+        }
+    }
+    catch (std::exception& e)
+    {
+        art::log(e, __FILE__, __LINE__);
+        ++statistics::exceptions_raised;
+    }
+    return nullptr;
+}
+
+art::iterator::iterator(value_type key) : t(get_art())
+{
+    ++statistics::lb_ops;
+    try
+    {
+
+        auto lb = inner_lower_bound(tl, t, key);
+        if (lb.null()) return;
+        const art::leaf* al = lb.const_leaf();
+        if (!al)
+        {
+            tl.clear();
+        }else
+        {
+            c = last_node(tl);
+        }
+
+    }
+    catch (std::exception& e)
+    {
+        art::log(e, __FILE__, __LINE__);
+        ++statistics::exceptions_raised;
+    }
+}
+
+bool art::iterator::next()
+{
+    c = nullptr;
+    bool r = increment_trace(t->root, tl);
+    if (!r)
+    {
+        tl.clear();
+    }else
+    {
+        c = last_node(tl);
+        if (!c.is_leaf)
+        {
+            c = nullptr;
+        }
+    }
+    return r;
+}
+bool art::iterator::end() const
+{
+    return !c.is_leaf;
+}
+bool art::iterator::ok() const
+{
+    return !end();
+}
+art::node_ptr art::iterator::current() const
+{
+    return c;
+}
+const art::leaf* art::iterator::l() const
+{
+    return current().const_leaf();
+}
+art::value_type art::iterator::key() const
+{
+    return l()->get_key();
+}
+art::value_type art::iterator::value() const
+{
+    return l()->get_value();
+
 }
 
 /**
@@ -728,7 +860,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
                 }
                 else
                 {
-                    ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl);
+                    ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
                     // create a new leaf to carry the new value
                     ++statistics::leaf_nodes_replaced;
                     return n;
@@ -835,13 +967,18 @@ RECURSE_SEARCH:;
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
-                const NodeResult& fc)
+void art_insert
+(   art::tree* t
+,   const art::key_spec& options
+,   art::value_type key
+,   art::value_type value
+,   bool replace
+,   const NodeResult& fc)
 {
     try
     {
         int old_val = 0;
-        art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 1);
+        art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0);
         if (!old_val)
         {
             t->size++;
@@ -870,6 +1007,12 @@ void art_insert(art::tree* t, const art::key_spec& options, art::value_type key,
         art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
+
+}
+void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
+                const NodeResult& fc)
+{
+    art_insert(t, options, key, value, true, fc);
 }
 
 /**

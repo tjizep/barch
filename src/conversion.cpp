@@ -4,12 +4,12 @@
 #include "conversion.h"
 // take a string and convert to a number as bytes or leave it alone
 // and return the bytes directly. the bytes will be copied
-conversion::comparable_result conversion::convert(const char* v, size_t vlen)
+conversion::comparable_result conversion::convert(const char* v, size_t vlen, bool noint)
 {
 	int64_t i;
 	double d;
 
-	if (is_integer(v, vlen))
+	if (!noint && is_integer(v, vlen))
 	{
 		auto ianswer = fast_float::from_chars(v, v + vlen, i); // check if it's an integer first
 
@@ -27,6 +27,10 @@ conversion::comparable_result conversion::convert(const char* v, size_t vlen)
 	}
 
 	return {v, vlen};
+}
+conversion::comparable_result conversion::convert(const std::string& str, bool noint)
+{
+	return convert(str.c_str(), str.size(), noint);
 }
 art::value_type conversion::to_value(const std::string& s)
 {

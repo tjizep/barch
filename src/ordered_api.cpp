@@ -320,7 +320,7 @@ int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			if (v >= upper) break;
 
 			auto encoded_number = v.sub(lower.size, numeric_key_size);
-			auto member = v.sub(lower.size + numeric_key_size + 1); // theres a 0 char and I'm not sure where it comes from
+			auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
 			auto number = conversion::enc_bytes_to_dbl(encoded_number);
 
 			size_t found_count = 0;

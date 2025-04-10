@@ -51,4 +51,5 @@ assert(vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 1, 2, 3, 'AGGREGATE',
 assert(vk.call('B.ZINTER', 2, 'zgame', 'yzgame', 'WEIGHTS', 1, 1, 1, 'AGGREGATE','SUM') == "0")
 assert(vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'WEIGHTS', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == "0")
 assert(vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'AGGREGATE', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == "0")
+assert(#vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WITHSCORES') == 6)
 return {"OK"}

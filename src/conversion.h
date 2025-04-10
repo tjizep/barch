@@ -185,6 +185,10 @@ namespace conversion
 
         [[nodiscard]] art::value_type get_value() const
         {
+            if (*get_data() == art::tinteger || *get_data() == art::tdouble)
+            {
+                return {get_data(), get_size()};
+            }
             return {get_data(), get_size() + 1}; // include the null terminator for this case
         }
         int ctype() const

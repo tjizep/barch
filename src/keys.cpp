@@ -37,7 +37,9 @@ int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key)
 	size_t kl;
 	const unsigned char* enck = key.bytes;
 	unsigned key_len = key.size;
-	if (key_len == numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble))
+	// TODO: integers sometimes go in here as one longer than they should be
+	// we make the test a little more slack
+	if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble))
 	{
 		ik = conversion::enc_bytes_to_int(enck, key_len);
 		if (*enck == art::tdouble)

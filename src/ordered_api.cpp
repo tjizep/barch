@@ -55,7 +55,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}
 
 		auto score = conversion::convert(k, klen, true);
-		//auto member = conversion::convert(v, vlen);
+		auto member = conversion::convert(v, vlen);
 		conversion::comparable_result id {++counter};
 		if (score.ctype() != art::tdouble)
 		{
@@ -64,7 +64,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			continue;
 		}
 		query[0].push(score);
-		//query[0].push(member);
+		query[0].push(member);
 		//query[0].push(id); // so we can add many with the same score
 		art::value_type qkey = query[0].create();
 		art::value_type qv = {v, (unsigned)vlen};
@@ -81,7 +81,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		{
 			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
 		}
-		query[0].pop(1);
+		query[0].pop(2);
 		++responses;
 	}
 	auto current = get_art()->size;
@@ -320,6 +320,7 @@ int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			if (v >= upper) break;
 
 			auto encoded_number = v.sub(lower.size, numeric_key_size);
+			auto member = v.sub(lower.size + numeric_key_size + 1); // theres a 0 char and I'm not sure where it comes from
 			auto number = conversion::enc_bytes_to_dbl(encoded_number);
 
 			size_t found_count = 0;
@@ -351,8 +352,15 @@ int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 				switch (spec.aggr)
 				{
 				case art::zops_spec::agg_none:
-					ValkeyModule_ReplyWithDouble(ctx, number);
+					reply_encoded_key(ctx, member);
 					++replies;
+					if (spec.has_withscores)
+					{
+						//ValkeyModule_ReplyWithDouble(ctx, number);
+						reply_encoded_key(ctx, encoded_number);
+						++replies;
+					}
+
 					break;
 				case art::zops_spec::avg:
 				case art::zops_spec::sum:

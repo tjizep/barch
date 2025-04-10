@@ -36,7 +36,7 @@ int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key)
 	const char* k;
 	size_t kl;
 	const unsigned char* enck = key.bytes;
-	unsigned key_len = key.length();
+	unsigned key_len = key.size;
 	if (key_len == numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble))
 	{
 		ik = conversion::enc_bytes_to_int(enck, key_len);
@@ -58,10 +58,8 @@ int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key)
 	}
 	else if (key_len >= 1 && *enck == art::tstring)
 	{
-		//&& *enck == 2 //it's a string
-
 		k = (const char*)&enck[1];
-		kl = key_len - 1;
+		kl = key_len - 2;
 		if (ValkeyModule_ReplyWithStringBuffer(ctx, k, kl) == VALKEYMODULE_ERR)
 		{
 			return -1;

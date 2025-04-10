@@ -567,6 +567,7 @@ namespace art
             avg = 3,
             agg_none = 4
         };
+        bool has_withscores{false};
         aggregate_index aggr{agg_none};
         aggregate_index map_aggr(int ix)
         {
@@ -619,6 +620,10 @@ namespace art
                 {
                 case weights:
                     ++spos;
+                    if (!weight_values.empty())
+                    {
+                        return VALKEYMODULE_ERR;
+                    }
                     while (is_integer(spos))
                     {
                         weight_values.push_back(tol(spos++));
@@ -626,15 +631,29 @@ namespace art
 
                     break;
                 case aggregate:
+                    if (aggr != agg_none)
+                    {
+                        return VALKEYMODULE_ERR;
+                    }
                     aggr = map_aggr(has_enum(aggregate_types,++spos));
                     ++spos;
                     break;
                 case withscores:
+                    if (has_withscores)
+                    {
+                        return VALKEYMODULE_ERR;
+                    }
+                    has_withscores = true;
+                    ++spos;
                     break;
                 default:
                     return VALKEYMODULE_ERR;
                 }
             } while (spos < argc);
+            if (has_withscores && aggr != agg_none)
+            {
+                return VALKEYMODULE_ERR;
+            }
             return VALKEYMODULE_OK;
         }
     };

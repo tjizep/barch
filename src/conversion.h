@@ -123,17 +123,17 @@ namespace conversion
         {
             if (this->size < sizeof(storage)-1)
             {
-                memcpy(storage + 1, val, this->size - 1);
-                storage[0] = art::tstring;
+                memset(storage, 0, sizeof(storage));
                 data = storage;
             }else
             {
                 bytes = heap::allocate<uint8_t>(this->size + 1);
-                //TODO: ?hack? a hidden trailing null pointer has to be added
-                memcpy(bytes + 1, val, this->size - 1);
-                bytes[0] = art::tstring;
                 data = bytes;
             }
+            //TODO: ?hack? a hidden trailing null pointer has to be added
+            data[this->size] = 0x00;
+            memcpy(data + 1, val, this->size - 1);
+            data[0] = art::tstring;
 
         }
 

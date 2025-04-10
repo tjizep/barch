@@ -596,8 +596,12 @@ namespace art
                 return VALKEYMODULE_ERR;
             }
 
-            while (has_enum(keywords,spos) == 3 && keys.size() < numkeys)
+            while (keys.size() < numkeys)
             {
+                if (spos >= argc)
+                {
+                    return VALKEYMODULE_ERR;
+                }
                 keys.push_back(tos(spos++));
             }
             if (keys.size() != numkeys)

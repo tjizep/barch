@@ -14,7 +14,7 @@ static std::atomic<int64_t> counter = art::now() * 1000000;
 struct query_pool
 {
 	composite query[max_queries_per_call]{};
-	ankerl::unordered_dense::set<size_t> available{};
+	heap::set<size_t> available{};
 	query_pool()
 	{
 		for (size_t i = 0; i < max_queries_per_call; i++)

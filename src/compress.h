@@ -31,11 +31,7 @@
 #include "page_modifications.h"
 
 typedef uint16_t PageSizeType;
-typedef ankerl::unordered_dense::set<
-            size_t
-        ,   ankerl::unordered_dense::hash<size_t>
-        ,   std::equal_to<size_t>
-        ,   heap::allocator<size_t>> address_set;
+typedef heap::set<size_t> address_set;
 
 struct training_entry
 {
@@ -61,7 +57,7 @@ struct free_page
     explicit free_page(compressed_address p) : page(p.page())
     {
     };
-    std::vector<PageSizeType, heap::allocator<PageSizeType>> offsets{}; // within page
+    heap::vector<PageSizeType> offsets{}; // within page
     uint64_t page{0};
 
     [[nodiscard]] bool empty() const
@@ -159,9 +155,9 @@ struct free_bin
         return !empty();
     }
 
-    std::vector<size_t, heap::allocator<size_t>> get_addresses(size_t page)
+    heap::vector<size_t> get_addresses(size_t page)
     {
-        std::vector<size_t, heap::allocator<size_t>> r;
+        heap::vector<size_t> r;
         if (page < page_index.size())
         {
             size_t at = page_index.at(page);
@@ -386,8 +382,8 @@ struct compress
 private:
 
     heap::buffer<uint8_t> training_data{0};
-    std::vector<training_entry, heap::allocator<training_entry>> trainables{};
-    std::vector<training_entry, heap::allocator<training_entry>> intraining{};
+    heap::std_vector<training_entry> trainables{};
+    heap::std_vector<training_entry> intraining{};
     ZSTD_CDict* dict{nullptr};
     ZSTD_CCtx* cctx = ZSTD_createCCtx();
     ZSTD_DCtx* dctx = ZSTD_createDCtx();
@@ -419,7 +415,7 @@ private:
     size_t fragmentation = 0;
     std::string name;
 
-    std::vector<size_t,heap::allocator<size_t>> decompressed_pages{};
+    heap::vector<size_t> decompressed_pages{};
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{};
     lru_list lru{};
@@ -1045,9 +1041,9 @@ public:
     // TODO: this function may cause to much latency when the arena is large
     // maybe just dont iterate through everything - it doesnt need to get
     // every page
-    std::vector<size_t, heap::allocator<size_t>> create_fragmentation_list(size_t max_pages) const
+    heap::vector<size_t> create_fragmentation_list(size_t max_pages) const
     {
-        std::vector<size_t, heap::allocator<size_t>> pages;
+        heap::vector<size_t> pages;
         if (fragmented.empty()) return {};
         for (auto page : fragmented)
         {

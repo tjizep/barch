@@ -12,6 +12,7 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include <ankerl/unordered_dense.h>
 
 namespace heap
 {
@@ -626,5 +627,27 @@ namespace heap
             return begin() + size();
         }
     };
+    template<typename K, typename V>
+    using map = ankerl::unordered_dense::map
+        <   K
+        ,   V
+        ,   ankerl::unordered_dense::hash<size_t>
+        ,   std::equal_to<size_t>
+        ,   allocator<std::pair<K,V> >
+        >;
+
+    template<typename K>
+    using set = ankerl::unordered_dense::set
+        <   K
+        ,   ankerl::unordered_dense::hash<size_t>
+        ,   std::equal_to<size_t>
+        ,   allocator<K>
+        >;
+    template<typename K>
+
+using std_vector = std::vector
+    <   K
+    ,   allocator<K>
+    >;
 }
 #endif //SASTAM_H

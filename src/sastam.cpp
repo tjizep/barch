@@ -42,10 +42,8 @@ void* heap::allocate(size_t size)
 {
     if (!size) return nullptr;
 
-
-
     void* r = nullptr;
-    if (use_malloc== 1)
+    if (use_malloc == 1)
     {
         r = malloc(size + padding + check_size);
     }else

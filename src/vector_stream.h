@@ -10,7 +10,7 @@
 struct vector_stream
 {
 	size_t pos {};
-	std::vector<uint8_t, heap::allocator<uint8_t>> buf{};
+	heap::std_vector<uint8_t> buf{};
 	void write(const char *data, size_t size)
     {
 		if (pos > buf.size())

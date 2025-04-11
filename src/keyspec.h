@@ -13,6 +13,7 @@ extern "C" {
 #include <regex>
 #include <chrono>
 #include <initializer_list>
+#include "sastam.h"
 namespace art
 {
     /**
@@ -548,10 +549,10 @@ namespace art
         }
         int64_t fields_start{0};
         size_t numkeys{0};
-        std::vector<std::string> keys{};
-        std::vector<double> weight_values{};
-        std::vector<std::string> keywords = {"weights","aggregate","withscores"};
-        std::vector<std::string> aggregate_types = {"sum","min","max", "avg"};
+        heap::std_vector<std::string> keys{};
+        heap::std_vector<double> weight_values{};
+        heap::std_vector<std::string> keywords = {"weights","aggregate","withscores"};
+        heap::std_vector<std::string> aggregate_types = {"sum","min","max", "avg"};
 
         enum keyword_index
         {

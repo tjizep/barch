@@ -28,8 +28,8 @@ namespace arena {
         ,   allocator_type> hash_type ;
 
         hash_type hidden_arena{};
-        std::vector<size_t, heap::allocator<size_t>> free_address_list{};
-        std::vector<size_t, heap::allocator<size_t>> buffered_free{};
+        heap::std_vector<size_t> free_address_list{};
+        heap::std_vector<size_t> buffered_free{};
         size_t top = 10000000;
         size_t free_pages = top;
         size_t last_allocated = 0;
@@ -63,8 +63,8 @@ namespace arena {
         void clear()
         {
             hidden_arena = hash_type{};
-            free_address_list = std::vector<size_t, heap::allocator<size_t>>{};
-            buffered_free = std::vector<size_t, heap::allocator<size_t>>{};
+            free_address_list = heap::std_vector<size_t>{};
+            buffered_free = heap::std_vector<size_t>{};
             top = 10000000;
             free_pages = top;
             last_allocated = 0;

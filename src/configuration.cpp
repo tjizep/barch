@@ -25,13 +25,13 @@ static std::string log_page_access_trace{};
 static std::string save_interval{};
 static std::string max_modifications_before_save{};
 
-static std::vector<std::string> valid_evictions = {
+static heap::std_vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
 };
-static std::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
-static std::vector<std::string> valid_defrag = {"on", "true", "off", "yes", "no", "null", "nil"};
+static heap::std_vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
+static heap::std_vector<std::string> valid_defrag = {"on", "true", "off", "yes", "no", "null", "nil"};
 
-bool check_type(const std::string& et, const std::vector<std::string>& valid)
+bool check_type(const std::string& et, const heap::std_vector<std::string>& valid)
 {
     return std::any_of(valid.begin(), valid.end(), [&et](const std::string& val)
     {

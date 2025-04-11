@@ -191,7 +191,7 @@ namespace conversion
             }
             return {get_data(), get_size() + 1}; // include the null terminator for this case
         }
-        int ctype() const
+        [[nodiscard]] int ctype() const
         {
             if (get_size() == 0) return art::tnone;
 

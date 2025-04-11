@@ -52,4 +52,16 @@ assert(vk.call('B.ZINTER', 2, 'zgame', 'yzgame', 'WEIGHTS', 1, 1, 1, 'AGGREGATE'
 assert(vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'WEIGHTS', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == "0")
 assert(vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'AGGREGATE', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == "0")
 assert(#vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WITHSCORES') == 6)
+assert(vk.call('B.ZADD','diffy1',1,'one',2,'two',3,'three')==3)
+assert(vk.call('B.ZADD','diffy2',1,'one',2,'two',3,'three')==3)
+assert(vk.call('B.ZADD','diffy3',1,'one',2,'two')==2)
+assert(vk.call('B.ZADD','diffy4',1,'one',2,'two',3,'three',4,'four')==4)
+assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy2') == 0)
+assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy4') == 0)
+assert(#vk.call('B.ZDIFF', 2, 'diffy4','diffy1') == 1)
+assert(#vk.call('B.ZDIFF', 2, 'diffy3','diffy1') == 0)
+assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy3') == 1)
+assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy1') == 0)
+-- the single case is treated as an error - not like redis - although I think no one will mind ?
+-- assert(#vk.call('B.ZDIFF', 1, 'diffy1') == 0)
 return {"OK"}

@@ -17,6 +17,7 @@ enum
     initialize_memory = 1,
     storage_version = 6,
     ticker_size = 32,
-    numeric_key_size = 10
+    numeric_key_size = 10,
+    max_queries_per_call = 32
 };
 #endif //CONSTANTS_H

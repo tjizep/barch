@@ -260,6 +260,7 @@ namespace art
         tree *t;
         trace_list tl{};
         node_ptr c{};
+
         /**
          * performs a lower-bound search and returns an iterator that may not always be valid
          * the life-time of the iterator must not exceed that of the t or key parameters
@@ -274,12 +275,19 @@ namespace art
         iterator& operator=(iterator&& it) = default;
         iterator& operator=(const iterator& it) = default;
         bool next();
+        bool previous();
         [[nodiscard]] const leaf* l() const;
         [[nodiscard]] value_type key() const;
         [[nodiscard]] value_type value() const;
         [[nodiscard]] bool end() const;
         [[nodiscard]] bool ok() const;
         [[nodiscard]] node_ptr current() const;
+        bool update(std::function<node_ptr(const leaf* l)> updater);
+        bool update(value_type value);
+        bool update(value_type value, int64_t ttl, bool volat);
+        bool update(int64_t ttl, bool volat);
+        bool update(int64_t ttl);
+        bool remove();
     };
     node_ptr find(value_type key);
     int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);

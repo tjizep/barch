@@ -218,8 +218,15 @@ static bool extend_trace_min(const art::node_ptr& root, art::trace_list& trace)
     }
     return true;
 }
+static art::trace_element last_child_off(art::node_ptr n)
+{
+    if (n.null()) return {nullptr, nullptr, 0};
+    if (n.is_leaf) return {nullptr, nullptr, 0};
+    unsigned idx = n->last_index();
 
-#if 0
+    return {n, n->get_child(idx), idx};
+}
+
 static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
 {
     if (trace.empty())
@@ -235,7 +242,6 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
     }
     return true;
 }
-#endif
 
 /**
  * Searches for a value in the ART tree
@@ -459,16 +465,6 @@ static art::trace_element first_child_off(art::node_ptr n)
     return {n, n->get_child(n->first_index()), 0};
 }
 
-#if 0
-static art::trace_element last_child_off(art::node_ptr n)
-{
-    if (n.null()) return {nullptr, nullptr, 0};
-    if (n.is_leaf) return {nullptr, nullptr, 0};
-    unsigned idx = n->last_index();
-
-    return {n, n->get_child(idx), idx};
-}
-#endif
 
 static art::trace_element increment_te(const art::trace_element& te)
 {
@@ -477,6 +473,15 @@ static art::trace_element increment_te(const art::trace_element& te)
 
     const art::node* n = te.parent.get_node();
     return n->next(te);
+}
+
+static art::trace_element decrement_te(const art::trace_element& te)
+{
+    if (te.parent.null()) return {nullptr, nullptr, 0};
+    if (te.parent.is_leaf) return {nullptr, nullptr, 0};
+
+    const art::node* n = te.parent.get_node();
+    return n->previous(te);
 }
 
 
@@ -511,6 +516,40 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
             while (u != trace.rbegin());
         }
         return extend_trace_min(root, trace);
+    }
+    return false;
+}
+static bool decrement_trace(const art::node_ptr& root, art::trace_list& trace)
+{
+    // TODO: theres probably something still wrong with this code
+    for (auto r = trace.rbegin(); r != trace.rend(); ++r)
+    {
+        art::trace_element te = decrement_te(*r);
+        if (te.empty())
+            continue; // goto the parent further back and try to decrement that
+        *r = te;
+        if (te.child.is_leaf)
+        {
+            // cleanup if this node is nearer to the root
+            while(!trace.empty() && trace.rbegin() != r) trace.pop_back();
+            return true;
+        }
+        if (r != trace.rbegin())
+        {
+            auto u = r;
+            // go forward/down in the tree
+            do
+            {
+                --u;
+
+                te = last_child_off(te.child);
+                if (te.empty())
+                    return false;
+                *u = te;
+            }
+            while (u != trace.rbegin());
+        }
+        return extend_trace_max(root, trace);
     }
     return false;
 }
@@ -707,6 +746,24 @@ art::iterator::iterator(value_type key) : t(get_art())
     }
 }
 
+bool art::iterator::previous()
+{
+    c = nullptr;
+    bool r = decrement_trace(t->root, tl);
+    if (!r)
+    {
+        tl.clear();
+    }else
+    {
+        c = last_node(tl);
+        if (!c.is_leaf)
+        {
+            c = nullptr;
+        }
+    }
+    return r;
+}
+
 bool art::iterator::next()
 {
     c = nullptr;
@@ -726,7 +783,7 @@ bool art::iterator::next()
 }
 bool art::iterator::end() const
 {
-    return !c.is_leaf;
+    return !c.is_leaf || tl.empty() || !t || t->size == 0;
 }
 bool art::iterator::ok() const
 {
@@ -744,10 +801,72 @@ art::value_type art::iterator::key() const
 {
     return l()->get_key();
 }
+
 art::value_type art::iterator::value() const
 {
     return l()->get_value();
 
+}
+
+bool art::iterator::remove()
+{
+    if (end()) return false;
+    auto bef = t->size;
+    art_delete(t,key());
+    return bef > t->size;
+}
+
+bool art::iterator::update(std::function<node_ptr(const leaf* l)> updater)
+{
+    if (end()) return false;
+    auto &el = last_el(tl);
+    art::node_ptr n = el.child;
+    if (n.is_leaf)
+    {
+        const art::leaf* leaf = n.const_leaf();
+        if (!leaf->expired())
+        {
+            node_ptr new_leaf = updater(leaf);
+            n = n.modify()->expand_pointers(n,{new_leaf});
+            n.modify()->set_child(el.child_ix,new_leaf);
+            destroy_node(n);
+            return true;
+        } //skip this one if it's expired
+    }
+    return false;
+
+}
+
+bool art::iterator::update(int64_t ttl, bool volat)
+{
+    return update([ttl,volat](const art::leaf* l) -> node_ptr
+    {
+        return make_leaf(l->get_key(),l->get_value(), ttl, volat);
+    });
+}
+bool art::iterator::update(int64_t ttl)
+{
+    return update([ttl](const art::leaf* l) -> node_ptr
+    {
+        return make_leaf(l->get_key(),l->get_value(), ttl, l->is_volatile());
+    });
+
+}
+
+bool art::iterator::update(value_type value, int64_t ttl, bool volat)
+{
+    return update([value,ttl,volat](const art::leaf* l) -> node_ptr
+    {
+        return make_leaf(l->get_key(),value, ttl, volat);
+    });
+}
+
+bool art::iterator::update(value_type value)
+{
+    return update([value](const art::leaf* l) -> node_ptr
+    {
+        return make_leaf(l->get_key(),value,l->ttl(), l->is_volatile());
+    });
 }
 
 /**

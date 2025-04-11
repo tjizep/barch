@@ -287,7 +287,7 @@ namespace art
         bool update(value_type value, int64_t ttl, bool volat);
         bool update(int64_t ttl, bool volat);
         bool update(int64_t ttl);
-        bool remove();
+        [[nodiscard]] bool remove() const;
     };
     node_ptr find(value_type key);
     int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);

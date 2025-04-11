@@ -781,22 +781,27 @@ bool art::iterator::next()
     }
     return r;
 }
+
 bool art::iterator::end() const
 {
     return !c.is_leaf || tl.empty() || !t || t->size == 0;
 }
+
 bool art::iterator::ok() const
 {
     return !end();
 }
+
 art::node_ptr art::iterator::current() const
 {
     return c;
 }
+
 const art::leaf* art::iterator::l() const
 {
     return current().const_leaf();
 }
+
 art::value_type art::iterator::key() const
 {
     return l()->get_key();
@@ -808,7 +813,7 @@ art::value_type art::iterator::value() const
 
 }
 
-bool art::iterator::remove()
+bool art::iterator::remove() const
 {
     if (end()) return false;
     auto bef = t->size;

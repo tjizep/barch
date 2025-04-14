@@ -650,4 +650,5 @@ using std_vector = std::vector
     ,   allocator<K>
     >;
 }
+extern void abort_with(const char * message);
 #endif //SASTAM_H

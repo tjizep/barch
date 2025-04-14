@@ -156,3 +156,8 @@ double heap::get_physical_memory_ratio()
     }
     return r;
 }
+
+void abort_with(const char* message)
+{
+    art::std_abort("There's a bug and we cannot continue - this is the last reason - ",message);
+}

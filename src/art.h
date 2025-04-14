@@ -270,6 +270,10 @@ namespace art
          */
 
         explicit iterator(value_type key);
+        /**
+         * starts the iterator at the first key (left most) in the tree
+         */
+        iterator();
         iterator(const iterator& it) = default;
         iterator(iterator&& it) = default;
         iterator& operator=(iterator&& it) = default;

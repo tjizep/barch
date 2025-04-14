@@ -136,14 +136,16 @@ namespace art
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
-            for (unsigned i = 0; i < data().occupants; i++)
+            auto &d = nd();
+
+            for (unsigned i = 0; i < d.occupants; i++)
             {
-                if (nd().keys[i] >= c && has_child(i))
+                if (d.keys[i] >= c && d.children[i].exists())
                 {
-                    return {{this, get_child(i), i}, nd().keys[i] == c};
+                    return {{this, get_child(i), i}, d.keys[i] == c};
                 }
             }
-            return {{nullptr, nullptr, data().occupants}, false};
+            return {{nullptr, nullptr, d.occupants}, false};
         }
 
         [[nodiscard]] trace_element next(const trace_element& te) const override
@@ -161,7 +163,7 @@ namespace art
             unsigned i = te.child_ix;
             if (i > 0)
             {
-                return {this, get_child(i), i - 1};
+                return {this, get_child(i - 1), i - 1};
             }
             return {};
         }
@@ -670,7 +672,7 @@ namespace art
             return {{nullptr, nullptr, 256}, false};
         }
 
-        trace_element next(const trace_element& te) const override
+        [[nodiscard]] trace_element next(const trace_element& te) const override
         {
             for (unsigned i = te.child_ix + 1; i < 256; ++i)
             {
@@ -684,7 +686,7 @@ namespace art
             return {};
         }
 
-        trace_element previous(const trace_element& te) const override
+        [[nodiscard]] trace_element previous(const trace_element& te) const override
         {
             if (!te.child_ix) return {};
             for (unsigned i = te.child_ix - 1; i > 0; --i)

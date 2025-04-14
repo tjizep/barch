@@ -29,13 +29,13 @@ struct query_pool
 			available.erase(r);
 			return r;
 		}
-		throw std::runtime_error("Queries overflow");
+		abort();
 	}
 	composite& operator[](size_t i)
 	{
 		if (i >= max_queries_per_call)
 		{
-			throw std::out_of_range("");
+			abort();
 		}
 		return query[i];
 	}
@@ -43,7 +43,7 @@ struct query_pool
 	{
 		if (available.contains(id))
 		{
-			throw std::out_of_range("");
+			abort();
 		}
 		available.insert(id);
 	}
@@ -75,10 +75,9 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	art::zadd_spec zspec(argv, argc);
 	if (zspec.parse_options() != VALKEYMODULE_OK)
 	{
-		return ValkeyModule_WrongArity(ctx);
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
 	}
 	int64_t updated = 0;
-
 	auto fc = [&](art::node_ptr) -> void
 	{
 		++updated;
@@ -166,13 +165,15 @@ int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	auto container = conversion::convert(n, nlen);
 	auto mn = conversion::convert(smin, minlen, true);
 	auto mx = conversion::convert(smax, maxlen, true);
-	query lq,uq;
+	query lq,uq,pq;
 	auto lower = lq->create({container,mn});
+	auto prefix = pq->create({container});
 	auto upper = uq->create({container,mx});
 	long long count = 0;
 	art::iterator ai(lower);
 	while (ai.ok())
 	{
+		if (!ai.key().starts_with(prefix)) break;
 		if (ai.key() <= upper)
 		{
 			++count;
@@ -206,6 +207,7 @@ int cmd_ZCARD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	art::iterator ai(lower);
 	while (ai.ok())
 	{
+		if (!ai.key().starts_with(lower)) break;
 		if (ai.key() <= upper)
 		{
 			++count;
@@ -267,13 +269,12 @@ int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops operate
 		query lq,uq;
 		auto container = conversion::convert(*fk);
 		auto lower = lq->create({container});
-		auto upper = uq->create({container,art::ts_end});
 		art::iterator i(lower);
 
 		for (;i.ok();)
 		{
 			auto v = i.key();
-			if (v >= upper) break;
+			if (!v.starts_with(lower)) break;
 
 			auto encoded_number = v.sub(lower.size, numeric_key_size);
 			auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
@@ -380,4 +381,118 @@ int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		art::log(e,__FILE__,__LINE__);
 	}
 	return ValkeyModule_ReplyWithError(ctx,"internal error");
+}
+
+int cmd_ZPOPMIN(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+
+	if (argc < 2)
+		return ValkeyModule_WrongArity(ctx);
+	size_t klen;
+	long long count = 1;
+	long long replies = 0;
+	const char* k = ValkeyModule_StringPtrLen(argv[1], &klen);
+	if (argc == 3)
+	{
+		if (VALKEYMODULE_OK != ValkeyModule_StringToLongLong(argv[2], &count))
+		{
+			return ValkeyModule_ReplyWithError(ctx,"invalid count");
+		}
+	}
+
+	if (key_ok(k, klen) != 0)
+	{
+		return ValkeyModule_ReplyWithNull(ctx);
+	}
+	auto container = conversion::convert(k, klen);
+	query l,u;
+	auto lower = l->create({container});
+	ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+
+	for (long long c = 0; c < count; ++c)
+	{
+		art::iterator i(lower);
+		if (!i.ok())
+		{
+			break;
+		}
+		auto v = i.key();
+		if (!v.starts_with(lower)) break;
+		auto encoded_number = v.sub(lower.size, numeric_key_size);
+		auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
+		reply_encoded_key(ctx, encoded_number);
+		reply_encoded_key(ctx, member);
+		replies += 2;
+		if (!i.remove())
+		{
+			break;
+		};
+	}
+	ValkeyModule_ReplySetArrayLength(ctx, replies);
+	return 0;
+}
+
+int cmd_ZPOPMAX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+
+	if (argc < 2)
+		return ValkeyModule_WrongArity(ctx);
+	size_t klen;
+	long long count = 1;
+	long long replies = 0;
+	const char* k = ValkeyModule_StringPtrLen(argv[1], &klen);
+	if (argc == 3)
+	{
+		if (VALKEYMODULE_OK != ValkeyModule_StringToLongLong(argv[2], &count))
+		{
+			return ValkeyModule_ReplyWithError(ctx,"invalid count");
+		}
+	}
+
+	if (key_ok(k, klen) != 0)
+	{
+		return ValkeyModule_ReplyWithNull(ctx);
+	}
+
+	auto container = conversion::convert(k, klen);
+	query l,u;
+	auto lower = l->create({container});
+	auto upper = u->create({container, art::ts_end});
+	ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+
+	for (long long c = 0; c < count; ++c)
+	{
+		art::iterator i(upper);
+		if (!i.ok())
+		{
+			break;
+		}
+		auto v = i.key();
+		if (!v.starts_with(lower)) {
+			i.previous();
+			if (!i.ok())
+			{
+				break;
+			}
+			v = i.key();
+		};
+		if (!v.starts_with(lower)) break;
+
+		auto encoded_number = v.sub(lower.size, numeric_key_size);
+		auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
+		reply_encoded_key(ctx, encoded_number);
+		reply_encoded_key(ctx, member);
+		replies += 2;
+
+		if (!i.remove())
+		{
+			art::std_log("Could not remove key");
+		};
+	}
+	ValkeyModule_ReplySetArrayLength(ctx, replies);
+	return 0;
 }

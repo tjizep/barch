@@ -74,7 +74,7 @@ struct free_page
         PageSizeType r = offsets.back();
         if (r >= page_size)
         {
-            abort();
+            abort_with("invalid offset");
         }
         offsets.pop_back();
         return {page, r};
@@ -181,7 +181,7 @@ struct free_bin
         {
             if (p.page != page)
             {
-                abort();
+                abort_with("page does not match");
             }
             r = p.offsets.size() * size;
             p.clear();
@@ -194,7 +194,7 @@ struct free_bin
     {
         if (s != size)
         {
-            abort();
+            abort_with("invalid size match");
         }
         if (page_index.size() <= address.page())
         {
@@ -216,7 +216,7 @@ struct free_bin
     {
         if (s != size)
         {
-            abort();
+            abort_with("invalid free list size");
         }
         if (pages.empty())
         {
@@ -316,7 +316,7 @@ struct free_list
             }
             else
             {
-                abort();
+                abort_with("unbalanced pointer size");
             }
         }
     }
@@ -334,14 +334,14 @@ struct free_list
         {
             if (added < size)
             {
-                abort();
+                abort_with("trying to free too many bytes");
             }
             added -= size;
             if (test_memory == 1)
             {
                 if (addresses.count(r.address()) == 0)
                 {
-                    abort();
+                    abort_with("memory test failed: no such free address");
                 }
                 addresses.erase(r.address());
             }
@@ -515,7 +515,7 @@ private:
         if (size_to_train > min_training_size)
         {
             if (!intraining.empty() || size_in_training != 0)
-                abort();
+                abort_with("zstd training parameter mismatch");
             intraining.swap(trainables);
             size_in_training = size_to_train;
             size_to_train = 0;
@@ -538,7 +538,7 @@ private:
                                                      compressed_max_size, data, size, localDict);
         if (ZDICT_isError(compressed))
         {
-            abort();
+            abort_with("zstd dictionary compression error");
         }
         auto compressed_data = heap::buffer<uint8_t>(compressed);
         compressed_data.emplace(compressed, compressed_data_temp.begin());
@@ -603,7 +603,7 @@ private:
         {
             auto msg = ZDICT_getErrorName(decompressed_size);
             std::cerr << msg << std::endl;
-            abort();
+            abort_with(msg);
         }
         return decompressed;
     }

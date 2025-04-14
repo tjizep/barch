@@ -23,7 +23,7 @@ art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl,
     l->set_value(v);
     if (l->byte_size() != leaf_size)
     {
-        abort();
+        abort_with("invalid leaf size");
     }
 
     return logical;
@@ -63,7 +63,7 @@ static art::node* make_node(art::node_ptr_storage& ptr, compressed_address a, ar
     {
         return ptr.emplace<Type8>(a, node);
     }
-    abort();
+    abort_with("invalid pointer size");
 }
 
 art::node_ptr art::resolve_read_node(compressed_address address)
@@ -85,7 +85,7 @@ art::node_ptr art::resolve_read_node(compressed_address address)
     case art::node_256:
         return make_node<art::node256_4, art::node256_8>(ptr, address, node);
     default:
-        abort();
+        abort_with("unknown or invalid node type");
     }
 }
 
@@ -186,7 +186,7 @@ void page_iterator(const heap::buffer<uint8_t>& page, unsigned size, std::functi
         const art::leaf* l = (art::leaf*)i;
         if (l->key_len > page.byte_size())
         {
-            abort();
+            abort_with("invalid key data");
         }
         if (l->deleted())
         {
@@ -236,7 +236,7 @@ void art::tree::run_defrag()
                     art_delete(this, l->get_key(), fc);
                     if (c1 - 1 != this->size)
                     {
-                        abort();
+                        abort_with("key does not exist anymore");
                     }
                 });
 
@@ -248,7 +248,7 @@ void art::tree::run_defrag()
                     art_insert(this, options, l->get_key(), l->get_value(), fc);
                     if (c1 + 1 != this->size)
                     {
-                        abort();
+                        abort_with("key not added");
                     }
                 });
                 ++statistics::pages_defragged;

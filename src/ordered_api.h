@@ -10,5 +10,8 @@ int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZCARD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZDIFF(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZPOPMAX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZPOPMIN(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+
 
 #endif //ORDERED_API_H

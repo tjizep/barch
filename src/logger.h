@@ -51,6 +51,20 @@ namespace art
         raw_write_to_log(true, std::string_view{braces.data()}, fmt::make_format_args(args...));
     }
     template<typename... Args>
+    static constexpr void std_abort(Args&&... args)
+    {
+
+        // Generate formatting string "{} "...
+        std::array<char, sizeof...(Args) * 3 + 1> braces{};
+        constexpr const char c[4] = "{} ";
+        for (size_t i{0}; i != braces.size() - 1; ++i)
+            braces[i] = c[i % 3];
+        braces.back() = '\0';
+
+        raw_write_to_log(true, std::string_view{braces.data()}, fmt::make_format_args(args...));
+        abort();
+    }
+    template<typename... Args>
     static constexpr void std_log(Args&&... args)
     {
 

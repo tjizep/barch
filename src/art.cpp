@@ -128,7 +128,7 @@ static void destroy_node(art::node_ptr n)
         }
         break;
     default:
-        abort();
+        abort_with("unknown or invalid key type");
     }
 
     // Free ourself on the way up
@@ -177,7 +177,7 @@ static art::node_ptr find_child(art::node_ptr n, unsigned char c)
 static art::trace_element& last_el(art::trace_list& trace)
 {
     if (trace.empty())
-        abort();
+        abort_with("the trace is empty");
     return *(trace.rbegin());
 }
 #if 0
@@ -400,6 +400,7 @@ static art::node_ptr minimum(const art::node_ptr& n)
  * @return nullptr if the item was not found, otherwise
  * the leaf containing the value pointer is returned.
  */
+static bool increment_trace(const art::node_ptr& root, art::trace_list& trace);
 static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* t, art::value_type key)
 {
     art::node_ptr n = t->root;
@@ -417,12 +418,66 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
                 n = t->root;
                 continue;
             }
-            if (l->compare(key.bytes, key.length(), depth) >= 0)
-            {
+            return n;
 
-                return n;
+        }
+        auto& d = n->data();
+        if (d.partial_len)
+        {
+            unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
+            if (!prefix_len)
+            {
+                break;
             }
-            return nullptr;
+            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
+            {
+                depth += prefix_len;
+            }else
+                depth += d.partial_len;
+        }
+
+        art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
+        if (!te.empty())
+        {
+            if (te.child_ix == d.occupants)
+            {
+                if (!increment_trace(n, trace)) return nullptr;
+                if (!extend_trace_min(t->root, trace)) return nullptr;
+                n = last_el(trace).child;
+                continue;
+            }
+            trace.push_back(te);
+        }else
+        {
+            abort_with("trace is empty");
+        }
+        n = te.child;
+        depth++;
+    }
+    if (!extend_trace_min(t->root, trace)) return nullptr;
+    n = last_el(trace).child;
+    return n;
+}
+// TODO: this is a fast function that reduces lower bound shimmying - but I'm not sure if itll always work
+#if 0
+static art::node_ptr inner_min_bound(art::trace_list& trace, const art::tree* t, art::value_type key)
+{
+    art::node_ptr n = t->root;
+    int depth = 0, is_equal = 0;
+
+    while (!n.null())
+    {
+        if (n.is_leaf)
+        {
+            auto l = n.const_leaf();
+            if (l->expired())
+            {
+                art_delete((art::tree*)t, l->get_key());
+                n = t->root;
+                continue;
+            }
+
+            return n; // luxury return
         }
         auto& d = n->data();
         if (d.partial_len)
@@ -430,6 +485,14 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
             if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
             {
+                art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth+prefix_len, &is_equal);
+                if (te.child_ix == d.occupants)
+                {
+                    if (trace.empty()) return nullptr;
+                    if (!extend_trace_max(t->root, trace)) return nullptr;
+                    n = last_el(trace).child;
+                    continue;
+                }
                 break;
             }
             depth += d.partial_len;
@@ -439,24 +502,18 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         if (!te.empty())
         {
             trace.push_back(te);
+        }else
+        {
+            abort_with("the trace is empty");
         }
         n = te.child;
         depth++;
     }
     if (!extend_trace_min(t->root, trace)) return nullptr;
     n = last_el(trace).child;
-    if (n.is_leaf)
-    {
-        auto l = n.const_leaf();
-
-        if (!l->expired() && l->compare(key) >= 0)
-        {
-            return n;
-        }
-    }
-    return nullptr;
+    return n;
 }
-
+#endif
 static art::trace_element first_child_off(art::node_ptr n)
 {
     if (n.null()) return {nullptr, nullptr, 0};
@@ -488,70 +545,35 @@ static art::trace_element decrement_te(const art::trace_element& te)
 static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
 {
     // TODO: theres probably something still wrong with this code
-    for (auto r = trace.rbegin(); r != trace.rend(); ++r)
-    {
-        art::trace_element te = increment_te(*r);
-        if (te.empty())
-            continue; // goto the parent further back and try to increment that
-        *r = te;
-        if (te.child.is_leaf)
+    while (!trace.empty())
+    {   auto& last = last_el(trace);
+        auto& parent_d = last.parent->data();
+        if (last.child_ix == (unsigned)parent_d.occupants-1)
         {
-            // cleanup if this node is nearer to the root
-            while(!trace.empty() && trace.rbegin() != r) trace.pop_back();
-            return true;
-        }
-        if (r != trace.rbegin())
+            trace.pop_back();
+        }else
         {
-            auto u = r;
-            // go forward/down in the tree
-            do
-            {
-                --u;
-
-                te = first_child_off(te.child);
-                if (te.empty())
-                    return false;
-                *u = te;
-            }
-            while (u != trace.rbegin());
+            break;
         }
-        return extend_trace_min(root, trace);
     }
-    return false;
+    if (trace.empty()) return false;
+
+    trace.back() = increment_te(last_el(trace));
+    return extend_trace_min(root, trace);
 }
 static bool decrement_trace(const art::node_ptr& root, art::trace_list& trace)
 {
-    // TODO: theres probably something still wrong with this code
-    for (auto r = trace.rbegin(); r != trace.rend(); ++r)
+    while (!trace.empty() && last_el(trace).child_ix == 0)
     {
-        art::trace_element te = decrement_te(*r);
-        if (te.empty())
-            continue; // goto the parent further back and try to decrement that
-        *r = te;
-        if (te.child.is_leaf)
-        {
-            // cleanup if this node is nearer to the root
-            while(!trace.empty() && trace.rbegin() != r) trace.pop_back();
-            return true;
-        }
-        if (r != trace.rbegin())
-        {
-            auto u = r;
-            // go forward/down in the tree
-            do
-            {
-                --u;
-
-                te = last_child_off(te.child);
-                if (te.empty())
-                    return false;
-                *u = te;
-            }
-            while (u != trace.rbegin());
-        }
-        return extend_trace_max(root, trace);
+        trace.pop_back();
     }
-    return false;
+    if (trace.empty())
+    {
+        return extend_trace_min(root, trace);
+    }
+    auto& last= last_el(trace);
+    trace.back() = decrement_te(last);
+    return extend_trace_max(root, trace);
 }
 
 art::node_ptr art::lower_bound(const art::tree* t, art::value_type key)
@@ -610,7 +632,7 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
                 }
                 else
                 {
-                    abort();
+                    abort_with("not a leaf");
                 }
             }
             while (increment_trace(t->root, tl));
@@ -659,7 +681,7 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
                 }
                 else
                 {
-                    abort();
+                    abort_with("not a leaf");
                 }
             }
             while (increment_trace(t->root, tl));
@@ -720,14 +742,27 @@ art::node_ptr art::find(value_type key)
     }
     return nullptr;
 }
+art::iterator::iterator() : t(get_art())
+{
+    auto lb = art_minimum(t);//inner_min_bound(tl, t, key);
+    if (lb.null()) return;
+    const art::leaf* al = lb.const_leaf();
+    if (!al)
+    {
+        tl.clear();
+    }else
+    {
+        c = last_node(tl);
+    }
 
+}
 art::iterator::iterator(value_type key) : t(get_art())
 {
     ++statistics::lb_ops;
     try
     {
 
-        auto lb = inner_lower_bound(tl, t, key);
+        auto lb = inner_lower_bound(tl, t, key);//inner_min_bound(tl, t, key);
         if (lb.null()) return;
         const art::leaf* al = lb.const_leaf();
         if (!al)
@@ -1116,7 +1151,7 @@ void art_insert
         {
             if (!old.is_leaf)
             {
-                abort();
+                abort_with("not a leaf");
             }
             fc(old);
             free_leaf_node(old);
@@ -1324,7 +1359,7 @@ static int recursive_iter(art::node_ptr n, CallBack cb, void* data)
         break;
 
     default:
-        abort();
+        abort_with("unknown or invalid node type");
     }
     return 0;
 }
@@ -1496,7 +1531,7 @@ uint64_t art_evict_lru(art::tree* t)
             const art::leaf* l = (art::leaf*)i;
             if (l->key_len > page.first.byte_size())
             {
-                abort();
+                abort_with("invalid key or key size");
             }
             if (l->deleted())
             {

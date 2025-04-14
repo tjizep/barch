@@ -13,5 +13,10 @@ int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZPOPMAX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZPOPMIN(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZRANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZREVRANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZRANGEBYSCORE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
+int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 
 #endif //ORDERED_API_H

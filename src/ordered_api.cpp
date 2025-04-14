@@ -185,19 +185,8 @@ int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	return ValkeyModule_ReplyWithLongLong(ctx, count);
 }
-
-int cmd_ZRANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 {
-	ValkeyModule_AutoMemory(ctx);
-	compressed_release release;
-	if (argc < 4)
-		return ValkeyModule_WrongArity(ctx);
-	art::zrange_spec spec(argv,argc);
-	if (spec.parse_options() != VALKEYMODULE_OK)
-	{
-		return ValkeyModule_ReplyWithError(ctx, "syntax error");
-	}
-
 	auto container = conversion::convert(spec.key);
 	auto mn = conversion::convert(spec.start, true);
 	auto mx = conversion::convert(spec.stop, true);
@@ -292,7 +281,21 @@ int cmd_ZRANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	ValkeyModule_ReplySetArrayLength(ctx, replies);
 
 	return 0;
+}
 
+int cmd_ZRANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+
+	return ZRANGE(ctx, spec);
 }
 int cmd_ZCARD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
@@ -604,4 +607,81 @@ int cmd_ZPOPMAX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	ValkeyModule_ReplySetArrayLength(ctx, replies);
 	return 0;
+}
+
+int cmd_ZREVRANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+	spec.REV = true;
+	spec.BYLEX = false;
+	return ZRANGE(ctx, spec);
+}
+
+int cmd_ZRANGEBYSCORE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+	spec.REV = false;
+	spec.BYLEX = false;
+	return ZRANGE(ctx, spec);
+}
+int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+	spec.REV = true;
+	spec.BYLEX = false;
+	return ZRANGE(ctx, spec);
+}
+int cmd_ZRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+	spec.REV = false;
+	spec.BYLEX = true;
+	return ZRANGE(ctx, spec);
+}
+int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+	spec.REV = true;
+	spec.BYLEX = true;
+	return ZRANGE(ctx, spec);
 }

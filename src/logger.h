@@ -51,7 +51,7 @@ namespace art
         raw_write_to_log(true, std::string_view{braces.data()}, fmt::make_format_args(args...));
     }
     template<typename... Args>
-    static constexpr void std_abort(Args&&... args)
+    static constexpr void std_abort(Args&&... args) __THROW
     {
 
         // Generate formatting string "{} "...

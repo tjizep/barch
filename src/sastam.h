@@ -650,5 +650,5 @@ using std_vector = std::vector
     ,   allocator<K>
     >;
 }
-extern void abort_with(const char * message);
+extern void abort_with(const char * message) __THROW __attribute__ ((__noreturn__));
 #endif //SASTAM_H

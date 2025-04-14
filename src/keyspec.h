@@ -658,5 +658,110 @@ namespace art
             return VALKEYMODULE_OK;
         }
     };
+    struct zrange_spec : base_key_spec
+    {
+        zrange_spec& operator=(ValkeyModuleString**) = delete;
+        zrange_spec& operator=(const zrange_spec&) = delete;
+        zrange_spec(const zops_spec&) = delete;
+
+        zrange_spec(ValkeyModuleString** argvz, int argcz)
+        {
+            argv = argvz;
+            argc = argcz;
+        }
+        int64_t fields_start{0};
+        size_t numkeys{0};
+        std::string key{};
+        std::string start{};
+        std::string stop{};
+
+        heap::std_vector<std::string>& get_kewords()
+        {
+            static heap::std_vector<std::string> by = {"byscore","bylex","rev","limit", "withscores"};
+            return by;
+        }
+
+        enum keyword_index
+        {
+            byscore = 0,
+            bylex = 1,
+            rev = 2,
+            limit = 3,
+            withscores = 4
+        };
+        bool BYLEX{false};
+        bool BYSCORE{false};
+        bool REV{false};
+        bool has_withscores{false};
+        int64_t offset{0};
+        int64_t count{0};
+        int parse_options()
+        {
+            int spos = 1; // the key is the first one
+            if (argc < 4)
+            {
+                return VALKEYMODULE_ERR;
+            }
+            key = tos(spos++);
+            if (spos == argc)
+            {
+                return VALKEYMODULE_ERR;
+            }
+            start = tos(spos++);
+            if (spos == argc)
+            {
+                return VALKEYMODULE_ERR;
+            }
+            stop = tos(spos++);
+            if (spos == argc)
+            {
+                return VALKEYMODULE_OK;
+            }
+
+            do
+            {
+                int which = has_enum(get_kewords(),spos);
+                switch (which)
+                {
+                case byscore:
+                    ++spos;
+                    BYSCORE = true;
+                    break;
+                case bylex:
+                    ++spos;
+                    BYLEX = true;
+                    break;
+                case limit:
+                    ++spos;
+                    if (!is_integer(spos))
+                    {
+                        return VALKEYMODULE_ERR;
+                    }
+                    offset = tol(spos++);
+                    if (!is_integer(spos))
+                    {
+                        return VALKEYMODULE_ERR;
+                    }
+                    count = tol(spos++);
+                    break;
+                case rev:
+                    ++spos;
+                    REV = true;
+                    break;
+                case withscores:
+                    if (has_withscores)
+                    {
+                        return VALKEYMODULE_ERR;
+                    }
+                    has_withscores = true;
+                    ++spos;
+                    break;
+                default:
+                    return VALKEYMODULE_ERR;
+                }
+            } while (spos < argc);
+            return VALKEYMODULE_OK;
+        }
+    };
 };
 #endif //SET_H

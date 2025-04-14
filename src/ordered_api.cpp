@@ -185,6 +185,115 @@ int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	return ValkeyModule_ReplyWithLongLong(ctx, count);
 }
+
+int cmd_ZRANGE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+
+	auto container = conversion::convert(spec.key);
+	auto mn = conversion::convert(spec.start, true);
+	auto mx = conversion::convert(spec.stop, true);
+	query lq,uq,pq;
+	auto lower = lq->create({container,mn});
+	auto prefix = pq->create({container});
+	auto upper = uq->create({container,mx});
+	long long count = 0;
+	long long replies = 0;
+	heap::std_vector<std::pair<art::value_type,art::value_type>> bylex;
+	heap::std_vector<art::value_type> rev;
+	ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+	art::iterator ai(lower);
+	while (ai.ok())
+	{
+		auto v = ai.key();
+		if (!v.starts_with(prefix)) break;
+		if (v <= upper)
+		{
+			bool doprint = !spec.count;
+
+			if (spec.count && count >= spec.offset && (count - spec.offset < spec.count))
+			{
+				doprint = true;
+			}
+			if (doprint)
+			{
+				auto encoded_number = v.sub(prefix.size, numeric_key_size);
+				auto member = v.sub(prefix.size + numeric_key_size);
+				bool pushed = spec.BYLEX || spec.REV;
+				if (spec.BYLEX)
+				{
+					bylex.push_back({member,encoded_number});
+				}
+				if (spec.REV && !spec.BYLEX)
+				{
+					rev.push_back(v.sub(prefix.size, numeric_key_size * 2));
+				}
+				if (!pushed)
+				{
+					reply_encoded_key(ctx, member);
+					++replies;
+					if (spec.has_withscores)
+					{
+						reply_encoded_key(ctx, encoded_number);
+						++replies;
+					}
+				}
+			}
+			++count;
+		}else
+		{
+			break;
+		}
+		ai.next();
+	}
+	if (spec.BYLEX)
+	{	if (spec.REV)
+		{
+			std::sort(bylex.begin(), bylex.end(),[](auto& a, auto& b)
+			{
+				return b < a;
+			});
+		}
+		for (auto& rec: bylex)
+		{
+			reply_encoded_key(ctx, rec.first);
+			++replies;
+			if (spec.has_withscores)
+			{
+				reply_encoded_key(ctx, rec.second);
+				++replies;
+			}
+		}
+	}else if (spec.REV)
+	{
+		std::sort(rev.begin(), rev.end(),[](auto& a, auto& b)
+		{
+			return b < a;
+		});
+		for (auto& rec: rev)
+		{
+			reply_encoded_key(ctx, rec.sub(numeric_key_size ,numeric_key_size));
+			++replies;
+			if (spec.has_withscores)
+			{
+				reply_encoded_key(ctx, rec.sub(0 ,numeric_key_size));
+				++replies;
+			}
+		}
+	};
+	ValkeyModule_ReplySetArrayLength(ctx, replies);
+
+	return 0;
+
+}
 int cmd_ZCARD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
 	ValkeyModule_AutoMemory(ctx);

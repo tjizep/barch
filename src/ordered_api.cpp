@@ -173,8 +173,9 @@ int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	art::iterator ai(lower);
 	while (ai.ok())
 	{
-		if (!ai.key().starts_with(prefix)) break;
-		if (ai.key() <= upper)
+		auto ik = ai.key();
+		if (!ik.starts_with(prefix)) break;
+		if (ik.sub(0,prefix.size + numeric_key_size) <= upper)
 		{
 			++count;
 		}else
@@ -204,7 +205,7 @@ int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 	{
 		auto v = ai.key();
 		if (!v.starts_with(prefix)) break;
-		if (v <= upper)
+		if (v.sub(0,prefix.size + numeric_key_size) <= upper)
 		{
 			bool doprint = !spec.count;
 

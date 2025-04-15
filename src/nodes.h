@@ -479,7 +479,7 @@ namespace art
     extern node_ptr resolve_write_node(compressed_address address);
 
 
-    typedef heap::vector<trace_element> trace_list;
+    typedef heap::small_vector<trace_element> trace_list;
 
     //void free_node(art_node *n);
     //void free_node(art_leaf *n);

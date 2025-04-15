@@ -145,6 +145,90 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
 	return 0;
 }
+int cmd_ZINCRBY(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	int responses = 0;
+	size_t nlen;
+	int64_t updated = 0;
+	auto fc = [&](art::node_ptr) -> void
+	{
+		++updated;
+	};
+	const char* key = ValkeyModule_StringPtrLen(argv[1], &nlen);
+	if (key_ok(key, nlen) != 0)
+	{
+		return ValkeyModule_ReplyWithNull(ctx);
+	}
+	size_t vlen;
+	double incr = 0.0f;
+	if (VALKEYMODULE_OK != ValkeyModule_StringToDouble(argv[2],&incr))
+	{
+		return ValkeyModule_ReplyWithError(ctx,"invalid argument");
+	}
+	const char* v = ValkeyModule_StringPtrLen(argv[3], &vlen);
+
+	if (key_ok(v, vlen) != 0)
+	{
+		return ValkeyModule_ReplyWithError(ctx,"invalid argument");
+	}
+	auto target = conversion::convert(v, vlen, true);
+	auto target_member = target.get_value();
+	auto container = conversion::convert(key, nlen);
+	query q1,q2;
+	auto prefix = q1->create({container});
+	art::iterator scores(prefix);
+	// we'll just add a bucket index to make scanning these faster without adding
+	// too much data
+	while (scores.ok())
+	{
+		auto k = scores.key();
+		auto val = scores.value();
+		if (!k.starts_with(prefix)) break;
+		auto encoded_number = k.sub(prefix.size, numeric_key_size);
+		auto member = k.sub(prefix.size + numeric_key_size);
+		if (target_member == member)
+		{
+			double number = conversion::enc_bytes_to_dbl(encoded_number);
+			number += incr;
+			conversion::comparable_result id {++counter};
+			q1->push(conversion::comparable_result(number));
+			q1->push(member);
+			art::value_type qkey = q1->create();
+			art_insert(get_art(), {}, qkey, val, true, fc);
+
+			q1->pop(2);
+			if (!scores.remove()) // remove the current one
+			{
+				return ValkeyModule_ReplyWithError(ctx,"internal error");
+			};
+
+			++responses;
+			return ValkeyModule_ReplyWithDouble(ctx, number);
+		}
+
+		scores.next();
+	}
+	if (responses == 0)
+	{
+		auto score = conversion::comparable_result(incr);
+		auto member = conversion::convert(v, vlen);
+		q1->push(score);
+		q1->push(member);
+		art::value_type qkey = q1->create();
+		art::value_type qv = {v, (unsigned)vlen};
+		art_insert(get_art(), {}, qkey, qv, true, fc);
+		q1->pop(2);
+		return ValkeyModule_ReplyWithDouble(ctx, incr);
+	}
+
+
+	return 0;
+}
 
 int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
@@ -339,7 +423,12 @@ enum ops
 	onion = 2
 };
 
-static int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops operate)
+static int ZOPER(
+	ValkeyModuleCtx* ctx,
+	ValkeyModuleString** argv,
+	int argc,
+	ops operate,
+	std::string store = "", bool card = false)
 {
 	ValkeyModule_AutoMemory(ctx);
 	compressed_release release;
@@ -352,7 +441,7 @@ static int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops 
 	{
 		return ValkeyModule_ReplyWithError(ctx,"syntax error");
 	}
-	if (spec.aggr == art::zops_spec::agg_none)
+	if (spec.aggr == art::zops_spec::agg_none && store.empty())
 		ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
 	long long replies = 0;
 	double aggr = 0.0f;
@@ -379,9 +468,17 @@ static int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops 
 	}
 	if (fk !=  spec.keys.end())
 	{
-		query lq,uq;
+		int64_t updated = 0;
+		auto fc = [&](art::node_ptr) -> void
+		{
+			++updated;
+		};
+		query lq,uq,q1;
 		auto container = conversion::convert(*fk);
 		auto lower = lq->create({container});
+		if (!store.empty())
+			q1->create({conversion::convert(store)});
+
 		art::iterator i(lower);
 
 		for (;i.ok();)
@@ -399,15 +496,17 @@ static int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops 
 
 			for (;ok !=  spec.keys.end();++ok)
 			{
-				query tainerq,checkq;
+				query tainerq, checkq;
 				auto check_set = conversion::convert(*ok);
 				auto check_tainer = tainerq->create({check_set});
-				auto check = checkq->create({check_set,conversion::comparable_result(number)});
+				auto check = checkq->create({check_set, conversion::comparable_result(number)});
 				art::iterator j(check);
 				bool found = false;
 				if (j.ok())
 				{
 					auto kf = j.key();
+					if (!kf.starts_with(check)) break;
+
 					auto efn = kf.sub(check_tainer.size, numeric_key_size);
 					auto fn = conversion::enc_bytes_to_dbl(efn);
 					found = fn==number;
@@ -437,13 +536,34 @@ static int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops 
 				switch (spec.aggr)
 				{
 				case art::zops_spec::agg_none:
-					reply_encoded_key(ctx, member);
-					++replies;
-					if (spec.has_withscores)
+					if (store.empty())
 					{
-						//ValkeyModule_ReplyWithDouble(ctx, number);
-						reply_encoded_key(ctx, encoded_number);
+						reply_encoded_key(ctx, member);
 						++replies;
+						if (spec.has_withscores)
+						{
+							//ValkeyModule_ReplyWithDouble(ctx, number);
+							reply_encoded_key(ctx, encoded_number);
+							++replies;
+						}
+
+					}else
+					{
+						// this is possible because the art tree is guaranteed not to reallocate
+						// anything during the compressed_release scope
+						if (!card)
+						{
+							conversion::comparable_result id {++counter};
+
+							q1->push({encoded_number});
+							q1->push({member});
+							art::value_type qkey = q1->create();
+							art::value_type qv = i.value();
+							art_insert(get_art(), {}, qkey, qv, false, fc);
+
+							q1->pop(2);
+						}
+						replies++;
 					}
 
 					break;
@@ -468,7 +588,14 @@ static int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops 
 	{
 		return ValkeyModule_ReplyWithDouble(ctx, count > 0 ? aggr : 0.0f);
 	}
-	ValkeyModule_ReplySetArrayLength(ctx, replies);
+	if (store.empty())
+	{
+		ValkeyModule_ReplySetArrayLength(ctx, replies);
+	}else
+	{
+		return ValkeyModule_ReplyWithLongLong(ctx, replies);
+	}
+
 
 	return 0;
 }
@@ -482,8 +609,30 @@ int cmd_ZDIFF(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		art::log(e,__FILE__,__LINE__);
 	}
 	return ValkeyModule_ReplyWithError(ctx,"internal error");
-
 }
+
+int cmd_ZDIFFSTORE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	size_t mlen = 0;
+	const char * member = ValkeyModule_StringPtrLen(argv[1],&mlen);
+	if (mlen == 0)
+		return ValkeyModule_ReplyWithError(ctx,"syntax error");
+	return ZOPER(ctx, &argv[1], argc-1, difference,member);
+}
+int cmd_ZINTERSTORE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	size_t mlen = 0;
+	const char * member = ValkeyModule_StringPtrLen(argv[1],&mlen);
+	if (mlen == 0)
+		return ValkeyModule_ReplyWithError(ctx,"syntax error");
+	return ZOPER(ctx, &argv[1], argc-1, intersect,member);
+}
+int cmd_ZINTERCARD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+
+	return ZOPER(ctx, argv, argc, intersect,"#",true);
+}
+
 int cmd_ZINTER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
 	try
@@ -689,92 +838,6 @@ int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc
 
 int add_ordered_api(ValkeyModuleCtx* ctx)
 {
-	heap::small_vector<int> testv;
-	int ttotal = 0;
-	for (int i = 0; i <100; ++i)
-	{
-		testv.push_back(i);
-		ttotal += i;
-	}
-	int total = 0;
-	for (auto r = testv.begin(); r != testv.end(); ++r)
-	{
-		total += *r;
-
-	}
-	if (total != ttotal)
-	{
-		art::std_err("tesfail");
-	}
-	for (auto r = testv.rbegin(); r != testv.rend(); ++r)
-	{
-		total -= *r;
-
-	}
-	if (total != 0)
-	{
-		art::std_err("tesfail");
-	}
-	for (int i = 0; i <100; ++i)
-	{
-		total += testv.back();
-		testv.pop_back();
-	}
-	if (total != ttotal)
-	{
-		art::std_err("tesfail");
-	}
-	if (!testv.empty())
-	{
-		art::std_err("should be empty",testv.size());
-	}
-	for (int i = 0; i <100; ++i)
-	{
-		testv.push_back(i);
-	}
-	int tbefore = total;
-	auto t = testv.begin();
-	for (int i = 0; i <100; ++i)
-	{
-		total += *t++;
-	}
-	if (total != 2*ttotal)
-	{
-		art::std_err("tesfail");
-	}
-	tbefore = total;
-	t = testv.begin();
-	for (int i = 0; i < 100; ++i)
-	{
-		total += *t;
-		++t;
-	}
-	if (total != 3*ttotal)
-	{
-		art::std_err("tesfail");
-	}
-	auto tr = testv.rbegin();
-	for (int i = 0; i <100; ++i)
-	{
-		total -= *tr++;
-	}
-
-	if (total != tbefore)
-	{
-		art::std_err("tesfail");
-	}
-	total = ttotal;
-	auto ttv= testv;
-	for (int i = 0; i <100; ++i)
-	{
-		total -= *ttv.rbegin();
-		ttv.pop_back();
-	}
-
-	if (total != 0)
-	{
-		art::std_err("tesfail");
-	}
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZPOPMIN), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
 		return VALKEYMODULE_ERR;
@@ -792,6 +855,18 @@ int add_ordered_api(ValkeyModuleCtx* ctx)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZDIFF), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZDIFFSTORE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZINTERSTORE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZINCRBY), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZINTERCARD), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZINTER), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

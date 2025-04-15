@@ -131,10 +131,32 @@ namespace conversion
                 data = bytes;
             }
             //TODO: ?hack? a hidden trailing null pointer has to be added
-            data[this->size] = 0x00;
+            //data[this->size] = 0x00;
             memcpy(data + 1, val, this->size - 1);
             data[0] = art::tstring;
 
+        }
+        comparable_result(art::value_type val)
+            : size(val.size)
+        {
+            if (!(      val.bytes[0]==art::tstring
+                    ||  val.bytes[0]==art::tinteger
+                    ||  val.bytes[0]==art::tdouble
+                    ||  val.bytes[0]==art::tcomposite
+                    ||  val.bytes[0]==art::tend))
+            {
+                throw_exception<std::invalid_argument>("invalid value_type");
+            }
+            if (this->size < sizeof(storage)-1)
+            {
+                memset(storage, 0, sizeof(storage));
+                data = storage;
+            }else
+            {
+                bytes = heap::allocate<uint8_t>(this->size);
+                data = bytes;
+            }
+            memcpy(data, val.bytes, this->size);
         }
 
         comparable_result(const comparable_result& r)
@@ -185,12 +207,9 @@ namespace conversion
 
         [[nodiscard]] art::value_type get_value() const
         {
-            if (*get_data() == art::tinteger || *get_data() == art::tdouble)
-            {
-                return {get_data(), get_size()};
-            }
-            return {get_data(), get_size() + 1}; // include the null terminator for this case
+            return {get_data(), get_size() }; // include the null terminator for this case
         }
+
         [[nodiscard]] int ctype() const
         {
             if (get_size() == 0) return art::tnone;

@@ -26,7 +26,7 @@ conversion::comparable_result conversion::convert(const char* v, size_t vlen, bo
 		return comparable_result(d);
 	}
 
-	return {v, vlen};
+	return {v, vlen + 1};
 }
 conversion::comparable_result conversion::convert(const std::string& str, bool noint)
 {

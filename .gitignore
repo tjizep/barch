@@ -8,6 +8,12 @@ Makefile
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
+dump.rdb
+leaf_data.dat
+node_data.dat
+.ninja*
+.idea/*
+cmake-*
 CTestTestfile.cmake
 _deps
 CMakeUserPresets.json

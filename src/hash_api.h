@@ -6,6 +6,8 @@
 #define HASH_API_H
 
 #include "valkeymodule.h"
+int add_hash_api(ValkeyModuleCtx* ctx);
+
 int cmd_HSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_HMSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_HEXPIRE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);

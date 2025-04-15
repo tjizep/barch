@@ -471,7 +471,7 @@ int cmd_MGET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         {
             auto converted = conversion::convert(k, klen);
             art::trace_list trace;
-            trace.reserve(klen);
+            //trace.reserve(klen);
             //read_lock rl(get_lock());
             art::node_ptr r = art_search(trace, get_art(), converted.get_value());
             if (r.null())
@@ -944,8 +944,6 @@ int cmd_CONFIG(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     return VALKEYMODULE_ERR;
 }
 
-#define NAME(x) "B." #x , cmd_##x
-
 /* This function must be present on each module. It is used in order to
  * register the commands into the server. */
 int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
@@ -980,95 +978,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
     if (ValkeyModule_CreateCommand(ctx, NAME(MGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
-    if (ValkeyModule_CreateCommand(ctx, NAME(HSET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HGETDEL), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HGETEX), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HMSET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HEXPIRE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HDEL), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HINCRBY), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HINCRBYFLOAT), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZPOPMIN), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZPOPMAX), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HTTL), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HLEN), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HEXPIRETIME), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HMGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HGETALL), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HKEYS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HEXISTS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
     if (ValkeyModule_CreateCommand(ctx, NAME(KEYS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZADD), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZCOUNT), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZCARD), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZDIFF), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZINTER), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZREVRANGE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-            return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGEBYSCORE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-            return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZREVRANGEBYSCORE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-            return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZREVRANGEBYLEX), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-            return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGEBYLEX), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
-            return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(LB), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
@@ -1130,6 +1041,14 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
     if (ValkeyModule_CreateCommand(ctx, NAME(CLEAR), "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (add_hash_api(ctx) != VALKEYMODULE_OK)
+    {
+        return VALKEYMODULE_ERR;
+    }
+    if (add_ordered_api(ctx) != VALKEYMODULE_OK)
+    {
+        return VALKEYMODULE_ERR;
+    }
     Constants.init(ctx);
     // valkey should free this I hope
     if (art::register_valkey_configuration(ctx) != 0)

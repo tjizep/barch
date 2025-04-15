@@ -10,6 +10,7 @@
 #include <cstring> // for memcpy
 #include <new> // bad_alloc, bad_array_new_length
 #include <memory>
+#include <statistics.h>
 #include <stdexcept>
 #include <vector>
 #include <ankerl/unordered_dense.h>
@@ -401,154 +402,142 @@ namespace heap
 
     /// a checked vector with automatic heap allocator
     template <typename T>
-    struct vector
+    struct small_vector
     {
+    private:
         typedef std::vector<T, allocator<T>> vtype;
+        typedef std::array<T, 16> stype;
+        stype scontent{};
+        size_t ssize{0};
         vtype content{};
-        vector() = default;
+    public:
+        small_vector()
+        {
+        };
 
-        explicit vector(size_t r)
+        explicit small_vector(size_t r)
         {
             resize(r);
         }
 
-        ~vector()
+        ~small_vector()
         {
             clear();
         }
 
-        vector(const vector& other) noexcept
+        small_vector(const small_vector& other) noexcept
         {
             *this = other;
         }
 
-        vector(vector&& other) noexcept
+        small_vector(small_vector&& other) noexcept
         {
             *this = std::move(other);
         }
 
-        vector& operator=(const vector& other) noexcept
+        small_vector& operator=(const small_vector& other) noexcept
         {
             content = other.content;
+            ssize = other.ssize;
+            scontent = other.scontent;
             return *this;
         }
 
-        vector& operator=(vector&& other) noexcept
+        small_vector& operator=(small_vector&& other) noexcept
         {
             content = std::move(other.content);
+            ssize = other.ssize;
+            scontent = std::move(other.scontent);
             return *this;
         }
 
         [[nodiscard]] bool empty() const
         {
-            return content.empty();
+            return ssize == 0;
         }
 
         [[nodiscard]] size_t capacity() const
         {
+            if (ssize < scontent.size())
+                return scontent.size();
             return content.capacity();
         };
 
         [[nodiscard]] size_t size() const
         {
-            return content.size();
+            return ssize;
         }
 
         void resize(size_t n)
         {
-            content.resize(n);
-        }
+            if (ssize < scontent.size())
+            {
+                if (n >= scontent.size())
+                {
+                    content.clear();
+                    content.assign(scontent.begin(), scontent.end());
+                    content.resize(n);
+                }
 
-        bool included(const T* it) const
-        {
-            return it >= begin() && it <= end();
-        }
-
-        size_t index(const T* it) const
-        {
-            return it - begin();
-        }
-
-        void erase(ptrdiff_t from, ptrdiff_t to)
-        {
-            erase(begin() + from, begin() + to);
-        }
-
-        void erase(const T* from, const T* to)
-        {
-            if (!included(from) || !included(to) || from > to) return; // TODO: or abort() ?
-            content.erase(from, to);
+            }else
+            {
+                if (n < scontent.size())
+                {
+                    content.resize(n);
+                    std::copy(content.begin(), content.end(), scontent.begin());
+                    content = vtype();
+                }else
+                {
+                    content.resize(n);
+                }
+            }
+            ssize = n;
         }
 
         void reserve(size_t n)
         {
-            content.reserve(n);
+            if (n >= scontent.size())
+                content.reserve(n);
         }
 
         void clear()
         {
-            content.clear();
+            ssize = 0;
+            content = vtype();
         }
 
         void push_back(const T& x)
         {
-            content.emplace_back(x);
+            resize(ssize + 1);
+            at(ssize-1) = x;
         }
 
         template <typename... Args>
         void emplace_back(Args&&... arg)
-        {
-            content.emplace_back(std::forward<Args>(arg)...);
-        }
-
-        void emplace_back(const T& x)
-        {
-            content.emplace_back(x);
+        {   resize(ssize + 1);
+            at(ssize-1) = T(std::forward<Args>(arg)...);
         }
 
         void emplace_back()
         {
-            content.emplace_back();
-        }
-        void emplace_back(const T* data, size_t n)
-        {
-            for (size_t i = 0; i < n; ++i)
-                content.emplace_back(data+i);
-        }
-
-        void append(const T* start, const T* end)
-        {
-            content.insert(content.end(), start, end);
-        }
-
-        void append(const vector& other)
-        {
-            append(other.cbegin(), other.cend());
+            emplace_back(T());
         }
 
         T& back()
         {
-            if (content.size() == 0)
-            {
-                throw std::out_of_range("back()");
-            }
-            return content.back();
+            return at(size()-1) ;
         }
 
         const T& back() const
         {
-            if (empty())
-            {
-                throw std::out_of_range("back()");
-            }
-            return content.back();
+            return at(size()-1) ;
         }
 
         void pop_back()
         {
             if (!empty())
             {
-                content.pop_back();
+                resize(size() - 1);
             }
         }
 
@@ -566,65 +555,360 @@ namespace heap
         {
             if (ix >= size())
             {
-                throw std::out_of_range("at()");
+                throw_exception<std::out_of_range> ("at()");
+            }
+            if (ssize < scontent.size())
+            {
+                return scontent[ix];
             }
             return content[ix];
+
         }
 
         const T& at(size_t ix) const
         {
-            if (ix >= size())
+            //if (ix >= size())
+            //{
+            //    throw_exception<std::out_of_range> ("at()");
+            //}
+            if (ssize < scontent.size())
             {
-                throw std::out_of_range("at()");
+                return scontent[ix];
             }
             return content[ix];
         }
 
         T* data()
         {
-            if (empty())
-            {
-                throw std::out_of_range("data()");
-            }
-            return content.data();
+            return &at(0);
         }
 
         const T* data() const
         {
-            if (empty())
+            return &at(0);
+        }
+        struct iterator
+        {
+            T* ptr{};
+            T* operator ->()
             {
-                throw std::out_of_range("data()");
+                return ptr;
             }
-            return content.data();
+            const T* operator ->() const
+            {
+                return ptr;
+            }
+            T& operator *()
+            {
+                return *ptr;
+            }
+            const T& operator *() const
+            {
+                return *ptr;
+            }
+
+            iterator(T* start) : ptr(start) {}
+            iterator(const iterator& other) = default;
+            iterator& operator++()
+            {
+                ++ptr;
+                return *this;
+            }
+            iterator operator++(int)
+            {
+                iterator r = *this;
+                ++ptr;
+                return r;
+            }
+            iterator& operator--()
+            {
+                --ptr;
+                return *this;
+            }
+            iterator operator--(int)
+            {
+                iterator r = *this;
+                --ptr;
+                return r;
+            }
+            bool operator==(const iterator& other) const
+            {
+                return ptr == other.ptr;
+            }
+            bool operator!=(const iterator& other) const
+            {
+                return ptr != other.ptr;
+            }
+
+        };
+        struct const_iterator
+        {
+            const T* ptr{};
+            const T* operator ->()
+            {
+                return ptr;
+            }
+            const T& operator *() const
+            {
+                return *ptr;
+            }
+            const_iterator(const T* start) : ptr(start) {}
+            const_iterator(const const_iterator& other) = default;
+            const_iterator(const iterator& other) : ptr(other.ptr) {}
+            const_iterator& operator=(const const_iterator& other)
+            {
+                ptr = other.ptr;
+                return *this;
+            }
+            const_iterator& operator=(const iterator& other)
+            {
+                ptr = other.ptr;
+                return *this;
+            }
+            const_iterator& operator++()
+            {
+                ++ptr;
+                return *this;
+            }
+            const_iterator operator++(int)
+            {
+                const_iterator r = *this;
+                ++ptr;
+                return r;
+            }
+
+            const_iterator& operator--()
+            {
+                --ptr;
+                return *this;
+            }
+            const_iterator operator--(int)
+            {
+                const_iterator r = *this;
+                --ptr;
+                return r;
+            }
+            const T& operator*()
+            {
+                return *ptr;
+            }
+            bool operator==(const const_iterator& other) const
+            {
+                return ptr == other.ptr;
+            }
+            bool operator!=(const const_iterator& other) const
+            {
+                return ptr != other.ptr;
+            }
+            bool operator==(const iterator& other) const
+            {
+                return ptr == other.ptr;
+            }
+            bool operator!=(const iterator& other) const
+            {
+                return ptr != other.ptr;
+            }
+
+        };
+        struct reverse_iterator
+        {
+            T* ptr{};
+            T* operator ->()
+            {
+                return ptr;
+            }
+            const T* operator ->() const
+            {
+                return ptr;
+            }
+            T& operator *()
+            {
+                return *ptr;
+            }
+            const T& operator *() const
+            {
+                return *ptr;
+            }
+
+            reverse_iterator(T* start) : ptr(start) {}
+            reverse_iterator(const reverse_iterator& other) = default;
+            reverse_iterator(const iterator& other) : ptr(other.ptr) {}
+            reverse_iterator& operator=(const reverse_iterator& other) = default;
+            reverse_iterator& operator=(const iterator& other)
+            {
+                ptr = other.ptr;
+                return *this;
+            }
+            reverse_iterator& operator++()
+            {
+                --ptr;
+                return *this;
+            }
+            reverse_iterator& operator--()
+            {
+                ++ptr;
+                return *this;
+            }
+            reverse_iterator operator++(int)
+            {
+                reverse_iterator r = *this;
+                ++(*this);
+                return r;
+            }
+            reverse_iterator operator--(int)
+            {
+                reverse_iterator r = *this;
+                --(*this);
+                return r;
+            }
+            bool operator==(const reverse_iterator& other) const
+            {
+                return ptr == other.ptr;
+            }
+            bool operator!=(const reverse_iterator& other) const
+            {
+                return ptr != other.ptr;
+            }
+
+        };
+        struct const_reverse_iterator
+        {
+            const T* ptr{};
+            const T* operator ->() const
+            {
+                return ptr;
+            }
+            const_reverse_iterator(const T* start) : ptr(start) {}
+            const_reverse_iterator(const const_reverse_iterator& other) = default;
+            const_reverse_iterator(const iterator& other) : ptr(other.ptr) {}
+            const_reverse_iterator(const const_iterator& other) : ptr(other.ptr) {}
+            const_reverse_iterator& operator=(const const_iterator& other)
+            {
+                ptr = other.ptr;
+                return *this;
+            }
+            const_reverse_iterator& operator=(const reverse_iterator& other)
+            {
+                ptr = other.ptr;
+                return *this;
+            }
+            const_reverse_iterator& operator=(const iterator& other)
+            {
+                ptr = other.ptr;
+                return *this;
+            }
+            const_reverse_iterator& operator++()
+            {
+                --ptr;
+                return *this;
+            }
+            const_reverse_iterator operator++(int)
+            {
+                const_reverse_iterator r = *this;
+                ++r;
+                return r;
+            }
+            const T& operator*() const
+            {
+                return *ptr;
+            }
+            bool operator==(const const_reverse_iterator& other) const
+            {
+                return ptr == other.ptr;
+            }
+            bool operator!=(const const_reverse_iterator& other) const
+            {
+                return ptr != other.ptr;
+            }
+            bool operator==(const const_iterator& other) const
+            {
+                return ptr == other.ptr;
+            }
+            bool operator!=(const const_iterator& other) const
+            {
+                return ptr != other.ptr;
+            }
+
+        };
+
+        iterator raw_begin()
+        {
+            if (ssize < scontent.size())
+            {
+                return (T*)scontent.begin();
+            }
+            return &content[0];
+        };
+        const_iterator raw_begin() const
+        {
+            if (ssize < scontent.size())
+            {
+                return (T*)scontent.begin();
+            }
+            return &content[0];
+        };
+
+        iterator begin()
+        {
+            if (empty()) return nullptr;
+
+            return raw_begin();
+        };
+
+        const_iterator begin() const
+        {
+            if (empty()) return nullptr;
+
+            return raw_begin();
+        }
+        const_iterator cbegin()
+        {
+            if (empty()) return nullptr;
+
+            return raw_begin();
+        }
+        reverse_iterator rbegin()
+        {
+            if (empty()) return nullptr;
+
+            return --end();
+        }
+        const_reverse_iterator rbegin() const
+        {
+            if (empty()) return nullptr;
+
+            return --end();
         }
 
-        typename vtype::iterator begin()
+        reverse_iterator rend()
         {
-            return content.begin();
-        }
-        typename vtype::const_iterator begin() const
-        {
-            return content.begin();
-        }
-        typename vtype::const_iterator cbegin()
-        {
-            return content.cbegin();
+            if (empty()) return nullptr;
+
+            return --begin();
         }
 
-
-        typename vtype::iterator end()
+        const_reverse_iterator rend() const
         {
-            return content.end();
+            if (empty()) return nullptr;
+            return --begin();
         }
 
-        typename vtype::const_iterator end() const
+        iterator end()
         {
-            return content.end();
+            if (empty()) return nullptr;
+            return &at(0) + size();
         }
 
-        const T* cend() const
+        const_iterator end() const
         {
-            return begin() + size();
+            if (empty()) return nullptr;
+            return &at(0) + size();
+        }
+
+        const_iterator cend() const
+        {
+            if (empty()) return nullptr;
+            return &at(0) + size();
         }
     };
     template<typename K, typename V>
@@ -644,11 +928,15 @@ namespace heap
         ,   allocator<K>
         >;
     template<typename K>
-
-using std_vector = std::vector
-    <   K
-    ,   allocator<K>
-    >;
+    using std_vector = std::vector
+        <   K
+        ,   allocator<K>
+        >;
+    template<typename K>
+    using vector = std::vector
+        <   K
+        //,   allocator<K>
+        >;
 }
 extern void abort_with(const char * message) __THROW __attribute__ ((__noreturn__));
 #endif //SASTAM_H

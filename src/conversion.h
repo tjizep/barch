@@ -95,7 +95,7 @@ namespace conversion
         uint8_t* bytes = nullptr; // NB! this gets freed
 
     public:
-        explicit comparable_result() = default;
+        comparable_result() = default;
         explicit comparable_result(int64_t value)
             : data(&integer.bytes[0])
               , integer(comparable_bytes(value, art::tinteger))

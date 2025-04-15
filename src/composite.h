@@ -8,9 +8,9 @@
 #include "value_type.h"
 struct composite
 {
-	typedef heap::vector<conversion::comparable_result> comparable_vector;
+	typedef heap::small_vector<conversion::comparable_result> comparable_vector;
 	template<typename VT>
-	static art::value_type build_prefix(size_t end, const heap::vector<uint8_t> & bytes, const VT& v)
+	static art::value_type build_prefix(size_t end, const heap::small_vector<uint8_t> & bytes, const VT& v)
 	{
 		size_t count = 0;
 		size_t at = 0;
@@ -26,7 +26,7 @@ struct composite
 
 
 	template<typename VT>
-	static art::value_type build_key(heap::vector<uint8_t> & result, const VT& v)
+	static art::value_type build_key(heap::small_vector<uint8_t> & result, const VT& v)
 	{
 		size_t count = 0;
 		for (const auto& i : v)
@@ -45,8 +45,8 @@ struct composite
 		return art::value_type(result);
 	}
 
-	heap::vector<conversion::comparable_result> comp{};
-	heap::vector<uint8_t> key_buffer{};
+	heap::small_vector<conversion::comparable_result> comp{};
+	heap::small_vector<uint8_t> key_buffer{};
 
 	composite() = default;
     art::value_type create(std::initializer_list<conversion::comparable_result> from){

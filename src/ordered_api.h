@@ -5,6 +5,7 @@
 #ifndef ORDERED_API_H
 #define ORDERED_API_H
 #include "valkeymodule.h"
+int add_ordered_api(ValkeyModuleCtx* ctx);
 int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
 int cmd_ZCARD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);

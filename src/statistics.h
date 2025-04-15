@@ -45,3 +45,8 @@ namespace statistics {
     extern std::atomic<uint64_t> update_ops;
 
 }
+template <typename Ext>
+static void throw_exception(const char * name)  {
+    ++statistics::exceptions_raised;
+    throw Ext{name};
+}

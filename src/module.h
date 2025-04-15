@@ -6,7 +6,7 @@
 #define MODULE_H
 
 #include "art.h"
-
+#define NAME(x) "B." #x , cmd_##x
 extern art::tree* ad;
 struct constants
 {

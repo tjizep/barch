@@ -186,7 +186,7 @@ int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	return ValkeyModule_ReplyWithLongLong(ctx, count);
 }
-int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
+static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 {
 	auto container = conversion::convert(spec.key);
 	auto mn = conversion::convert(spec.start, true);
@@ -339,7 +339,7 @@ enum ops
 	onion = 2
 };
 
-int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops operate)
+static int ZOPER(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, ops operate)
 {
 	ValkeyModule_AutoMemory(ctx);
 	compressed_release release;
@@ -685,4 +685,135 @@ int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc
 	spec.REV = true;
 	spec.BYLEX = true;
 	return ZRANGE(ctx, spec);
+}
+
+int add_ordered_api(ValkeyModuleCtx* ctx)
+{
+	heap::small_vector<int> testv;
+	int ttotal = 0;
+	for (int i = 0; i <100; ++i)
+	{
+		testv.push_back(i);
+		ttotal += i;
+	}
+	int total = 0;
+	for (auto r = testv.begin(); r != testv.end(); ++r)
+	{
+		total += *r;
+
+	}
+	if (total != ttotal)
+	{
+		art::std_err("tesfail");
+	}
+	for (auto r = testv.rbegin(); r != testv.rend(); ++r)
+	{
+		total -= *r;
+
+	}
+	if (total != 0)
+	{
+		art::std_err("tesfail");
+	}
+	for (int i = 0; i <100; ++i)
+	{
+		total += testv.back();
+		testv.pop_back();
+	}
+	if (total != ttotal)
+	{
+		art::std_err("tesfail");
+	}
+	if (!testv.empty())
+	{
+		art::std_err("should be empty",testv.size());
+	}
+	for (int i = 0; i <100; ++i)
+	{
+		testv.push_back(i);
+	}
+	int tbefore = total;
+	auto t = testv.begin();
+	for (int i = 0; i <100; ++i)
+	{
+		total += *t++;
+	}
+	if (total != 2*ttotal)
+	{
+		art::std_err("tesfail");
+	}
+	tbefore = total;
+	t = testv.begin();
+	for (int i = 0; i < 100; ++i)
+	{
+		total += *t;
+		++t;
+	}
+	if (total != 3*ttotal)
+	{
+		art::std_err("tesfail");
+	}
+	auto tr = testv.rbegin();
+	for (int i = 0; i <100; ++i)
+	{
+		total -= *tr++;
+	}
+
+	if (total != tbefore)
+	{
+		art::std_err("tesfail");
+	}
+	total = ttotal;
+	auto ttv= testv;
+	for (int i = 0; i <100; ++i)
+	{
+		total -= *ttv.rbegin();
+		ttv.pop_back();
+	}
+
+	if (total != 0)
+	{
+		art::std_err("tesfail");
+	}
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZPOPMIN), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZPOPMAX), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZADD), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZCOUNT), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZCARD), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZDIFF), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZINTER), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZREVRANGE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGEBYSCORE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZREVRANGEBYSCORE), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZREVRANGEBYLEX), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGEBYLEX), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+    return VALKEYMODULE_OK;
 }

@@ -27,6 +27,9 @@ namespace art
         explicit value_type(const heap::vector<uint8_t>& value): bytes(value.data()), size(value.size())
         {
         }
+        explicit value_type(const heap::small_vector<uint8_t>& value): bytes(value.data()), size(value.size())
+        {
+        }
 
         value_type(const char* v, unsigned l): bytes((const unsigned char*)v), size(l)
         {

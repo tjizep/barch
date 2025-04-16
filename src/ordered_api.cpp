@@ -213,13 +213,13 @@ int cmd_ZREM(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		auto member = conversion::convert(mem, mlen);
 		conversion::comparable_result id {++counter};
 		qmember->push(member);
-		art::iterator members(qmember->create());
-		if (members.ok()) {
-			auto kmember = members.key();
-			if (!kmember.starts_with(member_prefix)) break;
-			auto fkmember = members.value();
+		art::iterator byscore(qmember->create());
+		if (byscore.ok()) {
+			auto kscore = byscore.key();
+			if (!kscore.starts_with(member_prefix)) break;
+			auto fkmember = byscore.value();
 			art_delete(get_art(), fkmember);
-			if (members.remove())
+			if (byscore.remove())
 			{
 				++removed;
 			}

@@ -10,7 +10,7 @@
 #include "module.h"
 // TODO: one day this counters gonna wrap
 static std::atomic<int64_t> counter = art::now() * 1000000;
-
+#define IX_MEMBER "__mem_"
 struct query_pool
 {
 	composite query[max_queries_per_call]{};
@@ -61,7 +61,30 @@ struct query
 		queries.release(id);
 	}
 };
+struct ordered_keys
+{
+	ordered_keys(const ordered_keys&) = default;
+	ordered_keys(ordered_keys&&) = default;
+	ordered_keys(
+		const composite& score_key,
+		const composite& member_key,
+		art::value_type value) : score_key(score_key), member_key(member_key), value(value) {}
 
+	composite score_key;
+	composite member_key;
+	art::value_type value;
+};
+void insert_ordered(composite& score_key, composite& member_key, art::value_type value, bool update = false)
+{
+	auto sk = score_key.create();
+	auto mk = member_key.create();
+	art_insert(get_art(), {}, sk, value,update,[](art::node_ptr) -> void{});
+	art_insert(get_art(), {}, mk, sk,update,[](art::node_ptr) -> void{});
+}
+void insert_ordered(ordered_keys& thing, bool update = false)
+{
+	insert_ordered(thing.score_key, thing.member_key, thing.value, update);
+}
 int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
 	ValkeyModule_AutoMemory(ctx);
@@ -78,9 +101,14 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		return ValkeyModule_ReplyWithError(ctx, "syntax error");
 	}
 	int64_t updated = 0;
+	int64_t fkadded = 0;
 	auto fc = [&](art::node_ptr) -> void
 	{
 		++updated;
+	};
+	auto fcfk = [&](art::node_ptr) -> void
+	{
+		--fkadded;
 	};
 	const char* key = ValkeyModule_StringPtrLen(argv[1], &nlen);
 	if (key_ok(key, nlen) != 0)
@@ -89,8 +117,9 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	auto before = get_art()->size;
 	auto container = conversion::convert(key, nlen);
-	query q1,q2;
+	query q1, qindex;
 	q1->create({container});
+	qindex->create({IX_MEMBER ,container});
 	for (int n = zspec.fields_start; n < argc; n+=2)
 	{
 		size_t klen, vlen;
@@ -115,7 +144,8 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}
 		q1->push(score);
 		q1->push(member);
-		//query[0].push(id); // so we can add many with the same score
+		qindex->push(member);
+		auto member_key = qindex->create();
 		art::value_type qkey = q1->create();
 		art::value_type qv = {v, (unsigned)vlen};
 		if (zspec.XX)
@@ -130,21 +160,77 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}else
 		{
 			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
+			art_insert(get_art(), {}, member_key, qkey, true, fcfk);
+			++fkadded;
 		}
 		q1->pop(2);
+		qindex->pop(1);
 		++responses;
 	}
 	auto current = get_art()->size;
 	if (zspec.CH)
 	{
-		ValkeyModule_ReplyWithLongLong(ctx, current - before + updated);
+		ValkeyModule_ReplyWithLongLong(ctx, current - before + updated - fkadded);
 	} else
 	{
-		ValkeyModule_ReplyWithLongLong(ctx, current - before);
+		ValkeyModule_ReplyWithLongLong(ctx, current - before - fkadded);
 	}
 
 	return 0;
 }
+int cmd_ZREM(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+
+	if (argc < 3)
+		return ValkeyModule_WrongArity(ctx);
+	int responses = 0;
+	int r = VALKEYMODULE_OK;
+	size_t nlen;
+	int64_t removed = 0;
+	const char* key = ValkeyModule_StringPtrLen(argv[1], &nlen);
+	if (key_ok(key, nlen) != 0)
+	{
+		return ValkeyModule_ReplyWithNull(ctx);
+	}
+	auto container = conversion::convert(key, nlen);
+	query q1,qmember;
+	q1->create({container});
+	auto member_prefix = qmember->create({IX_MEMBER ,container});
+	for (int n = 2; n < argc; ++n)
+	{
+		size_t mlen = 0;
+		const char* mem = ValkeyModule_StringPtrLen(argv[n], &mlen);
+
+		if (key_ok(mem, mlen) != 0)
+		{
+			r |= ValkeyModule_ReplyWithNull(ctx);
+			++responses;
+			continue;
+		}
+
+		auto member = conversion::convert(mem, mlen);
+		conversion::comparable_result id {++counter};
+		qmember->push(member);
+		art::iterator members(qmember->create());
+		if (members.ok()) {
+			auto kmember = members.key();
+			if (!kmember.starts_with(member_prefix)) break;
+			auto fkmember = members.value();
+			art_delete(get_art(), fkmember);
+			if (members.remove())
+			{
+				++removed;
+			}
+		}
+		qmember->pop(1);
+		++responses;
+	}
+
+	return ValkeyModule_ReplyWithLongLong(ctx, removed);
+}
+
 int cmd_ZINCRBY(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
 	ValkeyModule_AutoMemory(ctx);
@@ -446,6 +532,8 @@ static int ZOPER(
 	long long replies = 0;
 	double aggr = 0.0f;
 	size_t count = 0;
+	heap::vector<ordered_keys> new_keys;
+
 	size_t ks = spec.keys.size();
 	auto fk = spec.keys.begin();
 	switch (spec.aggr)
@@ -468,16 +556,9 @@ static int ZOPER(
 	}
 	if (fk !=  spec.keys.end())
 	{
-		int64_t updated = 0;
-		auto fc = [&](art::node_ptr) -> void
-		{
-			++updated;
-		};
-		query lq,uq,q1;
+		query lq,uq;
 		auto container = conversion::convert(*fk);
 		auto lower = lq->create({container});
-		if (!store.empty())
-			q1->create({conversion::convert(store)});
 
 		art::iterator i(lower);
 
@@ -554,14 +635,16 @@ static int ZOPER(
 						if (!card)
 						{
 							conversion::comparable_result id {++counter};
+							composite score_key, member_key;
+							score_key.create({conversion::convert(store)});
+							score_key.push({encoded_number});
+							score_key.push({member});
 
-							q1->push({encoded_number});
-							q1->push({member});
-							art::value_type qkey = q1->create();
-							art::value_type qv = i.value();
-							art_insert(get_art(), {}, qkey, qv, false, fc);
+							member_key.create({IX_MEMBER,conversion::convert(store)});
+							member_key.push({member});
+							member_key.push({encoded_number});
 
-							q1->pop(2);
+							new_keys.push_back({score_key,member_key,i.value()});
 						}
 						replies++;
 					}
@@ -583,6 +666,11 @@ static int ZOPER(
 			i.next();
 		}
 
+	}
+
+	for (auto&ordered_keys : new_keys)
+	{
+		insert_ordered(ordered_keys);
 	}
 	if (replies == 0 && spec.aggr != art::zops_spec::agg_none)
 	{
@@ -846,6 +934,9 @@ int add_ordered_api(ValkeyModuleCtx* ctx)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZADD), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZREM), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZCOUNT), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

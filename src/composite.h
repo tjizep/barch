@@ -49,6 +49,7 @@ struct composite
 	heap::small_vector<uint8_t> key_buffer{};
 
 	composite() = default;
+	composite(const composite& ) = default;
     art::value_type create(std::initializer_list<conversion::comparable_result> from){
 		comp.clear();
 		comp.push_back(art::ts_composite);

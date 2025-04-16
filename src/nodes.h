@@ -481,9 +481,6 @@ namespace art
 
     typedef heap::small_vector<trace_element> trace_list;
 
-    //void free_node(art_node *n);
-    //void free_node(art_leaf *n);
-
     /**
      * Represents a leaf. These are
      * of arbitrary size, as they include the key.

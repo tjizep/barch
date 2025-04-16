@@ -88,7 +88,7 @@ namespace conversion
     struct comparable_result
     {
     private:
-        uint8_t storage[32]{};
+        uint8_t storage[48]{};
         uint8_t* data = nullptr; // this may point to the integer or another externally allocated variable
         byte_comparable<int64_t> integer{};
         size_t size = 0; // the size as initialized - only changed on construction
@@ -117,6 +117,24 @@ namespace conversion
             storage[0] = ct.id;
             storage[1] = 0x00;
             data = storage;
+        }
+        comparable_result(const char* val)
+        {
+            size = strlen(val);
+            if (this->size < sizeof(storage)-1)
+            {
+                memset(storage, 0, sizeof(storage));
+                data = storage;
+            }else
+            {
+                bytes = heap::allocate<uint8_t>(this->size + 1);
+                data = bytes;
+            }
+            //TODO: ?hack? a hidden trailing null pointer has to be added
+            //data[this->size] = 0x00;
+            memcpy(data + 1, val, this->size - 1);
+            data[0] = art::tstring;
+
         }
         comparable_result(const char* val, size_t size)
             : size(size + 1)

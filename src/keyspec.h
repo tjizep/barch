@@ -690,6 +690,7 @@ namespace art
             withscores = 4
         };
         bool BYLEX{false};
+        bool REMOVE{false};
         bool BYSCORE{false};
         bool REV{false};
         bool has_withscores{false};

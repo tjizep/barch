@@ -81,9 +81,20 @@ void insert_ordered(composite& score_key, composite& member_key, art::value_type
 	art_insert(get_art(), {}, sk, value,update,[](art::node_ptr) -> void{});
 	art_insert(get_art(), {}, mk, sk,update,[](art::node_ptr) -> void{});
 }
+void remove_ordered(composite& score_key, composite& member_key)
+{
+	auto sk = score_key.create();
+	auto mk = member_key.create();
+	art_delete(get_art(), sk);
+	art_delete(get_art(), mk);
+}
 void insert_ordered(ordered_keys& thing, bool update = false)
 {
 	insert_ordered(thing.score_key, thing.member_key, thing.value, update);
+}
+void remove_ordered(ordered_keys& thing)
+{
+	remove_ordered(thing.score_key, thing.member_key);
 }
 int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
@@ -106,9 +117,15 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		++updated;
 	};
-	auto fcfk = [&](art::node_ptr) -> void
+	auto fcfk = [&](art::node_ptr val) -> void
 	{
+		if (val.is_leaf)
+		{
+			art_delete(get_art(), val.const_leaf()->get_value());
+
+		}
 		--fkadded;
+
 	};
 	const char* key = ValkeyModule_StringPtrLen(argv[1], &nlen);
 	if (key_ok(key, nlen) != 0)
@@ -159,9 +176,10 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			});
 		}else
 		{
-			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
 			art_insert(get_art(), {}, member_key, qkey, true, fcfk);
+			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
 			++fkadded;
+
 		}
 		q1->pop(2);
 		qindex->pop(1);
@@ -361,21 +379,48 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 	auto container = conversion::convert(spec.key);
 	auto mn = conversion::convert(spec.start, true);
 	auto mx = conversion::convert(spec.stop, true);
-	query lq,uq,pq;
-	auto lower = lq->create({container,mn});
-	auto prefix = pq->create({container});
-	auto upper = uq->create({container,mx});
+	query lq,uq,pq,tq;
+	art::value_type lower;
+	art::value_type prefix;
+	art::value_type nprefix;
+	art::value_type upper;
+	if (spec.BYLEX)
+	{
+		// it is implied that mn and mx are non-numeric strings
+		lower = lq->create({IX_MEMBER,container,mn });
+		prefix = pq->create({IX_MEMBER, container});
+		nprefix = tq->create({container});
+		upper = uq->create({IX_MEMBER, container,mx });
+
+	}else
+	{
+		lower = lq->create({container,mn });
+		prefix = pq->create({container});
+		nprefix = prefix;
+		upper = uq->create({container,mx });
+	}
 	long long count = 0;
 	long long replies = 0;
 	heap::std_vector<std::pair<art::value_type,art::value_type>> bylex;
 	heap::std_vector<art::value_type> rev;
-	ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+	heap::vector<ordered_keys> removals;
+	if (!spec.REMOVE)
+		ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
 	art::iterator ai(lower);
 	while (ai.ok())
 	{
 		auto v = ai.key();
 		if (!v.starts_with(prefix)) break;
-		if (v.sub(0,prefix.size + numeric_key_size) <= upper)
+		art::value_type current_comp;
+		if (spec.BYLEX)
+		{
+			current_comp = v.sub(0, prefix.size + mx.get_size()-1);
+			v = ai.value();// in case of bylex the value is a fk to by-score
+		}else
+		{	current_comp = v.sub(0, prefix.size + numeric_key_size);
+		}
+
+		if ( current_comp <= upper )
 		{
 			bool doprint = !spec.count;
 
@@ -385,18 +430,31 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 			}
 			if (doprint)
 			{
-				auto encoded_number = v.sub(prefix.size, numeric_key_size);
-				auto member = v.sub(prefix.size + numeric_key_size);
-				bool pushed = spec.BYLEX || spec.REV;
-				if (spec.BYLEX)
+				auto encoded_number = v.sub(nprefix.size, numeric_key_size);
+				auto member = v.sub(nprefix.size + numeric_key_size);
+				bool pushed = false;
+
+				if (spec.REV && !spec.REMOVE)
 				{
-					bylex.push_back({member,encoded_number});
+					if (spec.BYLEX)
+					{
+						bylex.push_back({member,encoded_number});
+						pushed = true;
+					}else
+					{
+						rev.push_back(v.sub(nprefix.size, numeric_key_size * 2));
+						pushed = true;
+					}
 				}
-				if (spec.REV && !spec.BYLEX)
+				if (!pushed && spec.REMOVE) // scheduled for removal
 				{
-					rev.push_back(v.sub(prefix.size, numeric_key_size * 2));
+					composite score_key, member_key;
+					score_key.create({container,encoded_number,member});
+					// fyi: member key means lex key
+					member_key.create({IX_MEMBER,container,member});
+					removals.push_back({score_key,member_key,art::value_type()});
 				}
-				if (!pushed)
+				if (!pushed && !spec.REMOVE) // bylex should be in correct order
 				{
 					reply_encoded_key(ctx, member);
 					++replies;
@@ -414,7 +472,7 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 		}
 		ai.next();
 	}
-	if (spec.BYLEX)
+	if (spec.BYLEX && !spec.REMOVE)
 	{	if (spec.REV)
 		{
 			std::sort(bylex.begin(), bylex.end(),[](auto& a, auto& b)
@@ -424,6 +482,7 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 		}
 		for (auto& rec: bylex)
 		{
+			/// TODO: min max filter
 			reply_encoded_key(ctx, rec.first);
 			++replies;
 			if (spec.has_withscores)
@@ -432,7 +491,7 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 				++replies;
 			}
 		}
-	}else if (spec.REV)
+	}else if (spec.REV && !spec.REMOVE)
 	{
 		std::sort(rev.begin(), rev.end(),[](auto& a, auto& b)
 		{
@@ -449,7 +508,17 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 			}
 		}
 	};
-	ValkeyModule_ReplySetArrayLength(ctx, replies);
+	if (!spec.REMOVE)
+	{
+		ValkeyModule_ReplySetArrayLength(ctx, replies);
+	}
+	else
+	{	for (auto& r: removals)
+		{
+			remove_ordered(r.score_key, r.member_key);
+		}
+		return ValkeyModule_ReplyWithLongLong(ctx, removals.size());
+	}
 
 	return 0;
 }
@@ -514,7 +583,9 @@ static int ZOPER(
 	ValkeyModuleString** argv,
 	int argc,
 	ops operate,
-	std::string store = "", bool card = false)
+	std::string store = "",
+	bool card = false,
+	bool removal = false)
 {
 	ValkeyModule_AutoMemory(ctx);
 	compressed_release release;
@@ -533,6 +604,7 @@ static int ZOPER(
 	double aggr = 0.0f;
 	size_t count = 0;
 	heap::vector<ordered_keys> new_keys;
+	heap::vector<ordered_keys> removed_keys;
 
 	size_t ks = spec.keys.size();
 	auto fk = spec.keys.begin();
@@ -634,17 +706,19 @@ static int ZOPER(
 						// anything during the compressed_release scope
 						if (!card)
 						{
-							conversion::comparable_result id {++counter};
 							composite score_key, member_key;
-							score_key.create({conversion::convert(store)});
-							score_key.push({encoded_number});
-							score_key.push({member});
+							if (removal)
+							{
+								score_key.create({container,encoded_number,member});
+								member_key.create({IX_MEMBER,container,member,encoded_number});
+								removed_keys.push_back({score_key,member_key,i.value()});
+							}else
+							{
+								score_key.create({conversion::convert(store),encoded_number,member});
+								member_key.create({IX_MEMBER,conversion::convert(store),member,encoded_number});
+								new_keys.push_back({score_key,member_key,i.value()});
+							}
 
-							member_key.create({IX_MEMBER,conversion::convert(store)});
-							member_key.push({member});
-							member_key.push({encoded_number});
-
-							new_keys.push_back({score_key,member_key,i.value()});
 						}
 						replies++;
 					}
@@ -671,6 +745,10 @@ static int ZOPER(
 	for (auto&ordered_keys : new_keys)
 	{
 		insert_ordered(ordered_keys);
+	}
+	for (auto&ordered_keys : removed_keys)
+	{
+		remove_ordered(ordered_keys);
 	}
 	if (replies == 0 && spec.aggr != art::zops_spec::agg_none)
 	{
@@ -893,6 +971,24 @@ int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int ar
 	spec.BYLEX = false;
 	return ZRANGE(ctx, spec);
 }
+int cmd_ZREMRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc < 4)
+		return ValkeyModule_WrongArity(ctx);
+	art::zrange_spec spec(argv,argc);
+	if (spec.parse_options() != VALKEYMODULE_OK)
+	{
+		return ValkeyModule_ReplyWithError(ctx, "syntax error");
+	}
+	spec.REV = false;
+	spec.BYLEX = true;
+	spec.REMOVE = true;
+	return ZRANGE(ctx, spec);
+}
+
+
 int cmd_ZRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
 	ValkeyModule_AutoMemory(ctx);
@@ -955,6 +1051,9 @@ int add_ordered_api(ValkeyModuleCtx* ctx)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZINCRBY), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZREMRANGEBYLEX), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZINTERCARD), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

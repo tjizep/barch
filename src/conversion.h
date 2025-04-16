@@ -120,7 +120,7 @@ namespace conversion
         }
         comparable_result(const char* val)
         {
-            size = strlen(val);
+            size = strlen(val)+1; // include type byte
             if (this->size < sizeof(storage)-1)
             {
                 memset(storage, 0, sizeof(storage));
@@ -133,6 +133,7 @@ namespace conversion
             //TODO: ?hack? a hidden trailing null pointer has to be added
             //data[this->size] = 0x00;
             memcpy(data + 1, val, this->size - 1);
+            data[this->size] = 0;
             data[0] = art::tstring;
 
         }

@@ -16,7 +16,7 @@ namespace art
     {
         const unsigned char* bytes;
         unsigned size;
-
+        value_type() : bytes(nullptr), size(0) {}
         explicit value_type(nullptr_t): bytes(nullptr), size(0)
         {
         }

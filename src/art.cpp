@@ -1013,17 +1013,17 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
             if (replace)
             {
                 art::leaf* dl = n.l();
-                if (dl->val_len == value.size && !l->expired())
-                {
+                //if (dl->val_len == value.size && !l->expired())
+                //{
                     dl->set_value(value);
-                }
-                else
-                {
+                //}
+                //else
+                //{
                     ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
                     // create a new leaf to carry the new value
                     ++statistics::leaf_nodes_replaced;
                     return n;
-                }
+                //}
             }
             return nullptr;
         }

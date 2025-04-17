@@ -1015,7 +1015,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
                 art::leaf* dl = n.l();
                 //if (dl->val_len == value.size && !l->expired())
                 //{
-                    dl->set_value(value);
+                //    dl->set_value(value);
                 //}
                 //else
                 //{

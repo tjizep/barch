@@ -401,12 +401,12 @@ namespace heap
     };
 
     /// a checked vector with automatic heap allocator
-    template <typename T>
+    template <typename T, int StaticSize = 16>
     struct small_vector
     {
     private:
         typedef std::vector<T, allocator<T>> vtype;
-        typedef std::array<T, 16> stype;
+        typedef std::array<T, StaticSize> stype;
         stype scontent{};
         size_t ssize{0};
         vtype content{};

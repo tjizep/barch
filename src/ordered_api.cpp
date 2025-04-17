@@ -52,9 +52,10 @@ thread_local query_pool queries;
 struct query
 {
 	size_t id = queries.create();
+	composite * cache = &queries[id];
 	composite* operator->() const
 	{
-		return &queries[id];
+		return cache;//&queries[id];
 	}
 	~query()
 	{
@@ -98,11 +99,13 @@ void remove_ordered(ordered_keys& thing)
 }
 int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
-	ValkeyModule_AutoMemory(ctx);
-	compressed_release release;
 
 	if (argc < 4)
 		return ValkeyModule_WrongArity(ctx);
+
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	auto * t = get_art();
 	int responses = 0;
 	int r = VALKEYMODULE_OK;
 	size_t nlen;
@@ -111,6 +114,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		return ValkeyModule_ReplyWithError(ctx, "syntax error");
 	}
+
 	int64_t updated = 0;
 	int64_t fkadded = 0;
 	auto fc = [&](art::node_ptr) -> void
@@ -121,7 +125,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		if (val.is_leaf)
 		{
-			art_delete(get_art(), val.const_leaf()->get_value());
+			art_delete(t, val.const_leaf()->get_value());
 
 		}
 		--fkadded;
@@ -162,6 +166,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		q1->push(score);
 		q1->push(member);
 		qindex->push(member);
+		qindex->push(score);
 		auto member_key = qindex->create();
 		art::value_type qkey = q1->create();
 		art::value_type qv = {v, (unsigned)vlen};
@@ -176,16 +181,16 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			});
 		}else
 		{
-			art_insert(get_art(), {}, member_key, qkey, true, fcfk);
-			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
+			art_insert(t, {}, member_key, qkey, true, fcfk);
+			art_insert(t, {}, qkey, {}, true, fc);
 			++fkadded;
 
 		}
 		q1->pop(2);
-		qindex->pop(1);
+		qindex->pop(2);
 		++responses;
 	}
-	auto current = get_art()->size;
+	auto current = t->size;
 	if (zspec.CH)
 	{
 		ValkeyModule_ReplyWithLongLong(ctx, current - before + updated - fkadded);

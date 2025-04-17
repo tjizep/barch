@@ -493,7 +493,7 @@ namespace art
                 return VALKEYMODULE_OK;
             }
 
-            which_flag_n = has_enum({"nx","xx"}, spos);
+            which_flag_n = 2;//has_enum({"nx","xx"}, spos);
             if (which_flag_n < 2)
             {
                 switch (which_flag_n)
@@ -510,7 +510,7 @@ namespace art
                 ++spos;
 
             }
-            which_flag_g = has_enum({"gt","lt"}, spos);
+            which_flag_g = 2;//has_enum({"gt","lt"}, spos);
             if (which_flag_g < 2)
             {
                 switch (which_flag_g)
@@ -527,11 +527,11 @@ namespace art
                 ++spos;
 
             }
-            if (has("ch",spos))
-            {
-                CH = true;
-                spos++;
-            }
+//            if (has("ch",spos))
+//            {
+//                CH = true;
+//                spos++;
+//            }
             fields_start = spos;
             return VALKEYMODULE_OK;
         }

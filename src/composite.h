@@ -9,8 +9,9 @@
 struct composite
 {
 	typedef heap::small_vector<conversion::comparable_result> comparable_vector;
+	typedef heap::small_vector<uint8_t,64> byte_vector;
 	template<typename VT>
-	static art::value_type build_prefix(size_t end, const heap::small_vector<uint8_t> & bytes, const VT& v)
+	static art::value_type build_prefix(size_t end, const byte_vector & bytes, const VT& v)
 	{
 		size_t count = 0;
 		size_t at = 0;
@@ -26,7 +27,7 @@ struct composite
 
 
 	template<typename VT>
-	static art::value_type build_key(heap::small_vector<uint8_t> & result, const VT& v)
+	static art::value_type build_key(byte_vector & result, const VT& v)
 	{
 		size_t count = 0;
 		for (const auto& i : v)
@@ -42,11 +43,11 @@ struct composite
 			memcpy(p, k.bytes, k.size);
 			p += k.size;
 		}
-		return art::value_type(result);
+		return {result.data(),result.size()};
 	}
 
-	heap::small_vector<conversion::comparable_result> comp{};
-	heap::small_vector<uint8_t> key_buffer{};
+	comparable_vector comp{};
+	byte_vector key_buffer{};
 
 	composite() = default;
 	composite(const composite& ) = default;
@@ -79,7 +80,7 @@ struct composite
 
 	[[nodiscard]] art::value_type end() const
     {
-    	return art::value_type(key_buffer);
+    	return {key_buffer.data(),key_buffer.size()};
     }
 	[[nodiscard]] art::value_type prefix(size_t length) const
     {

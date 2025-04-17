@@ -480,6 +480,7 @@ namespace art
         bool GT{false};
         bool LT{false};
         bool CH{false};
+        bool LFI{false};
 
         int64_t which_flag_n{3};
         int64_t which_flag_g{3};
@@ -527,10 +528,21 @@ namespace art
                 ++spos;
 
             }
-            if (has("ch",spos))
+
+
+            while (true)
             {
-                CH = true;
-                spos++;
+                int lfi_ch = has_enum({"ch","lfi"}, spos);
+                if ( lfi_ch == 0)
+                {
+                    CH = true;
+                    spos++;
+                }
+                if (lfi_ch == 1){
+                    LFI = true;
+                    spos++;
+                }
+                if (lfi_ch == 2) break;
             }
             fields_start = spos;
             return VALKEYMODULE_OK;

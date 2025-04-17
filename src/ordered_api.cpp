@@ -142,6 +142,10 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		size_t klen, vlen;
 		const char* k = ValkeyModule_StringPtrLen(argv[n], &klen);
+		if (n + 1 >= argc)
+		{
+			return ValkeyModule_ReplyWithError(ctx, "syntax error");
+		}
 		const char* v = ValkeyModule_StringPtrLen(argv[n + 1], &vlen);
 
 		if (key_ok(k, klen) != 0 || key_ok(v, vlen) != 0)
@@ -178,9 +182,13 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			});
 		}else
 		{
-			art_insert(get_art(), {}, member_key, qkey, true, fcfk);
+			if (zspec.LFI)
+			{
+				art_insert(get_art(), {}, member_key, qkey, true, fcfk);
+				++fkadded;
+			}
 			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
-			++fkadded;
+
 
 		}
 		q1->pop(2);

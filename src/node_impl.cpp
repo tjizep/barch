@@ -57,7 +57,7 @@ static art::node* make_node(art::node_ptr_storage& ptr, compressed_address a, ar
 {
     if (node->pointer_size == 4)
     {
-        return ptr.emplace<Type4>(a, node);
+        return ptr.emplace<Type8>(a, node);
     }
     else if (node->pointer_size == 8)
     {
@@ -116,13 +116,13 @@ art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
     switch (nt)
     {
     case art::node_4:
-        return ptr.emplace<art::node4_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<art::node4_8>()->create().expand_pointers(ref, c);
     case art::node_16:
-        return ptr.emplace<art::node16_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<art::node16_8>()->create().expand_pointers(ref, c);
     case art::node_48:
-        return ptr.emplace<art::node48_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<art::node48_8>()->create().expand_pointers(ref, c);
     case art::node_256:
-        return ptr.emplace<art::node256_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<art::node256_8>()->create().expand_pointers(ref, c);
     default:
         throw std::runtime_error("Unknown node type");
     }

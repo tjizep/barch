@@ -163,6 +163,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		q1->push(score);
 		q1->push(member);
 		qindex->push(member);
+		qindex->push(score);
 		auto member_key = qindex->create();
 		art::value_type qkey = q1->create();
 		art::value_type qv = {v, (unsigned)vlen};
@@ -183,7 +184,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
 		}
 		q1->pop(2);
-		qindex->pop(1);
+		qindex->pop(2);
 		++responses;
 	}
 	auto current = get_art()->size;

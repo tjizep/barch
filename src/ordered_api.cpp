@@ -52,9 +52,10 @@ thread_local query_pool queries;
 struct query
 {
 	size_t id = queries.create();
+	composite * cache = &queries[id];
 	composite* operator->() const
 	{
-		return &queries[id];
+		return cache;//&queries[id];
 	}
 	~query()
 	{

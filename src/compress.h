@@ -697,6 +697,10 @@ private:
     std::pair<size_t, storage&> expand_over_null_base(size_t ps = page_size)
     {
         auto at = allocate();
+        if (is_null_base(at))
+        {
+            at = allocate();
+        }
         last_page_allocated = at;
         return allocate_page_at(at, ps);
     }

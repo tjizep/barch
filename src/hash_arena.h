@@ -30,7 +30,7 @@ namespace arena {
         hash_type hidden_arena{};
         heap::std_vector<size_t> free_address_list{};
         heap::std_vector<size_t> buffered_free{};
-        size_t top = 10000000;
+        size_t top = 100000000;
         size_t free_pages = top;
         size_t last_allocated = 0;
         size_t max_address_accessed = 0;

@@ -1,8 +1,17 @@
 local vk
 vk = redis
+vk.call("B.CONFIG", "SET","max_memory_bytes", "128m")
+vk.call("B.CONFIG", "SET","active_defrag", "off")
+vk.call("B.CONFIG", "SET","compression", "off")
+vk.call("B.CONFIG", "SET","save_interval", "10000000000")
+vk.call("B.CONFIG", "SET","max_modifications_before_save", "10000000000")
+
 vk.call('B.CLEAR')
 local t = vk.call('B.MILLIS')
-for i=1,300000 do
-    assert(vk.call('B.ZADD', 'agame', i+1.1, 'first'..i, i+2.0, 'second'..i ,i+3.5, 'third'..i) == 3)
+for i=1,1000000 do
+    vk.call('B.ZADD', i, i+1.1, 'first') --i+2.0, 'second' ,i+3.5, 'third'
 end
-return {vk.call('B.SIZE'),vk.call('B.MILLIS')-t}
+local tr = {vk.call('B.SIZE'),vk.call('B.MILLIS')-t}
+vk.call('B.CLEAR')
+return tr
+--return {vk.call('DBSIZE'),vk.call('B.MILLIS')-t}

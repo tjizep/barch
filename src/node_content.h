@@ -704,10 +704,11 @@ namespace art
             return sizeof(ChildElementType);
         };
 
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned , unsigned ) const
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned , unsigned& size ) const
         {
-            return 0;
-        };
+            size = 0;
+            return 256;
+        }
     protected:
     };
 }

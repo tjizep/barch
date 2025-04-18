@@ -936,19 +936,18 @@ int64_t art::distance(const tree* t, const trace_list& ia, const trace_list& b)
 
     int64_t r = 1;
     trace_list a = ia;
-    bool do_opt = nullptr == t ;
     while (a != b)
     {
-        if (do_opt)
+        auto &last = a.back();
+        auto& blast= b.back();
+        if (last.parent != blast.parent)
         {
-            auto &last = a.back();
-            unsigned d = last.parent->leaf_only_distance(last.child_ix+1,16);
-            if (d == 16 && last.child_ix+d < 255)
+            unsigned d = 0;
+            unsigned lix = last.parent->leaf_only_distance(last.child_ix+1,d);
+            if (d > 1 && lix < 256 )
             {
-                last.child_ix+=d;
-                last.child = last.parent->get_child(last.child_ix);
-                r+=d;
-                continue;
+                r += d;
+                last.child_ix = lix;
             }
         }
         if (!increment_trace(t->root,a)) return r;

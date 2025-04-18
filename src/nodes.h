@@ -480,7 +480,7 @@ namespace art
         [[nodiscard]] virtual node_ptr_storage get_storage() const = 0;
         [[nodiscard]] virtual compressed_address create_data() = 0;
         virtual void free_data() = 0;
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned size) const  = 0;
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size) const  = 0;
     };
 
     typedef node::node_ptr node_ptr;

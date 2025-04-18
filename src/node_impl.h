@@ -543,6 +543,32 @@ namespace art
             }
             return {};
         }
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned unused(start), unsigned& size ) const
+        {
+            size = 0;
+#if 0
+            unsigned r = start;
+            auto& dat = nd();
+            unsigned last_leaf = 256;
+
+            for (; r < 256; ++r)
+            {
+                if (dat.types[r] != 0)
+                {
+
+                    if (dat.types[r] == non_leaf_type)
+                        return last_leaf < 256 ? dat.keys[last_leaf] - 1 : 256;
+                    ++size;
+                    last_leaf = r;
+                }
+
+            return last_leaf < 256 ? dat.keys[last_leaf] - 1: 256;}
+#else
+            return 256;
+#endif
+
+
+        }
     };
 
     typedef node48<int32_t> node48_4;
@@ -703,15 +729,28 @@ namespace art
             }
             return {};
         }
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned size) const
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size) const
         {
-            unsigned r = 0;
-            if (start + size >= 256) return 0;
+            unsigned r = start;
             auto& dat = nd();
-            r = simd::count_chars(dat.types+start, size,leaf_type);
-            if ( simd::count_chars(dat.types+start,size,non_leaf_type)>0)
-                return 0;
-            return r;
+            unsigned last_leaf = 256;
+            size = 0;
+            for (; r < 256; ++r)
+            {
+                if (dat.types[r] != 0)
+                {
+
+                    if (dat.types[r] == non_leaf_type)
+                        return last_leaf;
+                    ++size;
+                    last_leaf = r;
+                }
+            }
+            return last_leaf;
+            //r = simd::count_chars(dat.types+start, size,leaf_type);
+            //if ( simd::count_chars(dat.types+start,size,non_leaf_type)>0)
+            //    return 0;
+            //return r;
         };
     };
 

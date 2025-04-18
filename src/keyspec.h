@@ -31,10 +31,8 @@ namespace art
         static std::regex integer;
         int argc = 0;
         int r = 0;
-        char empty[1] = "";
+        char empty[2] = {0x00,0x00};
         mutable std::string s{};
-
-
 
         const std::string& tos(int at) const
         {
@@ -110,8 +108,20 @@ namespace art
             return l;
         }
 
-        int has_enum(const std::initializer_list<std::string>& names,int at)
+        int has_enum(const std::initializer_list<const char*>& names,int at)
         {
+
+            const char * token = toc(at);
+            int matches = 0;
+            for (const char* name : names)
+            {
+                if (*token == std::tolower(*name) || *token == std::toupper(*name))
+                {
+                    ++matches;
+                }
+            }
+            if (!matches) return (int)names.size();
+
             const std::string& it = tos(at);
             if (it.empty()) return false;
             to_lower(s);
@@ -504,66 +514,55 @@ namespace art
             {
                 return VALKEYMODULE_OK;
             }
-            const char * cmd = toc(spos);
-            if (*cmd=='n'||*cmd=='N'||*cmd=='x'||*cmd=='X')
+            which_flag_n = has_enum({"nx","xx"}, spos);
+            if (which_flag_n < 2)
             {
-                which_flag_n = has_enum({"nx","xx"}, spos);
-                if (which_flag_n < 2)
+                switch (which_flag_n)
                 {
-                    switch (which_flag_n)
-                    {
-                    case 0:
-                        NX = true;
-                        break;
-                    case 1:
-                        XX = true;
-                        break;
-                    default:
-                        break;
-                    }
-                    ++spos;
-
+                case 0:
+                    NX = true;
+                    break;
+                case 1:
+                    XX = true;
+                    break;
+                default:
+                    break;
                 }
+                ++spos;
             }
-            cmd = toc(spos);
-            if (*cmd=='g'||*cmd=='G'||*cmd=='l'||*cmd=='L')
-            {
-                which_flag_g = has_enum({"gt","lt"}, spos);
-                if (which_flag_g < 2)
-                {
-                    switch (which_flag_g)
-                    {
-                    case 0:
-                        GT = true;
-                        break;
-                    case 1:
-                        LT = true;
-                        break;
-                    default:
-                        break;
-                    }
-                    ++spos;
 
+
+            which_flag_g = has_enum({"gt","lt"}, spos);
+            if (which_flag_g < 2)
+            {
+                switch (which_flag_g)
+                {
+                case 0:
+                    GT = true;
+                    break;
+                case 1:
+                    LT = true;
+                    break;
+                default:
+                    break;
                 }
+                ++spos;
+
             }
-            cmd = toc(spos);
-            if (*cmd=='c'||*cmd=='C'||*cmd=='l'||*cmd=='L')
+            while (true)
             {
-                while (true)
-                {
 
-                    int lfi_ch = has_enum({"ch","lfi"}, spos);
-                    if ( lfi_ch == 0)
-                    {
-                        CH = true;
-                        spos++;
-                    }
-                    if (lfi_ch == 1){
-                        LFI = true;
-                        spos++;
-                    }
-                    if (lfi_ch == 2) break;
+                int lfi_ch = has_enum({"ch","lfi"}, spos);
+                if ( lfi_ch == 0)
+                {
+                    CH = true;
+                    spos++;
                 }
+                if (lfi_ch == 1){
+                    LFI = true;
+                    spos++;
+                }
+                if (lfi_ch == 2) break;
             }
             fields_start = spos;
             return VALKEYMODULE_OK;

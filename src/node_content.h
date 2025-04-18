@@ -344,7 +344,7 @@ namespace art
             check_object();
             if (SIZE <= at)
                 abort();
-            nd().types[at] = 1;
+            nd().types[at] = leaf_type;
         }
 
         void set_child(unsigned at, node_ptr node) final
@@ -353,7 +353,7 @@ namespace art
             if (SIZE <= at)
                 abort();
             auto& dat = nd();
-            dat.types[at] = node.is_leaf ? 1 : 0;
+            dat.types[at] = node.is_leaf ? leaf_type : non_leaf_type;
             if (node.is_leaf)
             {
                 dat.leaves[at] = node.logical;
@@ -369,7 +369,7 @@ namespace art
             check_object();
             if (SIZE <= at)
                 abort();
-            bool is = nd().types[at] != 0;
+            bool is = nd().types[at] == leaf_type;
             return is;
         }
 
@@ -387,7 +387,7 @@ namespace art
             if (at < SIZE)
             {
                 auto& dat = nd();
-                return dat.types[at] ? node_ptr(dat.leaves[at]) : dat.children[at].get_node();
+                return dat.types[at] == leaf_type ? node_ptr(dat.leaves[at]) : dat.children[at].get_node();
             }
             return nullptr;
         }
@@ -396,7 +396,7 @@ namespace art
         {
             check_object();
             if (at < SIZE)
-                return nd().types[at] ? node_ptr(nd().leaves[at]) : node_ptr(nd().children[at]);
+                return nd().types[at] == leaf_type ? node_ptr(nd().leaves[at]) : node_ptr(nd().children[at]);
 
             return nullptr;
         }
@@ -599,7 +599,7 @@ namespace art
         [[nodiscard]] bool child_type(unsigned at) const override
         {
             check_object();
-            return nd().types[at];
+            return nd().types[at] == leaf_type;
         }
 
         void set_children(unsigned dpos, const node* other, unsigned spos, unsigned count) override
@@ -704,6 +704,10 @@ namespace art
             return sizeof(ChildElementType);
         };
 
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned , unsigned ) const
+        {
+            return 0;
+        };
     protected:
     };
 }

@@ -157,7 +157,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
 		auto score = conversion::convert(k, klen, true);
 		auto member = conversion::convert(v, vlen);
-		conversion::comparable_result id {++counter};
+		conversion::comparable_key id {++counter};
 		if (score.ctype() != art::tdouble)
 		{
 			r |= ValkeyModule_ReplyWithNull(ctx);
@@ -239,7 +239,7 @@ int cmd_ZREM(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}
 
 		auto member = conversion::convert(mem, mlen);
-		conversion::comparable_result id {++counter};
+		conversion::comparable_key id {++counter};
 		qmember->push(member);
 		art::iterator byscore(qmember->create());
 		if (byscore.ok()) {
@@ -309,8 +309,8 @@ int cmd_ZINCRBY(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		{
 			double number = conversion::enc_bytes_to_dbl(encoded_number);
 			number += incr;
-			conversion::comparable_result id {++counter};
-			q1->push(conversion::comparable_result(number));
+			conversion::comparable_key id {++counter};
+			q1->push(conversion::comparable_key(number));
 			q1->push(member);
 			art::value_type qkey = q1->create();
 			art_insert(get_art(), {}, qkey, val, true, fc);
@@ -329,7 +329,7 @@ int cmd_ZINCRBY(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	if (responses == 0)
 	{
-		auto score = conversion::comparable_result(incr);
+		auto score = conversion::comparable_key(incr);
 		auto member = conversion::convert(v, vlen);
 		q1->push(score);
 		q1->push(member);
@@ -662,7 +662,7 @@ static int ZOPER(
 				query tainerq, checkq;
 				auto check_set = conversion::convert(*ok);
 				auto check_tainer = tainerq->create({check_set});
-				auto check = checkq->create({check_set, conversion::comparable_result(number)});
+				auto check = checkq->create({check_set, conversion::comparable_key(number)});
 				art::iterator j(check);
 				bool found = false;
 				if (j.ok())
@@ -1029,6 +1029,48 @@ int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc
 	spec.BYLEX = true;
 	return ZRANGE(ctx, spec);
 }
+int cmd_ZRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc != 4)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	size_t cl=0,al=0,bl=0 ;
+	const char * c = ValkeyModule_StringPtrLen(argv[1],&cl);
+	if (cl==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	const char * a = ValkeyModule_StringPtrLen(argv[2],&al);
+	if (al==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	const char * b = ValkeyModule_StringPtrLen(argv[3],&bl);
+	if (bl==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+
+	query qlower,qupper;
+	auto container = conversion::convert(c,cl);
+	auto lower_score = conversion::convert(a,al,true);
+	auto upper_score = conversion::convert(b,bl,true);
+	auto lower_key = qlower->create({container,lower_score});
+	auto upper_key = qupper->create({container,upper_score});
+	art::iterator upper(upper_key);
+	art::iterator lower(lower_key);
+
+	int64_t rank = 0;
+	if (upper.ok() && lower.ok())
+	{
+		rank = lower.distance(upper);
+	}
+
+	return ValkeyModule_ReplyWithLongLong(ctx,rank);
+}
 
 int add_ordered_api(ValkeyModuleCtx* ctx)
 {
@@ -1088,6 +1130,9 @@ int add_ordered_api(ValkeyModuleCtx* ctx)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGEBYLEX), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
 		return VALKEYMODULE_ERR;
 
     return VALKEYMODULE_OK;

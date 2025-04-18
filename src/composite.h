@@ -8,7 +8,7 @@
 #include "value_type.h"
 struct composite
 {
-	typedef heap::small_vector<conversion::comparable_result> comparable_vector;
+	typedef heap::small_vector<conversion::comparable_key> comparable_vector;
 	typedef heap::small_vector<uint8_t,64> byte_vector;
 	template<typename VT>
 	static art::value_type build_prefix(size_t end, const byte_vector & bytes, const VT& v)
@@ -51,7 +51,7 @@ struct composite
 
 	composite() = default;
 	composite(const composite& ) = default;
-    art::value_type create(std::initializer_list<conversion::comparable_result> from){
+    art::value_type create(std::initializer_list<conversion::comparable_key> from){
 		comp.clear();
 		comp.push_back(art::ts_composite);
         for(const auto& i : from){
@@ -59,7 +59,7 @@ struct composite
         }
     	return create();
     }
-	void push(const conversion::comparable_result & k)
+	void push(const conversion::comparable_key & k)
     {
 	    comp.push_back(k);
 

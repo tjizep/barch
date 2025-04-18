@@ -493,6 +493,35 @@ namespace heap
             }
             ssize = n;
         }
+        bool operator!=(const small_vector& other) const
+        {
+            if (ssize != other.size()) return true;
+            for (size_t i = 0; i < size(); ++i)
+            {
+                if ((*this)[i] != other[i]) return true;
+            }
+            return false;
+        }
+        bool operator<(const small_vector& other) const
+        {
+            size_t ms = std::min(size(), other.size());
+            for (size_t i = 0; i < ms; ++i)
+            {
+                if ((*this)[i] == other[i]) continue;
+                if ((*this)[i] < other[i]) return true;
+                return false;
+            }
+            return size() < other.size();
+        }
+        bool starts_with(const small_vector& other) const
+        {
+            size_t ms = std::min(size(), other.size());
+            for (size_t i = 0; i < ms; ++i)
+            {
+                if ((*this)[i] != other[i]) return false;
+            }
+            return true;
+        }
 
         void reserve(size_t n)
         {

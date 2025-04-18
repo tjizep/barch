@@ -178,7 +178,7 @@ static art::trace_element& last_el(art::trace_list& trace)
 {
     if (trace.empty())
         abort_with("the trace is empty");
-    return *(trace.rbegin());
+    return trace.back();
 }
 #if 0
 static const art::trace_element& last_el(const art::trace_list& trace)
@@ -213,7 +213,10 @@ static bool extend_trace_min(const art::node_ptr& root, art::trace_list& trace)
     while (!u.child.is_leaf)
     {
         u = first_child_off(u.child);
-        if (u.empty()) return false;
+        if (u.empty())
+        {
+            return false;
+        }
         trace.push_back(u);
     }
     return true;
@@ -516,10 +519,23 @@ static art::node_ptr inner_min_bound(art::trace_list& trace, const art::tree* t,
 #endif
 static art::trace_element first_child_off(art::node_ptr n)
 {
-    if (n.null()) return {nullptr, nullptr, 0};
-    if (n.is_leaf) return {nullptr, nullptr, 0};
+    if (n.null())
+        return {nullptr, nullptr, 0};
+    if (n.is_leaf)
+        return {nullptr, nullptr, 0};
 
-    return {n, n->get_child(n->first_index()), 0};
+    auto at = n->first_index();
+    auto np = n->get_child(at);
+    if (np.null())
+    {
+        auto att = n->first_index();
+        auto npt = n->get_child(att);
+        if (at != att || np != npt)
+        {
+            abort_with("the first child is not a child node");
+        }
+    }
+    return {n, np, at};
 }
 
 
@@ -529,7 +545,8 @@ static art::trace_element increment_te(const art::trace_element& te)
     if (te.parent.is_leaf) return {nullptr, nullptr, 0};
 
     const art::node* n = te.parent.get_node();
-    return n->next(te);
+    auto np = n->next(te);
+    return np;
 }
 
 static art::trace_element decrement_te(const art::trace_element& te)
@@ -544,21 +561,22 @@ static art::trace_element decrement_te(const art::trace_element& te)
 
 static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
 {
-    // TODO: theres probably something still wrong with this code
     while (!trace.empty())
     {   auto& last = last_el(trace);
-        auto& parent_d = last.parent->data();
-        if (last.child_ix == (unsigned)parent_d.occupants-1)
+        auto npt = increment_te(last);//last.parent->next(last);
+        if (npt.parent.null())
         {
             trace.pop_back();
         }else
         {
+            trace.back() = npt;
             break;
         }
     }
-    if (trace.empty()) return false;
-
-    trace.back() = increment_te(last_el(trace));
+    if (trace.empty())
+    {
+        return false;
+    }
     return extend_trace_min(root, trace);
 }
 static bool decrement_trace(const art::node_ptr& root, art::trace_list& trace)
@@ -909,6 +927,39 @@ bool art::iterator::update(value_type value)
     });
 }
 
+// computes distance while incrementing a trace list as efficiently as it can
+int64_t art::distance(const tree* t, const trace_list& ia, const trace_list& b)
+{
+    if (ia.empty()) return 0;
+    if (b.empty()) return 0;
+    if (ia[0].parent != b[0].parent || b < ia) return 0;
+
+    int64_t r = 1;
+    trace_list a = ia;
+    bool do_opt = nullptr == t ;
+    while (a != b)
+    {
+        if (do_opt)
+        {
+            auto &last = a.back();
+            unsigned d = last.parent->leaf_only_distance(last.child_ix+1,16);
+            if (d == 16 && last.child_ix+d < 255)
+            {
+                last.child_ix+=d;
+                last.child = last.parent->get_child(last.child_ix);
+                r+=d;
+                continue;
+            }
+        }
+        if (!increment_trace(t->root,a)) return r;
+        ++r;
+    }
+    return r;
+}
+int64_t art::iterator::distance(const iterator& other) const
+{
+    return art::distance(t,this->tl,other.tl);
+}
 /**
  * Returns the minimum valued leaf
  */

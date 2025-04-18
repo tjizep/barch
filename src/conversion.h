@@ -85,7 +85,7 @@ namespace conversion
     }
 
 
-    struct comparable_result
+    struct comparable_key
     {
     private:
         uint8_t storage[48]{};
@@ -95,8 +95,8 @@ namespace conversion
         uint8_t* bytes = nullptr; // NB! this gets freed
 
     public:
-        comparable_result() = default;
-        explicit comparable_result(int64_t value)
+        comparable_key() = default;
+        explicit comparable_key(int64_t value)
             : data(&integer.bytes[0])
               , integer(comparable_bytes(value, art::tinteger))
               // numbers are ordered before most ascii strings unless they start with 0x01
@@ -104,21 +104,21 @@ namespace conversion
         {
         }
 
-        explicit comparable_result(double value)
+        explicit comparable_key(double value)
             : data(&integer.bytes[0])
               , integer(comparable_bytes(value, art::tdouble))
               , size(integer.get_size())
         {
             size = integer.get_size();
         }
-        comparable_result(const art::composite_type& ct)
+        comparable_key(const art::composite_type& ct)
             : size(2)
         {
             storage[0] = ct.id;
             storage[1] = 0x00;
             data = storage;
         }
-        comparable_result(const char* val)
+        comparable_key(const char* val)
         {
             size = strlen(val)+1; // include type byte
             if (this->size < sizeof(storage)-1)
@@ -137,7 +137,7 @@ namespace conversion
             data[0] = art::tstring;
 
         }
-        comparable_result(const char* val, size_t size)
+        comparable_key(const char* val, size_t size)
             : size(size + 1)
         {
             if (this->size < sizeof(storage)-1)
@@ -155,7 +155,7 @@ namespace conversion
             data[0] = art::tstring;
 
         }
-        comparable_result(art::value_type val)
+        comparable_key(art::value_type val)
             : size(val.size)
         {
             if (!(      val.bytes[0]==art::tstring
@@ -178,17 +178,17 @@ namespace conversion
             memcpy(data, val.bytes, this->size);
         }
 
-        comparable_result(const comparable_result& r)
+        comparable_key(const comparable_key& r)
         {
             *this = r;
         }
 
-        ~comparable_result()
+        ~comparable_key()
         {
             if (bytes != nullptr) heap::free(bytes, this->size + 1);
         }
 
-        comparable_result& operator=(const comparable_result& r)
+        comparable_key& operator=(const comparable_key& r)
         {
             if (this == &r) return *this;
             if (bytes != nullptr) heap::free(bytes, this->size + 1);
@@ -258,8 +258,8 @@ namespace conversion
     art::value_type to_value(const std::string& s);
     // take a string and convert to a number as bytes or leave it alone
     // and return the bytes directly. the bytes will be copied
-    comparable_result convert(const char* v, size_t vlen, bool noint = false);
-    comparable_result convert(const std::string& str, bool noint = false);
+    comparable_key convert(const char* v, size_t vlen, bool noint = false);
+    comparable_key convert(const std::string& str, bool noint = false);
 
     inline int64_t enc_bytes_to_int(const uint8_t* bytes, size_t len)
     {

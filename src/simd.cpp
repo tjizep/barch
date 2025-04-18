@@ -13,11 +13,14 @@
 #endif
 #endif
 #include "simd.h"
+
+#include <cstdint>
+#include <cstring>
 /**
  * compare two buffers and put the result in a bitmap
  */
 
-unsigned bits_oper16(const unsigned char* a, const unsigned char* b, unsigned mask, unsigned operbits)
+unsigned simd::bits_oper16(const unsigned char* a, const unsigned char* b, unsigned mask, unsigned operbits)
 {
     unsigned bitfield = 0;
     // support non-86 architectures via sse2neon
@@ -76,4 +79,76 @@ unsigned bits_oper16(const unsigned char* a, const unsigned char* b, unsigned ma
 #endif
     bitfield &= mask;
     return bitfield;
+}
+
+extern size_t simd::count_chars(const uint8_t* data, unsigned size, uint8_t ch)
+{
+    size_t total = 0;
+#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
+    __m128i tocmp =  _mm_set1_epi8(ch);
+    const uint8_t* ptr = data;
+    uint8_t rest[16];
+    while (size) {
+        size_t diff = 16;
+        const uint8_t* cur_ptr = ptr;
+        if (size < 16)
+        {
+            memset(rest, ~ch, sizeof(rest));
+            memcpy(rest, ptr, size);
+            diff = size;
+        }else{
+            memcpy(rest, ptr, 16);
+        }
+        cur_ptr = rest;
+        int mask = 0;
+        __m128i chunk = _mm_load_si128 ((__m128i const*)cur_ptr);
+        __m128i results =  _mm_cmpeq_epi8(chunk, tocmp);
+        mask = _mm_movemask_epi8(results);
+        total += __builtin_popcount(mask);
+        ptr += diff;
+        size -= diff;
+    }
+#endif
+    return total;
+}
+size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
+{
+    size_t first = 0;
+#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
+    __m128i tocmp =  _mm_set1_epi8(ch);
+    const uint8_t* ptr = data;
+    uint8_t rest[16];
+    while (size) {
+        size_t diff = 16;
+        if (size < 16)
+        {
+            memset(rest, ~ch, sizeof(rest));
+            memcpy(rest, ptr, size);
+            diff = size;
+        }else{
+            memcpy(rest, ptr, 16);
+        }
+        int mask = 0;
+        __m128i chunk = _mm_load_si128 ((__m128i const*)rest);
+        __m128i results =  _mm_cmpgt_epi8(chunk, tocmp);
+        mask = _mm_movemask_epi8(results);
+        if (mask)
+        {
+            int lz = __builtin_ctz(mask);
+            return first + lz;
+        }
+        first += diff;
+        ptr += diff;
+        size -= diff;
+    }
+#else
+    for (int i = 0; i < size;++i)
+    {
+        if (data[i]>ch) return i;
+    }
+    first = size;;
+
+#endif
+    return first;
+
 }

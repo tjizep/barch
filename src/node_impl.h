@@ -142,7 +142,7 @@ namespace art
             {
                 if (d.keys[i] >= c && d.children[i].exists())
                 {
-                    return {{this, get_child(i), i}, d.keys[i] == c};
+                    return {{this, get_child(i), i, d.keys[i]}, d.keys[i] == c};
                 }
             }
             return {{nullptr, nullptr, d.occupants}, false};
@@ -153,7 +153,7 @@ namespace art
             unsigned i = te.child_ix + 1;
             if (i < this->data().occupants)
             {
-                return {this, this->get_child(i), i};
+                return {this, this->get_child(i), i, nd().keys[i]};
             }
             return {};
         }
@@ -163,10 +163,11 @@ namespace art
             unsigned i = te.child_ix;
             if (i > 0)
             {
-                return {this, get_child(i - 1), i - 1};
+                return {this, get_child(i - 1), i - 1,nd().keys[i - 1]};
             }
             return {};
         }
+
     };
 
     typedef node4_v<int32_t> node4_4;
@@ -207,7 +208,7 @@ namespace art
 
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
         {
-            unsigned i = bits_oper16(this->nd().keys, nuchar<16>(c), (1 << this->data().occupants) - 1, operbits);
+            unsigned i = simd::bits_oper16(this->nd().keys, simd::nuchar<16>(c), (1 << this->data().occupants) - 1, operbits);
             if (i)
             {
                 i = __builtin_ctz(i);
@@ -238,7 +239,7 @@ namespace art
         {
             unsigned mask = (1 << this->data().occupants) - 1;
 
-            unsigned bitfield = bits_oper16(nuchar<16>(c), this->get_keys(), mask, lt);
+            unsigned bitfield = simd::bits_oper16(simd::nuchar<16>(c), this->get_keys(), mask, lt);
 
             // Check if less than any
             unsigned idx;
@@ -295,7 +296,7 @@ namespace art
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
             unsigned mask = (1 << this->data().occupants) - 1;
-            unsigned bf = bits_oper16(this->nd().keys, nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt);
+            unsigned bf = bits_oper16(this->nd().keys, simd::nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt);
             // inverse logic
             if (bf)
             {
@@ -308,9 +309,10 @@ namespace art
         [[nodiscard]] trace_element next(const trace_element& te) const override
         {
             unsigned i = te.child_ix + 1;
-            if (i < this->data().occupants)
+            auto &dat = this->nd();
+            if (i < dat.occupants)
             {
-                return {this, this->get_child(i), i}; // the keys are ordered so fine I think
+                return {this, this->get_child(i), i, dat.keys[i]}; // the keys are ordered so fine I think
             }
             return {};
         }
@@ -319,8 +321,8 @@ namespace art
         {
             unsigned i = te.child_ix;
             if (i > 0)
-            {
-                return {this, this->get_child(i), i - 1}; // the keys are ordered so fine I think
+            {   auto &dat = this->nd();
+                return {this, this->get_child(i), i - 1, dat.keys[i - 1]}; // the keys are ordered so fine I think
             }
             return {};
         }
@@ -479,9 +481,10 @@ namespace art
         {
             unsigned uc = 0; // ?
             unsigned i;
+            auto& dat = nd();
             for (; uc < 256; uc++)
             {
-                i = nd().keys[uc];
+                i = dat.keys[uc];
                 if (i > 0)
                 {
                     return i - 1;
@@ -498,42 +501,44 @@ namespace art
             */
             unsigned uc = c;
             unsigned i = 0;
+            auto &dat = this->nd();
             for (; uc < 256; uc++)
             {
-                i = nd().keys[uc];
+                i = dat.keys[uc];
                 if (i > 0)
                 {
-                    trace_element te = {this, get_child(i - 1), i - 1};
+                    trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)uc};
                     return {te, (i == c)};
                 }
             }
             return {{nullptr, nullptr, 256}, false};
         }
 
-        [[nodiscard]] trace_element next(const trace_element& te) const override
+        [[nodiscard]] trace_element previous(const trace_element& te) const override
         {
-            unsigned uc = te.child_ix, i;
-
+            unsigned uc = te.k, i;
+            auto &dat = this->nd();
             for (; uc > 0; --uc)
             {
-                i = nd().keys[uc];
+                i = dat.keys[uc];
                 if (i > 0)
                 {
-                    return {this, get_child(i - 1), i - 1};
+                    return {this, get_child(i - 1), i - 1, (uint8_t)uc};
                 }
             }
             return {};
         }
 
-        [[nodiscard]] trace_element previous(const trace_element& te) const override
+        [[nodiscard]] trace_element next(const trace_element& te) const override
         {
-            unsigned uc = te.child_ix + 1, i;
+            unsigned uc = te.k + 1, i;
+            auto &dat = this->nd();
             for (; uc < 256; uc++)
             {
-                i = nd().keys[uc];
+                i = dat.keys[uc];
                 if (i > 0)
                 {
-                    return {this, get_child(i - 1), i - 1};
+                    return {this, get_child(i - 1), i - 1, (uint8_t)uc};
                 }
             }
             return {};
@@ -666,7 +671,7 @@ namespace art
                 if (has_child(i))
                 {
                     // because nodes are ordered accordingly
-                    return {{this, get_child(i), i}, (i == c)};
+                    return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
                 }
             }
             return {{nullptr, nullptr, 256}, false};
@@ -674,15 +679,13 @@ namespace art
 
         [[nodiscard]] trace_element next(const trace_element& te) const override
         {
-            for (unsigned i = te.child_ix + 1; i < 256; ++i)
-            {
-                // these aren't sparse so shouldn't take long
-                if (has_child(i))
-                {
-                    // because nodes are ordered accordingly
-                    return {this, get_child(i), i};
-                }
-            }
+            if (te.child_ix > 255) return {};
+
+            auto& dat = nd();
+            auto r = simd::first_byte_gt(dat.keys+te.child_ix+1,256-te.child_ix-1,0);
+            unsigned i = te.child_ix + r + 1;
+            if (i < 256)
+                return {this, get_child(i), i, (uint8_t)i};
             return {};
         }
 
@@ -695,11 +698,21 @@ namespace art
                 if (has_child(i))
                 {
                     // because nodes are ordered accordingly
-                    return {this, get_child(i), i};
+                    return {this, get_child(i), i, (uint8_t)i};
                 }
             }
             return {};
         }
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned size) const
+        {
+            unsigned r = 0;
+            if (start + size >= 256) return 0;
+            auto& dat = nd();
+            r = simd::count_chars(dat.types+start, size,leaf_type);
+            if ( simd::count_chars(dat.types+start,size,non_leaf_type)>0)
+                return 0;
+            return r;
+        };
     };
 
     typedef node256<int32_t> node256_4;

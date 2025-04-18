@@ -4,7 +4,7 @@
 #include "conversion.h"
 // take a string and convert to a number as bytes or leave it alone
 // and return the bytes directly. the bytes will be copied
-conversion::comparable_result conversion::convert(const char* v, size_t vlen, bool noint)
+conversion::comparable_key conversion::convert(const char* v, size_t vlen, bool noint)
 {
 	int64_t i;
 	double d;
@@ -15,7 +15,7 @@ conversion::comparable_result conversion::convert(const char* v, size_t vlen, bo
 
 		if (ianswer.ec == std::errc() && ianswer.ptr == v + vlen)
 		{
-			return comparable_result(i);
+			return comparable_key(i);
 		}
 	}
 
@@ -23,12 +23,12 @@ conversion::comparable_result conversion::convert(const char* v, size_t vlen, bo
 
 	if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen)
 	{
-		return comparable_result(d);
+		return comparable_key(d);
 	}
 
 	return {v, vlen + 1};
 }
-conversion::comparable_result conversion::convert(const std::string& str, bool noint)
+conversion::comparable_key conversion::convert(const std::string& str, bool noint)
 {
 	return convert(str.c_str(), str.size(), noint);
 }

@@ -512,7 +512,7 @@ namespace art
             int spos = 2; // the key is the first one
             if (argc < 3)
             {
-                return VALKEYMODULE_OK;
+                return VALKEYMODULE_ERR;
             }
             which_flag_n = has_enum({"nx","xx"}, spos);
             if (which_flag_n < 2)
@@ -530,7 +530,6 @@ namespace art
                 }
                 ++spos;
             }
-
 
             which_flag_g = has_enum({"gt","lt"}, spos);
             if (which_flag_g < 2)
@@ -563,6 +562,7 @@ namespace art
                     spos++;
                 }
                 if (lfi_ch == 2) break;
+
             }
             fields_start = spos;
             return VALKEYMODULE_OK;

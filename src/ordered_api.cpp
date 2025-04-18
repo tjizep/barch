@@ -135,9 +135,9 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	auto before = get_art()->size;
 	auto container = conversion::convert(key, nlen);
-	query q1, qindex;
+	query q1;
 	q1->create({container});
-	qindex->create({IX_MEMBER ,container});
+
 	for (int n = zspec.fields_start; n < argc; n+=2)
 	{
 		size_t klen, vlen;
@@ -166,9 +166,6 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}
 		q1->push(score);
 		q1->push(member);
-		qindex->push(member);
-		qindex->push(score);
-		auto member_key = qindex->create();
 		art::value_type qkey = q1->create();
 		art::value_type qv = {v, (unsigned)vlen};
 		if (zspec.XX)
@@ -183,7 +180,9 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}else
 		{
 			if (zspec.LFI)
-			{
+			{	query qindex;
+
+				auto member_key = qindex->create({IX_MEMBER ,container, member, score});
 				art_insert(get_art(), {}, member_key, qkey, true, fcfk);
 				++fkadded;
 			}
@@ -192,7 +191,6 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
 		}
 		q1->pop(2);
-		qindex->pop(2);
 		++responses;
 	}
 	auto current = get_art()->size;

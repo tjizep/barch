@@ -8,7 +8,7 @@ vk.call("B.CONFIG", "SET","max_modifications_before_save", "10000000000")
 
 vk.call('B.CLEAR')
 local t = vk.call('B.MILLIS')
-for i=1,4000000 do
+for i=1,1000000 do
     vk.call('B.ZADD', i, i+1.1, 'first') --i+2.0, 'second' ,i+3.5, 'third'
 end
 local tr = {vk.call('B.SIZE'),vk.call('B.MILLIS')-t}

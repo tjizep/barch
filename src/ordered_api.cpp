@@ -97,6 +97,8 @@ void remove_ordered(ordered_keys& thing)
 {
 	remove_ordered(thing.score_key, thing.member_key);
 }
+static composite cmd_ZADD_q1;
+static composite cmd_ZADD_qindex;
 int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
 	ValkeyModule_AutoMemory(ctx);
@@ -135,9 +137,6 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	auto before = get_art()->size;
 	auto container = conversion::convert(key, nlen);
-	query q1;
-	q1->create({container});
-
 	for (int n = zspec.fields_start; n < argc; n+=2)
 	{
 		size_t klen, vlen;
@@ -164,12 +163,11 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			++responses;
 			continue;
 		}
-		q1->push(score);
-		q1->push(member);
-		art::value_type qkey = q1->create();
+		art::value_type qkey = cmd_ZADD_q1.create({container,score,member});
 		art::value_type qv = {v, (unsigned)vlen};
 		if (zspec.XX)
 		{
+			art::value_type qkey = cmd_ZADD_q1.create({container,score,member});
 			art::update(get_art(), qkey,[&](const art::node_ptr& old) -> art::node_ptr
 			{
 				if (old.null()) return nullptr;
@@ -180,9 +178,8 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}else
 		{
 			if (zspec.LFI)
-			{	query qindex;
-
-				auto member_key = qindex->create({IX_MEMBER ,container, member, score});
+			{
+				auto member_key = cmd_ZADD_qindex.create({IX_MEMBER ,container, member, score});
 				art_insert(get_art(), {}, member_key, qkey, true, fcfk);
 				++fkadded;
 			}
@@ -190,7 +187,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
 
 		}
-		q1->pop(2);
+		//q1->pop(2);
 		++responses;
 	}
 	auto current = get_art()->size;

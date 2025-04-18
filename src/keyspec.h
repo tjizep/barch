@@ -31,6 +31,7 @@ namespace art
         static std::regex integer;
         int argc = 0;
         int r = 0;
+        char empty[1] = "";
         mutable std::string s{};
 
 
@@ -50,6 +51,16 @@ namespace art
             return s;
         }
 
+        const char * toc(int at) const
+        {
+            size_t vlen = 0;
+            const char* val = ValkeyModule_StringPtrLen(argv[at], &vlen);
+            if (val == nullptr)
+            {
+                return empty;
+            }
+            return val;
+        }
         std::string& tos(int at)
         {
             s.clear();
@@ -493,12 +504,14 @@ namespace art
             {
                 return VALKEYMODULE_OK;
             }
-
-            which_flag_n = has_enum({"nx","xx"}, spos);
-            if (which_flag_n < 2)
+            const char * cmd = toc(spos);
+            if (*cmd=='n'||*cmd=='N'||*cmd=='x'||*cmd=='X')
             {
-                switch (which_flag_n)
+                which_flag_n = has_enum({"nx","xx"}, spos);
+                if (which_flag_n < 2)
                 {
+                    switch (which_flag_n)
+                    {
                     case 0:
                         NX = true;
                         break;
@@ -507,42 +520,50 @@ namespace art
                         break;
                     default:
                         break;
-                }
-                ++spos;
+                    }
+                    ++spos;
 
+                }
             }
-            which_flag_g = has_enum({"gt","lt"}, spos);
-            if (which_flag_g < 2)
+            cmd = toc(spos);
+            if (*cmd=='g'||*cmd=='G'||*cmd=='l'||*cmd=='L')
             {
-                switch (which_flag_g)
+                which_flag_g = has_enum({"gt","lt"}, spos);
+                if (which_flag_g < 2)
                 {
-                case 0:
-                    GT = true;
-                    break;
-                case 1:
-                    LT = true;
-                    break;
-                default:
-                    break;
-                }
-                ++spos;
+                    switch (which_flag_g)
+                    {
+                    case 0:
+                        GT = true;
+                        break;
+                    case 1:
+                        LT = true;
+                        break;
+                    default:
+                        break;
+                    }
+                    ++spos;
 
+                }
             }
-
-
-            while (true)
+            cmd = toc(spos);
+            if (*cmd=='c'||*cmd=='C'||*cmd=='l'||*cmd=='L')
             {
-                int lfi_ch = has_enum({"ch","lfi"}, spos);
-                if ( lfi_ch == 0)
+                while (true)
                 {
-                    CH = true;
-                    spos++;
+
+                    int lfi_ch = has_enum({"ch","lfi"}, spos);
+                    if ( lfi_ch == 0)
+                    {
+                        CH = true;
+                        spos++;
+                    }
+                    if (lfi_ch == 1){
+                        LFI = true;
+                        spos++;
+                    }
+                    if (lfi_ch == 2) break;
                 }
-                if (lfi_ch == 1){
-                    LFI = true;
-                    spos++;
-                }
-                if (lfi_ch == 2) break;
             }
             fields_start = spos;
             return VALKEYMODULE_OK;

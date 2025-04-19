@@ -23,7 +23,7 @@ enum
 {
     padding = 0,
     heap_checks = 0,
-    use_malloc = 1
+    use_malloc = 0
 };
 
 static size_t check_size = (heap_checks != 1) ? 0 : sizeof(uint32_t);
@@ -133,10 +133,13 @@ void heap::free(void* ptr)
         size_t size = 0;
         if (use_malloc != 1)
         {
-            //size = ValkeyModule_MallocSize(ptr);
+            ValkeyModule_Free(ptr);
+        }else
+        {
+            free(ptr, size);
         }
 
-        free(ptr, size);
+
     }
 }
 

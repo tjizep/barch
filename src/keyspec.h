@@ -51,6 +51,8 @@ namespace art
 
         const char * toc(int at) const
         {
+            if (at>= argc) return empty;
+
             size_t vlen = 0;
             const char* val = ValkeyModule_StringPtrLen(argv[at], &vlen);
             if (val == nullptr)
@@ -95,73 +97,33 @@ namespace art
             auto val = std::stoll(scheck);
             return val;
         }
-        static std::string& to_lower(std::string& s)
-        {
-            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-            return s;
-        }
-        static std::string to_lower(const std::string& s)
-        {
-            std::string l = s;
-            std::transform(l.begin(), l.end(), l.begin(), ::tolower);
-
-            return l;
-        }
 
         int has_enum(const std::initializer_list<const char*>& names,int at)
         {
 
             const char * token = toc(at);
-            int matches = 0;
+            int ctr = 0;
             for (const char* name : names)
             {
-                if (*token == std::tolower(*name) || *token == std::toupper(*name))
+                if (std::tolower(*token) == *name)
                 {
-                    ++matches;
+                    if (strcasecmp(token+1, name+1) == 0)
+                    {
+                        return ctr;
+                    }
                 }
+                ++ctr;
             }
-            if (!matches) return (int)names.size();
+            return ctr;
 
-            const std::string& it = tos(at);
-            if (it.empty()) return false;
-            to_lower(s);
-            int found = 0;
-            for (auto& n : names)
-            {
-                if (to_lower(n) == s)
-                {
-                    return found;
-                }
-                ++found;
-            }
-            return found;
-        }
-        template<class T>
-        int has_enum(const T& names,int at)
-        {
-            const std::string& it = tos(at);
-            if (it.empty()) return false;
-            to_lower(s);
-            int found = 0;
-            for (auto& n : names)
-            {
-                if (to_lower(n) == s)
-                {
-                    return found;
-                }
-                ++found;
-            }
-            return found;
         }
 
         bool has(const char* what, int at) const
         {
             if (at >= argc) return false;
 
-            const std::string& it = tos(at);
-            if (it.empty()) return false;
-            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-            return s == what;
+            const char* it = toc(at);
+            return strcasecmp(it, what)==0;
         }
     };
 
@@ -583,8 +545,6 @@ namespace art
         size_t numkeys{0};
         heap::std_vector<std::string> keys{};
         heap::std_vector<double> weight_values{};
-        heap::std_vector<std::string> keywords = {"weights","aggregate","withscores"};
-        heap::std_vector<std::string> aggregate_types = {"sum","min","max", "avg"};
 
         enum keyword_index
         {
@@ -648,7 +608,7 @@ namespace art
             }
             do
             {
-                int which = has_enum(keywords,spos);
+                int which = has_enum({"weights","aggregate","withscores"},spos);
                 switch (which)
                 {
                 case weights:
@@ -668,7 +628,7 @@ namespace art
                     {
                         return VALKEYMODULE_ERR;
                     }
-                    aggr = map_aggr(has_enum(aggregate_types,++spos));
+                    aggr = map_aggr(has_enum({"sum","min","max", "avg"},++spos));
                     ++spos;
                     break;
                 case withscores:
@@ -706,13 +666,6 @@ namespace art
         std::string key{};
         std::string start{};
         std::string stop{};
-
-        heap::std_vector<std::string>& get_kewords()
-        {
-            static heap::std_vector<std::string> by = {"byscore","bylex","rev","limit", "withscores"};
-            return by;
-        }
-
         enum keyword_index
         {
             byscore = 0,
@@ -753,7 +706,7 @@ namespace art
 
             do
             {
-                int which = has_enum(get_kewords(),spos);
+                int which = has_enum({"byscore","bylex","rev","limit", "withscores"},spos);
                 switch (which)
                 {
                 case byscore:

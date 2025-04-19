@@ -114,6 +114,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		return ValkeyModule_ReplyWithError(ctx, "syntax error");
 	}
+	//zspec.LFI = true;
 	int64_t updated = 0;
 	int64_t fkadded = 0;
 	auto fc = [&](art::node_ptr) -> void
@@ -187,7 +188,6 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
 
 		}
-		//q1->pop(2);
 		++responses;
 	}
 	auto current = get_art()->size;

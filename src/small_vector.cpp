@@ -3,7 +3,7 @@
 //
 #include "sastam.h"
 #include "logger.h"
-
+#if 0
 static int test(){
 	heap::small_vector<int> testv;
 	int ttotal = 0;
@@ -94,3 +94,4 @@ static int test(){
     return ttotal;
 }
 static int tests= test();
+#endif

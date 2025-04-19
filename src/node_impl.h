@@ -429,11 +429,12 @@ namespace art
         void add_child_inner(unsigned char c, node_ptr child) override
         {
             unsigned pos = 0;
-            while (has_child(pos)) pos++;
+            auto &dat = this->nd();
+            while (dat.children[pos].exists()) pos++;
             // not we do not need to call insert_type an empty child is found
             set_child(pos, child);
-            nd().keys[c] = pos + 1;
-            data().occupants++;
+            dat.keys[c] = pos + 1;
+            dat.occupants++;
         }
 
         void add_child(unsigned char c, node_ptr& ref, node_ptr child) override

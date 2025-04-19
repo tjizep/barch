@@ -707,6 +707,8 @@ namespace art
         [[nodiscard]] virtual unsigned leaf_only_distance(unsigned , unsigned& size ) const
         {
             size = 0;
+            auto& dat = nd();
+            __builtin_prefetch(dat.keys);
             return 256;
         }
     protected:

@@ -544,10 +544,10 @@ namespace art
             }
             return {};
         }
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned unused(start), unsigned& size ) const
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size ) const
         {
             size = 0;
-#if 0
+            return 0;
             unsigned r = start;
             auto& dat = nd();
             unsigned last_leaf = 256;
@@ -562,12 +562,10 @@ namespace art
                     ++size;
                     last_leaf = r;
                 }
-
-            return last_leaf < 256 ? dat.keys[last_leaf] - 1: 256;}
-#else
+            }
+            if (last_leaf < 256)
+                return dat.keys[last_leaf] - 1;
             return 256;
-#endif
-
 
         }
     };

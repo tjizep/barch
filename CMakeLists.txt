@@ -16,7 +16,7 @@ endif ()
 set(CMAKE_CPP_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #remove -Werror because fmtlib
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Weffc++")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra -Weffc++")
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)

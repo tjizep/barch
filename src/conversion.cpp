@@ -54,7 +54,7 @@ bool conversion::is_integer(const char* str, size_t l)
 	{
 		return false;
 	}
-	if (*s == '-')
+	if (*s == '-' || *s == '+')
 	{
 		++s;
 	}

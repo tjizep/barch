@@ -3,7 +3,7 @@ vk = redis
 
 vk.call('B.CLEAR')
 local t = vk.call('B.MILLIS')
-local count = 10000
+local count = 1000000
 local key = 'z'
 for i=1,count do
     vk.call('B.ZADD', key, i, 'at '..i) --i+2.0, 'second' ,i+3.5, 'third'

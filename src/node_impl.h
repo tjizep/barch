@@ -430,7 +430,12 @@ namespace art
         {
             unsigned pos = 0;
             auto &dat = this->nd();
-            while (dat.children[pos].exists()) pos++;
+            // The simd optimization below seems to provide benefits
+            // I leave the original here for reference or if
+            // some bug emerges
+            //while (dat.children[pos].exists()) pos++;
+            pos = simd::first_byte_eq(dat.types, node48::KEY_COUNT,0);
+
             // not we do not need to call insert_type an empty child is found
             set_child(pos, child);
             dat.keys[c] = pos + 1;
@@ -439,7 +444,8 @@ namespace art
 
         void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
-            if (data().occupants < 48)
+            auto & dat = nd();
+            if (dat.occupants < 48)
             {
                 this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
@@ -448,9 +454,9 @@ namespace art
                 auto new_node = alloc_node_ptr(node_256, {});
                 for (unsigned i = 0; i < 256; i++)
                 {
-                    if (nd().keys[i])
+                    if (dat.keys[i])
                     {
-                        node_ptr nc = get_child(nd().keys[i] - 1);
+                        node_ptr nc = get_child(dat.keys[i] - 1);
                         if (nc.null())
                         {
                             abort();
@@ -503,15 +509,28 @@ namespace art
             unsigned uc = c;
             unsigned i = 0;
             auto &dat = this->nd();
+            int test = simd::first_byte_gt(dat.keys+uc, 256-uc,0) + uc;
+            if (test < 256)
+            {
+                i = dat.keys[test];
+                trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)uc};
+                return {te, (i == c)};
+            }
+#if 0
             for (; uc < 256; uc++)
             {
                 i = dat.keys[uc];
                 if (i > 0)
                 {
+                    if (test!=i)
+                    {
+                        std_log("failed test?");
+                    }
                     trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)uc};
                     return {te, (i == c)};
                 }
             }
+#endif
             return {{nullptr, nullptr, 256}, false};
         }
 
@@ -681,7 +700,7 @@ namespace art
             unsigned uc = 0; // ?
             for (; uc < 256; uc++)
             {
-                if (dat.children[uc].exists())
+                if (dat.types[uc] > 0)
                 {
                     return uc;
                 }
@@ -691,14 +710,28 @@ namespace art
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
+            auto& dat = nd();
+            unsigned i = simd::first_byte_gt(dat.types+c,256-c,0)+c;
+            if (i < 256)
+            {
+                return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
+            }
+
+#if 0
             for (unsigned i = c; i < 256; ++i)
             {
                 if (has_child(i))
                 {
+                    if (si != i)
+                    {
+                        abort();
+                    }
                     // because nodes are ordered accordingly
                     return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
                 }
             }
+
+#endif
             return {{nullptr, nullptr, 256}, false};
         }
 

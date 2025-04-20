@@ -48,10 +48,10 @@ local test = function()
     tests = tests + 1
     local t
     t = vk.call('B.MILLIS')
-    for i = 1, count do
-        local k = convert(i)
-        vk.call('B.SET',k,i)
-    end
+        for i = 1, count do
+            local k = convert(i)
+            vk.call('B.SET',k,i)
+        end
 
     local valids = 0
 
@@ -71,7 +71,7 @@ local test = function()
 end
 
 
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "25m")
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "80m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "10000000000")

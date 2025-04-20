@@ -468,7 +468,7 @@ namespace art
         virtual void copy_from(node_ptr s) = 0;
         virtual void copy_header(node_ptr src) = 0;
         virtual void set_children(unsigned dpos, const node* other, unsigned spos, unsigned count) = 0;
-        [[nodiscard]] virtual bool child_type(unsigned at) const = 0;
+        [[nodiscard]] virtual uint8_t child_type(unsigned at) const = 0;
         // returns true if node does not need to be rebuilt
         [[nodiscard]] virtual bool ok_child(node_ptr np) const = 0;
         [[nodiscard]] virtual bool ok_children(const children_t& child) const = 0;

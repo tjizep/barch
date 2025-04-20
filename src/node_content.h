@@ -216,6 +216,7 @@ namespace art
     struct encoded_node_content : public node, private node::node_proxy
     {
         // test somewhere that sizeof ChildElementType == sizeof LeafElementType
+        const static unsigned KEY_COUNT = KEYS;
         typedef i_ptr_t IntPtrType;
         typedef i_ptr_t ChildElementType;
         typedef i_ptr_t LeafElementType;
@@ -596,10 +597,10 @@ namespace art
             }
         }
 
-        [[nodiscard]] bool child_type(unsigned at) const override
+        [[nodiscard]] uint8_t child_type(unsigned at) const override
         {
             check_object();
-            return nd().types[at] == leaf_type;
+            return nd().types[at];
         }
 
         void set_children(unsigned dpos, const node* other, unsigned spos, unsigned count) override

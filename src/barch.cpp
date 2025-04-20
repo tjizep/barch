@@ -31,6 +31,7 @@ extern "C" {
 #include "ordered_api.h"
 
 static auto startTime = std::chrono::high_resolution_clock::now();
+static ValkeyModuleString* cannedStrings[64];
 
 struct iter_state
 {
@@ -435,8 +436,6 @@ int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 
     auto converted = conversion::convert(k, klen);
     art::trace_list trace;
-    //trace.reserve(klen);
-    //read_lock rl(get_lock());
     art::node_ptr r = art_search(trace, get_art(), converted.get_value());
     if (r.null())
     {
@@ -445,6 +444,17 @@ int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     else
     {
         auto vt = r.const_leaf()->get_value();
+        if (vt.size < 54)
+        {
+            size_t l = 0;
+            ValkeyModuleString * vms = cannedStrings[vt.size];
+            char * str = (char*)ValkeyModule_StringPtrLen(vms, &l);
+            if (l == vt.size)
+            {
+                memcpy(str,vt.chars(),vt.size);
+                return ValkeyModule_ReplyWithString(ctx, vms);
+            }
+        }
         return ValkeyModule_ReplyWithStringBuffer(ctx,vt.chars(), vt.size);
     }
 }
@@ -1078,7 +1088,14 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
         art::std_log(e.what());
         return VALKEYMODULE_ERR;
     }
-
+    const char* data = "0123456789012345678901234567890123456789012345678901234567890123456789";
+    size_t size = 0;
+    for (auto& cs: cannedStrings)
+    {
+        if (size)
+            cs = ValkeyModule_CreateString(ctx,data,size);
+        ++size;
+    }
     return VALKEYMODULE_OK;
 }
 

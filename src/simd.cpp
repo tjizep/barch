@@ -14,6 +14,7 @@
 #endif
 #include "simd.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 /**
@@ -119,6 +120,7 @@ size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
     const uint8_t* ptr = data;
     uint8_t rest[16];
     while (size) {
+        __builtin_prefetch(ptr+16);
         size_t diff = 16;
         if (size < 16)
         {
@@ -152,3 +154,113 @@ size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
     return first;
 
 }
+size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
+{
+    auto m = (const uint8_t*)memchr(data, ch, size);
+    if (!m) return size;
+    return  m - data;
+#if 0
+    size_t first = 0;
+#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
+    __m128i tocmp =  _mm_set1_epi8(ch);
+    const uint8_t* ptr = data;
+    uint8_t rest[16];
+    while (size) {
+        __builtin_prefetch(ptr+16);
+        size_t diff = 16;
+        if (size < 16)
+        {
+            memset(rest, ~ch, sizeof(rest));
+            memcpy(rest, ptr, size);
+            diff = size;
+        }else{
+            memcpy(rest, ptr, 16);
+        }
+        int mask = 0;
+        __m128i chunk = _mm_load_si128 ((__m128i const*)rest);
+        __m128i results =  _mm_cmpeq_epi8(chunk, tocmp);
+        mask = _mm_movemask_epi8(results);
+        if (mask)
+        {
+            int lz = __builtin_ctz(mask);
+            return first + lz;
+        }
+        first += diff;
+        ptr += diff;
+        size -= diff;
+    }
+#else
+    for (int i = 0; i < size;++i)
+    {
+        if (data[i]>ch) return i;
+    }
+    first = size;;
+
+#endif
+    return first;
+#endif
+}
+#include "logger.h"
+int test()
+{
+    unsigned char data[16] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00};
+    unsigned char data1[16] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+    unsigned char data2[35] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00};
+    if (10 != simd::first_byte_eq(data, 16, 1))
+    {
+        abort();
+    }
+    if (16 != simd::first_byte_eq(data1, 16, 1))
+    {
+        abort();
+    }
+    if (32 != simd::first_byte_eq(data2, 35, 1))
+    {
+        abort();
+    }
+    if (32 != simd::first_byte_gt(data2, 35, 0))
+    {
+        abort();
+    }
+#if 0
+    int64_t test_total = 0;
+    int64_t test_total1 = 0;
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i< 3000000;++i)
+    {
+        int at = 0;
+        for (auto ch : data2)
+        {
+            if (ch != 0)
+            {
+                if (at == 32)
+                    ++test_total;
+            }
+            ++at;
+        }
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    int64_t normal_time = duration.count();
+    start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i< 3000000;++i)
+    {
+        if (simd::first_byte_eq(data2, 35, 1)==32)
+        {
+            ++test_total1;
+        }
+
+    }
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    int64_t simd_time = duration.count();
+    art::std_log("normal vs sse time",normal_time, simd_time,"ms");
+    if (test_total1 != test_total)
+    {
+        abort();
+    }
+#endif
+
+    return 0;
+}
+static int t = test();

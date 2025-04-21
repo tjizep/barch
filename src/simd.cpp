@@ -12,6 +12,11 @@
 #include <emmintrin.h>
 #endif
 #endif
+
+#ifdef __AVX__
+#include <immintrin.h>
+#endif
+
 #include "simd.h"
 
 #include <chrono>
@@ -122,6 +127,10 @@ size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
     const uint8_t* ptr = data;
     const uint8_t* end = data + size;
 #if 1
+#if defined(__AVX__)
+
+#endif
+
 #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
     __m128i tocmp =  _mm_set1_epi8(ch);
     while (size >= 16) {
@@ -140,6 +149,18 @@ size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
         size -= diff;
     }
 #endif
+#endif
+#if 1
+    while (size >= 8)
+    {
+        if (ptr[0] == ch || ptr[1] == ch || ptr[2] == ch || ptr[3] == ch ||
+            ptr[4] == ch || ptr[5] == ch || ptr[6] == ch || ptr[7] == ch)
+        {
+            break;
+        }
+        ptr+=8;
+        size-=8;
+    }
 #endif
     while (ptr!=end)
     {
@@ -205,7 +226,7 @@ int test()
     end = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     int64_t simd_time = duration.count();
-    art::std_log("normal vs sse time",normal_time, simd_time,"ms");
+    art::std_log("normal vs simd time",normal_time, simd_time,"ms");
     if (test_total1 != test_total)
     {
         abort();

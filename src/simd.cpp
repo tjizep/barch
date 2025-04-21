@@ -82,56 +82,18 @@ unsigned simd::bits_oper16(const unsigned char* a, const unsigned char* b, unsig
     return bitfield;
 }
 
-extern size_t simd::count_chars(const uint8_t* data, unsigned size, uint8_t ch)
-{
-    size_t total = 0;
-#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
-    __m128i tocmp =  _mm_set1_epi8(ch);
-    const uint8_t* ptr = data;
-    uint8_t rest[16];
-    while (size) {
-        size_t diff = 16;
-        const uint8_t* cur_ptr = ptr;
-        if (size < 16)
-        {
-            memset(rest, ~ch, sizeof(rest));
-            memcpy(rest, ptr, size);
-            diff = size;
-        }else{
-            memcpy(rest, ptr, 16);
-        }
-        cur_ptr = rest;
-        int mask = 0;
-        __m128i chunk = _mm_load_si128 ((__m128i const*)cur_ptr);
-        __m128i results =  _mm_cmpeq_epi8(chunk, tocmp);
-        mask = _mm_movemask_epi8(results);
-        total += __builtin_popcount(mask);
-        ptr += diff;
-        size -= diff;
-    }
-#endif
-    return total;
-}
 size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
 {
-    size_t first = 0;
-#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
-    __m128i tocmp =  _mm_set1_epi8(ch);
     const uint8_t* ptr = data;
-    uint8_t rest[16];
-    while (size) {
+    const uint8_t* end = data + size;
+#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
+    size_t first = 0;
+    __m128i tocmp =  _mm_set1_epi8(ch);
+    while (size >= 16) {
         __builtin_prefetch(ptr+16);
         size_t diff = 16;
-        if (size < 16)
-        {
-            memset(rest, ~ch, sizeof(rest));
-            memcpy(rest, ptr, size);
-            diff = size;
-        }else{
-            memcpy(rest, ptr, 16);
-        }
         int mask = 0;
-        __m128i chunk = _mm_load_si128 ((__m128i const*)rest);
+        __m128i chunk = _mm_loadu_si128 ((__m128i const*)ptr);
         __m128i results =  _mm_cmpgt_epi8(chunk, tocmp);
         mask = _mm_movemask_epi8(results);
         if (mask)
@@ -143,41 +105,31 @@ size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
         ptr += diff;
         size -= diff;
     }
-#else
-    for (int i = 0; i < size;++i)
-    {
-        if (data[i]>ch) return i;
-    }
-    first = size;;
-
 #endif
-    return first;
 
+    while (ptr!=end)
+    {
+        if (*ptr > ch)
+        {
+            return ptr - data;
+        }
+        ++ptr;
+    }
+    return ptr - data;
 }
 size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
 {
-    auto m = (const uint8_t*)memchr(data, ch, size);
-    if (!m) return size;
-    return  m - data;
-#if 0
-    size_t first = 0;
-#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
-    __m128i tocmp =  _mm_set1_epi8(ch);
     const uint8_t* ptr = data;
-    uint8_t rest[16];
-    while (size) {
+    const uint8_t* end = data + size;
+#if 1
+#if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
+    size_t first = 0;
+    __m128i tocmp =  _mm_set1_epi8(ch);
+    while (size >= 16) {
         __builtin_prefetch(ptr+16);
         size_t diff = 16;
-        if (size < 16)
-        {
-            memset(rest, ~ch, sizeof(rest));
-            memcpy(rest, ptr, size);
-            diff = size;
-        }else{
-            memcpy(rest, ptr, 16);
-        }
         int mask = 0;
-        __m128i chunk = _mm_load_si128 ((__m128i const*)rest);
+        __m128i chunk = _mm_loadu_si128 ((__m128i const*)ptr);
         __m128i results =  _mm_cmpeq_epi8(chunk, tocmp);
         mask = _mm_movemask_epi8(results);
         if (mask)
@@ -189,16 +141,17 @@ size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
         ptr += diff;
         size -= diff;
     }
-#else
-    for (int i = 0; i < size;++i)
+#endif
+#endif
+    while (ptr!=end)
     {
-        if (data[i]>ch) return i;
+        if (*ptr == ch)
+        {
+            return ptr - data;
+        }
+        ++ptr;
     }
-    first = size;;
-
-#endif
-    return first;
-#endif
+    return ptr - data;
 }
 #include "logger.h"
 int test()
@@ -231,7 +184,7 @@ int test()
         int at = 0;
         for (auto ch : data2)
         {
-            if (ch != 0)
+            if (ch == 1)
             {
                 if (at == 32)
                     ++test_total;

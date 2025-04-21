@@ -237,7 +237,8 @@ namespace art
 
         void add_child_inner(unsigned char c, node_ptr child) override
         {
-            unsigned mask = (1 << this->data().occupants) - 1;
+            auto &dat = this->nd();
+            unsigned mask = (1 << dat.occupants) - 1;
 
             unsigned bitfield = simd::bits_oper16(simd::nuchar<16>(c), this->get_keys(), mask, lt);
 
@@ -246,18 +247,18 @@ namespace art
             if (bitfield)
             {
                 idx = __builtin_ctz(bitfield);
-                memmove(this->nd().keys + idx + 1, this->nd().keys + idx, this->data().occupants - idx);
-                memmove(this->nd().children.data + idx + 1, this->nd().children.data + idx,
-                        (this->data().occupants - idx) * sizeof(typename Parent::ChildElementType));
+                memmove(dat.keys + idx + 1, dat.keys + idx, dat.occupants - idx);
+                memmove(dat.children.data + idx + 1, dat.children.data + idx,
+                        (dat.occupants - idx) * sizeof(typename Parent::ChildElementType));
             }
             else
-                idx = this->data().occupants;
+                idx = dat.occupants;
 
             this->insert_type(idx);
             // Set the child
-            this->nd().keys[idx] = c;
+            dat.keys[idx] = c;
             this->set_child(idx, child);
-            ++this->data().occupants;
+            ++dat.occupants;
         }
 
         void add_child(unsigned char c, node_ptr& ref, node_ptr child) override

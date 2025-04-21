@@ -87,7 +87,7 @@ size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
     const uint8_t* ptr = data;
     const uint8_t* end = data + size;
 #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
-    size_t first = 0;
+    //size_t first = 0;
     __m128i tocmp =  _mm_set1_epi8(ch);
     while (size >= 16) {
         __builtin_prefetch(ptr+16);
@@ -99,9 +99,9 @@ size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
         if (mask)
         {
             int lz = __builtin_ctz(mask);
-            return first + lz;
+            return ptr - data + lz;
         }
-        first += diff;
+        //first += diff;
         ptr += diff;
         size -= diff;
     }
@@ -123,7 +123,6 @@ size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
     const uint8_t* end = data + size;
 #if 1
 #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
-    size_t first = 0;
     __m128i tocmp =  _mm_set1_epi8(ch);
     while (size >= 16) {
         __builtin_prefetch(ptr+16);
@@ -135,9 +134,8 @@ size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
         if (mask)
         {
             int lz = __builtin_ctz(mask);
-            return first + lz;
+            return ptr - data + lz;
         }
-        first += diff;
         ptr += diff;
         size -= diff;
     }
@@ -175,7 +173,7 @@ int test()
     {
         abort();
     }
-#if 0
+#if 1
     int64_t test_total = 0;
     int64_t test_total1 = 0;
     auto start = std::chrono::high_resolution_clock::now();

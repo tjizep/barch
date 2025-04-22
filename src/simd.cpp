@@ -194,7 +194,7 @@ int test()
     {
         abort();
     }
-#if 1
+#if 0
     int64_t test_total = 0;
     int64_t test_total1 = 0;
     auto start = std::chrono::high_resolution_clock::now();

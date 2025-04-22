@@ -340,6 +340,7 @@ namespace art
         uint8_t pointer_size = 0;
         uint8_t partial_len = 0;
         uint8_t occupants = 0;
+        uint64_t descendants = 0;
         unsigned char partial[max_prefix_llength]{};
     };
 
@@ -449,10 +450,11 @@ namespace art
         [[nodiscard]] virtual node_ptr last() const = 0;
         [[nodiscard]] virtual unsigned last_index() const = 0;
         virtual void remove(node_ptr& ref, unsigned pos, unsigned char key) = 0;
-        virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) = 0;
+        virtual unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) = 0;
 
-        virtual void add_child_inner(unsigned char, node_ptr)
+        virtual unsigned add_child_inner(unsigned char, node_ptr)
         {
+            return 0;
         }
 
         [[nodiscard]] virtual const unsigned char& get_key(unsigned at) const = 0;

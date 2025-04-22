@@ -93,6 +93,7 @@ namespace art
         uint64_t save_size = 0;
         vector_stream save_stats{};
         std::shared_mutex save_load_mutex{};
+        trace_list trace{};
         void start_maintain();
         tree(const tree&) = delete;
 
@@ -109,6 +110,7 @@ namespace art
         void commit();
         void rollback();
         void clear();
+        void update_trace(int direction);
     };
 }
 

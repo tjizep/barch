@@ -1092,7 +1092,13 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         // Add the leafs to the new node_4
         ref = new_node;
         ref.modify()->add_child(l->key()[depth + longest_prefix], ref, l1);
-        ref.modify()->add_child(l2.const_leaf()->key()[depth + longest_prefix], ref, l2);
+        if (l1.is_leaf) // because l1 isnt going to be in the path
+        {
+            ++ref.modify()->data().descendants;
+        }
+        auto l2k = l2.const_leaf()->key()[depth + longest_prefix];
+        auto l2idx = ref.modify()->add_child(l2k, ref, l2);
+        t->trace.push_back({ref, l2,l2idx,l2k});
         return nullptr;
     }
 
@@ -1107,7 +1113,6 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
             goto RECURSE_SEARCH;
         }
 
-        // TODO: do fast child adding (by adding multiple children at once)
         // Create a new node and a new leaf
         art::node_ptr new_leaf = make_leaf(key, value);
         auto new_node = art::alloc_node_ptr(art::initial_node, {n, new_leaf}); // pass children to get opt. ptr size
@@ -1115,25 +1120,30 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         new_node.modify()->data().partial_len = prefix_diff;
         memcpy(new_node.modify()->data().partial, n->data().partial, std::min<int>(art::max_prefix_llength, prefix_diff));
         // Adjust the prefix of the old node
+        auto& modn = n.modify()->data();
         if (n->data().partial_len <= art::max_prefix_llength)
         {
-            ref.modify()->add_child(n->data().partial[prefix_diff], ref, n);
-            n.modify()->data().partial_len -= (prefix_diff + 1);
-            memmove(n.modify()->data().partial, n->data().partial + prefix_diff + 1,
-                    std::min<int>(art::max_prefix_llength, n->data().partial_len));
+
+            auto ck = modn.partial[prefix_diff];
+            ref.modify()->add_child(ck, ref, n); // descendants of n will be added to ref
+            modn.partial_len -= (prefix_diff + 1);
+            memmove(modn.partial, modn.partial + prefix_diff + 1,
+                    std::min<int>(art::max_prefix_llength, modn.partial_len));
         }
         else
         {
-            n.modify()->data().partial_len -= (prefix_diff + 1);
+            modn.partial_len -= (prefix_diff + 1);
             const auto* l = minimum(n).const_leaf();
-            ref.modify()->add_child(l->get_key()[depth + prefix_diff], ref, n);
-            memcpy(n.modify()->data().partial, l->key() + depth + prefix_diff + 1,
-                   std::min<int>(art::max_prefix_llength, n->data().partial_len));
+            auto ck = l->get_key()[depth + prefix_diff];
+            ref.modify()->add_child(ck, ref, n);
+            memcpy(modn.partial, l->key() + depth + prefix_diff + 1,
+                   std::min<int>(art::max_prefix_llength, modn.partial_len));
         }
 
         // Insert the new leaf (safely considering optimal pointer sizes)
+        auto idx = ref.modify()->add_child(key[depth + prefix_diff], ref, new_leaf);
 
-        ref.modify()->add_child(key[depth + prefix_diff], ref, new_leaf);
+        t->trace.push_back( {ref,new_leaf,idx, key[depth]});
 
         return nullptr;
     }
@@ -1143,15 +1153,14 @@ RECURSE_SEARCH:;
     // Find a child to recurse to
     unsigned pos = n->index(key[depth]);
     art::node_ptr child = n->get_node(pos);
-    if (!n.is_leaf)
-    {
-        //trace_element te = {n,child,pos, key[depth]};
-        //trace.push_back(te);
-    }
+
     if (!child.null())
     {
+        if (!n.is_leaf)
+        {
+            t->trace.push_back({n,child,pos, key[depth]});
+        }
         art::node_ptr nc = child;
-
         auto r = recursive_insert(t, options, child, nc, key, value, depth + 1, old, replace);
         if (nc != child)
         {
@@ -1163,7 +1172,8 @@ RECURSE_SEARCH:;
 
     // No child, node goes within us
     art::node_ptr l = make_leaf(key, value);
-    n.modify()->add_child(key[depth], ref, l);
+    auto idx = n.modify()->add_child(key[depth], ref, l);
+    t->trace.push_back( {ref, l, idx, key[depth]});
     return nullptr;
 }
 
@@ -1187,10 +1197,13 @@ void art_insert
     try
     {
         int old_val = 0;
+        t->trace.clear();
+
         art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0);
         if (!old_val)
         {
             t->size++;
+            t->update_trace(+1);
             ++statistics::insert_ops;
         }
         else
@@ -1260,7 +1273,7 @@ static void remove_child(art::node_ptr n, art::node_ptr& ref, unsigned char c, u
     n.modify()->remove(ref, pos, c);
 }
 
-static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref, art::value_type key, int depth)
+static const art::node_ptr recursive_delete(art::tree* t, art::node_ptr n, art::node_ptr& ref, art::value_type key, int depth)
 {
     // Search terminated
     if (n.null()) return nullptr;
@@ -1290,18 +1303,26 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref,
     }
 
     // Find child node
+    auto k = key[depth];
     unsigned idx = n->index(key[depth]);
     art::node_ptr child = n->get_node(idx);
     if (child.null())
         return nullptr;
-
+    t->trace.push_back({n,child,idx,k});
     // If the child is leaf, delete from this node
     if (child.is_leaf)
     {
         const art::leaf* l = child.const_leaf();
         if (l->compare(key.bytes, key.length(), depth) == 0)
         {
+            art::node_ptr ref_bef = ref;
             remove_child(n, ref, key[depth], idx);
+            if (ref_bef != ref)
+            {
+                t->trace.pop_back();
+                if (!ref.is_leaf)
+                    t->trace.push_back({ref,child,idx,k});
+            }
             return child;
         }
         return nullptr;
@@ -1309,8 +1330,9 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref,
     else
     {
         // Recurse
+
         art::node_ptr new_child = child;
-        auto r = recursive_delete(child, new_child, key, depth + 1);
+        auto r = recursive_delete(t, child, new_child, key, depth + 1);
         if (new_child != child)
         {
             if (!n->ok_child(new_child))
@@ -1341,10 +1363,12 @@ void art_delete(art::tree* t, art::value_type key, const NodeResult& fc)
     ++statistics::delete_ops;
     try
     {
-        art::node_ptr l = recursive_delete(t->root, t->root, key, 0);
+        t->trace.clear();
+        art::node_ptr l = recursive_delete(t,t->root, t->root, key, 0);
         if (!l.null())
         {
             t->size--;
+            t->update_trace(-1);
             if (!l.const_leaf()->expired())
                 fc(l);
             free_node(l);
@@ -1880,3 +1904,33 @@ void art::tree::clear()
     //destroy_leaf_compression();
     //destroy_node_compression();
 }
+void art::tree::update_trace(int direction)
+{
+#if 1
+    if (!trace.empty())
+    {
+        if (trace[0].parent!=root)
+        {
+            std_log("trace root invalid");
+            abort_with("invalid trace root");
+        }
+        auto trd = trace[0].parent->data().descendants;
+        if (trd+direction != size)
+        {
+            std_err("descendants invalid",trd,"!=",size);
+            abort_with("invalid descendants");
+        }
+        for (auto& ut: trace)
+        {
+            ut.parent.modify()->data().descendants += direction;
+        }
+        trd = trace[0].parent->data().descendants;
+        if (trd != size)
+        {
+            std_err("descendants invalid",trd,"!=",size);
+            abort_with("invalid descendants");
+        }
+    }
+#endif
+}
+

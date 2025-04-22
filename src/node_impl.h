@@ -89,7 +89,7 @@ namespace art
             }
         }
 
-        void add_child_inner(unsigned char c, node_ptr child) override
+        unsigned add_child_inner(unsigned char c, node_ptr child) override
         {
             unsigned idx = index(c, gt);
             auto& dat = nd();
@@ -101,14 +101,19 @@ namespace art
             // Insert element
             dat.keys[idx] = c;
             set_child(idx, child);
+            if (!child.is_leaf)
+            {
+               dat.descendants += child->data().descendants;
+            }
             ++dat.occupants;
+            return idx;
         }
 
-        void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
             if (data().occupants < 4)
             {
-                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
+                return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
@@ -119,7 +124,7 @@ namespace art
                 new_node.modify()->copy_header(this);
                 ref = new_node;
                 free_node(this);
-                new_node.modify()->add_child(c, ref, child);
+                return new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -235,7 +240,7 @@ namespace art
             }
         }
 
-        void add_child_inner(unsigned char c, node_ptr child) override
+        unsigned add_child_inner(unsigned char c, node_ptr child) override
         {
             auto &dat = this->nd();
             unsigned mask = (1 << dat.occupants) - 1;
@@ -258,14 +263,21 @@ namespace art
             // Set the child
             dat.keys[idx] = c;
             this->set_child(idx, child);
+            if (!child.is_leaf)
+            {
+                dat.descendants += child->data().descendants;
+            }
+
+
             ++dat.occupants;
+            return idx;
         }
 
-        void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
             if (this->data().occupants < 16)
             {
-                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
+                return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
@@ -280,7 +292,7 @@ namespace art
                 new_node.modify()->copy_header(this);
                 ref = new_node;
                 free_node(this);
-                new_node.modify()->add_child(c, ref, child);
+                return new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -427,7 +439,7 @@ namespace art
             }
         }
 
-        void add_child_inner(unsigned char c, node_ptr child) override
+        unsigned add_child_inner(unsigned char c, node_ptr child) override
         {
             unsigned pos = 0;
             auto &dat = this->nd();
@@ -440,15 +452,20 @@ namespace art
             // not we do not need to call insert_type an empty child is found
             set_child(pos, child);
             dat.keys[c] = pos + 1;
-            dat.occupants++;
+            if (!child.is_leaf)
+            {
+                dat.descendants += child->data().descendants;
+            }
+            ++dat.occupants;
+            return pos;
         }
 
-        void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
             auto & dat = nd();
             if (dat.occupants < 48)
             {
-                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
+                return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
@@ -469,7 +486,7 @@ namespace art
                 statistics::node256_occupants += new_node->data().occupants;
                 ref = new_node;
                 free_node(this);
-                new_node.modify()->add_child(c, ref, child);
+                return new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -672,14 +689,20 @@ namespace art
             }
         }
 
-        void add_child(unsigned char c, node_ptr&, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr&, node_ptr child) override
         {
             if (!has_child(c))
             {
+                auto& dat = nd();
                 ++statistics::node256_occupants;
-                ++data().occupants; // just to keep stats ok
+                ++dat.occupants; // just to keep stats ok
+                if (!child.is_leaf)
+                {
+                    dat.descendants += child->data().descendants;
+                }
             }
             set_child(c, child);
+            return c;
         }
 
         [[nodiscard]] node_ptr last() const override

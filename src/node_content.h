@@ -644,12 +644,18 @@ namespace art
             if (pos < KEYS && KEYS == SIZE)
             {
                 auto& dat = nd();
+                if (dat.types[pos] == non_leaf_type)
+                {
+                    dat.descendants -= get_child(pos)->data().descendants;
+                }
                 memmove(dat.keys + pos, dat.keys + pos + 1, dat.occupants - 1 - pos);
                 memmove(dat.children.data + pos, dat.children.data + pos + 1,
                         (dat.occupants - 1 - pos) * sizeof(ChildElementType));
+
                 remove_type(pos);
                 dat.keys[dat.occupants - 1] = 0;
                 dat.children[dat.occupants - 1] = nullptr;
+
                 --dat.occupants;
             }
             else
@@ -670,6 +676,7 @@ namespace art
             dat.occupants = sd.occupants;
             dat.partial_len = sd.partial_len;
             memcpy(dat.partial, sd.partial, std::min<unsigned>(max_prefix_llength, sd.partial_len));
+            dat.descendants = sd.descendants;
         }
 
         void copy_from(node_ptr s) override

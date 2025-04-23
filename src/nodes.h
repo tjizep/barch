@@ -79,7 +79,7 @@ namespace art
 
     struct node_ptr_storage
     {
-        uint8_t storage[64 - sizeof(size_t)]{};
+        uint8_t storage[node_pointer_storage_size]{};
         size_t size{};
         node_ptr_storage() = default;
 
@@ -359,18 +359,16 @@ namespace art
             {
                 return parent.null() && child.null() && child_ix == 0;
             }
-            bool operator<(const trace_element& rhs) const
+
+            bool operator!=(const trace_element& rhs) const
             {
-                return child_ix < rhs.child_ix;
+                return parent != rhs.parent || child_ix != rhs.child_ix || child != rhs.child;
             }
             bool operator==(const trace_element& rhs) const
             {
-                return child_ix == rhs.child_ix;
+                return parent == rhs.parent && child_ix == rhs.child_ix && child == rhs.child;
             }
-            bool operator!=(const trace_element& rhs) const
-            {
-                return child_ix != rhs.child_ix;
-            }
+
         };
 
         typedef std::array<node_ptr, max_alloc_children> children_t;

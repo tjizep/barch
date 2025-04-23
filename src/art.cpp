@@ -442,12 +442,9 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
         if (!te.empty())
         {
-            if (te.child_ix == d.occupants)
+            if (te.child.null())
             {
-                if (!increment_trace(n, trace)) return nullptr;
-                if (!extend_trace_min(t->root, trace)) return nullptr;
-                n = last_el(trace).child;
-                continue;
+                break;
             }
             trace.push_back(te);
         }else
@@ -926,18 +923,93 @@ bool art::iterator::update(value_type value)
         return make_leaf(l->get_key(),value,l->ttl(), l->is_volatile());
     });
 }
+static art::trace_element first (const art::trace_element& el)
+{
+    if (el.parent.is_leaf) return {};
+    if (el.parent.null()) return {};
+    auto fst = el.parent->first_index();
+    return {el.parent,el.parent->get_child(fst),fst};
+}
 
+static art::trace_element next (const art::trace_element& el)
+{
+    if (el.parent.is_leaf) return {};
+    if (el.parent.null()) return {};
+    return el.parent->next(el);
+}
+static art::trace_element previous (const art::trace_element& el)
+{
+    if (el.parent.is_leaf) return {};
+    if (el.parent.null()) return {};
+    return el.parent->previous(el);
+}
+static int64_t descendants(const art::trace_element& t)
+{
+    if (t.child.null()) return 0;
+    if (t.child.is_leaf)
+    {
+        return 1;
+    }
+    return t.child->data().descendants;
+}
+static art::trace_element last(const art::trace_element& el)
+{
+    auto li = el.parent->last_index();
+    return {el.parent,el.parent->get_child(li),li};
+}
+static int64_t total(const art::trace_element& start,const art::trace_element& end)
+{
+    int64_t r = 0;
+    if (start.parent.null()) return 0;
+    art::trace_element i = start, e= {};
+    while (i != e && i != end){
+        r += descendants(i);
+        i = next(i);
+    };
+    return r;
+}
+int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
+{
+    int64_t r = 2;
+    size_t depth = std::min(a.size(),b.size());
+
+    for (size_t i = 0; i < depth; ++i)
+    {
+        if (a[i] == b[i])
+        {
+            continue; // there's nothing between them
+        }
+
+        if (a[i].parent == b[i].parent)
+        {
+            r += total(next(a[i]),b[i]);
+        }else
+        {
+            r += total(next(a[i]),{});
+            r += total(first(b[i]),b[i]);
+        }
+    }
+    for (size_t i = depth; i < a.size(); ++i)
+    {
+        r += total(next(a[i]),{});
+    }
+    for (size_t i = depth; i < b.size(); ++i)
+    {
+        r += total(first(b[i]),b[i]);
+    }
+    return r;
+}
 // computes distance while incrementing a trace list as efficiently as it can
 int64_t art::distance(const tree* t, const trace_list& ia, const trace_list& b)
 {
     if (ia.empty()) return 0;
     if (b.empty()) return 0;
-    if (ia[0].parent != b[0].parent || b < ia) return 0;
-
+    if (ia[0].parent != b[0].parent) return 0;
     int64_t r = 1;
     trace_list a = ia;
     while (a != b)
     {
+        #if 0
         auto &last = a.back();
         auto& blast= b.back();
         if (last.parent != blast.parent)
@@ -950,15 +1022,33 @@ int64_t art::distance(const tree* t, const trace_list& ia, const trace_list& b)
                 last.child_ix = lix;
             }
         }
-        if (!increment_trace(t->root,a)) return r;
+#endif
+
+        if (!increment_trace(t->root,a))
+        {
+            return r;
+        }
         ++r;
     }
     return r;
 }
+int64_t art::fast_distance(const tree* t, const trace_list& ia, const trace_list& b)
+{
+    if (ia.empty()) return 0;
+    if (b.empty()) return 0;
+    if (ia[0].parent != b[0].parent) return 0;
+    return indexed_distance(ia,b);
+}
+
 int64_t art::iterator::distance(const iterator& other) const
 {
     return art::distance(t,this->tl,other.tl);
 }
+int64_t art::iterator::fast_distance(const iterator& other) const
+{
+    return art::fast_distance(t,this->tl,other.tl);
+}
+
 /**
  * Returns the minimum valued leaf
  */

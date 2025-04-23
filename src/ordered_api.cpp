@@ -1049,19 +1049,62 @@ int cmd_ZRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		return ValkeyModule_WrongArity(ctx);
 	}
 
-	query qlower,qupper;
+	composite qlower,qupper;
 	auto container = conversion::convert(c,cl);
-	auto lower_score = conversion::convert(a,al,true);
-	auto upper_score = conversion::convert(b,bl,true);
-	auto lower_key = qlower->create({container,lower_score});
-	auto upper_key = qupper->create({container,upper_score});
-	art::iterator upper(upper_key);
-	art::iterator lower(lower_key);
+	auto lower = conversion::convert(a,al,true);
+	auto upper = conversion::convert(b,bl,true);
+	auto min_key = qlower.create({container,lower});
+	auto max_key = qupper.create({container,upper});
+	art::iterator first(min_key);
+	art::iterator last(max_key);
 
 	int64_t rank = 0;
-	if (upper.ok() && lower.ok())
+	if (first.ok() && last.ok())
+	{	//last.previous();
+		rank = first.distance(last);
+	}
+
+	return ValkeyModule_ReplyWithLongLong(ctx,rank);
+}
+
+int cmd_ZFASTRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc != 4)
 	{
-		rank = lower.distance(upper);
+		return ValkeyModule_WrongArity(ctx);
+	}
+	size_t cl=0,al=0,bl=0 ;
+	const char * c = ValkeyModule_StringPtrLen(argv[1],&cl);
+	if (cl==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	const char * a = ValkeyModule_StringPtrLen(argv[2],&al);
+	if (al==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	const char * b = ValkeyModule_StringPtrLen(argv[3],&bl);
+	if (bl==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+
+	composite qlower,qupper;
+	auto container = conversion::convert(c,cl);
+	auto lower = conversion::convert(a,al,true);
+	auto upper = conversion::convert(b,bl,true);
+	auto min_key = qlower.create({container,lower});
+	auto max_key = qupper.create({container,upper});
+	art::iterator first(min_key);
+	art::iterator last(max_key);
+
+	int64_t rank = 0;
+	if (first.ok() && last.ok())
+	{	//last.previous();
+		rank = first.fast_distance(last);
 	}
 
 	return ValkeyModule_ReplyWithLongLong(ctx,rank);
@@ -1128,6 +1171,9 @@ int add_ordered_api(ValkeyModuleCtx* ctx)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZFASTRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
 		return VALKEYMODULE_ERR;
 
     return VALKEYMODULE_OK;

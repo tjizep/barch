@@ -11,7 +11,7 @@ enum
     auto_vac = 0,
     auto_vac_workers = 4,
     iterate_workers = 4,
-    test_memory = 0,
+    test_memory = 1,
     allocation_padding = 0,
     use_last_page_caching = 0,
     initialize_memory = 1,
@@ -21,5 +21,7 @@ enum
     max_queries_per_call = 32,
     leaf_type = 1,
     non_leaf_type = 2,
+    comparable_key_static_size = 48,
+    node_pointer_storage_size = 128
 };
 #endif //CONSTANTS_H

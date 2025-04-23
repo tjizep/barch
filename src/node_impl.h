@@ -763,11 +763,15 @@ namespace art
         {
             if (te.child_ix > 255) return {};
 
-            auto& dat = nd();
-            auto r = simd::first_byte_gt(dat.keys+te.child_ix+1,256-te.child_ix-1,0);
-            unsigned i = te.child_ix + r + 1;
-            if (i < 256)
-                return {this, get_child(i), i, (uint8_t)i};
+            //auto& dat = nd();
+            //auto r = //simd::first_byte_gt(dat.keys+te.child_ix+1,256-te.child_ix-1,0);
+            for (unsigned i =  te.child_ix + 1;i < 256; ++i)
+            {
+                if (has_child(i))
+                {
+                    return {this, get_child(i), i, (uint8_t)i};
+                }
+            }
             return {};
         }
 

@@ -295,11 +295,13 @@ namespace art
         bool update(int64_t ttl);
         [[nodiscard]] bool remove() const;
         [[nodiscard]] int64_t distance(const iterator& other) const;
+        [[nodiscard]] int64_t fast_distance(const iterator& other) const;
     };
     node_ptr find(value_type key);
     int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);
     int range(const tree* t, value_type key, value_type key_end, LeafCallBack cb);
     int64_t distance(const tree* t, const trace_list& a, const trace_list& b);
+    int64_t fast_distance(const tree* t, const trace_list& a, const trace_list& b);
 }
 
 

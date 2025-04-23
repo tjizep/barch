@@ -88,7 +88,7 @@ namespace conversion
     struct comparable_key
     {
     private:
-        uint8_t storage[48]{};
+        uint8_t storage[comparable_key_static_size]{};
         uint8_t* data = nullptr; // this may point to the integer or another externally allocated variable
         byte_comparable<int64_t> integer{};
         size_t size = 0; // the size as initialized - only changed on construction

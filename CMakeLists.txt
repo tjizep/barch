@@ -17,7 +17,11 @@ set(CMAKE_CPP_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(USE_AVX_INSTRUCTIONS ON)
 #remove -Werror because fmtlib
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Weffc++")
+if (CMAKE_BUILD_TYPE=RelWithDebInfo)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -march=native -Weffc++")
+else ()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Weffc++")
+endif ()
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)

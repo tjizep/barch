@@ -401,7 +401,7 @@ namespace heap
     };
 
     /// a checked vector with automatic heap allocator
-    template <typename T, int StaticSize = 16>
+    template <typename T, int StaticSize = 8>
     struct small_vector
     {
     private:

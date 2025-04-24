@@ -210,18 +210,19 @@ namespace art
             storage.emplace<node16_v>(*this);
             return storage;
         }
-
+#if 0
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
         {
-            unsigned i = simd::bits_oper16(this->nd().keys, simd::nuchar<16>(c), (1 << this->data().occupants) - 1, operbits);
-            if (i)
-            {
-                i = __builtin_ctz(i);
-                return i;
+            auto& dat = this->nd();
+            if (operbits == gt) {
+                return std::min<unsigned>(dat.occupants,simd::first_byte_gt(dat.keys,16,c));
             }
-            return this->data().occupants;
+            if (operbits == eq) {
+                return std::min<unsigned>(dat.occupants,simd::first_byte_eq(dat.keys,16,c));
+            }
+            return Parent::index(c, operbits);
         }
-
+#endif
 
         // unsigned pos = l - children;
         void remove(node_ptr& ref, unsigned pos, unsigned char) override
@@ -242,35 +243,23 @@ namespace art
 
         unsigned add_child_inner(unsigned char c, node_ptr child) override
         {
-            auto &dat = this->nd();
-            unsigned mask = (1 << dat.occupants) - 1;
-
-            unsigned bitfield = simd::bits_oper16(simd::nuchar<16>(c), this->get_keys(), mask, lt);
-
-            // Check if less than any
-            unsigned idx;
-            if (bitfield)
-            {
-                idx = __builtin_ctz(bitfield);
-                memmove(dat.keys + idx + 1, dat.keys + idx, dat.occupants - idx);
-                memmove(dat.children.data + idx + 1, dat.children.data + idx,
-                        (dat.occupants - idx) * sizeof(typename Parent::ChildElementType));
-            }
-            else
-                idx = dat.occupants;
-
+            unsigned idx = this->index(c, gt);
+            auto& dat = this->nd();
+            // Shift to make room
+            memmove(dat.keys + idx + 1, dat.keys + idx, dat.occupants - idx);
+            memmove(dat.children.data + idx + 1, dat.children.data + idx,
+                    (dat.occupants - idx) * sizeof(IPtrType));
             this->insert_type(idx);
-            // Set the child
+            // Insert element
             dat.keys[idx] = c;
             this->set_child(idx, child);
             if (!child.is_leaf)
             {
                 dat.descendants += child->data().descendants;
             }
-
-
             ++dat.occupants;
             return idx;
+
         }
 
         unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
@@ -308,6 +297,7 @@ namespace art
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
+#if 0
             unsigned mask = (1 << this->data().occupants) - 1;
             unsigned bf = bits_oper16(this->nd().keys, simd::nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt);
             // inverse logic
@@ -316,6 +306,18 @@ namespace art
                 unsigned i = __builtin_ctz(bf);
                 return {{this, this->get_child(i), i}, this->nd().keys[i] == c};
             }
+#else
+            auto &d = this->nd();
+
+            for (unsigned i = 0; i < d.occupants; i++)
+            {
+                if (d.keys[i] >= c && d.children[i].exists())
+                {
+                    return {{this, this->get_child(i), i, d.keys[i]}, d.keys[i] == c};
+                }
+            }
+            return {{nullptr, nullptr, d.occupants}, false};
+#endif
             return {{nullptr, nullptr, this->data().occupants}, false};
         }
 
@@ -335,7 +337,7 @@ namespace art
             unsigned i = te.child_ix;
             if (i > 0)
             {   auto &dat = this->nd();
-                return {this, this->get_child(i), i - 1, dat.keys[i - 1]}; // the keys are ordered so fine I think
+                return {this, this->get_child(i - 1), i - 1, dat.keys[i - 1]}; // the keys are ordered so fine I think
             }
             return {};
         }

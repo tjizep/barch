@@ -10,6 +10,7 @@
 #include "compress.h"
 #include "configuration.h"
 #include "glob.h"
+#include "keys.h"
 #include "logger.h"
 static compress* node_compression = nullptr;
 static compress* leaf_compression = nullptr;
@@ -254,7 +255,7 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type key)
+art::node_ptr art_search(const art::tree* t, art::value_type key)
 {
     ++statistics::get_ops;
     try
@@ -428,15 +429,15 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         if (d.partial_len)
         {
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (!prefix_len)
+            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
             {
                 break;
             }
-            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
+            depth += d.partial_len;
+            if (depth >= key.length())
             {
-                depth += prefix_len;
-            }else
-                depth += d.partial_len;
+                break;
+            }
         }
 
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
@@ -523,15 +524,6 @@ static art::trace_element first_child_off(art::node_ptr n)
 
     auto at = n->first_index();
     auto np = n->get_child(at);
-    if (np.null())
-    {
-        auto att = n->first_index();
-        auto npt = n->get_child(att);
-        if (at != att || np != npt)
-        {
-            abort_with("the first child is not a child node");
-        }
-    }
     return {n, np, at};
 }
 
@@ -561,7 +553,7 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
     while (!trace.empty())
     {   auto& last = last_el(trace);
         auto npt = increment_te(last);//last.parent->next(last);
-        if (npt.parent.null())
+        if (!npt.valid())
         {
             trace.pop_back();
         }else
@@ -970,7 +962,7 @@ static int64_t total(const art::trace_element& start,const art::trace_element& e
 }
 int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
 {
-    int64_t r = 2;
+    int64_t r = 1;
     size_t depth = std::min(a.size(),b.size());
 
     for (size_t i = 0; i < depth; ++i)
@@ -989,50 +981,29 @@ int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
             r += total(first(b[i]),b[i]);
         }
     }
+
     for (size_t i = depth; i < a.size(); ++i)
     {
         r += total(next(a[i]),{});
     }
+#if 1
     for (size_t i = depth; i < b.size(); ++i)
     {
-        r += total(first(b[i]),b[i]);
+        if (i < b.size()-1) {
+            r += total(first(b[i]),b[i]);
+        }else {
+            r += total(first(b[i]),b[i]);
+            r += descendants(b[i]);
+        }
+
+
+
     }
+#endif
     return r;
 }
 // computes distance while incrementing a trace list as efficiently as it can
-int64_t art::distance(const tree* t, const trace_list& ia, const trace_list& b)
-{
-    if (ia.empty()) return 0;
-    if (b.empty()) return 0;
-    if (ia[0].parent != b[0].parent) return 0;
-    int64_t r = 1;
-    trace_list a = ia;
-    while (a != b)
-    {
-        #if 0
-        auto &last = a.back();
-        auto& blast= b.back();
-        if (last.parent != blast.parent)
-        {
-            unsigned d = 0;
-            unsigned lix = last.parent->leaf_only_distance(last.child_ix+1,d);
-            if (d > 1 && lix < 256 )
-            {
-                r += d;
-                last.child_ix = lix;
-            }
-        }
-#endif
-
-        if (!increment_trace(t->root,a))
-        {
-            return r;
-        }
-        ++r;
-    }
-    return r;
-}
-int64_t art::fast_distance(const tree* t, const trace_list& ia, const trace_list& b)
+int64_t art::fast_distance(const trace_list& ia, const trace_list& b)
 {
     if (ia.empty()) return 0;
     if (b.empty()) return 0;
@@ -1042,13 +1013,53 @@ int64_t art::fast_distance(const tree* t, const trace_list& ia, const trace_list
 
 int64_t art::iterator::distance(const iterator& other) const
 {
-    return art::distance(t,this->tl,other.tl);
+    iterator a = *this;
+    iterator b = other;
+    int64_t r = 0;
+    while (a.ok() && a.key() <= b.key())
+    {
+
+        ++r;
+        auto kprev = a.key();
+        a.next();
+        if(a.key() < kprev)
+        {
+            abort_with("invalid key order");
+        }
+    }
+    return r;
+}
+int64_t art::iterator::distance(value_type other) const
+{
+    iterator a = *this;
+    int64_t r = 0;
+    while (a.ok() && a.key() <= other)
+    {
+        ++r;
+        auto kprev = a.key();
+        a.next();
+        if(a.key() < kprev)
+        {
+            abort_with("invalid key order");
+        }
+    }
+    return r;
 }
 int64_t art::iterator::fast_distance(const iterator& other) const
 {
-    return art::fast_distance(t,this->tl,other.tl);
+    return art::fast_distance(this->tl,other.tl);
 }
 
+void art::iterator::log_trace() const
+{
+    size_t ctr = 0;
+    std_log("=======-iterator trace-========");
+    log_encoded_key(key());
+    for (auto &el : tl)
+    {
+        std_log(++ctr,el.parent.logical.address(), el.child_ix);
+    }
+}
 /**
  * Returns the minimum valued leaf
  */

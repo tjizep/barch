@@ -111,7 +111,15 @@ size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
         size -= diff;
     }
 #endif
-
+    while (size >= 4)
+    {
+        if (ptr[0] > ch || ptr[1] > ch || ptr[2] > ch || ptr[3] > ch )
+        {
+            break;
+        }
+        ptr += 4;
+        size -= 4;
+    }
     while (ptr!=end)
     {
         if (*ptr > ch)

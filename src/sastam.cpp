@@ -22,7 +22,7 @@ static long long getTotalPhysicalMemory()
 enum
 {
     padding = 0,
-    heap_checks = 1,
+    heap_checks = 0,
     use_malloc = 0
 };
 

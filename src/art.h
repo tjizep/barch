@@ -187,7 +187,7 @@ void art_delete(art::tree* t, art::value_type key, const NodeResult& fc);
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-art::node_ptr art_search(art::trace_list& trace, const art::tree* t, art::value_type key);
+art::node_ptr art_search(const art::tree* t, art::value_type key);
 
 /**
  * Returns the minimum valued leaf
@@ -295,13 +295,15 @@ namespace art
         bool update(int64_t ttl);
         [[nodiscard]] bool remove() const;
         [[nodiscard]] int64_t distance(const iterator& other) const;
+        [[nodiscard]] int64_t distance(value_type other) const;
         [[nodiscard]] int64_t fast_distance(const iterator& other) const;
+        void log_trace() const;
     };
     node_ptr find(value_type key);
     int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);
     int range(const tree* t, value_type key, value_type key_end, LeafCallBack cb);
     int64_t distance(const tree* t, const trace_list& a, const trace_list& b);
-    int64_t fast_distance(const tree* t, const trace_list& a, const trace_list& b);
+    int64_t fast_distance(const trace_list& a, const trace_list& b);
 }
 
 

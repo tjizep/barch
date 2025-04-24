@@ -415,7 +415,10 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 	while (ai.ok())
 	{
 		auto v = ai.key();
-		if (!v.starts_with(prefix)) break;
+		if (!v.starts_with(prefix))
+		{
+			break;
+		}
 		art::value_type current_comp;
 		if (spec.BYLEX)
 		{
@@ -1055,13 +1058,17 @@ int cmd_ZRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	auto upper = conversion::convert(b,bl,true);
 	auto min_key = qlower.create({container,lower});
 	auto max_key = qupper.create({container,upper});
+	if (max_key < min_key)
+	{
+		return ValkeyModule_ReplyWithLongLong(ctx,0);
+	}
 	art::iterator first(min_key);
-	art::iterator last(max_key);
 
 	int64_t rank = 0;
-	if (first.ok() && last.ok())
-	{	//last.previous();
-		rank = first.distance(last);
+	if (first.ok())
+	{
+
+		rank = first.distance(max_key);
 	}
 
 	return ValkeyModule_ReplyWithLongLong(ctx,rank);
@@ -1100,10 +1107,15 @@ int cmd_ZFASTRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	auto max_key = qupper.create({container,upper});
 	art::iterator first(min_key);
 	art::iterator last(max_key);
-
+	if (max_key < min_key)
+	{
+		return ValkeyModule_ReplyWithLongLong(ctx,0);
+	}
 	int64_t rank = 0;
 	if (first.ok() && last.ok())
-	{	//last.previous();
+	{	if (last.key() > max_key) {
+			last.previous();
+		}
 		rank = first.fast_distance(last);
 	}
 

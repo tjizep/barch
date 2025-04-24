@@ -368,7 +368,9 @@ namespace art
             {
                 return parent == rhs.parent && child_ix == rhs.child_ix && child == rhs.child;
             }
-
+            [[nodiscard]] bool valid() const {
+                return !parent.null() && !child.null();
+            }
         };
 
         typedef std::array<node_ptr, max_alloc_children> children_t;

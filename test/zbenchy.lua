@@ -48,10 +48,11 @@ local test = function()
     tests = tests + 1
     local t
     t = vk.call('B.MILLIS')
-        for i = 1, count do
-            local k = convert(i)
-            vk.call('B.SET',k,i)
-        end
+
+    for i = 1, count do
+        local k = convert(i)
+        vk.call('B.SET',k,i)
+    end
 
     local valids = 0
 

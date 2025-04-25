@@ -2017,8 +2017,8 @@ void art::tree::update_trace(int direction)
         auto trd = trace[0].parent->data().descendants;
         if (trd+direction != size)
         {
-            std_err("descendants invalid",trd,"!=",size);
-            abort_with("invalid descendants");
+            std_err("descendant count invalid",trd,"!=",size);
+            abort_with("invalid descendant count");
         }
         for (auto& ut: trace)
         {
@@ -2027,8 +2027,8 @@ void art::tree::update_trace(int direction)
         trd = trace[0].parent->data().descendants;
         if (trd != size)
         {
-            std_err("descendants invalid",trd,"!=",size);
-            abort_with("invalid descendants");
+            std_err("descendant count invalid",trd,"!=",size);
+            abort_with("invalid descendant count");
         }
     }
 #endif

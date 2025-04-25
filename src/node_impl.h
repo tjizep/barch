@@ -79,7 +79,8 @@ namespace art
                         memcpy(dat.partial + prefix, child->data().partial, sub_prefix);
                         prefix += sub_prefix;
                     }
-
+                    // this seems counter-intuitive but the trace update at the end will fix it
+                    child.modify()->data().descendants = dat.descendants;
                     // Store the prefix in the child
                     memcpy(child.modify()->data().partial, dat.partial, std::min<unsigned>(prefix, max_prefix_llength));
                     child.modify()->data().partial_len += dat.partial_len + 1;

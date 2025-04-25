@@ -18,6 +18,7 @@ enum
     storage_version = 6,
     ticker_size = 32,
     numeric_key_size = 10,
+    composite_key_size = 2,
     max_queries_per_call = 32,
     leaf_type = 1,
     non_leaf_type = 2,

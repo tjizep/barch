@@ -1113,10 +1113,17 @@ int cmd_ZFASTRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	}
 	int64_t rank = 0;
 	if (first.ok() && last.ok())
-	{	if (last.key() > max_key) {
-			last.previous();
+	{
+		//log_encoded_key(max_key);
+		//log_encoded_key(last.key());
+		auto partial = last.key().sub(0,composite_key_size+container.get_size()+numeric_key_size);
+
+		//log_encoded_key(partial);
+		if ( partial < max_key) {
+			last.next();
 		}
-		rank = first.fast_distance(last);
+
+		rank += first.fast_distance(last);
 	}
 
 	return ValkeyModule_ReplyWithLongLong(ctx,rank);

@@ -112,6 +112,7 @@ unsigned log_encoded_key(art::value_type key,bool start)
 	}
 	else if (key_len > 1 && *enck == art::tcomposite)
 	{
+		art::std_continue("<",2,">");
 		art::std_continue("{composite}[");
 		unsigned kl = 2;
 		const char* ptr = (const char*)&enck[2];
@@ -131,10 +132,11 @@ unsigned log_encoded_key(art::value_type key,bool start)
 			default:
 				return 0;
 			}
+			art::std_continue("<",len,">");
 			ptr += log_encoded_key({ptr,len},false);
 			kl += len;
 		}
-		art::std_continue("]");
+		art::std_continue("] <",kl,">");
 		if (start) art::std_end();
 		return key_len;
 	}

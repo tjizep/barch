@@ -149,7 +149,7 @@ int tree_destroy(art::tree* t)
 /**
  * find first not less than
  */
-static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char* key, int key_len, int depth,
+static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char* key, unsigned key_len, unsigned depth,
                                             int* is_equal)
 {
     unsigned char c = 0x00;
@@ -408,7 +408,8 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace);
 static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* t, art::value_type key)
 {
     art::node_ptr n = t->root;
-    int depth = 0, is_equal = 0;
+    unsigned depth = 0;
+    int is_equal = 0;
 
     while (!n.null())
     {
@@ -445,6 +446,7 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         {
             if (te.child.null())
             {
+                increment_trace(t->root, trace);
                 break;
             }
             trace.push_back(te);
@@ -929,12 +931,14 @@ static art::trace_element next (const art::trace_element& el)
     if (el.parent.null()) return {};
     return el.parent->next(el);
 }
+#ifdef __UNUSED_FUNCTION__
 static art::trace_element previous (const art::trace_element& el)
 {
     if (el.parent.is_leaf) return {};
     if (el.parent.null()) return {};
     return el.parent->previous(el);
 }
+#endif
 static int64_t descendants(const art::trace_element& t)
 {
     if (t.child.null()) return 0;
@@ -944,11 +948,13 @@ static int64_t descendants(const art::trace_element& t)
     }
     return t.child->data().descendants;
 }
+#ifdef __UNUSED_FUNCTION__
 static art::trace_element last(const art::trace_element& el)
 {
     auto li = el.parent->last_index();
     return {el.parent,el.parent->get_child(li),li};
 }
+#endif
 static int64_t total(const art::trace_element& start,const art::trace_element& end)
 {
     int64_t r = 0;
@@ -960,11 +966,12 @@ static int64_t total(const art::trace_element& start,const art::trace_element& e
     };
     return r;
 }
-int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
+static int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
 {
-    int64_t r = 1;
+    if (b.empty() || a.empty()) return 0;
+    int64_t r = 0; //descendants(a.back());;
     size_t depth = std::min(a.size(),b.size());
-
+    r += descendants(b.back());
     for (size_t i = 0; i < depth; ++i)
     {
         if (a[i] == b[i])
@@ -986,20 +993,12 @@ int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
     {
         r += total(next(a[i]),{});
     }
-#if 1
+
     for (size_t i = depth; i < b.size(); ++i)
     {
-        if (i < b.size()-1) {
-            r += total(first(b[i]),b[i]);
-        }else {
-            r += total(first(b[i]),b[i]);
-            r += descendants(b[i]);
-        }
-
-
+        r += total(first(b[i]),b[i]);
 
     }
-#endif
     return r;
 }
 // computes distance while incrementing a trace list as efficiently as it can

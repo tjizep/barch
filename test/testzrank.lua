@@ -15,17 +15,17 @@ if vk.call('B.SIZE') < count then
 end
 --6910,58858;2985,75538,4049;857377
 local toadd = vk.call('B.MILLIS') - t
-local min = count*0.01*math.random()
-local max = count*math.random()
+local min = math.floor(count*0.01*math.random())
+local max = count*math.random()--math.floor()
 t = vk.call('B.MILLIS')
 local zr = vk.call('B.ZRANK',key,min,max)
 local torank = vk.call('B.MILLIS') - t
 local zr2 = vk.call('B.ZFASTRANK',key,min,max)
 --local range = vk.call('B.ZRANGE',key,min,max)
---assert(#range==zr)
+assert(zr2==zr)
 local tr = {"toadd",toadd,"torank",torank,
-    {"min",min},
-    {"max",max},
+    {"min: "..min},
+    {"max: "..max},
     {"guess","slow zr : "..zr,"fast zr: "..zr2},
     {"actual 1: "..zr},
     {"max - min: "..(max-min)},

@@ -68,22 +68,22 @@ static art::node* make_node(art::node_ptr_storage& ptr, compressed_address a, ar
 
 art::node_ptr art::resolve_read_node(compressed_address address)
 {
-    auto* node = art::get_node_compression().read<art::node_data>(address);
-    art::node_ptr_storage ptr;
+    auto* node = get_node_compression().read<node_data>(address);
+    node_ptr_storage ptr;
     if (node == nullptr)
     {
-        return art::node_ptr{nullptr};
+        return node_ptr{nullptr};
     }
     switch (node->type)
     {
-    case art::node_4:
-        return make_node<art::node4_4, art::node4_8>(ptr, address, node);
-    case art::node_16:
-        return make_node<art::node16_4, art::node16_8>(ptr, address, node);
-    case art::node_48:
-        return make_node<art::node48_4, art::node48_8>(ptr, address, node);
-    case art::node_256:
-        return make_node<art::node256_4, art::node256_8>(ptr, address, node);
+    case node_4:
+        return make_node<node4_4, node4_8>(ptr, address, node);
+    case node_16:
+        return make_node<node16_4, node16_8>(ptr, address, node);
+    case node_48:
+        return make_node<node48_4, node48_8>(ptr, address, node);
+    case node_256:
+        return make_node<node256_4, node256_8>(ptr, address, node);
     default:
         abort_with("unknown or invalid node type");
     }
@@ -95,13 +95,13 @@ art::node_ptr art::resolve_write_node(compressed_address address)
     node_ptr_storage ptr;
     switch (node->type)
     {
-    case art::node_4:
+    case node_4:
         return make_node<node4_4, node4_8>(ptr, address, node);
-    case art::node_16:
+    case node_16:
         return make_node<node16_4, node16_8>(ptr, address, node);
-    case art::node_48:
+    case node_48:
         return make_node<node48_4, node48_8>(ptr, address, node);
-    case art::node_256:
+    case node_256:
         return make_node<node256_4, node256_8>(ptr, address, node);
     default:
         throw std::runtime_error("Unknown node type");
@@ -110,19 +110,19 @@ art::node_ptr art::resolve_write_node(compressed_address address)
 
 art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
 {
-    art::node_ptr ref;
+    node_ptr ref;
 
-    art::node_ptr_storage ptr;
+    node_ptr_storage ptr;
     switch (nt)
     {
-    case art::node_4:
-        return ptr.emplace<art::node4_8>()->create().expand_pointers(ref, c);
-    case art::node_16:
-        return ptr.emplace<art::node16_8>()->create().expand_pointers(ref, c);
-    case art::node_48:
-        return ptr.emplace<art::node48_8>()->create().expand_pointers(ref, c);
-    case art::node_256:
-        return ptr.emplace<art::node256_8>()->create().expand_pointers(ref, c);
+    case node_4:
+        return ptr.emplace<node4_8>()->create().expand_pointers(ref, c);
+    case node_16:
+        return ptr.emplace<node16_8>()->create().expand_pointers(ref, c);
+    case node_48:
+        return ptr.emplace<node48_8>()->create().expand_pointers(ref, c);
+    case node_256:
+        return ptr.emplace<node256_8>()->create().expand_pointers(ref, c);
     default:
         throw std::runtime_error("Unknown node type");
     }
@@ -130,17 +130,17 @@ art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
 
 art::node_ptr art::alloc_8_node_ptr(unsigned nt)
 {
-    art::node_ptr_storage ptr;
+    node_ptr_storage ptr;
     switch (nt)
     {
-    case art::node_4:
-        return ptr.emplace<art::node4_8>();
-    case art::node_16:
-        return ptr.emplace<art::node16_8>();
-    case art::node_48:
-        return ptr.emplace<art::node48_8>();
-    case art::node_256:
-        return ptr.emplace<art::node256_8>();
+    case node_4:
+        return ptr.emplace<node4_8>();
+    case node_16:
+        return ptr.emplace<node16_8>();
+    case node_48:
+        return ptr.emplace<node48_8>();
+    case node_256:
+        return ptr.emplace<node256_8>();
     default:
         throw std::runtime_error("Unknown node type");
     }
@@ -207,19 +207,19 @@ void page_iterator(const heap::buffer<uint8_t>& page, unsigned size, std::functi
  */
 void art::tree::run_defrag()
 {
-    if (!art::has_leaf_compression()) return;
-    auto fc = [](const art::node_ptr& unused(n)) -> void
+    if (!has_leaf_compression()) return;
+    auto fc = [](const node_ptr& unused(n)) -> void
     {
     };
-    auto& lc = art::get_leaf_compression();
+    auto& lc = get_leaf_compression();
 
 
     try
     {
-        if (lc.fragmentation_ratio() > -1) //art::get_min_fragmentation_ratio())
+        if (lc.fragmentation_ratio() > -1) //get_min_fragmentation_ratio())
         {
-            auto fl = lc.create_fragmentation_list(art::get_max_defrag_page_count());
-            art::key_spec options;
+            auto fl = lc.create_fragmentation_list(get_max_defrag_page_count());
+            key_spec options;
             for (auto p : fl)
             {
                 compressed_release releaser;
@@ -229,7 +229,7 @@ void art::tree::run_defrag()
                 //write_lock lock(get_lock());
                 auto page = lc.get_page_buffer(p);
 
-                page_iterator(page.first, page.second, [&fc,this](const art::leaf* l)
+                page_iterator(page.first, page.second, [&fc,this](const leaf* l)
                 {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
@@ -240,7 +240,7 @@ void art::tree::run_defrag()
                     }
                 });
 
-                page_iterator(page.first, page.second, [&fc,&options,this](const art::leaf* l)
+                page_iterator(page.first, page.second, [&fc,&options,this](const leaf* l)
                 {
                     if (l->deleted()) return;
                     size_t c1 = this->size;

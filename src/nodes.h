@@ -382,9 +382,9 @@ namespace art
             {
                 if (!dcache || last_ticker != page_modifications::get_ticker(address.page()))
                 {
-                    dcache = get_node_compression().read<T>(address);
+                    dcache = get_node_compression().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
-                    is_reader = 0x01;
+                    is_reader = 0x00;
 
                 }
                 return (T*)dcache;

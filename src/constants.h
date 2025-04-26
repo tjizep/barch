@@ -16,7 +16,7 @@ enum
     use_last_page_caching = 0,
     initialize_memory = 1,
     storage_version = 6,
-    ticker_size = 32,
+    ticker_size = 64,
     numeric_key_size = 10,
     composite_key_size = 2,
     max_queries_per_call = 32,

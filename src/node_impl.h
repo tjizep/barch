@@ -36,7 +36,7 @@ namespace art
             node4_v::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const final
+        [[nodiscard]] node_ptr_storage get_storage() const override
         {
             node_ptr_storage storage;
             storage.emplace<node4_v>(*this);
@@ -205,7 +205,7 @@ namespace art
             node16_v::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const final
+        [[nodiscard]] node_ptr_storage get_storage() const override
         {
             node_ptr_storage storage;
             storage.emplace<node16_v>(*this);
@@ -378,7 +378,7 @@ namespace art
             node48::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const final
+        [[nodiscard]] node_ptr_storage get_storage() const override
         {
             node_ptr_storage storage;
             storage.emplace<node48>(*this);

@@ -205,7 +205,7 @@ namespace art
             storage.emplace<node16_v>(*this);
             return storage;
         }
-
+#if 0
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
         {
             unsigned i = simd::bits_oper16(this->nd().keys, simd::nuchar<16>(c), (1 << this->data().occupants) - 1, operbits);
@@ -217,7 +217,7 @@ namespace art
             return this->data().occupants;
         }
 
-
+#endif
         // unsigned pos = l - children;
         void remove(node_ptr& ref, unsigned pos, unsigned char) override
         {
@@ -237,25 +237,14 @@ namespace art
 
         void add_child_inner(unsigned char c, node_ptr child) override
         {
-            auto &dat = this->nd();
-            unsigned mask = (1 << dat.occupants) - 1;
-
-            unsigned bitfield = simd::bits_oper16(simd::nuchar<16>(c), this->get_keys(), mask, lt);
-
-            // Check if less than any
-            unsigned idx;
-            if (bitfield)
-            {
-                idx = __builtin_ctz(bitfield);
-                memmove(dat.keys + idx + 1, dat.keys + idx, dat.occupants - idx);
-                memmove(dat.children.data + idx + 1, dat.children.data + idx,
-                        (dat.occupants - idx) * sizeof(typename Parent::ChildElementType));
-            }
-            else
-                idx = dat.occupants;
-
+            unsigned idx = this->index(c, gt);
+            auto& dat = this->nd();
+            // Shift to make room
+            memmove(dat.keys + idx + 1, dat.keys + idx, this->data().occupants - idx);
+            memmove(dat.children.data + idx + 1, dat.children.data + idx,
+                    (this->data().occupants - idx) * sizeof(IPtrType));
             this->insert_type(idx);
-            // Set the child
+            // Insert element
             dat.keys[idx] = c;
             this->set_child(idx, child);
             ++dat.occupants;

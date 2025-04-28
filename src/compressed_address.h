@@ -12,6 +12,10 @@ struct compressed_address
     compressed_address() = default;
     compressed_address(const compressed_address&) = default;
     compressed_address& operator=(const compressed_address&) = default;
+    void set_as_ptr(const uint8_t* addr)
+    {
+        this->index = (AddressIntType)addr;
+    }
 
     explicit compressed_address(size_t index) : index(index)
     {
@@ -107,6 +111,7 @@ struct compressed_address
     {
         return index;
     }
+
 
 private:
     AddressIntType index = 0;

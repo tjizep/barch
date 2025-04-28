@@ -445,54 +445,56 @@ namespace art
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
         {
             check_object();
+            auto &dat = nd();
             unsigned i;
-            if (KEYS < data().occupants)
+            if (KEYS < dat.occupants)
             {
-                return data().occupants;
+                return dat.occupants;
             }
             if (operbits & (eq & gt))
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (nd().keys[i] >= c)
+                    if (dat.keys[i] >= c)
                         return i;
                 }
                 if (operbits == (eq & gt)) return data().occupants;
             }
-            if (operbits & (eq & lt))
+            if (operbits & (eq & lt) && KEYS > 0)
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (nd().keys[i] <= c)
+                    if (dat.keys[i] <= c)
                         return i;
                 }
                 if (operbits == (eq & lt)) return data().occupants;
             }
             if (operbits & eq)
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (KEYS > 0 && nd().keys[i] == c)
+                    if (KEYS > 0 && dat.keys[i] == c)
                         return i;
                 }
             }
-            if (operbits & gt)
+            if (operbits & gt && KEYS > 0 )
             {
-                for (i = 0; i < data().occupants; ++i)
+
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (KEYS > 0 && nd().keys[i] > c)
+                    if (dat.keys[i] > c)
                         return i;
                 }
             }
-            if (operbits & lt)
+            if (KEYS > 0 && operbits & lt)
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (KEYS > 0 && nd().keys[i] < c)
+                    if (dat.keys[i] < c)
                         return i;
                 }
             }
-            return data().occupants;
+            return dat.occupants;
         }
 
         [[nodiscard]] unsigned index(unsigned char c) const override

@@ -404,10 +404,10 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
     ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "360000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "3600000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "1300000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "13000000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxModificationsBeforeSave, SetMaxModificationsBeforeSave,
                                              ApplyMaxModificationsBeforeSave, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
@@ -468,7 +468,12 @@ int art::set_configuration_value(ValkeyModuleString* Name, ValkeyModuleString* V
     }
     else if (name == "log_page_access_trace")
     {
-        return SetEnablePageTrace(nullptr, Value, nullptr, nullptr);
+        auto r = SetEnablePageTrace(nullptr, Value, nullptr, nullptr);
+        if (r == VALKEYMODULE_OK)
+        {
+            return ApplyEnablePageTrace(nullptr, nullptr, nullptr);
+        }
+        return r;
     }
     else
     {

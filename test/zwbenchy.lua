@@ -36,6 +36,8 @@ end
 for i = 1, count do
     numbers[i] = i
 end
+math.randomseed(count)
+
 numbers = shuffle(numbers)
 
 local tocharsnum = function(num)
@@ -43,7 +45,7 @@ local tocharsnum = function(num)
 end
 
 local test = function()
-    result[inc()] ={'CLEAR B', vk.call('B.CLEAR')}
+    --result[inc()] ={'CLEAR B', vk.call('B.CLEAR')}
 
     tests = tests + 1
     local t
@@ -55,18 +57,19 @@ local test = function()
     end
 
     local valids = 0
-
+--[[
     for i = 1, count do
 	    local k = convert(i)
-	    if vk.call('B.GET',k) then
+	    if vk.call('B.GET',k) == ""..i then
             valids = valids + 1
         end
 	end
-
+]]
 	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'VALIDS', valids}
     result[inc()] = {'B MEM', vk.call('B.HEAPBYTES')}
     result[inc()] = {'SIZE', vk.call('B.SIZE')}
+    --result[inc()] = {'CLEAR B', vk.call('B.CLEAR')}
     result[inc()] = {'SAVE B', vk.call('B.SAVE')}
 
 end

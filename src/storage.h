@@ -10,16 +10,16 @@
 typedef std::list<size_t, heap::allocator<size_t>> lru_list;
 struct storage
 {
-    storage() : compressed(0), decompressed(0)
+    storage()
     {
     }
 
-    storage(storage&& other) noexcept : compressed(0), decompressed(0)
+    storage(storage&& other) noexcept
     {
         *this = std::move(other);
     }
 
-    storage(const storage& other) : compressed(0), decompressed(0)
+    storage(const storage& other)
     {
         *this = other;
     }
@@ -27,10 +27,8 @@ struct storage
     storage& operator=(const storage& other)
     {
         if (&other == this) return *this;
-        compressed = other.compressed;
-        decompressed = other.decompressed;
         write_position = other.write_position;
-        modifications = other.modifications;
+        //modifications = other.modifications;
         size = other.size;
         lru = other.lru;
         ticker = other.ticker;
@@ -40,10 +38,8 @@ struct storage
 
     void clear()
     {
-        compressed.release();
-        decompressed.release();
         write_position = 0;
-        modifications = 0;
+        //modifications = 0;
         size = 0;
         ticker = 0;
         fragmentation = 0;
@@ -53,10 +49,8 @@ struct storage
     storage& operator=(storage&& other) noexcept
     {
         if (&other == this) return *this;
-        compressed = std::move(other.compressed);
-        decompressed = std::move(other.decompressed);
         write_position = other.write_position;
-        modifications = other.modifications;
+        //modifications = other.modifications;
         size = other.size;
         lru = other.lru;
         ticker = other.ticker;
@@ -67,14 +61,12 @@ struct storage
 
     [[nodiscard]] bool empty() const
     {
-        return size == 0 && write_position == 0 && compressed.empty() && decompressed.empty();
+        return size == 0 && write_position == 0 ;
     }
 
-    heap::buffer<uint8_t> compressed;
-    heap::buffer<uint8_t> decompressed;
-    uint16_t write_position = 0;
-    uint16_t size = 0;
-    uint16_t modifications = 0;
+    uint32_t write_position = 0;
+    uint32_t size = 0;
+    //uint32_t modifications = 0;
     lru_list::iterator lru{};
     uint64_t ticker = 0;
     uint64_t physical = 0;

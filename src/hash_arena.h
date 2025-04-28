@@ -9,14 +9,12 @@
 #include <fstream>
 #include <page_modifications.h>
 #include <ankerl/unordered_dense.h>
+#include <sys/mman.h>
+
 namespace arena {
     struct base_hash_arena
     {
-        enum
-        {
-            cache_size = 1024
-        };
-
+        bool opt_use_vmmap = false;
     protected:
         typedef heap::allocator<std::pair<size_t,storage>> allocator_type;
 
@@ -35,6 +33,9 @@ namespace arena {
         size_t last_allocated = 0;
         size_t max_address_accessed = 0;
         base_hash_arena* source = nullptr;
+        uint8_t* page_data{nullptr};
+        size_t page_data_size{0};
+
 
         void recover_free(size_t at)
         {
@@ -57,9 +58,57 @@ namespace arena {
         }
 
     public:
-        base_hash_arena(const arena::base_hash_arena&) = default;
-        base_hash_arena& operator=(const arena::base_hash_arena&) = default;
+        base_hash_arena(const base_hash_arena& other) {
+            *this = other;
+        };
+        base_hash_arena(base_hash_arena&& other) noexcept {
+            *this = std::move(other);
+        };
+        base_hash_arena& operator=(base_hash_arena&& other) {
+            if (this != &other) {
+                this->clear();
+                opt_use_vmmap = other.opt_use_vmmap;
+                hidden_arena = std::move(other.hidden_arena);
+                free_address_list = std::move(other.free_address_list);
+                buffered_free = std::move(other.buffered_free);
+                top = other.top;
+                free_pages = other.free_pages;
+                last_allocated = other.last_allocated;
+                max_address_accessed = other.max_address_accessed;
+                source = other.source;
+                page_data = other.page_data;
+                page_data_size = other.page_data_size;
+                other.page_data = nullptr;
+                other.page_data_size = 0;
+                other.clear();
+            }
+            return *this;
+        };
+        base_hash_arena& operator=(const base_hash_arena& other) {
+            if (this != &other) {
+                this->clear();
+                //opt_use_vmmap = other.opt_use_vmmap;
+                alloc_page_data(other.page_data_size);
+                memcpy(page_data, other.page_data, other.page_data_size);
+                top = other.top;
+                free_pages = other.free_pages;
+                max_address_accessed = other.max_address_accessed;
+                source = other.source;
+                hidden_arena = other.hidden_arena;
+            }
+            return *this;
+        };
+        ~base_hash_arena() {
+            if (page_data != nullptr) {
+                if (opt_use_vmmap) {
+                    munmap(page_data, page_data_size);
+                } else {
+                    free(page_data);
 
+                }
+                heap::allocated -= page_data_size;
+            }
+        }
         void clear()
         {
             hidden_arena = hash_type{};
@@ -70,6 +119,16 @@ namespace arena {
             last_allocated = 0;
             max_address_accessed = 0;
             source = nullptr;
+            if (page_data != nullptr) {
+                if (opt_use_vmmap){
+                    munmap(page_data, page_data_size);
+                } else {
+                    free(page_data);
+                }
+            }
+            heap::allocated -= page_data_size;
+            page_data = nullptr;
+            page_data_size = 0;
         }
         base_hash_arena() = default;
         // arena virtualization functions
@@ -199,6 +258,7 @@ namespace arena {
             {
                 throw std::runtime_error("invalid page");
             }
+
             auto pi = hidden_arena.find(at);
             if (pi == hidden_arena.end())
             {
@@ -332,6 +392,52 @@ namespace arena {
             }
 
         }
+        void alloc_page_data(size_t new_size) {
+            heap::allocated -= page_data_size;
+            if (opt_use_vmmap) {
+
+                page_data_size = std::max<size_t>(2ll*1024ll*1024ll*1024ll,2ll*new_size);
+                page_data = (uint8_t*)mmap(nullptr, new_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+                if (page_data == MAP_FAILED) {
+                    abort_with("failed to allocate virtual page data");
+                }
+            }else {
+                auto old = page_data;
+                page_data = (uint8_t*)realloc(page_data, new_size);
+                if (!page_data) {
+                    abort_with("out of memory");
+                }
+                page_data_size = new_size;
+
+                if (old != page_data)
+                {
+                    page_modifications::inc_all_tickers();
+                }
+
+            }
+            heap::allocated += page_data_size;
+        }
+        uint8_t* get_alloc_page_data(compressed_address r,size_t size) {
+            // page size must be a power of two
+            size_t page_pos = r.page() * page_size;
+            size_t offset = r.offset();
+            if (page_data_size <= page_pos + offset + size) {
+                alloc_page_data((r.page() + 256)*page_size + size);
+            }
+            if (page_data_size < page_pos + offset + size) {
+                abort_with("position not allocated");
+            }
+            return page_data + page_pos + r.offset();
+        }
+        [[nodiscard]] uint8_t* get_page_data(compressed_address r) const {
+            size_t page_pos = r.page()*page_size;
+            size_t offset = r.offset();
+            if (page_pos + offset > page_data_size) {
+                abort_with("invalid page address");
+            }
+            return page_data + page_pos + offset;
+        }
+
         bool save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const;
         bool load(const std::string& filename, const std::function<void(std::ifstream&)>& extra);
         static bool arena_read(base_hash_arena& arena, const std::function<void(std::ifstream&)>& extra, const std::string& filename) ;
@@ -428,13 +534,13 @@ namespace arena {
             return main.get_max_address_accessed();
         }
         void begin() {
-            buffer.set_source(&main);
+            //buffer.set_source(&main);
         }
         void commit() {
-            buffer.move_to_source();
+            //buffer.move_to_source();
         }
         void rollback() {
-            buffer.clear();
+            //buffer.clear();
         }
         bool save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const {
             return main.save(filename, extra);
@@ -442,6 +548,14 @@ namespace arena {
         bool load(const std::string& filename, const std::function<void(std::ifstream&)>& extra) {
             return main.load(filename, extra);
         };
+
+        uint8_t* get_alloc_page_data(compressed_address r,size_t size) {
+            return main.get_alloc_page_data(r,size);
+        }
+
+        [[nodiscard]] uint8_t* get_page_data(compressed_address r) const {
+            return main.get_page_data(r);
+        }
 
     };
 }

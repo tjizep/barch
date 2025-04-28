@@ -158,7 +158,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		auto score = conversion::convert(k, klen, true);
 		auto member = conversion::convert(v, vlen);
 		conversion::comparable_key id {++counter};
-		if (score.ctype() != art::tdouble)
+		if (score.ctype() != art::tfloat && score.ctype() != art::tdouble)
 		{
 			r |= ValkeyModule_ReplyWithNull(ctx);
 			++responses;
@@ -184,6 +184,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 				art_insert(get_art(), {}, member_key, qkey, true, fcfk);
 				++fkadded;
 			}
+			//log_encoded_key(qkey);
 			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
 
 
@@ -298,11 +299,11 @@ int cmd_ZINCRBY(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		auto k = scores.key();
 		auto val = scores.value();
 		if (!k.starts_with(prefix)) break;
-		auto encoded_number = k.sub(prefix.size, numeric_key_size);
-		auto member = k.sub(prefix.size + numeric_key_size);
+		auto encoded_number = k.sub(prefix.size, num32_key_size);
+		auto member = k.sub(prefix.size + num32_key_size);
 		if (target_member == member)
 		{
-			double number = conversion::enc_bytes_to_dbl(encoded_number);
+			float number = conversion::enc_bytes_to_float(encoded_number);
 			number += incr;
 			conversion::comparable_key id {++counter};
 			q1->push(conversion::comparable_key(number));
@@ -368,7 +369,7 @@ int cmd_ZCOUNT(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		auto ik = ai.key();
 		if (!ik.starts_with(prefix)) break;
-		if (ik.sub(0,prefix.size + numeric_key_size) <= upper)
+		if (ik.sub(0,prefix.size + num32_key_size) <= upper)
 		{
 			++count;
 		}else
@@ -425,7 +426,7 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 			current_comp = v.sub(0, prefix.size + mx.get_size()-1);
 			v = ai.value();// in case of bylex the value is a fk to by-score
 		}else
-		{	current_comp = v.sub(0, prefix.size + numeric_key_size);
+		{	current_comp = v.sub(0, prefix.size + num32_key_size);
 		}
 
 		if ( current_comp <= upper )
@@ -438,8 +439,8 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 			}
 			if (doprint)
 			{
-				auto encoded_number = v.sub(nprefix.size, numeric_key_size);
-				auto member = v.sub(nprefix.size + numeric_key_size);
+				auto encoded_number = v.sub(nprefix.size, num32_key_size);
+				auto member = v.sub(nprefix.size + num32_key_size);
 				bool pushed = false;
 
 				if (spec.REV && !spec.REMOVE)
@@ -450,7 +451,7 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 						pushed = true;
 					}else
 					{
-						rev.push_back(v.sub(nprefix.size, numeric_key_size * 2));
+						rev.push_back(v.sub(nprefix.size, num32_key_size * 2));
 						pushed = true;
 					}
 				}
@@ -507,11 +508,11 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 		});
 		for (auto& rec: rev)
 		{
-			reply_encoded_key(ctx, rec.sub(numeric_key_size ,numeric_key_size));
+			reply_encoded_key(ctx, rec.sub(num32_key_size ,num32_key_size));
 			++replies;
 			if (spec.has_withscores)
 			{
-				reply_encoded_key(ctx, rec.sub(0 ,numeric_key_size));
+				reply_encoded_key(ctx, rec.sub(0 ,num32_key_size));
 				++replies;
 			}
 		}
@@ -585,7 +586,9 @@ enum ops
 	intersect = 1,
 	onion = 2
 };
-
+static double rnd(float f) {
+	return std::round((double)f * 100000.0) / 100000.0;
+}
 static int ZOPER(
 	ValkeyModuleCtx* ctx,
 	ValkeyModuleString** argv,
@@ -646,10 +649,9 @@ static int ZOPER(
 		{
 			auto v = i.key();
 			if (!v.starts_with(lower)) break;
-
-			auto encoded_number = v.sub(lower.size, numeric_key_size);
-			auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-			auto number = conversion::enc_bytes_to_dbl(encoded_number);
+			auto encoded_number = v.sub(lower.size, num32_key_size);
+			auto member = v.sub(lower.size + num32_key_size); // theres a 0 char and I'm not sure where it comes from
+			auto number = conversion::enc_bytes_to_float(encoded_number);
 
 			size_t found_count = 0;
 			auto ok = spec.keys.begin();
@@ -660,7 +662,7 @@ static int ZOPER(
 				query tainerq, checkq;
 				auto check_set = conversion::convert(*ok);
 				auto check_tainer = tainerq->create({check_set});
-				auto check = checkq->create({check_set, conversion::comparable_key(number)});
+				auto check = checkq->create({check_set, conversion::comparable_key((float)number)});
 				art::iterator j(check);
 				bool found = false;
 				if (j.ok())
@@ -668,8 +670,8 @@ static int ZOPER(
 					auto kf = j.key();
 					if (!kf.starts_with(check)) break;
 
-					auto efn = kf.sub(check_tainer.size, numeric_key_size);
-					auto fn = conversion::enc_bytes_to_dbl(efn);
+					auto efn = kf.sub(check_tainer.size, num32_key_size);
+					auto fn = conversion::enc_bytes_to_float(efn);
 					found = fn==number;
 				}
 				if (found) found_count++;
@@ -734,13 +736,13 @@ static int ZOPER(
 					break;
 				case art::zops_spec::avg:
 				case art::zops_spec::sum:
-					aggr += number;
+					aggr += rnd(number);
 					break;
 				case art::zops_spec::min:
-					aggr = std::min(number, aggr);
+					aggr = std::min(rnd(number), aggr);
 					break;
 				case art::zops_spec::max:
-					aggr = std::max(number, aggr);
+					aggr = std::max(rnd(number), aggr);
 					break;
 				}
 			}
@@ -856,8 +858,8 @@ int cmd_ZPOPMIN(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		}
 		auto v = i.key();
 		if (!v.starts_with(lower)) break;
-		auto encoded_number = v.sub(lower.size, numeric_key_size);
-		auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
+		auto encoded_number = v.sub(lower.size, num32_key_size);
+		auto member = v.sub(lower.size + num32_key_size); // theres a 0 char and I'm not sure where it comes from
 		reply_encoded_key(ctx, encoded_number);
 		reply_encoded_key(ctx, member);
 		replies += 2;
@@ -918,8 +920,8 @@ int cmd_ZPOPMAX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		};
 		if (!v.starts_with(lower)) break;
 
-		auto encoded_number = v.sub(lower.size, numeric_key_size);
-		auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
+		auto encoded_number = v.sub(lower.size, num32_key_size);
+		auto member = v.sub(lower.size + num32_key_size); // theres a 0 char and I'm not sure where it comes from
 		reply_encoded_key(ctx, encoded_number);
 		reply_encoded_key(ctx, member);
 		replies += 2;
@@ -1116,7 +1118,7 @@ int cmd_ZFASTRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		//log_encoded_key(max_key);
 		//log_encoded_key(last.key());
-		auto partial = last.key().sub(0,composite_key_size+container.get_size()+numeric_key_size);
+		auto partial = last.key().sub(0,composite_key_size+container.get_size()+num32_key_size);
 
 		//log_encoded_key(partial);
 		if ( partial < max_key) {

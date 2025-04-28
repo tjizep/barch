@@ -465,14 +465,14 @@ namespace art
 
         unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
-            auto & dat = nd();
-            if (dat.occupants < 48)
+            if (nd().occupants < 48)
             {
                 return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
                 auto new_node = alloc_node_ptr(node_256, {});
+                auto &dat = nd();
                 for (unsigned i = 0; i < 256; i++)
                 {
                     if (dat.keys[i])

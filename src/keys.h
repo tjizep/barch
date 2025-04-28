@@ -9,7 +9,10 @@
 #include "art.h"
 #include "conversion.h"
 #include "value_type.h"
-
+namespace art
+{
+	unsigned key_type_size(value_type key);
+}
 int key_ok(const char* k, size_t klen);
 int key_check(ValkeyModuleCtx* ctx, const char* k, size_t klen);
 int reply_encoded_key(ValkeyModuleCtx* ctx, art::value_type key);

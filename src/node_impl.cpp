@@ -16,8 +16,9 @@ art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl,
     unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
     size_t leaf_size = sizeof(leaf) + key_len + ttl_size + 1 + val_len;
     // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
-    auto logical = art::get_leaf_compression().new_address(leaf_size);
-    auto* l = new(get_leaf_compression().read<leaf>(logical)) leaf(key_len, val_len, ttl, is_volatile);
+    compressed_address logical;
+    auto ldata = get_leaf_compression().new_address(logical,leaf_size);
+    auto* l = new(ldata) leaf(key_len, val_len, ttl, is_volatile);
     ++statistics::leaf_nodes;
     l->set_key(key);
     l->set_value(v);
@@ -34,7 +35,7 @@ void art::free_leaf_node(art::leaf* l, compressed_address logical)
 {
     if (l == nullptr) return;
     l->set_deleted();
-    art::get_leaf_compression().free(logical, l->byte_size());
+    get_leaf_compression().free(logical, l->byte_size());
     --statistics::leaf_nodes;
 }
 
@@ -175,19 +176,16 @@ art::tree::~tree()
 #include "configuration.h"
 #include <functional>
 
-void page_iterator(const heap::buffer<uint8_t>& page, unsigned size, std::function<void(const art::leaf*)> cb)
+void page_iterator(const heap::buffer<uint8_t>& page_data, unsigned size, std::function<void(const art::leaf*)> cb)
 {
     if (!size) return;
 
-    auto e = page.begin() + size;
+    auto e = page_data.begin() + size;
     size_t deleted = 0;
-    for (auto i = page.begin(); i != e;)
+    for (auto i = page_data.begin(); i != e;)
     {
         const art::leaf* l = (art::leaf*)i;
-        if (l->key_len > page.byte_size())
-        {
-            abort_with("invalid key data");
-        }
+
         if (l->deleted())
         {
             deleted++;
@@ -267,7 +265,7 @@ void art::tree::run_defrag()
 
 void abstract_eviction(art::tree* t,
                        const std::function<bool(const art::leaf* l)>& predicate,
-                       const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()>& src)
+                       const std::function<std::pair<const heap::buffer<uint8_t>&, size_t> ()>& src)
 {
     if (heap::get_physical_memory_ratio() < 0.99)
         if (heap::allocated < art::get_max_module_memory()) return;

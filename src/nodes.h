@@ -32,11 +32,13 @@ namespace art
 
     enum key_types
     {
-        tinteger = 0,
-        tdouble = 1,
-        tstring = 2,
-        tcomposite = 3,
-        tend = 255,
+        tinteger = 0u,
+        tdouble = 1u,
+        tstring = 2u,
+        tcomposite = 3u,
+        tshort = 4u,
+        tfloat = 5u,
+        tend = 255u,
         tnone = 65536
     };
     struct composite_type
@@ -393,6 +395,7 @@ namespace art
             template <typename T>
             T* refresh_cache()
             {
+
                 if (is_reader || !dcache || last_ticker != page_modifications::get_ticker(address.page()))
                 {
                     dcache = get_node_compression().modify<T>(address);
@@ -400,6 +403,7 @@ namespace art
                     is_reader = 0x00;
 
                 }
+
                 return (T*)dcache;
             }
 
@@ -494,7 +498,7 @@ namespace art
     extern node_ptr resolve_write_node(compressed_address address);
 
 
-    typedef heap::small_vector<trace_element> trace_list;
+    typedef heap::vector<trace_element> trace_list;
 
     /**
      * Represents a leaf. These are

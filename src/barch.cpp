@@ -31,7 +31,6 @@ extern "C" {
 #include "ordered_api.h"
 
 static auto startTime = std::chrono::high_resolution_clock::now();
-static ValkeyModuleString* cannedStrings[64];
 
 struct iter_state
 {
@@ -253,6 +252,7 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     {
         return ValkeyModule_WrongArity(ctx);
     }
+
     //write_lock wl(get_lock());
     art::value_type reply{"", 0};
     auto fc = [&](const art::node_ptr&) -> void
@@ -278,7 +278,7 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     }
     else
     {
-        return ValkeyModule_ReplyWithBool(ctx, true);
+        return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 }
 static int BarchMofifyInteger(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, long long by)
@@ -426,7 +426,7 @@ int cmd_ADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     size_t klen;
@@ -434,8 +434,10 @@ int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     if (key_ok(k, klen) != 0)
         return key_check(ctx, k, klen);
 
+    compressed_release release;
     auto converted = conversion::convert(k, klen);
     art::node_ptr r = art_search(get_art(), converted.get_value());
+
     if (r.null())
     {
         return ValkeyModule_ReplyWithNull(ctx);
@@ -443,18 +445,10 @@ int cmd_GET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     else
     {
         auto vt = r.const_leaf()->get_value();
-        if (vt.size < 54)
-        {
-            size_t l = 0;
-            ValkeyModuleString * vms = cannedStrings[vt.size];
-            char * str = (char*)ValkeyModule_StringPtrLen(vms, &l);
-            if (l == vt.size)
-            {
-                memcpy(str,vt.chars(),vt.size);
-                return ValkeyModule_ReplyWithString(ctx, vms);
-            }
-        }
-        return ValkeyModule_ReplyWithStringBuffer(ctx,vt.chars(), vt.size);
+        // Note: replying with only the string as a long long (which is 8 bytes) doubles performance
+        // i.e. like this: ValkeyModule_ReplyWithLongLong(ctx,*(long long *)vt.chars());
+        //
+        return ValkeyModule_ReplyWithStringBuffer(ctx,vt.chars(),vt.size);
     }
 }
 /* CDICT.MGET <keys>
@@ -1084,14 +1078,6 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx* ctx, ValkeyModuleString**, int)
     {
         art::std_log(e.what());
         return VALKEYMODULE_ERR;
-    }
-    const char* data = "0123456789012345678901234567890123456789012345678901234567890123456789";
-    size_t size = 0;
-    for (auto& cs: cannedStrings)
-    {
-        if (size)
-            cs = ValkeyModule_CreateString(ctx,data,size);
-        ++size;
     }
     return VALKEYMODULE_OK;
 }

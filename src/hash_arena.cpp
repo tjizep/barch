@@ -4,7 +4,7 @@
 #include "hash_arena.h"
 #include "art.h"
 
-void append(std::ofstream& out, size_t page, const storage& s)
+void append(std::ofstream& out, size_t page, const storage& s, const uint8_t* data)
 {
     if (out.fail())
     {
@@ -15,19 +15,16 @@ void append(std::ofstream& out, size_t page, const storage& s)
     long size = 0;
     writep(out,page);
     writep(out,s.fragmentation);
-    writep(out,s.modifications);
+    writep(out,0);
     writep(out,s.size);
     writep(out,s.ticker);
     writep(out,s.write_position);
-    size = s.compressed.byte_size();
+    size = 0;
+    writep(out,size);
+    size = s.write_position; //s.decompressed.byte_size();
     writep(out,size);
     if (size)
-        out.write((const char*)s.compressed.begin(), size);
-    size = s.decompressed.byte_size();
-    writep(out,size);
-    if (size)
-        out.write((const char*)s.decompressed.begin(), size);
-
+        out.write((const char*)data,size);
 }
 static const uint64_t alloc_record_size = sizeof(uint64_t)*2;
 
@@ -70,15 +67,15 @@ bool arena::base_hash_arena::save(const std::string& filename, const std::functi
     size_t record_pos = 0;
     iterate_arena([&](size_t page, const storage& s)
     {
-        storage cpy = s; // copy buffer under lock
+        // copy buffer under lock
         // TODO: theres a deadlock here because its possible to save while another save
         // is already running - causing a lock order violation and therefore deadlock
         // so the unlock is currently disabled - although it shouldn't be
 
-        // compress::mutex.unlock(); // let other things happen while io is being done
+        //compress::mutex.unlock(); // let other things happen while io is being done
 
         uint64_t start = out.tellp();
-        append(out, page, cpy);
+        append(out, page, s, get_page_data({page,0}));
 
         uint64_t finish = out.tellp();
         // write the allocation record
@@ -157,21 +154,20 @@ bool arena::base_hash_arena::arena_read(base_hash_arena& arena, const std::funct
             uint64_t start = in.tellg();
             readp(in,page);
             readp(in,s.fragmentation);
-            readp(in,s.modifications);
+            uint32_t mods = 0;
+            readp(in,mods);
             readp(in,s.size);
             readp(in,s.ticker);
             readp(in,s.write_position);
             readp(in,bsize);
             if (bsize)
             {
-                s.compressed = heap::buffer<uint8_t>(bsize);
-                in.read((char*)s.compressed.begin(), bsize);
+                abort_with("invalid file");
             }
             readp(in,bsize);
             if (bsize)
             {
-                s.decompressed = heap::buffer<uint8_t>(bsize);
-                in.read((char*)s.decompressed.begin(), bsize);
+                in.read((char*)arena.get_alloc_page_data({page,0},bsize), bsize);
             }
             arena.hidden_arena[page] = s;
             if (in.fail())

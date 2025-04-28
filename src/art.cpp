@@ -1122,14 +1122,15 @@ static int prefix_mismatch(const art::node_ptr& n, art::value_type key, unsigned
     int kd = key.length() - depth; // this can be negative ?
     int max_cmp = std::min<int>(std::min<int>(art::max_prefix_llength, n->data().partial_len), kd);
     int idx;
+    auto& dat = n->data();
     for (idx = 0; idx < max_cmp; idx++)
     {
-        if (n->data().partial[idx] != key[depth + idx])
+        if (dat.partial[idx] != key[depth + idx])
             return idx;
     }
 
     // If the prefix is short we can avoid finding a leaf
-    if (n->data().partial_len > art::max_prefix_llength)
+    if (dat.partial_len > art::max_prefix_llength)
     {
         // Prefix is longer than what we've checked, find a leaf
         const art::leaf* l = minimum(n).const_leaf();
@@ -1169,10 +1170,10 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
                 //}
                 //else
                 //{
-                    ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
-                    // create a new leaf to carry the new value
-                    ++statistics::leaf_nodes_replaced;
-                    return n;
+                ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
+                // create a new leaf to carry the new value
+                ++statistics::leaf_nodes_replaced;
+                return n;
                 //}
             }
             return nullptr;
@@ -1703,7 +1704,7 @@ uint64_t art_evict_lru(art::tree* t)
         while (i != e)
         {
             const art::leaf* l = (art::leaf*)i;
-            if (l->key_len > page.first.byte_size())
+            if (l->key_len > page.second)
             {
                 abort_with("invalid key or key size");
             }
@@ -1716,7 +1717,7 @@ uint64_t art_evict_lru(art::tree* t)
             i += (l->byte_size() + test_memory);
         }
         ++statistics::pages_evicted;
-        return page.first.byte_size();
+        return page.second;
     }
     catch (std::exception& e)
     {
@@ -1741,7 +1742,7 @@ void art::glob(tree* unused(t), const keys_spec& spec, value_type pattern, const
             while (i != e)
             {
                 const leaf* l = (const leaf*)i;
-                if (l->key_len > page.byte_size())
+                if (l->key_len > size)
                 {
                     throw std::runtime_error("art::glob: key too long");
                 }
@@ -1929,29 +1930,30 @@ bool art::tree::load()
     };
     auto st = std::chrono::high_resolution_clock::now();
 
-    if (!art::get_node_compression().load_extra("node_data.dat",[&](std::ifstream&){}))
+    if (!get_node_compression().load_extra("node_data.dat",[&](std::ifstream&){}))
     {
         return false;
     }
-    if (!art::get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root))
+    if (!get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root))
     {
         return false;
     }
 
     if (is_leaf)
     {
-        t->root = art::node_ptr{root};
+        t->root = node_ptr{root};
     }else
     {
-        t->root = art::resolve_read_node(root);
+        t->root = resolve_read_node(root);
     }
     auto now = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-    art::std_log("Done loading BARCH, keys loaded:",t->size,"");
+    std_log("Done loading BARCH, keys loaded:",t->size,"");
 
-    art::std_log("loaded barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
-    art::std_log("db memory when created",(float)heap::allocated/(1024*1024),"Mb");
+    std_log("loaded barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
+    std_log("db memory when created",(float)heap::allocated/(1024*1024),"Mb");
+
     return true;
 }
 

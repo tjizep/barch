@@ -43,6 +43,10 @@ namespace art
         {
         }
 
+        [[nodiscard]] unsigned empty() const
+        {
+            return size == 0;
+        }
         [[nodiscard]] unsigned length() const
         {
             if (!size) return 0;
@@ -114,7 +118,7 @@ namespace art
             {
                 return bytes[i];
             }
-            throw std::out_of_range("index out of range");
+            abort_with("index out of range");
         }
     };
 }

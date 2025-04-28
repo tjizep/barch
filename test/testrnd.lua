@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 10000
+local count = 10
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}

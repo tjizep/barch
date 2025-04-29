@@ -91,7 +91,8 @@ namespace arena {
                 this->clear();
                 //opt_use_vmmap = other.opt_use_vmmap;
                 alloc_page_data(other.page_data_size);
-                memcpy(page_data, other.page_data, (other.get_max_address_accessed()+1)*page_size);
+                if (other.page_data_size)
+                    memcpy(page_data, other.page_data, std::min(other.page_data_size,(other.get_max_address_accessed()+1)*page_size));
                 top = other.top;
                 free_pages = other.free_pages;
                 max_address_accessed = other.max_address_accessed;

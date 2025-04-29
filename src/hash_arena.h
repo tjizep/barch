@@ -435,7 +435,8 @@ namespace arena {
                     clear();
                     abort_with("out of virtual memory");
                 }
-                page_data_size = heap::get_physical_memory_bytes()*0.9; //std::max<size_t>(2ll*1024ll*1024ll*1024ll,2ll*new_size);
+                double factor = (double)vmm_physical_factor/100.0;
+                page_data_size = heap::get_physical_memory_bytes()*factor; //std::max<size_t>(2ll*1024ll*1024ll*1024ll,2ll*new_size);
                 page_data = (uint8_t*)mmap(nullptr, page_data_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");

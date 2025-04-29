@@ -14,7 +14,8 @@ art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl,
     unsigned val_len = v.size;
     unsigned key_len = key.length();
     unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
-    size_t leaf_size = sizeof(leaf) + key_len + ttl_size + 1 + val_len;
+    unsigned sol = sizeof(leaf);
+    size_t leaf_size = sol + key_len + ttl_size + 1 + val_len;
     // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
     compressed_address logical;
     auto ldata = get_leaf_compression().new_address(logical,leaf_size);
@@ -58,7 +59,7 @@ static art::node* make_node(art::node_ptr_storage& ptr, compressed_address a, ar
 {
     if (node->pointer_size == 4)
     {
-        return ptr.emplace<Type8>(a, node);
+        return ptr.emplace<Type4>(a, node);
     }
     else if (node->pointer_size == 8)
     {
@@ -117,13 +118,13 @@ art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
     switch (nt)
     {
     case node_4:
-        return ptr.emplace<node4_8>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node4_4>()->create().expand_pointers(ref, c);
     case node_16:
-        return ptr.emplace<node16_8>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node16_4>()->create().expand_pointers(ref, c);
     case node_48:
-        return ptr.emplace<node48_8>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node48_4>()->create().expand_pointers(ref, c);
     case node_256:
-        return ptr.emplace<node256_8>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node256_4>()->create().expand_pointers(ref, c);
     default:
         throw std::runtime_error("Unknown node type");
     }

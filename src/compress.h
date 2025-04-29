@@ -858,7 +858,7 @@ public:
 
         size_t size = sz + test_memory + allocation_padding;
         //std::lock_guard guard(mutex);
-        //r = emancipated.get(size);
+        r = emancipated.get(size);
         if (!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty())
         {
             if (test_memory)

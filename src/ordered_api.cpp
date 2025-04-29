@@ -99,6 +99,7 @@ void remove_ordered(ordered_keys& thing)
 }
 static composite cmd_ZADD_q1;
 static composite cmd_ZADD_qindex;
+static composite cmd_ZADD_qscore;
 int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 {
 	ValkeyModule_AutoMemory(ctx);
@@ -114,7 +115,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		return ValkeyModule_ReplyWithError(ctx, "syntax error");
 	}
-	//zspec.LFI = true;
+	zspec.LFI = true;
 	int64_t updated = 0;
 	int64_t fkadded = 0;
 	auto fc = [&](art::node_ptr) -> void
@@ -164,23 +165,23 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			++responses;
 			continue;
 		}
-		art::value_type qkey = cmd_ZADD_q1.create({container,score,member});
+		art::value_type qkey = cmd_ZADD_q1.create({container, score, member});
 		art::value_type qv = {v, (unsigned)vlen};
 		if (zspec.XX)
 		{
-			art::value_type qkey = cmd_ZADD_q1.create({container,score,member});
+			art::value_type qkey = cmd_ZADD_q1.create({container, score,member});
 			art::update(get_art(), qkey,[&](const art::node_ptr& old) -> art::node_ptr
 			{
 				if (old.null()) return nullptr;
 
 				auto l = old.const_leaf();
-				return art::make_leaf(qkey, qv, l->ttl(), l->is_volatile());
+				return art::make_leaf(qkey, {}, l->ttl(), l->is_volatile());
 			});
 		}else
 		{
 			if (zspec.LFI)
 			{
-				auto member_key = cmd_ZADD_qindex.create({IX_MEMBER ,container, member, score});
+				auto member_key = cmd_ZADD_qindex.create({IX_MEMBER ,container, member});//, score
 				art_insert(get_art(), {}, member_key, qkey, true, fcfk);
 				++fkadded;
 			}

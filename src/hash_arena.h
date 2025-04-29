@@ -106,9 +106,8 @@ namespace arena {
                     munmap(page_data, page_data_size);
                 } else {
                     free(page_data);
-
+                    heap::allocated -= page_data_size;
                 }
-                heap::allocated -= page_data_size;
             }
         }
         void reallocate(bool use_vmm) {
@@ -160,9 +159,10 @@ namespace arena {
                     munmap(page_data, page_data_size);
                 } else {
                     free(page_data);
+                    heap::allocated -= page_data_size;
                 }
             }
-            heap::allocated -= page_data_size;
+
             page_data = nullptr;
             page_data_size = 0;
         }

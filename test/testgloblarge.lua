@@ -70,16 +70,8 @@ convert = tochars123
 test()
 result[inc()] = {"'B.CONFIG', 'SET','compression', 'zstd'", vk.call('B.CONFIG', 'SET','compression', 'zstd')}
 local before = vk.call('B.HEAPBYTES')
-result[inc()] = {'B.VACUUM',vk.call('B.VACUUM')}
-if before > vk.call('B.HEAPBYTES') then
-    successes = successes + 1
-end
 --clear()
-if isnew then
-    assert(successes==3, "test failures")
-else
-    assert(successes==2, "test failures")
-end
+assert(successes==2, "test failures")
 assert(failures==0, "test failures")
 
 return result

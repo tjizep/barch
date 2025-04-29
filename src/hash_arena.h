@@ -11,10 +11,12 @@
 #include <ankerl/unordered_dense.h>
 #include <sys/mman.h>
 
+#include "logger.h"
+
 namespace arena {
     struct base_hash_arena
     {
-        bool opt_use_vmmap = false;
+        bool opt_use_vmmap = true;
     protected:
         typedef heap::allocator<std::pair<size_t,storage>> allocator_type;
 
@@ -107,6 +109,40 @@ namespace arena {
 
                 }
                 heap::allocated -= page_data_size;
+            }
+        }
+        void reallocate(bool use_vmm) {
+            if (use_vmm == opt_use_vmmap) {
+                return;
+            }
+            if (use_vmm) {
+                opt_use_vmmap = true;
+                if (page_data) {
+                    size_t new_page_data_size = (max_address_accessed+1)*page_size;
+                    auto old_data = page_data;
+                    auto old_page_data_size = page_data_size;
+                    page_data = nullptr;
+                    page_data_size = 0;
+                    alloc_page_data(new_page_data_size);
+                    memcpy(page_data, old_data, old_page_data_size);
+                    free(old_data);
+                    heap::allocated -= old_page_data_size;
+                    art::std_log("reallocating [",old_page_data_size,"] physical page data, to [",page_data_size,"]virtual memory");
+                }
+
+            } else {
+                if (page_data) {
+                    size_t old_page_data_size = page_data_size;
+                    size_t new_page_data_size = (max_address_accessed+1)*page_size;
+                    auto npd = (uint8_t*)realloc(nullptr, new_page_data_size);
+                    memcpy(npd, page_data, new_page_data_size);
+                    heap::allocated += new_page_data_size;
+
+                    munmap(page_data, page_data_size);
+                    page_data = npd;
+                    art::std_log("reallocating [",old_page_data_size,"] vmm page data, to [",page_data_size,"] physical memory");
+
+                }
             }
         }
         void clear()
@@ -393,15 +429,20 @@ namespace arena {
 
         }
         void alloc_page_data(size_t new_size) {
-            heap::allocated -= page_data_size;
-            if (opt_use_vmmap) {
 
-                page_data_size = std::max<size_t>(2ll*1024ll*1024ll*1024ll,2ll*new_size);
-                page_data = (uint8_t*)mmap(nullptr, new_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+            if (opt_use_vmmap) {
+                if (page_data_size > 0) {
+                    clear();
+                    abort_with("out of virtual memory");
+                }
+                page_data_size = heap::get_physical_memory_bytes()*0.9; //std::max<size_t>(2ll*1024ll*1024ll*1024ll,2ll*new_size);
+                page_data = (uint8_t*)mmap(nullptr, page_data_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
+                art::std_log("allocated",page_data_size,"virtual memory as page data");
             }else {
+                heap::allocated -= page_data_size;
                 auto old = page_data;
                 page_data = (uint8_t*)realloc(page_data, new_size);
                 if (!page_data) {
@@ -413,9 +454,10 @@ namespace arena {
                 {
                     page_modifications::inc_all_tickers();
                 }
+                heap::allocated += page_data_size;
 
             }
-            heap::allocated += page_data_size;
+
         }
         uint8_t* get_alloc_page_data(compressed_address r,size_t size) {
             // page size must be a power of two
@@ -556,7 +598,15 @@ namespace arena {
         [[nodiscard]] uint8_t* get_page_data(compressed_address r) const {
             return main.get_page_data(r);
         }
-
+        void set_opt_use_vmm(bool use_vmm) {
+            main.reallocate(use_vmm);
+        }
+        [[nodiscard]] size_t get_bytes_allocated() const {
+            if (main.opt_use_vmmap) {
+                return (main.get_max_address_accessed()+1)*page_size;
+            }
+            return 0;
+        }
     };
 }
 

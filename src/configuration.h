@@ -27,6 +27,7 @@ namespace art
         uint64_t max_modifications_before_save{1300000};
         unsigned iteration_worker_count{2};
         float min_fragmentation_ratio = 0.6f;
+        bool use_vmm_memory{true};
         bool active_defrag = false;
         bool evict_volatile_lru{false};
         bool evict_allkeys_lru{false};

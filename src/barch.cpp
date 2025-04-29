@@ -725,10 +725,11 @@ int cmd_STATS(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
 
     long row_count = 0;
     art_statistics as = art::get_statistics();
+    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
-    ValkeyModule_ReplyWithLongLong(ctx, as.heap_bytes_allocated);
+    ValkeyModule_ReplyWithLongLong(ctx, as.heap_bytes_allocated + vbytes);
     ValkeyModule_ReplySetArrayLength(ctx, 2);
     ++row_count;
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
@@ -908,7 +909,9 @@ int cmd_HEAPBYTES(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
     //compressed_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);;
-    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)heap::allocated);
+    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
+
+    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)heap::allocated + vbytes);
 }
 
 int cmd_EVICT(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)

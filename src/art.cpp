@@ -1186,6 +1186,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         auto new_stored = art::alloc_node_ptr(art::initial_node, {l1, l2});
         auto* new_node = new_stored.modify();
         // Determine longest prefix
+        l = n.const_leaf();
         unsigned longest_prefix = longest_common_prefix(l, l2.const_leaf(), depth);
         new_node->data().partial_len = longest_prefix;
         memcpy(new_node->data().partial, key.bytes + depth,

@@ -581,10 +581,15 @@ private:
             art::std_log("page trace[",name,"]:",at.address(),at.page(),at.offset(),modify);
         }
         if (at.null()) return nullptr;
-        //update_lru(at.page(), t);
-        //
-        return main.get_page_data(at);
+        if (opt_enable_lru) {
+            auto p = at.page();
+            auto& t = retrieve_page(p, modify);
+            update_lru(at.page(), t);
+        }
 
+
+        return main.get_page_data(at);
+#if 0
         invalid(at);
         if (test_memory)
         {
@@ -604,6 +609,8 @@ private:
         update_lru(at.page(), t);
         //uint8_t* rp = t.decompressed.begin() + at.offset();
         return main.get_page_data(at);
+#endif
+
     }
 
     void invalid(compressed_address at) const
@@ -1131,6 +1138,12 @@ public:
         last_created_page = {};
         last_page_ptr = {};
 
+    }
+    void set_opt_use_vmm(bool use_vmm_mem) {
+        main.set_opt_use_vmm(use_vmm_mem);
+    }
+    [[nodiscard]] size_t get_bytes_allocated() const {
+        return main.get_bytes_allocated();
     }
 };
 

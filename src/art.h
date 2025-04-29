@@ -93,7 +93,22 @@ namespace art
         uint64_t save_size = 0;
         vector_stream save_stats{};
         std::shared_mutex save_load_mutex{};
+        bool opt_use_trace = true;
+    private:
         trace_list trace{};
+    public:
+        void clear_trace() {
+            if (opt_use_trace)
+                trace.clear();
+        }
+        void pop_trace() {
+            if (opt_use_trace)
+                trace.pop_back();
+        }
+        void push_trace(const trace_element& te) {
+            if (opt_use_trace)
+                trace.push_back(te);
+        }
         void start_maintain();
         tree(const tree&) = delete;
 

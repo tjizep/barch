@@ -30,7 +30,7 @@ static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
 };
 static std::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
-static std::vector<std::string> valid_use_vmm_mem = {"on", "true", "off", "yes", "no", "null", "nil"};
+static std::vector<std::string> valid_use_vmm_mem = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 static std::vector<std::string> valid_defrag = {"on", "true", "off", "yes", "no", "null", "nil"};
 template<typename VT>
 bool check_type(const std::string& et, const VT& valid)
@@ -445,7 +445,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "no", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "false", VALKEYMODULE_CONFIG_DEFAULT,
                                          GetUseVMMemory, SetUseVMMemory,
                                          ApplyUseVMMemory, nullptr);
     return ret;
@@ -620,4 +620,8 @@ bool art::get_log_page_access_trace()
 {
     std::unique_lock lock(config_mutex);
     return record.log_page_access_trace;
+}
+bool art::get_use_vmm_memory() {
+    std::unique_lock lock(config_mutex);
+    return record.use_vmm_memory;
 }

@@ -10,13 +10,13 @@
 #include <page_modifications.h>
 #include <ankerl/unordered_dense.h>
 #include <sys/mman.h>
-
+#include "configuration.h"
 #include "logger.h"
 
 namespace arena {
     struct base_hash_arena
     {
-        bool opt_use_vmmap = true;
+        bool opt_use_vmmap = art::get_use_vmm_memory();
     protected:
         typedef heap::allocator<std::pair<size_t,storage>> allocator_type;
 
@@ -102,7 +102,7 @@ namespace arena {
         };
         ~base_hash_arena() {
             if (page_data != nullptr) {
-                if (opt_use_vmmap) {
+                if (art::get_use_vmm_memory()) {
                     munmap(page_data, page_data_size);
                 } else {
                     free(page_data);
@@ -126,7 +126,7 @@ namespace arena {
                     memcpy(page_data, old_data, old_page_data_size);
                     free(old_data);
                     heap::allocated -= old_page_data_size;
-                    art::std_log("reallocating [",old_page_data_size,"] physical page data, to [",page_data_size,"]virtual memory");
+                    art::std_log("reallocating [",old_page_data_size,"] physical page data, to [",page_data_size,"] virtual memory");
                 }
 
             } else {
@@ -138,8 +138,10 @@ namespace arena {
                     heap::allocated += new_page_data_size;
 
                     munmap(page_data, page_data_size);
+                    page_data_size = new_page_data_size;
                     page_data = npd;
-                    art::std_log("reallocating [",old_page_data_size,"] vmm page data, to [",page_data_size,"] physical memory");
+                    page_modifications::inc_all_tickers();
+                    art::std_log("reallocating [",old_page_data_size,"] vmm page data, to [",new_page_data_size,"] physical memory");
 
                 }
             }
@@ -441,6 +443,7 @@ namespace arena {
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
+                page_modifications::inc_all_tickers();
                 art::std_log("allocated",page_data_size,"virtual memory as page data");
             }else {
                 heap::allocated -= page_data_size;

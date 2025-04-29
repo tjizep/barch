@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <chrono>
 #include "sastam.h"
+#include "compressed_address.h"
 
 namespace art
 {
@@ -19,6 +20,10 @@ namespace art
         value_type() : bytes(nullptr), size(0) {}
         explicit value_type(nullptr_t): bytes(nullptr), size(0)
         {
+        }
+        explicit value_type(const compressed_address& value):  bytes((const uint8_t*)&value), size(sizeof(int64_t))
+        {
+
         }
         explicit value_type(const heap::buffer<uint8_t>& value): bytes(value.begin()), size(value.byte_size())
         {
@@ -119,6 +124,14 @@ namespace art
                 return bytes[i];
             }
             abort_with("index out of range");
+        }
+        [[nodiscard]] compressed_address as_address() const {
+            if (size == sizeof(compressed_address)) {
+                compressed_address address;
+                memcpy(&address, bytes, sizeof(compressed_address));
+                return address;
+            }
+            return compressed_address{};
         }
     };
 }

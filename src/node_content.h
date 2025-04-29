@@ -11,12 +11,12 @@
 namespace art
 {
     template <typename EncodingType>
-    bool ok(const node* n, uintptr_t base)
+    bool ok(const uint64_t n, uintptr_t base)
     {
-        if (n == nullptr) return true;
+        if (n == 0) return true;
         if (sizeof(EncodingType) == sizeof(uintptr_t)) return true;
 
-        auto uval = n->get_address().address();
+        auto uval = n;
 
         int64_t ival = uval - base;
         int64_t imax = i64max<EncodingType>();
@@ -193,9 +193,10 @@ namespace art
             return 0;
         }
 
-        [[nodiscard]] bool ok(const node_ptr&) const
+        [[nodiscard]] bool ok(const node_ptr& n) const
         {
-            return true;
+
+            return art::ok<EncodedType>(n.logical.address(),get_offset());
         }
 
         ProxyType operator[](unsigned at)
@@ -686,7 +687,7 @@ namespace art
             check_object();
             if (s->data().occupants > SIZE)
             {
-                abort();
+                abort_with("invalid occupant count");
             }
             this->copy_header(s);
             set_keys(s->get_keys(), s->data().occupants);

@@ -6,8 +6,8 @@
 // and return the bytes directly. the bytes will be copied
 conversion::comparable_key conversion::convert(const char* v, size_t vlen, bool noint)
 {
-	int32_t i;
-	float d;
+	int64_t i;
+	double d;
 
 	if (!noint && is_integer(v, vlen))
 	{

@@ -81,9 +81,9 @@ namespace art
 
     struct node_ptr_storage
     {
-        uint8_t storage[node_pointer_storage_size]{};
+        uint8_t storage[node_pointer_storage_size];
         size_t size{};
-        node_ptr_storage() = default;
+        node_ptr_storage() {};
 
         node_ptr_storage(const node_ptr_storage& src)
         {

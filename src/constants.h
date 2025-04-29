@@ -14,7 +14,7 @@ enum
     test_memory = 0,
     allocation_padding = 0,
     initialize_memory = 1,
-    storage_version = 6,
+    storage_version = 7,
     ticker_size = 64,
     numeric_key_size = 10,
     num32_key_size = 6,
@@ -22,8 +22,8 @@ enum
     max_queries_per_call = 32,
     leaf_type = 1,
     non_leaf_type = 2,
-    comparable_key_static_size = 48,
-    node_pointer_storage_size = 44,
+    comparable_key_static_size = 32,
+    node_pointer_storage_size = 36,
     vmm_physical_factor = 50 // percent
 };
 #endif //CONSTANTS_H

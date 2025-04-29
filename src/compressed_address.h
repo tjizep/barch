@@ -87,7 +87,7 @@ struct compressed_address
         return index / page_size;
     }
 
-    [[nodiscard]] size_t address() const
+    [[nodiscard]] AddressIntType address() const
     {
         return index;
     }

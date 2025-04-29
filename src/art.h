@@ -83,20 +83,23 @@ namespace art
 
     struct tree
     {
+    private:
+        trace_list trace{};
+    public:
         bool mexit = false;
         bool transacted = false;
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
-        art::node_ptr root = nullptr;
+        node_ptr root = nullptr;
         uint64_t size = 0;
         // to support a transaction
-        art::node_ptr save_root = nullptr;
+        node_ptr save_root = nullptr;
         uint64_t save_size = 0;
         vector_stream save_stats{};
         std::shared_mutex save_load_mutex{};
         bool opt_use_trace = true;
-    private:
-        trace_list trace{};
-    public:
+        node_ptr last_leaf_added {};
+
+
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();

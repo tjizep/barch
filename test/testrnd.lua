@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 10
+local count = 10000
 local result = {}
 local i = 1
 local chars = {'a','b','c','e','f','g','h'}
@@ -58,9 +58,9 @@ local test = function()
 
     for i = 1, count do
         local k = convert(i-1)
-        vk.call('B.BEGIN')
+        --vk.call('B.BEGIN')
         vk.call('B.SET',k,'#'..i)
-        vk.call('B.COMMIT')
+        --vk.call('B.COMMIT')
     end
 
     for i = 1, count do

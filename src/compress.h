@@ -947,7 +947,7 @@ public:
     }
     void release_context()
     {
-        context_vacuum();
+        //context_vacuum();
         mutex.unlock();
     }
 

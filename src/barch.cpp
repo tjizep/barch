@@ -644,7 +644,7 @@ int cmd_SAVE(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
 {
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    compressed_release release;
+    //compressed_release release;
     //write_lock rl(get_lock());
     if (!get_art()->save())
     {

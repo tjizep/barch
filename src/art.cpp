@@ -393,7 +393,7 @@ static art::node_ptr minimum(const art::node_ptr& n)
     // Handle base cases
     if (n.null()) return nullptr;
     if (n.is_leaf) return n;
-    return minimum(n->get_child(n->first_index()));
+    return minimum(n->get_child(n->first_index().first));
 }
 
 /**
@@ -525,8 +525,8 @@ static art::trace_element first_child_off(art::node_ptr n)
         return {nullptr, nullptr, 0};
 
     auto at = n->first_index();
-    auto np = n->get_child(at);
-    return {n, np, at};
+    auto np = n->get_child(at.first);
+    return {n, np, at.first,at.second};
 }
 
 
@@ -922,7 +922,7 @@ static art::trace_element first (const art::trace_element& el)
     if (el.parent.is_leaf) return {};
     if (el.parent.null()) return {};
     auto fst = el.parent->first_index();
-    return {el.parent,el.parent->get_child(fst),fst};
+    return {el.parent,el.parent->get_child(fst.first),fst.first,fst.second};
 }
 
 static art::trace_element next (const art::trace_element& el)
@@ -1032,15 +1032,9 @@ int64_t art::iterator::distance(value_type other) const
 {
     iterator a = *this;
     int64_t r = 0;
-    while (a.ok() && a.key() <= other)
-    {
+    while (a.ok() && a.key() <= other){
         ++r;
-        auto kprev = a.key();
         a.next();
-        if(a.key() < kprev)
-        {
-            abort_with("invalid key order");
-        }
     }
     return r;
 }
@@ -1053,11 +1047,15 @@ void art::iterator::log_trace() const
 {
     size_t ctr = 0;
     std_log("=======-iterator trace-========");
+    std_log("  tree size: ", this->t->size);
     log_encoded_key(key());
     for (auto &el : tl)
     {
-        std_log(++ctr,el.parent.logical.address(), el.child_ix);
+        auto tp = el.parent->type();
+        auto checked = el.parent->check_data();
+        std_log(++ctr,"address:",el.parent.logical.address(),"type:",el.parent->data().type,"child index:", el.child_ix, tp, checked);
     }
+    std_log("=====-end iterator trace-======");
 }
 /**
  * Returns the minimum valued leaf

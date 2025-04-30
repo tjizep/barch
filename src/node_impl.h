@@ -107,6 +107,9 @@ namespace art
                dat.descendants += child->data().descendants;
             }
             ++dat.occupants;
+            if (!this->check_data()) {
+                abort_with("check failed");
+            }
             return idx;
         }
 
@@ -259,6 +262,10 @@ namespace art
                 dat.descendants += child->data().descendants;
             }
             ++dat.occupants;
+            if (!this->check_data()) {
+                abort_with("check failed");
+            }
+
             return idx;
 
         }
@@ -460,6 +467,9 @@ namespace art
                 dat.descendants += child->data().descendants;
             }
             ++dat.occupants;
+            if (!this->check_data()) {
+                abort_with("check failed");
+            }
             return pos;
         }
 
@@ -505,7 +515,7 @@ namespace art
             return nd().keys[idx] - 1;
         }
 
-        [[nodiscard]] unsigned first_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
         {
             unsigned uc = 0; // ?
             unsigned i;
@@ -515,10 +525,10 @@ namespace art
                 i = dat.keys[uc];
                 if (i > 0)
                 {
-                    return i - 1;
+                    return {i - 1,uc};
                 }
             }
-            return uc;
+            return {256,uc}; // ??
         }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
@@ -721,7 +731,7 @@ namespace art
             return idx;
         }
 
-        [[nodiscard]] unsigned first_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
         {
             auto& dat = nd();
             unsigned uc = 0; // ?
@@ -729,10 +739,10 @@ namespace art
             {
                 if (dat.types[uc] > 0)
                 {
-                    return uc;
+                    return {(unsigned)uc,uc};
                 }
             }
-            return uc;
+            return {uc,uc}; // ?
         }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override

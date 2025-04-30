@@ -6,6 +6,7 @@
 #define CONSTANTS_H
 enum
 {
+    node_checks = 0,
     page_size = 8192, // must be a power of twp
     reserved_address_base = 120000,
     auto_vac = 0,

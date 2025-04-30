@@ -374,6 +374,23 @@ namespace art
             bool is = nd().types[at] == leaf_type;
             return is;
         }
+        [[nodiscard]] bool check_data() const final {
+            if (node_checks == 0) return true;
+            auto &dat = nd();
+            if (dat.occupants > SIZE) {
+                return false;
+            }
+            if (KEYS == 0 || KEYS == 256) return true;
+
+            uint8_t prev = 0;
+            for (unsigned at = 0; at < dat.occupants; ++at) {
+                if (dat.keys[at] < prev) {
+                    return false;
+                }
+                prev = dat.keys[at];
+            }
+            return true;
+        };
 
         [[nodiscard]] bool has_child(unsigned at) const final
         {
@@ -516,10 +533,12 @@ namespace art
             return get_child(index(c, operbits));
         }
 
-        [[nodiscard]] unsigned first_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
         {
             check_object();
-            return 0;
+            if (KEYS==0) return {0,0x00};
+            if (nd().occupants==0) return {0,0x00};
+            return {0,nd().keys[0]};
         };
 
         [[nodiscard]] const unsigned char* get_keys() const override

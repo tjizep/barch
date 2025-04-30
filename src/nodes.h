@@ -464,7 +464,7 @@ namespace art
         [[nodiscard]] virtual const unsigned char& get_key(unsigned at) const = 0;
         virtual unsigned char& get_key(unsigned at) = 0;
         unsigned check_prefix(const unsigned char*, unsigned, unsigned) const;
-        [[nodiscard]] virtual unsigned first_index() const = 0;
+        [[nodiscard]] virtual std::pair<unsigned,uint8_t> first_index() const = 0;
         [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) const = 0;
         [[nodiscard]] virtual trace_element next(const trace_element& te) const = 0;
         [[nodiscard]] virtual trace_element previous(const trace_element& te) const = 0;
@@ -487,6 +487,8 @@ namespace art
         [[nodiscard]] virtual compressed_address create_data() = 0;
         virtual void free_data() = 0;
         [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size) const  = 0;
+        [[nodiscard]] virtual bool check_data() const = 0;
+
     };
 
     typedef node::node_ptr node_ptr;

@@ -364,7 +364,6 @@ void art::tree::start_maintain()
             {
                 if (get_modifications() - mods > 0)
                 {
-                    compressed_release releaser;
                     this->save();
                     start_save_time = std::chrono::high_resolution_clock::now();
                     mods = get_modifications();

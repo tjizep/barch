@@ -439,13 +439,13 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
     ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "3600000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "13000000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "43000000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxModificationsBeforeSave, SetMaxModificationsBeforeSave,
                                              ApplyMaxModificationsBeforeSave, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "false", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                          GetUseVMMemory, SetUseVMMemory,
                                          ApplyUseVMMemory, nullptr);
     return ret;

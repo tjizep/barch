@@ -469,7 +469,7 @@ namespace arena {
             size_t page_pos = r.page() * page_size;
             size_t offset = r.offset();
             if (page_data_size <= page_pos + offset + size) {
-                alloc_page_data((r.page() + 256)*page_size + size);
+                alloc_page_data((r.page() + 1024)*page_size + size);
             }
             if (page_data_size < page_pos + offset + size) {
                 abort_with("position not allocated");
@@ -491,103 +491,84 @@ namespace arena {
     };
 
     struct hash_arena {
-        base_hash_arena buffer {};
         base_hash_arena main {};
         // arena virtualization functions
         [[nodiscard]] size_t page_count() const
         {
-            if (buffer.has_source()) return buffer.page_count();
             return main.page_count();
         }
 
         [[nodiscard]] size_t max_logical_address() const
         {
-            if (buffer.has_source()) return buffer.max_logical_address();
             return main.max_logical_address();
         }
 
         void free_page(size_t at)
         {
-            if (buffer.has_source()) return buffer.free_page(at);
             main.free_page(at);
         }
 
         [[nodiscard]] bool is_free(size_t at) const
         {
-            if (buffer.has_source()) return buffer.is_free(at);
             return main.is_free(at);
         }
 
         [[nodiscard]] bool has_free() const
         {
-            if (buffer.has_source()) return buffer.has_free();
             return main.has_free();
         }
 
         size_t allocate()
         {
-            if (buffer.has_source()) return buffer.allocate();
             return main.allocate();
         }
 
         [[nodiscard]] bool has_page(size_t at) const
         {
-            if (buffer.has_source()) return buffer.has_page(at);
             return main.has_page(at);
         }
         storage& modify(size_t at)
         {
-            if (buffer.has_source()) return buffer.modify(at);
             return main.modify(at);
         }
         [[nodiscard]] const storage& read(size_t at) const
         {
-            if (buffer.has_source()) return buffer.read(at);
             return main.read(at);
         }
         [[nodiscard]] storage& read(size_t at)
         {
-            if (buffer.has_source()) return buffer.read(at);
             return main.read(at);
         }
 
         [[nodiscard]] const storage& retrieve_page(size_t at) const
         {
-            if (buffer.has_source()) return buffer.read(at);
             return main.read(at);
         }
 
         void iterate_arena(const std::function<bool(size_t, storage&)>& iter)
         {
-            if (buffer.has_source()) return buffer.iterate_arena(iter);
             main.iterate_arena(iter);
         }
 
         void iterate_arena(const std::function<void(size_t, storage&)>& iter)
         {
-            if (buffer.has_source()) return buffer.iterate_arena(iter);
             main.iterate_arena(iter);
         }
 
         void iterate_arena(const std::function<void(size_t, const storage&) >& iter) const
         {
-            if (buffer.has_source()) return buffer.iterate_arena(iter);
             main.iterate_arena(iter);
         }
 
         [[nodiscard]] size_t get_max_address_accessed() const
         {
-            if (buffer.has_source()) return buffer.get_max_address_accessed();
             return main.get_max_address_accessed();
         }
         void begin() {
-            //buffer.set_source(&main);
         }
         void commit() {
-            //buffer.move_to_source();
         }
         void rollback() {
-            //buffer.clear();
         }
         bool save(const std::string& filename, const std::function<void(std::ofstream&)>& extra) const {
             return main.save(filename, extra);

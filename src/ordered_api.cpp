@@ -117,6 +117,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	zspec.LFI = true;
 	int64_t updated = 0;
 	int64_t fkadded = 0;
+	auto rt = get_art();
 	auto fc = [&](art::node_ptr) -> void
 	{
 		++updated;
@@ -125,7 +126,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		if (val.is_leaf)
 		{
-			art_delete(get_art(), val.const_leaf()->get_value());
+			art_delete(rt, val.const_leaf()->get_value());
 
 		}
 		--fkadded;
@@ -136,7 +137,8 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		return ValkeyModule_ReplyWithNull(ctx);
 	}
-	auto before = get_art()->size;
+
+	auto before = rt->size;
 	auto container = conversion::convert(key, nlen);
 	for (int n = zspec.fields_start; n < argc; n+=2)
 	{
@@ -168,7 +170,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		if (zspec.XX)
 		{
 			art::value_type qkey = cmd_ZADD_q1.create({container, score,member});
-			art::update(get_art(), qkey,[&](const art::node_ptr& old) -> art::node_ptr
+			art::update(rt, qkey,[&](const art::node_ptr& old) -> art::node_ptr
 			{
 				if (old.null()) return nullptr;
 
@@ -180,16 +182,16 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			if (zspec.LFI)
 			{
 				auto member_key = cmd_ZADD_qindex.create({IX_MEMBER ,container, member});//, score
-				art_insert(get_art(), {}, member_key, qkey, true, fcfk);
+				art_insert(rt, {}, member_key, qkey, true, fcfk);
 				++fkadded;
 			}
 
-			art_insert(get_art(), {}, qkey, {}, !zspec.NX, fc);
+			art_insert(rt, {}, qkey, {}, !zspec.NX, fc);
 
 		}
 		++responses;
 	}
-	auto current = get_art()->size;
+	auto current = rt->size;
 	if (zspec.CH)
 	{
 		ValkeyModule_ReplyWithLongLong(ctx, current - before + updated - fkadded);

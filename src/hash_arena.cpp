@@ -67,12 +67,6 @@ bool arena::base_hash_arena::save(const std::string& filename, const std::functi
     size_t record_pos = 0;
     iterate_arena([&](size_t page, const storage& s)
     {
-        // copy buffer under lock
-        // TODO: theres a deadlock here because its possible to save while another save
-        // is already running - causing a lock order violation and therefore deadlock
-        // so the unlock is currently disabled - although it shouldn't be
-
-        //compress::mutex.unlock(); // let other things happen while io is being done
 
         uint64_t start = out.tellp();
         append(out, page, s, get_page_data({page,0}));
@@ -83,7 +77,6 @@ bool arena::base_hash_arena::save(const std::string& filename, const std::functi
         writep(out, start);
         out.seekp(finish, std::ios::beg);
         ++record_pos;
-        //compress::mutex.lock();
 
     });
     if (out.fail())

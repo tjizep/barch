@@ -1042,7 +1042,7 @@ public:
 private:
 
 public:
-    bool save_extra(const std::string &filename, const std::function<void(std::ofstream& of)>& extra1) const
+    bool save_extra(const arena::hash_arena& copy, const std::string &filename, const std::function<void(std::ofstream& of)>& extra1) const
     {
         auto writer = [&](std::ofstream& of) -> void
         {
@@ -1065,9 +1065,12 @@ public:
             writep(of, fragmentation);
             extra1(of);
         };
-        return main.save(filename,writer);
-    }
 
+        return copy.save(filename,writer);
+    }
+    [[nodiscard]] const arena::hash_arena& get_main() const {
+        return main;
+    }
     bool load_extra(const std::string& filenname, const std::function<void(std::ifstream& of)>& extra1)
     {
         auto reader = [&](std::ifstream& in) -> void

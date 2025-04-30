@@ -1898,14 +1898,20 @@ bool art::tree::save()
 
     auto st = std::chrono::high_resolution_clock::now();
     transaction tx; // stabilize main while saving
-
-    if (!art::get_leaf_compression().save_extra("leaf_data.dat", save_stats_and_root))
+    arena::hash_arena leaves;
+    arena::hash_arena nodes;
+    {
+        compressed_release release; // only lock during copy
+        leaves = get_leaf_compression().get_main();
+        nodes = get_node_compression().get_main();
+    }
+    if (!get_leaf_compression().save_extra(leaves, "leaf_data.dat", save_stats_and_root))
     {
         return false;
     }
 
 
-    if (!art::get_node_compression().save_extra("node_data.dat", [&](std::ofstream&){}))
+    if (!get_node_compression().save_extra(nodes,"node_data.dat", [&](std::ofstream&){}))
     {
         return false;
     }
@@ -1914,7 +1920,7 @@ bool art::tree::save()
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
 
-    art::std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
+    std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
     return true;
 }
 bool art::tree::load()

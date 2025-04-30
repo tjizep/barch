@@ -165,7 +165,6 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			continue;
 		}
 		art::value_type qkey = cmd_ZADD_q1.create({container, score, member});
-		art::value_type qv = {v, (unsigned)vlen};
 		if (zspec.XX)
 		{
 			art::value_type qkey = cmd_ZADD_q1.create({container, score,member});
@@ -185,7 +184,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 				++fkadded;
 			}
 
-			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
+			art_insert(get_art(), {}, qkey, {}, !zspec.NX, fc);
 
 		}
 		++responses;

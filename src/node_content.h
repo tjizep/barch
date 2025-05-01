@@ -536,10 +536,20 @@ namespace art
         [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
         {
             check_object();
+            auto& dat = nd();
             if (KEYS==0) return {0,0x00};
-            if (nd().occupants==0) return {0,0x00};
-            return {0,nd().keys[0]};
+            if (dat.occupants==0) return {0,0x00};
+            return {0,dat.keys[0]};
         };
+
+
+        [[nodiscard]] virtual std::pair<unsigned,uint8_t> last_index() const
+        {
+            auto& dat = this->nd();
+            if (KEYS==0) return {0,0x00};
+            if (dat.occupants==0) return {0,0x00};
+            return {dat.occupants - 1, dat.keys[dat.occupants - 1]};
+        }
 
         [[nodiscard]] const unsigned char* get_keys() const override
         {

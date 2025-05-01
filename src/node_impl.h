@@ -138,11 +138,6 @@ namespace art
             return get_child(idx);
         }
 
-        [[nodiscard]] unsigned last_index() const override
-        {
-            return data().occupants - 1;
-        }
-
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
             auto &d = nd();
@@ -298,10 +293,6 @@ namespace art
             return this->get_child(this->data().occupants - 1);
         }
 
-        [[nodiscard]] unsigned last_index() const override
-        {
-            return this->data().occupants - 1;
-        }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
@@ -505,14 +496,15 @@ namespace art
 
         [[nodiscard]] node_ptr last() const override
         {
-            return get_child(last_index());
+            return get_child(last_index().first);
         }
 
-        [[nodiscard]] unsigned last_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> last_index() const override
         {
             unsigned idx = 255;
-            while (!nd().keys[idx]) idx--;
-            return nd().keys[idx] - 1;
+            auto& dat = nd();
+            while (!dat.keys[idx]) idx--;
+            return {dat.keys[idx] - 1, dat.keys[idx]};
         }
 
         [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
@@ -544,7 +536,7 @@ namespace art
             if (test < 256)
             {
                 i = dat.keys[test];
-                trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)uc};
+                trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)test};
                 return {te, (i == c)};
             }
 #if 0
@@ -720,15 +712,15 @@ namespace art
 
         [[nodiscard]] node_ptr last() const override
         {
-            return get_child(last_index());
+            return get_child(last_index().first);
         }
 
-        [[nodiscard]] unsigned last_index() const override
+        [[nodiscard]] std::pair<unsigned, uint8_t> last_index() const override
         {
             auto& dat = nd();
             unsigned idx = 255;
             while (dat.children[idx].empty()) idx--;
-            return idx;
+            return {idx, idx};
         }
 
         [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
@@ -747,28 +739,15 @@ namespace art
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
-            auto& dat = nd();
-            unsigned i = simd::first_byte_gt(dat.types+c,256-c,0)+c;
-            if (i < 256)
-            {
-                return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
-            }
-
-#if 0
             for (unsigned i = c; i < 256; ++i)
             {
                 if (has_child(i))
                 {
-                    if (si != i)
-                    {
-                        abort();
-                    }
                     // because nodes are ordered accordingly
                     return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
                 }
             }
 
-#endif
             return {{nullptr, nullptr, 256}, false};
         }
 

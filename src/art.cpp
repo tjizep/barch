@@ -158,7 +158,8 @@ static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char
 
     c = key[std::min(depth, key_len)];
     auto r = n->lower_bound_child(c);
-    *is_equal = r.second;
+    if (is_equal)
+        *is_equal = r.second;
     return r.first;
 }
 
@@ -226,9 +227,9 @@ static art::trace_element last_child_off(art::node_ptr n)
 {
     if (n.null()) return {nullptr, nullptr, 0};
     if (n.is_leaf) return {nullptr, nullptr, 0};
-    unsigned idx = n->last_index();
+    auto idx = n->last_index();
 
-    return {n, n->get_child(idx), idx};
+    return {n, n->get_child(idx.first), idx.first,idx.second};
 }
 
 static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
@@ -423,6 +424,11 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
                 n = t->root;
                 continue;
             }
+            while (last_el(trace).child.is_leaf &&
+                    last_el(trace).child.const_leaf()->get_key() < key)
+            {
+                if (!increment_trace(t->root, trace)) return nullptr;
+            }
             return n;
 
         }
@@ -442,22 +448,30 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         }
 
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
-        if (!te.empty())
-        {
+        if (te.child.null())
+        {   // there is no lower bound on this node
+            increment_trace(t->root, trace);
+            break;
+        }
+        if (!is_equal && !te.child.is_leaf)
+        {   // only for internal nodes - the lb has skipped some child nodes so we have to go back one
+            te = te.parent->previous(te);
             if (te.child.null())
             {
-                increment_trace(t->root, trace);
                 break;
             }
-            trace.push_back(te);
-        }else
-        {
-            abort_with("trace is empty");
         }
+        trace.push_back(te);
         n = te.child;
         depth++;
     }
     if (!extend_trace_min(t->root, trace)) return nullptr;
+
+    while (last_el(trace).child.is_leaf &&
+        last_el(trace).child.const_leaf()->get_key() < key)
+    {
+        if (!increment_trace(t->root, trace)) return nullptr;
+    }
     n = last_el(trace).child;
     return n;
 }
@@ -572,7 +586,7 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
 }
 static bool decrement_trace(const art::node_ptr& root, art::trace_list& trace)
 {
-    while (!trace.empty() && last_el(trace).child_ix == 0)
+    while (!trace.empty() && last_el(trace) == last_el(trace).parent->first_index())
     {
         trace.pop_back();
     }
@@ -969,9 +983,9 @@ static int64_t total(const art::trace_element& start,const art::trace_element& e
 static int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
 {
     if (b.empty() || a.empty()) return 0;
-    int64_t r = 0; //descendants(a.back());;
+    if (b.back() == a.back()) return 0;
+    int64_t r = descendants(a.back());//  + descendants(b.back());
     size_t depth = std::min(a.size(),b.size());
-    r += descendants(b.back());
     for (size_t i = 0; i < depth; ++i)
     {
         if (a[i] == b[i])
@@ -1017,7 +1031,7 @@ int64_t art::iterator::distance(const iterator& other) const
     int64_t r = 0;
     while (a.ok() && a.key() <= b.key())
     {
-
+        //log_encoded_key(a.key());
         ++r;
         auto kprev = a.key();
         a.next();
@@ -1028,11 +1042,20 @@ int64_t art::iterator::distance(const iterator& other) const
     }
     return r;
 }
-int64_t art::iterator::distance(value_type other) const
+int64_t art::iterator::distance(value_type other, bool traced) const
 {
     iterator a = *this;
     int64_t r = 0;
+    auto prev = a.key();
     while (a.ok() && a.key() <= other){
+        if (traced)
+            log_encoded_key(a.key());
+        if (a.key() < prev) {
+            log_encoded_key(a.key());
+            log_encoded_key(prev);
+            abort_with("invalid key order");
+        }
+        prev = a.key();
         ++r;
         a.next();
     }
@@ -1053,7 +1076,7 @@ void art::iterator::log_trace() const
     {
         auto tp = el.parent->type();
         auto checked = el.parent->check_data();
-        std_log(++ctr,"address:",el.parent.logical.address(),"type:",el.parent->data().type,"child index:", el.child_ix, tp, checked);
+        std_log(++ctr,"address:",el.parent.logical.address(),"type:",el.parent->data().type,"child index:", el.child_ix, el.k, tp, checked);
     }
     std_log("=====-end iterator trace-======");
 }

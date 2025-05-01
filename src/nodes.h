@@ -373,6 +373,12 @@ namespace art
             [[nodiscard]] bool valid() const {
                 return !parent.null() && !child.null();
             }
+            bool operator==(const std::pair<unsigned,uint8_t>& rhs) const {
+                return child_ix == rhs.first && k == rhs.second;
+            }
+            bool operator!=(const std::pair<unsigned,uint8_t>& rhs) const {
+                return !(*this == rhs);
+            }
         };
 
         typedef std::array<node_ptr, max_alloc_children> children_t;
@@ -452,7 +458,7 @@ namespace art
         [[nodiscard]] virtual node_ptr find(unsigned char, unsigned operbits) const = 0;
         [[nodiscard]] virtual node_ptr find(unsigned char) const = 0;
         [[nodiscard]] virtual node_ptr last() const = 0;
-        [[nodiscard]] virtual unsigned last_index() const = 0;
+        [[nodiscard]] virtual std::pair<unsigned,uint8_t> last_index() const = 0;
         virtual void remove(node_ptr& ref, unsigned pos, unsigned char key) = 0;
         virtual unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) = 0;
 

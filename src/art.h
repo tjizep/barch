@@ -313,7 +313,7 @@ namespace art
         bool update(int64_t ttl);
         [[nodiscard]] bool remove() const;
         [[nodiscard]] int64_t distance(const iterator& other) const;
-        [[nodiscard]] int64_t distance(value_type other) const;
+        [[nodiscard]] int64_t distance(value_type other, bool traced = false) const;
         [[nodiscard]] int64_t fast_distance(const iterator& other) const;
         void log_trace() const;
     };

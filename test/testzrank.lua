@@ -2,36 +2,44 @@ local vk
 vk = redis
 
 local t = vk.call('B.MILLIS')
-local count = 30000
+local count = 120000
 local key = 'z'
 
-vk.call('B.CLEAR')
-for i=1,count do
-    vk.call('B.ZADD', key, count*math.random(), 'at '..i) 
+if vk.call('B.SIZE') < count then
+    vk.call('B.CLEAR')
+
+    for i=1,count do
+        vk.call('B.ZADD', key, count*math.random(), 'at '..i)
+        vk.call('B.ZADD', key, math.floor(count*math.random()), 'at '..i)
+    end
+    vk.call('B.SAVE')
 end
 local results = {}
-local faults = 0
+local rcnt = 1
+local function add(tr)
+    results[rcnt] = tr
+    rcnt = rcnt + 1
+end
+
+local failures = 0
 for i=1,1000 do
-    local min = math.floor(count*0.01*math.random())
-    local max = count*math.random()--math.floor()
+    local min = math.floor((count-count/10)*math.random())
+    local max = min + count/10 --count*math.random()--math.floor()
     local zr = vk.call('B.ZRANK',key,min,max)
     local zr2 = vk.call('B.ZFASTRANK',key,min,max)
-    --local range = vk.call('B.ZRANGE',key,min,max)
-    --assert(zr2==zr)
-    if zr ~= zr2 then
+    if math.abs(zr-zr2) > 0 then
         local tr = {
             {"min: "..min},
             {"max: "..max},
             {"guess","slow zr : "..zr,"fast zr: "..zr2},
             {"actual 1: "..zr},
             {"max - min: "..(max-min)},
-            {"diff",zr2-zr},vk.call('B.SIZE')}
-        results[i] = tr
-        faults = faults + 1
+            {"diff",zr2-zr}}
+        add(tr)
+        failures = failures + 1
     end
 end
 vk.call('B.CLEAR')
---results[1] = {"it"}
-assert(faults > 1)
-return results
+assert(failures == 0)
+return failures
 

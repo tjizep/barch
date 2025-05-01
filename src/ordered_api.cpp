@@ -1112,25 +1112,21 @@ int cmd_ZFASTRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	auto upper = conversion::convert(b,bl,true);
 	auto min_key = qlower.create({container,lower});
 	auto max_key = qupper.create({container,upper});
-	art::iterator first(min_key);
-	art::iterator last(max_key);
 	if (max_key < min_key)
 	{
 		return ValkeyModule_ReplyWithLongLong(ctx,0);
 	}
+
+	art::iterator first(min_key);
+	art::iterator last(max_key);
+
 	int64_t rank = 0;
 	if (first.ok() && last.ok())
 	{
-		//log_encoded_key(max_key);
-		//log_encoded_key(last.key());
-		auto partial = last.key().sub(0,composite_key_size+container.get_size()+numeric_key_size);
 
-		//log_encoded_key(partial);
-		if ( partial < max_key) {
-			last.next();
-		}
-
+		rank += last.key() == max_key ? 1 : 0;
 		rank += first.fast_distance(last);
+
 	}
 
 	return ValkeyModule_ReplyWithLongLong(ctx,rank);

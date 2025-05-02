@@ -619,6 +619,7 @@ static int ZOPER(
 	long long replies = 0;
 	double aggr = 0.0f;
 	size_t count = 0;
+	size_t results_added = 0;
 	heap::vector<ordered_keys> new_keys;
 	heap::vector<ordered_keys> removed_keys;
 
@@ -700,7 +701,7 @@ static int ZOPER(
 				break;
 			}
 			if (add_result)
-			{
+			{	++results_added;
 				switch (spec.aggr)
 				{
 				case art::zops_spec::agg_none:
@@ -767,7 +768,7 @@ static int ZOPER(
 	}
 	if (replies == 0 && spec.aggr != art::zops_spec::agg_none)
 	{
-		return ValkeyModule_ReplyWithDouble(ctx, count > 0 ? aggr : 0.0f);
+		return ValkeyModule_ReplyWithDouble(ctx, results_added > 0 ? aggr : 0.0f);
 	}
 	if (store.empty())
 	{

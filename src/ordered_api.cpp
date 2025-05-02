@@ -79,8 +79,8 @@ void insert_ordered(composite& score_key, composite& member_key, art::value_type
 {
 	auto sk = score_key.create();
 	auto mk = member_key.create();
-	art_insert(get_art(), {}, sk, value,update,[](art::node_ptr) -> void{});
-	art_insert(get_art(), {}, mk, sk,update,[](art::node_ptr) -> void{});
+	art_insert(get_art(), sk, value,update,[](art::node_ptr) -> void{});
+	art_insert(get_art(), mk, sk,update,[](art::node_ptr) -> void{});
 }
 void remove_ordered(composite& score_key, composite& member_key)
 {
@@ -182,11 +182,11 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			if (zspec.LFI)
 			{
 				auto member_key = cmd_ZADD_qindex.create({IX_MEMBER ,container, member});//, score
-				art_insert(rt, {}, member_key, qkey, true, fcfk);
+				art_insert(rt, member_key, qkey, true, fcfk);
 				++fkadded;
 			}
 
-			art_insert(rt, {}, qkey, {}, !zspec.NX, fc);
+			art_insert(rt, qkey, {}, !zspec.NX, fc);
 
 		}
 		++responses;
@@ -309,7 +309,7 @@ int cmd_ZINCRBY(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 			q1->push(conversion::comparable_key(number));
 			q1->push(member);
 			art::value_type qkey = q1->create();
-			art_insert(get_art(), {}, qkey, val, true, fc);
+			art_insert(get_art(), qkey, val, true, fc);
 
 			q1->pop(2);
 			if (!scores.remove()) // remove the current one
@@ -331,7 +331,7 @@ int cmd_ZINCRBY(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		q1->push(member);
 		art::value_type qkey = q1->create();
 		art::value_type qv = {v, (unsigned)vlen};
-		art_insert(get_art(), {}, qkey, qv, true, fc);
+		art_insert(get_art(), qkey, qv, true, fc);
 		q1->pop(2);
 		return ValkeyModule_ReplyWithDouble(ctx, incr);
 	}

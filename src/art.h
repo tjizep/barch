@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include "nodes.h"
-#include "compress.h"
+#include "virtual_allocation.h"
 #include "keyspec.h"
 #include "value_type.h"
 #include "vector_stream.h"
@@ -98,7 +98,7 @@ namespace art
         std::shared_mutex save_load_mutex{};
         bool opt_use_trace = true;
         node_ptr last_leaf_added {};
-
+        key_spec default_options{};
 
         void clear_trace() {
             if (opt_use_trace)
@@ -160,7 +160,6 @@ uint64_t art_size(art::tree* t);
  */
 void art_insert
 (   art::tree* t
-,   const art::key_spec& options
 ,   art::value_type key
 ,   art::value_type value
 ,   const NodeResult& fc
@@ -168,7 +167,6 @@ void art_insert
 
 void art_insert
 (   art::tree* t
-,   const art::key_spec& options
 ,   art::value_type key
 ,   art::value_type value
 ,   bool replace
@@ -183,7 +181,7 @@ void art_insert
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
+void art_insert_no_replace(art::tree* t, art::value_type key, art::value_type value,
                            const NodeResult& fc);
 
 /**

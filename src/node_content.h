@@ -29,10 +29,9 @@ namespace art
     {
     private:
         EncodingType& value;
-        uintptr_t base;
-
+        unused(uintptr_t base;)
     public:
-        encoded_element(EncodingType& value, uintptr_t base) : value(value), base(base)
+        encoded_element(EncodingType& value, uintptr_t unused(base)) : value(value) //, base(base)
         {
         }
 
@@ -65,11 +64,7 @@ namespace art
             {
                 abort();
             }
-            if (ptr.address() > std::numeric_limits<EncodingType>::max())
-            {
-                abort_with("invalid address");
-            }
-            value = ptr.null() ? 0 : ptr.address();
+            value = ptr.address(); //ptr.null() ? 0 :
         }
 
         [[nodiscard]] logical_leaf get_leaf() const
@@ -93,12 +88,14 @@ namespace art
                 value = 0;
                 return;
             }
+#if 0
             if (sizeof(EncodingType) == sizeof(uintptr_t))
             {
                 value = ptr->get_address().address();
                 return;
             }
-            value = (ptr->get_address().address() - base);
+#endif
+            value = (ptr->get_address().address() unused(- base));
         }
 
         [[nodiscard]] node_ptr modify()
@@ -111,7 +108,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_write_node(compressed_address((int64_t)value + base));
+            return resolve_write_node(compressed_address((int64_t)value unused(+ base)));
         }
 
         [[nodiscard]] node_ptr get_node() const
@@ -124,7 +121,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_read_node(compressed_address((int64_t)value + base));
+            return resolve_read_node(compressed_address((int64_t)value + 0));
         }
 
         [[nodiscard]] node_ptr cget() const
@@ -137,7 +134,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_read_node(compressed_address((int64_t)value + base));
+            return resolve_read_node(compressed_address((int64_t)value + 0));
         }
 
         encoded_element& operator=(const node* ptr)
@@ -269,8 +266,8 @@ namespace art
 
         compressed_address create_data() final
         {
-            address = get_node_compression().new_address(alloc_size());
-            encoded_data* r = get_node_compression().modify<encoded_data>(address);
+            address = get_node_allocator().new_address(alloc_size());
+            encoded_data* r = get_node_allocator().modify<encoded_data>(address);
             r->type = node_type;
             r->pointer_size = sizeof(IntPtrType);
             dcache = r;
@@ -316,7 +313,7 @@ namespace art
             }
             //if (address.is_null_base())
             //    abort();
-            get_node_compression().free(address, alloc_size());
+            get_node_allocator().free(address, alloc_size());
         }
 
         encoded_node_content() = default;
@@ -361,17 +358,16 @@ namespace art
 
         void set_child(unsigned at, node_ptr node) final
         {
-            check_object();
-            if (SIZE <= at)
-                abort();
+            //check_object();
+            //if (SIZE <= at)
+            //    abort();
             auto& dat = nd();
-            dat.types[at] = node.is_leaf ? leaf_type : non_leaf_type;
             if (node.is_leaf)
-            {
+            {   dat.types[at] = leaf_type;
                 dat.leaves[at] = node.logical;
             }
             else
-            {
+            {   dat.types[at] = node_type;
                 dat.children[at] = node;
             }
         }
@@ -767,14 +763,6 @@ namespace art
             return sizeof(ChildElementType);
         };
 
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned , unsigned& size ) const
-        {
-            size = 0;
-            auto& dat = nd();
-            __builtin_prefetch(dat.keys);
-            return 256;
-        }
-    protected:
     };
 }
 #endif //NODE_ABSTRACT_H

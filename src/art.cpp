@@ -7,84 +7,86 @@
 #include "art.h"
 #include "valkeymodule.h"
 #include "statistics.h"
-#include "compress.h"
+#include "virtual_allocation.h"
 #include "configuration.h"
 #include "glob.h"
 #include "keys.h"
 #include "logger.h"
-static compress* node_compression = nullptr;
-static compress* leaf_compression = nullptr;
+static virtual_allocation* node_allocation = nullptr;
+static virtual_allocation* leaf_allocation = nullptr;
+extern art::tree* get_art();
 
 bool art::has_leaf_compression()
 {
-    return leaf_compression != nullptr;
+    return leaf_allocation != nullptr;
 }
 
 bool art::has_node_compression()
 {
-    return node_compression != nullptr;
+    return node_allocation != nullptr;
 }
 
 bool art::init_leaf_compression()
 {
-    leaf_compression = new(heap::allocate<compress>(1)) compress(get_compression_enabled(),
+    leaf_allocation = new(heap::allocate<virtual_allocation>(1)) virtual_allocation(get_compression_enabled(),
                                                                  get_evict_allkeys_lru() || get_evict_volatile_lru(),
                                                                  "leaf");
-    return leaf_compression != nullptr;
+    return leaf_allocation != nullptr;
 }
 
 void art::destroy_node_compression()
 {
-    if (node_compression != nullptr)
+    if (node_allocation != nullptr)
     {
-        node_compression->~compress();
-        heap::free(node_compression);
-        node_compression = nullptr;
+        node_allocation->~virtual_allocation();
+        heap::free(node_allocation);
+        node_allocation = nullptr;
     }
 }
 
 void art::destroy_leaf_compression()
 {
-    if (leaf_compression != nullptr)
+    if (leaf_allocation != nullptr)
     {
-        leaf_compression->~compress();
-        heap::free(leaf_compression);
-        leaf_compression = nullptr;
+        leaf_allocation->~virtual_allocation();
+        heap::free(leaf_allocation);
+        leaf_allocation = nullptr;
     }
 }
 
 bool art::init_node_compression()
 {
-    node_compression = new(heap::allocate<compress>(1))compress(get_compression_enabled(), false, "node");
-    return node_compression != nullptr;
+    node_allocation = new(heap::allocate<virtual_allocation>(1))virtual_allocation(get_compression_enabled(), false, "node");
+    return node_allocation != nullptr;
 }
 
-compress& art::get_leaf_compression()
+virtual_allocation& art::get_leaf_allocation()
 {
     if (!has_leaf_compression())
     {
         init_leaf_compression();
     }
-    return *leaf_compression;
+    return *leaf_allocation;
 };
 
-compress& art::get_node_compression()
+virtual_allocation& art::get_node_allocator()
 {
     if (!has_node_compression())
     {
         init_node_compression();
     }
-    return *node_compression;
+    return *node_allocation;
 };
 
 compressed_release::compressed_release()
 {
-    art::get_leaf_compression().enter_context();
+    get_art()->default_options.clear();
+    art::get_leaf_allocation().enter_context();
 }
 
 compressed_release::~compressed_release()
 {
-    art::get_leaf_compression().release_context();
+    art::get_leaf_allocation().release_context();
 }
 
 /**
@@ -717,7 +719,7 @@ int art::range(const art::tree* t, art::value_type key, art::value_type key_end,
     }
     return 0;
 }
-extern art::tree* get_art();
+
 art::node_ptr art::find(value_type key)
 {
     const tree* t = get_art();
@@ -1165,13 +1167,13 @@ static int prefix_mismatch(const art::node_ptr& n, art::value_type key, unsigned
     return idx;
 }
 
-static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options, art::node_ptr n, art::node_ptr& ref,
+static art::node_ptr recursive_insert(art::tree* t, art::node_ptr n, art::node_ptr& ref,
                                       art::value_type key, art::value_type value, int depth, int* old, int replace)
 {
     // If we are at a nullptr node, inject a leaf
     if (n.null())
     {
-        ref = art::make_leaf(key, value, options.ttl);
+        ref = art::make_leaf(key, value, t->default_options.ttl);
         t->last_leaf_added = ref;
         return nullptr;
     }
@@ -1192,7 +1194,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
                 //}
                 //else
                 //{
-                ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
+                ref = make_leaf(key, value, t->default_options.keepttl ? dl->ttl() : t->default_options.ttl, dl->is_volatile());
                 t->last_leaf_added = ref;
                 // create a new leaf to carry the new value
                 ++statistics::leaf_nodes_replaced;
@@ -1287,7 +1289,7 @@ RECURSE_SEARCH:;
             t->push_trace({n,child,pos, key[depth]});
         }
         art::node_ptr nc = child;
-        auto r = recursive_insert(t, options, child, nc, key, value, depth + 1, old, replace);
+        auto r = recursive_insert(t, child, nc, key, value, depth + 1, old, replace);
         if (nc != child)
         {
             n = n.modify()->expand_pointers(ref, {nc});
@@ -1316,7 +1318,6 @@ RECURSE_SEARCH:;
  */
 void art_insert
 (   art::tree* t
-,   const art::key_spec& options
 ,   art::value_type key
 ,   art::value_type value
 ,   bool replace
@@ -1327,7 +1328,7 @@ void art_insert
         int old_val = 0;
         t->clear_trace();
 
-        art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0);
+        art::node_ptr old = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0);
         if (!old_val)
         {
             t->size++;
@@ -1359,10 +1360,10 @@ void art_insert
     }
 
 }
-void art_insert(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
+void art_insert(art::tree* t, art::value_type key, art::value_type value,
                 const NodeResult& fc)
 {
-    art_insert(t, options, key, value, true, fc);
+    art_insert(t, key, value, true, fc);
 }
 
 /**
@@ -1374,14 +1375,14 @@ void art_insert(art::tree* t, const art::key_spec& options, art::value_type key,
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
+void art_insert_no_replace(art::tree* t, art::value_type key, art::value_type value,
                            const NodeResult& fc)
 {
     ++statistics::insert_ops;
     try
     {
         int old_val = 0;
-        art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0);
+        art::node_ptr r = recursive_insert(t, t->root, t->root, key, value, 0, &old_val, 0);
         if (r.null())
         {
             t->size++;
@@ -1720,7 +1721,7 @@ uint64_t art_evict_lru(art::tree* t)
 {
     try
     {
-        auto page = art::get_leaf_compression().get_lru_page();
+        auto page = art::get_leaf_allocation().get_lru_page();
         if (!page.second) return 0;
         auto i = page.first.begin();
         auto e = i + page.second;
@@ -1760,7 +1761,7 @@ void art::glob(tree* unused(t), const keys_spec& spec, value_type pattern, const
     {
         int64_t counter = 0;
         // this is a multi-threaded iterator and care should be taken
-        get_leaf_compression().iterate_pages([&](size_t size,size_t unused(padd), const heap::buffer<uint8_t>& page)-> bool
+        get_leaf_allocation().iterate_pages([&](size_t size,size_t unused(padd), const heap::buffer<uint8_t>& page)-> bool
         {
             if (!size) return true;
             auto i = page.begin();
@@ -1817,8 +1818,8 @@ art_statistics art::get_statistics()
     as.node256_nodes = (int64_t)statistics::n256_nodes;
     as.node256_occupants = as.node256_nodes ? ((int64_t)statistics::node256_occupants / as.node256_nodes) : 0ll;
     as.node48_nodes = (int64_t)statistics::n48_nodes;
-    as.bytes_allocated = (int64_t)get_leaf_compression().get_allocated() + get_node_compression().get_allocated(); //statistics::addressable_bytes_alloc;
-    as.bytes_interior = (int64_t)get_node_compression().get_allocated();
+    as.bytes_allocated = (int64_t)get_leaf_allocation().get_allocated() + get_node_allocator().get_allocated(); //statistics::addressable_bytes_alloc;
+    as.bytes_interior = (int64_t)get_node_allocator().get_allocated();
     as.page_bytes_compressed = (int64_t)statistics::page_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t)statistics::page_bytes_uncompressed;
     as.pages_uncompressed = (int64_t)statistics::pages_uncompressed;
@@ -1924,16 +1925,16 @@ bool art::tree::save()
     arena::hash_arena nodes;
     {
         compressed_release release; // only lock during copy
-        leaves = get_leaf_compression().get_main();
-        nodes = get_node_compression().get_main();
+        leaves = get_leaf_allocation().get_main();
+        nodes = get_node_allocator().get_main();
     }
-    if (!get_leaf_compression().save_extra(leaves, "leaf_data.dat", save_stats_and_root))
+    if (!get_leaf_allocation().save_extra(leaves, "leaf_data.dat", save_stats_and_root))
     {
         return false;
     }
 
 
-    if (!get_node_compression().save_extra(nodes,"node_data.dat", [&](std::ofstream&){}))
+    if (!get_node_allocator().save_extra(nodes,"node_data.dat", [&](std::ofstream&){}))
     {
         return false;
     }
@@ -1963,11 +1964,11 @@ bool art::tree::load()
     };
     auto st = std::chrono::high_resolution_clock::now();
 
-    if (!get_node_compression().load_extra("node_data.dat",[&](std::ifstream&){}))
+    if (!get_node_allocator().load_extra("node_data.dat",[&](std::ifstream&){}))
     {
         return false;
     }
-    if (!get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root))
+    if (!get_leaf_allocation().load_extra("leaf_data.dat", load_stats_and_root))
     {
         return false;
     }
@@ -1996,21 +1997,21 @@ void art::tree::begin() {
     save_size = size;
     save_stats.clear();
     stats_to_stream(save_stats);
-    get_leaf_compression().begin();
-    get_node_compression().begin();
+    get_leaf_allocation().begin();
+    get_node_allocator().begin();
     transacted = true;
 }
 void art::tree::commit() {
     if (!transacted) return;
-    get_leaf_compression().commit();
-    get_node_compression().commit();
+    get_leaf_allocation().commit();
+    get_node_allocator().commit();
     transacted = false;
 
 }
 void art::tree::rollback() {
     if (!transacted) return;
-    get_leaf_compression().rollback();
-    get_node_compression().rollback();
+    get_leaf_allocation().rollback();
+    get_node_allocator().rollback();
     root = save_root;
     size = save_size;
     save_stats.seek(0);
@@ -2023,8 +2024,8 @@ void art::tree::clear()
     root = {nullptr};
     size = 0;
     transacted = false;
-    get_leaf_compression().clear();
-    get_node_compression().clear();
+    get_leaf_allocation().clear();
+    get_node_allocator().clear();
     statistics::n4_nodes = 0;
     statistics::n16_nodes = 0;
     statistics::n48_nodes = 0;

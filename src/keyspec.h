@@ -33,7 +33,10 @@ namespace art
         int r = 0;
         char empty[2] = {0x00,0x00};
         mutable std::string s{};
-
+        void set(ValkeyModuleString* const* argv, int argc) {
+            this->argv = argv;
+            this->argc = argc;
+        }
         const std::string& tos(int at) const
         {
             s.clear();
@@ -135,7 +138,14 @@ namespace art
         bool xx = false;
         bool keepttl = true;
         int64_t ttl = 0;
-
+        void clear() {
+            none = false;
+            get = false;
+            nx = false;
+            xx = false;
+            keepttl = true;
+            ttl = 0;
+        }
         key_spec() = default;
 
         key_spec(ValkeyModuleString** argvz, int argcz)

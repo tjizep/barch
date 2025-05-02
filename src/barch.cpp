@@ -239,6 +239,8 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     compressed_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
+    auto *t = get_art();
+
     size_t klen, vlen;
     const char* k = ValkeyModule_StringPtrLen(argv[1], &klen);
     const char* v = ValkeyModule_StringPtrLen(argv[2], &vlen);
@@ -247,8 +249,8 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         return key_check(ctx, k, klen);
 
     auto converted = conversion::convert(k, klen);
-    art::key_spec spec(argv, argc);
-    if (spec.parse_options() != VALKEYMODULE_OK)
+    t->default_options.set(argv, argc);
+    if (t->default_options.parse_options() != VALKEYMODULE_OK)
     {
         return ValkeyModule_WrongArity(ctx);
     }
@@ -257,27 +259,29 @@ int cmd_SET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     art::value_type reply{"", 0};
     auto fc = [&](const art::node_ptr&) -> void
     {
-        if (spec.get)
+        if (t->default_options.get)
         {
             reply = converted.get_value();
         }
     };
 
-    art_insert(get_art(), spec, converted.get_value(), {v, (unsigned)vlen}, fc);
-    if (spec.get)
+    art_insert(t, converted.get_value(), {v, (unsigned)vlen}, fc);
+
+    if (t->default_options.get)
     {
         if (reply.size)
         {
             ValkeyModule_AutoMemory(ctx);
+            t->default_options.clear();
             return reply_encoded_key(ctx, reply);
         }
         else
-        {
+        {   t->default_options.clear();
             return ValkeyModule_ReplyWithNull(ctx);
         }
     }
     else
-    {
+    {   t->default_options.clear();
         return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 }
@@ -378,13 +382,12 @@ int cmd_MSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         }
 
         auto converted = conversion::convert(k, klen);
-        art::key_spec spec;//(argv, argc);
         art::value_type reply{"", 0};
         auto fc = [&](art::node_ptr) -> void
         {
         };
 
-        art_insert(get_art(), spec, converted.get_value(), {v, (unsigned)vlen}, fc);
+        art_insert(get_art(), converted.get_value(), {v, (unsigned)vlen}, fc);
 
         ++responses;
     }
@@ -411,10 +414,11 @@ int cmd_ADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
     auto fc = [](art::node_ptr) -> void
     {
     };
+    auto* t= get_art();
     auto converted = conversion::convert(k, klen);
-    art::key_spec spec(argv, argc);
+    t->default_options.set(argv, argc);
     write_lock w(get_lock());
-    art_insert_no_replace(get_art(), spec, converted.get_value(), {v, (unsigned)vlen}, fc);
+    art_insert_no_replace(t, converted.get_value(), {v, (unsigned)vlen}, fc);
 
     return ValkeyModule_ReplyWithString(ctx,Constants.OK);
 }
@@ -723,7 +727,7 @@ int cmd_STATS(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
 
     long row_count = 0;
     art_statistics as = art::get_statistics();
-    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
+    auto vbytes = art::get_node_allocator().get_bytes_allocated() + art::get_leaf_allocation().get_bytes_allocated();
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
@@ -898,7 +902,7 @@ int cmd_VACUUM(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
     compressed_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    size_t result = art::get_leaf_compression().vacuum();
+    size_t result = art::get_leaf_allocation().vacuum();
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)result);
 }
 
@@ -907,7 +911,7 @@ int cmd_HEAPBYTES(ValkeyModuleCtx* ctx, ValkeyModuleString**, int argc)
     //compressed_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);;
-    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
+    auto vbytes = art::get_node_allocator().get_bytes_allocated() + art::get_leaf_allocation().get_bytes_allocated();
 
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)heap::allocated + vbytes);
 }

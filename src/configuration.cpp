@@ -118,8 +118,8 @@ static int SetUseVMMemory(const char*unused_arg, ValkeyModuleString* val, void*u
 
 static int ApplyUseVMMemory(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
 {
-    art::get_leaf_compression().set_opt_use_vmm(record.use_vmm_memory);
-    art::get_node_compression().set_opt_use_vmm(record.use_vmm_memory);
+    art::get_leaf_allocation().set_opt_use_vmm(record.use_vmm_memory);
+    art::get_node_allocator().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;
 }
 
@@ -149,8 +149,8 @@ static int SetCompressionType(const char*unused_arg, ValkeyModuleString* val, vo
 
 static int ApplyCompressionType(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
 {
-    art::get_leaf_compression().set_opt_enable_compression(art::get_compression_enabled());
-    art::get_node_compression().set_opt_enable_compression(art::get_compression_enabled());
+    art::get_leaf_allocation().set_opt_enable_compression(art::get_compression_enabled());
+    art::get_node_allocator().set_opt_enable_compression(art::get_compression_enabled());
     return VALKEYMODULE_OK;
 }
 
@@ -372,8 +372,8 @@ static int SetEnablePageTrace(const char*unused_arg, ValkeyModuleString* val, vo
 static int ApplyEnablePageTrace(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
 {
     std::unique_lock lock(config_mutex);
-    art::get_leaf_compression().set_opt_trace_page(record.log_page_access_trace);
-    art::get_node_compression().set_opt_trace_page(record.log_page_access_trace);
+    art::get_leaf_allocation().set_opt_trace_page(record.log_page_access_trace);
+    art::get_node_allocator().set_opt_trace_page(record.log_page_access_trace);
     return VALKEYMODULE_OK;
 }
 

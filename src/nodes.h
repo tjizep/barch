@@ -9,7 +9,7 @@
 #include "valkeymodule.h"
 
 #include <array>
-#include "compress.h"
+#include "virtual_allocation.h"
 #include "value_type.h"
 #include "keyspec.h"
 
@@ -76,8 +76,8 @@ namespace art
 
     void free_leaf_node(art::leaf* l, compressed_address logical);
     typedef compressed_address logical_leaf;
-    extern compress& get_leaf_compression();
-    extern compress& get_node_compression();
+    extern virtual_allocation& get_leaf_allocation();
+    extern virtual_allocation& get_node_allocator();
 
     struct node_ptr_storage
     {
@@ -153,7 +153,7 @@ namespace art
         {
         }
 
-        node_ptr_t(compressed_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl)
+        node_ptr_t(compressed_address cl) : is_leaf(true), resolver(&get_leaf_allocation()), logical(cl)
         {
         }
 
@@ -167,7 +167,7 @@ namespace art
             return storage.null();
         }
 
-        compress* resolver{nullptr};
+        virtual_allocation* resolver{nullptr};
         compressed_address logical{};
         node_ptr_storage storage{};
 
@@ -190,7 +190,7 @@ namespace art
         void set(const logical_leaf& lf)
         {
             logical = lf;
-            if (!resolver) resolver = &get_leaf_compression();
+            if (!resolver) resolver = &get_leaf_allocation();
             is_leaf = true;
         }
 
@@ -390,7 +390,7 @@ namespace art
             {
                 if (!dcache || last_ticker != page_modifications::get_ticker(address.page()))
                 {
-                    dcache = get_node_compression().modify<T>(address);
+                    dcache = get_node_allocator().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
                     is_reader = 0x00;
 
@@ -404,7 +404,7 @@ namespace art
 
                 if (is_reader || !dcache || last_ticker != page_modifications::get_ticker(address.page()))
                 {
-                    dcache = get_node_compression().modify<T>(address);
+                    dcache = get_node_allocator().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
                     is_reader = 0x00;
 
@@ -494,7 +494,6 @@ namespace art
         [[nodiscard]] virtual node_ptr_storage get_storage() const = 0;
         [[nodiscard]] virtual compressed_address create_data() = 0;
         virtual void free_data() = 0;
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size) const  = 0;
         [[nodiscard]] virtual bool check_data() const = 0;
 
     };

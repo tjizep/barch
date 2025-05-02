@@ -18,7 +18,7 @@ art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl,
     size_t leaf_size = sol + key_len + ttl_size + 1 + val_len;
     // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
     compressed_address logical;
-    auto ldata = get_leaf_compression().new_address(logical,leaf_size);
+    auto ldata = get_leaf_allocation().new_address(logical,leaf_size);
     auto* l = new(ldata) leaf(key_len, val_len, ttl, is_volatile);
     ++statistics::leaf_nodes;
     l->set_key(key);
@@ -35,7 +35,7 @@ void art::free_leaf_node(art::leaf* l, compressed_address logical)
 {
     if (l == nullptr) return;
     l->set_deleted();
-    get_leaf_compression().free(logical, l->byte_size());
+    get_leaf_allocation().free(logical, l->byte_size());
     --statistics::leaf_nodes;
 }
 
@@ -69,7 +69,7 @@ static art::node* make_node(art::node_ptr_storage& ptr, compressed_address a, ar
 
 art::node_ptr art::resolve_read_node(compressed_address address)
 {
-    auto* node = get_node_compression().read<node_data>(address);
+    auto* node = get_node_allocator().read<node_data>(address);
     node_ptr_storage ptr;
     if (node == nullptr)
     {
@@ -89,10 +89,9 @@ art::node_ptr art::resolve_read_node(compressed_address address)
         abort_with("unknown or invalid node type");
     }
 }
-
 art::node_ptr art::resolve_write_node(compressed_address address)
 {
-    auto* node = get_node_compression().modify<node_data>(address);
+    auto* node = get_node_allocator().modify<node_data>(address);
     node_ptr_storage ptr;
     switch (node->type)
     {
@@ -210,7 +209,7 @@ void art::tree::run_defrag()
     auto fc = [](const node_ptr& unused(n)) -> void
     {
     };
-    auto& lc = get_leaf_compression();
+    auto& lc = get_leaf_allocation();
 
 
     try
@@ -244,7 +243,7 @@ void art::tree::run_defrag()
                     if (l->deleted()) return;
                     size_t c1 = this->size;
                     options.ttl = l->ttl();
-                    art_insert(this, options, l->get_key(), l->get_value(), fc);
+                    art_insert(this, l->get_key(), l->get_value(), fc);
                     if (c1 + 1 != this->size)
                     {
                         abort_with("key not added");
@@ -285,14 +284,14 @@ void abstract_eviction(art::tree* t,
 void abstract_lru_eviction(art::tree* t, const std::function<bool(const art::leaf* l)>& predicate)
 {
     if (heap::allocated < art::get_max_module_memory()) return;
-    auto& lc = art::get_leaf_compression();
+    auto& lc = art::get_leaf_allocation();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 
 void abstract_lfu_eviction(art::tree* t, const std::function<bool(const art::leaf* l)>& predicate)
 {
     if (heap::allocated < art::get_max_module_memory()) return;
-    auto& lc = art::get_leaf_compression();
+    auto& lc = art::get_leaf_allocation();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 

@@ -4,6 +4,46 @@
 
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 
+## Whats New (2 May 2025)
+### Ordered Set API's
+
+All are O(1) (+N where applicable) time except ZRANK which is O(m) ZFASTRANK is a O(1) replacement.
+Not all flags on ZADD are supported yet except XX and NX.
+
+B.ZPOPMIN,B.ZPOPMAX, B.ZADD, B.ZREM, B.ZCOUNT, B.ZCARD, B.ZDIFF, B.ZDIFFSTORE, B.ZINTERSTORE, B.ZINCRBY, B.ZREMRANGEBYLEX, B.ZINTERCARD, B.ZINTER, B.ZRANGE, B.ZREVRANGE, B.ZRANGEBYSCORE, B.ZREVRANGEBYSCORE, B.ZREVRANGEBYLEX, B.ZRANGEBYLEX, B.ZRANK, B.ZFASTRANK
+
+### Hash Set Functions added
+
+All are O(1) time
+
+B.HSET, B.HGETDEL, B.HGETEX, B.HMSET, B.HEXPIRE, B.HDEL, B.HINCRBY, B.HINCRBYFLOAT, B.HGET, B.HTTL, B.HLEN, B.HEXPIRETIME, B.HMGET, B.HGETALL, B.HKEYS, B.HEXISTS
+Other functions
+
+BSIZE is replaced by B.SIZE
+B.STATS is used for statistics about the internal data structures
+
+### Notes on ZFASTRANK
+
+ZFastRank employs a newly developed constant time algorithm for determining rank in a sorted or ordered set.
+The algorithm makes use of trace paths and cumulative nodes to calculate the node count between arbitrary boundaries in constant time on ART's (Adaptive Radix Trees).
+This algorithm is currently unknown to academia or other entities.
+
+### Benchmarks
+Barch ZADD benchmark
+```
+./valkey-benchmark -t b.zadd -r 10000000 -n 40000000 -P 16 -q
+B.ZADD: 280117.94 requests per second, p50=2.935 msec
+```
+Valkey ZADD benchmark
+```
+./valkey-benchmark -t zadd -r 10000000 -n 40000000 -P 16 -q
+ZADD: 176270.47 requests per second, p50=4.647 msec
+```
+Barch has on average 80% less latency the difference increases with key count and requests
+
+
+
+
 # Features
 1. Ordered: minimum, lower-bound and maximum operations are constant time
 2. Low memory footprint: Half that of standard hash map while providing similar single threaded latency 

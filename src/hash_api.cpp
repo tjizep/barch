@@ -52,7 +52,7 @@ int cmd_HSET(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
         art::value_type key = query.create();
         art::value_type val = {v, (unsigned)vlen};
 
-        art_insert(get_art(), key, val, fc);
+        art_insert(get_art(), {}, key, val, fc);
         query.pop_back();
         ++responses;
     }

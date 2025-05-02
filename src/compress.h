@@ -353,7 +353,7 @@ struct free_list
 };
 
 
-struct virtual_allocation
+struct compress
 {
     enum
     {
@@ -361,16 +361,16 @@ struct virtual_allocation
         compression_level = 1
     };
 
-    virtual_allocation() = default;
+    compress() = default;
 
-    explicit virtual_allocation(bool opt_enable_compression, bool opt_enable_lru, std::string name):
+    explicit compress(bool opt_enable_compression, bool opt_enable_lru, std::string name):
         opt_enable_compression(opt_enable_compression), opt_enable_lru(opt_enable_lru), name(std::move(name))
     {
         opt_page_trace = art::get_log_page_access_trace();
     };
-    virtual_allocation(const virtual_allocation&) = delete;
+    compress(const compress&) = delete;
 
-    ~virtual_allocation()
+    ~compress()
     {
         threads_exit = true;
         if (tpoll.joinable())
@@ -412,7 +412,7 @@ private:
     size_t last_created_page{};
     uint8_t* last_page_ptr{};
 
-    virtual_allocation& operator=(const virtual_allocation& t)
+    compress& operator=(const compress& t)
     {
         if (this == &t) return *this;
         return *this;

@@ -587,6 +587,30 @@ namespace art
             }
             return {};
         }
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size ) const
+        {
+            size = 0;
+            return 0;
+            unsigned r = start;
+            auto& dat = nd();
+            unsigned last_leaf = 256;
+
+            for (; r < 256; ++r)
+            {
+                if (dat.types[r] != 0)
+                {
+
+                    if (dat.types[r] == non_leaf_type)
+                        return last_leaf < 256 ? dat.keys[last_leaf] - 1 : 256;
+                    ++size;
+                    last_leaf = r;
+                }
+            }
+            if (last_leaf < 256)
+                return dat.keys[last_leaf] - 1;
+            return 256;
+
+        }
     };
 
     typedef node48<int32_t> node48_4;
@@ -758,6 +782,29 @@ namespace art
             }
             return {};
         }
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size) const
+        {
+            unsigned r = start;
+            auto& dat = nd();
+            unsigned last_leaf = 256;
+            size = 0;
+            for (; r < 256; ++r)
+            {
+                if (dat.types[r] != 0)
+                {
+
+                    if (dat.types[r] == non_leaf_type)
+                        return last_leaf;
+                    ++size;
+                    last_leaf = r;
+                }
+            }
+            return last_leaf;
+            //r = simd::count_chars(dat.types+start, size,leaf_type);
+            //if ( simd::count_chars(dat.types+start,size,non_leaf_type)>0)
+            //    return 0;
+            //return r;
+        };
     };
 
     typedef node256<int32_t> node256_4;

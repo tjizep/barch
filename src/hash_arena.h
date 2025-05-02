@@ -5,7 +5,7 @@
 #ifndef HASH_ARENA_H
 #define HASH_ARENA_H
 #include "storage.h"
-#include "compressed_address.h"
+#include "logical_address.h"
 #include <fstream>
 #include <page_modifications.h>
 #include <ankerl/unordered_dense.h>
@@ -253,7 +253,7 @@ namespace arena {
             }
             for (size_t to = 1; to < top; ++to)
             {
-                if (is_free(to) && !compressed_address::is_null_base(to))
+                if (is_free(to) && !logical_address::is_null_base(to))
                 {
                     last_allocated = to;
                     recover_free(to);
@@ -464,7 +464,7 @@ namespace arena {
             }
 
         }
-        uint8_t* get_alloc_page_data(compressed_address r,size_t size) {
+        uint8_t* get_alloc_page_data(logical_address r,size_t size) {
             // page size must be a power of two
             size_t page_pos = r.page() * page_size;
             size_t offset = r.offset();
@@ -476,7 +476,7 @@ namespace arena {
             }
             return page_data + page_pos + r.offset();
         }
-        [[nodiscard]] uint8_t* get_page_data(compressed_address r) const {
+        [[nodiscard]] uint8_t* get_page_data(logical_address r) const {
             size_t page_pos = r.page()*page_size;
             size_t offset = r.offset();
             if (page_pos + offset > page_data_size) {
@@ -577,11 +577,11 @@ namespace arena {
             return main.load(filename, extra);
         };
 
-        uint8_t* get_alloc_page_data(compressed_address r,size_t size) {
+        uint8_t* get_alloc_page_data(logical_address r,size_t size) {
             return main.get_alloc_page_data(r,size);
         }
 
-        [[nodiscard]] uint8_t* get_page_data(compressed_address r) const {
+        [[nodiscard]] uint8_t* get_page_data(logical_address r) const {
             return main.get_page_data(r);
         }
         void set_opt_use_vmm(bool use_vmm) {

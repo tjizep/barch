@@ -24,7 +24,7 @@
 
 #include "ioutil.h"
 #include "configuration.h"
-#include "compressed_address.h"
+#include "logical_address.h"
 #include "constants.h"
 #include "storage.h"
 #include "hash_arena.h"
@@ -54,7 +54,7 @@ struct free_page
 {
     free_page() = default;
 
-    explicit free_page(compressed_address p) : page(p.page())
+    explicit free_page(logical_address p) : page(p.page())
     {
     };
     heap::vector<PageSizeType> offsets{}; // within page
@@ -65,11 +65,11 @@ struct free_page
         return offsets.empty();
     }
 
-    compressed_address pop()
+    logical_address pop()
     {
         if (empty())
         {
-            return compressed_address{0};
+            return logical_address{0};
         }
         PageSizeType r = offsets.back();
         if (r >= page_size)
@@ -166,7 +166,7 @@ struct free_bin
                 auto& p = pages.at(at - 1);
                 for (auto o : p.offsets)
                 {
-                    compressed_address ad{page, o};
+                    logical_address ad{page, o};
                     r.push_back(ad.address());
                 }
             }
@@ -190,7 +190,7 @@ struct free_bin
         return r;
     }
 
-    void add(compressed_address address, unsigned s)
+    void add(logical_address address, unsigned s)
     {
         if (s != size)
         {
@@ -212,7 +212,7 @@ struct free_bin
         pages[page].push(address.offset());
     }
 
-    compressed_address pop(unsigned s)
+    logical_address pop(unsigned s)
     {
         if (s != size)
         {
@@ -220,21 +220,21 @@ struct free_bin
         }
         if (pages.empty())
         {
-            return compressed_address(0);
+            return logical_address(0);
         }
         auto& p = pages.back();
         if (p.empty())
         {
             page_index[p.page] = 0;
             pages.pop_back();
-            return compressed_address(0);
+            return logical_address(0);
         }
         if (page_index[p.page] == 0)
         {
-            return compressed_address(0);
+            return logical_address(0);
         }
 
-        compressed_address address = p.pop();
+        logical_address address = p.pop();
         if (p.empty())
         {
             page_index[p.page] = 0;
@@ -261,7 +261,7 @@ struct free_list
         }
     }
 
-    void inner_add(compressed_address address, unsigned size)
+    void inner_add(logical_address address, unsigned size)
     {
         if (size >= free_bins.size())
         {
@@ -286,7 +286,7 @@ struct free_list
         added += size;
     }
 
-    void add(compressed_address address, unsigned size)
+    void add(logical_address address, unsigned size)
     {
         inner_add(address, size);
     }
@@ -321,15 +321,15 @@ struct free_list
         }
     }
 
-    compressed_address get(unsigned size)
+    logical_address get(unsigned size)
     {
         if (size >= free_bins.size())
         {
-            return compressed_address{0};
+            return logical_address{0};
         }
-        if (!added) return compressed_address{0};
+        if (!added) return logical_address{0};
 
-        compressed_address r = free_bins[size].pop(size);
+        logical_address r = free_bins[size].pop(size);
         if (!r.null())
         {
             if (added < size)
@@ -353,7 +353,7 @@ struct free_list
 };
 
 
-struct compress
+struct logical_allocator
 {
     enum
     {
@@ -361,16 +361,16 @@ struct compress
         compression_level = 1
     };
 
-    compress() = default;
+    logical_allocator() = default;
 
-    explicit compress(bool opt_enable_compression, bool opt_enable_lru, std::string name):
+    explicit logical_allocator(bool opt_enable_compression, bool opt_enable_lru, std::string name):
         opt_enable_compression(opt_enable_compression), opt_enable_lru(opt_enable_lru), name(std::move(name))
     {
         opt_page_trace = art::get_log_page_access_trace();
     };
-    compress(const compress&) = delete;
+    logical_allocator(const logical_allocator&) = delete;
 
-    ~compress()
+    ~logical_allocator()
     {
         threads_exit = true;
         if (tpoll.joinable())
@@ -394,8 +394,8 @@ private:
 
     bool threads_exit = false;
     size_t last_page_allocated{0};
-    compressed_address arena_head{0};
-    compressed_address highest_reserve_address{0};
+    logical_address arena_head{0};
+    logical_address highest_reserve_address{0};
     uint64_t last_heap_bytes = 0;
     uint64_t release_counter = 0;
     uint64_t ticker = 1;
@@ -412,7 +412,7 @@ private:
     size_t last_created_page{};
     uint8_t* last_page_ptr{};
 
-    compress& operator=(const compress& t)
+    logical_allocator& operator=(const logical_allocator& t)
     {
         if (this == &t) return *this;
         return *this;
@@ -469,14 +469,14 @@ private:
 
 
 
-    [[nodiscard]] static bool is_null_base(const compressed_address& at)
+    [[nodiscard]] static bool is_null_base(const logical_address& at)
     {
         return at.is_null_base();
     }
 
     [[nodiscard]] static bool is_null_base(size_t at)
     {
-        return compressed_address::is_null_base(at);
+        return logical_address::is_null_base(at);
     }
 
     [[nodiscard]] size_t last_block() const
@@ -574,7 +574,7 @@ private:
         return r;
     }
 
-    uint8_t* basic_resolve(compressed_address at, bool modify = false)
+    uint8_t* basic_resolve(logical_address at, bool modify = false)
     {
         if (opt_page_trace)
         {
@@ -613,13 +613,13 @@ private:
 
     }
 
-    void invalid(compressed_address at) const
+    void invalid(logical_address at) const
     {
         if (!opt_validate_addresses) return;
         valid(at);
     }
 
-    void valid(compressed_address at) const
+    void valid(logical_address at) const
     {
         if (!opt_validate_addresses) return;
 
@@ -693,7 +693,7 @@ public:
     {
         return allocated;
     }
-    void free(compressed_address at, size_t sz)
+    void free(logical_address at, size_t sz)
     {
 
         size_t size = sz + test_memory + allocation_padding;
@@ -829,7 +829,7 @@ public:
     }
 
     template <typename T>
-    T* read(compressed_address at)
+    T* read(logical_address at)
     {
 
         if (at.null()) return nullptr;
@@ -839,7 +839,7 @@ public:
     }
 
     template <typename T>
-    T* modify(compressed_address at)
+    T* modify(logical_address at)
     {
 
         if (at.null()) return nullptr;
@@ -848,12 +848,12 @@ public:
         uint8_t* d = basic_resolve(at, true);
         return (T*)d;
     }
-    compressed_address new_address(size_t sz) {
-        compressed_address r;
+    logical_address new_address(size_t sz) {
+        logical_address r;
         new_address(r,sz);
         return r;
     }
-    uint8_t* new_address(compressed_address& r,size_t sz)
+    uint8_t* new_address(logical_address& r,size_t sz)
     {
 
         size_t size = sz + test_memory + allocation_padding;
@@ -907,7 +907,7 @@ public:
             abort();
         }
         last_page_allocated = at.first;
-        compressed_address ca(at.first, at.second.write_position);
+        logical_address ca(at.first, at.second.write_position);
         at.second.write_position += size;
         at.second.size++;
         //at.second.modifications++;

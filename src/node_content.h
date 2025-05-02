@@ -111,7 +111,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_write_node(compressed_address((int64_t)value + base));
+            return resolve_write_node(logical_address((int64_t)value + base));
         }
 
         [[nodiscard]] node_ptr get_node() const
@@ -124,7 +124,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_read_node(compressed_address((int64_t)value + base));
+            return resolve_read_node(logical_address((int64_t)value + base));
         }
 
         [[nodiscard]] node_ptr cget() const
@@ -137,7 +137,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_read_node(compressed_address((int64_t)value + base));
+            return resolve_read_node(logical_address((int64_t)value + base));
         }
 
         encoded_element& operator=(const node* ptr)
@@ -146,7 +146,7 @@ namespace art
             return *this;
         }
 
-        encoded_element& operator=(const compressed_address ptr)
+        encoded_element& operator=(const logical_address ptr)
         {
             set_leaf(ptr);
             return *this;
@@ -267,7 +267,7 @@ namespace art
             return this;
         }
 
-        compressed_address create_data() final
+        logical_address create_data() final
         {
             address = get_node_compression().new_address(alloc_size());
             encoded_data* r = get_node_compression().modify<encoded_data>(address);
@@ -327,7 +327,7 @@ namespace art
             return *this;
         }
 
-        void from(compressed_address address, node_data* data)
+        void from(logical_address address, node_data* data)
         {
             set_lazy<IntPtrType, node_type>(address, data);
         };
@@ -341,7 +341,7 @@ namespace art
         encoded_node_content(const encoded_node_content& content) = default;
         encoded_node_content& operator=(const encoded_node_content&) = delete;
 
-        [[nodiscard]] compressed_address get_address() const final
+        [[nodiscard]] logical_address get_address() const final
         {
             return address;
         }

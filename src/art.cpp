@@ -7,13 +7,13 @@
 #include "art.h"
 #include "valkeymodule.h"
 #include "statistics.h"
-#include "compress.h"
+#include "logical_allocator.h"
 #include "configuration.h"
 #include "glob.h"
 #include "keys.h"
 #include "logger.h"
-static compress* node_compression = nullptr;
-static compress* leaf_compression = nullptr;
+static logical_allocator* node_compression = nullptr;
+static logical_allocator* leaf_compression = nullptr;
 
 bool art::has_leaf_compression()
 {
@@ -27,7 +27,7 @@ bool art::has_node_compression()
 
 bool art::init_leaf_compression()
 {
-    leaf_compression = new(heap::allocate<compress>(1)) compress(get_compression_enabled(),
+    leaf_compression = new(heap::allocate<logical_allocator>(1)) logical_allocator(get_compression_enabled(),
                                                                  get_evict_allkeys_lru() || get_evict_volatile_lru(),
                                                                  "leaf");
     return leaf_compression != nullptr;
@@ -37,7 +37,7 @@ void art::destroy_node_compression()
 {
     if (node_compression != nullptr)
     {
-        node_compression->~compress();
+        node_compression->~logical_allocator();
         heap::free(node_compression);
         node_compression = nullptr;
     }
@@ -47,7 +47,7 @@ void art::destroy_leaf_compression()
 {
     if (leaf_compression != nullptr)
     {
-        leaf_compression->~compress();
+        leaf_compression->~logical_allocator();
         heap::free(leaf_compression);
         leaf_compression = nullptr;
     }
@@ -55,11 +55,11 @@ void art::destroy_leaf_compression()
 
 bool art::init_node_compression()
 {
-    node_compression = new(heap::allocate<compress>(1))compress(get_compression_enabled(), false, "node");
+    node_compression = new(heap::allocate<logical_allocator>(1))logical_allocator(get_compression_enabled(), false, "node");
     return node_compression != nullptr;
 }
 
-compress& art::get_leaf_compression()
+logical_allocator& art::get_leaf_compression()
 {
     if (!has_leaf_compression())
     {
@@ -68,7 +68,7 @@ compress& art::get_leaf_compression()
     return *leaf_compression;
 };
 
-compress& art::get_node_compression()
+logical_allocator& art::get_node_compression()
 {
     if (!has_node_compression())
     {
@@ -1911,7 +1911,7 @@ bool art::tree::save()
         stats_to_stream(of);
 
 
-        auto root = compressed_address(t->root.logical);
+        auto root = logical_address(t->root.logical);
         writep(of, root);
         writep(of, t->root.is_leaf);
         writep(of, t->size);
@@ -1949,7 +1949,7 @@ bool art::tree::load()
 {
     std::lock_guard guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
-    compressed_address root;
+    logical_address root;
     bool is_leaf = false;
     // save stats in the leaf storage
     auto load_stats_and_root = [&](std::ifstream& in)

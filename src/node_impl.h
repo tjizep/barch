@@ -26,12 +26,12 @@ namespace art
 
         node4_v() = default;
 
-        explicit node4_v(compressed_address address)
+        explicit node4_v(logical_address address)
         {
             node4_v::from(address);
         }
 
-        explicit node4_v(compressed_address address, node_data* data)
+        explicit node4_v(logical_address address, node_data* data)
         {
             node4_v::from(address, data);
         }
@@ -193,12 +193,12 @@ namespace art
 
         node16_v() = default;
 
-        explicit node16_v(compressed_address address)
+        explicit node16_v(logical_address address)
         {
             node16_v::from(address);
         }
 
-        explicit node16_v(compressed_address address, node_data* data)
+        explicit node16_v(logical_address address, node_data* data)
         {
             node16_v::from(address, data);
         }
@@ -366,12 +366,12 @@ namespace art
         using this_type::index;
         node48() = default;
 
-        explicit node48(compressed_address address)
+        explicit node48(logical_address address)
         {
             node48::from(address);
         }
 
-        explicit node48(compressed_address address, node_data* data)
+        explicit node48(logical_address address, node_data* data)
         {
             node48::from(address, data);
         }
@@ -632,12 +632,12 @@ namespace art
 
         node256() = default;
 
-        explicit node256(compressed_address address)
+        explicit node256(logical_address address)
         {
             node256::from(address);
         }
 
-        explicit node256(compressed_address address, node_data* data)
+        explicit node256(logical_address address, node_data* data)
         {
             node256::from(address, data);
         }

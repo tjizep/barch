@@ -17,7 +17,7 @@ art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl,
     unsigned sol = sizeof(leaf);
     size_t leaf_size = sol + key_len + ttl_size + 1 + val_len;
     // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
-    compressed_address logical;
+    logical_address logical;
     auto ldata = get_leaf_compression().new_address(logical,leaf_size);
     auto* l = new(ldata) leaf(key_len, val_len, ttl, is_volatile);
     ++statistics::leaf_nodes;
@@ -31,7 +31,7 @@ art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl,
 }
 
 
-void art::free_leaf_node(art::leaf* l, compressed_address logical)
+void art::free_leaf_node(art::leaf* l, logical_address logical)
 {
     if (l == nullptr) return;
     l->set_deleted();
@@ -54,7 +54,7 @@ void art::free_node(art::node_ptr n)
  * initializes to zero and sets the type.
  */
 template <typename Type4, typename Type8>
-static art::node* make_node(art::node_ptr_storage& ptr, compressed_address a, art::node_data* node)
+static art::node* make_node(art::node_ptr_storage& ptr, logical_address a, art::node_data* node)
 {
     if (node->pointer_size == 4)
     {
@@ -67,7 +67,7 @@ static art::node* make_node(art::node_ptr_storage& ptr, compressed_address a, ar
     abort_with("invalid pointer size");
 }
 
-art::node_ptr art::resolve_read_node(compressed_address address)
+art::node_ptr art::resolve_read_node(logical_address address)
 {
     auto* node = get_node_compression().read<node_data>(address);
     node_ptr_storage ptr;
@@ -90,7 +90,7 @@ art::node_ptr art::resolve_read_node(compressed_address address)
     }
 }
 
-art::node_ptr art::resolve_write_node(compressed_address address)
+art::node_ptr art::resolve_write_node(logical_address address)
 {
     auto* node = get_node_compression().modify<node_data>(address);
     node_ptr_storage ptr;

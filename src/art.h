@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include "nodes.h"
-#include "compress.h"
+#include "logical_allocator.h"
 #include "keyspec.h"
 #include "value_type.h"
 #include "vector_stream.h"

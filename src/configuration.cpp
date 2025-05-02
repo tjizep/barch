@@ -24,11 +24,13 @@ static std::string active_defrag{};
 static std::string log_page_access_trace{};
 static std::string save_interval{};
 static std::string max_modifications_before_save{};
+static std::string use_vmm_mem{};
 
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
 };
 static std::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
+static std::vector<std::string> valid_use_vmm_mem = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 static std::vector<std::string> valid_defrag = {"on", "true", "off", "yes", "no", "null", "nil"};
 template<typename VT>
 bool check_type(const std::string& et, const VT& valid)
@@ -88,6 +90,36 @@ static int SetMaxMemoryBytes(const char*unused_arg, ValkeyModuleString* val, voi
 
 static int ApplyMaxMemoryRatio(ValkeyModuleCtx*unused(ctx), void*unused(priv), ValkeyModuleString**unused(vks))
 {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString* GetUseVMMemory(const char*unused_arg, void*unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, use_vmm_mem.c_str(), use_vmm_mem.length());
+}
+
+static int SetUseVMMemory(const char*unused_arg, ValkeyModuleString* val, void*unused_arg,
+                              ValkeyModuleString**unused_arg)
+{
+    std::unique_lock lock(config_mutex);
+    std::string test_use_vmm_memory = ValkeyModule_StringPtrLen(val, nullptr);
+    std::transform(test_use_vmm_memory.begin(), test_use_vmm_memory.end(), test_use_vmm_memory.begin(),
+                   ::tolower);
+
+    if (!check_type(test_use_vmm_memory, valid_use_vmm_mem))
+    {
+        return VALKEYMODULE_ERR;
+    }
+    use_vmm_mem = test_use_vmm_memory;
+    record.use_vmm_memory = (use_vmm_mem == "on" || use_vmm_mem == "true" || use_vmm_mem == "yes");
+    return VALKEYMODULE_OK;
+}
+
+static int ApplyUseVMMemory(ValkeyModuleCtx*unused_arg, void*unused_arg, ValkeyModuleString**unused_arg)
+{
+    art::get_leaf_compression().set_opt_use_vmm(record.use_vmm_memory);
+    art::get_node_compression().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;
 }
 
@@ -404,15 +436,18 @@ int art::register_valkey_configuration(ValkeyModuleCtx* ctx)
     ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "360000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "3600000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "1300000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "43000000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxModificationsBeforeSave, SetMaxModificationsBeforeSave,
                                              ApplyMaxModificationsBeforeSave, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "no", VALKEYMODULE_CONFIG_DEFAULT,
+                                         GetUseVMMemory, SetUseVMMemory,
+                                         ApplyUseVMMemory, nullptr);
     return ret;
 }
 
@@ -468,7 +503,12 @@ int art::set_configuration_value(ValkeyModuleString* Name, ValkeyModuleString* V
     }
     else if (name == "log_page_access_trace")
     {
-        return SetEnablePageTrace(nullptr, Value, nullptr, nullptr);
+        auto r = SetEnablePageTrace(nullptr, Value, nullptr, nullptr);
+        if (r == VALKEYMODULE_OK)
+        {
+            return ApplyEnablePageTrace(nullptr, nullptr, nullptr);
+        }
+        return r;
     }
     else
     {
@@ -580,4 +620,8 @@ bool art::get_log_page_access_trace()
 {
     std::unique_lock lock(config_mutex);
     return record.log_page_access_trace;
+}
+bool art::get_use_vmm_memory() {
+    std::unique_lock lock(config_mutex);
+    return record.use_vmm_memory;
 }

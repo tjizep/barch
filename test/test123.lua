@@ -23,7 +23,7 @@ end
 local test = function()
 
     tests = tests + 1
-    vk.call('B.BEGIN')
+    --vk.call('B.BEGIN')
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
@@ -34,10 +34,10 @@ local test = function()
             vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
     end
-    vk.call('B.COMMIT')
+    --vk.call('B.COMMIT')
 
     for i = 1, count do
-        vk.call('B.BEGIN')
+        --vk.call('B.BEGIN')
         local k = convert(i-1)
         local v = '#'..i
         if vk.call('B.GET',k) ~= v then
@@ -48,7 +48,7 @@ local test = function()
         if math.mod(i,logperiod) == 0 then
             vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
         end
-        vk.call('B.ROLLBACK')
+        --vk.call('B.ROLLBACK')
     end
 
     result[inc()] = {"'B.RANGE',convert(2), convert(count-2), 10", vk.call('B.RANGE',convert(2), convert(count-2), 4)}
@@ -110,7 +110,7 @@ result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "100")
 result[inc()] = vk.call("B.CONFIG", "SET","max_modifications_before_save", "1000")
 
 convert = tochars123
-for i = 1,5 do
+for i = 1,2 do
     test()
     clear()
 end

@@ -11,12 +11,12 @@
 namespace art
 {
     template <typename EncodingType>
-    bool ok(const node* n, uintptr_t base)
+    bool ok(const uint64_t n, uintptr_t base)
     {
-        if (n == nullptr) return true;
+        if (n == 0) return true;
         if (sizeof(EncodingType) == sizeof(uintptr_t)) return true;
 
-        auto uval = n->get_address().address();
+        auto uval = n;
 
         int64_t ival = uval - base;
         int64_t imax = i64max<EncodingType>();
@@ -65,6 +65,10 @@ namespace art
             {
                 abort();
             }
+            if (ptr.address() > std::numeric_limits<EncodingType>::max())
+            {
+                abort_with("invalid address");
+            }
             value = ptr.null() ? 0 : ptr.address();
         }
 
@@ -74,7 +78,8 @@ namespace art
             {
                 abort();
             }
-            return logical_leaf(value);
+            auto l = logical_leaf(value);
+            return l;
         }
 
         void set_node(const node* ptr)
@@ -106,7 +111,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_write_node(compressed_address((int64_t)value + base));
+            return resolve_write_node(logical_address((int64_t)value + base));
         }
 
         [[nodiscard]] node_ptr get_node() const
@@ -119,7 +124,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_read_node(compressed_address((int64_t)value + base));
+            return resolve_read_node(logical_address((int64_t)value + base));
         }
 
         [[nodiscard]] node_ptr cget() const
@@ -132,7 +137,7 @@ namespace art
             {
                 return nullptr;
             }
-            return resolve_read_node(compressed_address((int64_t)value + base));
+            return resolve_read_node(logical_address((int64_t)value + base));
         }
 
         encoded_element& operator=(const node* ptr)
@@ -141,7 +146,7 @@ namespace art
             return *this;
         }
 
-        encoded_element& operator=(const compressed_address ptr)
+        encoded_element& operator=(const logical_address ptr)
         {
             set_leaf(ptr);
             return *this;
@@ -193,9 +198,10 @@ namespace art
             return 0;
         }
 
-        [[nodiscard]] bool ok(const node_ptr&) const
+        [[nodiscard]] bool ok(const node_ptr& n) const
         {
-            return true;
+            return n.logical.address() < std::numeric_limits<EncodedType>::max();
+            //return art::ok<EncodedType>(n.logical.address(),get_offset());
         }
 
         ProxyType operator[](unsigned at)
@@ -256,7 +262,12 @@ namespace art
             return *refresh_cache<encoded_data>();
         }
 
-        compressed_address create_data() final
+        node_ptr create_node() {
+            create_data();
+            return this;
+        }
+
+        logical_address create_data() final
         {
             address = get_node_compression().new_address(alloc_size());
             encoded_data* r = get_node_compression().modify<encoded_data>(address);
@@ -316,7 +327,7 @@ namespace art
             return *this;
         }
 
-        void from(compressed_address address, node_data* data)
+        void from(logical_address address, node_data* data)
         {
             set_lazy<IntPtrType, node_type>(address, data);
         };
@@ -330,7 +341,7 @@ namespace art
         encoded_node_content(const encoded_node_content& content) = default;
         encoded_node_content& operator=(const encoded_node_content&) = delete;
 
-        [[nodiscard]] compressed_address get_address() const final
+        [[nodiscard]] logical_address get_address() const final
         {
             return address;
         }
@@ -373,6 +384,23 @@ namespace art
             bool is = nd().types[at] == leaf_type;
             return is;
         }
+        [[nodiscard]] bool check_data() const final {
+            if (node_checks == 0) return true;
+            auto &dat = nd();
+            if (dat.occupants > SIZE) {
+                return false;
+            }
+            if (KEYS == 0 || KEYS == 256) return true;
+
+            uint8_t prev = 0;
+            for (unsigned at = 0; at < dat.occupants; ++at) {
+                if (dat.keys[at] < prev) {
+                    return false;
+                }
+                prev = dat.keys[at];
+            }
+            return true;
+        };
 
         [[nodiscard]] bool has_child(unsigned at) const final
         {
@@ -430,11 +458,15 @@ namespace art
                 // TODO: compress leaf addresses again
                 if (np.is_leaf)
                 {
-                    return nd().leaves.ok(np);
+                    if (!nd().leaves.ok(np)) {
+                        return false;
+                    }
                 }
                 else
                 {
-                    return nd().children.ok(np);
+                    if(!nd().children.ok(np)) {
+                        return false;
+                    }
                 }
             }
             return true;
@@ -445,54 +477,56 @@ namespace art
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
         {
             check_object();
+            auto &dat = nd();
             unsigned i;
-            if (KEYS < data().occupants)
+            if (KEYS < dat.occupants)
             {
-                return data().occupants;
+                return dat.occupants;
             }
             if (operbits & (eq & gt))
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (nd().keys[i] >= c)
+                    if (dat.keys[i] >= c)
                         return i;
                 }
                 if (operbits == (eq & gt)) return data().occupants;
             }
-            if (operbits & (eq & lt))
+            if (operbits & (eq & lt) && KEYS > 0)
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (nd().keys[i] <= c)
+                    if (dat.keys[i] <= c)
                         return i;
                 }
                 if (operbits == (eq & lt)) return data().occupants;
             }
             if (operbits & eq)
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (KEYS > 0 && nd().keys[i] == c)
+                    if (KEYS > 0 && dat.keys[i] == c)
                         return i;
                 }
             }
-            if (operbits & gt)
+            if (operbits & gt && KEYS > 0 )
             {
-                for (i = 0; i < data().occupants; ++i)
+
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (KEYS > 0 && nd().keys[i] > c)
+                    if (dat.keys[i] > c)
                         return i;
                 }
             }
-            if (operbits & lt)
+            if (KEYS > 0 && operbits & lt)
             {
-                for (i = 0; i < data().occupants; ++i)
+                for (i = 0; i < dat.occupants; ++i)
                 {
-                    if (KEYS > 0 && nd().keys[i] < c)
+                    if (dat.keys[i] < c)
                         return i;
                 }
             }
-            return data().occupants;
+            return dat.occupants;
         }
 
         [[nodiscard]] unsigned index(unsigned char c) const override
@@ -513,11 +547,23 @@ namespace art
             return get_child(index(c, operbits));
         }
 
-        [[nodiscard]] unsigned first_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
         {
             check_object();
-            return 0;
+            auto& dat = nd();
+            if (KEYS==0) return {0,0x00};
+            if (dat.occupants==0) return {0,0x00};
+            return {0,dat.keys[0]};
         };
+
+
+        [[nodiscard]] virtual std::pair<unsigned,uint8_t> last_index() const
+        {
+            auto& dat = this->nd();
+            if (KEYS==0) return {0,0x00};
+            if (dat.occupants==0) return {0,0x00};
+            return {dat.occupants - 1, dat.keys[dat.occupants - 1]};
+        }
 
         [[nodiscard]] const unsigned char* get_keys() const override
         {
@@ -567,7 +613,7 @@ namespace art
         {
             check_object();
             if (KEYS < count)
-                abort();
+                return;
             memcpy(nd().keys, other_keys, count);
         }
 
@@ -644,12 +690,18 @@ namespace art
             if (pos < KEYS && KEYS == SIZE)
             {
                 auto& dat = nd();
+                if (dat.types[pos] == non_leaf_type)
+                {
+                    dat.descendants -= get_child(pos)->data().descendants;
+                }
                 memmove(dat.keys + pos, dat.keys + pos + 1, dat.occupants - 1 - pos);
                 memmove(dat.children.data + pos, dat.children.data + pos + 1,
                         (dat.occupants - 1 - pos) * sizeof(ChildElementType));
+
                 remove_type(pos);
                 dat.keys[dat.occupants - 1] = 0;
                 dat.children[dat.occupants - 1] = nullptr;
+
                 --dat.occupants;
             }
             else
@@ -670,6 +722,7 @@ namespace art
             dat.occupants = sd.occupants;
             dat.partial_len = sd.partial_len;
             memcpy(dat.partial, sd.partial, std::min<unsigned>(max_prefix_llength, sd.partial_len));
+            dat.descendants = sd.descendants;
         }
 
         void copy_from(node_ptr s) override
@@ -677,7 +730,7 @@ namespace art
             check_object();
             if (s->data().occupants > SIZE)
             {
-                abort();
+                abort_with("invalid occupant count");
             }
             this->copy_header(s);
             set_keys(s->get_keys(), s->data().occupants);
@@ -696,6 +749,15 @@ namespace art
             n.modify()->copy_from(this);
             free_node(this);
             ref = n;
+            return n;
+        }
+        [[nodiscard]] node_ptr expand_pointers(const children_t& children) override
+        {
+            check_object();
+            if (ok_children(children)) return this;
+            node_ptr n = alloc_8_node_ptr(type());
+            n.modify()->copy_from(this);
+            free_node(this);
             return n;
         }
 

@@ -10,7 +10,7 @@
 #include "module.h"
 // TODO: one day this counters gonna wrap
 static std::atomic<int64_t> counter = art::now() * 1000000;
-#define IX_MEMBER "__mem_"
+#define IX_MEMBER ""
 struct query_pool
 {
 	composite query[max_queries_per_call]{};
@@ -114,9 +114,10 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		return ValkeyModule_ReplyWithError(ctx, "syntax error");
 	}
-	//zspec.LFI = true;
+	zspec.LFI = true;
 	int64_t updated = 0;
 	int64_t fkadded = 0;
+	auto rt = get_art();
 	auto fc = [&](art::node_ptr) -> void
 	{
 		++updated;
@@ -125,7 +126,7 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		if (val.is_leaf)
 		{
-			art_delete(get_art(), val.const_leaf()->get_value());
+			art_delete(rt, val.const_leaf()->get_value());
 
 		}
 		--fkadded;
@@ -136,7 +137,8 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 	{
 		return ValkeyModule_ReplyWithNull(ctx);
 	}
-	auto before = get_art()->size;
+
+	auto before = rt->size;
 	auto container = conversion::convert(key, nlen);
 	for (int n = zspec.fields_start; n < argc; n+=2)
 	{
@@ -158,39 +160,38 @@ int cmd_ZADD(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		auto score = conversion::convert(k, klen, true);
 		auto member = conversion::convert(v, vlen);
 		conversion::comparable_key id {++counter};
-		if (score.ctype() != art::tdouble)
+		if (score.ctype() != art::tfloat && score.ctype() != art::tdouble)
 		{
 			r |= ValkeyModule_ReplyWithNull(ctx);
 			++responses;
 			continue;
 		}
-		art::value_type qkey = cmd_ZADD_q1.create({container,score,member});
-		art::value_type qv = {v, (unsigned)vlen};
+		art::value_type qkey = cmd_ZADD_q1.create({container, score, member});
 		if (zspec.XX)
 		{
-			art::value_type qkey = cmd_ZADD_q1.create({container,score,member});
-			art::update(get_art(), qkey,[&](const art::node_ptr& old) -> art::node_ptr
+			art::value_type qkey = cmd_ZADD_q1.create({container, score,member});
+			art::update(rt, qkey,[&](const art::node_ptr& old) -> art::node_ptr
 			{
 				if (old.null()) return nullptr;
 
 				auto l = old.const_leaf();
-				return art::make_leaf(qkey, qv, l->ttl(), l->is_volatile());
+				return art::make_leaf(qkey, {}, l->ttl(), l->is_volatile());
 			});
 		}else
 		{
 			if (zspec.LFI)
 			{
-				auto member_key = cmd_ZADD_qindex.create({IX_MEMBER ,container, member, score});
-				art_insert(get_art(), {}, member_key, qkey, true, fcfk);
+				auto member_key = cmd_ZADD_qindex.create({IX_MEMBER ,container, member});//, score
+				art_insert(rt, {}, member_key, qkey, true, fcfk);
 				++fkadded;
 			}
-			art_insert(get_art(), {}, qkey, qv, !zspec.NX, fc);
 
+			art_insert(rt, {}, qkey, {}, !zspec.NX, fc);
 
 		}
 		++responses;
 	}
-	auto current = get_art()->size;
+	auto current = rt->size;
 	if (zspec.CH)
 	{
 		ValkeyModule_ReplyWithLongLong(ctx, current - before + updated - fkadded);
@@ -415,7 +416,10 @@ static int ZRANGE(ValkeyModuleCtx* ctx, const art::zrange_spec& spec)
 	while (ai.ok())
 	{
 		auto v = ai.key();
-		if (!v.starts_with(prefix)) break;
+		if (!v.starts_with(prefix))
+		{
+			break;
+		}
 		art::value_type current_comp;
 		if (spec.BYLEX)
 		{
@@ -582,7 +586,14 @@ enum ops
 	intersect = 1,
 	onion = 2
 };
-
+#if 0
+static double rnd(float f) {
+	return std::round((double)f * 100000.0) / 100000.0;
+}
+#endif
+static double rnd(double f) {
+	return f;
+}
 static int ZOPER(
 	ValkeyModuleCtx* ctx,
 	ValkeyModuleString** argv,
@@ -643,7 +654,6 @@ static int ZOPER(
 		{
 			auto v = i.key();
 			if (!v.starts_with(lower)) break;
-
 			auto encoded_number = v.sub(lower.size, numeric_key_size);
 			auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
 			auto number = conversion::enc_bytes_to_dbl(encoded_number);
@@ -715,12 +725,12 @@ static int ZOPER(
 							if (removal)
 							{
 								score_key.create({container,encoded_number,member});
-								member_key.create({IX_MEMBER,container,member,encoded_number});
+								member_key.create({IX_MEMBER,container,member});
 								removed_keys.push_back({score_key,member_key,i.value()});
 							}else
 							{
 								score_key.create({conversion::convert(store),encoded_number,member});
-								member_key.create({IX_MEMBER,conversion::convert(store),member,encoded_number});
+								member_key.create({IX_MEMBER,conversion::convert(store),member});
 								new_keys.push_back({score_key,member_key,i.value()});
 							}
 
@@ -731,13 +741,13 @@ static int ZOPER(
 					break;
 				case art::zops_spec::avg:
 				case art::zops_spec::sum:
-					aggr += number;
+					aggr += rnd(number);
 					break;
 				case art::zops_spec::min:
-					aggr = std::min(number, aggr);
+					aggr = std::min(rnd(number), aggr);
 					break;
 				case art::zops_spec::max:
-					aggr = std::max(number, aggr);
+					aggr = std::max(rnd(number), aggr);
 					break;
 				}
 			}
@@ -1049,19 +1059,74 @@ int cmd_ZRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
 		return ValkeyModule_WrongArity(ctx);
 	}
 
-	query qlower,qupper;
+	composite qlower,qupper;
 	auto container = conversion::convert(c,cl);
-	auto lower_score = conversion::convert(a,al,true);
-	auto upper_score = conversion::convert(b,bl,true);
-	auto lower_key = qlower->create({container,lower_score});
-	auto upper_key = qupper->create({container,upper_score});
-	art::iterator upper(upper_key);
-	art::iterator lower(lower_key);
+	auto lower = conversion::convert(a,al,true);
+	auto upper = conversion::convert(b,bl,true);
+	auto min_key = qlower.create({container,lower});
+	auto max_key = qupper.create({container,upper});
+	if (max_key < min_key)
+	{
+		return ValkeyModule_ReplyWithLongLong(ctx,0);
+	}
+	art::iterator first(min_key);
 
 	int64_t rank = 0;
-	if (upper.ok() && lower.ok())
+	if (first.ok())
 	{
-		rank = lower.distance(upper);
+
+		rank = first.distance(max_key);
+	}
+
+	return ValkeyModule_ReplyWithLongLong(ctx,rank);
+}
+
+int cmd_ZFASTRANK(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc)
+{
+	ValkeyModule_AutoMemory(ctx);
+	compressed_release release;
+	if (argc != 4)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	size_t cl=0,al=0,bl=0 ;
+	const char * c = ValkeyModule_StringPtrLen(argv[1],&cl);
+	if (cl==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	const char * a = ValkeyModule_StringPtrLen(argv[2],&al);
+	if (al==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+	const char * b = ValkeyModule_StringPtrLen(argv[3],&bl);
+	if (bl==0)
+	{
+		return ValkeyModule_WrongArity(ctx);
+	}
+
+	composite qlower,qupper;
+	auto container = conversion::convert(c,cl);
+	auto lower = conversion::convert(a,al,true);
+	auto upper = conversion::convert(b,bl,true);
+	auto min_key = qlower.create({container,lower});
+	auto max_key = qupper.create({container,upper});
+	if (max_key < min_key)
+	{
+		return ValkeyModule_ReplyWithLongLong(ctx,0);
+	}
+
+	art::iterator first(min_key);
+	art::iterator last(max_key);
+
+	int64_t rank = 0;
+	if (first.ok() && last.ok())
+	{
+
+		rank += last.key() == max_key ? 1 : 0;
+		rank += first.fast_distance(last);
+
 	}
 
 	return ValkeyModule_ReplyWithLongLong(ctx,rank);
@@ -1128,6 +1193,9 @@ int add_ordered_api(ValkeyModuleCtx* ctx)
 		return VALKEYMODULE_ERR;
 
 	if (ValkeyModule_CreateCommand(ctx, NAME(ZRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+		return VALKEYMODULE_ERR;
+
+	if (ValkeyModule_CreateCommand(ctx, NAME(ZFASTRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
 		return VALKEYMODULE_ERR;
 
     return VALKEYMODULE_OK;

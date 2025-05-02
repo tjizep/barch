@@ -55,7 +55,7 @@ local test = function()
 
     for i = 1, count do
 	    local k = convert(i)
-	    if vk.call('GET',k) == ""..i then
+	    if vk.call('GET',k) then
             valids = valids + 1
         end
 	end

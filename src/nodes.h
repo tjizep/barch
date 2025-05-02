@@ -9,7 +9,7 @@
 #include "valkeymodule.h"
 
 #include <array>
-#include "compress.h"
+#include "logical_allocator.h"
 #include "value_type.h"
 #include "keyspec.h"
 
@@ -32,11 +32,13 @@ namespace art
 
     enum key_types
     {
-        tinteger = 0,
-        tdouble = 1,
-        tstring = 2,
-        tcomposite = 3,
-        tend = 255,
+        tinteger = 0u,
+        tdouble = 1u,
+        tstring = 2u,
+        tcomposite = 3u,
+        tshort = 4u,
+        tfloat = 5u,
+        tend = 255u,
         tnone = 65536
     };
     struct composite_type
@@ -72,16 +74,16 @@ namespace art
 
     struct leaf;
 
-    void free_leaf_node(art::leaf* l, compressed_address logical);
-    typedef compressed_address logical_leaf;
-    extern compress& get_leaf_compression();
-    extern compress& get_node_compression();
+    void free_leaf_node(art::leaf* l, logical_address logical);
+    typedef logical_address logical_leaf;
+    extern logical_allocator& get_leaf_compression();
+    extern logical_allocator& get_node_compression();
 
     struct node_ptr_storage
     {
-        uint8_t storage[64 - sizeof(size_t)]{};
+        uint8_t storage[node_pointer_storage_size];
         size_t size{};
-        node_ptr_storage() = default;
+        node_ptr_storage() {};
 
         node_ptr_storage(const node_ptr_storage& src)
         {
@@ -151,7 +153,7 @@ namespace art
         {
         }
 
-        node_ptr_t(compressed_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl)
+        node_ptr_t(logical_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl)
         {
         }
 
@@ -165,8 +167,8 @@ namespace art
             return storage.null();
         }
 
-        compress* resolver{nullptr};
-        compressed_address logical{};
+        logical_allocator* resolver{nullptr};
+        logical_address logical{};
         node_ptr_storage storage{};
 
         void set(nullptr_t)
@@ -340,6 +342,7 @@ namespace art
         uint8_t pointer_size = 0;
         uint8_t partial_len = 0;
         uint8_t occupants = 0;
+        uint64_t descendants = 0;
         unsigned char partial[max_prefix_llength]{};
     };
 
@@ -358,17 +361,23 @@ namespace art
             {
                 return parent.null() && child.null() && child_ix == 0;
             }
-            bool operator<(const trace_element& rhs) const
+
+            bool operator!=(const trace_element& rhs) const
             {
-                return child_ix < rhs.child_ix;
+                return parent != rhs.parent || child_ix != rhs.child_ix || child != rhs.child;
             }
             bool operator==(const trace_element& rhs) const
             {
-                return child_ix == rhs.child_ix;
+                return parent == rhs.parent && child_ix == rhs.child_ix && child == rhs.child;
             }
-            bool operator!=(const trace_element& rhs) const
-            {
-                return child_ix != rhs.child_ix;
+            [[nodiscard]] bool valid() const {
+                return !parent.null() && !child.null();
+            }
+            bool operator==(const std::pair<unsigned,uint8_t>& rhs) const {
+                return child_ix == rhs.first && k == rhs.second;
+            }
+            bool operator!=(const std::pair<unsigned,uint8_t>& rhs) const {
+                return !(*this == rhs);
             }
         };
 
@@ -381,19 +390,6 @@ namespace art
             {
                 if (!dcache || last_ticker != page_modifications::get_ticker(address.page()))
                 {
-                    dcache = get_node_compression().read<T>(address);
-                    last_ticker = page_modifications::get_ticker(address.page());
-                    is_reader = 0x01;
-
-                }
-                return (T*)dcache;
-            }
-
-            template <typename T>
-            T* refresh_cache()
-            {
-                if (is_reader || !dcache || last_ticker != page_modifications::get_ticker(address.page()))
-                {
                     dcache = get_node_compression().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
                     is_reader = 0x00;
@@ -402,15 +398,30 @@ namespace art
                 return (T*)dcache;
             }
 
+            template <typename T>
+            T* refresh_cache()
+            {
+
+                if (is_reader || !dcache || last_ticker != page_modifications::get_ticker(address.page()))
+                {
+                    dcache = get_node_compression().modify<T>(address);
+                    last_ticker = page_modifications::get_ticker(address.page());
+                    is_reader = 0x00;
+
+                }
+
+                return (T*)dcache;
+            }
+
             mutable node_data* dcache = nullptr;
             mutable char is_reader = 0x00;
             mutable uint32_t last_ticker = page_modifications::get_ticker(0);
-            compressed_address address{};
+            logical_address address{};
             node_proxy(const node_proxy&) = default;
             node_proxy() = default;
 
             template <typename IntPtrType, uint8_t NodeType>
-            void set_lazy(compressed_address address, node_data* data)
+            void set_lazy(logical_address address, node_data* data)
             {
                 if (address.null())
                 {
@@ -447,18 +458,19 @@ namespace art
         [[nodiscard]] virtual node_ptr find(unsigned char, unsigned operbits) const = 0;
         [[nodiscard]] virtual node_ptr find(unsigned char) const = 0;
         [[nodiscard]] virtual node_ptr last() const = 0;
-        [[nodiscard]] virtual unsigned last_index() const = 0;
+        [[nodiscard]] virtual std::pair<unsigned,uint8_t> last_index() const = 0;
         virtual void remove(node_ptr& ref, unsigned pos, unsigned char key) = 0;
-        virtual void add_child(unsigned char c, node_ptr& ref, node_ptr child) = 0;
+        virtual unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) = 0;
 
-        virtual void add_child_inner(unsigned char, node_ptr)
+        virtual unsigned add_child_inner(unsigned char, node_ptr)
         {
+            return 0;
         }
 
         [[nodiscard]] virtual const unsigned char& get_key(unsigned at) const = 0;
         virtual unsigned char& get_key(unsigned at) = 0;
         unsigned check_prefix(const unsigned char*, unsigned, unsigned) const;
-        [[nodiscard]] virtual unsigned first_index() const = 0;
+        [[nodiscard]] virtual std::pair<unsigned,uint8_t> first_index() const = 0;
         [[nodiscard]] virtual std::pair<trace_element, bool> lower_bound_child(unsigned char c) const = 0;
         [[nodiscard]] virtual trace_element next(const trace_element& te) const = 0;
         [[nodiscard]] virtual trace_element previous(const trace_element& te) const = 0;
@@ -475,24 +487,28 @@ namespace art
         [[nodiscard]] virtual unsigned ptr_size() const = 0;
 
         [[nodiscard]] virtual node_ptr expand_pointers(node_ptr& ref, const children_t& child) = 0;
+        [[nodiscard]] virtual node_ptr expand_pointers(const children_t& child) = 0;
+
         [[nodiscard]] virtual size_t alloc_size() const = 0;
-        [[nodiscard]] virtual compressed_address get_address() const = 0;
+        [[nodiscard]] virtual logical_address get_address() const = 0;
         [[nodiscard]] virtual node_ptr_storage get_storage() const = 0;
-        [[nodiscard]] virtual compressed_address create_data() = 0;
+        [[nodiscard]] virtual logical_address create_data() = 0;
         virtual void free_data() = 0;
         [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size) const  = 0;
+        [[nodiscard]] virtual bool check_data() const = 0;
+
     };
 
     typedef node::node_ptr node_ptr;
     typedef node::trace_element trace_element;
     typedef node::children_t children_t;
-    node_ptr alloc_node_ptr(unsigned nt, const children_t& c);
+    node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const children_t& c);
     node_ptr alloc_8_node_ptr(unsigned nt); // magic 8 ball
-    extern node_ptr resolve_read_node(compressed_address address);
-    extern node_ptr resolve_write_node(compressed_address address);
+    extern node_ptr resolve_read_node(logical_address address);
+    extern node_ptr resolve_write_node(logical_address address);
 
 
-    typedef heap::small_vector<trace_element> trace_list;
+    typedef heap::vector<trace_element> trace_list;
 
     /**
      * Represents a leaf. These are

@@ -101,5 +101,4 @@ assert(#vk.call('B.ZPOPMIN','cbgame')==2)
 assert(vk.call('B.ZCARD','cbgame')==0)
 assert(vk.call('B.ZREMRANGEBYLEX', 'rcgame','a','z') == 3)
 assert(vk.call('B.ZCARD','rcgame')==0)
-
 return {"OK"}

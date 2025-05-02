@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include "nodes.h"
-#include "compress.h"
+#include "logical_allocator.h"
 #include "keyspec.h"
 #include "value_type.h"
 #include "vector_stream.h"
@@ -83,16 +83,35 @@ namespace art
 
     struct tree
     {
+    private:
+        trace_list trace{};
+    public:
         bool mexit = false;
         bool transacted = false;
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
-        art::node_ptr root = nullptr;
+        node_ptr root = nullptr;
         uint64_t size = 0;
         // to support a transaction
-        art::node_ptr save_root = nullptr;
+        node_ptr save_root = nullptr;
         uint64_t save_size = 0;
         vector_stream save_stats{};
         std::shared_mutex save_load_mutex{};
+        bool opt_use_trace = true;
+        node_ptr last_leaf_added {};
+
+
+        void clear_trace() {
+            if (opt_use_trace)
+                trace.clear();
+        }
+        void pop_trace() {
+            if (opt_use_trace)
+                trace.pop_back();
+        }
+        void push_trace(const trace_element& te) {
+            if (opt_use_trace)
+                trace.push_back(te);
+        }
         void start_maintain();
         tree(const tree&) = delete;
 
@@ -109,6 +128,7 @@ namespace art
         void commit();
         void rollback();
         void clear();
+        void update_trace(int direction);
     };
 }
 
@@ -185,7 +205,7 @@ void art_delete(art::tree* t, art::value_type key, const NodeResult& fc);
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-art::node_ptr art_search(art::trace_list& trace, const art::tree* t, art::value_type key);
+art::node_ptr art_search(const art::tree* t, art::value_type key);
 
 /**
  * Returns the minimum valued leaf
@@ -293,11 +313,15 @@ namespace art
         bool update(int64_t ttl);
         [[nodiscard]] bool remove() const;
         [[nodiscard]] int64_t distance(const iterator& other) const;
+        [[nodiscard]] int64_t distance(value_type other, bool traced = false) const;
+        [[nodiscard]] int64_t fast_distance(const iterator& other) const;
+        void log_trace() const;
     };
     node_ptr find(value_type key);
     int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);
     int range(const tree* t, value_type key, value_type key_end, LeafCallBack cb);
     int64_t distance(const tree* t, const trace_list& a, const trace_list& b);
+    int64_t fast_distance(const trace_list& a, const trace_list& b);
 }
 
 

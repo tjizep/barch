@@ -418,8 +418,7 @@ int HGETEX(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc, const std:
             auto converted = conversion::convert(k, klen);
             query.push(converted);
             art::value_type search_key = query.create();
-            art::trace_list trace;
-            art::node_ptr r = art_search(trace, get_art(), search_key);
+            art::node_ptr r = art_search(get_art(), search_key);
             if (r.null())
             {
                 nullreporter();

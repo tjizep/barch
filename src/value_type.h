@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <chrono>
 #include "sastam.h"
+#include "logical_address.h"
 
 namespace art
 {
@@ -19,6 +20,10 @@ namespace art
         value_type() : bytes(nullptr), size(0) {}
         explicit value_type(nullptr_t): bytes(nullptr), size(0)
         {
+        }
+        explicit value_type(const logical_address& value):  bytes((const uint8_t*)&value), size(sizeof(int64_t))
+        {
+
         }
         explicit value_type(const heap::buffer<uint8_t>& value): bytes(value.begin()), size(value.byte_size())
         {
@@ -43,6 +48,10 @@ namespace art
         {
         }
 
+        [[nodiscard]] unsigned empty() const
+        {
+            return size == 0;
+        }
         [[nodiscard]] unsigned length() const
         {
             if (!size) return 0;
@@ -114,7 +123,15 @@ namespace art
             {
                 return bytes[i];
             }
-            throw std::out_of_range("index out of range");
+            abort_with("index out of range");
+        }
+        [[nodiscard]] logical_address as_address() const {
+            if (size == sizeof(logical_address)) {
+                logical_address address;
+                memcpy(&address, bytes, sizeof(logical_address));
+                return address;
+            }
+            return logical_address{};
         }
     };
 }

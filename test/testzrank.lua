@@ -1,22 +1,45 @@
 local vk
 vk = redis
 
-vk.call('B.CLEAR')
 local t = vk.call('B.MILLIS')
-local count = 1000000
+local count = 120000
 local key = 'z'
-for i=1,count do
-    vk.call('B.ZADD', key, i, 'at '..i) --i+2.0, 'second' ,i+3.5, 'third'
+
+if vk.call('B.SIZE') < count then
+    vk.call('B.CLEAR')
+
+    for i=1,count do
+        vk.call('B.ZADD', key, count*math.random(), 'at '..i)
+        vk.call('B.ZADD', key, math.floor(count*math.random()), 'at '..i)
+    end
+    vk.call('B.SAVE')
 end
-local toadd = vk.call('B.MILLIS') - t
-local min = count*0.01
-local max = count*0.9
-t = vk.call('B.MILLIS')
-local zr = vk.call('B.ZRANK',key,min,max)
-local torank = vk.call('B.MILLIS') - t
-local range = vk.call('B.ZRANGE',key,min,max)
-assert(#range==zr)
-local tr = {"toadd",toadd,"torank",torank,zr,vk.call('B.SIZE')}
+local results = {}
+local rcnt = 1
+local function add(tr)
+    results[rcnt] = tr
+    rcnt = rcnt + 1
+end
+
+local failures = 0
+for i=1,1000 do
+    local min = math.floor((count-count/10)*math.random())
+    local max = min + count/10 --count*math.random()--math.floor()
+    local zr = vk.call('B.ZRANK',key,min,max)
+    local zr2 = vk.call('B.ZFASTRANK',key,min,max)
+    if math.abs(zr-zr2) > 0 then
+        local tr = {
+            {"min: "..min},
+            {"max: "..max},
+            {"guess","slow zr : "..zr,"fast zr: "..zr2},
+            {"actual 1: "..zr},
+            {"max - min: "..(max-min)},
+            {"diff",zr2-zr}}
+        add(tr)
+        failures = failures + 1
+    end
+end
 vk.call('B.CLEAR')
-return tr
+assert(failures == 0)
+return failures
 

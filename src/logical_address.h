@@ -6,23 +6,27 @@
 #define COMPRESSED_ADDRESS_H
 #include <limits>
 #include "constants.h"
-struct compressed_address
+struct logical_address
 {
     typedef uint64_t AddressIntType;
-    compressed_address() = default;
-    compressed_address(const compressed_address&) = default;
-    compressed_address& operator=(const compressed_address&) = default;
+    logical_address() = default;
+    logical_address(const logical_address&) = default;
+    logical_address& operator=(const logical_address&) = default;
+    void set_as_ptr(const uint8_t* addr)
+    {
+        this->index = (AddressIntType)addr;
+    }
 
-    explicit compressed_address(size_t index) : index(index)
+    explicit logical_address(size_t index) : index(index)
     {
     }
 
-    compressed_address(size_t p, size_t o)
+    logical_address(size_t p, size_t o)
     {
         from_page_offset(p, o);
     }
 
-    compressed_address& operator =(nullptr_t)
+    logical_address& operator =(nullptr_t)
     {
         index = 0;
         return *this;
@@ -33,17 +37,17 @@ struct compressed_address
         return index == 0;
     }
 
-    bool operator==(const compressed_address& other) const
+    bool operator==(const logical_address& other) const
     {
         return index == other.index;
     }
 
-    bool operator!=(const compressed_address& other) const
+    bool operator!=(const logical_address& other) const
     {
         return index != other.index;
     }
 
-    bool operator<(const compressed_address& other) const
+    bool operator<(const logical_address& other) const
     {
         return index < other.index;
     }
@@ -83,7 +87,7 @@ struct compressed_address
         return index / page_size;
     }
 
-    [[nodiscard]] size_t address() const
+    [[nodiscard]] AddressIntType address() const
     {
         return index;
     }
@@ -107,6 +111,7 @@ struct compressed_address
     {
         return index;
     }
+
 
 private:
     AddressIntType index = 0;

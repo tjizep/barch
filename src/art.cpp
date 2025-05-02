@@ -7,12 +7,13 @@
 #include "art.h"
 #include "valkeymodule.h"
 #include "statistics.h"
-#include "compress.h"
+#include "logical_allocator.h"
 #include "configuration.h"
 #include "glob.h"
+#include "keys.h"
 #include "logger.h"
-static compress* node_compression = nullptr;
-static compress* leaf_compression = nullptr;
+static logical_allocator* node_compression = nullptr;
+static logical_allocator* leaf_compression = nullptr;
 
 bool art::has_leaf_compression()
 {
@@ -26,7 +27,7 @@ bool art::has_node_compression()
 
 bool art::init_leaf_compression()
 {
-    leaf_compression = new(heap::allocate<compress>(1)) compress(get_compression_enabled(),
+    leaf_compression = new(heap::allocate<logical_allocator>(1)) logical_allocator(get_compression_enabled(),
                                                                  get_evict_allkeys_lru() || get_evict_volatile_lru(),
                                                                  "leaf");
     return leaf_compression != nullptr;
@@ -36,7 +37,7 @@ void art::destroy_node_compression()
 {
     if (node_compression != nullptr)
     {
-        node_compression->~compress();
+        node_compression->~logical_allocator();
         heap::free(node_compression);
         node_compression = nullptr;
     }
@@ -46,7 +47,7 @@ void art::destroy_leaf_compression()
 {
     if (leaf_compression != nullptr)
     {
-        leaf_compression->~compress();
+        leaf_compression->~logical_allocator();
         heap::free(leaf_compression);
         leaf_compression = nullptr;
     }
@@ -54,11 +55,11 @@ void art::destroy_leaf_compression()
 
 bool art::init_node_compression()
 {
-    node_compression = new(heap::allocate<compress>(1))compress(get_compression_enabled(), false, "node");
+    node_compression = new(heap::allocate<logical_allocator>(1))logical_allocator(get_compression_enabled(), false, "node");
     return node_compression != nullptr;
 }
 
-compress& art::get_leaf_compression()
+logical_allocator& art::get_leaf_compression()
 {
     if (!has_leaf_compression())
     {
@@ -67,7 +68,7 @@ compress& art::get_leaf_compression()
     return *leaf_compression;
 };
 
-compress& art::get_node_compression()
+logical_allocator& art::get_node_compression()
 {
     if (!has_node_compression())
     {
@@ -148,7 +149,7 @@ int tree_destroy(art::tree* t)
 /**
  * find first not less than
  */
-static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char* key, int key_len, int depth,
+static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char* key, unsigned key_len, unsigned depth,
                                             int* is_equal)
 {
     unsigned char c = 0x00;
@@ -157,7 +158,8 @@ static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char
 
     c = key[std::min(depth, key_len)];
     auto r = n->lower_bound_child(c);
-    *is_equal = r.second;
+    if (is_equal)
+        *is_equal = r.second;
     return r.first;
 }
 
@@ -225,9 +227,9 @@ static art::trace_element last_child_off(art::node_ptr n)
 {
     if (n.null()) return {nullptr, nullptr, 0};
     if (n.is_leaf) return {nullptr, nullptr, 0};
-    unsigned idx = n->last_index();
+    auto idx = n->last_index();
 
-    return {n, n->get_child(idx), idx};
+    return {n, n->get_child(idx.first), idx.first,idx.second};
 }
 
 static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
@@ -254,7 +256,7 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list& trace)
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-art::node_ptr art_search(art::trace_list&, const art::tree* t, art::value_type key)
+art::node_ptr art_search(const art::tree* t, art::value_type key)
 {
     ++statistics::get_ops;
     try
@@ -392,7 +394,7 @@ static art::node_ptr minimum(const art::node_ptr& n)
     // Handle base cases
     if (n.null()) return nullptr;
     if (n.is_leaf) return n;
-    return minimum(n->get_child(n->first_index()));
+    return minimum(n->get_child(n->first_index().first));
 }
 
 /**
@@ -407,7 +409,8 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace);
 static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* t, art::value_type key)
 {
     art::node_ptr n = t->root;
-    int depth = 0, is_equal = 0;
+    unsigned depth = 0;
+    int is_equal = 0;
 
     while (!n.null())
     {
@@ -421,6 +424,11 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
                 n = t->root;
                 continue;
             }
+            while (last_el(trace).child.is_leaf &&
+                    last_el(trace).child.const_leaf()->get_key() < key)
+            {
+                if (!increment_trace(t->root, trace)) return nullptr;
+            }
             return n;
 
         }
@@ -428,36 +436,42 @@ static art::node_ptr inner_lower_bound(art::trace_list& trace, const art::tree* 
         if (d.partial_len)
         {
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-            if (!prefix_len)
+            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
             {
                 break;
             }
-            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
+            depth += d.partial_len;
+            if (depth >= key.length())
             {
-                depth += prefix_len;
-            }else
-                depth += d.partial_len;
+                break;
+            }
         }
 
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
-        if (!te.empty())
-        {
-            if (te.child_ix == d.occupants)
-            {
-                if (!increment_trace(n, trace)) return nullptr;
-                if (!extend_trace_min(t->root, trace)) return nullptr;
-                n = last_el(trace).child;
-                continue;
-            }
-            trace.push_back(te);
-        }else
-        {
-            abort_with("trace is empty");
+        if (te.child.null())
+        {   // there is no lower bound on this node
+            increment_trace(t->root, trace);
+            break;
         }
+        if (!is_equal && !te.child.is_leaf)
+        {   // only for internal nodes - the lb has skipped some child nodes so we have to go back one
+            te = te.parent->previous(te);
+            if (te.child.null())
+            {
+                break;
+            }
+        }
+        trace.push_back(te);
         n = te.child;
         depth++;
     }
     if (!extend_trace_min(t->root, trace)) return nullptr;
+
+    while (last_el(trace).child.is_leaf &&
+        last_el(trace).child.const_leaf()->get_key() < key)
+    {
+        if (!increment_trace(t->root, trace)) return nullptr;
+    }
     n = last_el(trace).child;
     return n;
 }
@@ -525,17 +539,8 @@ static art::trace_element first_child_off(art::node_ptr n)
         return {nullptr, nullptr, 0};
 
     auto at = n->first_index();
-    auto np = n->get_child(at);
-    if (np.null())
-    {
-        auto att = n->first_index();
-        auto npt = n->get_child(att);
-        if (at != att || np != npt)
-        {
-            abort_with("the first child is not a child node");
-        }
-    }
-    return {n, np, at};
+    auto np = n->get_child(at.first);
+    return {n, np, at.first,at.second};
 }
 
 
@@ -564,7 +569,7 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
     while (!trace.empty())
     {   auto& last = last_el(trace);
         auto npt = increment_te(last);//last.parent->next(last);
-        if (npt.parent.null())
+        if (!npt.valid())
         {
             trace.pop_back();
         }else
@@ -581,7 +586,7 @@ static bool increment_trace(const art::node_ptr& root, art::trace_list& trace)
 }
 static bool decrement_trace(const art::node_ptr& root, art::trace_list& trace)
 {
-    while (!trace.empty() && last_el(trace).child_ix == 0)
+    while (!trace.empty() && last_el(trace) == last_el(trace).parent->first_index())
     {
         trace.pop_back();
     }
@@ -926,38 +931,154 @@ bool art::iterator::update(value_type value)
         return make_leaf(l->get_key(),value,l->ttl(), l->is_volatile());
     });
 }
-
-// computes distance while incrementing a trace list as efficiently as it can
-int64_t art::distance(const tree* t, const trace_list& ia, const trace_list& b)
+static art::trace_element first (const art::trace_element& el)
 {
-    if (ia.empty()) return 0;
-    if (b.empty()) return 0;
-    if (ia[0].parent != b[0].parent || b < ia) return 0;
+    if (el.parent.is_leaf) return {};
+    if (el.parent.null()) return {};
+    auto fst = el.parent->first_index();
+    return {el.parent,el.parent->get_child(fst.first),fst.first,fst.second};
+}
 
-    int64_t r = 1;
-    trace_list a = ia;
-    while (a != b)
+static art::trace_element next (const art::trace_element& el)
+{
+    if (el.parent.is_leaf) return {};
+    if (el.parent.null()) return {};
+    return el.parent->next(el);
+}
+#ifdef __UNUSED_FUNCTION__
+static art::trace_element previous (const art::trace_element& el)
+{
+    if (el.parent.is_leaf) return {};
+    if (el.parent.null()) return {};
+    return el.parent->previous(el);
+}
+#endif
+static int64_t descendants(const art::trace_element& t)
+{
+    if (t.child.null()) return 0;
+    if (t.child.is_leaf)
     {
-        auto &last = a.back();
-        auto& blast= b.back();
-        if (last.parent != blast.parent)
+        return 1;
+    }
+    return t.child->data().descendants;
+}
+#ifdef __UNUSED_FUNCTION__
+static art::trace_element last(const art::trace_element& el)
+{
+    auto li = el.parent->last_index();
+    return {el.parent,el.parent->get_child(li),li};
+}
+#endif
+static int64_t total(const art::trace_element& start,const art::trace_element& end)
+{
+    int64_t r = 0;
+    if (start.parent.null()) return 0;
+    art::trace_element i = start, e= {};
+    while (i != e && i != end){
+        r += descendants(i);
+        i = next(i);
+    };
+    return r;
+}
+static int64_t indexed_distance(const art::trace_list& a, const art::trace_list& b)
+{
+    if (b.empty() || a.empty()) return 0;
+    if (b.back() == a.back()) return 0;
+    int64_t r = descendants(a.back());//  + descendants(b.back());
+    size_t depth = std::min(a.size(),b.size());
+    for (size_t i = 0; i < depth; ++i)
+    {
+        if (a[i] == b[i])
         {
-            unsigned d = 0;
-            unsigned lix = last.parent->leaf_only_distance(last.child_ix+1,d);
-            if (d > 1 && lix < 256 )
-            {
-                r += d;
-                last.child_ix = lix;
-            }
+            continue; // there's nothing between them
         }
-        if (!increment_trace(t->root,a)) return r;
-        ++r;
+
+        if (a[i].parent == b[i].parent)
+        {
+            r += total(next(a[i]),b[i]);
+        }else
+        {
+            r += total(next(a[i]),{});
+            r += total(first(b[i]),b[i]);
+        }
+    }
+
+    for (size_t i = depth; i < a.size(); ++i)
+    {
+        r += total(next(a[i]),{});
+    }
+
+    for (size_t i = depth; i < b.size(); ++i)
+    {
+        r += total(first(b[i]),b[i]);
+
     }
     return r;
 }
+// computes distance while incrementing a trace list as efficiently as it can
+int64_t art::fast_distance(const trace_list& ia, const trace_list& b)
+{
+    if (ia.empty()) return 0;
+    if (b.empty()) return 0;
+    if (ia[0].parent != b[0].parent) return 0;
+    return indexed_distance(ia,b);
+}
+
 int64_t art::iterator::distance(const iterator& other) const
 {
-    return art::distance(t,this->tl,other.tl);
+    iterator a = *this;
+    iterator b = other;
+    int64_t r = 0;
+    while (a.ok() && a.key() <= b.key())
+    {
+        //log_encoded_key(a.key());
+        ++r;
+        auto kprev = a.key();
+        a.next();
+        if(a.key() < kprev)
+        {
+            abort_with("invalid key order");
+        }
+    }
+    return r;
+}
+int64_t art::iterator::distance(value_type other, bool traced) const
+{
+    iterator a = *this;
+    int64_t r = 0;
+    auto prev = a.key();
+    while (a.ok() && a.key() <= other){
+        if (traced)
+            log_encoded_key(a.key());
+        if (a.key() < prev) {
+            log_encoded_key(a.key());
+            log_encoded_key(prev);
+            abort_with("invalid key order");
+        }
+        prev = a.key();
+        ++r;
+        a.next();
+    }
+    return r;
+}
+int64_t art::iterator::fast_distance(const iterator& other) const
+{
+    return art::fast_distance(this->tl,other.tl);
+}
+
+void art::iterator::log_trace() const
+{
+    size_t ctr = 0;
+    std_log("=======-iterator trace-========");
+    std_log("  tree size: ", this->t->size);
+    log_encoded_key(key());
+    for (auto &el : tl)
+    {
+        auto tp = el.parent->type();
+        auto checked = el.parent->check_data();
+        std_log(++ctr,"address:",el.parent.logical.address(),"type:",el.parent->data().type,"child index:", el.child_ix, el.k, tp, checked);
+    }
+    std_log("=====-end iterator trace-======");
 }
 /**
  * Returns the minimum valued leaf
@@ -1022,14 +1143,15 @@ static int prefix_mismatch(const art::node_ptr& n, art::value_type key, unsigned
     int kd = key.length() - depth; // this can be negative ?
     int max_cmp = std::min<int>(std::min<int>(art::max_prefix_llength, n->data().partial_len), kd);
     int idx;
+    auto& dat = n->data();
     for (idx = 0; idx < max_cmp; idx++)
     {
-        if (n->data().partial[idx] != key[depth + idx])
+        if (dat.partial[idx] != key[depth + idx])
             return idx;
     }
 
     // If the prefix is short we can avoid finding a leaf
-    if (n->data().partial_len > art::max_prefix_llength)
+    if (dat.partial_len > art::max_prefix_llength)
     {
         // Prefix is longer than what we've checked, find a leaf
         const art::leaf* l = minimum(n).const_leaf();
@@ -1050,6 +1172,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
     if (n.null())
     {
         ref = art::make_leaf(key, value, options.ttl);
+        t->last_leaf_added = ref;
         return nullptr;
     }
     // If we are at a leaf, we need to replace it with a node
@@ -1069,10 +1192,11 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
                 //}
                 //else
                 //{
-                    ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
-                    // create a new leaf to carry the new value
-                    ++statistics::leaf_nodes_replaced;
-                    return n;
+                ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
+                t->last_leaf_added = ref;
+                // create a new leaf to carry the new value
+                ++statistics::leaf_nodes_replaced;
+                return n;
                 //}
             }
             return nullptr;
@@ -1080,11 +1204,12 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         art::node_ptr l1 = n;
         // Create a new leaf
         art::node_ptr l2 = make_leaf(key, value);
-
+        t->last_leaf_added = l2;
         // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
-        auto new_stored = art::alloc_node_ptr(art::initial_node, {l1, l2});
+        auto new_stored = art::alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
         auto* new_node = new_stored.modify();
         // Determine longest prefix
+        l = n.const_leaf();
         unsigned longest_prefix = longest_common_prefix(l, l2.const_leaf(), depth);
         new_node->data().partial_len = longest_prefix;
         memcpy(new_node->data().partial, key.bytes + depth,
@@ -1092,7 +1217,13 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         // Add the leafs to the new node_4
         ref = new_node;
         ref.modify()->add_child(l->key()[depth + longest_prefix], ref, l1);
-        ref.modify()->add_child(l2.const_leaf()->key()[depth + longest_prefix], ref, l2);
+        if (l1.is_leaf) // because l1 isnt going to be in the path
+        {
+            ++ref.modify()->data().descendants;
+        }
+        auto l2k = l2.const_leaf()->key()[depth + longest_prefix];
+        auto l2idx = ref.modify()->add_child(l2k, ref, l2);
+        t->push_trace({ref, l2, l2idx, l2k});
         return nullptr;
     }
 
@@ -1107,33 +1238,38 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
             goto RECURSE_SEARCH;
         }
 
-        // TODO: do fast child adding (by adding multiple children at once)
         // Create a new node and a new leaf
         art::node_ptr new_leaf = make_leaf(key, value);
-        auto new_node = art::alloc_node_ptr(art::initial_node, {n, new_leaf}); // pass children to get opt. ptr size
+        t->last_leaf_added = new_leaf;
+        auto new_node = art::alloc_node_ptr(initial_node_ptr_size, art::initial_node, {n, new_leaf}); // pass children to get opt. ptr size
         ref = new_node;
         new_node.modify()->data().partial_len = prefix_diff;
         memcpy(new_node.modify()->data().partial, n->data().partial, std::min<int>(art::max_prefix_llength, prefix_diff));
         // Adjust the prefix of the old node
+        auto& modn = n.modify()->data();
         if (n->data().partial_len <= art::max_prefix_llength)
         {
-            ref.modify()->add_child(n->data().partial[prefix_diff], ref, n);
-            n.modify()->data().partial_len -= (prefix_diff + 1);
-            memmove(n.modify()->data().partial, n->data().partial + prefix_diff + 1,
-                    std::min<int>(art::max_prefix_llength, n->data().partial_len));
+
+            auto ck = modn.partial[prefix_diff];
+            ref.modify()->add_child(ck, ref, n); // descendants of n will be added to ref
+            modn.partial_len -= (prefix_diff + 1);
+            memmove(modn.partial, modn.partial + prefix_diff + 1,
+                    std::min<int>(art::max_prefix_llength, modn.partial_len));
         }
         else
         {
-            n.modify()->data().partial_len -= (prefix_diff + 1);
+            modn.partial_len -= (prefix_diff + 1);
             const auto* l = minimum(n).const_leaf();
-            ref.modify()->add_child(l->get_key()[depth + prefix_diff], ref, n);
-            memcpy(n.modify()->data().partial, l->key() + depth + prefix_diff + 1,
-                   std::min<int>(art::max_prefix_llength, n->data().partial_len));
+            auto ck = l->get_key()[depth + prefix_diff];
+            ref.modify()->add_child(ck, ref, n);
+            memcpy(modn.partial, l->key() + depth + prefix_diff + 1,
+                   std::min<int>(art::max_prefix_llength, modn.partial_len));
         }
 
         // Insert the new leaf (safely considering optimal pointer sizes)
+        auto idx = ref.modify()->add_child(key[depth + prefix_diff], ref, new_leaf);
 
-        ref.modify()->add_child(key[depth + prefix_diff], ref, new_leaf);
+        t->push_trace( {ref,new_leaf,idx, key[depth]});
 
         return nullptr;
     }
@@ -1143,15 +1279,14 @@ RECURSE_SEARCH:;
     // Find a child to recurse to
     unsigned pos = n->index(key[depth]);
     art::node_ptr child = n->get_node(pos);
-    if (!n.is_leaf)
-    {
-        //trace_element te = {n,child,pos, key[depth]};
-        //trace.push_back(te);
-    }
+
     if (!child.null())
     {
+        if (!n.is_leaf)
+        {
+            t->push_trace({n,child,pos, key[depth]});
+        }
         art::node_ptr nc = child;
-
         auto r = recursive_insert(t, options, child, nc, key, value, depth + 1, old, replace);
         if (nc != child)
         {
@@ -1163,7 +1298,10 @@ RECURSE_SEARCH:;
 
     // No child, node goes within us
     art::node_ptr l = make_leaf(key, value);
-    n.modify()->add_child(key[depth], ref, l);
+    t->last_leaf_added = l;
+    n = n.modify()->expand_pointers(ref, {l});
+    auto idx = n.modify()->add_child(key[depth], ref, l);
+    t->push_trace( {ref, l, idx, key[depth]});
     return nullptr;
 }
 
@@ -1187,10 +1325,13 @@ void art_insert
     try
     {
         int old_val = 0;
+        t->clear_trace();
+
         art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0);
         if (!old_val)
         {
             t->size++;
+            t->update_trace(+1);
             ++statistics::insert_ops;
         }
         else
@@ -1260,7 +1401,7 @@ static void remove_child(art::node_ptr n, art::node_ptr& ref, unsigned char c, u
     n.modify()->remove(ref, pos, c);
 }
 
-static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref, art::value_type key, int depth)
+static const art::node_ptr recursive_delete(art::tree* t, art::node_ptr n, art::node_ptr& ref, art::value_type key, int depth)
 {
     // Search terminated
     if (n.null()) return nullptr;
@@ -1290,18 +1431,26 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref,
     }
 
     // Find child node
+    auto k = key[depth];
     unsigned idx = n->index(key[depth]);
     art::node_ptr child = n->get_node(idx);
     if (child.null())
         return nullptr;
-
+    t->push_trace({n,child,idx,k});
     // If the child is leaf, delete from this node
     if (child.is_leaf)
     {
         const art::leaf* l = child.const_leaf();
         if (l->compare(key.bytes, key.length(), depth) == 0)
         {
+            art::node_ptr ref_bef = ref;
             remove_child(n, ref, key[depth], idx);
+            if (ref_bef != ref)
+            {
+                t->pop_trace();
+                if (!ref.is_leaf)
+                    t->push_trace({ref,child,idx,k});
+            }
             return child;
         }
         return nullptr;
@@ -1309,8 +1458,9 @@ static const art::node_ptr recursive_delete(art::node_ptr n, art::node_ptr& ref,
     else
     {
         // Recurse
+
         art::node_ptr new_child = child;
-        auto r = recursive_delete(child, new_child, key, depth + 1);
+        auto r = recursive_delete(t, child, new_child, key, depth + 1);
         if (new_child != child)
         {
             if (!n->ok_child(new_child))
@@ -1341,10 +1491,12 @@ void art_delete(art::tree* t, art::value_type key, const NodeResult& fc)
     ++statistics::delete_ops;
     try
     {
-        art::node_ptr l = recursive_delete(t->root, t->root, key, 0);
+        t->clear_trace();
+        art::node_ptr l = recursive_delete(t,t->root, t->root, key, 0);
         if (!l.null())
         {
             t->size--;
+            t->update_trace(-1);
             if (!l.const_leaf()->expired())
                 fc(l);
             free_node(l);
@@ -1579,7 +1731,7 @@ uint64_t art_evict_lru(art::tree* t)
         while (i != e)
         {
             const art::leaf* l = (art::leaf*)i;
-            if (l->key_len > page.first.byte_size())
+            if (l->key_len > page.second)
             {
                 abort_with("invalid key or key size");
             }
@@ -1592,7 +1744,7 @@ uint64_t art_evict_lru(art::tree* t)
             i += (l->byte_size() + test_memory);
         }
         ++statistics::pages_evicted;
-        return page.first.byte_size();
+        return page.second;
     }
     catch (std::exception& e)
     {
@@ -1617,7 +1769,7 @@ void art::glob(tree* unused(t), const keys_spec& spec, value_type pattern, const
             while (i != e)
             {
                 const leaf* l = (const leaf*)i;
-                if (l->key_len > page.byte_size())
+                if (l->key_len > size)
                 {
                     throw std::runtime_error("art::glob: key too long");
                 }
@@ -1759,7 +1911,7 @@ bool art::tree::save()
         stats_to_stream(of);
 
 
-        auto root = compressed_address(t->root.logical);
+        auto root = logical_address(t->root.logical);
         writep(of, root);
         writep(of, t->root.is_leaf);
         writep(of, t->size);
@@ -1768,14 +1920,20 @@ bool art::tree::save()
 
     auto st = std::chrono::high_resolution_clock::now();
     transaction tx; // stabilize main while saving
-
-    if (!art::get_leaf_compression().save_extra("leaf_data.dat", save_stats_and_root))
+    arena::hash_arena leaves;
+    arena::hash_arena nodes;
+    {
+        compressed_release release; // only lock during copy
+        leaves = get_leaf_compression().get_main();
+        nodes = get_node_compression().get_main();
+    }
+    if (!get_leaf_compression().save_extra(leaves, "leaf_data.dat", save_stats_and_root))
     {
         return false;
     }
 
 
-    if (!art::get_node_compression().save_extra("node_data.dat", [&](std::ofstream&){}))
+    if (!get_node_compression().save_extra(nodes,"node_data.dat", [&](std::ofstream&){}))
     {
         return false;
     }
@@ -1784,14 +1942,14 @@ bool art::tree::save()
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
 
-    art::std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
+    std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
     return true;
 }
 bool art::tree::load()
 {
     std::lock_guard guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
-    compressed_address root;
+    logical_address root;
     bool is_leaf = false;
     // save stats in the leaf storage
     auto load_stats_and_root = [&](std::ifstream& in)
@@ -1805,29 +1963,30 @@ bool art::tree::load()
     };
     auto st = std::chrono::high_resolution_clock::now();
 
-    if (!art::get_node_compression().load_extra("node_data.dat",[&](std::ifstream&){}))
+    if (!get_node_compression().load_extra("node_data.dat",[&](std::ifstream&){}))
     {
         return false;
     }
-    if (!art::get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root))
+    if (!get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root))
     {
         return false;
     }
 
     if (is_leaf)
     {
-        t->root = art::node_ptr{root};
+        t->root = node_ptr{root};
     }else
     {
-        t->root = art::resolve_read_node(root);
+        t->root = resolve_read_node(root);
     }
     auto now = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-    art::std_log("Done loading BARCH, keys loaded:",t->size,"");
+    std_log("Done loading BARCH, keys loaded:",t->size,"");
 
-    art::std_log("loaded barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
-    art::std_log("db memory when created",(float)heap::allocated/(1024*1024),"Mb");
+    std_log("loaded barch db in", d.count(), "millis or", (float)dm.count()/1000000, "seconds");
+    std_log("db memory when created",(float)heap::allocated/(1024*1024),"Mb");
+
     return true;
 }
 
@@ -1880,3 +2039,33 @@ void art::tree::clear()
     //destroy_leaf_compression();
     //destroy_node_compression();
 }
+void art::tree::update_trace(int direction)
+{
+#if 1
+    if (!trace.empty())
+    {
+        if (trace[0].parent!=root)
+        {
+            std_log("trace root invalid");
+            abort_with("invalid trace root");
+        }
+        auto trd = trace[0].parent->data().descendants;
+        if (trd+direction != size)
+        {
+            std_err("descendant count invalid",trd,"!=",size);
+            abort_with("invalid descendant count");
+        }
+        for (auto& ut: trace)
+        {
+            ut.parent.modify()->data().descendants += direction;
+        }
+        trd = trace[0].parent->data().descendants;
+        if (trd != size)
+        {
+            std_err("descendant count invalid",trd,"!=",size);
+            abort_with("invalid descendant count");
+        }
+    }
+#endif
+}
+

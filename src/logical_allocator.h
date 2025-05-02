@@ -24,7 +24,7 @@
 
 #include "ioutil.h"
 #include "configuration.h"
-#include "compressed_address.h"
+#include "logical_address.h"
 #include "constants.h"
 #include "storage.h"
 #include "hash_arena.h"
@@ -54,7 +54,7 @@ struct free_page
 {
     free_page() = default;
 
-    explicit free_page(compressed_address p) : page(p.page())
+    explicit free_page(logical_address p) : page(p.page())
     {
     };
     heap::vector<PageSizeType> offsets{}; // within page
@@ -65,11 +65,11 @@ struct free_page
         return offsets.empty();
     }
 
-    compressed_address pop()
+    logical_address pop()
     {
         if (empty())
         {
-            return compressed_address{0};
+            return logical_address{0};
         }
         PageSizeType r = offsets.back();
         if (r >= page_size)
@@ -166,7 +166,7 @@ struct free_bin
                 auto& p = pages.at(at - 1);
                 for (auto o : p.offsets)
                 {
-                    compressed_address ad{page, o};
+                    logical_address ad{page, o};
                     r.push_back(ad.address());
                 }
             }
@@ -190,7 +190,7 @@ struct free_bin
         return r;
     }
 
-    void add(compressed_address address, unsigned s)
+    void add(logical_address address, unsigned s)
     {
         if (s != size)
         {
@@ -212,7 +212,7 @@ struct free_bin
         pages[page].push(address.offset());
     }
 
-    compressed_address pop(unsigned s)
+    logical_address pop(unsigned s)
     {
         if (s != size)
         {
@@ -220,21 +220,21 @@ struct free_bin
         }
         if (pages.empty())
         {
-            return compressed_address(0);
+            return logical_address(0);
         }
         auto& p = pages.back();
         if (p.empty())
         {
             page_index[p.page] = 0;
             pages.pop_back();
-            return compressed_address(0);
+            return logical_address(0);
         }
         if (page_index[p.page] == 0)
         {
-            return compressed_address(0);
+            return logical_address(0);
         }
 
-        compressed_address address = p.pop();
+        logical_address address = p.pop();
         if (p.empty())
         {
             page_index[p.page] = 0;
@@ -261,7 +261,7 @@ struct free_list
         }
     }
 
-    void inner_add(compressed_address address, unsigned size)
+    void inner_add(logical_address address, unsigned size)
     {
         if (size >= free_bins.size())
         {
@@ -286,7 +286,7 @@ struct free_list
         added += size;
     }
 
-    void add(compressed_address address, unsigned size)
+    void add(logical_address address, unsigned size)
     {
         inner_add(address, size);
     }
@@ -321,15 +321,15 @@ struct free_list
         }
     }
 
-    compressed_address get(unsigned size)
+    logical_address get(unsigned size)
     {
         if (size >= free_bins.size())
         {
-            return compressed_address{0};
+            return logical_address{0};
         }
-        if (!added) return compressed_address{0};
+        if (!added) return logical_address{0};
 
-        compressed_address r = free_bins[size].pop(size);
+        logical_address r = free_bins[size].pop(size);
         if (!r.null())
         {
             if (added < size)
@@ -353,7 +353,7 @@ struct free_list
 };
 
 
-struct compress
+struct logical_allocator
 {
     enum
     {
@@ -361,40 +361,30 @@ struct compress
         compression_level = 1
     };
 
-    compress() = default;
+    logical_allocator() = default;
 
-    explicit compress(bool opt_enable_compression, bool opt_enable_lru, std::string name):
+    explicit logical_allocator(bool opt_enable_compression, bool opt_enable_lru, std::string name):
         opt_enable_compression(opt_enable_compression), opt_enable_lru(opt_enable_lru), name(std::move(name))
     {
         opt_page_trace = art::get_log_page_access_trace();
     };
-    compress(const compress&) = delete;
+    logical_allocator(const logical_allocator&) = delete;
 
-    ~compress()
+    ~logical_allocator()
     {
         threads_exit = true;
         if (tpoll.joinable())
             tpoll.join();
-        ZSTD_freeCCtx(cctx);
     }
 
     static std::shared_mutex mutex;
 private:
-
-    heap::buffer<uint8_t> training_data{0};
-    heap::std_vector<training_entry> trainables{};
-    heap::std_vector<training_entry> intraining{};
-    ZSTD_CDict* dict{nullptr};
-    ZSTD_CCtx* cctx = ZSTD_createCCtx();
-    ZSTD_DCtx* dctx = ZSTD_createDCtx();
-    size_t trained_size = 0;
 
     arena::hash_arena main {};
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
     std::thread tdict{};
     std::thread tpoll{};
-
     bool opt_page_trace = false;
     bool opt_enable_compression = false;
     bool opt_enable_lru = false;
@@ -403,11 +393,9 @@ private:
     unsigned opt_iterate_workers = 1;
 
     bool threads_exit = false;
-    unsigned size_in_training = 0;
-    unsigned size_to_train = 0;
     size_t last_page_allocated{0};
-    compressed_address arena_head{0};
-    compressed_address highest_reserve_address{0};
+    logical_address arena_head{0};
+    logical_address highest_reserve_address{0};
     uint64_t last_heap_bytes = 0;
     uint64_t release_counter = 0;
     uint64_t ticker = 1;
@@ -415,7 +403,6 @@ private:
     size_t fragmentation = 0;
     std::string name;
 
-    heap::vector<size_t> decompressed_pages{};
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{};
     lru_list lru{};
@@ -424,126 +411,14 @@ private:
     address_set erased{}; // for runtime use after free tests
     size_t last_created_page{};
     uint8_t* last_page_ptr{};
-    compress& operator=(const compress& t)
+
+    logical_allocator& operator=(const logical_allocator& t)
     {
         if (this == &t) return *this;
         return *this;
     };
 
-    void train()
-    {
-        if (size_in_training < min_training_size)
-        {
-            return;
-        }
-        unsigned sampleCount = intraining.size();
-        auto samplesBuffer = heap::buffer<uint8_t>(size_in_training);
-        training_data = heap::buffer<uint8_t>(size_in_training);
-        auto sampleSizes = heap::buffer<size_t>(sampleCount);
 
-        auto samplesBufferPtr = samplesBuffer.begin();
-        auto sampleSizesPtr = sampleSizes.begin();
-        for (auto [data,size] : intraining)
-        {
-            *sampleSizesPtr++ = size;
-            memcpy(samplesBufferPtr, data, size);
-            heap::free(const_cast<uint8_t*>(data), size);
-            samplesBufferPtr += size;
-        }
-        if (sampleSizesPtr - sampleSizes.begin() != sampleCount)
-        {
-            throw std::runtime_error("training size mismatch");
-        }
-        if (samplesBufferPtr - samplesBuffer.begin() != size_in_training)
-        {
-            throw std::runtime_error("training size mismatch");
-        }
-        ZSTD_CDict* can_haz = nullptr;
-        size_t trainedSize = ZDICT_trainFromBuffer(training_data.begin(),
-                                                   size_in_training, samplesBuffer.begin(),
-                                                   sampleSizes.cbegin(), sampleCount);
-        if (ZDICT_isError(trainedSize))
-        {
-            auto zde = ZDICT_getErrorName(trainedSize);
-            std::cerr << zde << std::endl;
-            // some issue - need to start again
-        }
-        else
-        {
-            trained_size = trainedSize;
-            can_haz = ZSTD_createCDict(training_data.begin(), trainedSize, compression_level);
-        }
-
-
-        size_in_training = 0;
-        intraining.clear();
-        if (can_haz)
-        {
-            dict = can_haz;
-            tpoll = std::thread([&]()
-            {
-                while (!threads_exit)
-                {
-                    if (heap::get_physical_memory_ratio() > 0.95 || heap::allocated > art::get_max_module_memory())
-                    {
-                        std::unique_lock guard(mutex);
-                        full_vacuum();
-                    }
-
-                    std::this_thread::sleep_for(std::chrono::milliseconds(45));
-                }
-            });
-        }
-    }
-
-    bool add_training_entry(const uint8_t* data, size_t size)
-    {
-        if (!art::get_compression_enabled())
-        {
-            return false;
-        }
-        if (min_training_size == 0 || dict || size_in_training != 0 || size_to_train > min_training_size)
-        {
-            return false;
-        }
-        heap::buffer<uint8_t> sample(size);
-        sample.emplace(size, data);
-        training_entry t = {sample.move(), size};
-        trainables.push_back(t);
-        size_to_train += size;
-
-        if (size_to_train > min_training_size)
-        {
-            if (!intraining.empty() || size_in_training != 0)
-                abort_with("zstd training parameter mismatch");
-            intraining.swap(trainables);
-            size_in_training = size_to_train;
-            size_to_train = 0;
-            if (tdict.joinable())
-                tdict.join();
-            tdict = std::thread(&compress::train, this);
-            //train();
-        }
-        return true;
-    }
-
-
-    static heap::buffer<uint8_t> compress_2_buffer(ZSTD_CDict* localDict, ZSTD_CCtx* cctx, const uint8_t* data,
-                                                   size_t size)
-    {
-        if (!localDict || !cctx) return heap::buffer<uint8_t>(0);
-        size_t compressed_max_size = ZSTD_compressBound(size);
-        auto compressed_data_temp = heap::buffer<uint8_t>(compressed_max_size);
-        size_t compressed = ZSTD_compress_usingCDict(cctx, compressed_data_temp.begin(),
-                                                     compressed_max_size, data, size, localDict);
-        if (ZDICT_isError(compressed))
-        {
-            abort_with("zstd dictionary compression error");
-        }
-        auto compressed_data = heap::buffer<uint8_t>(compressed);
-        compressed_data.emplace(compressed, compressed_data_temp.begin());
-        return compressed_data;
-    }
     // arena virtualization start
     storage& retrieve_page(size_t page, bool modify = false)
     {
@@ -554,11 +429,11 @@ private:
         return main.read(page);
     }
 
-    const storage& retrieve_page(size_t page) const
+    [[nodiscard]] const storage& retrieve_page(size_t page) const
     {
         return main.read(page);
     }
-    size_t max_logical_address() const
+    [[nodiscard]] size_t max_logical_address() const
     {
         return main.max_logical_address();
     }
@@ -591,56 +466,17 @@ private:
         main.iterate_arena(iter);
     }
     // arena virtualization end
-    heap::buffer<uint8_t> decompress_buffer(ZSTD_DCtx* d_ctx, size_t known_decompressed_size,
-                                            const heap::buffer<uint8_t>& compressed)
-    {
-        heap::buffer<uint8_t> decompressed = heap::buffer<uint8_t>(known_decompressed_size);
-        size_t decompressed_size = ZSTD_decompress_usingDict(d_ctx,
-                                                             decompressed.begin(), decompressed.size(),
-                                                             compressed.begin(), compressed.size(),
-                                                             training_data.begin(), trained_size);
-        if (ZDICT_isError(decompressed_size))
-        {
-            auto msg = ZDICT_getErrorName(decompressed_size);
-            std::cerr << msg << std::endl;
-            abort_with(msg);
-        }
-        return decompressed;
-    }
 
-    heap::buffer<uint8_t> decompress_buffer(size_t known_decompressed_size, const heap::buffer<uint8_t>& compressed)
-    {
-        return decompress_buffer(dctx, known_decompressed_size, compressed);
-    }
-    ;
 
-    [[nodiscard]] bool decompress(std::pair<size_t, storage&>& param)
-    {
-        storage& todo = param.second;
-        if (todo.decompressed.empty() && !todo.compressed.empty())
-        {
-            todo.decompressed = decompress_buffer(page_size, todo.compressed);
-            statistics::page_bytes_uncompressed += todo.decompressed.byte_size();
-            ++statistics::pages_uncompressed;
 
-            if (todo.decompressed.size() != page_size)
-            {
-                abort();
-            }
-            //decompressed_pages.push_back(param.first);
-            return true;
-        }
-        return false;
-    }
-
-    [[nodiscard]] static bool is_null_base(const compressed_address& at)
+    [[nodiscard]] static bool is_null_base(const logical_address& at)
     {
         return at.is_null_base();
     }
 
     [[nodiscard]] static bool is_null_base(size_t at)
     {
-        return compressed_address::is_null_base(at);
+        return logical_address::is_null_base(at);
     }
 
     [[nodiscard]] size_t last_block() const
@@ -678,19 +514,14 @@ private:
         }
     }
 
-    std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ps = page_size)
+    std::pair<size_t, storage&> allocate_page_at(size_t at, size_t ) //unused(ps = page_size)
     {
         auto& page = main.read(at);
         add_to_lru(at, page);
-        page.decompressed = std::move(heap::buffer<uint8_t>(ps));
-        statistics::page_bytes_uncompressed += page.decompressed.byte_size();
-        ++statistics::pages_uncompressed;
         if (initialize_memory == 1)
         {
-            memset(page.decompressed.begin(), 0, ps);
         }
 
-        decompressed_pages.push_back(at);
         return {at, page};
     }
 
@@ -723,15 +554,6 @@ private:
         }
         if (last.write_position + size >= page_size)
         {
-            if (!dict && !last.decompressed.empty())
-            {
-                add_training_entry(last.decompressed.begin(), last.write_position);
-            }
-            else if (!last.decompressed.empty() && auto_vac != 0)
-            {
-                // if (last.modifications > 0)
-                // to schedule a buffer release/compress
-            }
 
             return expand_over_null_base();
         }
@@ -747,50 +569,27 @@ private:
         size_t r = 0;
         heap::buffer<uint8_t> torelease;
 
-        auto& t = retrieve_page(at);
         page_modifications::inc_ticker(at);
-        if (t.modifications && !t.compressed.empty())
-        {
-            if (t.decompressed.empty())
-            {
-                abort();
-            }
-            statistics::page_bytes_compressed -= t.compressed.size();
-            --statistics::pages_compressed;
-            t.compressed.release();
-        }
-
-        if (t.compressed.empty() && !t.decompressed.empty())
-        {
-            t.compressed = compress_2_buffer(dict, cctx, t.decompressed.begin(), page_size);
-            if (!t.compressed.empty())
-            {
-                statistics::page_bytes_compressed += t.compressed.size();
-                ++statistics::pages_compressed;
-                t.modifications = 0;
-            }
-        }
-
-        if (!t.decompressed.empty() && !t.compressed.empty() && t.modifications == 0)
-        {
-            r = t.decompressed.byte_size();
-
-            torelease = std::move(t.decompressed);
-            statistics::page_bytes_uncompressed -= torelease.byte_size();
-            --statistics::pages_uncompressed;
-        }
 
         return r;
     }
 
-
-    uint8_t* basic_resolve(compressed_address at, bool modify = false)
+    uint8_t* basic_resolve(logical_address at, bool modify = false)
     {
         if (opt_page_trace)
         {
             art::std_log("page trace[",name,"]:",at.address(),at.page(),at.offset(),modify);
         }
         if (at.null()) return nullptr;
+        if (opt_enable_lru) {
+            auto p = at.page();
+            auto& t = retrieve_page(p, modify);
+            update_lru(at.page(), t);
+        }
+
+
+        return main.get_page_data(at);
+#if 0
         invalid(at);
         if (test_memory)
         {
@@ -803,40 +602,24 @@ private:
         }
         auto p = at.page();
         auto& t = retrieve_page(p, modify);
-        if (t.decompressed.empty() && !t.compressed.empty())
-        {
-            std::pair<size_t, storage&> dec = {p, t};
-            if (decompress(dec))
-            {
-                // we might signal this as decompressed
-                if (modify && !t.compressed.empty())
-                {
-                    statistics::page_bytes_compressed -= t.compressed.byte_size();
-                    --statistics::pages_compressed;
-                    t.compressed.release();
-                }
-            }
-        }
-        if (t.decompressed.empty())
-        {
-            throw std::runtime_error("empty page");
-        }
         if (modify)
         {
-            t.modifications++;
+            //t.modifications++;
         }
         update_lru(at.page(), t);
+        //uint8_t* rp = t.decompressed.begin() + at.offset();
+        return main.get_page_data(at);
+#endif
 
-        return t.decompressed.begin() + at.offset();
     }
 
-    void invalid(compressed_address at) const
+    void invalid(logical_address at) const
     {
         if (!opt_validate_addresses) return;
         valid(at);
     }
 
-    void valid(compressed_address at) const
+    void valid(logical_address at) const
     {
         if (!opt_validate_addresses) return;
 
@@ -871,20 +654,15 @@ private:
         {
             workers[ivac] = std::thread([this,ivac,&r]()
             {
-                ZSTD_CCtx* cctx = ZSTD_createCCtx();
                 iterate_arena([&](size_t p, storage&) -> void
                 {
                     if (p % auto_vac_workers == ivac)
-                        r += release_decompressed(cctx, p);
+                        r += release_decompressed(nullptr, p);
                 });
-
-                if (cctx)
-                    ZSTD_freeCCtx(cctx);
             });
         }
         for (auto& worker : workers) worker.join();
 
-        decompressed_pages.clear();
         ++statistics::vacuums_performed;
         return r;
     }
@@ -896,27 +674,8 @@ private:
         auto& t = retrieve_page(at);
         if (t.empty()) return {};
         valid({at, 0});
-        std::pair<size_t, storage&> dec = {at, t};
-        if (decompress(dec))
-        {
-            // release the decompreseed page again
-            if (opt_move_decompressed_pages)
-            {
-                heap::buffer<uint8_t> decompressed = std::move(t.decompressed);
-                if (!decompressed.empty())
-                {
-                    statistics::page_bytes_uncompressed -= decompressed.byte_size();
-                    --statistics::pages_uncompressed;
-                    return {decompressed, t.write_position};
-                }
-            }
-        }
-        if (t.decompressed.empty())
-        {
-            return {heap::buffer<uint8_t>(), 0};
-        }
 
-        return {t.decompressed, t.write_position};
+        return {heap::buffer{main.get_page_data({at,0}),t.write_position}, t.write_position};
     }
 
 public:
@@ -934,8 +693,9 @@ public:
     {
         return allocated;
     }
-    void free(compressed_address at, size_t sz)
+    void free(logical_address at, size_t sz)
     {
+
         size_t size = sz + test_memory + allocation_padding;
 
         uint8_t* d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
@@ -986,27 +746,13 @@ public:
                 last_page_allocated = 0;
             }
             t.size = 0;
-            t.modifications = 0;
+            //t.modifications = 0;
             if (fragmentation < t.fragmentation)
             {
                 abort();
             }
             fragmentation -= t.fragmentation;
             //t.write_position = 0;
-
-
-            if (!t.compressed.empty())
-            {
-                --statistics::pages_compressed;
-                statistics::page_bytes_compressed -= t.compressed.byte_size();
-                t.compressed.release();
-            }
-
-            if (!t.decompressed.empty())
-            {
-                --statistics::pages_uncompressed;
-                statistics::page_bytes_uncompressed -= t.decompressed.byte_size();
-            }
 
             if (!lru.empty())
                 lru.erase(t.lru);
@@ -1026,7 +772,7 @@ public:
         {
             emancipated.add(at, size); // add a free allocation for later re-use
             t.size--;
-            t.modifications++;
+            //t.modifications++;
             if (t.fragmentation + size > t.write_position)
             {
                 abort();
@@ -1079,54 +825,40 @@ public:
                 return get_page_buffer_inner(*(--lru.end()));
             }
         }
-        return {heap::buffer<uint8_t>(), 0};
+        return {{}, 0};
     }
 
     template <typename T>
-    T* read(compressed_address at)
+    T* read(logical_address at)
     {
 
         if (at.null()) return nullptr;
         //std::lock_guard guard(mutex);
-        if (use_last_page_caching == 1)
-        {
-            if (last_created_page == at.page())
-            {
-                //last_page_ptr->modifications++;
-                uint8_t* d = last_page_ptr;
-                d += at.offset();
-                return (T*)d;
-            }
-        }
         const uint8_t* d = basic_resolve(at);
         return (T*)d;
     }
 
     template <typename T>
-    T* modify(compressed_address at)
+    T* modify(logical_address at)
     {
-        if (use_last_page_caching == 1)
-        {
-            if (last_created_page == at.page())
-            {
-                //last_page_ptr->modifications++;
-                uint8_t* d = last_page_ptr;
-                d += at.offset();
-                return (T*)d;
-            }
-        }
+
         if (at.null()) return nullptr;
         //std::lock_guard guard(mutex);
 
         uint8_t* d = basic_resolve(at, true);
         return (T*)d;
     }
-
-    compressed_address new_address(size_t sz)
+    logical_address new_address(size_t sz) {
+        logical_address r;
+        new_address(r,sz);
+        return r;
+    }
+    uint8_t* new_address(logical_address& r,size_t sz)
     {
+
         size_t size = sz + test_memory + allocation_padding;
         //std::lock_guard guard(mutex);
-        compressed_address r = emancipated.get(size);
+        r = emancipated.get(size);
         if (!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty())
         {
             if (test_memory)
@@ -1141,19 +873,14 @@ public:
                 pcheck.write_position = w + size;
             }
             std::pair<size_t, storage&> at = {r.page(), pcheck};
-            if (decompress(at))
-            {
-                statistics::page_bytes_compressed -= at.second.compressed.byte_size();
-                --statistics::pages_compressed;
-                at.second.compressed.release();
-                // we might signal this as decompressed
-            };
+
             // last_page_allocated should not be set here
             at.second.size++;
-            at.second.modifications++;
+            //at.second.modifications++;
             at.second.fragmentation -= size;
 
             invalid(r);
+            //r.set_data(at.second.decompressed.begin() + at.second.write_position);
             auto* data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0)
             {
@@ -1161,69 +888,54 @@ public:
             }
             if (test_memory == 1)
                 data[sz] = r.address() % 255;
-            if (at.second.decompressed.empty())
-            {
-                abort();
-            }
+
+            allocated += size;
+            uint8_t* pd = main.get_alloc_page_data(r, sz);
             if (initialize_memory == 1)
             {
-                memset(at.second.decompressed.begin() + r.offset(), 0, sz);
+                memset(pd, 0, sz);
             }
-            allocated += size;
-
-            if (use_last_page_caching == 1)
-            {
-                last_created_page = r.page();
-                storage& p = at.second;
-                last_page_ptr = p.decompressed.begin();
-            }
-            return r;
+            return pd;
         }
         auto at = create_if_required(size);
         if (is_null_base(at.first))
         {
             abort();
         }
-        if (at.second.decompressed.empty() && !at.second.compressed.empty())
-        {
-            if (decompress(at))
-            {
-                statistics::page_bytes_compressed -= at.second.compressed.byte_size();
-                --statistics::pages_compressed;
-                at.second.compressed.release();
-                // we might signal this as decompressed
-            };
-        }
-        if (at.second.write_position + size > at.second.decompressed.size() || at.second.decompressed.empty())
+        if (at.second.write_position + size > page_size)
         {
             abort();
         }
         last_page_allocated = at.first;
-        compressed_address ca(at.first, at.second.write_position);
+        logical_address ca(at.first, at.second.write_position);
         at.second.write_position += size;
         at.second.size++;
-        at.second.modifications++;
-        if (use_last_page_caching == 1)
-        {
-            storage& p = at.second;
-            last_page_ptr = p.decompressed.begin();
-            last_created_page = ca.page();
+        //at.second.modifications++;
 
-        }
         if (test_memory)
         {   invalid(ca);
             erased.erase(ca.address());
         }
+        uint8_t* rd = main.get_alloc_page_data(ca,size);
+
+        if (initialize_memory == 1)
+        {
+            memset(rd, 0, sz);
+        }
+
+        if (test_memory == 1)
+            rd[sz] = ca.address() % 255;
+
         auto* data = (test_memory == 1) ? basic_resolve(ca) : nullptr;
-        if (test_memory == 1 && data[sz] != 0)
+        if (test_memory == 1 && data[sz] != ca.address() % 255)
         {
             abort();
         }
-        if (test_memory == 1)
-            data[sz] = ca.address() % 255;
-        allocated += size;
 
-        return ca;
+        allocated += size;
+        r = ca;
+
+        return rd;
     }
     void enter_context()
     {
@@ -1235,19 +947,7 @@ public:
     }
     void release_context()
     {
-
-
-        if (use_last_page_caching == 1)
-        {
-            last_created_page = 0;
-            last_page_ptr = nullptr;
-
-        }
-        if (statistics::page_bytes_compressed > heap::allocated)
-        {
-            //abort();
-        }
-        context_vacuum();
+        //context_vacuum();
         mutex.unlock();
     }
 
@@ -1283,16 +983,6 @@ public:
 
     void context_vacuum()
     {
-        if (!opt_enable_compression) return;
-        double ratio = heap::get_physical_memory_ratio();
-        bool heap_overflow = heap::allocated > art::get_max_module_memory();
-        if ((heap_overflow || ratio > 0.99) && !decompressed_pages.empty())
-        {
-            //++flush_ticker;
-            //size_t at = decompressed_pages.back();
-            //decompressed_pages.pop_back();
-            return; //release_decompressed(cctx,at);
-        }
 
     }
 
@@ -1307,7 +997,6 @@ public:
     void iterate_pages(const std::function<bool(size_t,size_t, const heap::buffer<uint8_t>&)>& found_page)
     {
         opt_iterate_workers = art::get_iteration_worker_count();
-        std::atomic<size_t> r = 0;
         std::thread workers[opt_iterate_workers];
         std::atomic<bool> stop = false;
         for (unsigned iwork = 0; iwork < opt_iterate_workers; iwork++)
@@ -1322,27 +1011,20 @@ public:
                     if (page % opt_iterate_workers == iwork)
                     {
 
-                        heap::buffer<uint8_t> decompressed;
-                        heap::buffer<uint8_t> compressed;
                         unsigned wp = 0;
+                        heap::buffer<uint8_t> pdata;
                         {
                             // copy under lock
                             std::lock_guard guard(mutex);
                             if (!is_free(page))
                             {
                                 wp = data.write_position;
-                                decompressed = data.decompressed;
-                                compressed = data.compressed;
+                                pdata = std::move(heap::buffer{main.get_page_data({page,0}),wp});
                             }
                         }
-                        if (decompressed.empty() && !compressed.empty())
+                        if (wp)
                         {
-                            // TODO: it must be different for non page sizes
-                            decompressed = decompress_buffer(dctx, std::max<unsigned>(page_size, wp), compressed);
-                        }
-                        if (!decompressed.empty())
-                        {
-                            stop = !found_page(wp,page, decompressed);
+                            stop = !found_page(wp,page, pdata);
                             return;
                         }
 
@@ -1360,14 +1042,12 @@ public:
 private:
 
 public:
-    bool save_extra(const std::string &filename, const std::function<void(std::ofstream& of)>& extra1) const
+    bool save_extra(const arena::hash_arena& copy, const std::string &filename, const std::function<void(std::ofstream& of)>& extra1) const
     {
         auto writer = [&](std::ofstream& of) -> void
         {
-            long ts = trained_size;
+            long ts = 0;
             writep(of,ts);
-            if (trained_size)
-                of.write((const char*)training_data.data(), ts);
 
             writep(of, opt_enable_compression);
             writep(of, opt_enable_lru);
@@ -1385,32 +1065,18 @@ public:
             writep(of, fragmentation);
             extra1(of);
         };
-        return main.save(filename,writer);
-    }
 
+        return copy.save(filename,writer);
+    }
+    [[nodiscard]] const arena::hash_arena& get_main() const {
+        return main;
+    }
     bool load_extra(const std::string& filenname, const std::function<void(std::ifstream& of)>& extra1)
     {
         auto reader = [&](std::ifstream& in) -> void
         {
-            if (dict)
-            {
-                ZSTD_freeCDict(dict);
-            }
-            dict = nullptr;
             long ts = 0;
             readp(in,ts);
-            if (ts)
-            {
-                training_data = heap::buffer<uint8_t>(ts);
-                in.read((char*)training_data.data(), ts);
-                trained_size = ts;
-                dict = ZSTD_createCDict(training_data.begin(), trained_size, compression_level);
-                if (!dict)
-                {
-                    throw std::runtime_error("failed to load dictionary");
-                }
-            }
-
 
             readp(in, opt_enable_compression);
             readp(in, opt_enable_lru);
@@ -1458,18 +1124,15 @@ public:
     {
         main.rollback();
         main = arena::hash_arena{};
-        size_in_training = 0;
-        size_to_train = 0;
         last_page_allocated = {0};
-        arena_head = {0};
-        highest_reserve_address = {0};
+        arena_head = {nullptr};
+        highest_reserve_address = {nullptr};
         last_heap_bytes = 0;
         release_counter = 0;
         ticker = 1;
         allocated = 0;
         fragmentation = 0;
 
-        decompressed_pages = {};
         last_vacuum_millis = std::chrono::high_resolution_clock::now();;
         emancipated = {};
         lru = {};
@@ -1478,13 +1141,12 @@ public:
         last_created_page = {};
         last_page_ptr = {};
 
-
-        if (dict)
-        {
-            //ZSTD_freeCDict(dict);
-            //dict = nullptr;
-        };
-
+    }
+    void set_opt_use_vmm(bool use_vmm_mem) {
+        main.set_opt_use_vmm(use_vmm_mem);
+    }
+    [[nodiscard]] size_t get_bytes_allocated() const {
+        return main.get_bytes_allocated();
     }
 };
 

@@ -15,6 +15,8 @@
 #include <vector>
 #include <ankerl/unordered_dense.h>
 
+#include "jg/dense_hash_map.hpp"
+
 namespace heap
 {
     uint64_t get_physical_memory_bytes();
@@ -102,6 +104,14 @@ namespace heap
             if (size)
             {
                 ptr = (T*)allocate(byte_size());
+            }
+        }
+        explicit buffer(const T* data, size_t size) : ptr(nullptr), count(size)
+        {
+            if (size)
+            {
+                ptr = (T*)allocate(byte_size());
+                std::memcpy(ptr, data, byte_size());
             }
         }
 
@@ -401,7 +411,7 @@ namespace heap
     };
 
     /// a checked vector with automatic heap allocator
-    template <typename T, int StaticSize = 16>
+    template <typename T, int StaticSize = 8>
     struct small_vector
     {
     private:

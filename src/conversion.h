@@ -14,7 +14,7 @@ namespace conversion
         explicit byte_comparable(const uint8_t* data, size_t len)
         {
             memcpy(&bytes[0], data, std::min(sizeof(bytes) - 1, len));
-            bytes[9] = 0;
+            bytes[sizeof(I)+1] = 0;
         }
 
         // probably cpp will optimize this
@@ -48,6 +48,19 @@ namespace conversion
         int64_t v = (r - (1ll << 63));
         return v;
     }
+    inline int32_t dec_bytes_to_int32(const byte_comparable<int32_t>& i)
+    {
+        int32_t r = 0;
+        r += (i.bytes[1] & 0xFF);
+        r <<= 8;
+        r += (i.bytes[2] & 0xFF);
+        r <<= 8;
+        r += (i.bytes[3] & 0xFF);
+        r <<= 8;
+        r += (i.bytes[4] & 0xFF);
+        int32_t v = (r - (1 << 31));
+        return v;
+    }
 
     // compute a comparable string of bytes from a number using a type byte to separate
     // floats and integers else theres going to be floats mixed in integers
@@ -75,6 +88,21 @@ namespace conversion
         r.bytes[1] = (uint8_t)(t & 0xFF);
         return r;
     }
+    static inline byte_comparable<int32_t> comparable_bytes32(int32_t n, uint8_t type_byte)
+    {
+        byte_comparable<int32_t> r;
+        uint32_t t = n + (1 << 31); // so that negative numbers compare to less than positive numbers
+        r.bytes[0] = type_byte; // most significant is the type (overriding any value bytes)
+
+        r.bytes[4] = (uint8_t)(t & 0xFF);
+        t >>= 8;
+        r.bytes[3] = (uint8_t)(t & 0xFF);
+        t >>= 8;
+        r.bytes[2] = (uint8_t)(t & 0xFF);
+        t >>= 8;
+        r.bytes[1] = (uint8_t)(t & 0xFF);
+        return r;
+    }
 
     // TODO: function isnt considering mantissa maybe
     static byte_comparable<int64_t> comparable_bytes(double n, uint8_t)
@@ -84,13 +112,27 @@ namespace conversion
         return comparable_bytes(in, art::tdouble);
     }
 
+    static byte_comparable<int32_t> comparable_bytes(float n, uint8_t)
+    {
+        int32_t in;
+        memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
+        return comparable_bytes32(in, art::tfloat);
+    }
+    static byte_comparable<int32_t> comparable_bytes(int32_t n, uint8_t)
+    {
+        int32_t in;
+        memcpy(&in, &n, sizeof(in)); // apparently mantissa is most significant - but I'm not so sure
+        return comparable_bytes32(in, art::tshort);
+    }
+
 
     struct comparable_key
     {
     private:
-        uint8_t storage[48]{};
+        uint8_t storage[comparable_key_static_size]{};
         uint8_t* data = nullptr; // this may point to the integer or another externally allocated variable
         byte_comparable<int64_t> integer{};
+        byte_comparable<int32_t> int32{};
         size_t size = 0; // the size as initialized - only changed on construction
         uint8_t* bytes = nullptr; // NB! this gets freed
 
@@ -103,6 +145,14 @@ namespace conversion
               , size(integer.get_size())
         {
         }
+        explicit comparable_key(int32_t value)
+            : data(&int32.bytes[0])
+              , int32(comparable_bytes(value, art::tshort))
+              // numbers are ordered before most ascii strings unless they start with 0x01
+              , size(integer.get_size())
+        {
+        }
+
 
         explicit comparable_key(double value)
             : data(&integer.bytes[0])
@@ -111,6 +161,14 @@ namespace conversion
         {
             size = integer.get_size();
         }
+        explicit comparable_key(float value)
+            : data(&int32.bytes[0])
+              , int32(comparable_bytes(value, art::tfloat))
+              , size(int32.get_size())
+        {
+            size = int32.get_size();
+        }
+
         comparable_key(const art::composite_type& ct)
             : size(2)
         {
@@ -162,6 +220,7 @@ namespace conversion
                     ||  val.bytes[0]==art::tinteger
                     ||  val.bytes[0]==art::tdouble
                     ||  val.bytes[0]==art::tcomposite
+                    ||  val.bytes[0]==art::tfloat
                     ||  val.bytes[0]==art::tend))
             {
                 throw_exception<std::invalid_argument>("invalid value_type");
@@ -198,9 +257,13 @@ namespace conversion
             {
                 bytes = heap::allocate<uint8_t>(r.size + 1); // hidden 0 byte at end
                 data = bytes;
+                data[size] = 0;
             }else if (r.data==&r.integer.bytes[0])
             {
                 data = &integer.bytes[0];
+            }else if (r.data==&r.int32.bytes[0])
+            {
+                data = &int32.bytes[0];
             }else
             {
                 if (size >= sizeof(storage)-1)
@@ -208,9 +271,10 @@ namespace conversion
                     abort();
                 }
                 data = storage;
+                data[size] = 0;
             }
             memcpy(data, r.data, size);
-            data[size] = 0;
+
             return *this;
         }
 
@@ -270,9 +334,20 @@ namespace conversion
 
         return dec_bytes_to_int(dec);
     }
+    inline int32_t enc_bytes_to_int32(const uint8_t* bytes, size_t len)
+    {
+        int32_t r = 0;
+        if (len != num32_key_size)
+            return r;
+        byte_comparable<int32_t> dec(bytes, len);
+
+        return dec_bytes_to_int32(dec);
+    }
     inline int64_t enc_bytes_to_int(art::value_type value)
     {
         int64_t r = 0;
+        if (value.empty()) return r;
+
         if (value.size != numeric_key_size)
             return r;
 
@@ -284,8 +359,58 @@ namespace conversion
         r = dec_bytes_to_int(dec);
         return r;
     }
+    inline int32_t enc_bytes_to_int32(art::value_type value)
+    {
+        int32_t r = 0;
+        if (value.size != num32_key_size)
+            return r;
+
+        if (*value.bytes != art::tfloat)
+            return r;
+
+        byte_comparable<int32_t> dec(value.bytes, value.size);
+
+        r = dec_bytes_to_int32(dec);
+        return r;
+    }
+
+    inline double enc_bytes_to_dbl(art::value_type value);
+    inline float enc_bytes_to_float(art::value_type value)
+    {
+        if (value.empty()) {
+            return 0.0;
+        }
+        if (value.bytes[0] == art::tdouble) {
+            return enc_bytes_to_dbl(value);
+        }
+        if (value.bytes[0] == art::tshort) {
+            return enc_bytes_to_int32(value);
+        }
+        if (value.bytes[0] != art::tfloat) {
+            return 0.0;
+        }
+        int32_t r = enc_bytes_to_int32(value);
+        float fl = 0;
+        memcpy(&fl, &r, sizeof(int32_t));
+        return fl;
+    }
     inline double enc_bytes_to_dbl(art::value_type value)
     {
+        if (value.empty()) {
+            return 0.0;
+        }
+        if (value.bytes[0] == art::tfloat) {
+            return std::round((double)enc_bytes_to_float(value) * 100000.0) / 100000.0;;
+        }
+        if (value.bytes[0] == art::tshort) {
+            return enc_bytes_to_int32(value);
+        }
+        if (value.bytes[0] == art::tinteger) {
+            return enc_bytes_to_int(value);
+        }
+        if (value.bytes[0] != art::tdouble) {
+            return 0.0;
+        }
         int64_t r = enc_bytes_to_int(value);
         double dbl = 0;
         memcpy(&dbl, &r, sizeof(int64_t));

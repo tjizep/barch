@@ -26,17 +26,17 @@ namespace art
 
         node4_v() = default;
 
-        explicit node4_v(compressed_address address)
+        explicit node4_v(logical_address address)
         {
             node4_v::from(address);
         }
 
-        explicit node4_v(compressed_address address, node_data* data)
+        explicit node4_v(logical_address address, node_data* data)
         {
             node4_v::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const final
+        [[nodiscard]] node_ptr_storage get_storage() const override
         {
             node_ptr_storage storage;
             storage.emplace<node4_v>(*this);
@@ -79,7 +79,8 @@ namespace art
                         memcpy(dat.partial + prefix, child->data().partial, sub_prefix);
                         prefix += sub_prefix;
                     }
-
+                    // this seems counter-intuitive but the trace update at the end will fix it
+                    child.modify()->data().descendants = dat.descendants;
                     // Store the prefix in the child
                     memcpy(child.modify()->data().partial, dat.partial, std::min<unsigned>(prefix, max_prefix_llength));
                     child.modify()->data().partial_len += dat.partial_len + 1;
@@ -89,7 +90,7 @@ namespace art
             }
         }
 
-        void add_child_inner(unsigned char c, node_ptr child) override
+        unsigned add_child_inner(unsigned char c, node_ptr child) override
         {
             unsigned idx = index(c, gt);
             auto& dat = nd();
@@ -101,25 +102,33 @@ namespace art
             // Insert element
             dat.keys[idx] = c;
             set_child(idx, child);
+            if (!child.is_leaf)
+            {
+               dat.descendants += child->data().descendants;
+            }
             ++dat.occupants;
+            if (!this->check_data()) {
+                abort_with("check failed");
+            }
+            return idx;
         }
 
-        void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
             if (data().occupants < 4)
             {
-                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
+                return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
-                auto new_node = alloc_node_ptr(node_16, {child});
+                auto new_node = alloc_node_ptr(sizeof(IntegerPtr), node_16, {child});
                 // Copy the child pointers and the key map
                 new_node.modify()->set_children(0, this, 0, data().occupants);
                 new_node.modify()->set_keys(nd().keys, data().occupants);
                 new_node.modify()->copy_header(this);
                 ref = new_node;
                 free_node(this);
-                new_node.modify()->add_child(c, ref, child);
+                return new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -127,11 +136,6 @@ namespace art
         {
             unsigned idx = data().occupants - 1;
             return get_child(idx);
-        }
-
-        [[nodiscard]] unsigned last_index() const override
-        {
-            return data().occupants - 1;
         }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
@@ -189,17 +193,17 @@ namespace art
 
         node16_v() = default;
 
-        explicit node16_v(compressed_address address)
+        explicit node16_v(logical_address address)
         {
             node16_v::from(address);
         }
 
-        explicit node16_v(compressed_address address, node_data* data)
+        explicit node16_v(logical_address address, node_data* data)
         {
             node16_v::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const final
+        [[nodiscard]] node_ptr_storage get_storage() const override
         {
             node_ptr_storage storage;
             storage.emplace<node16_v>(*this);
@@ -208,16 +212,17 @@ namespace art
 #if 0
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override
         {
-            unsigned i = simd::bits_oper16(this->nd().keys, simd::nuchar<16>(c), (1 << this->data().occupants) - 1, operbits);
-            if (i)
-            {
-                i = __builtin_ctz(i);
-                return i;
+            auto& dat = this->nd();
+            if (operbits == gt) {
+                return std::min<unsigned>(dat.occupants,simd::first_byte_gt(dat.keys,16,c));
             }
-            return this->data().occupants;
+            if (operbits == eq) {
+                return std::min<unsigned>(dat.occupants,simd::first_byte_eq(dat.keys,16,c));
+            }
+            return Parent::index(c, operbits);
         }
-
 #endif
+
         // unsigned pos = l - children;
         void remove(node_ptr& ref, unsigned pos, unsigned char) override
         {
@@ -225,7 +230,7 @@ namespace art
 
             if (this->data().occupants == 3)
             {
-                auto new_node = alloc_node_ptr(node_4, {});
+                auto new_node = alloc_node_ptr(sizeof(IPtrType), node_4, {});
                 new_node.modify()->copy_header(this);
                 new_node.modify()->set_keys(this->nd().keys, 3);
                 new_node.modify()->set_children(0, this, 0, 3);
@@ -235,30 +240,40 @@ namespace art
             }
         }
 
-        void add_child_inner(unsigned char c, node_ptr child) override
+        unsigned add_child_inner(unsigned char c, node_ptr child) override
         {
             unsigned idx = this->index(c, gt);
             auto& dat = this->nd();
             // Shift to make room
-            memmove(dat.keys + idx + 1, dat.keys + idx, this->data().occupants - idx);
+            memmove(dat.keys + idx + 1, dat.keys + idx, dat.occupants - idx);
             memmove(dat.children.data + idx + 1, dat.children.data + idx,
-                    (this->data().occupants - idx) * sizeof(IPtrType));
+                    (dat.occupants - idx) * sizeof(IPtrType));
             this->insert_type(idx);
             // Insert element
             dat.keys[idx] = c;
             this->set_child(idx, child);
+            if (!child.is_leaf)
+            {
+                dat.descendants += child->data().descendants;
+            }
             ++dat.occupants;
+            if (!this->check_data()) {
+                abort_with("check failed");
+            }
+
+            return idx;
+
         }
 
-        void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
             if (this->data().occupants < 16)
             {
-                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
+                return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
-                auto new_node = alloc_node_ptr(node_48, {child});
+                auto new_node = alloc_node_ptr(sizeof(IPtrType), node_48, {child});
 
                 // Copy the child pointers and populate the key map
                 new_node.modify()->set_children(0, this, 0, this->data().occupants);
@@ -269,7 +284,7 @@ namespace art
                 new_node.modify()->copy_header(this);
                 ref = new_node;
                 free_node(this);
-                new_node.modify()->add_child(c, ref, child);
+                return new_node.modify()->add_child(c, ref, child);
             }
         }
 
@@ -278,13 +293,10 @@ namespace art
             return this->get_child(this->data().occupants - 1);
         }
 
-        [[nodiscard]] unsigned last_index() const override
-        {
-            return this->data().occupants - 1;
-        }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
+#if 0
             unsigned mask = (1 << this->data().occupants) - 1;
             unsigned bf = bits_oper16(this->nd().keys, simd::nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt);
             // inverse logic
@@ -293,6 +305,18 @@ namespace art
                 unsigned i = __builtin_ctz(bf);
                 return {{this, this->get_child(i), i}, this->nd().keys[i] == c};
             }
+#else
+            auto &d = this->nd();
+
+            for (unsigned i = 0; i < d.occupants; i++)
+            {
+                if (d.keys[i] >= c && d.children[i].exists())
+                {
+                    return {{this, this->get_child(i), i, d.keys[i]}, d.keys[i] == c};
+                }
+            }
+            return {{nullptr, nullptr, d.occupants}, false};
+#endif
             return {{nullptr, nullptr, this->data().occupants}, false};
         }
 
@@ -312,7 +336,7 @@ namespace art
             unsigned i = te.child_ix;
             if (i > 0)
             {   auto &dat = this->nd();
-                return {this, this->get_child(i), i - 1, dat.keys[i - 1]}; // the keys are ordered so fine I think
+                return {this, this->get_child(i - 1), i - 1, dat.keys[i - 1]}; // the keys are ordered so fine I think
             }
             return {};
         }
@@ -342,17 +366,17 @@ namespace art
         using this_type::index;
         node48() = default;
 
-        explicit node48(compressed_address address)
+        explicit node48(logical_address address)
         {
             node48::from(address);
         }
 
-        explicit node48(compressed_address address, node_data* data)
+        explicit node48(logical_address address, node_data* data)
         {
             node48::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const final
+        [[nodiscard]] node_ptr_storage get_storage() const override
         {
             node_ptr_storage storage;
             storage.emplace<node48>(*this);
@@ -393,7 +417,7 @@ namespace art
 
             if (data().occupants == 12)
             {
-                auto new_node = alloc_node_ptr(node_16, {});
+                auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_16, {});
                 new_node.modify()->copy_header(this);
                 unsigned child = 0;
                 for (unsigned i = 0; i < 256; i++)
@@ -416,7 +440,7 @@ namespace art
             }
         }
 
-        void add_child_inner(unsigned char c, node_ptr child) override
+        unsigned add_child_inner(unsigned char c, node_ptr child) override
         {
             unsigned pos = 0;
             auto &dat = this->nd();
@@ -429,19 +453,27 @@ namespace art
             // not we do not need to call insert_type an empty child is found
             set_child(pos, child);
             dat.keys[c] = pos + 1;
-            dat.occupants++;
+            if (!child.is_leaf)
+            {
+                dat.descendants += child->data().descendants;
+            }
+            ++dat.occupants;
+            if (!this->check_data()) {
+                abort_with("check failed");
+            }
+            return pos;
         }
 
-        void add_child(unsigned char c, node_ptr& ref, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
         {
-            auto & dat = nd();
-            if (dat.occupants < 48)
+            if (nd().occupants < 48)
             {
-                this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
+                return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             }
             else
             {
-                auto new_node = alloc_node_ptr(node_256, {});
+                auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_256, {});
+                auto &dat = nd();
                 for (unsigned i = 0; i < 256; i++)
                 {
                     if (dat.keys[i])
@@ -451,6 +483,7 @@ namespace art
                         {
                             abort();
                         }
+                        new_node = new_node.modify()->expand_pointers({nc});
                         new_node.modify()->set_child(i, nc);
                     }
                 }
@@ -458,23 +491,24 @@ namespace art
                 statistics::node256_occupants += new_node->data().occupants;
                 ref = new_node;
                 free_node(this);
-                new_node.modify()->add_child(c, ref, child);
+                return new_node.modify()->add_child(c, ref, child);
             }
         }
 
         [[nodiscard]] node_ptr last() const override
         {
-            return get_child(last_index());
+            return get_child(last_index().first);
         }
 
-        [[nodiscard]] unsigned last_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> last_index() const override
         {
             unsigned idx = 255;
-            while (!nd().keys[idx]) idx--;
-            return nd().keys[idx] - 1;
+            auto& dat = nd();
+            while (!dat.keys[idx]) idx--;
+            return {dat.keys[idx] - 1, dat.keys[idx]};
         }
 
-        [[nodiscard]] unsigned first_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
         {
             unsigned uc = 0; // ?
             unsigned i;
@@ -484,10 +518,10 @@ namespace art
                 i = dat.keys[uc];
                 if (i > 0)
                 {
-                    return i - 1;
+                    return {i - 1,uc};
                 }
             }
-            return uc;
+            return {256,uc}; // ??
         }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
@@ -503,7 +537,7 @@ namespace art
             if (test < 256)
             {
                 i = dat.keys[test];
-                trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)uc};
+                trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)test};
                 return {te, (i == c)};
             }
 #if 0
@@ -598,12 +632,12 @@ namespace art
 
         node256() = default;
 
-        explicit node256(compressed_address address)
+        explicit node256(logical_address address)
         {
             node256::from(address);
         }
 
-        explicit node256(compressed_address address, node_data* data)
+        explicit node256(logical_address address, node_data* data)
         {
             node256::from(address, data);
         }
@@ -642,7 +676,7 @@ namespace art
             // trashing if we sit on the 48/49 boundary
             if (dat.occupants == 37)
             {
-                auto new_node = alloc_node_ptr(node_48, {});
+                auto new_node = alloc_node_ptr(sizeof(intptr_t), node_48, {});
                 ref = new_node;
                 new_node.modify()->copy_header(this);
 
@@ -661,30 +695,36 @@ namespace art
             }
         }
 
-        void add_child(unsigned char c, node_ptr&, node_ptr child) override
+        unsigned add_child(unsigned char c, node_ptr&, node_ptr child) override
         {
             if (!has_child(c))
             {
+                auto& dat = nd();
                 ++statistics::node256_occupants;
-                ++data().occupants; // just to keep stats ok
+                ++dat.occupants; // just to keep stats ok
+                if (!child.is_leaf)
+                {
+                    dat.descendants += child->data().descendants;
+                }
             }
             set_child(c, child);
+            return c;
         }
 
         [[nodiscard]] node_ptr last() const override
         {
-            return get_child(last_index());
+            return get_child(last_index().first);
         }
 
-        [[nodiscard]] unsigned last_index() const override
+        [[nodiscard]] std::pair<unsigned, uint8_t> last_index() const override
         {
             auto& dat = nd();
             unsigned idx = 255;
             while (dat.children[idx].empty()) idx--;
-            return idx;
+            return {idx, idx};
         }
 
-        [[nodiscard]] unsigned first_index() const override
+        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
         {
             auto& dat = nd();
             unsigned uc = 0; // ?
@@ -692,36 +732,23 @@ namespace art
             {
                 if (dat.types[uc] > 0)
                 {
-                    return uc;
+                    return {(unsigned)uc,uc};
                 }
             }
-            return uc;
+            return {uc,uc}; // ?
         }
 
         [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
         {
-            auto& dat = nd();
-            unsigned i = simd::first_byte_gt(dat.types+c,256-c,0)+c;
-            if (i < 256)
-            {
-                return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
-            }
-
-#if 0
             for (unsigned i = c; i < 256; ++i)
             {
                 if (has_child(i))
                 {
-                    if (si != i)
-                    {
-                        abort();
-                    }
                     // because nodes are ordered accordingly
                     return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
                 }
             }
 
-#endif
             return {{nullptr, nullptr, 256}, false};
         }
 
@@ -729,11 +756,15 @@ namespace art
         {
             if (te.child_ix > 255) return {};
 
-            auto& dat = nd();
-            auto r = simd::first_byte_gt(dat.keys+te.child_ix+1,256-te.child_ix-1,0);
-            unsigned i = te.child_ix + r + 1;
-            if (i < 256)
-                return {this, get_child(i), i, (uint8_t)i};
+            //auto& dat = nd();
+            //auto r = //simd::first_byte_gt(dat.keys+te.child_ix+1,256-te.child_ix-1,0);
+            for (unsigned i =  te.child_ix + 1;i < 256; ++i)
+            {
+                if (has_child(i))
+                {
+                    return {this, get_child(i), i, (uint8_t)i};
+                }
+            }
             return {};
         }
 

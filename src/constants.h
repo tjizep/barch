@@ -8,6 +8,7 @@ enum
 {
     node_checks = 0,
     page_size = 8192, // must be a power of twp
+    initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,
     auto_vac = 0,
     auto_vac_workers = 4,

@@ -121,7 +121,7 @@ namespace art
             }
             else
             {
-                auto new_node = alloc_node_ptr(node_16, {child});
+                auto new_node = alloc_node_ptr(sizeof(IntegerPtr), node_16, {child});
                 // Copy the child pointers and the key map
                 new_node.modify()->set_children(0, this, 0, data().occupants);
                 new_node.modify()->set_keys(nd().keys, data().occupants);
@@ -230,7 +230,7 @@ namespace art
 
             if (this->data().occupants == 3)
             {
-                auto new_node = alloc_node_ptr(node_4, {});
+                auto new_node = alloc_node_ptr(sizeof(IPtrType), node_4, {});
                 new_node.modify()->copy_header(this);
                 new_node.modify()->set_keys(this->nd().keys, 3);
                 new_node.modify()->set_children(0, this, 0, 3);
@@ -273,7 +273,7 @@ namespace art
             }
             else
             {
-                auto new_node = alloc_node_ptr(node_48, {child});
+                auto new_node = alloc_node_ptr(sizeof(IPtrType), node_48, {child});
 
                 // Copy the child pointers and populate the key map
                 new_node.modify()->set_children(0, this, 0, this->data().occupants);
@@ -417,7 +417,7 @@ namespace art
 
             if (data().occupants == 12)
             {
-                auto new_node = alloc_node_ptr(node_16, {});
+                auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_16, {});
                 new_node.modify()->copy_header(this);
                 unsigned child = 0;
                 for (unsigned i = 0; i < 256; i++)
@@ -472,7 +472,7 @@ namespace art
             }
             else
             {
-                auto new_node = alloc_node_ptr(node_256, {});
+                auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_256, {});
                 auto &dat = nd();
                 for (unsigned i = 0; i < 256; i++)
                 {
@@ -483,6 +483,7 @@ namespace art
                         {
                             abort();
                         }
+                        new_node = new_node.modify()->expand_pointers({nc});
                         new_node.modify()->set_child(i, nc);
                     }
                 }
@@ -675,7 +676,7 @@ namespace art
             // trashing if we sit on the 48/49 boundary
             if (dat.occupants == 37)
             {
-                auto new_node = alloc_node_ptr(node_48, {});
+                auto new_node = alloc_node_ptr(sizeof(intptr_t), node_48, {});
                 ref = new_node;
                 new_node.modify()->copy_header(this);
 

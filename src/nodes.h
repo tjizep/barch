@@ -487,6 +487,8 @@ namespace art
         [[nodiscard]] virtual unsigned ptr_size() const = 0;
 
         [[nodiscard]] virtual node_ptr expand_pointers(node_ptr& ref, const children_t& child) = 0;
+        [[nodiscard]] virtual node_ptr expand_pointers(const children_t& child) = 0;
+
         [[nodiscard]] virtual size_t alloc_size() const = 0;
         [[nodiscard]] virtual compressed_address get_address() const = 0;
         [[nodiscard]] virtual node_ptr_storage get_storage() const = 0;
@@ -500,7 +502,7 @@ namespace art
     typedef node::node_ptr node_ptr;
     typedef node::trace_element trace_element;
     typedef node::children_t children_t;
-    node_ptr alloc_node_ptr(unsigned nt, const children_t& c);
+    node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const children_t& c);
     node_ptr alloc_8_node_ptr(unsigned nt); // magic 8 ball
     extern node_ptr resolve_read_node(compressed_address address);
     extern node_ptr resolve_write_node(compressed_address address);

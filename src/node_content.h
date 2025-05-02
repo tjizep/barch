@@ -65,6 +65,10 @@ namespace art
             {
                 abort();
             }
+            if (ptr.address() > std::numeric_limits<EncodingType>::max())
+            {
+                abort_with("invalid address");
+            }
             value = ptr.null() ? 0 : ptr.address();
         }
 
@@ -74,7 +78,8 @@ namespace art
             {
                 abort();
             }
-            return logical_leaf(value);
+            auto l = logical_leaf(value);
+            return l;
         }
 
         void set_node(const node* ptr)
@@ -195,8 +200,8 @@ namespace art
 
         [[nodiscard]] bool ok(const node_ptr& n) const
         {
-
-            return art::ok<EncodedType>(n.logical.address(),get_offset());
+            return n.logical.address() < std::numeric_limits<EncodedType>::max();
+            //return art::ok<EncodedType>(n.logical.address(),get_offset());
         }
 
         ProxyType operator[](unsigned at)
@@ -255,6 +260,11 @@ namespace art
         const encoded_data& nd() const
         {
             return *refresh_cache<encoded_data>();
+        }
+
+        node_ptr create_node() {
+            create_data();
+            return this;
         }
 
         compressed_address create_data() final
@@ -448,11 +458,15 @@ namespace art
                 // TODO: compress leaf addresses again
                 if (np.is_leaf)
                 {
-                    return nd().leaves.ok(np);
+                    if (!nd().leaves.ok(np)) {
+                        return false;
+                    }
                 }
                 else
                 {
-                    return nd().children.ok(np);
+                    if(!nd().children.ok(np)) {
+                        return false;
+                    }
                 }
             }
             return true;
@@ -599,7 +613,7 @@ namespace art
         {
             check_object();
             if (KEYS < count)
-                abort();
+                return;
             memcpy(nd().keys, other_keys, count);
         }
 
@@ -735,6 +749,15 @@ namespace art
             n.modify()->copy_from(this);
             free_node(this);
             ref = n;
+            return n;
+        }
+        [[nodiscard]] node_ptr expand_pointers(const children_t& children) override
+        {
+            check_object();
+            if (ok_children(children)) return this;
+            node_ptr n = alloc_8_node_ptr(type());
+            n.modify()->copy_from(this);
+            free_node(this);
             return n;
         }
 

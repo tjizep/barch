@@ -1206,7 +1206,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         art::node_ptr l2 = make_leaf(key, value);
         t->last_leaf_added = l2;
         // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
-        auto new_stored = art::alloc_node_ptr(art::initial_node, {l1, l2});
+        auto new_stored = art::alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
         auto* new_node = new_stored.modify();
         // Determine longest prefix
         l = n.const_leaf();
@@ -1241,7 +1241,7 @@ static art::node_ptr recursive_insert(art::tree* t, const art::key_spec& options
         // Create a new node and a new leaf
         art::node_ptr new_leaf = make_leaf(key, value);
         t->last_leaf_added = new_leaf;
-        auto new_node = art::alloc_node_ptr(art::initial_node, {n, new_leaf}); // pass children to get opt. ptr size
+        auto new_node = art::alloc_node_ptr(initial_node_ptr_size, art::initial_node, {n, new_leaf}); // pass children to get opt. ptr size
         ref = new_node;
         new_node.modify()->data().partial_len = prefix_diff;
         memcpy(new_node.modify()->data().partial, n->data().partial, std::min<int>(art::max_prefix_llength, prefix_diff));
@@ -1299,6 +1299,7 @@ RECURSE_SEARCH:;
     // No child, node goes within us
     art::node_ptr l = make_leaf(key, value);
     t->last_leaf_added = l;
+    n = n.modify()->expand_pointers(ref, {l});
     auto idx = n.modify()->add_child(key[depth], ref, l);
     t->push_trace( {ref, l, idx, key[depth]});
     return nullptr;

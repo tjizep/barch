@@ -109,21 +109,22 @@ art::node_ptr art::resolve_write_node(compressed_address address)
     }
 }
 
-art::node_ptr art::alloc_node_ptr(unsigned nt, const art::children_t& c)
+art::node_ptr art::alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t& c)
 {
-    node_ptr ref;
+
+    if (ptrsize == 8) return alloc_8_node_ptr(nt);
 
     node_ptr_storage ptr;
     switch (nt)
     {
     case node_4:
-        return ptr.emplace<node4_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node4_4>()->create().expand_pointers(c);
     case node_16:
-        return ptr.emplace<node16_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node16_4>()->create().expand_pointers(c);
     case node_48:
-        return ptr.emplace<node48_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node48_4>()->create().expand_pointers(c);
     case node_256:
-        return ptr.emplace<node256_4>()->create().expand_pointers(ref, c);
+        return ptr.emplace<node256_4>()->create().expand_pointers(c);
     default:
         throw std::runtime_error("Unknown node type");
     }
@@ -135,13 +136,13 @@ art::node_ptr art::alloc_8_node_ptr(unsigned nt)
     switch (nt)
     {
     case node_4:
-        return ptr.emplace<node4_8>();
+        return ptr.emplace<node4_8>()->create_node();
     case node_16:
-        return ptr.emplace<node16_8>();
+        return ptr.emplace<node16_8>()->create_node();
     case node_48:
-        return ptr.emplace<node48_8>();
+        return ptr.emplace<node48_8>()->create_node();
     case node_256:
-        return ptr.emplace<node256_8>();
+        return ptr.emplace<node256_8>()->create_node();
     default:
         throw std::runtime_error("Unknown node type");
     }

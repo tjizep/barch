@@ -1,5 +1,7 @@
 #pragma once
 #include <atomic>
+#include <exception>
+
 namespace statistics {
     /**
      * size stats
@@ -43,10 +45,10 @@ namespace statistics {
     extern std::atomic<uint64_t> incr_ops;
     extern std::atomic<uint64_t> decr_ops;
     extern std::atomic<uint64_t> update_ops;
-
 }
-template <typename Ext>
-static void throw_exception(const char * name)  {
+
+template<typename Ext>
+static void throw_exception(const char *name) {
     ++statistics::exceptions_raised;
-    throw Ext{name};
+    throw Ext(name);
 }

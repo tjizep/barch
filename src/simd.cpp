@@ -26,8 +26,7 @@
  * compare two buffers and put the result in a bitmap
  */
 
-unsigned simd::bits_oper16(const unsigned char* a, const unsigned char* b, unsigned mask, unsigned operbits)
-{
+unsigned simd::bits_oper16(const unsigned char *a, const unsigned char *b, unsigned mask, unsigned operbits) {
     unsigned bitfield = 0;
     // support non-86 architectures via sse2neon
 #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
@@ -43,22 +42,19 @@ unsigned simd::bits_oper16(const unsigned char* a, const unsigned char* b, unsig
             }
 #endif
 
-    if ((operbits & eq) == eq)
-    {
+    if ((operbits & eq) == eq) {
         // _mm_set1_epi8(a)
-        cmp = _mm_cmpeq_epi8(_mm_loadu_si128((__m128i*)a), _mm_loadu_si128((__m128i*)b));
+        cmp = _mm_cmpeq_epi8(_mm_loadu_si128((__m128i *) a), _mm_loadu_si128((__m128i *) b));
         bitfield |= _mm_movemask_epi8(cmp);
     }
 
-    if ((operbits & lt) == lt)
-    {
-        cmp = _mm_cmplt_epi8(_mm_loadu_si128((__m128i*)a), _mm_loadu_si128((__m128i*)b));
+    if ((operbits & lt) == lt) {
+        cmp = _mm_cmplt_epi8(_mm_loadu_si128((__m128i *) a), _mm_loadu_si128((__m128i *) b));
         bitfield |= _mm_movemask_epi8(cmp);
     }
 
-    if ((operbits & gt) == gt)
-    {
-        cmp = _mm_cmpgt_epi8(_mm_loadu_si128((__m128i*)a), _mm_loadu_si128((__m128i*)b));
+    if ((operbits & gt) == gt) {
+        cmp = _mm_cmpgt_epi8(_mm_loadu_si128((__m128i *) a), _mm_loadu_si128((__m128i *) b));
         bitfield |= (_mm_movemask_epi8(cmp));
     }
 #else
@@ -87,22 +83,20 @@ unsigned simd::bits_oper16(const unsigned char* a, const unsigned char* b, unsig
     return bitfield;
 }
 
-size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
-{
-    const uint8_t* ptr = data;
-    const uint8_t* end = data + size;
+size_t simd::first_byte_gt(const uint8_t *data, unsigned size, uint8_t ch) {
+    const uint8_t *ptr = data;
+    const uint8_t *end = data + size;
 #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
     //size_t first = 0;
-    __m128i tocmp =  _mm_set1_epi8(ch);
+    __m128i tocmp = _mm_set1_epi8(ch);
     while (size >= 16) {
-        __builtin_prefetch(ptr+16);
+        __builtin_prefetch(ptr + 16);
         size_t diff = 16;
         int mask = 0;
-        __m128i chunk = _mm_loadu_si128 ((__m128i const*)ptr);
-        __m128i results =  _mm_cmpgt_epi8(chunk, tocmp);
+        __m128i chunk = _mm_loadu_si128((__m128i const *) ptr);
+        __m128i results = _mm_cmpgt_epi8(chunk, tocmp);
         mask = _mm_movemask_epi8(results);
-        if (mask)
-        {
+        if (mask) {
             int lz = __builtin_ctz(mask);
             return ptr - data + lz;
         }
@@ -111,45 +105,40 @@ size_t simd::first_byte_gt(const uint8_t* data, unsigned size, uint8_t ch)
         size -= diff;
     }
 #endif
-    while (size >= 4)
-    {
-        if (ptr[0] > ch || ptr[1] > ch || ptr[2] > ch || ptr[3] > ch )
-        {
+    while (size >= 4) {
+        if (ptr[0] > ch || ptr[1] > ch || ptr[2] > ch || ptr[3] > ch) {
             break;
         }
         ptr += 4;
         size -= 4;
     }
-    while (ptr!=end)
-    {
-        if (*ptr > ch)
-        {
+    while (ptr != end) {
+        if (*ptr > ch) {
             return ptr - data;
         }
         ++ptr;
     }
     return ptr - data;
 }
-size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
-{
-    const uint8_t* ptr = data;
-    const uint8_t* end = data + size;
+
+size_t simd::first_byte_eq(const uint8_t *data, unsigned size, uint8_t ch) {
+    const uint8_t *ptr = data;
+    const uint8_t *end = data + size;
 #if 1
 #if defined(__AVX__)
 
 #endif
 
 #if defined(__i386__) || defined(__amd64__) || defined(__ARM_NEON__)
-    __m128i tocmp =  _mm_set1_epi8(ch);
+    __m128i tocmp = _mm_set1_epi8(ch);
     while (size >= 16) {
-        __builtin_prefetch(ptr+16);
+        __builtin_prefetch(ptr + 16);
         size_t diff = 16;
         int mask = 0;
-        __m128i chunk = _mm_loadu_si128 ((__m128i const*)ptr);
-        __m128i results =  _mm_cmpeq_epi8(chunk, tocmp);
+        __m128i chunk = _mm_loadu_si128((__m128i const *) ptr);
+        __m128i results = _mm_cmpeq_epi8(chunk, tocmp);
         mask = _mm_movemask_epi8(results);
-        if (mask)
-        {
+        if (mask) {
             int lz = __builtin_ctz(mask);
             return ptr - data + lz;
         }
@@ -159,47 +148,47 @@ size_t simd::first_byte_eq(const uint8_t* data, unsigned size, uint8_t ch)
 #endif
 #endif
 #if 1
-    while (size >= 8)
-    {
+    while (size >= 8) {
         if (ptr[0] == ch || ptr[1] == ch || ptr[2] == ch || ptr[3] == ch ||
-            ptr[4] == ch || ptr[5] == ch || ptr[6] == ch || ptr[7] == ch)
-        {
+            ptr[4] == ch || ptr[5] == ch || ptr[6] == ch || ptr[7] == ch) {
             break;
         }
-        ptr+=8;
-        size-=8;
+        ptr += 8;
+        size -= 8;
     }
 #endif
-    while (ptr!=end)
-    {
-        if (*ptr == ch)
-        {
+    while (ptr != end) {
+        if (*ptr == ch) {
             return ptr - data;
         }
         ++ptr;
     }
     return ptr - data;
 }
+
 #include "logger.h"
-int test()
-{
-    unsigned char data[16] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00};
-    unsigned char data1[16] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
-    unsigned char data2[35] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00};
-    if (10 != simd::first_byte_eq(data, 16, 1))
-    {
+
+int test() {
+    unsigned char data[16] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00
+    };
+    unsigned char data1[16] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    unsigned char data2[35] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00
+    };
+    if (10 != simd::first_byte_eq(data, 16, 1)) {
         abort();
     }
-    if (16 != simd::first_byte_eq(data1, 16, 1))
-    {
+    if (16 != simd::first_byte_eq(data1, 16, 1)) {
         abort();
     }
-    if (32 != simd::first_byte_eq(data2, 35, 1))
-    {
+    if (32 != simd::first_byte_eq(data2, 35, 1)) {
         abort();
     }
-    if (32 != simd::first_byte_gt(data2, 35, 0))
-    {
+    if (32 != simd::first_byte_gt(data2, 35, 0)) {
         abort();
     }
 #if 0
@@ -243,4 +232,5 @@ int test()
 
     return 0;
 }
+
 static int t = test();

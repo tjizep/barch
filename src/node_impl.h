@@ -9,35 +9,29 @@
 *  these are virtualized variable pointer nodes for external storage and or memory reduction using
 *  pointer offsets or compression
 */
-namespace art
-{
+namespace art {
     /**
      * variable pointer size node with 4 children
      */
-    template <typename IntegerPtr>
-    struct node4_v final : public encoded_node_content<4, 4, node_4, IntegerPtr>
-    {
+    template<typename IntegerPtr>
+    struct node4_v final : public encoded_node_content<4, 4, node_4, IntegerPtr> {
         typedef encoded_node_content<4, 4, node_4, IntegerPtr> this_type;
 
-        [[nodiscard]] uint8_t type() const override
-        {
+        [[nodiscard]] uint8_t type() const override {
             return node_4;
         }
 
         node4_v() = default;
 
-        explicit node4_v(logical_address address)
-        {
+        explicit node4_v(logical_address address) {
             node4_v::from(address);
         }
 
-        explicit node4_v(logical_address address, node_data* data)
-        {
+        explicit node4_v(logical_address address, node_data *data) {
             node4_v::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const override
-        {
+        [[nodiscard]] node_ptr_storage get_storage() const override {
             node_ptr_storage storage;
             storage.emplace<node4_v>(*this);
             return storage;
@@ -55,25 +49,20 @@ namespace art
         using this_type::insert_type;
         using this_type::index;
 
-        void remove(node_ptr& ref, unsigned pos, unsigned char) override
-        {
+        void remove(node_ptr &ref, unsigned pos, unsigned char) override {
             remove_child(pos);
-            auto& dat = nd();
+            auto &dat = nd();
             // Remove nodes with only a single child
-            if (dat.occupants == 1)
-            {
+            if (dat.occupants == 1) {
                 node_ptr child = get_child(0);
-                if (!child.is_leaf)
-                {
+                if (!child.is_leaf) {
                     // Concatenate the prefixes
                     unsigned prefix = data().partial_len;
-                    if (prefix < max_prefix_llength)
-                    {
+                    if (prefix < max_prefix_llength) {
                         dat.partial[prefix] = dat.keys[0];
                         ++prefix;
                     }
-                    if (prefix < max_prefix_llength)
-                    {
+                    if (prefix < max_prefix_llength) {
                         unsigned sub_prefix = std::min<
                             unsigned>(child->data().partial_len, max_prefix_llength - prefix);
                         memcpy(dat.partial + prefix, child->data().partial, sub_prefix);
@@ -90,10 +79,9 @@ namespace art
             }
         }
 
-        unsigned add_child_inner(unsigned char c, node_ptr child) override
-        {
+        unsigned add_child_inner(unsigned char c, node_ptr child) override {
             unsigned idx = index(c, gt);
-            auto& dat = nd();
+            auto &dat = nd();
             // Shift to make room
             memmove(dat.keys + idx + 1, dat.keys + idx, data().occupants - idx);
             memmove(dat.children.data + idx + 1, dat.children.data + idx,
@@ -102,9 +90,8 @@ namespace art
             // Insert element
             dat.keys[idx] = c;
             set_child(idx, child);
-            if (!child.is_leaf)
-            {
-               dat.descendants += child->data().descendants;
+            if (!child.is_leaf) {
+                dat.descendants += child->data().descendants;
             }
             ++dat.occupants;
             if (!this->check_data()) {
@@ -113,14 +100,10 @@ namespace art
             return idx;
         }
 
-        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
-        {
-            if (data().occupants < 4)
-            {
+        unsigned add_child(unsigned char c, node_ptr &ref, node_ptr child) override {
+            if (data().occupants < 4) {
                 return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
-            }
-            else
-            {
+            } else {
                 auto new_node = alloc_node_ptr(sizeof(IntegerPtr), node_16, {child});
                 // Copy the child pointers and the key map
                 new_node.modify()->set_children(0, this, 0, data().occupants);
@@ -132,46 +115,37 @@ namespace art
             }
         }
 
-        [[nodiscard]] node_ptr last() const override
-        {
+        [[nodiscard]] node_ptr last() const override {
             unsigned idx = data().occupants - 1;
             return get_child(idx);
         }
 
-        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
-        {
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override {
             auto &d = nd();
 
-            for (unsigned i = 0; i < d.occupants; i++)
-            {
-                if (d.keys[i] >= c && d.children[i].exists())
-                {
+            for (unsigned i = 0; i < d.occupants; i++) {
+                if (d.keys[i] >= c && d.children[i].exists()) {
                     return {{this, get_child(i), i, d.keys[i]}, d.keys[i] == c};
                 }
             }
             return {{nullptr, nullptr, d.occupants}, false};
         }
 
-        [[nodiscard]] trace_element next(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element next(const trace_element &te) const override {
             unsigned i = te.child_ix + 1;
-            if (i < this->data().occupants)
-            {
+            if (i < this->data().occupants) {
                 return {this, this->get_child(i), i, nd().keys[i]};
             }
             return {};
         }
 
-        [[nodiscard]] trace_element previous(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element previous(const trace_element &te) const override {
             unsigned i = te.child_ix;
-            if (i > 0)
-            {
-                return {this, get_child(i - 1), i - 1,nd().keys[i - 1]};
+            if (i > 0) {
+                return {this, get_child(i - 1), i - 1, nd().keys[i - 1]};
             }
             return {};
         }
-
     };
 
     typedef node4_v<int32_t> node4_4;
@@ -179,32 +153,27 @@ namespace art
     /**
      * Variable pointer node with 16 children
      */
-    template <typename IPtrType>
+    template<typename IPtrType>
     struct node16_v final : public
-        encoded_node_content<16, 16, node_16, IPtrType>
-    {
+            encoded_node_content<16, 16, node_16, IPtrType> {
         typedef encoded_node_content<16, 16, node_16, IPtrType> Parent;
         typedef encoded_node_content<16, 16, node_16, IPtrType> this_type;
 
-        [[nodiscard]] uint8_t type() const override
-        {
+        [[nodiscard]] uint8_t type() const override {
             return node_16;
         }
 
         node16_v() = default;
 
-        explicit node16_v(logical_address address)
-        {
+        explicit node16_v(logical_address address) {
             node16_v::from(address);
         }
 
-        explicit node16_v(logical_address address, node_data* data)
-        {
+        explicit node16_v(logical_address address, node_data *data) {
             node16_v::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const override
-        {
+        [[nodiscard]] node_ptr_storage get_storage() const override {
             node_ptr_storage storage;
             storage.emplace<node16_v>(*this);
             return storage;
@@ -224,12 +193,10 @@ namespace art
 #endif
 
         // unsigned pos = l - children;
-        void remove(node_ptr& ref, unsigned pos, unsigned char) override
-        {
+        void remove(node_ptr &ref, unsigned pos, unsigned char) override {
             this->remove_child(pos);
 
-            if (this->data().occupants == 3)
-            {
+            if (this->data().occupants == 3) {
                 auto new_node = alloc_node_ptr(sizeof(IPtrType), node_4, {});
                 new_node.modify()->copy_header(this);
                 new_node.modify()->set_keys(this->nd().keys, 3);
@@ -240,10 +207,9 @@ namespace art
             }
         }
 
-        unsigned add_child_inner(unsigned char c, node_ptr child) override
-        {
+        unsigned add_child_inner(unsigned char c, node_ptr child) override {
             unsigned idx = this->index(c, gt);
-            auto& dat = this->nd();
+            auto &dat = this->nd();
             // Shift to make room
             memmove(dat.keys + idx + 1, dat.keys + idx, dat.occupants - idx);
             memmove(dat.children.data + idx + 1, dat.children.data + idx,
@@ -252,8 +218,7 @@ namespace art
             // Insert element
             dat.keys[idx] = c;
             this->set_child(idx, child);
-            if (!child.is_leaf)
-            {
+            if (!child.is_leaf) {
                 dat.descendants += child->data().descendants;
             }
             ++dat.occupants;
@@ -262,23 +227,17 @@ namespace art
             }
 
             return idx;
-
         }
 
-        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
-        {
-            if (this->data().occupants < 16)
-            {
+        unsigned add_child(unsigned char c, node_ptr &ref, node_ptr child) override {
+            if (this->data().occupants < 16) {
                 return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
-            }
-            else
-            {
+            } else {
                 auto new_node = alloc_node_ptr(sizeof(IPtrType), node_48, {child});
 
                 // Copy the child pointers and populate the key map
                 new_node.modify()->set_children(0, this, 0, this->data().occupants);
-                for (unsigned i = 0; i < this->data().occupants; i++)
-                {
+                for (unsigned i = 0; i < this->data().occupants; i++) {
                     new_node.modify()->set_key(this->nd().keys[i], i + 1);
                 }
                 new_node.modify()->copy_header(this);
@@ -288,14 +247,12 @@ namespace art
             }
         }
 
-        [[nodiscard]] node_ptr last() const override
-        {
+        [[nodiscard]] node_ptr last() const override {
             return this->get_child(this->data().occupants - 1);
         }
 
 
-        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
-        {
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override {
 #if 0
             unsigned mask = (1 << this->data().occupants) - 1;
             unsigned bf = bits_oper16(this->nd().keys, simd::nuchar<16>(c), mask, OPERATION_BIT::eq | OPERATION_BIT::gt);
@@ -308,10 +265,8 @@ namespace art
 #else
             auto &d = this->nd();
 
-            for (unsigned i = 0; i < d.occupants; i++)
-            {
-                if (d.keys[i] >= c && d.children[i].exists())
-                {
+            for (unsigned i = 0; i < d.occupants; i++) {
+                if (d.keys[i] >= c && d.children[i].exists()) {
                     return {{this, this->get_child(i), i, d.keys[i]}, d.keys[i] == c};
                 }
             }
@@ -320,22 +275,19 @@ namespace art
             return {{nullptr, nullptr, this->data().occupants}, false};
         }
 
-        [[nodiscard]] trace_element next(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element next(const trace_element &te) const override {
             unsigned i = te.child_ix + 1;
             auto &dat = this->nd();
-            if (i < dat.occupants)
-            {
+            if (i < dat.occupants) {
                 return {this, this->get_child(i), i, dat.keys[i]}; // the keys are ordered so fine I think
             }
             return {};
         }
 
-        [[nodiscard]] trace_element previous(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element previous(const trace_element &te) const override {
             unsigned i = te.child_ix;
-            if (i > 0)
-            {   auto &dat = this->nd();
+            if (i > 0) {
+                auto &dat = this->nd();
                 return {this, this->get_child(i - 1), i - 1, dat.keys[i - 1]}; // the keys are ordered so fine I think
             }
             return {};
@@ -348,9 +300,8 @@ namespace art
      * Node with 48 children, but
      * a full 256 byte field.
      */
-    template <typename PtrEncodedType>
-    struct node48 final : public encoded_node_content<48, 256, node_48, PtrEncodedType>
-    {
+    template<typename PtrEncodedType>
+    struct node48 final : public encoded_node_content<48, 256, node_48, PtrEncodedType> {
         typedef encoded_node_content<48, 256, node_48, PtrEncodedType> this_type;
 
         using this_type::copy_from;
@@ -364,50 +315,42 @@ namespace art
         using this_type::nd;
         using this_type::insert_type;
         using this_type::index;
+
         node48() = default;
 
-        explicit node48(logical_address address)
-        {
+        explicit node48(logical_address address) {
             node48::from(address);
         }
 
-        explicit node48(logical_address address, node_data* data)
-        {
+        explicit node48(logical_address address, node_data *data) {
             node48::from(address, data);
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const override
-        {
+        [[nodiscard]] node_ptr_storage get_storage() const override {
             node_ptr_storage storage;
             storage.emplace<node48>(*this);
             return storage;
         }
 
-        [[nodiscard]] uint8_t type() const override
-        {
+        [[nodiscard]] uint8_t type() const override {
             return node_48;
         }
 
-        [[nodiscard]] unsigned index(unsigned char c) const override
-        {
+        [[nodiscard]] unsigned index(unsigned char c) const override {
             unsigned i = nd().keys[c];
             if (i)
                 return i - 1;
             return 256;
         }
 
-        void remove(node_ptr& ref, unsigned pos, unsigned char key) override
-        {
-            if ((unsigned)nd().keys[key] - 1 != pos)
-            {
+        void remove(node_ptr &ref, unsigned pos, unsigned char key) override {
+            if ((unsigned) nd().keys[key] - 1 != pos) {
                 abort();
             }
-            if (nd().keys[key] == 0)
-            {
+            if (nd().keys[key] == 0) {
                 return;
             }
-            if (nd().children[pos].empty())
-            {
+            if (nd().children[pos].empty()) {
                 abort();
             }
             nd().keys[key] = 0;
@@ -415,19 +358,15 @@ namespace art
             nd().types[pos] = false;
             --nd().occupants;
 
-            if (data().occupants == 12)
-            {
+            if (data().occupants == 12) {
                 auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_16, {});
                 new_node.modify()->copy_header(this);
                 unsigned child = 0;
-                for (unsigned i = 0; i < 256; i++)
-                {
+                for (unsigned i = 0; i < 256; i++) {
                     pos = nd().keys[i];
-                    if (pos)
-                    {
+                    if (pos) {
                         node_ptr nn = get_child(pos - 1);
-                        if (nn.null())
-                        {
+                        if (nn.null()) {
                             abort();
                         }
                         new_node.modify()->set_key(child, i);
@@ -440,21 +379,19 @@ namespace art
             }
         }
 
-        unsigned add_child_inner(unsigned char c, node_ptr child) override
-        {
+        unsigned add_child_inner(unsigned char c, node_ptr child) override {
             unsigned pos = 0;
             auto &dat = this->nd();
             // The simd optimization below seems to provide benefits
             // I leave the original here for reference or if
             // some bug emerges
             //while (dat.children[pos].exists()) pos++;
-            pos = simd::first_byte_eq(dat.types, node48::KEY_COUNT,0);
+            pos = simd::first_byte_eq(dat.types, node48::KEY_COUNT, 0);
 
             // not we do not need to call insert_type an empty child is found
             set_child(pos, child);
             dat.keys[c] = pos + 1;
-            if (!child.is_leaf)
-            {
+            if (!child.is_leaf) {
                 dat.descendants += child->data().descendants;
             }
             ++dat.occupants;
@@ -464,23 +401,16 @@ namespace art
             return pos;
         }
 
-        unsigned add_child(unsigned char c, node_ptr& ref, node_ptr child) override
-        {
-            if (nd().occupants < 48)
-            {
+        unsigned add_child(unsigned char c, node_ptr &ref, node_ptr child) override {
+            if (nd().occupants < 48) {
                 return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
-            }
-            else
-            {
+            } else {
                 auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_256, {});
                 auto &dat = nd();
-                for (unsigned i = 0; i < 256; i++)
-                {
-                    if (dat.keys[i])
-                    {
+                for (unsigned i = 0; i < 256; i++) {
+                    if (dat.keys[i]) {
                         node_ptr nc = get_child(dat.keys[i] - 1);
-                        if (nc.null())
-                        {
+                        if (nc.null()) {
                             abort();
                         }
                         new_node = new_node.modify()->expand_pointers({nc});
@@ -495,37 +425,31 @@ namespace art
             }
         }
 
-        [[nodiscard]] node_ptr last() const override
-        {
+        [[nodiscard]] node_ptr last() const override {
             return get_child(last_index().first);
         }
 
-        [[nodiscard]] std::pair<unsigned,uint8_t> last_index() const override
-        {
+        [[nodiscard]] std::pair<unsigned, uint8_t> last_index() const override {
             unsigned idx = 255;
-            auto& dat = nd();
+            auto &dat = nd();
             while (!dat.keys[idx]) idx--;
             return {dat.keys[idx] - 1, dat.keys[idx]};
         }
 
-        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
-        {
+        [[nodiscard]] std::pair<unsigned, uint8_t> first_index() const override {
             unsigned uc = 0; // ?
             unsigned i;
-            auto& dat = nd();
-            for (; uc < 256; uc++)
-            {
+            auto &dat = nd();
+            for (; uc < 256; uc++) {
                 i = dat.keys[uc];
-                if (i > 0)
-                {
-                    return {i - 1,uc};
+                if (i > 0) {
+                    return {i - 1, uc};
                 }
             }
-            return {256,uc}; // ??
+            return {256, uc}; // ??
         }
 
-        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
-        {
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override {
             /*
             * find first not less than
             * todo: make lb faster by adding bit map index and using __builtin_ctz as above
@@ -533,11 +457,10 @@ namespace art
             unsigned uc = c;
             unsigned i = 0;
             auto &dat = this->nd();
-            int test = simd::first_byte_gt(dat.keys+uc, 256-uc,0) + uc;
-            if (test < 256)
-            {
+            int test = simd::first_byte_gt(dat.keys + uc, 256 - uc, 0) + uc;
+            if (test < 256) {
                 i = dat.keys[test];
-                trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)test};
+                trace_element te = {this, get_child(i - 1), i - 1, (uint8_t) test};
                 return {te, (i == c)};
             }
 #if 0
@@ -558,48 +481,39 @@ namespace art
             return {{nullptr, nullptr, 256}, false};
         }
 
-        [[nodiscard]] trace_element previous(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element previous(const trace_element &te) const override {
             unsigned uc = te.k, i;
             auto &dat = this->nd();
-            for (; uc > 0; --uc)
-            {
+            for (; uc > 0; --uc) {
                 i = dat.keys[uc];
-                if (i > 0)
-                {
-                    return {this, get_child(i - 1), i - 1, (uint8_t)uc};
+                if (i > 0) {
+                    return {this, get_child(i - 1), i - 1, (uint8_t) uc};
                 }
             }
             return {};
         }
 
-        [[nodiscard]] trace_element next(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element next(const trace_element &te) const override {
             unsigned uc = te.k + 1, i;
             auto &dat = this->nd();
-            for (; uc < 256; uc++)
-            {
+            for (; uc < 256; uc++) {
                 i = dat.keys[uc];
-                if (i > 0)
-                {
-                    return {this, get_child(i - 1), i - 1, (uint8_t)uc};
+                if (i > 0) {
+                    return {this, get_child(i - 1), i - 1, (uint8_t) uc};
                 }
             }
             return {};
         }
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size ) const
-        {
+
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned &size) const {
             size = 0;
             return 0;
             unsigned r = start;
-            auto& dat = nd();
+            auto &dat = nd();
             unsigned last_leaf = 256;
 
-            for (; r < 256; ++r)
-            {
-                if (dat.types[r] != 0)
-                {
-
+            for (; r < 256; ++r) {
+                if (dat.types[r] != 0) {
                     if (dat.types[r] == non_leaf_type)
                         return last_leaf < 256 ? dat.keys[last_leaf] - 1 : 256;
                     ++size;
@@ -609,7 +523,6 @@ namespace art
             if (last_leaf < 256)
                 return dat.keys[last_leaf] - 1;
             return 256;
-
         }
     };
 
@@ -618,9 +531,8 @@ namespace art
     /**
      * variable pointer size node with 256 children
      */
-    template <typename intptr_t>
-    struct node256 final : public encoded_node_content<256, 0, node_256, intptr_t>
-    {
+    template<typename intptr_t>
+    struct node256 final : public encoded_node_content<256, 0, node_256, intptr_t> {
         typedef encoded_node_content<256, 0, node_256, intptr_t> this_type;
 
         using this_type::set_child;
@@ -632,59 +544,49 @@ namespace art
 
         node256() = default;
 
-        explicit node256(logical_address address)
-        {
+        explicit node256(logical_address address) {
             node256::from(address);
         }
 
-        explicit node256(logical_address address, node_data* data)
-        {
+        explicit node256(logical_address address, node_data *data) {
             node256::from(address, data);
         }
 
-        [[nodiscard]] uint8_t type() const override
-        {
+        [[nodiscard]] uint8_t type() const override {
             return node_256;
         }
 
-        [[nodiscard]] node_ptr_storage get_storage() const
-        {
+        [[nodiscard]] node_ptr_storage get_storage() const {
             node_ptr_storage storage;
             storage.emplace<node256>(*this);
             return storage;
         }
 
-        [[nodiscard]] unsigned index(unsigned char c) const override
-        {
+        [[nodiscard]] unsigned index(unsigned char c) const override {
             if (nd().children[c].exists())
                 return c;
             return 256;
         }
 
-        void remove(node_ptr& ref, unsigned pos, unsigned char key) override
-        {
-            if (key != pos)
-            {
+        void remove(node_ptr &ref, unsigned pos, unsigned char key) override {
+            if (key != pos) {
                 abort();
             }
-            auto& dat = nd();
+            auto &dat = nd();
             dat.children[key] = nullptr;
             dat.types[key] = 0;
             --dat.occupants;
             --statistics::node256_occupants;
             // Resize to a node48 on underflow, not immediately to prevent
             // trashing if we sit on the 48/49 boundary
-            if (dat.occupants == 37)
-            {
+            if (dat.occupants == 37) {
                 auto new_node = alloc_node_ptr(sizeof(intptr_t), node_48, {});
                 ref = new_node;
                 new_node.modify()->copy_header(this);
 
                 pos = 0;
-                for (unsigned i = 0; i < 256; i++)
-                {
-                    if (has_any(i))
-                    {
+                for (unsigned i = 0; i < 256; i++) {
+                    if (has_any(i)) {
                         new_node.modify()->set_child(pos, get_child(i)); //[pos] = n->nd().children[i];
                         new_node.modify()->set_key(i, pos + 1);
                         pos++;
@@ -695,15 +597,12 @@ namespace art
             }
         }
 
-        unsigned add_child(unsigned char c, node_ptr&, node_ptr child) override
-        {
-            if (!has_child(c))
-            {
-                auto& dat = nd();
+        unsigned add_child(unsigned char c, node_ptr &, node_ptr child) override {
+            if (!has_child(c)) {
+                auto &dat = nd();
                 ++statistics::node256_occupants;
                 ++dat.occupants; // just to keep stats ok
-                if (!child.is_leaf)
-                {
+                if (!child.is_leaf) {
                     dat.descendants += child->data().descendants;
                 }
             }
@@ -711,88 +610,71 @@ namespace art
             return c;
         }
 
-        [[nodiscard]] node_ptr last() const override
-        {
+        [[nodiscard]] node_ptr last() const override {
             return get_child(last_index().first);
         }
 
-        [[nodiscard]] std::pair<unsigned, uint8_t> last_index() const override
-        {
-            auto& dat = nd();
+        [[nodiscard]] std::pair<unsigned, uint8_t> last_index() const override {
+            auto &dat = nd();
             unsigned idx = 255;
             while (dat.children[idx].empty()) idx--;
             return {idx, idx};
         }
 
-        [[nodiscard]] std::pair<unsigned,uint8_t> first_index() const override
-        {
-            auto& dat = nd();
+        [[nodiscard]] std::pair<unsigned, uint8_t> first_index() const override {
+            auto &dat = nd();
             unsigned uc = 0; // ?
-            for (; uc < 256; uc++)
-            {
-                if (dat.types[uc] > 0)
-                {
-                    return {(unsigned)uc,uc};
+            for (; uc < 256; uc++) {
+                if (dat.types[uc] > 0) {
+                    return {(unsigned) uc, uc};
                 }
             }
-            return {uc,uc}; // ?
+            return {uc, uc}; // ?
         }
 
-        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override
-        {
-            for (unsigned i = c; i < 256; ++i)
-            {
-                if (has_child(i))
-                {
+        [[nodiscard]] std::pair<trace_element, bool> lower_bound_child(unsigned char c) const override {
+            for (unsigned i = c; i < 256; ++i) {
+                if (has_child(i)) {
                     // because nodes are ordered accordingly
-                    return {{this, get_child(i), i, (uint8_t)i}, (i == c)};
+                    return {{this, get_child(i), i, (uint8_t) i}, (i == c)};
                 }
             }
 
             return {{nullptr, nullptr, 256}, false};
         }
 
-        [[nodiscard]] trace_element next(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element next(const trace_element &te) const override {
             if (te.child_ix > 255) return {};
 
             //auto& dat = nd();
             //auto r = //simd::first_byte_gt(dat.keys+te.child_ix+1,256-te.child_ix-1,0);
-            for (unsigned i =  te.child_ix + 1;i < 256; ++i)
-            {
-                if (has_child(i))
-                {
-                    return {this, get_child(i), i, (uint8_t)i};
+            for (unsigned i = te.child_ix + 1; i < 256; ++i) {
+                if (has_child(i)) {
+                    return {this, get_child(i), i, (uint8_t) i};
                 }
             }
             return {};
         }
 
-        [[nodiscard]] trace_element previous(const trace_element& te) const override
-        {
+        [[nodiscard]] trace_element previous(const trace_element &te) const override {
             if (!te.child_ix) return {};
-            for (unsigned i = te.child_ix - 1; i > 0; --i)
-            {
+            for (unsigned i = te.child_ix - 1; i > 0; --i) {
                 // these aren't sparse so shouldn't take long
-                if (has_child(i))
-                {
+                if (has_child(i)) {
                     // because nodes are ordered accordingly
-                    return {this, get_child(i), i, (uint8_t)i};
+                    return {this, get_child(i), i, (uint8_t) i};
                 }
             }
             return {};
         }
-        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned& size) const
-        {
+
+        [[nodiscard]] virtual unsigned leaf_only_distance(unsigned start, unsigned &size) const {
             unsigned r = start;
-            auto& dat = nd();
+            auto &dat = nd();
             unsigned last_leaf = 256;
             size = 0;
-            for (; r < 256; ++r)
-            {
-                if (dat.types[r] != 0)
-                {
-
+            for (; r < 256; ++r) {
+                if (dat.types[r] != 0) {
                     if (dat.types[r] == non_leaf_type)
                         return last_leaf;
                     ++size;

@@ -4,8 +4,8 @@
 
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
-enum
-{
+
+enum {
     node_checks = 0,
     page_size = 8192, // must be a power of twp
     initial_node_ptr_size = 4, // must be a power of twp

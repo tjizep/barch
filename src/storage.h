@@ -7,25 +7,21 @@
 #include <cinttypes>
 #include <list>
 #include "sastam.h"
-typedef std::list<size_t, heap::allocator<size_t>> lru_list;
-struct storage
-{
-    storage()
-    {
+typedef std::list<size_t, heap::allocator<size_t> > lru_list;
+
+struct storage {
+    storage() {
     }
 
-    storage(storage&& other) noexcept
-    {
+    storage(storage &&other) noexcept {
         *this = std::move(other);
     }
 
-    storage(const storage& other)
-    {
+    storage(const storage &other) {
         *this = other;
     }
 
-    storage& operator=(const storage& other)
-    {
+    storage &operator=(const storage &other) {
         if (&other == this) return *this;
         write_position = other.write_position;
         //modifications = other.modifications;
@@ -36,8 +32,7 @@ struct storage
         return *this;
     }
 
-    void clear()
-    {
+    void clear() {
         write_position = 0;
         //modifications = 0;
         size = 0;
@@ -46,8 +41,7 @@ struct storage
         lru = lru_list::iterator();
     }
 
-    storage& operator=(storage&& other) noexcept
-    {
+    storage &operator=(storage &&other) noexcept {
         if (&other == this) return *this;
         write_position = other.write_position;
         //modifications = other.modifications;
@@ -59,9 +53,8 @@ struct storage
         return *this;
     }
 
-    [[nodiscard]] bool empty() const
-    {
-        return size == 0 && write_position == 0 ;
+    [[nodiscard]] bool empty() const {
+        return size == 0 && write_position == 0;
     }
 
     uint32_t write_position = 0;

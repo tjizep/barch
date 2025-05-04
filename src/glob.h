@@ -35,7 +35,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 #include "value_type.h"
-struct  glob {
+
+struct glob {
 private:
     /* Glob-style pattern matching. */
     static int stringmatchlen_impl(const char *pattern,
@@ -45,11 +46,10 @@ private:
                                    int nocase,
                                    int *skipLongerMatches,
                                    int nesting);
+
 public:
     static int stringmatchlen(art::value_type pattern, art::value_type string, int nocase);
-
 };
-
 
 
 #endif //GLOB_H

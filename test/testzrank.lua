@@ -9,8 +9,9 @@ if vk.call('B.SIZE') < count then
     vk.call('B.CLEAR')
 
     for i=1,count do
-        vk.call('B.ZADD', key, count*math.random(), 'at '..i)
-        vk.call('B.ZADD', key, math.floor(count*math.random()), 'at '..i)
+        local s = count*math.random()
+        vk.call('B.ZADD', key, s, 'at '..i)
+        vk.call('B.ZADD', key, math.floor(s), 'flor '..i)
     end
     vk.call('B.SAVE')
 end

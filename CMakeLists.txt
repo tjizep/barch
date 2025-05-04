@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 3.22)
 project(barch VERSION 0.0.1 LANGUAGES CXX)
 enable_testing()
 if (NOT ADD_ZSTD_COMPRESSION)
-    set(ADD_ZSTD_COMPRESSION ON)
+    set(ADD_ZSTD_COMPRESSION OFF)
+endif ()
+if (NOT ADD_FAST_FLOAT)
+    set(ADD_FAST_FLOAT ON)
 endif ()
 
 if (NOT ADD_FMT)
@@ -39,14 +42,14 @@ if (ADD_ZSTD_COMPRESSION)
 else ()
     message("ZSTD compression not used use -DADD_ZSTD_COMPRESSION=ON")
 endif()
-
-FetchContent_Declare(
-        fast_float
-        GIT_REPOSITORY https://github.com/fastfloat/fast_float.git
-        GIT_TAG main
-)
-FetchContent_MakeAvailable(fast_float)
-
+if (ADD_FAST_FLOAT)
+    FetchContent_Declare(
+            fast_float
+            GIT_REPOSITORY https://github.com/fastfloat/fast_float.git
+            GIT_TAG main
+    )
+    FetchContent_MakeAvailable(fast_float)
+endif ()
 if (ADD_FMT)
 
     FetchContent_Declare(

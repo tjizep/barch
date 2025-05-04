@@ -5,6 +5,7 @@
 #ifndef ORDERED_API_H
 #define ORDERED_API_H
 #include "valkeymodule.h"
-int add_ordered_api(ValkeyModuleCtx* ctx);
+
+int add_ordered_api(ValkeyModuleCtx *ctx);
 
 #endif //ORDERED_API_H

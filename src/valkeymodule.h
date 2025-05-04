@@ -142,6 +142,7 @@ typedef long long ustime_t;
 #define VALKEYMODULE_CONFIG_SENSITIVE (1ULL << 1)    /* Does this value contain sensitive information */
 #define VALKEYMODULE_CONFIG_HIDDEN (1ULL << 4)       /* This config is hidden in `config get <pattern>` (used for tests/debugging) */
 
+
 #define VALKEYMODULE_CONFIG_PROTECTED (1ULL << 5)    /* Becomes immutable if enable-protected-configs is enabled. */
 #define VALKEYMODULE_CONFIG_DENY_LOADING (1ULL << 6) /* This config is forbidden during loading. */
 
@@ -149,8 +150,7 @@ typedef long long ustime_t;
 #define VALKEYMODULE_CONFIG_BITFLAGS (1ULL << 8) /* Indicates if this value can be set as a multiple enum values */
 
 /* StreamID type. */
-typedef struct ValkeyModuleStreamID
-{
+typedef struct ValkeyModuleStreamID {
     uint64_t ms;
     uint64_t seq;
 } ValkeyModuleStreamID;
@@ -245,6 +245,7 @@ This flag should not be used directly by the module.
 #define VALKEYMODULE_NOTIFY_STREAM (1 << 10)   /* t */
 #define VALKEYMODULE_NOTIFY_KEY_MISS (1 << 11) /* m (Note: This one is excluded from VALKEYMODULE_NOTIFY_ALL on purpose) */
 
+
 #define VALKEYMODULE_NOTIFY_LOADED (1 << 12)   /* module only key space notification, indicate a key loaded from rdb */
 #define VALKEYMODULE_NOTIFY_MODULE (1 << 13)   /* d, module key space notification */
 #define VALKEYMODULE_NOTIFY_NEW (1 << 14)      /* n, new key notification */
@@ -335,8 +336,7 @@ typedef uint64_t ValkeyModuleTimerID;
 
 /* Definitions for ValkeyModule_SetCommandInfo. */
 
-typedef enum
-{
+typedef enum {
     VALKEYMODULE_ARG_TYPE_STRING,
     VALKEYMODULE_ARG_TYPE_INTEGER,
     VALKEYMODULE_ARG_TYPE_DOUBLE,
@@ -353,10 +353,10 @@ typedef enum
 #define VALKEYMODULE_CMD_ARG_MULTIPLE (1 << 1)       /* The argument may repeat itself (like key in DEL) */
 #define VALKEYMODULE_CMD_ARG_MULTIPLE_TOKEN (1 << 2) /* The argument may repeat itself, and so does its token (like `GET pattern` in SORT) */
 
+
 #define _VALKEYMODULE_CMD_ARG_NEXT (1 << 3)
 
-typedef enum
-{
+typedef enum {
     VALKEYMODULE_KSPEC_BS_INVALID = 0, /* Must be zero. An implicitly value of
                                         * zero is provided when the field is
                                         * absent in a struct literal. */
@@ -365,8 +365,7 @@ typedef enum
     VALKEYMODULE_KSPEC_BS_KEYWORD
 } ValkeyModuleKeySpecBeginSearchType;
 
-typedef enum
-{
+typedef enum {
     VALKEYMODULE_KSPEC_FK_OMITTED = 0, /* Used when the field is absent in a
                                         * struct literal. Don't use this value
                                         * explicitly. */
@@ -396,46 +395,40 @@ typedef enum
 #define VALKEYMODULE_CMD_CHANNEL_SUBSCRIBE (1ULL << 2)
 #define VALKEYMODULE_CMD_CHANNEL_UNSUBSCRIBE (1ULL << 3)
 
-typedef struct ValkeyModuleCommandArg
-{
-    const char* name;
+typedef struct ValkeyModuleCommandArg {
+    const char *name;
     ValkeyModuleCommandArgType type;
     int key_spec_index; /* If type is KEY, this is a zero-based index of
                          * the key_spec in the command. For other types,
                          * you may specify -1. */
-    const char* token; /* If type is PURE_TOKEN, this is the token. */
-    const char* summary;
-    const char* since;
+    const char *token; /* If type is PURE_TOKEN, this is the token. */
+    const char *summary;
+    const char *since;
     int flags; /* The VALKEYMODULE_CMD_ARG_* macros. */
-    const char* deprecated_since;
-    struct ValkeyModuleCommandArg* subargs;
-    const char* display_text;
+    const char *deprecated_since;
+    struct ValkeyModuleCommandArg *subargs;
+    const char *display_text;
 } ValkeyModuleCommandArg;
 
-typedef struct
-{
-    const char* since;
-    const char* changes;
+typedef struct {
+    const char *since;
+    const char *changes;
 } ValkeyModuleCommandHistoryEntry;
 
-typedef struct
-{
-    const char* notes;
+typedef struct {
+    const char *notes;
     uint64_t flags; /* VALKEYMODULE_CMD_KEY_* macros. */
     ValkeyModuleKeySpecBeginSearchType begin_search_type;
 
-    union
-    {
-        struct
-        {
+    union {
+        struct {
             /* The index from which we start the search for keys */
             int pos;
         } index;
 
-        struct
-        {
+        struct {
             /* The keyword that indicates the beginning of key args */
-            const char* keyword;
+            const char *keyword;
             /* An index in argv from which to start searching.
              * Can be negative, which means start search from the end, in reverse
              * (Example: -2 means to start in reverse from the penultimate arg) */
@@ -445,10 +438,8 @@ typedef struct
 
     ValkeyModuleKeySpecFindKeysType find_keys_type;
 
-    union
-    {
-        struct
-        {
+    union {
+        struct {
             /* Index of the last key relative to the result of the begin search
              * step. Can be negative, in which case it's not relative. -1
              * indicating till the last argument, -2 one before the last and so
@@ -463,8 +454,7 @@ typedef struct
             int limit;
         } range;
 
-        struct
-        {
+        struct {
             /* Index of the argument containing the number of keys to come
              * relative to the result of the begin search step */
             int keynumidx;
@@ -479,8 +469,7 @@ typedef struct
     } fk;
 } ValkeyModuleCommandKeySpec;
 
-typedef struct
-{
+typedef struct {
     int version;
     size_t sizeof_historyentry;
     size_t sizeof_keyspec;
@@ -496,28 +485,29 @@ static const ValkeyModuleCommandInfoVersion ValkeyModule_CurrentCommandInfoVersi
 
 #define VALKEYMODULE_COMMAND_INFO_VERSION (&ValkeyModule_CurrentCommandInfoVersion)
 
-typedef struct
-{
+typedef struct {
     /* Always set version to VALKEYMODULE_COMMAND_INFO_VERSION */
-    const ValkeyModuleCommandInfoVersion* version;
-    const char* summary; /* Summary of the command */
-    const char* complexity; /* Complexity description */
-    const char* since; /* Debut module version of the command */
-    ValkeyModuleCommandHistoryEntry* history; /* History */
+    const ValkeyModuleCommandInfoVersion *version;
+    const char *summary; /* Summary of the command */
+    const char *complexity; /* Complexity description */
+    const char *since; /* Debut module version of the command */
+    ValkeyModuleCommandHistoryEntry *history; /* History */
     /* A string of space-separated tips meant for clients/proxies regarding this
      * command */
-    const char* tips;
+    const char *tips;
     /* Number of arguments, it is possible to use -N to say >= N */
     int arity;
-    ValkeyModuleCommandKeySpec* key_specs;
-    ValkeyModuleCommandArg* args;
+    ValkeyModuleCommandKeySpec *key_specs;
+    ValkeyModuleCommandArg *args;
 } ValkeyModuleCommandInfo;
 
 /* Eventloop definitions. */
 #define VALKEYMODULE_EVENTLOOP_READABLE 1
 #define VALKEYMODULE_EVENTLOOP_WRITABLE 2
-typedef void (*ValkeyModuleEventLoopFunc)(int fd, void* user_data, int mask);
-typedef void (*ValkeyModuleEventLoopOneShotFunc)(void* user_data);
+
+typedef void (*ValkeyModuleEventLoopFunc)(int fd, void *user_data, int mask);
+
+typedef void (*ValkeyModuleEventLoopOneShotFunc)(void *user_data);
 
 /* Server events definitions.
  * Those flags should not be used directly by the module, instead
@@ -543,18 +533,18 @@ typedef void (*ValkeyModuleEventLoopOneShotFunc)(void* user_data);
 #define VALKEYMODULE_EVENT_KEY 17
 #define _VALKEYMODULE_EVENT_NEXT 18 /* Next event flag, should be updated if a new event added. */
 
-typedef struct ValkeyModuleEvent
-{
+typedef struct ValkeyModuleEvent {
     uint64_t id; /* VALKEYMODULE_EVENT_... defines. */
     uint64_t dataver; /* Version of the structure we pass as 'data'. */
 } ValkeyModuleEvent;
 
 struct ValkeyModuleCtx;
 struct ValkeyModuleDefragCtx;
-typedef void (*ValkeyModuleEventCallback)(struct ValkeyModuleCtx* ctx,
+
+typedef void (*ValkeyModuleEventCallback)(struct ValkeyModuleCtx *ctx,
                                           ValkeyModuleEvent eid,
                                           uint64_t subevent,
-                                          void* data);
+                                          void *data);
 
 /* IMPORTANT: When adding a new version of one of below structures that contain
  * event data (ValkeyModuleFlushInfoV1 for example) we have to avoid renaming the
@@ -583,25 +573,25 @@ typedef void (*ValkeyModuleEventCallback)(struct ValkeyModuleCtx* ctx,
  * unless the author explicitly decided to use the newer event type.
  */
 static const ValkeyModuleEvent ValkeyModuleEvent_ReplicationRoleChanged = {
-                                   VALKEYMODULE_EVENT_REPLICATION_ROLE_CHANGED,
-                                   1
-                               },
-                               ValkeyModuleEvent_Persistence = {VALKEYMODULE_EVENT_PERSISTENCE, 1},
-                               ValkeyModuleEvent_FlushDB = {VALKEYMODULE_EVENT_FLUSHDB, 1},
-                               ValkeyModuleEvent_Loading = {VALKEYMODULE_EVENT_LOADING, 1},
-                               ValkeyModuleEvent_ClientChange = {VALKEYMODULE_EVENT_CLIENT_CHANGE, 1},
-                               ValkeyModuleEvent_Shutdown = {VALKEYMODULE_EVENT_SHUTDOWN, 1},
-                               ValkeyModuleEvent_ReplicaChange = {VALKEYMODULE_EVENT_REPLICA_CHANGE, 1},
-                               ValkeyModuleEvent_CronLoop = {VALKEYMODULE_EVENT_CRON_LOOP, 1},
-                               ValkeyModuleEvent_PrimaryLinkChange = {VALKEYMODULE_EVENT_PRIMARY_LINK_CHANGE, 1},
-                               ValkeyModuleEvent_ModuleChange = {VALKEYMODULE_EVENT_MODULE_CHANGE, 1},
-                               ValkeyModuleEvent_LoadingProgress = {VALKEYMODULE_EVENT_LOADING_PROGRESS, 1},
-                               ValkeyModuleEvent_SwapDB = {VALKEYMODULE_EVENT_SWAPDB, 1},
-                               ValkeyModuleEvent_ReplAsyncLoad = {VALKEYMODULE_EVENT_REPL_ASYNC_LOAD, 1},
-                               ValkeyModuleEvent_ForkChild = {VALKEYMODULE_EVENT_FORK_CHILD, 1},
-                               ValkeyModuleEvent_EventLoop = {VALKEYMODULE_EVENT_EVENTLOOP, 1},
-                               ValkeyModuleEvent_Config = {VALKEYMODULE_EVENT_CONFIG, 1},
-                               ValkeyModuleEvent_Key = {VALKEYMODULE_EVENT_KEY, 1};
+            VALKEYMODULE_EVENT_REPLICATION_ROLE_CHANGED,
+            1
+        },
+        ValkeyModuleEvent_Persistence = {VALKEYMODULE_EVENT_PERSISTENCE, 1},
+        ValkeyModuleEvent_FlushDB = {VALKEYMODULE_EVENT_FLUSHDB, 1},
+        ValkeyModuleEvent_Loading = {VALKEYMODULE_EVENT_LOADING, 1},
+        ValkeyModuleEvent_ClientChange = {VALKEYMODULE_EVENT_CLIENT_CHANGE, 1},
+        ValkeyModuleEvent_Shutdown = {VALKEYMODULE_EVENT_SHUTDOWN, 1},
+        ValkeyModuleEvent_ReplicaChange = {VALKEYMODULE_EVENT_REPLICA_CHANGE, 1},
+        ValkeyModuleEvent_CronLoop = {VALKEYMODULE_EVENT_CRON_LOOP, 1},
+        ValkeyModuleEvent_PrimaryLinkChange = {VALKEYMODULE_EVENT_PRIMARY_LINK_CHANGE, 1},
+        ValkeyModuleEvent_ModuleChange = {VALKEYMODULE_EVENT_MODULE_CHANGE, 1},
+        ValkeyModuleEvent_LoadingProgress = {VALKEYMODULE_EVENT_LOADING_PROGRESS, 1},
+        ValkeyModuleEvent_SwapDB = {VALKEYMODULE_EVENT_SWAPDB, 1},
+        ValkeyModuleEvent_ReplAsyncLoad = {VALKEYMODULE_EVENT_REPL_ASYNC_LOAD, 1},
+        ValkeyModuleEvent_ForkChild = {VALKEYMODULE_EVENT_FORK_CHILD, 1},
+        ValkeyModuleEvent_EventLoop = {VALKEYMODULE_EVENT_EVENTLOOP, 1},
+        ValkeyModuleEvent_Config = {VALKEYMODULE_EVENT_CONFIG, 1},
+        ValkeyModuleEvent_Key = {VALKEYMODULE_EVENT_KEY, 1};
 
 /* Those are values that are used for the 'subevent' callback argument. */
 #define VALKEYMODULE_SUBEVENT_PERSISTENCE_RDB_START 0
@@ -698,8 +688,7 @@ static const ValkeyModuleEvent ValkeyModuleEvent_ReplicationRoleChanged = {
 
 #define VALKEYMODULE_CLIENTINFO_VERSION 1
 
-typedef struct ValkeyModuleClientInfo
-{
+typedef struct ValkeyModuleClientInfo {
     uint64_t version; /* Version of this structure for ABI compat. */
     uint64_t flags; /* VALKEYMODULE_CLIENTINFO_FLAG_* */
     uint64_t id; /* Client ID. */
@@ -714,16 +703,15 @@ typedef struct ValkeyModuleClientInfo
 
 #define VALKEYMODULE_REPLICATIONINFO_VERSION 1
 
-typedef struct ValkeyModuleReplicationInfo
-{
+typedef struct ValkeyModuleReplicationInfo {
     uint64_t version; /* Not used since this structure is never passed
                               from the module to the core right now. Here
                               for future compatibility. */
     int primary; /* true if primary, false if replica */
-    char* primary_host; /* primary instance hostname for NOW_REPLICA */
+    char *primary_host; /* primary instance hostname for NOW_REPLICA */
     int primary_port; /* primary instance port for NOW_REPLICA */
-    char* replid1; /* Main replication ID */
-    char* replid2; /* Secondary replication ID */
+    char *replid1; /* Main replication ID */
+    char *replid2; /* Secondary replication ID */
     uint64_t repl1_offset; /* Main replication offset */
     uint64_t repl2_offset; /* Offset of replid2 validity */
 } ValkeyModuleReplicationInfoV1;
@@ -732,8 +720,7 @@ typedef struct ValkeyModuleReplicationInfo
 
 #define VALKEYMODULE_FLUSHINFO_VERSION 1
 
-typedef struct ValkeyModuleFlushInfo
-{
+typedef struct ValkeyModuleFlushInfo {
     uint64_t version; /* Not used since this structure is never passed
                          from the module to the core right now. Here
                          for future compatibility. */
@@ -745,12 +732,11 @@ typedef struct ValkeyModuleFlushInfo
 
 #define VALKEYMODULE_MODULE_CHANGE_VERSION 1
 
-typedef struct ValkeyModuleModuleChange
-{
+typedef struct ValkeyModuleModuleChange {
     uint64_t version; /* Not used since this structure is never passed
                                 from the module to the core right now. Here
                                 for future compatibility. */
-    const char* module_name; /* Name of module loaded or unloaded. */
+    const char *module_name; /* Name of module loaded or unloaded. */
     int32_t module_version; /* Module version. */
 } ValkeyModuleModuleChangeV1;
 
@@ -758,21 +744,19 @@ typedef struct ValkeyModuleModuleChange
 
 #define VALKEYMODULE_CONFIGCHANGE_VERSION 1
 
-typedef struct ValkeyModuleConfigChange
-{
+typedef struct ValkeyModuleConfigChange {
     uint64_t version; /* Not used since this structure is never passed
                                   from the module to the core right now. Here
                                   for future compatibility. */
     uint32_t num_changes; /* how many Valkey config options were changed */
-    const char** config_names; /* the config names that were changed */
+    const char **config_names; /* the config names that were changed */
 } ValkeyModuleConfigChangeV1;
 
 #define ValkeyModuleConfigChange ValkeyModuleConfigChangeV1
 
 #define VALKEYMODULE_CRON_LOOP_VERSION 1
 
-typedef struct ValkeyModuleCronLoopInfo
-{
+typedef struct ValkeyModuleCronLoopInfo {
     uint64_t version; /* Not used since this structure is never passed
                          from the module to the core right now. Here
                          for future compatibility. */
@@ -783,8 +767,7 @@ typedef struct ValkeyModuleCronLoopInfo
 
 #define VALKEYMODULE_LOADING_PROGRESS_VERSION 1
 
-typedef struct ValkeyModuleLoadingProgressInfo
-{
+typedef struct ValkeyModuleLoadingProgressInfo {
     uint64_t version; /* Not used since this structure is never passed
                          from the module to the core right now. Here
                          for future compatibility. */
@@ -797,8 +780,7 @@ typedef struct ValkeyModuleLoadingProgressInfo
 
 #define VALKEYMODULE_SWAPDBINFO_VERSION 1
 
-typedef struct ValkeyModuleSwapDbInfo
-{
+typedef struct ValkeyModuleSwapDbInfo {
     uint64_t version; /* Not used since this structure is never passed
                              from the module to the core right now. Here
                              for future compatibility. */
@@ -810,18 +792,16 @@ typedef struct ValkeyModuleSwapDbInfo
 
 #define VALKEYMODULE_KEYINFO_VERSION 1
 
-typedef struct ValkeyModuleKeyInfo
-{
+typedef struct ValkeyModuleKeyInfo {
     uint64_t version; /* Not used since this structure is never passed
                              from the module to the core right now. Here
                              for future compatibility. */
-    ValkeyModuleKey* key; /* Opened key. */
+    ValkeyModuleKey *key; /* Opened key. */
 } ValkeyModuleKeyInfoV1;
 
 #define ValkeyModuleKeyInfo ValkeyModuleKeyInfoV1
 
-typedef enum
-{
+typedef enum {
     VALKEYMODULE_ACL_LOG_AUTH = 0, /* Authentication failure */
     VALKEYMODULE_ACL_LOG_CMD, /* Command authorization failure */
     VALKEYMODULE_ACL_LOG_KEY, /* Key authorization failure */
@@ -836,9 +816,11 @@ typedef struct ValkeyModuleDefragCtx ValkeyModuleDefragCtx;
 
 /* Function pointers needed by both the core and modules, these needs to be
  * exposed since you can't cast a function pointer to (void *). */
-typedef void (*ValkeyModuleInfoFunc)(ValkeyModuleInfoCtx* ctx, int for_crash_report);
-typedef void (*ValkeyModuleDefragFunc)(ValkeyModuleDefragCtx* ctx);
-typedef void (*ValkeyModuleUserChangedFunc)(uint64_t client_id, void* privdata);
+typedef void (*ValkeyModuleInfoFunc)(ValkeyModuleInfoCtx *ctx, int for_crash_report);
+
+typedef void (*ValkeyModuleDefragFunc)(ValkeyModuleDefragCtx *ctx);
+
+typedef void (*ValkeyModuleUserChangedFunc)(uint64_t client_id, void *privdata);
 
 /* ------------------------- End of common defines ------------------------ */
 
@@ -888,65 +870,100 @@ typedef struct ValkeyModuleUser ValkeyModuleUser;
 typedef struct ValkeyModuleKeyOptCtx ValkeyModuleKeyOptCtx;
 typedef struct ValkeyModuleRdbStream ValkeyModuleRdbStream;
 
-typedef int (*ValkeyModuleCmdFunc)(ValkeyModuleCtx* ctx, ValkeyModuleString** argv, int argc);
-typedef void (*ValkeyModuleDisconnectFunc)(ValkeyModuleCtx* ctx, ValkeyModuleBlockedClient* bc);
-typedef int (*ValkeyModuleNotificationFunc)(ValkeyModuleCtx* ctx, int type, const char* event, ValkeyModuleString* key);
-typedef void (*ValkeyModulePostNotificationJobFunc)(ValkeyModuleCtx* ctx, void* pd);
-typedef void*(*ValkeyModuleTypeLoadFunc)(ValkeyModuleIO* rdb, int encver);
-typedef void (*ValkeyModuleTypeSaveFunc)(ValkeyModuleIO* rdb, void* value);
-typedef int (*ValkeyModuleTypeAuxLoadFunc)(ValkeyModuleIO* rdb, int encver, int when);
-typedef void (*ValkeyModuleTypeAuxSaveFunc)(ValkeyModuleIO* rdb, int when);
-typedef void (*ValkeyModuleTypeRewriteFunc)(ValkeyModuleIO* aof, ValkeyModuleString* key, void* value);
-typedef size_t (*ValkeyModuleTypeMemUsageFunc)(const void* value);
-typedef size_t (*ValkeyModuleTypeMemUsageFunc2)(ValkeyModuleKeyOptCtx* ctx, const void* value, size_t sample_size);
-typedef void (*ValkeyModuleTypeDigestFunc)(ValkeyModuleDigest* digest, void* value);
-typedef void (*ValkeyModuleTypeFreeFunc)(void* value);
-typedef size_t (*ValkeyModuleTypeFreeEffortFunc)(ValkeyModuleString* key, const void* value);
-typedef size_t (*ValkeyModuleTypeFreeEffortFunc2)(ValkeyModuleKeyOptCtx* ctx, const void* value);
-typedef void (*ValkeyModuleTypeUnlinkFunc)(ValkeyModuleString* key, const void* value);
-typedef void (*ValkeyModuleTypeUnlinkFunc2)(ValkeyModuleKeyOptCtx* ctx, const void* value);
-typedef void*(*ValkeyModuleTypeCopyFunc)(ValkeyModuleString* fromkey, ValkeyModuleString* tokey, const void* value);
-typedef void*(*ValkeyModuleTypeCopyFunc2)(ValkeyModuleKeyOptCtx* ctx, const void* value);
-typedef int (*ValkeyModuleTypeDefragFunc)(ValkeyModuleDefragCtx* ctx, ValkeyModuleString* key, void** value);
-typedef void (*ValkeyModuleClusterMessageReceiver)(ValkeyModuleCtx* ctx,
-                                                   const char* sender_id,
-                                                   uint8_t type,
-                                                   const unsigned char* payload,
-                                                   uint32_t len);
-typedef void (*ValkeyModuleTimerProc)(ValkeyModuleCtx* ctx, void* data);
-typedef void (*ValkeyModuleCommandFilterFunc)(ValkeyModuleCommandFilterCtx* filter);
-typedef void (*ValkeyModuleForkDoneHandler)(int exitcode, int bysignal, void* user_data);
-typedef void (*ValkeyModuleScanCB)(ValkeyModuleCtx* ctx,
-                                   ValkeyModuleString* keyname,
-                                   ValkeyModuleKey* key,
-                                   void* privdata);
-typedef void (*ValkeyModuleScanKeyCB)(ValkeyModuleKey* key,
-                                      ValkeyModuleString* field,
-                                      ValkeyModuleString* value,
-                                      void* privdata);
-typedef ValkeyModuleString*(*ValkeyModuleConfigGetStringFunc)(const char* name, void* privdata);
-typedef long long (*ValkeyModuleConfigGetNumericFunc)(const char* name, void* privdata);
-typedef int (*ValkeyModuleConfigGetBoolFunc)(const char* name, void* privdata);
-typedef int (*ValkeyModuleConfigGetEnumFunc)(const char* name, void* privdata);
-typedef int (*ValkeyModuleConfigSetStringFunc)(const char* name,
-                                               ValkeyModuleString* val,
-                                               void* privdata,
-                                               ValkeyModuleString** err);
-typedef int (*ValkeyModuleConfigSetNumericFunc)(const char* name,
-                                                long long val,
-                                                void* privdata,
-                                                ValkeyModuleString** err);
-typedef int (*ValkeyModuleConfigSetBoolFunc)(const char* name, int val, void* privdata, ValkeyModuleString** err);
-typedef int (*ValkeyModuleConfigSetEnumFunc)(const char* name, int val, void* privdata, ValkeyModuleString** err);
-typedef int (*ValkeyModuleConfigApplyFunc)(ValkeyModuleCtx* ctx, void* privdata, ValkeyModuleString** err);
-typedef void (*ValkeyModuleOnUnblocked)(ValkeyModuleCtx* ctx, ValkeyModuleCallReply* reply, void* private_data);
-typedef int (*ValkeyModuleAuthCallback)(ValkeyModuleCtx* ctx,
-                                        ValkeyModuleString* username,
-                                        ValkeyModuleString* password,
-                                        ValkeyModuleString** err);
+typedef int (*ValkeyModuleCmdFunc)(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
 
-typedef struct ValkeyModuleTypeMethods
-{
+typedef void (*ValkeyModuleDisconnectFunc)(ValkeyModuleCtx *ctx, ValkeyModuleBlockedClient *bc);
+
+typedef int (*ValkeyModuleNotificationFunc)(ValkeyModuleCtx *ctx, int type, const char *event, ValkeyModuleString *key);
+
+typedef void (*ValkeyModulePostNotificationJobFunc)(ValkeyModuleCtx *ctx, void *pd);
+
+typedef void *(*ValkeyModuleTypeLoadFunc)(ValkeyModuleIO *rdb, int encver);
+
+typedef void (*ValkeyModuleTypeSaveFunc)(ValkeyModuleIO *rdb, void *value);
+
+typedef int (*ValkeyModuleTypeAuxLoadFunc)(ValkeyModuleIO *rdb, int encver, int when);
+
+typedef void (*ValkeyModuleTypeAuxSaveFunc)(ValkeyModuleIO *rdb, int when);
+
+typedef void (*ValkeyModuleTypeRewriteFunc)(ValkeyModuleIO *aof, ValkeyModuleString *key, void *value);
+
+typedef size_t (*ValkeyModuleTypeMemUsageFunc)(const void *value);
+
+typedef size_t (*ValkeyModuleTypeMemUsageFunc2)(ValkeyModuleKeyOptCtx *ctx, const void *value, size_t sample_size);
+
+typedef void (*ValkeyModuleTypeDigestFunc)(ValkeyModuleDigest *digest, void *value);
+
+typedef void (*ValkeyModuleTypeFreeFunc)(void *value);
+
+typedef size_t (*ValkeyModuleTypeFreeEffortFunc)(ValkeyModuleString *key, const void *value);
+
+typedef size_t (*ValkeyModuleTypeFreeEffortFunc2)(ValkeyModuleKeyOptCtx *ctx, const void *value);
+
+typedef void (*ValkeyModuleTypeUnlinkFunc)(ValkeyModuleString *key, const void *value);
+
+typedef void (*ValkeyModuleTypeUnlinkFunc2)(ValkeyModuleKeyOptCtx *ctx, const void *value);
+
+typedef void *(*ValkeyModuleTypeCopyFunc)(ValkeyModuleString *fromkey, ValkeyModuleString *tokey, const void *value);
+
+typedef void *(*ValkeyModuleTypeCopyFunc2)(ValkeyModuleKeyOptCtx *ctx, const void *value);
+
+typedef int (*ValkeyModuleTypeDefragFunc)(ValkeyModuleDefragCtx *ctx, ValkeyModuleString *key, void **value);
+
+typedef void (*ValkeyModuleClusterMessageReceiver)(ValkeyModuleCtx *ctx,
+                                                   const char *sender_id,
+                                                   uint8_t type,
+                                                   const unsigned char *payload,
+                                                   uint32_t len);
+
+typedef void (*ValkeyModuleTimerProc)(ValkeyModuleCtx *ctx, void *data);
+
+typedef void (*ValkeyModuleCommandFilterFunc)(ValkeyModuleCommandFilterCtx *filter);
+
+typedef void (*ValkeyModuleForkDoneHandler)(int exitcode, int bysignal, void *user_data);
+
+typedef void (*ValkeyModuleScanCB)(ValkeyModuleCtx *ctx,
+                                   ValkeyModuleString *keyname,
+                                   ValkeyModuleKey *key,
+                                   void *privdata);
+
+typedef void (*ValkeyModuleScanKeyCB)(ValkeyModuleKey *key,
+                                      ValkeyModuleString *field,
+                                      ValkeyModuleString *value,
+                                      void *privdata);
+
+typedef ValkeyModuleString *(*ValkeyModuleConfigGetStringFunc)(const char *name, void *privdata);
+
+typedef long long (*ValkeyModuleConfigGetNumericFunc)(const char *name, void *privdata);
+
+typedef int (*ValkeyModuleConfigGetBoolFunc)(const char *name, void *privdata);
+
+typedef int (*ValkeyModuleConfigGetEnumFunc)(const char *name, void *privdata);
+
+typedef int (*ValkeyModuleConfigSetStringFunc)(const char *name,
+                                               ValkeyModuleString *val,
+                                               void *privdata,
+                                               ValkeyModuleString **err);
+
+typedef int (*ValkeyModuleConfigSetNumericFunc)(const char *name,
+                                                long long val,
+                                                void *privdata,
+                                                ValkeyModuleString **err);
+
+typedef int (*ValkeyModuleConfigSetBoolFunc)(const char *name, int val, void *privdata, ValkeyModuleString **err);
+
+typedef int (*ValkeyModuleConfigSetEnumFunc)(const char *name, int val, void *privdata, ValkeyModuleString **err);
+
+typedef int (*ValkeyModuleConfigApplyFunc)(ValkeyModuleCtx *ctx, void *privdata, ValkeyModuleString **err);
+
+typedef void (*ValkeyModuleOnUnblocked)(ValkeyModuleCtx *ctx, ValkeyModuleCallReply *reply, void *private_data);
+
+typedef int (*ValkeyModuleAuthCallback)(ValkeyModuleCtx *ctx,
+                                        ValkeyModuleString *username,
+                                        ValkeyModuleString *password,
+                                        ValkeyModuleString **err);
+
+typedef struct ValkeyModuleTypeMethods {
     uint64_t version;
     ValkeyModuleTypeLoadFunc rdb_load;
     ValkeyModuleTypeSaveFunc rdb_save;
@@ -980,685 +997,1038 @@ typedef struct ValkeyModuleTypeMethods
 #define VALKEYMODULE_ATTR VALKEYMODULE_ATTR_COMMON
 #endif
 
-VALKEYMODULE_API void*(*ValkeyModule_Alloc)(size_t bytes)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_TryAlloc)(size_t bytes)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_Realloc)(void* ptr, size_t bytes)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_TryRealloc)(void* ptr, size_t bytes)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_Free)(void* ptr) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_Calloc)(size_t nmemb, size_t size)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_TryCalloc)(size_t nmemb, size_t size)VALKEYMODULE_ATTR;
-VALKEYMODULE_API char*(*ValkeyModule_Strdup)(const char* str)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetApi)(const char*, void*) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CreateCommand)(ValkeyModuleCtx* ctx,
-                                                   const char* name,
+VALKEYMODULE_API void *(*ValkeyModule_Alloc)(size_t bytes)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_TryAlloc)(size_t bytes)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_Realloc)(void *ptr, size_t bytes)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_TryRealloc)(void *ptr, size_t bytes)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_Free)(void *ptr) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_Calloc)(size_t nmemb, size_t size)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_TryCalloc)(size_t nmemb, size_t size)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API char *(*ValkeyModule_Strdup)(const char *str)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetApi)(const char *, void *) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CreateCommand)(ValkeyModuleCtx *ctx,
+                                                   const char *name,
                                                    ValkeyModuleCmdFunc cmdfunc,
-                                                   const char* strflags,
+                                                   const char *strflags,
                                                    int firstkey,
                                                    int lastkey,
                                                    int keystep) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCommand*(*ValkeyModule_GetCommand)(ValkeyModuleCtx* ctx,
-                                                                const char* name)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CreateSubcommand)(ValkeyModuleCommand* parent,
-                                                      const char* name,
+
+VALKEYMODULE_API ValkeyModuleCommand *(*ValkeyModule_GetCommand)(ValkeyModuleCtx *ctx,
+                                                                 const char *name)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CreateSubcommand)(ValkeyModuleCommand *parent,
+                                                      const char *name,
                                                       ValkeyModuleCmdFunc cmdfunc,
-                                                      const char* strflags,
+                                                      const char *strflags,
                                                       int firstkey,
                                                       int lastkey,
                                                       int keystep) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetCommandInfo)(ValkeyModuleCommand* command,
-                                                    const ValkeyModuleCommandInfo* info) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetCommandACLCategories)(ValkeyModuleCommand* command,
-                                                             const char* ctgrsflags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_AddACLCategory)(ValkeyModuleCtx* ctx, const char* name) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SetModuleAttribs)(ValkeyModuleCtx* ctx, const char* name, int ver, int apiver)
+
+VALKEYMODULE_API int (*ValkeyModule_SetCommandInfo)(ValkeyModuleCommand *command,
+                                                    const ValkeyModuleCommandInfo *info) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SetCommandACLCategories)(ValkeyModuleCommand *command,
+                                                             const char *ctgrsflags) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_AddACLCategory)(ValkeyModuleCtx *ctx, const char *name) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SetModuleAttribs)(ValkeyModuleCtx *ctx, const char *name, int ver, int apiver)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_IsModuleNameBusy)(const char* name) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_WrongArity)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithLongLong)(ValkeyModuleCtx* ctx, long long ll) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetSelectedDb)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SelectDb)(ValkeyModuleCtx* ctx, int newid) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_KeyExists)(ValkeyModuleCtx* ctx, ValkeyModuleString* keyname) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleKey*(*ValkeyModule_OpenKey)(ValkeyModuleCtx* ctx,
-                                                         ValkeyModuleString* keyname,
-                                                         int mode)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_IsModuleNameBusy)(const char *name) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_WrongArity)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithLongLong)(ValkeyModuleCtx *ctx, long long ll) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetSelectedDb)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SelectDb)(ValkeyModuleCtx *ctx, int newid) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_KeyExists)(ValkeyModuleCtx *ctx, ValkeyModuleString *keyname) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleKey *(*ValkeyModule_OpenKey)(ValkeyModuleCtx *ctx,
+                                                          ValkeyModuleString *keyname,
+                                                          int mode)VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_GetOpenKeyModesAll)(void) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_CloseKey)(ValkeyModuleKey* kp) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_KeyType)(ValkeyModuleKey* kp) VALKEYMODULE_ATTR;
-VALKEYMODULE_API size_t (*ValkeyModule_ValueLength)(ValkeyModuleKey* kp) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ListPush)(ValkeyModuleKey* kp,
+
+VALKEYMODULE_API void (*ValkeyModule_CloseKey)(ValkeyModuleKey *kp) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_KeyType)(ValkeyModuleKey *kp) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API size_t (*ValkeyModule_ValueLength)(ValkeyModuleKey *kp) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ListPush)(ValkeyModuleKey *kp,
                                               int where,
-                                              ValkeyModuleString* ele) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_ListPop)(ValkeyModuleKey* key, int where)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_ListGet)(ValkeyModuleKey* key, long index)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ListSet)(ValkeyModuleKey* key,
+                                              ValkeyModuleString *ele) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_ListPop)(ValkeyModuleKey *key, int where)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_ListGet)(ValkeyModuleKey *key, long index)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ListSet)(ValkeyModuleKey *key,
                                              long index,
-                                             ValkeyModuleString* value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ListInsert)(ValkeyModuleKey* key,
+                                             ValkeyModuleString *value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ListInsert)(ValkeyModuleKey *key,
                                                 long index,
-                                                ValkeyModuleString* value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ListDelete)(ValkeyModuleKey* key, long index) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCallReply*(*ValkeyModule_Call)(ValkeyModuleCtx* ctx,
-                                                            const char* cmdname,
-                                                            const char* fmt,
-                                                            ...)VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_CallReplyProto)(ValkeyModuleCallReply* reply, size_t* len)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_FreeCallReply)(ValkeyModuleCallReply* reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CallReplyType)(ValkeyModuleCallReply* reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API long long (*ValkeyModule_CallReplyInteger)(ValkeyModuleCallReply* reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API double (*ValkeyModule_CallReplyDouble)(ValkeyModuleCallReply* reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CallReplyBool)(ValkeyModuleCallReply* reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_CallReplyBigNumber)(ValkeyModuleCallReply* reply,
-                                                               size_t* len)VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_CallReplyVerbatim)(ValkeyModuleCallReply* reply,
-                                                              size_t* len,
-                                                              const char** format)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCallReply*(*ValkeyModule_CallReplySetElement)(ValkeyModuleCallReply* reply,
-                                                                           size_t idx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CallReplyMapElement)(ValkeyModuleCallReply* reply,
+                                                ValkeyModuleString *value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ListDelete)(ValkeyModuleKey *key, long index) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCallReply *(*ValkeyModule_Call)(ValkeyModuleCtx *ctx,
+                                                             const char *cmdname,
+                                                             const char *fmt,
+                                                             ...)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_CallReplyProto)(ValkeyModuleCallReply *reply, size_t *len)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_FreeCallReply)(ValkeyModuleCallReply *reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CallReplyType)(ValkeyModuleCallReply *reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API long long (*ValkeyModule_CallReplyInteger)(ValkeyModuleCallReply *reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API double (*ValkeyModule_CallReplyDouble)(ValkeyModuleCallReply *reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CallReplyBool)(ValkeyModuleCallReply *reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_CallReplyBigNumber)(ValkeyModuleCallReply *reply,
+                                                                size_t *len)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_CallReplyVerbatim)(ValkeyModuleCallReply *reply,
+                                                               size_t *len,
+                                                               const char **format)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCallReply *(*ValkeyModule_CallReplySetElement)(ValkeyModuleCallReply *reply,
+                                                                            size_t idx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CallReplyMapElement)(ValkeyModuleCallReply *reply,
                                                          size_t idx,
-                                                         ValkeyModuleCallReply** key,
-                                                         ValkeyModuleCallReply** val) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CallReplyAttributeElement)(ValkeyModuleCallReply* reply,
+                                                         ValkeyModuleCallReply **key,
+                                                         ValkeyModuleCallReply **val) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CallReplyAttributeElement)(ValkeyModuleCallReply *reply,
                                                                size_t idx,
-                                                               ValkeyModuleCallReply** key,
-                                                               ValkeyModuleCallReply** val) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_CallReplyPromiseSetUnblockHandler)(ValkeyModuleCallReply* reply,
+                                                               ValkeyModuleCallReply **key,
+                                                               ValkeyModuleCallReply **val) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_CallReplyPromiseSetUnblockHandler)(ValkeyModuleCallReply *reply,
                                                                         ValkeyModuleOnUnblocked on_unblock,
-                                                                        void* private_data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CallReplyPromiseAbort)(ValkeyModuleCallReply* reply,
-                                                           void** private_data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCallReply*(*ValkeyModule_CallReplyAttribute)(ValkeyModuleCallReply* reply)
+                                                                        void *private_data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CallReplyPromiseAbort)(ValkeyModuleCallReply *reply,
+                                                           void **private_data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCallReply *(*ValkeyModule_CallReplyAttribute)(ValkeyModuleCallReply *reply)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API size_t (*ValkeyModule_CallReplyLength)(ValkeyModuleCallReply* reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCallReply*(*ValkeyModule_CallReplyArrayElement)(ValkeyModuleCallReply* reply,
-                                                                             size_t idx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CreateString)(ValkeyModuleCtx* ctx,
-                                                                 const char* ptr,
-                                                                 size_t len)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CreateStringFromLongLong)(ValkeyModuleCtx* ctx,
-                                                                             long long ll)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CreateStringFromULongLong)(ValkeyModuleCtx* ctx,
-                                                                              unsigned long long ull)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CreateStringFromDouble)(ValkeyModuleCtx* ctx,
-                                                                           double d)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CreateStringFromLongDouble)(ValkeyModuleCtx* ctx,
-                                                                               long double ld,
-                                                                               int humanfriendly)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(
-    *ValkeyModule_CreateStringFromString)(ValkeyModuleCtx* ctx, const ValkeyModuleString* str)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(
-    *ValkeyModule_CreateStringFromStreamID)(ValkeyModuleCtx* ctx, const ValkeyModuleStreamID* id)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CreateStringPrintf)(ValkeyModuleCtx* ctx, const char* fmt, ...)
+
+VALKEYMODULE_API size_t (*ValkeyModule_CallReplyLength)(ValkeyModuleCallReply *reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCallReply *(*ValkeyModule_CallReplyArrayElement)(ValkeyModuleCallReply *reply,
+                                                                              size_t idx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CreateString)(ValkeyModuleCtx *ctx,
+                                                                  const char *ptr,
+                                                                  size_t len)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CreateStringFromLongLong)(ValkeyModuleCtx *ctx,
+                                                                              long long ll)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CreateStringFromULongLong)(ValkeyModuleCtx *ctx,
+                                                                               unsigned long long ull)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CreateStringFromDouble)(ValkeyModuleCtx *ctx,
+                                                                            double d)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CreateStringFromLongDouble)(ValkeyModuleCtx *ctx,
+    long double ld,
+    int humanfriendly)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(
+    *ValkeyModule_CreateStringFromString)(ValkeyModuleCtx *ctx, const ValkeyModuleString *str)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(
+    *ValkeyModule_CreateStringFromStreamID)(ValkeyModuleCtx *ctx, const ValkeyModuleStreamID *id)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CreateStringPrintf)(ValkeyModuleCtx *ctx, const char *fmt, ...)
 VALKEYMODULE_ATTR_PRINTF(2, 3) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_FreeString)(ValkeyModuleCtx* ctx, ValkeyModuleString* str) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_StringPtrLen)(const ValkeyModuleString* str, size_t* len)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithError)(ValkeyModuleCtx* ctx, const char* err) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithErrorFormat)(ValkeyModuleCtx* ctx, const char* fmt, ...) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithSimpleString)(ValkeyModuleCtx* ctx, const char* msg) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithArray)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithMap)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithSet)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithAttribute)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithNullArray)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithEmptyArray)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ReplySetArrayLength)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ReplySetMapLength)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ReplySetSetLength)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ReplySetAttributeLength)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ReplySetPushLength)(ValkeyModuleCtx* ctx, long len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithStringBuffer)(ValkeyModuleCtx* ctx,
-                                                           const char* buf,
+
+VALKEYMODULE_API void (*ValkeyModule_FreeString)(ValkeyModuleCtx *ctx, ValkeyModuleString *str) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_StringPtrLen)(const ValkeyModuleString *str, size_t *len)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithError)(ValkeyModuleCtx *ctx, const char *err) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithErrorFormat)(ValkeyModuleCtx *ctx, const char *fmt, ...) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithSimpleString)(ValkeyModuleCtx *ctx, const char *msg) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithArray)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithMap)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithSet)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithAttribute)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithNullArray)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithEmptyArray)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ReplySetArrayLength)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ReplySetMapLength)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ReplySetSetLength)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ReplySetAttributeLength)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ReplySetPushLength)(ValkeyModuleCtx *ctx, long len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithStringBuffer)(ValkeyModuleCtx *ctx,
+                                                           const char *buf,
                                                            size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithCString)(ValkeyModuleCtx* ctx, const char* buf) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithString)(ValkeyModuleCtx* ctx, ValkeyModuleString* str) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithEmptyString)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithVerbatimString)(ValkeyModuleCtx* ctx,
-                                                             const char* buf,
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithCString)(ValkeyModuleCtx *ctx, const char *buf) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithString)(ValkeyModuleCtx *ctx, ValkeyModuleString *str) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithEmptyString)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithVerbatimString)(ValkeyModuleCtx *ctx,
+                                                             const char *buf,
                                                              size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithVerbatimStringType)(ValkeyModuleCtx* ctx,
-                                                                 const char* buf,
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithVerbatimStringType)(ValkeyModuleCtx *ctx,
+                                                                 const char *buf,
                                                                  size_t len,
-                                                                 const char* ext) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithNull)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithBool)(ValkeyModuleCtx* ctx, int b) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithLongDouble)(ValkeyModuleCtx* ctx, long double d) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithDouble)(ValkeyModuleCtx* ctx, double d) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithBigNumber)(ValkeyModuleCtx* ctx,
-                                                        const char* bignum,
+                                                                 const char *ext) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithNull)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithBool)(ValkeyModuleCtx *ctx, int b) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithLongDouble)(ValkeyModuleCtx *ctx, long double d) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithDouble)(ValkeyModuleCtx *ctx, double d) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithBigNumber)(ValkeyModuleCtx *ctx,
+                                                        const char *bignum,
                                                         size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplyWithCallReply)(ValkeyModuleCtx* ctx,
-                                                        ValkeyModuleCallReply* reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringToLongLong)(const ValkeyModuleString* str, long long* ll) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringToULongLong)(const ValkeyModuleString* str,
-                                                       unsigned long long* ull) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringToDouble)(const ValkeyModuleString* str, double* d) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringToLongDouble)(const ValkeyModuleString* str,
-                                                        long double* d) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringToStreamID)(const ValkeyModuleString* str,
-                                                      ValkeyModuleStreamID* id) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_AutoMemory)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_Replicate)(ValkeyModuleCtx* ctx, const char* cmdname, const char* fmt, ...)
+
+VALKEYMODULE_API int (*ValkeyModule_ReplyWithCallReply)(ValkeyModuleCtx *ctx,
+                                                        ValkeyModuleCallReply *reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringToLongLong)(const ValkeyModuleString *str, long long *ll) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringToULongLong)(const ValkeyModuleString *str,
+                                                       unsigned long long *ull) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringToDouble)(const ValkeyModuleString *str, double *d) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringToLongDouble)(const ValkeyModuleString *str,
+                                                        long double *d) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringToStreamID)(const ValkeyModuleString *str,
+                                                      ValkeyModuleStreamID *id) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_AutoMemory)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_Replicate)(ValkeyModuleCtx *ctx, const char *cmdname, const char *fmt, ...)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ReplicateVerbatim)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_CallReplyStringPtr)(ValkeyModuleCallReply* reply,
-                                                               size_t* len)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CreateStringFromCallReply)(ValkeyModuleCallReply* reply)
+
+VALKEYMODULE_API int (*ValkeyModule_ReplicateVerbatim)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_CallReplyStringPtr)(ValkeyModuleCallReply *reply,
+                                                                size_t *len)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CreateStringFromCallReply)(ValkeyModuleCallReply *reply)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DeleteKey)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_UnlinkKey)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringSet)(ValkeyModuleKey* key, ValkeyModuleString* str) VALKEYMODULE_ATTR;
-VALKEYMODULE_API char*(*ValkeyModule_StringDMA)(ValkeyModuleKey* key, size_t* len, int mode)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringTruncate)(ValkeyModuleKey* key, size_t newlen) VALKEYMODULE_ATTR;
-VALKEYMODULE_API mstime_t (*ValkeyModule_GetExpire)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetExpire)(ValkeyModuleKey* key, mstime_t expire) VALKEYMODULE_ATTR;
-VALKEYMODULE_API mstime_t (*ValkeyModule_GetAbsExpire)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetAbsExpire)(ValkeyModuleKey* key, mstime_t expire) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DeleteKey)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_UnlinkKey)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringSet)(ValkeyModuleKey *key, ValkeyModuleString *str) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API char *(*ValkeyModule_StringDMA)(ValkeyModuleKey *key, size_t *len, int mode)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringTruncate)(ValkeyModuleKey *key, size_t newlen) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API mstime_t (*ValkeyModule_GetExpire)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SetExpire)(ValkeyModuleKey *key, mstime_t expire) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API mstime_t (*ValkeyModule_GetAbsExpire)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SetAbsExpire)(ValkeyModuleKey *key, mstime_t expire) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API void (*ValkeyModule_ResetDataset)(int restart_aof, int async) VALKEYMODULE_ATTR;
-VALKEYMODULE_API unsigned long long (*ValkeyModule_DbSize)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_RandomKey)(ValkeyModuleCtx* ctx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetAdd)(ValkeyModuleKey* key, double score, ValkeyModuleString* ele, int* flagsptr)
+
+VALKEYMODULE_API unsigned long long (*ValkeyModule_DbSize)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_RandomKey)(ValkeyModuleCtx *ctx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetAdd)(ValkeyModuleKey *key, double score, ValkeyModuleString *ele, int *flagsptr)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetIncrby)(ValkeyModuleKey* key,
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetIncrby)(ValkeyModuleKey *key,
                                                 double score,
-                                                ValkeyModuleString* ele,
-                                                int* flagsptr,
-                                                double* newscore) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetScore)(ValkeyModuleKey* key,
-                                               ValkeyModuleString* ele,
-                                               double* score) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetRem)(ValkeyModuleKey* key,
-                                             ValkeyModuleString* ele,
-                                             int* deleted) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ZsetRangeStop)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetFirstInScoreRange)(ValkeyModuleKey* key,
+                                                ValkeyModuleString *ele,
+                                                int *flagsptr,
+                                                double *newscore) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetScore)(ValkeyModuleKey *key,
+                                               ValkeyModuleString *ele,
+                                               double *score) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetRem)(ValkeyModuleKey *key,
+                                             ValkeyModuleString *ele,
+                                             int *deleted) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ZsetRangeStop)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetFirstInScoreRange)(ValkeyModuleKey *key,
                                                            double min,
                                                            double max,
                                                            int minex,
                                                            int maxex) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetLastInScoreRange)(ValkeyModuleKey* key,
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetLastInScoreRange)(ValkeyModuleKey *key,
                                                           double min,
                                                           double max,
                                                           int minex,
                                                           int maxex) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetFirstInLexRange)(ValkeyModuleKey* key,
-                                                         ValkeyModuleString* min,
-                                                         ValkeyModuleString* max) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetLastInLexRange)(ValkeyModuleKey* key,
-                                                        ValkeyModuleString* min,
-                                                        ValkeyModuleString* max) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_ZsetRangeCurrentElement)(ValkeyModuleKey* key,
-                                                                            double* score)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetRangeNext)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetRangePrev)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ZsetRangeEndReached)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_HashSet)(ValkeyModuleKey* key, int flags, ...) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_HashGet)(ValkeyModuleKey* key, int flags, ...) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StreamAdd)(ValkeyModuleKey* key,
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetFirstInLexRange)(ValkeyModuleKey *key,
+                                                         ValkeyModuleString *min,
+                                                         ValkeyModuleString *max) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetLastInLexRange)(ValkeyModuleKey *key,
+                                                        ValkeyModuleString *min,
+                                                        ValkeyModuleString *max) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_ZsetRangeCurrentElement)(ValkeyModuleKey *key,
+                                                                             double *score)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetRangeNext)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetRangePrev)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ZsetRangeEndReached)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_HashSet)(ValkeyModuleKey *key, int flags, ...) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_HashGet)(ValkeyModuleKey *key, int flags, ...) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StreamAdd)(ValkeyModuleKey *key,
                                                int flags,
-                                               ValkeyModuleStreamID* id,
-                                               ValkeyModuleString** argv,
+                                               ValkeyModuleStreamID *id,
+                                               ValkeyModuleString **argv,
                                                int64_t numfields) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StreamDelete)(ValkeyModuleKey* key, ValkeyModuleStreamID* id) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StreamIteratorStart)(ValkeyModuleKey* key,
+
+VALKEYMODULE_API int (*ValkeyModule_StreamDelete)(ValkeyModuleKey *key, ValkeyModuleStreamID *id) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StreamIteratorStart)(ValkeyModuleKey *key,
                                                          int flags,
-                                                         ValkeyModuleStreamID* startid,
-                                                         ValkeyModuleStreamID* endid) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StreamIteratorStop)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StreamIteratorNextID)(ValkeyModuleKey* key,
-                                                          ValkeyModuleStreamID* id,
-                                                          long* numfields) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StreamIteratorNextField)(ValkeyModuleKey* key,
-                                                             ValkeyModuleString** field_ptr,
-                                                             ValkeyModuleString** value_ptr) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StreamIteratorDelete)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API long long (*ValkeyModule_StreamTrimByLength)(ValkeyModuleKey* key,
+                                                         ValkeyModuleStreamID *startid,
+                                                         ValkeyModuleStreamID *endid) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StreamIteratorStop)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StreamIteratorNextID)(ValkeyModuleKey *key,
+                                                          ValkeyModuleStreamID *id,
+                                                          long *numfields) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StreamIteratorNextField)(ValkeyModuleKey *key,
+                                                             ValkeyModuleString **field_ptr,
+                                                             ValkeyModuleString **value_ptr) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StreamIteratorDelete)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API long long (*ValkeyModule_StreamTrimByLength)(ValkeyModuleKey *key,
                                                               int flags,
                                                               long long length) VALKEYMODULE_ATTR;
-VALKEYMODULE_API long long (*ValkeyModule_StreamTrimByID)(ValkeyModuleKey* key,
+
+VALKEYMODULE_API long long (*ValkeyModule_StreamTrimByID)(ValkeyModuleKey *key,
                                                           int flags,
-                                                          ValkeyModuleStreamID* id) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_IsKeysPositionRequest)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_KeyAtPos)(ValkeyModuleCtx* ctx, int pos) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_KeyAtPosWithFlags)(ValkeyModuleCtx* ctx, int pos, int flags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_IsChannelsPositionRequest)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ChannelAtPosWithFlags)(ValkeyModuleCtx* ctx, int pos, int flags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API unsigned long long (*ValkeyModule_GetClientId)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_GetClientUserNameById)(ValkeyModuleCtx* ctx,
-                                                                          uint64_t id)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetClientInfoById)(void* ci, uint64_t id) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_GetClientNameById)(ValkeyModuleCtx* ctx,
-                                                                      uint64_t id)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetClientNameById)(uint64_t id, ValkeyModuleString* name) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_PublishMessage)(ValkeyModuleCtx* ctx,
-                                                    ValkeyModuleString* channel,
-                                                    ValkeyModuleString* message) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_PublishMessageShard)(ValkeyModuleCtx* ctx,
-                                                         ValkeyModuleString* channel,
-                                                         ValkeyModuleString* message) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetContextFlags)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
+                                                          ValkeyModuleStreamID *id) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_IsKeysPositionRequest)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_KeyAtPos)(ValkeyModuleCtx *ctx, int pos) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_KeyAtPosWithFlags)(ValkeyModuleCtx *ctx, int pos, int flags) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_IsChannelsPositionRequest)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ChannelAtPosWithFlags)(ValkeyModuleCtx *ctx, int pos, int flags) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API unsigned long long (*ValkeyModule_GetClientId)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_GetClientUserNameById)(ValkeyModuleCtx *ctx,
+                                                                           uint64_t id)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetClientInfoById)(void *ci, uint64_t id) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_GetClientNameById)(ValkeyModuleCtx *ctx,
+                                                                       uint64_t id)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SetClientNameById)(uint64_t id, ValkeyModuleString *name) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_PublishMessage)(ValkeyModuleCtx *ctx,
+                                                    ValkeyModuleString *channel,
+                                                    ValkeyModuleString *message) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_PublishMessageShard)(ValkeyModuleCtx *ctx,
+                                                         ValkeyModuleString *channel,
+                                                         ValkeyModuleString *message) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetContextFlags)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_AvoidReplicaTraffic)(void) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_PoolAlloc)(ValkeyModuleCtx* ctx, size_t bytes)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleType*(*ValkeyModule_CreateDataType)(ValkeyModuleCtx* ctx,
-                                                                 const char* name,
-                                                                 int encver,
-                                                                 ValkeyModuleTypeMethods* typemethods)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ModuleTypeSetValue)(ValkeyModuleKey* key,
-                                                        ValkeyModuleType* mt,
-                                                        void* value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ModuleTypeReplaceValue)(ValkeyModuleKey* key,
-                                                            ValkeyModuleType* mt,
-                                                            void* new_value,
-                                                            void** old_value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleType*(*ValkeyModule_ModuleTypeGetType)(ValkeyModuleKey* key)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_ModuleTypeGetValue)(ValkeyModuleKey* key)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_IsIOError)(ValkeyModuleIO* io) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SetModuleOptions)(ValkeyModuleCtx* ctx, int options) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SignalModifiedKey)(ValkeyModuleCtx* ctx,
-                                                       ValkeyModuleString* keyname) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SaveUnsigned)(ValkeyModuleIO* io, uint64_t value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API uint64_t (*ValkeyModule_LoadUnsigned)(ValkeyModuleIO* io) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SaveSigned)(ValkeyModuleIO* io, int64_t value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int64_t (*ValkeyModule_LoadSigned)(ValkeyModuleIO* io) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_EmitAOF)(ValkeyModuleIO* io, const char* cmdname, const char* fmt, ...)
+
+VALKEYMODULE_API void *(*ValkeyModule_PoolAlloc)(ValkeyModuleCtx *ctx, size_t bytes)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleType *(*ValkeyModule_CreateDataType)(ValkeyModuleCtx *ctx,
+                                                                  const char *name,
+                                                                  int encver,
+                                                                  ValkeyModuleTypeMethods *typemethods)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SaveString)(ValkeyModuleIO* io, ValkeyModuleString* s) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SaveStringBuffer)(ValkeyModuleIO* io,
-                                                       const char* str,
+
+VALKEYMODULE_API int (*ValkeyModule_ModuleTypeSetValue)(ValkeyModuleKey *key,
+                                                        ValkeyModuleType *mt,
+                                                        void *value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ModuleTypeReplaceValue)(ValkeyModuleKey *key,
+                                                            ValkeyModuleType *mt,
+                                                            void *new_value,
+                                                            void **old_value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleType *(*ValkeyModule_ModuleTypeGetType)(ValkeyModuleKey *key)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_ModuleTypeGetValue)(ValkeyModuleKey *key)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_IsIOError)(ValkeyModuleIO *io) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SetModuleOptions)(ValkeyModuleCtx *ctx, int options) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SignalModifiedKey)(ValkeyModuleCtx *ctx,
+                                                       ValkeyModuleString *keyname) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SaveUnsigned)(ValkeyModuleIO *io, uint64_t value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API uint64_t (*ValkeyModule_LoadUnsigned)(ValkeyModuleIO *io) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SaveSigned)(ValkeyModuleIO *io, int64_t value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int64_t (*ValkeyModule_LoadSigned)(ValkeyModuleIO *io) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_EmitAOF)(ValkeyModuleIO *io, const char *cmdname, const char *fmt, ...)
+VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SaveString)(ValkeyModuleIO *io, ValkeyModuleString *s) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SaveStringBuffer)(ValkeyModuleIO *io,
+                                                       const char *str,
                                                        size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_LoadString)(ValkeyModuleIO* io)VALKEYMODULE_ATTR;
-VALKEYMODULE_API char*(*ValkeyModule_LoadStringBuffer)(ValkeyModuleIO* io, size_t* lenptr)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SaveDouble)(ValkeyModuleIO* io, double value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API double (*ValkeyModule_LoadDouble)(ValkeyModuleIO* io) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SaveFloat)(ValkeyModuleIO* io, float value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API float (*ValkeyModule_LoadFloat)(ValkeyModuleIO* io) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SaveLongDouble)(ValkeyModuleIO* io, long double value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API long double (*ValkeyModule_LoadLongDouble)(ValkeyModuleIO* io) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_LoadDataTypeFromString)(const ValkeyModuleString* str,
-                                                             const ValkeyModuleType* mt)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_LoadDataTypeFromStringEncver)(const ValkeyModuleString* str,
-                                                                   const ValkeyModuleType* mt,
-                                                                   int encver)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_SaveDataTypeToString)(ValkeyModuleCtx* ctx,
-                                                                         void* data,
-                                                                         const ValkeyModuleType* mt)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_Log)(ValkeyModuleCtx* ctx, const char* level, const char* fmt, ...)
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_LoadString)(ValkeyModuleIO *io)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API char *(*ValkeyModule_LoadStringBuffer)(ValkeyModuleIO *io, size_t *lenptr)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SaveDouble)(ValkeyModuleIO *io, double value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API double (*ValkeyModule_LoadDouble)(ValkeyModuleIO *io) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SaveFloat)(ValkeyModuleIO *io, float value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API float (*ValkeyModule_LoadFloat)(ValkeyModuleIO *io) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SaveLongDouble)(ValkeyModuleIO *io, long double value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API long double (*ValkeyModule_LoadLongDouble)(ValkeyModuleIO *io) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_LoadDataTypeFromString)(const ValkeyModuleString *str,
+                                                              const ValkeyModuleType *mt)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_LoadDataTypeFromStringEncver)(const ValkeyModuleString *str,
+                                                                    const ValkeyModuleType *mt,
+                                                                    int encver)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_SaveDataTypeToString)(ValkeyModuleCtx *ctx,
+                                                                          void *data,
+                                                                          const ValkeyModuleType *mt)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_Log)(ValkeyModuleCtx *ctx, const char *level, const char *fmt, ...)
 VALKEYMODULE_ATTR VALKEYMODULE_ATTR_PRINTF(3, 4);
-VALKEYMODULE_API void (*ValkeyModule_LogIOError)(ValkeyModuleIO* io, const char* levelstr, const char* fmt, ...)
+
+VALKEYMODULE_API void (*ValkeyModule_LogIOError)(ValkeyModuleIO *io, const char *levelstr, const char *fmt, ...)
 VALKEYMODULE_ATTR VALKEYMODULE_ATTR_PRINTF(3, 4);
-VALKEYMODULE_API void (*ValkeyModule__Assert)(const char* estr, const char* file, int line) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_LatencyAddSample)(const char* event, mstime_t latency) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringAppendBuffer)(ValkeyModuleCtx* ctx,
-                                                        ValkeyModuleString* str,
-                                                        const char* buf,
+
+VALKEYMODULE_API void (*ValkeyModule__Assert)(const char *estr, const char *file, int line) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_LatencyAddSample)(const char *event, mstime_t latency) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringAppendBuffer)(ValkeyModuleCtx *ctx,
+                                                        ValkeyModuleString *str,
+                                                        const char *buf,
                                                         size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_TrimStringAllocation)(ValkeyModuleString* str) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_RetainString)(ValkeyModuleCtx* ctx, ValkeyModuleString* str) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_HoldString)(ValkeyModuleCtx* ctx,
-                                                               ValkeyModuleString* str)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StringCompare)(const ValkeyModuleString* a,
-                                                   const ValkeyModuleString* b) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCtx*(*ValkeyModule_GetContextFromIO)(ValkeyModuleIO* io)VALKEYMODULE_ATTR;
-VALKEYMODULE_API const ValkeyModuleString*(*ValkeyModule_GetKeyNameFromIO)(ValkeyModuleIO* io)VALKEYMODULE_ATTR;
-VALKEYMODULE_API const ValkeyModuleString*(*ValkeyModule_GetKeyNameFromModuleKey)(ValkeyModuleKey* key)
+
+VALKEYMODULE_API void (*ValkeyModule_TrimStringAllocation)(ValkeyModuleString *str) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_RetainString)(ValkeyModuleCtx *ctx, ValkeyModuleString *str) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_HoldString)(ValkeyModuleCtx *ctx,
+                                                                ValkeyModuleString *str)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StringCompare)(const ValkeyModuleString *a,
+                                                   const ValkeyModuleString *b) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCtx *(*ValkeyModule_GetContextFromIO)(ValkeyModuleIO *io)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const ValkeyModuleString *(*ValkeyModule_GetKeyNameFromIO)(ValkeyModuleIO *io)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const ValkeyModuleString *(*ValkeyModule_GetKeyNameFromModuleKey)(ValkeyModuleKey *key)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromModuleKey)(ValkeyModuleKey* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromIO)(ValkeyModuleIO* io) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromOptCtx)(ValkeyModuleKeyOptCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetToDbIdFromOptCtx)(ValkeyModuleKeyOptCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const ValkeyModuleString*(*ValkeyModule_GetKeyNameFromOptCtx)(ValkeyModuleKeyOptCtx* ctx)
+
+VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromModuleKey)(ValkeyModuleKey *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromIO)(ValkeyModuleIO *io) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromOptCtx)(ValkeyModuleKeyOptCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetToDbIdFromOptCtx)(ValkeyModuleKeyOptCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const ValkeyModuleString *(*ValkeyModule_GetKeyNameFromOptCtx)(ValkeyModuleKeyOptCtx *ctx)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API const ValkeyModuleString*(*ValkeyModule_GetToKeyNameFromOptCtx)(ValkeyModuleKeyOptCtx* ctx)
+
+VALKEYMODULE_API const ValkeyModuleString *(*ValkeyModule_GetToKeyNameFromOptCtx)(ValkeyModuleKeyOptCtx *ctx)
 VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API mstime_t (*ValkeyModule_Milliseconds)(void) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API uint64_t (*ValkeyModule_MonotonicMicroseconds)(void) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API ustime_t (*ValkeyModule_Microseconds)(void) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API ustime_t (*ValkeyModule_CachedMicroseconds)(void) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_DigestAddStringBuffer)(ValkeyModuleDigest* md,
-                                                            const char* ele,
+
+VALKEYMODULE_API void (*ValkeyModule_DigestAddStringBuffer)(ValkeyModuleDigest *md,
+                                                            const char *ele,
                                                             size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_DigestAddLongLong)(ValkeyModuleDigest* md, long long ele) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_DigestEndSequence)(ValkeyModuleDigest* md) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromDigest)(ValkeyModuleDigest* dig) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const ValkeyModuleString*(*ValkeyModule_GetKeyNameFromDigest)(ValkeyModuleDigest* dig)
+
+VALKEYMODULE_API void (*ValkeyModule_DigestAddLongLong)(ValkeyModuleDigest *md, long long ele) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_DigestEndSequence)(ValkeyModuleDigest *md) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromDigest)(ValkeyModuleDigest *dig) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const ValkeyModuleString *(*ValkeyModule_GetKeyNameFromDigest)(ValkeyModuleDigest *dig)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleDict*(*ValkeyModule_CreateDict)(ValkeyModuleCtx* ctx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_FreeDict)(ValkeyModuleCtx* ctx, ValkeyModuleDict* d) VALKEYMODULE_ATTR;
-VALKEYMODULE_API uint64_t (*ValkeyModule_DictSize)(ValkeyModuleDict* d) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictSetC)(ValkeyModuleDict* d, void* key, size_t keylen, void* ptr)
+
+VALKEYMODULE_API ValkeyModuleDict *(*ValkeyModule_CreateDict)(ValkeyModuleCtx *ctx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_FreeDict)(ValkeyModuleCtx *ctx, ValkeyModuleDict *d) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API uint64_t (*ValkeyModule_DictSize)(ValkeyModuleDict *d) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DictSetC)(ValkeyModuleDict *d, void *key, size_t keylen, void *ptr)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictReplaceC)(ValkeyModuleDict* d, void* key, size_t keylen, void* ptr)
+
+VALKEYMODULE_API int (*ValkeyModule_DictReplaceC)(ValkeyModuleDict *d, void *key, size_t keylen, void *ptr)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictSet)(ValkeyModuleDict* d, ValkeyModuleString* key, void* ptr) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictReplace)(ValkeyModuleDict* d,
-                                                 ValkeyModuleString* key,
-                                                 void* ptr) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_DictGetC)(ValkeyModuleDict* d, void* key, size_t keylen, int* nokey)
+
+VALKEYMODULE_API int (*ValkeyModule_DictSet)(ValkeyModuleDict *d, ValkeyModuleString *key, void *ptr) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DictReplace)(ValkeyModuleDict *d,
+                                                 ValkeyModuleString *key,
+                                                 void *ptr) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_DictGetC)(ValkeyModuleDict *d, void *key, size_t keylen, int *nokey)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_DictGet)(ValkeyModuleDict* d,
-                                              ValkeyModuleString* key,
-                                              int* nokey)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictDelC)(ValkeyModuleDict* d, void* key, size_t keylen, void* oldval)
+
+VALKEYMODULE_API void *(*ValkeyModule_DictGet)(ValkeyModuleDict *d,
+                                               ValkeyModuleString *key,
+                                               int *nokey)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DictDelC)(ValkeyModuleDict *d, void *key, size_t keylen, void *oldval)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictDel)(ValkeyModuleDict* d,
-                                             ValkeyModuleString* key,
-                                             void* oldval) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleDictIter*(*ValkeyModule_DictIteratorStartC)(ValkeyModuleDict* d,
-                                                                         const char* op,
-                                                                         void* key,
-                                                                         size_t keylen)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleDictIter*(*ValkeyModule_DictIteratorStart)(ValkeyModuleDict* d,
-                                                                        const char* op,
-                                                                        ValkeyModuleString* key)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_DictIteratorStop)(ValkeyModuleDictIter* di) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictIteratorReseekC)(ValkeyModuleDictIter* di,
-                                                         const char* op,
-                                                         void* key,
+
+VALKEYMODULE_API int (*ValkeyModule_DictDel)(ValkeyModuleDict *d,
+                                             ValkeyModuleString *key,
+                                             void *oldval) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleDictIter *(*ValkeyModule_DictIteratorStartC)(ValkeyModuleDict *d,
+                                                                          const char *op,
+                                                                          void *key,
+                                                                          size_t keylen)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleDictIter *(*ValkeyModule_DictIteratorStart)(ValkeyModuleDict *d,
+                                                                         const char *op,
+                                                                         ValkeyModuleString *key)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_DictIteratorStop)(ValkeyModuleDictIter *di) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DictIteratorReseekC)(ValkeyModuleDictIter *di,
+                                                         const char *op,
+                                                         void *key,
                                                          size_t keylen) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictIteratorReseek)(ValkeyModuleDictIter* di,
-                                                        const char* op,
-                                                        ValkeyModuleString* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_DictNextC)(ValkeyModuleDictIter* di,
-                                                size_t* keylen,
-                                                void** dataptr)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_DictPrevC)(ValkeyModuleDictIter* di,
-                                                size_t* keylen,
-                                                void** dataptr)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_DictNext)(ValkeyModuleCtx* ctx,
-                                                             ValkeyModuleDictIter* di,
-                                                             void** dataptr)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_DictPrev)(ValkeyModuleCtx* ctx,
-                                                             ValkeyModuleDictIter* di,
-                                                             void** dataptr)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictCompareC)(ValkeyModuleDictIter* di, const char* op, void* key, size_t keylen)
+
+VALKEYMODULE_API int (*ValkeyModule_DictIteratorReseek)(ValkeyModuleDictIter *di,
+                                                        const char *op,
+                                                        ValkeyModuleString *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_DictNextC)(ValkeyModuleDictIter *di,
+                                                 size_t *keylen,
+                                                 void **dataptr)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_DictPrevC)(ValkeyModuleDictIter *di,
+                                                 size_t *keylen,
+                                                 void **dataptr)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_DictNext)(ValkeyModuleCtx *ctx,
+                                                              ValkeyModuleDictIter *di,
+                                                              void **dataptr)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_DictPrev)(ValkeyModuleCtx *ctx,
+                                                              ValkeyModuleDictIter *di,
+                                                              void **dataptr)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DictCompareC)(ValkeyModuleDictIter *di, const char *op, void *key, size_t keylen)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DictCompare)(ValkeyModuleDictIter* di,
-                                                 const char* op,
-                                                 ValkeyModuleString* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RegisterInfoFunc)(ValkeyModuleCtx* ctx, ValkeyModuleInfoFunc cb) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_RegisterAuthCallback)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API int (*ValkeyModule_DictCompare)(ValkeyModuleDictIter *di,
+                                                 const char *op,
+                                                 ValkeyModuleString *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_RegisterInfoFunc)(ValkeyModuleCtx *ctx, ValkeyModuleInfoFunc cb) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_RegisterAuthCallback)(ValkeyModuleCtx *ctx,
                                                            ValkeyModuleAuthCallback cb) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoAddSection)(ValkeyModuleInfoCtx* ctx, const char* name) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoBeginDictField)(ValkeyModuleInfoCtx* ctx, const char* name) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoEndDictField)(ValkeyModuleInfoCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldString)(ValkeyModuleInfoCtx* ctx,
-                                                        const char* field,
-                                                        ValkeyModuleString* value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldCString)(ValkeyModuleInfoCtx* ctx,
-                                                         const char* field,
-                                                         const char* value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldDouble)(ValkeyModuleInfoCtx* ctx,
-                                                        const char* field,
+
+VALKEYMODULE_API int (*ValkeyModule_InfoAddSection)(ValkeyModuleInfoCtx *ctx, const char *name) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_InfoBeginDictField)(ValkeyModuleInfoCtx *ctx, const char *name) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_InfoEndDictField)(ValkeyModuleInfoCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldString)(ValkeyModuleInfoCtx *ctx,
+                                                        const char *field,
+                                                        ValkeyModuleString *value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldCString)(ValkeyModuleInfoCtx *ctx,
+                                                         const char *field,
+                                                         const char *value) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldDouble)(ValkeyModuleInfoCtx *ctx,
+                                                        const char *field,
                                                         double value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldLongLong)(ValkeyModuleInfoCtx* ctx,
-                                                          const char* field,
+
+VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldLongLong)(ValkeyModuleInfoCtx *ctx,
+                                                          const char *field,
                                                           long long value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldULongLong)(ValkeyModuleInfoCtx* ctx,
-                                                           const char* field,
+
+VALKEYMODULE_API int (*ValkeyModule_InfoAddFieldULongLong)(ValkeyModuleInfoCtx *ctx,
+                                                           const char *field,
                                                            unsigned long long value) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleServerInfoData*(*ValkeyModule_GetServerInfo)(ValkeyModuleCtx* ctx,
-                                                                          const char* section)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_FreeServerInfo)(ValkeyModuleCtx* ctx,
-                                                     ValkeyModuleServerInfoData* data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_ServerInfoGetField)(ValkeyModuleCtx* ctx,
-                                                                       ValkeyModuleServerInfoData* data,
-                                                                       const char* field)VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_ServerInfoGetFieldC)(ValkeyModuleServerInfoData* data,
-                                                                const char* field)VALKEYMODULE_ATTR;
-VALKEYMODULE_API long long (*ValkeyModule_ServerInfoGetFieldSigned)(ValkeyModuleServerInfoData* data,
-                                                                    const char* field,
-                                                                    int* out_err) VALKEYMODULE_ATTR;
-VALKEYMODULE_API unsigned long long (*ValkeyModule_ServerInfoGetFieldUnsigned)(ValkeyModuleServerInfoData* data,
-                                                                               const char* field,
-                                                                               int* out_err) VALKEYMODULE_ATTR;
-VALKEYMODULE_API double (*ValkeyModule_ServerInfoGetFieldDouble)(ValkeyModuleServerInfoData* data,
-                                                                 const char* field,
-                                                                 int* out_err) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SubscribeToServerEvent)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API ValkeyModuleServerInfoData *(*ValkeyModule_GetServerInfo)(ValkeyModuleCtx *ctx,
+                                                                           const char *section)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_FreeServerInfo)(ValkeyModuleCtx *ctx,
+                                                     ValkeyModuleServerInfoData *data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_ServerInfoGetField)(ValkeyModuleCtx *ctx,
+                                                                        ValkeyModuleServerInfoData *data,
+                                                                        const char *field)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_ServerInfoGetFieldC)(ValkeyModuleServerInfoData *data,
+                                                                 const char *field)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API long long (*ValkeyModule_ServerInfoGetFieldSigned)(ValkeyModuleServerInfoData *data,
+                                                                    const char *field,
+                                                                    int *out_err) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API unsigned long long (*ValkeyModule_ServerInfoGetFieldUnsigned)(ValkeyModuleServerInfoData *data,
+                                                                               const char *field,
+                                                                               int *out_err) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API double (*ValkeyModule_ServerInfoGetFieldDouble)(ValkeyModuleServerInfoData *data,
+                                                                 const char *field,
+                                                                 int *out_err) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SubscribeToServerEvent)(ValkeyModuleCtx *ctx,
                                                             ValkeyModuleEvent event,
                                                             ValkeyModuleEventCallback callback) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetLRU)(ValkeyModuleKey* key, mstime_t lru_idle) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetLRU)(ValkeyModuleKey* key, mstime_t* lru_idle) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetLFU)(ValkeyModuleKey* key, long long lfu_freq) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetLFU)(ValkeyModuleKey* key, long long* lfu_freq) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleBlockedClient*(*ValkeyModule_BlockClientOnKeys)(ValkeyModuleCtx* ctx,
-                                                                             ValkeyModuleCmdFunc reply_callback,
-                                                                             ValkeyModuleCmdFunc timeout_callback,
-                                                                             void (*free_privdata)(ValkeyModuleCtx*,
-                                                                                 void*),
-                                                                             long long timeout_ms,
-                                                                             ValkeyModuleString** keys,
-                                                                             int numkeys,
-                                                                             void* privdata)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleBlockedClient*(*ValkeyModule_BlockClientOnKeysWithFlags)(
-    ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API int (*ValkeyModule_SetLRU)(ValkeyModuleKey *key, mstime_t lru_idle) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetLRU)(ValkeyModuleKey *key, mstime_t *lru_idle) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SetLFU)(ValkeyModuleKey *key, long long lfu_freq) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetLFU)(ValkeyModuleKey *key, long long *lfu_freq) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleBlockedClient *(*ValkeyModule_BlockClientOnKeys)(ValkeyModuleCtx *ctx,
+                                                                              ValkeyModuleCmdFunc reply_callback,
+                                                                              ValkeyModuleCmdFunc timeout_callback,
+                                                                              void (*free_privdata)(ValkeyModuleCtx *,
+                                                                                  void *),
+                                                                              long long timeout_ms,
+                                                                              ValkeyModuleString **keys,
+                                                                              int numkeys,
+                                                                              void *privdata)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleBlockedClient *(*ValkeyModule_BlockClientOnKeysWithFlags)(
+    ValkeyModuleCtx *ctx,
     ValkeyModuleCmdFunc reply_callback,
     ValkeyModuleCmdFunc timeout_callback,
-    void (*free_privdata)(ValkeyModuleCtx*, void*),
+    void (*free_privdata)(ValkeyModuleCtx *, void *),
     long long timeout_ms,
-    ValkeyModuleString** keys,
+    ValkeyModuleString **keys,
     int numkeys,
-    void* privdata,
+    void *privdata,
     int flags)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SignalKeyAsReady)(ValkeyModuleCtx* ctx, ValkeyModuleString* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_GetBlockedClientReadyKey)(ValkeyModuleCtx* ctx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleScanCursor*(*ValkeyModule_ScanCursorCreate)(void)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ScanCursorRestart)(ValkeyModuleScanCursor* cursor) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ScanCursorDestroy)(ValkeyModuleScanCursor* cursor) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_Scan)(ValkeyModuleCtx* ctx,
-                                          ValkeyModuleScanCursor* cursor,
+
+VALKEYMODULE_API void (*ValkeyModule_SignalKeyAsReady)(ValkeyModuleCtx *ctx, ValkeyModuleString *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_GetBlockedClientReadyKey)(ValkeyModuleCtx *ctx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleScanCursor *(*ValkeyModule_ScanCursorCreate)(void)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ScanCursorRestart)(ValkeyModuleScanCursor *cursor) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ScanCursorDestroy)(ValkeyModuleScanCursor *cursor) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_Scan)(ValkeyModuleCtx *ctx,
+                                          ValkeyModuleScanCursor *cursor,
                                           ValkeyModuleScanCB fn,
-                                          void* privdata) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ScanKey)(ValkeyModuleKey* key,
-                                             ValkeyModuleScanCursor* cursor,
+                                          void *privdata) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ScanKey)(ValkeyModuleKey *key,
+                                             ValkeyModuleScanCursor *cursor,
                                              ValkeyModuleScanKeyCB fn,
-                                             void* privdata) VALKEYMODULE_ATTR;
+                                             void *privdata) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_GetContextFlagsAll)(void) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_GetModuleOptionsAll)(void) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_GetKeyspaceNotificationFlagsAll)(void) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_IsSubEventSupported)(ValkeyModuleEvent event, uint64_t subevent) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_GetServerVersion)(void) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_GetTypeMethodVersion)(void) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_Yield)(ValkeyModuleCtx* ctx, int flags, const char* busy_reply) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleBlockedClient*(*ValkeyModule_BlockClient)(ValkeyModuleCtx* ctx,
-                                                                       ValkeyModuleCmdFunc reply_callback,
-                                                                       ValkeyModuleCmdFunc timeout_callback,
-                                                                       void (*free_privdata)(ValkeyModuleCtx*,
-                                                                           void*),
-                                                                       long long timeout_ms)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_BlockClientGetPrivateData)(ValkeyModuleBlockedClient* blocked_client)
+
+VALKEYMODULE_API void (*ValkeyModule_Yield)(ValkeyModuleCtx *ctx, int flags, const char *busy_reply) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleBlockedClient *(*ValkeyModule_BlockClient)(ValkeyModuleCtx *ctx,
+                                                                        ValkeyModuleCmdFunc reply_callback,
+                                                                        ValkeyModuleCmdFunc timeout_callback,
+                                                                        void (*free_privdata)(ValkeyModuleCtx *,
+                                                                            void *),
+                                                                        long long timeout_ms)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_BlockClientGetPrivateData)(ValkeyModuleBlockedClient *blocked_client)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_BlockClientSetPrivateData)(ValkeyModuleBlockedClient* blocked_client,
-                                                                void* private_data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleBlockedClient*(*ValkeyModule_BlockClientOnAuth)(
-    ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API void (*ValkeyModule_BlockClientSetPrivateData)(ValkeyModuleBlockedClient *blocked_client,
+                                                                void *private_data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleBlockedClient *(*ValkeyModule_BlockClientOnAuth)(
+    ValkeyModuleCtx *ctx,
     ValkeyModuleAuthCallback reply_callback,
-    void (*free_privdata)(ValkeyModuleCtx*, void*))VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_UnblockClient)(ValkeyModuleBlockedClient* bc, void* privdata) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_IsBlockedReplyRequest)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_IsBlockedTimeoutRequest)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_GetBlockedClientPrivateData)(ValkeyModuleCtx* ctx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleBlockedClient*(*ValkeyModule_GetBlockedClientHandle)(ValkeyModuleCtx* ctx)
+    void (*free_privdata)(ValkeyModuleCtx *, void *))VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_UnblockClient)(ValkeyModuleBlockedClient *bc, void *privdata) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_IsBlockedReplyRequest)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_IsBlockedTimeoutRequest)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_GetBlockedClientPrivateData)(ValkeyModuleCtx *ctx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleBlockedClient *(*ValkeyModule_GetBlockedClientHandle)(ValkeyModuleCtx *ctx)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_AbortBlock)(ValkeyModuleBlockedClient* bc) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_BlockedClientMeasureTimeStart)(ValkeyModuleBlockedClient* bc) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_BlockedClientMeasureTimeEnd)(ValkeyModuleBlockedClient* bc) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCtx*(*ValkeyModule_GetThreadSafeContext)(ValkeyModuleBlockedClient* bc)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCtx*(*ValkeyModule_GetDetachedThreadSafeContext)(ValkeyModuleCtx* ctx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_FreeThreadSafeContext)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ThreadSafeContextLock)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ThreadSafeContextTryLock)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ThreadSafeContextUnlock)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SubscribeToKeyspaceEvents)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API int (*ValkeyModule_AbortBlock)(ValkeyModuleBlockedClient *bc) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_BlockedClientMeasureTimeStart)(ValkeyModuleBlockedClient *bc) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_BlockedClientMeasureTimeEnd)(ValkeyModuleBlockedClient *bc) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCtx *(*ValkeyModule_GetThreadSafeContext)(ValkeyModuleBlockedClient *bc)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCtx *(*ValkeyModule_GetDetachedThreadSafeContext)(ValkeyModuleCtx *ctx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_FreeThreadSafeContext)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ThreadSafeContextLock)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ThreadSafeContextTryLock)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_ThreadSafeContextUnlock)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SubscribeToKeyspaceEvents)(ValkeyModuleCtx *ctx,
                                                                int types,
                                                                ValkeyModuleNotificationFunc cb) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_AddPostNotificationJob)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API int (*ValkeyModule_AddPostNotificationJob)(ValkeyModuleCtx *ctx,
                                                             ValkeyModulePostNotificationJobFunc callback,
-                                                            void* pd,
-                                                            void (*free_pd)(void*)) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_NotifyKeyspaceEvent)(ValkeyModuleCtx* ctx,
+                                                            void *pd,
+                                                            void (*free_pd)(void *)) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_NotifyKeyspaceEvent)(ValkeyModuleCtx *ctx,
                                                          int type,
-                                                         const char* event,
-                                                         ValkeyModuleString* key) VALKEYMODULE_ATTR;
+                                                         const char *event,
+                                                         ValkeyModuleString *key) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_GetNotifyKeyspaceEvents)(void) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_BlockedClientDisconnected)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_RegisterClusterMessageReceiver)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API int (*ValkeyModule_BlockedClientDisconnected)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_RegisterClusterMessageReceiver)(ValkeyModuleCtx *ctx,
                                                                      uint8_t type,
                                                                      ValkeyModuleClusterMessageReceiver callback)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SendClusterMessage)(ValkeyModuleCtx* ctx,
-                                                        const char* target_id,
+
+VALKEYMODULE_API int (*ValkeyModule_SendClusterMessage)(ValkeyModuleCtx *ctx,
+                                                        const char *target_id,
                                                         uint8_t type,
-                                                        const char* msg,
+                                                        const char *msg,
                                                         uint32_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetClusterNodeInfo)(ValkeyModuleCtx* ctx,
-                                                        const char* id,
-                                                        char* ip,
-                                                        char* primary_id,
-                                                        int* port,
-                                                        int* flags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetClusterNodeInfoForClient)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API int (*ValkeyModule_GetClusterNodeInfo)(ValkeyModuleCtx *ctx,
+                                                        const char *id,
+                                                        char *ip,
+                                                        char *primary_id,
+                                                        int *port,
+                                                        int *flags) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetClusterNodeInfoForClient)(ValkeyModuleCtx *ctx,
                                                                  uint64_t client_id,
-                                                                 const char* node_id,
-                                                                 char* ip,
-                                                                 char* primary_id,
-                                                                 int* port,
-                                                                 int* flags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API char**(*ValkeyModule_GetClusterNodesList)(ValkeyModuleCtx* ctx, size_t* numnodes)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_FreeClusterNodesList)(char** ids) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleTimerID (*ValkeyModule_CreateTimer)(ValkeyModuleCtx* ctx,
+                                                                 const char *node_id,
+                                                                 char *ip,
+                                                                 char *primary_id,
+                                                                 int *port,
+                                                                 int *flags) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API char **(*ValkeyModule_GetClusterNodesList)(ValkeyModuleCtx *ctx, size_t *numnodes)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_FreeClusterNodesList)(char **ids) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleTimerID (*ValkeyModule_CreateTimer)(ValkeyModuleCtx *ctx,
                                                                  mstime_t period,
                                                                  ValkeyModuleTimerProc callback,
-                                                                 void* data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_StopTimer)(ValkeyModuleCtx* ctx,
+                                                                 void *data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_StopTimer)(ValkeyModuleCtx *ctx,
                                                ValkeyModuleTimerID id,
-                                               void** data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetTimerInfo)(ValkeyModuleCtx* ctx,
+                                               void **data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetTimerInfo)(ValkeyModuleCtx *ctx,
                                                   ValkeyModuleTimerID id,
-                                                  uint64_t* remaining,
-                                                  void** data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_GetMyClusterID)(void)VALKEYMODULE_ATTR;
+                                                  uint64_t *remaining,
+                                                  void **data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_GetMyClusterID)(void)VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API size_t (*ValkeyModule_GetClusterSize)(void) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_GetRandomBytes)(unsigned char* dst, size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_GetRandomHexChars)(char* dst, size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SetDisconnectCallback)(ValkeyModuleBlockedClient* bc,
+
+VALKEYMODULE_API void (*ValkeyModule_GetRandomBytes)(unsigned char *dst, size_t len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_GetRandomHexChars)(char *dst, size_t len) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SetDisconnectCallback)(ValkeyModuleBlockedClient *bc,
                                                             ValkeyModuleDisconnectFunc callback) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SetClusterFlags)(ValkeyModuleCtx* ctx, uint64_t flags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API unsigned int (*ValkeyModule_ClusterKeySlot)(ValkeyModuleString* key) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_ClusterCanonicalKeyNameInSlot)(unsigned int slot)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ExportSharedAPI)(ValkeyModuleCtx* ctx,
-                                                     const char* apiname,
-                                                     void* func) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_GetSharedAPI)(ValkeyModuleCtx* ctx, const char* apiname)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleCommandFilter*(*ValkeyModule_RegisterCommandFilter)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API void (*ValkeyModule_SetClusterFlags)(ValkeyModuleCtx *ctx, uint64_t flags) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API unsigned int (*ValkeyModule_ClusterKeySlot)(ValkeyModuleString *key) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_ClusterCanonicalKeyNameInSlot)(unsigned int slot)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ExportSharedAPI)(ValkeyModuleCtx *ctx,
+                                                     const char *apiname,
+                                                     void *func) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void *(*ValkeyModule_GetSharedAPI)(ValkeyModuleCtx *ctx, const char *apiname)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleCommandFilter *(*ValkeyModule_RegisterCommandFilter)(ValkeyModuleCtx *ctx,
     ValkeyModuleCommandFilterFunc cb,
     int flags)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_UnregisterCommandFilter)(ValkeyModuleCtx* ctx,
-                                                             ValkeyModuleCommandFilter* filter) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgsCount)(ValkeyModuleCommandFilterCtx* fctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_CommandFilterArgGet)(ValkeyModuleCommandFilterCtx* fctx,
-                                                                        int pos)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgInsert)(ValkeyModuleCommandFilterCtx* fctx,
+
+VALKEYMODULE_API int (*ValkeyModule_UnregisterCommandFilter)(ValkeyModuleCtx *ctx,
+                                                             ValkeyModuleCommandFilter *filter) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgsCount)(ValkeyModuleCommandFilterCtx *fctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_CommandFilterArgGet)(ValkeyModuleCommandFilterCtx *fctx,
+                                                                         int pos)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgInsert)(ValkeyModuleCommandFilterCtx *fctx,
                                                             int pos,
-                                                            ValkeyModuleString* arg) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgReplace)(ValkeyModuleCommandFilterCtx* fctx,
+                                                            ValkeyModuleString *arg) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgReplace)(ValkeyModuleCommandFilterCtx *fctx,
                                                              int pos,
-                                                             ValkeyModuleString* arg) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgDelete)(ValkeyModuleCommandFilterCtx* fctx,
+                                                             ValkeyModuleString *arg) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_CommandFilterArgDelete)(ValkeyModuleCommandFilterCtx *fctx,
                                                             int pos) VALKEYMODULE_ATTR;
-VALKEYMODULE_API unsigned long long (*ValkeyModule_CommandFilterGetClientId)(ValkeyModuleCommandFilterCtx* fctx)
+
+VALKEYMODULE_API unsigned long long (*ValkeyModule_CommandFilterGetClientId)(ValkeyModuleCommandFilterCtx *fctx)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_Fork)(ValkeyModuleForkDoneHandler cb, void* user_data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_Fork)(ValkeyModuleForkDoneHandler cb, void *user_data) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API void (*ValkeyModule_SendChildHeartbeat)(double progress) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_ExitFromChild)(int retcode) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_KillForkChild)(int child_pid) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API float (*ValkeyModule_GetUsedMemoryRatio)(void) VALKEYMODULE_ATTR;
-VALKEYMODULE_API size_t (*ValkeyModule_MallocSize)(void* ptr) VALKEYMODULE_ATTR;
-VALKEYMODULE_API size_t (*ValkeyModule_MallocUsableSize)(void* ptr) VALKEYMODULE_ATTR;
-VALKEYMODULE_API size_t (*ValkeyModule_MallocSizeString)(ValkeyModuleString* str) VALKEYMODULE_ATTR;
-VALKEYMODULE_API size_t (*ValkeyModule_MallocSizeDict)(ValkeyModuleDict* dict) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleUser*(*ValkeyModule_CreateModuleUser)(const char* name)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_FreeModuleUser)(ValkeyModuleUser* user) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SetContextUser)(ValkeyModuleCtx* ctx,
-                                                     const ValkeyModuleUser* user) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetModuleUserACL)(ValkeyModuleUser* user, const char* acl) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_SetModuleUserACLString)(ValkeyModuleCtx* ctx,
-                                                            ValkeyModuleUser* user,
-                                                            const char* acl,
-                                                            ValkeyModuleString** error) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_GetModuleUserACLString)(ValkeyModuleUser* user)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_GetCurrentUserName)(ValkeyModuleCtx* ctx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleUser*(*ValkeyModule_GetModuleUserFromUserName)(ValkeyModuleString* name)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ACLCheckCommandPermissions)(ValkeyModuleUser* user,
-                                                                ValkeyModuleString** argv,
+
+VALKEYMODULE_API size_t (*ValkeyModule_MallocSize)(void *ptr) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API size_t (*ValkeyModule_MallocUsableSize)(void *ptr) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API size_t (*ValkeyModule_MallocSizeString)(ValkeyModuleString *str) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API size_t (*ValkeyModule_MallocSizeDict)(ValkeyModuleDict *dict) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleUser *(*ValkeyModule_CreateModuleUser)(const char *name)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_FreeModuleUser)(ValkeyModuleUser *user) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SetContextUser)(ValkeyModuleCtx *ctx,
+                                                     const ValkeyModuleUser *user) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SetModuleUserACL)(ValkeyModuleUser *user, const char *acl) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_SetModuleUserACLString)(ValkeyModuleCtx *ctx,
+                                                            ValkeyModuleUser *user,
+                                                            const char *acl,
+                                                            ValkeyModuleString **error) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_GetModuleUserACLString)(ValkeyModuleUser *user)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_GetCurrentUserName)(ValkeyModuleCtx *ctx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleUser *(*ValkeyModule_GetModuleUserFromUserName)(ValkeyModuleString *name)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_ACLCheckCommandPermissions)(ValkeyModuleUser *user,
+                                                                ValkeyModuleString **argv,
                                                                 int argc) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ACLCheckKeyPermissions)(ValkeyModuleUser* user,
-                                                            ValkeyModuleString* key,
+
+VALKEYMODULE_API int (*ValkeyModule_ACLCheckKeyPermissions)(ValkeyModuleUser *user,
+                                                            ValkeyModuleString *key,
                                                             int flags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_ACLCheckChannelPermissions)(ValkeyModuleUser* user,
-                                                                ValkeyModuleString* ch,
+
+VALKEYMODULE_API int (*ValkeyModule_ACLCheckChannelPermissions)(ValkeyModuleUser *user,
+                                                                ValkeyModuleString *ch,
                                                                 int literal) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ACLAddLogEntry)(ValkeyModuleCtx* ctx,
-                                                     ValkeyModuleUser* user,
-                                                     ValkeyModuleString* object,
+
+VALKEYMODULE_API void (*ValkeyModule_ACLAddLogEntry)(ValkeyModuleCtx *ctx,
+                                                     ValkeyModuleUser *user,
+                                                     ValkeyModuleString *object,
                                                      ValkeyModuleACLLogEntryReason reason) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_ACLAddLogEntryByUserName)(ValkeyModuleCtx* ctx,
-                                                               ValkeyModuleString* user,
-                                                               ValkeyModuleString* object,
+
+VALKEYMODULE_API void (*ValkeyModule_ACLAddLogEntryByUserName)(ValkeyModuleCtx *ctx,
+                                                               ValkeyModuleString *user,
+                                                               ValkeyModuleString *object,
                                                                ValkeyModuleACLLogEntryReason reason) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_AuthenticateClientWithACLUser)(ValkeyModuleCtx* ctx,
-                                                                   const char* name,
+
+VALKEYMODULE_API int (*ValkeyModule_AuthenticateClientWithACLUser)(ValkeyModuleCtx *ctx,
+                                                                   const char *name,
                                                                    size_t len,
                                                                    ValkeyModuleUserChangedFunc callback,
-                                                                   void* privdata,
-                                                                   uint64_t* client_id) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_AuthenticateClientWithUser)(ValkeyModuleCtx* ctx,
-                                                                ValkeyModuleUser* user,
+                                                                   void *privdata,
+                                                                   uint64_t *client_id) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_AuthenticateClientWithUser)(ValkeyModuleCtx *ctx,
+                                                                ValkeyModuleUser *user,
                                                                 ValkeyModuleUserChangedFunc callback,
-                                                                void* privdata,
-                                                                uint64_t* client_id) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DeauthenticateAndCloseClient)(ValkeyModuleCtx* ctx,
+                                                                void *privdata,
+                                                                uint64_t *client_id) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DeauthenticateAndCloseClient)(ValkeyModuleCtx *ctx,
                                                                   uint64_t client_id) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RedactClientCommandArgument)(ValkeyModuleCtx* ctx, int pos) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_GetClientCertificate)(ValkeyModuleCtx* ctx,
-                                                                         uint64_t id)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int*(*ValkeyModule_GetCommandKeys)(ValkeyModuleCtx* ctx,
-                                                    ValkeyModuleString** argv,
-                                                    int argc,
-                                                    int* num_keys)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int*(*ValkeyModule_GetCommandKeysWithFlags)(ValkeyModuleCtx* ctx,
-                                                             ValkeyModuleString** argv,
-                                                             int argc,
-                                                             int* num_keys,
-                                                             int** out_flags)VALKEYMODULE_ATTR;
-VALKEYMODULE_API const char*(*ValkeyModule_GetCurrentCommandName)(ValkeyModuleCtx* ctx)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RegisterDefragFunc)(ValkeyModuleCtx* ctx,
+
+VALKEYMODULE_API int (*ValkeyModule_RedactClientCommandArgument)(ValkeyModuleCtx *ctx, int pos) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_GetClientCertificate)(ValkeyModuleCtx *ctx,
+                                                                          uint64_t id)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int *(*ValkeyModule_GetCommandKeys)(ValkeyModuleCtx *ctx,
+                                                     ValkeyModuleString **argv,
+                                                     int argc,
+                                                     int *num_keys)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int *(*ValkeyModule_GetCommandKeysWithFlags)(ValkeyModuleCtx *ctx,
+                                                              ValkeyModuleString **argv,
+                                                              int argc,
+                                                              int *num_keys,
+                                                              int **out_flags)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const char *(*ValkeyModule_GetCurrentCommandName)(ValkeyModuleCtx *ctx)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_RegisterDefragFunc)(ValkeyModuleCtx *ctx,
                                                         ValkeyModuleDefragFunc func) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void*(*ValkeyModule_DefragAlloc)(ValkeyModuleDefragCtx* ctx, void* ptr)VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleString*(*ValkeyModule_DefragValkeyModuleString)(ValkeyModuleDefragCtx* ctx,
-                                                                             ValkeyModuleString* str)VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DefragShouldStop)(ValkeyModuleDefragCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DefragCursorSet)(ValkeyModuleDefragCtx* ctx,
+
+VALKEYMODULE_API void *(*ValkeyModule_DefragAlloc)(ValkeyModuleDefragCtx *ctx, void *ptr)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleString *(*ValkeyModule_DefragValkeyModuleString)(ValkeyModuleDefragCtx *ctx,
+                                                                              ValkeyModuleString *str)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DefragShouldStop)(ValkeyModuleDefragCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_DefragCursorSet)(ValkeyModuleDefragCtx *ctx,
                                                      unsigned long cursor) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_DefragCursorGet)(ValkeyModuleDefragCtx* ctx,
-                                                     unsigned long* cursor) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromDefragCtx)(ValkeyModuleDefragCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API const ValkeyModuleString*(*ValkeyModule_GetKeyNameFromDefragCtx)(ValkeyModuleDefragCtx* ctx)
+
+VALKEYMODULE_API int (*ValkeyModule_DefragCursorGet)(ValkeyModuleDefragCtx *ctx,
+                                                     unsigned long *cursor) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_GetDbIdFromDefragCtx)(ValkeyModuleDefragCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API const ValkeyModuleString *(*ValkeyModule_GetKeyNameFromDefragCtx)(ValkeyModuleDefragCtx *ctx)
 VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_EventLoopAdd)(int fd, int mask, ValkeyModuleEventLoopFunc func, void* user_data)
+
+VALKEYMODULE_API int (*ValkeyModule_EventLoopAdd)(int fd, int mask, ValkeyModuleEventLoopFunc func, void *user_data)
 VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_EventLoopDel)(int fd, int mask) VALKEYMODULE_ATTR;
+
 VALKEYMODULE_API int (*ValkeyModule_EventLoopAddOneShot)(ValkeyModuleEventLoopOneShotFunc func,
-                                                         void* user_data) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RegisterBoolConfig)(ValkeyModuleCtx* ctx,
-                                                        const char* name,
+                                                         void *user_data) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_RegisterBoolConfig)(ValkeyModuleCtx *ctx,
+                                                        const char *name,
                                                         int default_val,
                                                         unsigned int flags,
                                                         ValkeyModuleConfigGetBoolFunc getfn,
                                                         ValkeyModuleConfigSetBoolFunc setfn,
                                                         ValkeyModuleConfigApplyFunc applyfn,
-                                                        void* privdata) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RegisterNumericConfig)(ValkeyModuleCtx* ctx,
-                                                           const char* name,
+                                                        void *privdata) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_RegisterNumericConfig)(ValkeyModuleCtx *ctx,
+                                                           const char *name,
                                                            long long default_val,
                                                            unsigned int flags,
                                                            long long min,
@@ -1666,45 +2036,51 @@ VALKEYMODULE_API int (*ValkeyModule_RegisterNumericConfig)(ValkeyModuleCtx* ctx,
                                                            ValkeyModuleConfigGetNumericFunc getfn,
                                                            ValkeyModuleConfigSetNumericFunc setfn,
                                                            ValkeyModuleConfigApplyFunc applyfn,
-                                                           void* privdata) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RegisterStringConfig)(ValkeyModuleCtx* ctx,
-                                                          const char* name,
-                                                          const char* default_val,
+                                                           void *privdata) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_RegisterStringConfig)(ValkeyModuleCtx *ctx,
+                                                          const char *name,
+                                                          const char *default_val,
                                                           unsigned int flags,
                                                           ValkeyModuleConfigGetStringFunc getfn,
                                                           ValkeyModuleConfigSetStringFunc setfn,
                                                           ValkeyModuleConfigApplyFunc applyfn,
-                                                          void* privdata) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RegisterEnumConfig)(ValkeyModuleCtx* ctx,
-                                                        const char* name,
+                                                          void *privdata) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_RegisterEnumConfig)(ValkeyModuleCtx *ctx,
+                                                        const char *name,
                                                         int default_val,
                                                         unsigned int flags,
-                                                        const char** enum_values,
-                                                        const int* int_values,
+                                                        const char **enum_values,
+                                                        const int *int_values,
                                                         int num_enum_vals,
                                                         ValkeyModuleConfigGetEnumFunc getfn,
                                                         ValkeyModuleConfigSetEnumFunc setfn,
                                                         ValkeyModuleConfigApplyFunc applyfn,
-                                                        void* privdata) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_LoadConfigs)(ValkeyModuleCtx* ctx) VALKEYMODULE_ATTR;
-VALKEYMODULE_API ValkeyModuleRdbStream*(*ValkeyModule_RdbStreamCreateFromFile)(const char* filename)VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_RdbStreamFree)(ValkeyModuleRdbStream* stream) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RdbLoad)(ValkeyModuleCtx* ctx,
-                                             ValkeyModuleRdbStream* stream,
+                                                        void *privdata) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_LoadConfigs)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API ValkeyModuleRdbStream *(*ValkeyModule_RdbStreamCreateFromFile)(const char *filename)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_RdbStreamFree)(ValkeyModuleRdbStream *stream) VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API int (*ValkeyModule_RdbLoad)(ValkeyModuleCtx *ctx,
+                                             ValkeyModuleRdbStream *stream,
                                              int flags) VALKEYMODULE_ATTR;
-VALKEYMODULE_API int (*ValkeyModule_RdbSave)(ValkeyModuleCtx* ctx,
-                                             ValkeyModuleRdbStream* stream,
+
+VALKEYMODULE_API int (*ValkeyModule_RdbSave)(ValkeyModuleCtx *ctx,
+                                             ValkeyModuleRdbStream *stream,
                                              int flags) VALKEYMODULE_ATTR;
 
 #define ValkeyModule_IsAOFClient(id) ((id) == UINT64_MAX)
 
 /* This is included inline inside each Valkey module. */
-static int ValkeyModule_Init(ValkeyModuleCtx* ctx, const char* name, int ver, int apiver) VALKEYMODULE_ATTR_UNUSED;
+static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, int apiver) VALKEYMODULE_ATTR_UNUSED;
 
-static int ValkeyModule_Init(ValkeyModuleCtx* ctx, const char* name, int ver, int apiver)
-{
-    void* getapifuncptr = ((void**)ctx)[0];
-    ValkeyModule_GetApi = (int (*)(const char*, void*))(unsigned long)getapifuncptr;
+static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, int apiver) {
+    void *getapifuncptr = ((void **) ctx)[0];
+    ValkeyModule_GetApi = (int (*)(const char *, void *)) (unsigned long) getapifuncptr;
     VALKEYMODULE_GET_API(Alloc);
     VALKEYMODULE_GET_API(TryAlloc);
     VALKEYMODULE_GET_API(Calloc);

@@ -10,13 +10,14 @@
 typedef std::unique_lock<std::shared_mutex> write_lock;
 typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
 //!typedef basic_ovectorstream<std::vector<char> >    ovectorstream;
-extern std::shared_mutex& get_lock();
+extern std::shared_mutex &get_lock();
+
 /**
  * context management
  */
-struct compressed_release
-{
+struct compressed_release {
     compressed_release();
+
     ~compressed_release();
 };
 
@@ -24,8 +25,7 @@ struct compressed_release
  * global statistics
  */
 
-struct art_statistics
-{
+struct art_statistics {
     int64_t leaf_nodes;
     int64_t node4_nodes;
     int64_t node16_nodes;
@@ -49,8 +49,7 @@ struct art_statistics
     int64_t exceptions_raised;
 };
 
-struct art_ops_statistics
-{
+struct art_ops_statistics {
     int64_t delete_ops;
     int64_t set_ops;
     int64_t iter_ops;
@@ -64,27 +63,31 @@ struct art_ops_statistics
     int64_t max_ops;
 };
 
-typedef std::function<int(void* data, art::value_type key, art::value_type value)> CallBack;
-typedef std::function<int(const art::node_ptr&)> LeafCallBack;
-typedef std::function<void(const art::node_ptr&)> NodeResult;
+typedef std::function<int(void *data, art::value_type key, art::value_type value)> CallBack;
+typedef std::function<int(const art::node_ptr &)> LeafCallBack;
+typedef std::function<void(const art::node_ptr &)> NodeResult;
 
 
 /**
  * art tree and company
  */
-namespace art
-{
+namespace art {
     bool has_leaf_compression();
+
     bool has_node_compression();
+
     bool init_leaf_compression();
+
     bool init_node_compression();
+
     void destroy_node_compression();
+
     void destroy_leaf_compression();
 
-    struct tree
-    {
+    struct tree {
     private:
         trace_list trace{};
+
     public:
         bool mexit = false;
         bool transacted = false;
@@ -97,37 +100,48 @@ namespace art
         vector_stream save_stats{};
         std::shared_mutex save_load_mutex{};
         bool opt_use_trace = true;
-        node_ptr last_leaf_added {};
+        node_ptr last_leaf_added{};
 
 
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();
         }
+
         void pop_trace() {
             if (opt_use_trace)
                 trace.pop_back();
         }
-        void push_trace(const trace_element& te) {
+
+        void push_trace(const trace_element &te) {
             if (opt_use_trace)
                 trace.push_back(te);
         }
-        void start_maintain();
-        tree(const tree&) = delete;
 
-        tree(const art::node_ptr& root, uint64_t size) : root(root), size(size)
-        {
+        void start_maintain();
+
+        tree(const tree &) = delete;
+
+        tree(const art::node_ptr &root, uint64_t size) : root(root), size(size) {
             start_maintain();
         }
 
         ~tree();
+
         void run_defrag();
+
         bool save();
+
         bool load();
+
         void begin();
+
         void commit();
+
         void rollback();
+
         void clear();
+
         void update_trace(int direction);
     };
 }
@@ -136,18 +150,18 @@ namespace art
  * Initializes an ART tree
  * @return 0 on success.
  */
-int art_tree_init(art::tree* t);
+int art_tree_init(art::tree *t);
 
 /**
  * Destroys an ART tree
  * @return 0 on success.
  */
-int tree_destroy(art::tree* t);
+int tree_destroy(art::tree *t);
 
 /**
  * Returns the size of the ART tree.
  */
-uint64_t art_size(art::tree* t);
+uint64_t art_size(art::tree *t);
 
 /**
  * inserts a new value into the art tree
@@ -159,20 +173,20 @@ uint64_t art_size(art::tree* t);
  * the old value pointer is returned.
  */
 void art_insert
-(   art::tree* t
-,   const art::key_spec& options
-,   art::value_type key
-,   art::value_type value
-,   const NodeResult& fc
+(art::tree *t
+ , const art::key_spec &options
+ , art::value_type key
+ , art::value_type value
+ , const NodeResult &fc
 );
 
 void art_insert
-(   art::tree* t
-,   const art::key_spec& options
-,   art::value_type key
-,   art::value_type value
-,   bool replace
-,   const NodeResult& fc);
+(art::tree *t
+ , const art::key_spec &options
+ , art::value_type key
+ , art::value_type value
+ , bool replace
+ , const NodeResult &fc);
 
 /**
  * inserts a new value into the art tree (not replacing)
@@ -183,8 +197,8 @@ void art_insert
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::value_type key, art::value_type value,
-                           const NodeResult& fc);
+void art_insert_no_replace(art::tree *t, const art::key_spec &options, art::value_type key, art::value_type value,
+                           const NodeResult &fc);
 
 /**
  * Deletes a value from the ART tree
@@ -194,8 +208,9 @@ void art_insert_no_replace(art::tree* t, const art::key_spec& options, art::valu
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-void art_delete(art::tree* t, art::value_type key);
-void art_delete(art::tree* t, art::value_type key, const NodeResult& fc);
+void art_delete(art::tree *t, art::value_type key);
+
+void art_delete(art::tree *t, art::value_type key, const NodeResult &fc);
 
 /**
  * Searches for a value in the ART tree
@@ -205,20 +220,19 @@ void art_delete(art::tree* t, art::value_type key, const NodeResult& fc);
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
  */
-art::node_ptr art_search(const art::tree* t, art::value_type key);
+art::node_ptr art_search(const art::tree *t, art::value_type key);
 
 /**
  * Returns the minimum valued leaf
  * @return The minimum leaf or NULL
  */
-art::node_ptr art_minimum(art::tree* t);
+art::node_ptr art_minimum(art::tree *t);
 
 /**
  * Returns the maximum valued leaf
  * @return The maximum leaf or NULL
  */
-namespace art
-{
+namespace art {
     /**
      * call 'updater' if key exists. updater can return a new leaf to replace the existing one.
      * if 'updater' returns null then nothing is updated
@@ -226,9 +240,9 @@ namespace art
      * @param key key to find
      * @param updater function to call for supplying modified key
      */
-    void update(tree* t, value_type key, const std::function<node_ptr(const node_ptr& leaf)>& updater);
+    void update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
 
-    art::node_ptr maximum(art::tree* t);
+    art::node_ptr maximum(art::tree *t);
 
     /**
      * Returns the lower bound value of a given key
@@ -239,7 +253,7 @@ namespace art
      * @return the lower bound or NULL if there is no value not less than key
      */
 
-    node_ptr lower_bound(const art::tree* t, art::value_type key);
+    node_ptr lower_bound(const art::tree *t, art::value_type key);
 }
 
 /**
@@ -252,7 +266,7 @@ namespace art
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter(art::tree* t, CallBack cb, void* data);
+int art_iter(art::tree *t, CallBack cb, void *data);
 
 /**
  * Iterates through the entries pairs in the map,
@@ -266,17 +280,15 @@ int art_iter(art::tree* t, CallBack cb, void* data);
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art::tree* t, art::value_type prefix, CallBack cb, void* data);
+int art_iter_prefix(art::tree *t, art::value_type prefix, CallBack cb, void *data);
+
 /**
  * iterates through a range from small to large from key to key_end
  * the first key is located in log(n) time
  * @return 0 on success, or the return of the callback.
  */
-namespace art
-{
-
-    struct iterator
-    {
+namespace art {
+    struct iterator {
         tree *t;
         trace_list tl{};
         node_ptr c{};
@@ -290,48 +302,75 @@ namespace art
          */
 
         explicit iterator(value_type key);
+
         /**
          * starts the iterator at the first key (left most) in the tree
          */
         iterator();
-        iterator(const iterator& it) = default;
-        iterator(iterator&& it) = default;
-        iterator& operator=(iterator&& it) = default;
-        iterator& operator=(const iterator& it) = default;
+
+        iterator(const iterator &it) = default;
+
+        iterator(iterator &&it) = default;
+
+        iterator &operator=(iterator &&it) = default;
+
+        iterator &operator=(const iterator &it) = default;
+
         bool next();
+
         bool previous();
-        [[nodiscard]] const leaf* l() const;
+
+        [[nodiscard]] const leaf *l() const;
+
         [[nodiscard]] value_type key() const;
+
         [[nodiscard]] value_type value() const;
+
         [[nodiscard]] bool end() const;
+
         [[nodiscard]] bool ok() const;
+
         [[nodiscard]] node_ptr current() const;
-        bool update(std::function<node_ptr(const leaf* l)> updater);
+
+        bool update(std::function<node_ptr(const leaf *l)> updater);
+
         bool update(value_type value);
+
         bool update(value_type value, int64_t ttl, bool volat);
+
         bool update(int64_t ttl, bool volat);
+
         bool update(int64_t ttl);
+
         [[nodiscard]] bool remove() const;
-        [[nodiscard]] int64_t distance(const iterator& other) const;
+
+        [[nodiscard]] int64_t distance(const iterator &other) const;
+
         [[nodiscard]] int64_t distance(value_type other, bool traced = false) const;
-        [[nodiscard]] int64_t fast_distance(const iterator& other) const;
+
+        [[nodiscard]] int64_t fast_distance(const iterator &other) const;
+
         void log_trace() const;
     };
+
     node_ptr find(value_type key);
-    int range(const tree* t, value_type key, value_type key_end, CallBack cb, void* data);
-    int range(const tree* t, value_type key, value_type key_end, LeafCallBack cb);
-    int64_t distance(const tree* t, const trace_list& a, const trace_list& b);
-    int64_t fast_distance(const trace_list& a, const trace_list& b);
+
+    int range(const tree *t, value_type key, value_type key_end, CallBack cb, void *data);
+
+    int range(const tree *t, value_type key, value_type key_end, LeafCallBack cb);
+
+    int64_t distance(const tree *t, const trace_list &a, const trace_list &b);
+
+    int64_t fast_distance(const trace_list &a, const trace_list &b);
 }
 
 
 /**
 * evict a lru page
 */
-uint64_t art_evict_lru(art::tree* t);
+uint64_t art_evict_lru(art::tree *t);
 
-namespace art
-{
+namespace art {
     /**
      * gets per module per node type statistics for all art_node* types
      * @return art_statistics
@@ -347,5 +386,5 @@ namespace art
      * glob match all the key value pairs except the deleted ones
      * This is a multi threaded iterator and care should be taken
      */
-    void glob(tree* t, const keys_spec& spec, value_type pattern, const std::function<bool(const leaf&)>& cb);
+    void glob(tree *t, const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb);
 }

@@ -5,4 +5,3 @@
 #include "page_modifications.h"
 
 std::atomic<uint32_t> page_modifications::flush_ticker[ticker_size]{};
-

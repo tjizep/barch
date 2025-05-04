@@ -16,8 +16,7 @@
 #include <fmt/color.h>
 #pragma GCC diagnostic pop
 
-namespace art
-{
+namespace art {
 #if __cplusplus >= 202002L
     extern void raw_write_to_log(std::string_view users_fmt, std::format_args&& args);
     template<typename... Args>
@@ -36,13 +35,15 @@ namespace art
 #else
 
     extern void raw_start_log(bool err);
-    extern void raw_end_log();
-    extern void raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_args&& args);
-    extern void raw_write_to_log(bool err, fmt::string_view users_fmt, fmt::format_args&& args);
-    template<typename... Args>
-    static constexpr void std_err(Args&&... args)
-    {
 
+    extern void raw_end_log();
+
+    extern void raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args);
+
+    extern void raw_write_to_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args);
+
+    template<typename... Args>
+    static constexpr void std_err(Args &&... args) {
         // Generate formatting string "{} "...
         std::array<char, sizeof...(Args) * 3 + 1> braces{};
         constexpr const char c[4] = "{} ";
@@ -52,10 +53,9 @@ namespace art
 
         raw_write_to_log(true, std::string_view{braces.data()}, fmt::make_format_args(args...));
     }
-    template<typename... Args>
-    static constexpr void std_abort(Args&&... args) __THROW
-    {
 
+    template<typename... Args>
+    static constexpr void std_abort(Args &&... args) __THROW {
         // Generate formatting string "{} "...
         std::array<char, sizeof...(Args) * 3 + 1> braces{};
         constexpr const char c[4] = "{} ";
@@ -66,10 +66,9 @@ namespace art
         raw_write_to_log(true, std::string_view{braces.data()}, fmt::make_format_args(args...));
         abort();
     }
-    template<typename... Args>
-    static constexpr void std_log(Args&&... args)
-    {
 
+    template<typename... Args>
+    static constexpr void std_log(Args &&... args) {
         // Generate formatting string "{} "...
         std::array<char, sizeof...(Args) * 3 + 1> braces{};
         constexpr const char c[4] = "{} ";
@@ -79,19 +78,17 @@ namespace art
 
         raw_write_to_log(false, std::string_view{braces.data()}, fmt::make_format_args(args...));
     }
-    inline void std_start()
-    {
+
+    inline void std_start() {
         raw_start_log(false);
     }
-    inline void std_end()
-    {
+
+    inline void std_end() {
         raw_end_log();
     }
 
     template<typename... Args>
-    static constexpr void std_continue(Args&&... args)
-    {
-
+    static constexpr void std_continue(Args &&... args) {
         // Generate formatting string "{} "...
         std::array<char, sizeof...(Args) * 3 + 1> braces{};
         constexpr const char c[4] = "{} ";
@@ -103,10 +100,11 @@ namespace art
     }
 
 #endif
-    extern void log(const std::string& message, const std::exception& e);
-    extern void log(const std::exception& e, const std::string& file, int line);
-    extern void log(const std::string& message);
+    extern void log(const std::string &message, const std::exception &e);
 
+    extern void log(const std::exception &e, const std::string &file, int line);
+
+    extern void log(const std::string &message);
 }
 
 

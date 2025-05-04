@@ -4,18 +4,17 @@
 
 #include "module.h"
 
-art::tree* ad{};
+art::tree *ad{};
 static std::shared_mutex shared{};
 constants Constants{};
-std::shared_mutex& get_lock()
-{
-	return shared;
+
+std::shared_mutex &get_lock() {
+    return shared;
 }
-art::tree* get_art()
-{
-	if (ad == nullptr)
-	{
-		ad = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0);
-	}
-	return ad;
+
+art::tree *get_art() {
+    if (ad == nullptr) {
+        ad = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0);
+    }
+    return ad;
 }

@@ -393,7 +393,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "3600", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "360000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "43000000",

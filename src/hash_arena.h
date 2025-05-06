@@ -399,6 +399,9 @@ namespace arena {
         }
 
         bool alloc_main(size_t new_size) {
+            if (new_size < physical_page_size) {
+                new_size = physical_page_size;
+            }
             if (opt_use_vmmap) {
                 if (page_data_size > 0) {
                     page_data = (uint8_t*) mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE);

@@ -915,7 +915,7 @@ public:
             readp(in, allocated);
             readp(in, fragmentation);
             last_page_allocated = 0;
-            fragmentation = 0;
+            //fragmentation = 0;
             extra1(in);
         };
         try {

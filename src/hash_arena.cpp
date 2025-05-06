@@ -11,6 +11,9 @@ void append(std::ofstream &out, size_t page, const storage &s, const uint8_t *da
     }
 
     long size = 0;
+    if (s.fragmentation > s.write_position) {
+        abort_with("invalid write position or fragmentation");
+    }
     writep(out, page);
     writep(out, s.fragmentation);
     writep(out, 0);
@@ -51,17 +54,19 @@ bool arena::base_hash_arena::save(const std::string &filename,
     }
     uint64_t alloc_table_start = out.tellp();
     // write the initial allocation table
-    iterate_arena([&out](size_t page, const storage &) {
+    size_t page_count = 0;
+    iterate_arena([&out,&page_count](size_t page, const storage &) {
         uint64_t p = page;
         uint64_t a = 0;
 
         writep(out, p);
         writep(out, a);
+        ++page_count;
     });
     size_t record_pos = 0;
     iterate_arena([&](size_t page, const storage &s) {
         uint64_t start = out.tellp();
-        append(out, page, s, get_page_data({page, 0}));
+        append(out, page, s, get_page_data({page, 0},false));
 
         uint64_t finish = out.tellp();
         // write the allocation record
@@ -70,6 +75,7 @@ bool arena::base_hash_arena::save(const std::string &filename,
         out.seekp(finish, std::ios::beg);
         ++record_pos;
     });
+    art::std_log("saved [",record_pos,"] out of [",size,"] pages");
     if (out.fail()) {
         art::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
         return false; // usually disk full at this stage
@@ -140,6 +146,10 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
             if (bsize) {
                 abort_with("invalid file");
             }
+            if (s.fragmentation > s.write_position) {
+                abort_with("invalid write position or fragmentation");
+            }
+
             readp(in, bsize);
             if (bsize) {
                 in.read((char *) arena.get_alloc_page_data({page, 0}, bsize), bsize);
@@ -173,6 +183,7 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
         art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
         return false;
     }
+    art::std_log("loaded [",size,"] pages");
     art::log("complete reading from " + filename);
     return true;
 }

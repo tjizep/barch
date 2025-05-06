@@ -378,7 +378,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetCompressionType, SetCompressionType, ApplyCompressionType, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "eviction_policy", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEvictionType, SetEvictionType, nullptr, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", "1024g", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", "1g", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxMemoryRatio, SetMaxMemoryBytes, ApplyMaxMemoryRatio, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);
@@ -393,7 +393,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "3600000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "3600", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "43000000",
@@ -403,7 +403,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "no", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetUseVMMemory, SetUseVMMemory,
                                              ApplyUseVMMemory, nullptr);
     return ret;

@@ -581,7 +581,7 @@ int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  * @return OK if successful
  */
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    //compressed_release release;
     //write_lock rl(get_lock());
 
     if (argc != 1)
@@ -624,7 +624,7 @@ int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 }
 
 int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    //compressed_release release;
     //write_lock rl(get_lock());
 
     if (argc != 1)

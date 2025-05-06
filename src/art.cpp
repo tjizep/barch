@@ -1633,25 +1633,33 @@ static void stream_to_stats(InStream &in) {
 }
 
 bool art::tree::save() {
-    std::lock_guard guard(save_load_mutex); // prevent save and load from occurring concurrently
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
+    bool saved = false;
+    node_ptr troot;
+    size_t tsize;
     auto save_stats_and_root = [&](std::ofstream &of) {
+        if (!saved) {
+            abort_with("synch error");
+        }
         stats_to_stream(of);
-
-
-        auto root = logical_address(t->root.logical);
+        auto root = logical_address(troot.logical);
         writep(of, root);
-        writep(of, t->root.is_leaf);
-        writep(of, t->size);
+        writep(of, troot.is_leaf);
+        writep(of, tsize);
     };
 
     auto st = std::chrono::high_resolution_clock::now();
     transaction tx; // stabilize main while saving
     arena::hash_arena leaves;
-    arena::hash_arena nodes; {
-        compressed_release release; // only lock during copy
-        leaves = get_leaf_compression().get_main();
-        nodes = get_node_compression().get_main();
+    arena::hash_arena nodes;
+    {
+        compressed_release release; // only lock during partial copy
+        tsize = t->size;
+        troot = t->root;
+        saved = true;
+        leaves.borrow(get_leaf_compression().get_main());
+        nodes.borrow(get_node_compression().get_main());
     }
     if (!get_leaf_compression().save_extra(leaves, "leaf_data.dat", save_stats_and_root)) {
         return false;
@@ -1673,41 +1681,49 @@ bool art::tree::save() {
 }
 
 bool art::tree::load() {
-    std::lock_guard guard(save_load_mutex); // prevent save and load from occurring concurrently
-    auto *t = this;
-    logical_address root;
-    bool is_leaf = false;
-    // save stats in the leaf storage
-    auto load_stats_and_root = [&](std::ifstream &in) {
-        stream_to_stats(in);
 
-        readp(in, root);
-        readp(in, is_leaf);
-        readp(in, t->size);
-    };
-    auto st = std::chrono::high_resolution_clock::now();
+    //
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    try {
+        std::lock_guard guard2(logical_allocator::mutex);
+        auto *t = this;
+        logical_address root;
+        bool is_leaf = false;
+        // save stats in the leaf storage
+        auto load_stats_and_root = [&](std::ifstream &in) {
+            stream_to_stats(in);
 
-    if (!get_node_compression().load_extra("node_data.dat", [&](std::ifstream &) {
-    })) {
+            readp(in, root);
+            readp(in, is_leaf);
+            readp(in, t->size);
+        };
+        auto st = std::chrono::high_resolution_clock::now();
+
+        if (!get_node_compression().load_extra("node_data.dat", [&](std::ifstream &) {
+        })) {
+            return false;
+        }
+        if (!get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root)) {
+            return false;
+        }
+
+        if (is_leaf) {
+            t->root = node_ptr{root};
+        } else {
+            t->root = resolve_read_node(root);
+        }
+        page_modifications::inc_all_tickers();
+        auto now = std::chrono::high_resolution_clock::now();
+        const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
+        const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
+        std_log("Done loading BARCH, keys loaded:", t->size, "");
+
+        std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
+        std_log("db memory when created", (float) heap::allocated / (1024 * 1024), "Mb");
+    }catch (std::exception &e) {
+        std_log("could not save",e.what());
         return false;
     }
-    if (!get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root)) {
-        return false;
-    }
-
-    if (is_leaf) {
-        t->root = node_ptr{root};
-    } else {
-        t->root = resolve_read_node(root);
-    }
-    auto now = std::chrono::high_resolution_clock::now();
-    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
-    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-    std_log("Done loading BARCH, keys loaded:", t->size, "");
-
-    std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
-    std_log("db memory when created", (float) heap::allocated / (1024 * 1024), "Mb");
-
     return true;
 }
 
@@ -1717,13 +1733,18 @@ void art::tree::begin() {
     save_size = size;
     save_stats.clear();
     stats_to_stream(save_stats);
-    get_leaf_compression().begin();
-    get_node_compression().begin();
+    {
+        std::lock_guard guard2(logical_allocator::mutex);
+        get_leaf_compression().begin();
+        get_node_compression().begin();
+
+    }
     transacted = true;
 }
 
 void art::tree::commit() {
     if (!transacted) return;
+    std::lock_guard guard2(logical_allocator::mutex);
     get_leaf_compression().commit();
     get_node_compression().commit();
     transacted = false;
@@ -1731,6 +1752,7 @@ void art::tree::commit() {
 
 void art::tree::rollback() {
     if (!transacted) return;
+    std::lock_guard guard2(logical_allocator::mutex);
     get_leaf_compression().rollback();
     get_node_compression().rollback();
     root = save_root;
@@ -1741,6 +1763,8 @@ void art::tree::rollback() {
 }
 
 void art::tree::clear() {
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    std::lock_guard guard2(logical_allocator::mutex);
     root = {nullptr};
     size = 0;
     transacted = false;

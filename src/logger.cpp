@@ -41,12 +41,17 @@ void art::log(const std::string& message)
 #else
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Weffc++"
+#include <mutex>
 #include <fmt/core.h>
 #include <fmt/chrono.h>
 #include <fmt/color.h>
 #pragma GCC diagnostic pop
-
+static std::mutex& get_lock() {
+    static std::mutex m;
+    return m;
+};
 void art::raw_start_log(bool err) {
+    std::unique_lock lock(get_lock());
     size_t tid = gettid();
     auto now = std::chrono::system_clock::now();
     // %d %b %Y %H:%M:%OS
@@ -68,6 +73,8 @@ void art::raw_start_log(bool err) {
 }
 
 void art::raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
+    std::unique_lock lock(get_lock());
+
     fmt::text_style text_color;
     if (err) {
         text_color = fg(fmt::color::burly_wood) | fmt::emphasis::italic;
@@ -78,10 +85,12 @@ void art::raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_arg
 }
 
 void art::raw_end_log() {
+    std::unique_lock lock(get_lock());
     std::clog << "\n";
 }
 
 void art::raw_write_to_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
+    std::unique_lock lock(get_lock());
     size_t tid = gettid();
     auto now = std::chrono::system_clock::now();
     // %d %b %Y %H:%M:%OS

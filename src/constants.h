@@ -7,7 +7,9 @@
 
 enum {
     node_checks = 0,
-    page_size = 8192, // must be a power of twp
+    page_footer = 0,
+    page_size = 8192 - page_footer, // must be a power of twp
+    physical_page_size = page_size + page_footer,
     initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,
     auto_vac = 0,
@@ -26,6 +28,6 @@ enum {
     non_leaf_type = 2,
     comparable_key_static_size = 32,
     node_pointer_storage_size = 36,
-    vmm_physical_factor = 50 // percent
+    vmm_physical_factor = 20 // percent
 };
 #endif //CONSTANTS_H

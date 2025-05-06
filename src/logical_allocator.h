@@ -216,6 +216,16 @@ struct free_list {
             free_bins.emplace_back(i);
         }
     }
+    void clear() {
+        added = 0;
+        addresses.clear();
+        max_bin = 0;
+        min_bin = page_size;
+        free_bins.clear();
+        for (unsigned i = 0; i < page_size; ++i) {
+            free_bins.emplace_back(i);
+        }
+    }
 
     void inner_add(logical_address address, unsigned size) {
         if (size >= free_bins.size()) {
@@ -328,10 +338,8 @@ private:
 
     bool threads_exit = false;
     size_t last_page_allocated{0};
-    logical_address arena_head{0};
     logical_address highest_reserve_address{0};
     uint64_t last_heap_bytes = 0;
-    uint64_t release_counter = 0;
     uint64_t ticker = 1;
     uint64_t allocated = 0;
     size_t fragmentation = 0;
@@ -354,6 +362,7 @@ private:
 
     // arena virtualization start
     storage &retrieve_page(size_t page, bool modify = false) {
+
         if (modify) {
             page_modifications::inc_ticker(page);
             return main.modify(page);
@@ -495,7 +504,7 @@ private:
         }
 
 
-        return main.get_page_data(at);
+        return main.get_page_data(at, modify);
 #if 0
         invalid(at);
         if (test_memory)
@@ -545,23 +554,6 @@ private:
         //return true;
     }
 
-    // TODO: put a time limit on this function because it can take long
-    size_t inner_vacuum() {
-        std::atomic<size_t> r = 0;
-        std::thread workers[auto_vac_workers];
-        for (unsigned ivac = 0; ivac < auto_vac_workers; ivac++) {
-            workers[ivac] = std::thread([this,ivac,&r]() {
-                iterate_arena([&](size_t p, storage &) -> void {
-                    if (p % auto_vac_workers == ivac)
-                        r += release_decompressed(p);
-                });
-            });
-        }
-        for (auto &worker: workers) worker.join();
-
-        ++statistics::vacuums_performed;
-        return r;
-    }
 
     std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer_inner(size_t at) {
         if (is_null_base(at)) return {};
@@ -570,7 +562,7 @@ private:
         if (t.empty()) return {};
         valid({at, 0});
 
-        return {heap::buffer{main.get_page_data({at, 0}), t.write_position}, t.write_position};
+        return {heap::buffer{main.get_page_data({at, 0},false), t.write_position}, t.write_position};
     }
 
 public:
@@ -649,7 +641,6 @@ public:
         } else {
             emancipated.add(at, size); // add a free allocation for later re-use
             t.size--;
-            //t.modifications++;
             if (t.fragmentation + size > t.write_position) {
                 abort();
             }
@@ -737,6 +728,9 @@ public:
             // last_page_allocated should not be set here
             at.second.size++;
             //at.second.modifications++;
+            if (at.second.fragmentation < size) {
+                abort_with(" no fragmentation?");
+            }
             at.second.fragmentation -= size;
 
             invalid(r);
@@ -819,11 +813,6 @@ public:
                 //abort();
                 art::std_log("Warning", (long long) total_heap, "<", (long long) statistics::page_bytes_compressed);
             }
-            auto start_vac = std::chrono::high_resolution_clock::now();
-            result = inner_vacuum();
-            auto end_vac = std::chrono::high_resolution_clock::now();
-            auto dvac = std::chrono::duration_cast<std::chrono::milliseconds>(end_vac - start_vac);
-            statistics::last_vacuum_time = dvac.count();
             last_heap_bytes = statistics::page_bytes_uncompressed;
             last_vacuum_millis = std::chrono::high_resolution_clock::now();
         }
@@ -836,9 +825,9 @@ public:
     }
 
 
-    size_t vacuum() {
-        size_t r = full_vacuum();
-        return r;
+    size_t vacuum() const {
+
+        return 0;
     }
 
     void iterate_pages(const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
@@ -857,7 +846,7 @@ public:
                             std::lock_guard guard(mutex);
                             if (!is_free(page)) {
                                 wp = data.write_position;
-                                pdata = std::move(heap::buffer{main.get_page_data({page, 0}), wp});
+                                pdata = std::move(heap::buffer{main.get_page_data({page, 0},false), wp});
                             }
                         }
                         if (wp) {
@@ -890,10 +879,8 @@ public:
             writep(of, opt_iterate_workers);
 
             writep(of, last_page_allocated);
-            writep(of, arena_head);
             writep(of, highest_reserve_address);
             writep(of, last_heap_bytes);
-            writep(of, release_counter);
             writep(of, ticker);
             writep(of, allocated);
             writep(of, fragmentation);
@@ -904,6 +891,9 @@ public:
     }
 
     [[nodiscard]] const arena::hash_arena &get_main() const {
+        return main;
+    }
+    [[nodiscard]] arena::hash_arena &get_main() {
         return main;
     }
 
@@ -919,17 +909,17 @@ public:
             readp(in, opt_iterate_workers);
 
             readp(in, last_page_allocated);
-            readp(in, arena_head);
             readp(in, highest_reserve_address);
             readp(in, last_heap_bytes);
-            readp(in, release_counter);
             readp(in, ticker);
             readp(in, allocated);
             readp(in, fragmentation);
-
+            last_page_allocated = 0;
+            fragmentation = 0;
             extra1(in);
         };
         try {
+            emancipated.clear();
             return main.load(filenname, reader);
         } catch (std::exception &e) {
             art::log(e,__FILE__,__LINE__);
@@ -955,10 +945,8 @@ public:
         main.rollback();
         main = arena::hash_arena{};
         last_page_allocated = {0};
-        arena_head = {nullptr};
         highest_reserve_address = {nullptr};
         last_heap_bytes = 0;
-        release_counter = 0;
         ticker = 1;
         allocated = 0;
         fragmentation = 0;

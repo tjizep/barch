@@ -32,7 +32,11 @@
 
 typedef uint16_t PageSizeType;
 typedef heap::set<size_t> address_set;
+enum {
+    PageOffset = 0, //,
+    LPageSize = page_size - sizeof(storage)
 
+};
 struct training_entry {
     training_entry(const uint8_t *data, size_t size) : data(data), size(size) {
     }
@@ -64,7 +68,7 @@ struct free_page {
             return logical_address{0};
         }
         PageSizeType r = offsets.back();
-        if (r >= page_size) {
+        if (r >= LPageSize) {
             abort_with("invalid offset");
         }
         offsets.pop_back();
@@ -205,14 +209,14 @@ struct free_bin {
 
 struct free_list {
     size_t added = 0;
-    size_t min_bin = page_size;
+    size_t min_bin = LPageSize;
     size_t max_bin = 0;
     address_set addresses{};
     heap::vector<free_bin> free_bins{};
     //heap::vector<free_bin> free_bins{};
 
     free_list() {
-        for (unsigned i = 0; i < page_size; ++i) {
+        for (unsigned i = 0; i < LPageSize; ++i) {
             free_bins.emplace_back(i);
         }
     }
@@ -220,9 +224,9 @@ struct free_list {
         added = 0;
         addresses.clear();
         max_bin = 0;
-        min_bin = page_size;
+        min_bin = LPageSize;
         free_bins.clear();
-        for (unsigned i = 0; i < page_size; ++i) {
+        for (unsigned i = 0; i < LPageSize; ++i) {
             free_bins.emplace_back(i);
         }
     }
@@ -327,7 +331,6 @@ private:
     arena::hash_arena main{};
     /// prevents other threads from allocating memory while vacuum is taking place
     /// it must be entered and left before the allocation mutex to prevent deadlocks
-    std::thread tdict{};
     std::thread tpoll{};
     bool opt_page_trace = false;
     bool opt_enable_compression = false;
@@ -353,7 +356,6 @@ private:
     address_set erased{}; // for runtime use after free tests
     size_t last_created_page{};
     uint8_t *last_page_ptr{};
-
     logical_allocator &operator=(const logical_allocator &t) {
         if (this == &t) return *this;
         return *this;
@@ -364,14 +366,15 @@ private:
     storage &retrieve_page(size_t page, bool modify = false) {
 
         if (modify) {
+            //main.modify(page);
             page_modifications::inc_ticker(page);
-            return main.modify(page);
+            return *(storage*)main.get_page_data({page,LPageSize}, modify); //main.modify(page);
         }
-        return main.read(page);
+        return *(storage*)main.get_page_data({page,LPageSize}, modify);
     }
 
     [[nodiscard]] const storage &retrieve_page(size_t page) const {
-        return main.read(page);
+        return *(const storage*)main.get_page_data({page,LPageSize}, false);//main.read(page);
     }
 
     [[nodiscard]] size_t max_logical_address() const {
@@ -398,14 +401,35 @@ private:
         return main.has_page(page);
     }
 
-    void iterate_arena(const std::function<void(size_t, storage &)> &iter) {
+    void iterate_arena(const std::function<void(size_t, size_t &)> &iter) {
         main.iterate_arena(iter);
     }
 
-    void iterate_arena(const std::function<void(size_t, const storage &)> &iter) const {
+    void iterate_arena(const std::function<void(size_t, const size_t &)> &iter) const {
         main.iterate_arena(iter);
     }
+    uint8_t* get_page_data(logical_address at) {
+        if (at.offset() > LPageSize) {
+            abort_with("offset too large");
+        }
+        return main.get_page_data({at.page(),at.offset()+PageOffset},true);
+    }
+    const uint8_t* get_page_data(logical_address at) const {
+        if (at.offset() > LPageSize) {
+            abort_with("offset too large");
+        }
 
+        return main.get_page_data({at.page(),at.offset()+PageOffset},true);
+    }
+    uint8_t * get_alloc_page_data(logical_address at, size_t size) {
+        if (size > LPageSize) {
+            abort_with("allocation too large");
+        }
+        if (at.offset() == 0) {
+            return main.get_alloc_page_data({at.page(),0},size+PageOffset) + PageOffset;
+        }
+        return main.get_alloc_page_data({at.page(),at.offset()+PageOffset},size);
+    }
     // arena virtualization end
 
 
@@ -443,9 +467,9 @@ private:
         }
     }
 
-    std::pair<size_t, storage &> allocate_page_at(size_t at, size_t) //unused(ps = page_size)
+    std::pair<size_t, storage &> allocate_page_at(size_t at, size_t) //unused(ps = SS)
     {
-        auto &page = main.read(at);
+        auto &page = retrieve_page(at);
         add_to_lru(at, page);
         if (initialize_memory == 1) {
         }
@@ -453,17 +477,20 @@ private:
         return {at, page};
     }
 
-    std::pair<size_t, storage &> expand_over_null_base(size_t ps = page_size) {
+    std::pair<size_t, storage &> expand_over_null_base(size_t ps = LPageSize) {
         auto at = allocate();
         if (is_null_base(at)) {
             at = allocate();
         }
         last_page_allocated = at;
+        static_assert((size_t)LPageSize<(size_t)page_size);
+        static_assert((size_t)LPageSize==(size_t)(page_size - sizeof(storage)));
+        main.get_alloc_page_data({at,0}, page_size);
         return allocate_page_at(at, ps);
     }
 
     std::pair<size_t, storage &> create_if_required(size_t size) {
-        if (size > page_size) {
+        if (size > LPageSize) {
             return expand_over_null_base(size);
         }
         if (last_page_allocated == 0) {
@@ -474,7 +501,7 @@ private:
         if (last.empty()) {
             abort();
         }
-        if (last.write_position + size >= page_size) {
+        if (last.write_position + size >= LPageSize) {
             return expand_over_null_base();
         }
 
@@ -504,7 +531,7 @@ private:
         }
 
 
-        return main.get_page_data(at, modify);
+        return get_page_data(at);
 #if 0
         invalid(at);
         if (test_memory)
@@ -524,7 +551,7 @@ private:
         }
         update_lru(at.page(), t);
         //uint8_t* rp = t.decompressed.begin() + at.offset();
-        return main.get_page_data(at);
+        return get_page_data(at);
 #endif
     }
 
@@ -562,7 +589,7 @@ private:
         if (t.empty()) return {};
         valid({at, 0});
 
-        return {heap::buffer{main.get_page_data({at, 0},false), t.write_position}, t.write_position};
+        return {heap::buffer{get_page_data({at,0}), t.write_position}, t.write_position};
     }
 
 public:
@@ -743,7 +770,7 @@ public:
                 data[sz] = r.address() % 255;
 
             allocated += size;
-            uint8_t *pd = main.get_alloc_page_data(r, sz);
+            uint8_t *pd = get_alloc_page_data(r, sz);
             if (initialize_memory == 1) {
                 memset(pd, 0, sz);
             }
@@ -753,7 +780,7 @@ public:
         if (is_null_base(at.first)) {
             abort();
         }
-        if (at.second.write_position + size > page_size) {
+        if (at.second.write_position + size > LPageSize) {
             abort();
         }
         last_page_allocated = at.first;
@@ -766,7 +793,7 @@ public:
             invalid(ca);
             erased.erase(ca.address());
         }
-        uint8_t *rd = main.get_alloc_page_data(ca, size);
+        uint8_t *rd = get_alloc_page_data(ca, size);
 
         if (initialize_memory == 1) {
             memset(rd, 0, sz);
@@ -836,7 +863,7 @@ public:
         std::atomic<bool> stop = false;
         for (unsigned iwork = 0; iwork < opt_iterate_workers; iwork++) {
             workers[iwork] = std::thread([this,iwork,&found_page,&stop]() {
-                iterate_arena([&](size_t page, storage &data) -> void {
+                iterate_arena([&](size_t page, size_t &) -> void {
                     if (stop) return;
                     if (is_null_base(page)) return;
                     if (page % opt_iterate_workers == iwork) {
@@ -845,8 +872,8 @@ public:
                             // copy under lock
                             std::lock_guard guard(mutex);
                             if (!is_free(page)) {
-                                wp = data.write_position;
-                                pdata = std::move(heap::buffer{main.get_page_data({page, 0},false), wp});
+                                wp = retrieve_page(page).write_position;
+                                pdata = std::move(heap::buffer{get_page_data({page,0}), wp});
                             }
                         }
                         if (wp) {

@@ -5,6 +5,8 @@
 #ifndef COMPRESSED_ADDRESS_H
 #define COMPRESSED_ADDRESS_H
 #include <limits>
+#include <cstddef>
+#include <cstdint>
 #include "constants.h"
 
 struct logical_address {

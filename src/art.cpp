@@ -53,16 +53,16 @@ bool art::init_node_compression() {
 }
 
 logical_allocator &art::get_leaf_compression() {
-    if (!has_leaf_compression()) {
-        init_leaf_compression();
-    }
+    //if (!has_leaf_compression()) {
+    //    init_leaf_compression();
+    //}
     return *leaf_compression;
 };
 
 logical_allocator &art::get_node_compression() {
-    if (!has_node_compression()) {
-        init_node_compression();
-    }
+    //if (!has_node_compression()) {
+    //    init_node_compression();
+    //}
     return *node_compression;
 };
 

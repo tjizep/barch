@@ -250,7 +250,8 @@ int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
             return ValkeyModule_ReplyWithNull(ctx);
         }
     } else {
-        return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        ValkeyModule_AutoMemory(ctx);
+        return ValkeyModule_ReplyWithBool(ctx,1);//ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 }
 

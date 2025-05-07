@@ -987,7 +987,7 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
 }
 
 static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options, art::node_ptr n, art::node_ptr &ref,
-                                      art::value_type key, art::value_type value, int depth, int *old, int replace) {
+                                      art::value_type key, art::value_type value, int depth, int *old, int replace,const NodeResult &fc) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
         ref = art::make_leaf(key, value, options.ttl);
@@ -1001,19 +1001,21 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options
         if (l->compare(key) == 0) {
             *old = 1;
             if (replace) {
+                fc(n);
                 art::leaf *dl = n.l();
-                //if (dl->val_len == value.size && !l->expired())
-                //{
-                //    dl->set_value(value);
-                //}
-                //else
-                //{
-                ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
-                t->last_leaf_added = ref;
-                // create a new leaf to carry the new value
-                ++statistics::leaf_nodes_replaced;
-                return n;
-                //}
+
+                if (dl->val_len == value.size && !l->expired())
+                {
+                    dl->set_value(value);
+                }
+                else
+                {
+                    ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
+                    t->last_leaf_added = ref;
+                    // create a new leaf to carry the new value
+                    ++statistics::leaf_nodes_replaced;
+                    return n;
+                }
             }
             return nullptr;
         }
@@ -1097,7 +1099,7 @@ RECURSE_SEARCH:;
             t->push_trace({n, child, pos, key[depth]});
         }
         art::node_ptr nc = child;
-        auto r = recursive_insert(t, options, child, nc, key, value, depth + 1, old, replace);
+        auto r = recursive_insert(t, options, child, nc, key, value, depth + 1, old, replace,fc);
         if (nc != child) {
             n = n.modify()->expand_pointers(ref, {nc});
             n.modify()->set_child(pos, nc);
@@ -1134,7 +1136,7 @@ void art_insert
         int old_val = 0;
         t->clear_trace();
 
-        art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0);
+        art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
         if (!old_val) {
             t->size++;
             t->update_trace(+1);
@@ -1146,10 +1148,10 @@ void art_insert
             if (!old.is_leaf) {
                 abort_with("not a leaf");
             }
-            fc(old);
+            //fc(old);
             free_leaf_node(old);
         } else if (old_val == 1) {
-            fc(old);
+            //fc(old);
         }
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
@@ -1176,11 +1178,10 @@ void art_insert_no_replace(art::tree *t, const art::key_spec &options, art::valu
     ++statistics::insert_ops;
     try {
         int old_val = 0;
-        art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0);
+        art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0,fc);
         if (r.null()) {
             t->size++;
         }
-        if (!r.null()) fc(r);
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;

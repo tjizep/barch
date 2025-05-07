@@ -15,17 +15,6 @@
 #include "sastam.h"
 
 namespace arena {
-    struct page {
-        uint8_t data[page_size];
-        uint32_t write_position = 0;
-        uint32_t size = 0;
-        //uint32_t modifications = 0;
-        //lru_list::iterator lru{};
-        uint64_t ticker = 0;
-        uint64_t physical = 0;
-        uint64_t logical = 0;
-        uint16_t fragmentation = 0;
-    };
     struct base_hash_arena {
         bool opt_use_vmmap = art::get_use_vmm_memory();
 

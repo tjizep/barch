@@ -217,8 +217,6 @@ void art::tree::run_defrag() {
                     }
                 });
                 ++statistics::pages_defragged;
-                //if (lc.fragmentation_ratio() < 1.0)
-                //return;
             }
         }
     } catch (std::exception &) {
@@ -319,7 +317,7 @@ void art::tree::start_maintain() {
                     mods = get_modifications();
                 }
             }
-            // we should wait on a join signal not just sleep else server wont stop quickly
+            // TODO: we should wait on a join signal not just sleep else server wont stop quickly
             std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
         }
     });

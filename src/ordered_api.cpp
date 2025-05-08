@@ -106,7 +106,7 @@ static composite cmd_ZADD_qindex;
 
 int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
@@ -191,7 +191,7 @@ int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
@@ -239,7 +239,7 @@ int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
@@ -316,7 +316,7 @@ int cmd_ZINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     size_t nlen, minlen, maxlen;
@@ -478,7 +478,7 @@ static int ZRANGE(ValkeyModuleCtx *ctx, const art::zrange_spec &spec) {
 
 int cmd_ZRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     art::zrange_spec spec(argv, argc);
@@ -491,7 +491,7 @@ int cmd_ZRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZCARD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 2)
         return ValkeyModule_WrongArity(ctx);
     size_t nlen;
@@ -542,7 +542,7 @@ static int ZOPER(
     bool card = false,
     bool removal = false) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
@@ -736,7 +736,7 @@ int cmd_ZINTER(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     if (argc < 2)
         return ValkeyModule_WrongArity(ctx);
@@ -780,7 +780,7 @@ int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     if (argc < 2)
         return ValkeyModule_WrongArity(ctx);
@@ -835,7 +835,7 @@ int cmd_ZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZREVRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     art::zrange_spec spec(argv, argc);
@@ -849,7 +849,7 @@ int cmd_ZREVRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     art::zrange_spec spec(argv, argc);
@@ -863,7 +863,7 @@ int cmd_ZRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
 
 int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     art::zrange_spec spec(argv, argc);
@@ -877,7 +877,7 @@ int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int ar
 
 int cmd_ZREMRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     art::zrange_spec spec(argv, argc);
@@ -893,7 +893,7 @@ int cmd_ZREMRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
 
 int cmd_ZRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     art::zrange_spec spec(argv, argc);
@@ -907,7 +907,7 @@ int cmd_ZRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     art::zrange_spec spec(argv, argc);
@@ -921,7 +921,7 @@ int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
 
 int cmd_ZRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 4) {
         return ValkeyModule_WrongArity(ctx);
     }
@@ -960,7 +960,7 @@ int cmd_ZRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_ZFASTRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 4) {
         return ValkeyModule_WrongArity(ctx);
     }

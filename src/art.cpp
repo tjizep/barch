@@ -15,22 +15,22 @@
 static logical_allocator *node_compression = nullptr;
 static logical_allocator *leaf_compression = nullptr;
 
-bool art::has_leaf_compression() {
+bool art::has_leaves() {
     return leaf_compression != nullptr;
 }
 
-bool art::has_node_compression() {
+bool art::has_nodes() {
     return node_compression != nullptr;
 }
 
-bool art::init_leaf_compression() {
+bool art::init_leaves() {
     leaf_compression = new(heap::allocate<logical_allocator>(1)) logical_allocator(get_compression_enabled(),
         get_evict_allkeys_lru() || get_evict_volatile_lru(),
         "leaf");
     return leaf_compression != nullptr;
 }
 
-void art::destroy_node_compression() {
+void art::destroy_nodes() {
     if (node_compression != nullptr) {
         node_compression->~logical_allocator();
         heap::free(node_compression);
@@ -38,7 +38,7 @@ void art::destroy_node_compression() {
     }
 }
 
-void art::destroy_leaf_compression() {
+void art::destroy_leaves() {
     if (leaf_compression != nullptr) {
         leaf_compression->~logical_allocator();
         heap::free(leaf_compression);
@@ -46,32 +46,32 @@ void art::destroy_leaf_compression() {
     }
 }
 
-bool art::init_node_compression() {
+bool art::init_nodes() {
     node_compression = new(heap::allocate<logical_allocator>(1))logical_allocator(
         get_compression_enabled(), false, "node");
     return node_compression != nullptr;
 }
 
-logical_allocator &art::get_leaf_compression() {
+logical_allocator &art::get_leaves() {
     //if (!has_leaf_compression()) {
     //    init_leaf_compression();
     //}
     return *leaf_compression;
 };
 
-logical_allocator &art::get_node_compression() {
+logical_allocator &art::get_nodes() {
     //if (!has_node_compression()) {
     //    init_node_compression();
     //}
     return *node_compression;
 };
 
-compressed_release::compressed_release() {
-    art::get_leaf_compression().enter_context();
+storage_release::storage_release() {
+    art::get_leaves().enter_context();
 }
 
-compressed_release::~compressed_release() {
-    art::get_leaf_compression().release_context();
+storage_release::~storage_release() {
+    art::get_leaves().release_context();
 }
 
 /**
@@ -1464,7 +1464,7 @@ uint64_t art_size(art::tree *t) {
 
 uint64_t art_evict_lru(art::tree *t) {
     try {
-        auto page = art::get_leaf_compression().get_lru_page();
+        auto page = art::get_leaves().get_lru_page();
         if (!page.second) return 0;
         auto i = page.first.begin();
         auto e = i + page.second;
@@ -1497,7 +1497,7 @@ void art::glob(tree * unused(t), const keys_spec &spec, value_type pattern,
     try {
         int64_t counter = 0;
         // this is a multi-threaded iterator and care should be taken
-        get_leaf_compression().iterate_pages(
+        get_leaves().iterate_pages(
             [&](size_t size, size_t unused(padd), const heap::buffer<uint8_t> &page)-> bool {
                 if (!size) return true;
                 auto i = page.begin();
@@ -1544,9 +1544,9 @@ art_statistics art::get_statistics() {
     as.node256_nodes = (int64_t) statistics::n256_nodes;
     as.node256_occupants = as.node256_nodes ? ((int64_t) statistics::node256_occupants / as.node256_nodes) : 0ll;
     as.node48_nodes = (int64_t) statistics::n48_nodes;
-    as.bytes_allocated = (int64_t) get_leaf_compression().get_allocated() + get_node_compression().get_allocated();
+    as.bytes_allocated = (int64_t) get_leaves().get_allocated() + get_nodes().get_allocated();
     //statistics::addressable_bytes_alloc;
-    as.bytes_interior = (int64_t) get_node_compression().get_allocated();
+    as.bytes_interior = (int64_t) get_nodes().get_allocated();
     as.page_bytes_compressed = (int64_t) statistics::page_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t) statistics::page_bytes_uncompressed;
     as.pages_uncompressed = (int64_t) statistics::pages_uncompressed;
@@ -1655,19 +1655,19 @@ bool art::tree::save() {
     arena::hash_arena leaves;
     arena::hash_arena nodes;
     {
-        compressed_release release; // only lock during partial copy
+        storage_release release; // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
-        leaves.borrow(get_leaf_compression().get_main());
-        nodes.borrow(get_node_compression().get_main());
+        leaves.borrow(get_leaves().get_main());
+        nodes.borrow(get_nodes().get_main());
     }
-    if (!get_leaf_compression().save_extra(leaves, "leaf_data.dat", save_stats_and_root)) {
+    if (!get_leaves().save_extra(leaves, "leaf_data.dat", save_stats_and_root)) {
         return false;
     }
 
 
-    if (!get_node_compression().save_extra(nodes, "node_data.dat", [&](std::ofstream &) {
+    if (!get_nodes().save_extra(nodes, "node_data.dat", [&](std::ofstream &) {
     })) {
         return false;
     }
@@ -1700,11 +1700,11 @@ bool art::tree::load() {
         };
         auto st = std::chrono::high_resolution_clock::now();
 
-        if (!get_node_compression().load_extra("node_data.dat", [&](std::ifstream &) {
+        if (!get_nodes().load_extra("node_data.dat", [&](std::ifstream &) {
         })) {
             return false;
         }
-        if (!get_leaf_compression().load_extra("leaf_data.dat", load_stats_and_root)) {
+        if (!get_leaves().load_extra("leaf_data.dat", load_stats_and_root)) {
             return false;
         }
 
@@ -1736,8 +1736,8 @@ void art::tree::begin() {
     stats_to_stream(save_stats);
     {
         std::lock_guard guard2(logical_allocator::mutex);
-        get_leaf_compression().begin();
-        get_node_compression().begin();
+        get_leaves().begin();
+        get_nodes().begin();
 
     }
     transacted = true;
@@ -1746,16 +1746,16 @@ void art::tree::begin() {
 void art::tree::commit() {
     if (!transacted) return;
     std::lock_guard guard2(logical_allocator::mutex);
-    get_leaf_compression().commit();
-    get_node_compression().commit();
+    get_leaves().commit();
+    get_nodes().commit();
     transacted = false;
 }
 
 void art::tree::rollback() {
     if (!transacted) return;
     std::lock_guard guard2(logical_allocator::mutex);
-    get_leaf_compression().rollback();
-    get_node_compression().rollback();
+    get_leaves().rollback();
+    get_nodes().rollback();
     root = save_root;
     size = save_size;
     save_stats.seek(0);
@@ -1769,8 +1769,8 @@ void art::tree::clear() {
     root = {nullptr};
     size = 0;
     transacted = false;
-    get_leaf_compression().clear();
-    get_node_compression().clear();
+    get_leaves().clear();
+    get_nodes().clear();
     statistics::n4_nodes = 0;
     statistics::n16_nodes = 0;
     statistics::n48_nodes = 0;

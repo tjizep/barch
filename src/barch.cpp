@@ -76,7 +76,7 @@ extern "C" {
 * and endkey. No more than 'count' items are emitted. */
 int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     //read_lock rl(get_lock());
     if (argc != 4)
@@ -127,7 +127,7 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 * and endkey. No more than 'count' items are emitted. */
 int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
 
     //read_lock rl(get_lock());
     if (argc != 3)
@@ -217,7 +217,7 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  *
  * Set the specified key to the specified value. */
 int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    compressed_release release;
+    storage_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
     size_t klen, vlen;
@@ -256,7 +256,7 @@ int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 
 static int BarchMofifyInteger(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, long long by) {
-    compressed_release release;
+    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     size_t klen;
@@ -322,7 +322,7 @@ int cmd_DECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -357,7 +357,7 @@ int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * Add the specified key only if its not there, with specified value. */
 int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 3)
         return ValkeyModule_WrongArity(ctx);
 
@@ -391,7 +391,7 @@ int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (key_ok(k, klen) != 0)
         return key_check(ctx, k, klen);
 
-    compressed_release release;
+    storage_release release;
     auto converted = conversion::convert(k, klen);
     art::node_ptr r = art_search(get_art(), converted.get_value());
 
@@ -412,7 +412,7 @@ int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * is not defined. */
 int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 2)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -447,7 +447,7 @@ int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * is not defined. */
 int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     //read_lock rl(get_lock());
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
@@ -475,7 +475,7 @@ int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
  * is not defined. */
 int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     //read_lock rl(get_lock());
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
@@ -495,7 +495,7 @@ int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  * is not defined. */
 int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     size_t klen;
@@ -523,7 +523,7 @@ int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * remove the value associated with the key and return the key if such a key existed. */
 int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     size_t klen;
@@ -555,7 +555,7 @@ int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * @return the size or o.k.a. key count.
  */
 int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     //read_lock rl(get_lock());
 
     if (argc != 1)
@@ -595,7 +595,7 @@ int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 }
 
 int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     //write_lock rl(get_lock());
 
     if (argc != 1)
@@ -605,7 +605,7 @@ int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 }
 
 int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     //write_lock rl(get_lock());
 
     if (argc != 1)
@@ -615,7 +615,7 @@ int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 }
 
 int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     //write_lock rl(get_lock());
 
     if (argc != 1)
@@ -639,13 +639,13 @@ int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  *
  * get memory statistics. */
 int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
 
     long row_count = 0;
     art_statistics as = art::get_statistics();
-    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
+    auto vbytes = art::get_nodes().get_bytes_allocated() + art::get_leaves().get_bytes_allocated();
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
@@ -760,7 +760,7 @@ int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  *
  * get memory statistics. */
 int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
 
@@ -815,10 +815,10 @@ int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 }
 
 int cmd_VACUUM(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    size_t result = art::get_leaf_compression().vacuum();
+    size_t result = art::get_leaves().vacuum();
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) result);
 }
 
@@ -826,13 +826,13 @@ int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     //compressed_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);;
-    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
+    auto vbytes = art::get_nodes().get_bytes_allocated() + art::get_leaves().get_bytes_allocated();
 
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) heap::allocated + vbytes);
 }
 
 int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+    storage_release release;
     //write_lock w(get_lock());
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
@@ -845,7 +845,7 @@ int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  * Set the specified key to the specified value. */
 int cmd_CONFIG(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 4)
         return ValkeyModule_WrongArity(ctx);
     //write_lock w(get_lock());
@@ -976,10 +976,10 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
     }
 
-    if (!art::init_leaf_compression())
+    if (!art::init_leaves())
         return VALKEYMODULE_ERR;
 
-    if (!art::init_node_compression())
+    if (!art::init_nodes())
         return VALKEYMODULE_ERR;
     try {
         get_art()->load();
@@ -991,8 +991,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
 }
 
 int ValkeyModule_OnUnload(void *unused_arg) {
-    art::destroy_leaf_compression();
-    art::destroy_node_compression();
+    art::destroy_leaves();
+    art::destroy_nodes();
     return VALKEYMODULE_OK;
 }
 }

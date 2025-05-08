@@ -219,8 +219,8 @@ namespace art {
         }
 
         logical_address create_data() final {
-            address = get_node_compression().new_address(alloc_size());
-            encoded_data *r = get_node_compression().modify<encoded_data>(address);
+            address = get_nodes().new_address(alloc_size());
+            encoded_data *r = get_nodes().modify<encoded_data>(address);
             r->type = node_type;
             r->pointer_size = sizeof(IntPtrType);
             dcache = r;
@@ -263,7 +263,7 @@ namespace art {
             }
             //if (address.is_null_base())
             //    abort();
-            get_node_compression().free(address, alloc_size());
+            get_nodes().free(address, alloc_size());
         }
 
         encoded_node_content() = default;

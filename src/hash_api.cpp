@@ -12,7 +12,7 @@
 
 int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -63,7 +63,7 @@ int HUPDATEEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fie
               bool replies,
               const std::function<art::node_ptr(const art::node_ptr &old)> &modify) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -250,7 +250,7 @@ int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
 
 int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -286,7 +286,7 @@ int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -326,7 +326,7 @@ int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
            const std::function<void(art::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -408,7 +408,7 @@ int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -449,7 +449,7 @@ int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -501,7 +501,7 @@ int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -532,7 +532,7 @@ int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HEXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;

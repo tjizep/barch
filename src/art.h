@@ -15,10 +15,10 @@ extern std::shared_mutex &get_lock();
 /**
  * context management
  */
-struct compressed_release {
-    compressed_release();
+struct storage_release {
+    storage_release();
 
-    ~compressed_release();
+    ~storage_release();
 };
 
 /**
@@ -72,17 +72,17 @@ typedef std::function<void(const art::node_ptr &)> NodeResult;
  * art tree and company
  */
 namespace art {
-    bool has_leaf_compression();
+    bool has_leaves();
 
-    bool has_node_compression();
+    bool has_nodes();
 
-    bool init_leaf_compression();
+    bool init_leaves();
 
-    bool init_node_compression();
+    bool init_nodes();
 
-    void destroy_node_compression();
+    void destroy_nodes();
 
-    void destroy_leaf_compression();
+    void destroy_leaves();
 
     struct tree {
     private:

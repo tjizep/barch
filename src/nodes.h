@@ -73,9 +73,9 @@ namespace art {
 
     typedef logical_address logical_leaf;
 
-    extern logical_allocator &get_leaf_compression();
+    extern logical_allocator &get_leaves();
 
-    extern logical_allocator &get_node_compression();
+    extern logical_allocator &get_nodes();
 
     struct node_ptr_storage {
         uint8_t storage[node_pointer_storage_size];
@@ -144,7 +144,7 @@ namespace art {
         node_ptr_t(const node_t *p): logical(p->get_address()), storage(p->get_storage()) {
         }
 
-        node_ptr_t(logical_address cl) : is_leaf(true), resolver(&get_leaf_compression()), logical(cl) {
+        node_ptr_t(logical_address cl) : is_leaf(true), resolver(&get_leaves()), logical(cl) {
         }
 
         node_ptr_t(std::nullptr_t) : is_leaf(false), resolver(nullptr) {
@@ -175,7 +175,7 @@ namespace art {
 
         void set(const logical_leaf &lf) {
             logical = lf;
-            if (!resolver) resolver = &get_leaf_compression();
+            if (!resolver) resolver = &get_leaves();
             is_leaf = true;
         }
 
@@ -344,29 +344,26 @@ namespace art {
 
         struct node_proxy {
             template<typename T>
-            const T *refresh_cache() const // read-only refresh
+            const T *refresh_cache() const
             {
                 if (!dcache || last_ticker != page_modifications::get_ticker(address.page())) {
-                    dcache = get_node_compression().modify<T>(address);
+                    dcache = get_nodes().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
-                    is_reader = 0x00;
                 }
                 return (T *) dcache;
             }
 
             template<typename T>
             T *refresh_cache() {
-                if (is_reader || !dcache || last_ticker != page_modifications::get_ticker(address.page())) {
-                    dcache = get_node_compression().modify<T>(address);
+                if (!dcache || last_ticker != page_modifications::get_ticker(address.page())) {
+                    dcache = get_nodes().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
-                    is_reader = 0x00;
                 }
 
                 return (T *) dcache;
             }
 
             mutable node_data *dcache = nullptr;
-            mutable char is_reader = 0x00;
             mutable uint32_t last_ticker = page_modifications::get_ticker(0);
             logical_address address{};
 
@@ -380,12 +377,11 @@ namespace art {
                     abort();
                 }
                 if (data->type != NodeType || data->pointer_size != sizeof(IntPtrType)) {
-                    abort();
+                    abort_with("type and pointer size does not match");
                 }
                 this->address = address;
                 last_ticker = page_modifications::get_ticker(address.page());
                 dcache = data; // it will get loaded as required
-                is_reader = 0x01;
             }
         };
 

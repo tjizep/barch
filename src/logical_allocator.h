@@ -319,19 +319,12 @@ struct logical_allocator {
 
     logical_allocator(const logical_allocator &) = delete;
 
-    ~logical_allocator() {
-        threads_exit = true;
-        if (tpoll.joinable())
-            tpoll.join();
-    }
+    ~logical_allocator() = default;
 
     static std::shared_mutex mutex;
 
 private:
     arena::hash_arena main{};
-    /// prevents other threads from allocating memory while vacuum is taking place
-    /// it must be entered and left before the allocation mutex to prevent deadlocks
-    std::thread tpoll{};
     bool opt_page_trace = false;
     bool opt_enable_compression = false;
     bool opt_enable_lru = false;
@@ -339,7 +332,6 @@ private:
     bool opt_move_decompressed_pages = false;
     unsigned opt_iterate_workers = 1;
 
-    bool threads_exit = false;
     size_t last_page_allocated{0};
     logical_address highest_reserve_address{0};
     uint64_t last_heap_bytes = 0;
@@ -508,7 +500,6 @@ private:
         return {last_page_allocated, last};
     }
 
-    // compression can happen in any single thread - even a worker thread
     size_t release_decompressed(size_t at) {
         if (is_null_base(at)) return 0;
         size_t r = 0;
@@ -532,27 +523,6 @@ private:
 
 
         return get_page_data(at);
-#if 0
-        invalid(at);
-        if (test_memory)
-        {
-            if (erased.count(at.address()))
-            {
-                std::cerr << "allocator '" << name << "' is accessing memory after it was freed ( at: " << at.address()
-                    << " )" << std::endl;
-                throw std::runtime_error("memory erased");
-            }
-        }
-        auto p = at.page();
-        auto& t = retrieve_page(p, modify);
-        if (modify)
-        {
-            //t.modifications++;
-        }
-        update_lru(at.page(), t);
-        //uint8_t* rp = t.decompressed.begin() + at.offset();
-        return get_page_data(at);
-#endif
     }
 
     void invalid(logical_address at) const {
@@ -578,7 +548,6 @@ private:
         if (t.write_position <= at.offset()) {
             throw std::runtime_error("invalid page write position");
         }
-        //return true;
     }
 
 
@@ -651,7 +620,6 @@ public:
                 abort();
             }
             fragmentation -= t.fragmentation;
-            //t.write_position = 0;
 
             if (!lru.empty())
                 lru.erase(t.lru);
@@ -717,6 +685,7 @@ public:
     T *read(logical_address at) {
         if (at.null()) return nullptr;
         //std::lock_guard guard(mutex);
+        static_assert(sizeof(T) < LPageSize);
         const uint8_t *d = basic_resolve(at);
         return (T *) d;
     }
@@ -725,7 +694,7 @@ public:
     T *modify(logical_address at) {
         if (at.null()) return nullptr;
         //std::lock_guard guard(mutex);
-
+        static_assert(sizeof(T) < LPageSize);
         uint8_t *d = basic_resolve(at, true);
         return (T *) d;
     }
@@ -761,7 +730,6 @@ public:
             at.second.fragmentation -= size;
 
             invalid(r);
-            //r.set_data(at.second.decompressed.begin() + at.second.write_position);
             auto *data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0) {
                 abort();
@@ -787,7 +755,6 @@ public:
         logical_address ca(at.first, at.second.write_position);
         at.second.write_position += size;
         at.second.size++;
-        //at.second.modifications++;
 
         if (test_memory) {
             invalid(ca);
@@ -890,8 +857,6 @@ public:
         for (auto &worker: workers) worker.join();
     }
 
-private:
-
 public:
     bool save_extra(const arena::hash_arena &copy, const std::string &filename,
                     const std::function<void(std::ofstream &of)> &extra1) const {
@@ -942,7 +907,6 @@ public:
             readp(in, allocated);
             readp(in, fragmentation);
             last_page_allocated = 0;
-            //fragmentation = 0;
             extra1(in);
         };
         try {

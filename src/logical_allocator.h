@@ -33,7 +33,6 @@
 typedef uint16_t PageSizeType;
 typedef heap::set<size_t> address_set;
 enum {
-    PageOffset = 0, //,
     LPageSize = page_size - sizeof(storage)
 
 };
@@ -404,23 +403,23 @@ private:
         if (at.offset() > LPageSize) {
             abort_with("offset too large");
         }
-        return main.get_page_data({at.page(),at.offset()+PageOffset},true);
+        return main.get_page_data({at.page(),at.offset()},true);
     }
     const uint8_t* get_page_data(logical_address at) const {
         if (at.offset() > LPageSize) {
             abort_with("offset too large");
         }
 
-        return main.get_page_data({at.page(),at.offset()+PageOffset},true);
+        return main.get_page_data({at.page(),at.offset()},true);
     }
     uint8_t * get_alloc_page_data(logical_address at, size_t size) {
         if (size > LPageSize) {
             abort_with("allocation too large");
         }
         if (at.offset() == 0) {
-            return main.get_alloc_page_data({at.page(),0},size+PageOffset) + PageOffset;
+            return main.get_alloc_page_data({at.page(),0},size);
         }
-        return main.get_alloc_page_data({at.page(),at.offset()+PageOffset},size);
+        return main.get_alloc_page_data({at.page(),at.offset()},size);
     }
     // arena virtualization end
 

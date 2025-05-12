@@ -3,8 +3,6 @@
 #include <cstdint>
 #include <bitset>
 #include <limits>
-#include <vector>
-#include <bits/ios_base.h>
 
 #include "valkeymodule.h"
 
@@ -73,10 +71,6 @@ namespace art {
 
     typedef logical_address logical_leaf;
 
-    extern logical_allocator &get_leaves();
-
-    extern logical_allocator &get_nodes();
-
     struct node_ptr_storage {
         uint8_t storage[node_pointer_storage_size];
         size_t size{};
@@ -132,10 +126,10 @@ namespace art {
     template<typename node_t>
     struct node_ptr_t {
         bool is_leaf{false};
-
         node_ptr_t() = default;
 
         node_ptr_t(const node_ptr_storage &s) : storage(s) {
+
             logical = storage.ptr<node_t>()->get_address();
         };
 
@@ -144,10 +138,10 @@ namespace art {
         node_ptr_t(const node_t *p): logical(p->get_address()), storage(p->get_storage()) {
         }
 
-        node_ptr_t(logical_address cl) : is_leaf(true), resolver(&get_leaves()), logical(cl) {
+        node_ptr_t(logical_address cl) : is_leaf(true), logical(cl) {
         }
 
-        node_ptr_t(std::nullptr_t) : is_leaf(false), resolver(nullptr) {
+        node_ptr_t(std::nullptr_t) : is_leaf(false) {
         }
 
         [[nodiscard]] bool null() const {
@@ -155,27 +149,23 @@ namespace art {
             return storage.null();
         }
 
-        logical_allocator *resolver{nullptr};
-        logical_address logical{};
+        logical_address logical{nullptr};
         node_ptr_storage storage{};
 
         void set(nullptr_t) {
             storage.size = 0;
             is_leaf = false;
             logical = nullptr;
-            resolver = nullptr;
         }
 
         void set(const node_t *n) {
             storage = n->get_storage();
             logical = n->get_address();
             is_leaf = false;
-            resolver = nullptr;
         }
 
         void set(const logical_leaf &lf) {
             logical = lf;
-            if (!resolver) resolver = &get_leaves();
             is_leaf = true;
         }
 
@@ -197,7 +187,6 @@ namespace art {
             this->is_leaf = n.is_leaf;
             this->storage = n.storage;
             this->logical = n.logical;
-            this->resolver = n.resolver;
             check();
             return *this;
         }
@@ -237,7 +226,7 @@ namespace art {
             if (!is_leaf)
                 abort();
             check();
-            auto *l = resolver->modify<leaf>(logical);
+            auto *l = logical.get_ap<alloc_pair>().get_leaves().modify<leaf>(logical);
             if (l == nullptr) {
                 abort();
             }
@@ -252,7 +241,7 @@ namespace art {
             if (!is_leaf)
                 abort();
             check();
-            const auto *l = resolver->read<leaf>(logical);
+            const auto *l = logical.get_ap<alloc_pair>().get_leaves().read<leaf>(logical);
             if (l == nullptr) {
                 abort();
             }
@@ -347,7 +336,7 @@ namespace art {
             const T *refresh_cache() const
             {
                 if (!dcache || last_ticker != page_modifications::get_ticker(address.page())) {
-                    dcache = get_nodes().modify<T>(address);
+                    dcache = address.get_ap<alloc_pair>().get_nodes().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
                 }
                 return (T *) dcache;
@@ -356,16 +345,15 @@ namespace art {
             template<typename T>
             T *refresh_cache() {
                 if (!dcache || last_ticker != page_modifications::get_ticker(address.page())) {
-                    dcache = get_nodes().modify<T>(address);
+                    dcache = address.get_ap<alloc_pair>().get_nodes().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
                 }
 
                 return (T *) dcache;
             }
-
             mutable node_data *dcache = nullptr;
             mutable uint32_t last_ticker = page_modifications::get_ticker(0);
-            logical_address address{};
+            mutable logical_address address{nullptr};
 
             node_proxy(const node_proxy &) = default;
 
@@ -475,7 +463,7 @@ namespace art {
 
         [[nodiscard]] virtual node_ptr_storage get_storage() const = 0;
 
-        [[nodiscard]] virtual logical_address create_data() = 0;
+        [[nodiscard]] virtual logical_address create_data(alloc_pair& nodes) = 0;
 
         virtual void free_data() = 0;
 
@@ -720,8 +708,9 @@ namespace art {
 
     void free_node(node_ptr n);
 
-    node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
+    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
 
+    node_ptr alloc_8_node_ptr(alloc_pair& alloc, unsigned nt);
 
     void free_leaf_node(art::node_ptr n);
 }

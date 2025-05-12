@@ -22,7 +22,8 @@ struct constants {
 extern constants Constants;
 
 std::shared_mutex &get_lock();
-
-art::tree *get_art();
-
+art::tree *get_art(art::value_type key);
+art::tree *get_art(size_t shard);
+art::value_type get_shard(ValkeyModuleString **argv);
+art::tree * get_art(ValkeyModuleString **argv);
 #endif //MODULE_H

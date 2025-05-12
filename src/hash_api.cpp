@@ -9,12 +9,12 @@
 #include "composite.h"
 #include "module.h"
 #include "keys.h"
-
 int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
+
     int responses = 0;
     int r = VALKEYMODULE_OK;
     size_t nlen;
@@ -29,6 +29,7 @@ int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (key_ok(n, nlen) != 0) {
         return ValkeyModule_ReplyWithNull(ctx);
     }
+    art::value_type shard_key{n, nlen};
     auto container = conversion::convert(n, nlen);
     query.create({container});
     for (int n = 2; n < argc; n += 2) {
@@ -47,7 +48,7 @@ int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         art::value_type key = query.create();
         art::value_type val = {v, (unsigned) vlen};
 
-        art_insert(get_art(), {}, key, val, fc);
+        art_insert(get_art(shard_key), {}, key, val, fc);
         query.pop_back();
         ++responses;
     }
@@ -63,9 +64,9 @@ int HUPDATEEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fie
               bool replies,
               const std::function<art::node_ptr(const art::node_ptr &old)> &modify) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     int r = VALKEYMODULE_OK;
     size_t nlen;
@@ -76,6 +77,7 @@ int HUPDATEEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fie
     if (key_ok(n, nlen) != 0) {
         return ValkeyModule_ReplyWithNull(ctx);
     }
+    art::value_type shard_key{n, nlen};
     query.create({conversion::convert(n, nlen)});
     if (replies)
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
@@ -103,7 +105,7 @@ int HUPDATEEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fie
         auto converted = conversion::convert(k, klen);
         query.push(converted);
         art::value_type key = query.create();
-        art::update(get_art(), key, updater);
+        art::update(get_art(shard_key), key, updater);
         query.pop_back();
         ++responses;
     }
@@ -143,7 +145,7 @@ int HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, const std
         }
         if (do_set) {
             r |= ValkeyModule_ReplyWithLongLong(ctx, 1);
-            return art::make_leaf(l->get_key(), l->get_value(), ttl, l->is_volatile());
+            return art::make_leaf(*get_art(argv), l->get_key(), l->get_value(), ttl, l->is_volatile());
         } else {
             r |= ValkeyModule_ReplyWithLongLong(ctx, 0);
         }
@@ -173,7 +175,7 @@ int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     long responses = 0;
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     r = r | HUPDATEEX(ctx, argv, argc, spec.fields_start, false,
-                      [&spec,&r,ctx,&responses](const art::node_ptr &leaf) -> art::node_ptr {
+                      [argv,&spec,&r,ctx,&responses](const art::node_ptr &leaf) -> art::node_ptr {
                           auto l = leaf.const_leaf();
                           int64_t ttl = 0;
                           bool do_set = false;
@@ -201,7 +203,7 @@ int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
                           r |= ValkeyModule_ReplyWithStringBuffer(ctx, l->get_value().chars(), l->get_value().size);
                           ++responses;
                           if (do_set) {
-                              return art::make_leaf(l->get_key(), l->get_value(), ttl, l->is_volatile());
+                              return art::make_leaf(*get_art(argv), l->get_key(), l->get_value(), ttl, l->is_volatile());
                           }
                           return nullptr;
                       });
@@ -250,9 +252,10 @@ int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
 
 int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
+
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     size_t nlen;
     thread_local composite query;
@@ -277,7 +280,7 @@ int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         query.push(converted);
 
         art::value_type key = query.create();
-        art_delete(get_art(), key, del_report);
+        art_delete(get_art(argv), key, del_report);
         query.pop_back();
     }
     ValkeyModule_ReplyWithLongLong(ctx, responses);
@@ -286,9 +289,10 @@ int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
+
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     size_t nlen;
     thread_local composite query;
@@ -316,7 +320,7 @@ int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         query.push(converted);
 
         art::value_type key = query.create();
-        art_delete(get_art(), key, del_report);
+        art_delete(get_art(argv), key, del_report);
         query.pop_back();
     }
     ValkeyModule_ReplyWithLongLong(ctx, responses);
@@ -326,9 +330,9 @@ int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
            const std::function<void(art::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     thread_local composite query;
     size_t nlen = 0;
@@ -338,7 +342,7 @@ int HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
     }
 
     art::value_type any_key = query.create({conversion::convert(n, nlen)});
-    art::node_ptr lb = lower_bound(get_art(), any_key);
+    art::node_ptr lb = lower_bound(get_art(argv), any_key);
     if (lb.null()) {
         return ValkeyModule_ReplyWithNull(ctx);
     }
@@ -358,7 +362,7 @@ int HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
             auto converted = conversion::convert(k, klen);
             query.push(converted);
             art::value_type search_key = query.create();
-            art::node_ptr r = art_search(get_art(), search_key);
+            art::node_ptr r = art_search(get_art(argv), search_key);
             if (r.null()) {
                 nullreporter();
             } else {
@@ -408,9 +412,9 @@ int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     thread_local composite query;
     size_t nlen = 0;
@@ -430,7 +434,7 @@ int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
         return 0;
     };
-    art::range(get_art(), search_start, search_end, table_iter, nullptr);
+    art::range(get_art(argv), search_start, search_end, table_iter, nullptr);
 
     return ValkeyModule_ReplyWithLongLong(ctx, responses);
 }
@@ -449,9 +453,9 @@ int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     thread_local composite query;
 
@@ -474,7 +478,7 @@ int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         exists = true;
         return -1;
     };
-    art::range(get_art(), search_start, search_end, table_counter);
+    art::range(get_art(argv), search_start, search_end, table_counter);
     if (!exists) {
         return ValkeyModule_ReplyWithNull(ctx);
     }
@@ -493,7 +497,7 @@ int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
         return 0;
     };
-    art::range(get_art(), search_start, search_end, table_iter);
+    art::range(get_art(argv), search_start, search_end, table_iter);
 
     ValkeyModule_ReplySetArrayLength(ctx, responses);
     return VALKEYMODULE_OK;
@@ -501,9 +505,9 @@ int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     thread_local composite query;
     size_t nlen = 0;
@@ -524,7 +528,7 @@ int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
         return 0;
     };
-    art::range(get_art(), search_start, search_end, table_iter, nullptr);
+    art::range(get_art(argv), search_start, search_end, table_iter, nullptr);
 
     ValkeyModule_ReplySetArrayLength(ctx, responses);
     return VALKEYMODULE_OK;
@@ -532,9 +536,9 @@ int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HEXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    storage_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     int responses = 0;
     thread_local composite query;
     size_t nlen = 0;
@@ -553,7 +557,7 @@ int cmd_HEXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         ++responses;
         return -1;
     };
-    art::range(get_art(), search_start, search_end, table_iter, nullptr);
+    art::range(get_art(argv), search_start, search_end, table_iter, nullptr);
 
     return ValkeyModule_ReplyWithBool(ctx, responses > 0 ? 1 : 0);
 }

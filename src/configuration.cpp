@@ -108,8 +108,8 @@ static int SetUseVMMemory(const char *unused_arg, ValkeyModuleString *val, void 
 }
 
 static int ApplyUseVMMemory(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    art::get_leaves().set_opt_use_vmm(record.use_vmm_memory);
-    art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
+    //get_art()->get_leaves().set_opt_use_vmm(record.use_vmm_memory);
+    //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;
 }
 
@@ -135,8 +135,8 @@ static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, v
 }
 
 static int ApplyCompressionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    art::get_leaves().set_opt_enable_compression(art::get_compression_enabled());
-    art::get_nodes().set_opt_enable_compression(art::get_compression_enabled());
+    //art::get_leaves().set_opt_enable_compression(art::get_compression_enabled());
+    //art::get_nodes().set_opt_enable_compression(art::get_compression_enabled());
     return VALKEYMODULE_OK;
 }
 
@@ -333,8 +333,8 @@ static int SetEnablePageTrace(const char *unused_arg, ValkeyModuleString *val, v
 
 static int ApplyEnablePageTrace(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     std::unique_lock lock(config_mutex);
-    art::get_leaves().set_opt_trace_page(record.log_page_access_trace);
-    art::get_nodes().set_opt_trace_page(record.log_page_access_trace);
+    //art::get_leaves().set_opt_trace_page(record.log_page_access_trace);
+    //art::get_nodes().set_opt_trace_page(record.log_page_access_trace);
     return VALKEYMODULE_OK;
 }
 
@@ -543,4 +543,8 @@ bool art::get_log_page_access_trace() {
 bool art::get_use_vmm_memory() {
     std::unique_lock lock(config_mutex);
     return record.use_vmm_memory;
+}
+static std::vector<size_t> shards = {0,1};
+const std::vector<size_t>& art::get_shard_count() {
+    return shards;
 }

@@ -33,7 +33,7 @@ namespace art {
         explicit value_type(const heap::small_vector<uint8_t> &value): bytes(value.data()), size(value.size()) {
         }
 
-        value_type(const char *v, unsigned l): bytes((const unsigned char *) v), size(l) {
+        value_type(const char *v, size_t l): bytes((const unsigned char *) v), size(l) {
         }
 
         value_type(const unsigned char *v, unsigned l): bytes(v), size(l) {
@@ -113,15 +113,6 @@ namespace art {
                 return bytes[i];
             }
             abort_with("index out of range");
-        }
-
-        [[nodiscard]] logical_address as_address() const {
-            if (size == sizeof(logical_address)) {
-                logical_address address;
-                memcpy(&address, bytes, sizeof(logical_address));
-                return address;
-            }
-            return logical_address{};
         }
     };
 }

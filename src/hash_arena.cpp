@@ -66,8 +66,8 @@ bool arena::base_hash_arena::save(const std::string &filename,
     size_t record_pos = 0;
     iterate_arena([&](size_t page, const size_t &) {
         uint64_t start = out.tellp();
-        const storage& s = *(const storage*)get_page_data({page, page_size-sizeof(storage)},false);
-        append(out, page, s, get_page_data({page, 0},false));
+        const storage& s = *(const storage*)get_page_data({page, page_size - sizeof(storage), nullptr},false);
+        append(out, page, s, get_page_data({page, 0, nullptr},false));
 
         uint64_t finish = out.tellp();
         // write the allocation record
@@ -155,7 +155,7 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
             if (bsize != page_size) {
                 abort_with("invalid page size");
             }
-            uint8_t* data = arena.get_alloc_page_data({page, 0}, bsize);
+            uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, bsize);
             in.read((char *) data, bsize);
             arena.hidden_arena[page] = page;
             if (in.fail()) {

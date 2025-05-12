@@ -8,31 +8,35 @@
 #include "node_impl.h"
 
 #include <algorithm>
-
-art::node_ptr art::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
-    unsigned val_len = v.size;
-    unsigned key_len = key.length();
-    unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
-    unsigned sol = sizeof(leaf);
-    size_t leaf_size = sol + key_len + ttl_size + 1 + val_len;
-    // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
-    logical_address logical;
-    auto ldata = get_leaves().new_address(logical, leaf_size);
-    auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile);
-    ++statistics::leaf_nodes;
-    l->set_key(key);
-    l->set_value(v);
-    if (l->byte_size() != leaf_size) {
-        abort_with("invalid leaf size");
+namespace art {
+    node_ptr tree::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
+        return art::make_leaf(*this, key, v, ttl, is_volatile);
     }
-    return logical;
-}
 
+    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile ){
+        unsigned val_len = v.size;
+        unsigned key_len = key.length();
+        unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
+        unsigned sol = sizeof(leaf);
+        size_t leaf_size = sol + key_len + ttl_size + 1 + val_len;
+        // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
+        logical_address logical{&alloc};
+        auto ldata = alloc.get_leaves().new_address(logical, leaf_size);
+        auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile);
+        ++statistics::leaf_nodes;
+        l->set_key(key);
+        l->set_value(v);
+        if (l->byte_size() != leaf_size) {
+            abort_with("invalid leaf size");
+        }
+        return logical;
+    }
+}
 
 void art::free_leaf_node(art::leaf *l, logical_address logical) {
     if (l == nullptr) return;
     l->set_deleted();
-    get_leaves().free(logical, l->byte_size());
+    logical.get_ap<alloc_pair>().get_leaves().free(logical, l->byte_size());
     --statistics::leaf_nodes;
 }
 
@@ -59,7 +63,7 @@ static art::node *make_node(art::node_ptr_storage &ptr, logical_address a, art::
 }
 
 art::node_ptr art::resolve_read_node(logical_address address) {
-    auto *node = get_nodes().read<node_data>(address);
+    auto *node = address.get_ap<alloc_pair>().get_nodes().read<node_data>(address);
     node_ptr_storage ptr;
     if (node == nullptr) {
         return node_ptr{nullptr};
@@ -77,57 +81,66 @@ art::node_ptr art::resolve_read_node(logical_address address) {
             abort_with("unknown or invalid node type");
     }
 }
+namespace art {
+    node_ptr resolve_write_node(logical_address address) {
+        auto *node = address.get_ap<alloc_pair>().get_nodes().modify<node_data>(address);
+        node_ptr_storage ptr;
+        switch (node->type) {
+            case node_4:
+                return make_node<node4_4, node4_8>(ptr, address, node);
+            case node_16:
+                return make_node<node16_4, node16_8>(ptr, address, node);
+            case node_48:
+                return make_node<node48_4, node48_8>(ptr, address, node);
+            case node_256:
+                return make_node<node256_4, node256_8>(ptr, address, node);
+            default:
+                throw std::runtime_error("Unknown node type");
+        }
+    }
 
-art::node_ptr art::resolve_write_node(logical_address address) {
-    auto *node = get_nodes().modify<node_data>(address);
-    node_ptr_storage ptr;
-    switch (node->type) {
-        case node_4:
-            return make_node<node4_4, node4_8>(ptr, address, node);
-        case node_16:
-            return make_node<node16_4, node16_8>(ptr, address, node);
-        case node_48:
-            return make_node<node48_4, node48_8>(ptr, address, node);
-        case node_256:
-            return make_node<node256_4, node256_8>(ptr, address, node);
-        default:
-            throw std::runtime_error("Unknown node type");
+    node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const art::children_t &c) {
+        if (ptrsize == 8) return alloc_8_node_ptr(alloc, nt);
+
+        node_ptr_storage ptr;
+        switch (nt) {
+            case node_4:
+                return ptr.emplace<node4_4>()->create(alloc).expand_pointers(c);
+            case node_16:
+                return ptr.emplace<node16_4>()->create(alloc).expand_pointers(c);
+            case node_48:
+                return ptr.emplace<node48_4>()->create(alloc).expand_pointers(c);
+            case node_256:
+                return ptr.emplace<node256_4>()->create(alloc).expand_pointers(c);
+            default:
+                throw std::runtime_error("Unknown node type");
+        }
+    }
+
+    node_ptr tree::alloc_node_ptr(unsigned ptrsize, unsigned nt, const children_t &c) {
+        return art::alloc_node_ptr(*this, ptrsize, nt, c);
+    }
+    node_ptr alloc_8_node_ptr(alloc_pair& alloc, unsigned nt) {
+        node_ptr_storage ptr;
+        switch (nt) {
+            case node_4:
+                return ptr.emplace<node4_8>()->create_node(alloc);
+            case node_16:
+                return ptr.emplace<node16_8>()->create_node(alloc);
+            case node_48:
+                return ptr.emplace<node48_8>()->create_node(alloc);
+            case node_256:
+                return ptr.emplace<node256_8>()->create_node(alloc);
+            default:
+                throw std::runtime_error("Unknown node type");
+        }
+    }
+
+    node_ptr tree::alloc_8_node_ptr(unsigned nt) {
+        return art::alloc_8_node_ptr(*this, nt);
     }
 }
 
-art::node_ptr art::alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c) {
-    if (ptrsize == 8) return alloc_8_node_ptr(nt);
-
-    node_ptr_storage ptr;
-    switch (nt) {
-        case node_4:
-            return ptr.emplace<node4_4>()->create().expand_pointers(c);
-        case node_16:
-            return ptr.emplace<node16_4>()->create().expand_pointers(c);
-        case node_48:
-            return ptr.emplace<node48_4>()->create().expand_pointers(c);
-        case node_256:
-            return ptr.emplace<node256_4>()->create().expand_pointers(c);
-        default:
-            throw std::runtime_error("Unknown node type");
-    }
-}
-
-art::node_ptr art::alloc_8_node_ptr(unsigned nt) {
-    node_ptr_storage ptr;
-    switch (nt) {
-        case node_4:
-            return ptr.emplace<node4_8>()->create_node();
-        case node_16:
-            return ptr.emplace<node16_8>()->create_node();
-        case node_48:
-            return ptr.emplace<node48_8>()->create_node();
-        case node_256:
-            return ptr.emplace<node256_8>()->create_node();
-        default:
-            throw std::runtime_error("Unknown node type");
-    }
-}
 
 
 /**
@@ -179,7 +192,6 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
  * this function isn't supposed to run a lot
  */
 void art::tree::run_defrag() {
-    if (!has_leaves()) return;
     auto fc = [](const node_ptr & unused(n)) -> void {
     };
     auto &lc = get_leaves();
@@ -191,7 +203,7 @@ void art::tree::run_defrag() {
             auto fl = lc.create_fragmentation_list(get_max_defrag_page_count());
             key_spec options;
             for (auto p: fl) {
-                storage_release releaser;
+                storage_release releaser(this->latch);
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) continue;
 
@@ -243,13 +255,14 @@ void abstract_eviction(art::tree *t,
 
 void abstract_lru_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
     if (heap::allocated < art::get_max_module_memory()) return;
-    auto &lc = art::get_leaves();
+    storage_release release(t->latch);
+    auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 
 void abstract_lfu_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
     if (heap::allocated < art::get_max_module_memory()) return;
-    auto &lc = art::get_leaves();
+    auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 

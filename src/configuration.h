@@ -6,6 +6,7 @@
 #define CONFIGURATION_H
 #include "valkeymodule.h"
 #include <limits>
+#include "sastam.h"
 /**
 * functions provide access to configuration
 */
@@ -78,5 +79,6 @@ namespace art {
     bool get_use_vmm_memory();
 
     int set_configuration_value(ValkeyModuleString *name, ValkeyModuleString *value);
+    const std::vector<size_t>& get_shard_count();
 }
 #endif //CONFIGURATION_H

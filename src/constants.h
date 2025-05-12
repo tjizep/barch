@@ -26,7 +26,7 @@ enum {
     leaf_type = 1,
     non_leaf_type = 2,
     comparable_key_static_size = 32,
-    node_pointer_storage_size = 36,
+    node_pointer_storage_size = 64,
     vmm_physical_factor = 20 // percent
 };
 #endif //CONSTANTS_H

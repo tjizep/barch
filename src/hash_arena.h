@@ -7,6 +7,7 @@
 //#include "storage.h"
 #include "logical_address.h"
 #include <fstream>
+#include <utility>
 #include <page_modifications.h>
 #include <ankerl/unordered_dense.h>
 #include <sys/mman.h>
@@ -399,7 +400,7 @@ namespace arena {
                         abort_with("failed to allocate virtual page data");
                     }
                     if (new_size > page_data_size) {
-                        memset(page_data + page_data_size, 0, new_size - page_data_size);
+                        //memset(page_data + page_data_size, 0, new_size - page_data_size);
                     }
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
@@ -409,7 +410,7 @@ namespace arena {
                     if (page_data == MAP_FAILED) {
                         abort_with("failed to allocate virtual page data");
                     }
-                    memset(page_data, 0, new_size);
+                    //memset(page_data, 0, new_size);
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
                     art::std_log("allocated", page_data_size, "virtual memory as page data");
@@ -468,7 +469,7 @@ namespace arena {
                 abort_with("invalid CoW page data");
             }
             if (std::max(page_data_size, cow_size) <= page_pos + offset + size) {
-                alloc_page_data((r.page() + 32) * physical_page_size + size);
+                alloc_page_data((r.page() + 128) * physical_page_size + size);
             }
             if (std::max(page_data_size, cow_size) < page_pos + offset + size) {
                 abort_with("position not allocated");
@@ -523,6 +524,9 @@ namespace arena {
             cow = nullptr;
             cow_size = 0;
         }
+        bool empty() const {
+            return page_data_size == 0;
+        }
         bool save(const std::string &filename, const std::function<void(std::ofstream &)> &extra) const;
 
         bool load(const std::string &filename, const std::function<void(std::ifstream &)> &extra);
@@ -532,7 +536,11 @@ namespace arena {
     };
 
     struct hash_arena {
+        std::string name;
         base_hash_arena main{};
+        hash_arena(const hash_arena &) = default;
+        hash_arena& operator=(const hash_arena &) = default;
+        explicit hash_arena(std::string name) : name(std::move(name)) {}
         // arena virtualization functions
         [[nodiscard]] size_t page_count() const {
             return main.page_count();
@@ -635,6 +643,9 @@ namespace arena {
                 return (main.get_max_address_accessed() + 1) * physical_page_size;
             }
             return 0;
+        }
+        bool empty() const {
+            return main.empty();
         }
     };
 }

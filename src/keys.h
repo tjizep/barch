@@ -25,14 +25,16 @@ unsigned log_encoded_key(art::value_type key, bool start = true);
 template<typename UT>
 static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by) {
     const art::leaf *leaf = old.const_leaf();
+    alloc_pair& alloc = const_cast<alloc_pair&>(old.logical.get_ap<alloc_pair>());
     if (conversion::convert_value(l, leaf->get_value())) {
         l += by;
         auto s = std::to_string(l);
         return make_leaf
-        (leaf->get_key()
-         , conversion::to_value(s)
-         , leaf->ttl()
-         , leaf->is_volatile()
+        (  alloc
+        ,  leaf->get_key()
+        ,  conversion::to_value(s)
+        ,  leaf->ttl()
+        ,  leaf->is_volatile()
         );
     }
     return nullptr;

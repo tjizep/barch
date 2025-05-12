@@ -12,68 +12,8 @@
 #include "glob.h"
 #include "keys.h"
 #include "logger.h"
-static logical_allocator *node_compression = nullptr;
-static logical_allocator *leaf_compression = nullptr;
 
-bool art::has_leaves() {
-    return leaf_compression != nullptr;
-}
-
-bool art::has_nodes() {
-    return node_compression != nullptr;
-}
-
-bool art::init_leaves() {
-    leaf_compression = new(heap::allocate<logical_allocator>(1)) logical_allocator(get_compression_enabled(),
-        get_evict_allkeys_lru() || get_evict_volatile_lru(),
-        "leaf");
-    return leaf_compression != nullptr;
-}
-
-void art::destroy_nodes() {
-    if (node_compression != nullptr) {
-        node_compression->~logical_allocator();
-        heap::free(node_compression);
-        node_compression = nullptr;
-    }
-}
-
-void art::destroy_leaves() {
-    if (leaf_compression != nullptr) {
-        leaf_compression->~logical_allocator();
-        heap::free(leaf_compression);
-        leaf_compression = nullptr;
-    }
-}
-
-bool art::init_nodes() {
-    node_compression = new(heap::allocate<logical_allocator>(1))logical_allocator(
-        get_compression_enabled(), false, "node");
-    return node_compression != nullptr;
-}
-
-logical_allocator &art::get_leaves() {
-    //if (!has_leaf_compression()) {
-    //    init_leaf_compression();
-    //}
-    return *leaf_compression;
-};
-
-logical_allocator &art::get_nodes() {
-    //if (!has_node_compression()) {
-    //    init_node_compression();
-    //}
-    return *node_compression;
-};
-
-storage_release::storage_release() {
-    art::get_leaves().enter_context();
-}
-
-storage_release::~storage_release() {
-    art::get_leaves().release_context();
-}
-
+extern art::tree *get_art(size_t shard);
 /**
  * Initializes an ART tree
  * @return 0 on success.
@@ -612,10 +552,10 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
     return 0;
 }
 
-extern art::tree *get_art();
+extern art::tree *get_art(art::value_type shard_key);
 
 art::node_ptr art::find(value_type key) {
-    const tree *t = get_art();
+    const tree *t = get_art(key);
     ++statistics::get_ops;
     try {
         node_ptr n = t->root;
@@ -653,7 +593,7 @@ art::node_ptr art::find(value_type key) {
     return nullptr;
 }
 
-art::iterator::iterator() : t(get_art()) {
+art::iterator::iterator(tree* t) : t(t) {
     auto lb = art_minimum(t); //inner_min_bound(tl, t, key);
     if (lb.null()) return;
     const art::leaf *al = lb.const_leaf();
@@ -664,7 +604,7 @@ art::iterator::iterator() : t(get_art()) {
     }
 }
 
-art::iterator::iterator(value_type key) : t(get_art()) {
+art::iterator::iterator(tree* t, value_type key) : t(t) {
     ++statistics::lb_ops;
     try {
         auto lb = inner_lower_bound(tl, t, key); //inner_min_bound(tl, t, key);
@@ -758,26 +698,26 @@ bool art::iterator::update(std::function<node_ptr(const leaf *l)> updater) {
 }
 
 bool art::iterator::update(int64_t ttl, bool volat) {
-    return update([ttl,volat](const art::leaf *l) -> node_ptr {
-        return make_leaf(l->get_key(), l->get_value(), ttl, volat);
+    return update([&](const art::leaf *l) -> node_ptr {
+        return t->make_leaf(l->get_key(), l->get_value(), ttl, volat);
     });
 }
 
 bool art::iterator::update(int64_t ttl) {
-    return update([ttl](const art::leaf *l) -> node_ptr {
-        return make_leaf(l->get_key(), l->get_value(), ttl, l->is_volatile());
+    return update([&](const art::leaf *l) -> node_ptr {
+        return t->make_leaf(l->get_key(), l->get_value(), ttl, l->is_volatile());
     });
 }
 
 bool art::iterator::update(value_type value, int64_t ttl, bool volat) {
-    return update([value,ttl,volat](const art::leaf *l) -> node_ptr {
-        return make_leaf(l->get_key(), value, ttl, volat);
+    return update([&](const art::leaf *l) -> node_ptr {
+        return t->make_leaf(l->get_key(), value, ttl, volat);
     });
 }
 
 bool art::iterator::update(value_type value) {
-    return update([value](const art::leaf *l) -> node_ptr {
-        return make_leaf(l->get_key(), value, l->ttl(), l->is_volatile());
+    return update([&](const art::leaf *l) -> node_ptr {
+        return t->make_leaf(l->get_key(), value, l->ttl(), l->is_volatile());
     });
 }
 
@@ -990,7 +930,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options
                                       art::value_type key, art::value_type value, int depth, int *old, int replace,const NodeResult &fc) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
-        ref = art::make_leaf(key, value, options.ttl);
+        ref = t->make_leaf(key, value, options.ttl);
         t->last_leaf_added = ref;
         return nullptr;
     }
@@ -1010,7 +950,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options
                 }
                 else
                 {
-                    ref = make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
+                    ref = t->make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
                     t->last_leaf_added = ref;
                     // create a new leaf to carry the new value
                     ++statistics::leaf_nodes_replaced;
@@ -1021,10 +961,10 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options
         }
         art::node_ptr l1 = n;
         // Create a new leaf
-        art::node_ptr l2 = make_leaf(key, value);
+        art::node_ptr l2 = t->make_leaf(key, value);
         t->last_leaf_added = l2;
         // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
-        auto new_stored = art::alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
+        auto new_stored = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
         auto *new_node = new_stored.modify();
         // Determine longest prefix
         l = n.const_leaf();
@@ -1055,9 +995,9 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options
         }
 
         // Create a new node and a new leaf
-        art::node_ptr new_leaf = make_leaf(key, value);
+        art::node_ptr new_leaf = make_leaf(*t, key, value);
         t->last_leaf_added = new_leaf;
-        auto new_node = art::alloc_node_ptr(initial_node_ptr_size, art::initial_node, {n, new_leaf});
+        auto new_node = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {n, new_leaf});
         // pass children to get opt. ptr size
         ref = new_node;
         new_node.modify()->data().partial_len = prefix_diff;
@@ -1108,7 +1048,7 @@ RECURSE_SEARCH:;
     }
 
     // No child, node goes within us
-    art::node_ptr l = make_leaf(key, value);
+    art::node_ptr l = t->make_leaf(key, value);
     t->last_leaf_added = l;
     n = n.modify()->expand_pointers(ref, {l});
     auto idx = n.modify()->add_child(key[depth], ref, l);
@@ -1464,7 +1404,7 @@ uint64_t art_size(art::tree *t) {
 
 uint64_t art_evict_lru(art::tree *t) {
     try {
-        auto page = art::get_leaves().get_lru_page();
+        auto page = t->get_leaves().get_lru_page();
         if (!page.second) return 0;
         auto i = page.first.begin();
         auto e = i + page.second;
@@ -1492,12 +1432,12 @@ uint64_t art_evict_lru(art::tree *t) {
     return 0;
 }
 
-void art::glob(tree * unused(t), const keys_spec &spec, value_type pattern,
+void art::glob(tree * t, const keys_spec &spec, value_type pattern,
                const std::function<bool(const leaf &l)> &cb) {
     try {
         int64_t counter = 0;
         // this is a multi-threaded iterator and care should be taken
-        get_leaves().iterate_pages(
+        t->get_leaves().iterate_pages(t->latch,
             [&](size_t size, size_t unused(padd), const heap::buffer<uint8_t> &page)-> bool {
                 if (!size) return true;
                 auto i = page.begin();
@@ -1544,9 +1484,14 @@ art_statistics art::get_statistics() {
     as.node256_nodes = (int64_t) statistics::n256_nodes;
     as.node256_occupants = as.node256_nodes ? ((int64_t) statistics::node256_occupants / as.node256_nodes) : 0ll;
     as.node48_nodes = (int64_t) statistics::n48_nodes;
-    as.bytes_allocated = (int64_t) get_leaves().get_allocated() + get_nodes().get_allocated();
+    for (size_t shard : art::get_shard_count()) {
+        as.bytes_allocated += (int64_t) get_art(shard)->get_leaves().get_allocated() + get_art(shard)->get_nodes().get_allocated();
+    }
+
     //statistics::addressable_bytes_alloc;
-    as.bytes_interior = (int64_t) get_nodes().get_allocated();
+    for (auto shard : art::get_shard_count()) {
+        as.bytes_interior += (int64_t) get_art(shard)->get_nodes().get_allocated();
+    }
     as.page_bytes_compressed = (int64_t) statistics::page_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t) statistics::page_bytes_uncompressed;
     as.pages_uncompressed = (int64_t) statistics::pages_uncompressed;
@@ -1562,20 +1507,22 @@ art_statistics art::get_statistics() {
     return as;
 }
 
-extern art::tree *get_art();
 
 struct transaction {
     bool was_transacted = false;
-
-    transaction() {
-        was_transacted = get_art()->transacted;
+    art::tree *t = nullptr;
+    transaction(const transaction&) = default;
+    transaction& operator=(const transaction&) = default;
+    explicit transaction(art::tree *t) : t(t) {
+        was_transacted = t->transacted;
         if (!was_transacted)
-            get_art()->begin();
+            t->begin();
     }
 
     ~transaction() {
         if (!was_transacted)
-            get_art()->commit();
+            t->commit();
+
     }
 };
 
@@ -1636,6 +1583,7 @@ static void stream_to_stats(InStream &in) {
 bool art::tree::save() {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
+    if (nodes.get_main().get_bytes_allocated()==0) return true;
     bool saved = false;
     node_ptr troot;
     size_t tsize;
@@ -1651,23 +1599,23 @@ bool art::tree::save() {
     };
 
     auto st = std::chrono::high_resolution_clock::now();
-    transaction tx; // stabilize main while saving
-    arena::hash_arena leaves;
-    arena::hash_arena nodes;
+    transaction tx(this); // stabilize main while saving
+    arena::hash_arena leaves{get_leaves().get_name()};
+    arena::hash_arena nodes{get_nodes().get_name()};
     {
-        storage_release release; // only lock during partial copy
+        storage_release release(latch); // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
         leaves.borrow(get_leaves().get_main());
         nodes.borrow(get_nodes().get_main());
     }
-    if (!get_leaves().save_extra(leaves, "leaf_data.dat", save_stats_and_root)) {
+    if (!get_leaves().save_extra(leaves, ".dat", save_stats_and_root)) {
         return false;
     }
 
 
-    if (!get_nodes().save_extra(nodes, "node_data.dat", [&](std::ofstream &) {
+    if (!get_nodes().save_extra(nodes, ".dat", [&](std::ofstream &) {
     })) {
         return false;
     }
@@ -1686,9 +1634,9 @@ bool art::tree::load() {
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
-        std::lock_guard guard2(logical_allocator::mutex);
+        storage_release release(latch);
         auto *t = this;
-        logical_address root;
+        logical_address root{nullptr};
         bool is_leaf = false;
         // save stats in the leaf storage
         auto load_stats_and_root = [&](std::ifstream &in) {
@@ -1700,11 +1648,11 @@ bool art::tree::load() {
         };
         auto st = std::chrono::high_resolution_clock::now();
 
-        if (!get_nodes().load_extra("node_data.dat", [&](std::ifstream &) {
+        if (!get_nodes().load_extra(".dat", [&](std::ifstream &) {
         })) {
             return false;
         }
-        if (!get_leaves().load_extra("leaf_data.dat", load_stats_and_root)) {
+        if (!get_leaves().load_extra(".dat", load_stats_and_root)) {
             return false;
         }
 
@@ -1735,7 +1683,7 @@ void art::tree::begin() {
     save_stats.clear();
     stats_to_stream(save_stats);
     {
-        std::lock_guard guard2(logical_allocator::mutex);
+       storage_release release(latch);
         get_leaves().begin();
         get_nodes().begin();
 
@@ -1745,7 +1693,7 @@ void art::tree::begin() {
 
 void art::tree::commit() {
     if (!transacted) return;
-    std::lock_guard guard2(logical_allocator::mutex);
+    storage_release release(latch);
     get_leaves().commit();
     get_nodes().commit();
     transacted = false;
@@ -1753,7 +1701,7 @@ void art::tree::commit() {
 
 void art::tree::rollback() {
     if (!transacted) return;
-    std::lock_guard guard2(logical_allocator::mutex);
+    storage_release release(latch);
     get_leaves().rollback();
     get_nodes().rollback();
     root = save_root;
@@ -1765,7 +1713,7 @@ void art::tree::rollback() {
 
 void art::tree::clear() {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    std::lock_guard guard2(logical_allocator::mutex);
+    storage_release release(latch);
     root = {nullptr};
     size = 0;
     transacted = false;

@@ -95,14 +95,8 @@ struct free_bin {
 
     free_bin(unsigned size, alloc_pair* alloc) : alloc(alloc), size(size) {
     }
-    free_bin(const free_bin& other) : alloc(other.alloc),size(other.size) {};
-    free_bin& operator=(const free_bin& other) {
-        if (this==&other) return *this;
-
-        alloc = other.alloc;
-        size = other.size;
-        return *this;
-    };
+    free_bin(const free_bin& other) = default; //: alloc(other.alloc),size(other.size) {};
+    free_bin& operator=(const free_bin& other) = default;
 
     alloc_pair * alloc = nullptr;
     unsigned size = 0;
@@ -223,7 +217,7 @@ struct free_list {
     size_t min_bin = LPageSize;
     size_t max_bin = 0;
     address_set addresses{};
-    heap::vector<free_bin> free_bins{};
+    heap::std_vector<free_bin> free_bins{};
     //heap::vector<free_bin> free_bins{};
     free_list(const free_list& other) = default;
     free_list& operator=(const free_list& other) {
@@ -231,6 +225,7 @@ struct free_list {
         alloc = other.alloc;
         added = other.added;
         min_bin = other.min_bin;
+        max_bin = other.max_bin;
         addresses = other.addresses;
         free_bins = other.free_bins;
         return *this;
@@ -260,7 +255,7 @@ struct free_list {
         }
         if (test_memory == 1) {
             if (addresses.count(address.address()) > 0) {
-                abort();
+                abort_with("address already freed");
             }
             addresses.insert(address.address());
         }
@@ -308,13 +303,19 @@ struct free_list {
             if (added < size) {
                 abort_with("trying to free too many bytes");
             }
-            added -= size;
             if (test_memory == 1) {
+                auto& tap = r.get_ap<alloc_pair>();
+                if (&tap != this->alloc) {
+                    abort_with("allocation pair from different tree");
+                }
                 if (addresses.count(r.address()) == 0) {
                     abort_with("memory test failed: no such free address");
                 }
+
                 addresses.erase(r.address());
             }
+            added -= size;
+
         }
 
 

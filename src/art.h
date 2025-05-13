@@ -77,6 +77,7 @@ namespace art {
     private:
         trace_list trace{};
     public:
+        composite query{};
         composite cmd_ZADD_q1{};
         composite cmd_ZADD_qindex{};
         bool mexit = false;
@@ -351,7 +352,7 @@ namespace art {
         void log_trace() const;
     };
 
-    node_ptr find(value_type key);
+    node_ptr find(const tree* t, value_type key);
 
     int range(const tree *t, value_type key, value_type key_end, CallBack cb, void *data);
 

@@ -12,7 +12,7 @@
 static std::atomic<int64_t> counter = art::now() * 1000000;
 #define IX_MEMBER ""
 art::tree *get_art_s(const std::string& key) {
-    return get_art(art::value_type(key.c_str(),key.size()));
+    return get_art(get_shard(key));
 }
 
 struct query_pool {
@@ -91,7 +91,7 @@ void insert_ordered(composite &score_key, composite &member_key, art::value_type
         abort_with("invalid key size");
     }
     shk = shk.sub(1,shk.size - 2);
-    auto t = get_art(shk);
+    auto t = get_art(get_shard(shk));
     art_insert(t, {}, sk, value, update, [](const art::node_ptr &) -> void {
     });
     art_insert(t, {}, mk, sk, update, [](const art::node_ptr &) -> void {
@@ -109,7 +109,7 @@ void remove_ordered(composite &score_key, composite &member_key) {
         abort_with("invalid key size");
     }
     shk = shk.sub(1,shk.size - 2);
-    auto t = get_art(shk);
+    auto t = get_art(get_shard(shk));
     art_delete(t, sk);
     art_delete(t, mk);
 }
@@ -129,8 +129,6 @@ int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
-    auto t = get_art(argv);
-    storage_release release(t->latch);
     int responses = 0;
     int r = VALKEYMODULE_OK;
     size_t nlen;
@@ -138,6 +136,9 @@ int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (zspec.parse_options() != VALKEYMODULE_OK) {
         return ValkeyModule_ReplyWithError(ctx, "syntax error");
     }
+    auto t = get_art(argv);
+    storage_release release(t->latch);
+
     zspec.LFI = true;
     int64_t updated = 0;
     int64_t fkadded = 0;
@@ -148,15 +149,14 @@ int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (key_ok(key, nlen) != 0) {
         return ValkeyModule_ReplyWithNull(ctx);
     }
-    auto rt = get_art({key,nlen});
     auto fcfk = [&](const art::node_ptr &val) -> void {
         if (val.is_leaf) {
-            art_delete(rt, val.const_leaf()->get_value());
+            art_delete(t, val.const_leaf()->get_value());
         }
         --fkadded;
     };
 
-    auto before = rt->size;
+    auto before = t->size;
     auto container = conversion::convert(key, nlen);
     for (int n = zspec.fields_start; n < argc; n += 2) {
         size_t klen, vlen;
@@ -182,24 +182,24 @@ int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         }
         art::value_type qkey = t->cmd_ZADD_q1.create({container, score, member});
         if (zspec.XX) {
-            art::update(rt, qkey, [&](const art::node_ptr &old) -> art::node_ptr {
+            art::update(t, qkey, [&](const art::node_ptr &old) -> art::node_ptr {
                 if (old.null()) return nullptr;
 
                 auto l = old.const_leaf();
-                return art::make_leaf(*get_art(qkey), qkey, {}, l->ttl(), l->is_volatile());
+                return art::make_leaf(*t, qkey, {}, l->ttl(), l->is_volatile());
             });
         } else {
             if (zspec.LFI) {
                 auto member_key = t->cmd_ZADD_qindex.create({IX_MEMBER, container, member}); //, score
-                art_insert(rt, {}, member_key, qkey, true, fcfk);
+                art_insert(t, {}, member_key, qkey, true, fcfk);
                 ++fkadded;
             }
 
-            art_insert(rt, {}, qkey, {}, !zspec.NX, fc);
+            art_insert(t, {}, qkey, {}, !zspec.NX, fc);
         }
         ++responses;
     }
-    auto current = rt->size;
+    auto current = t->size;
     if (zspec.CH) {
         ValkeyModule_ReplyWithLongLong(ctx, current - before + updated - fkadded);
     } else {
@@ -214,8 +214,6 @@ int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
-    auto t = get_art(argv);
-    storage_release release(t->latch);
     int responses = 0;
     int r = VALKEYMODULE_OK;
     size_t nlen;
@@ -224,7 +222,9 @@ int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (key_ok(key, nlen) != 0) {
         return ValkeyModule_ReplyWithNull(ctx);
     }
-    art::value_type vkey{key,nlen};
+    auto t = get_art(argv);
+    storage_release release(t->latch);
+
 
     auto container = conversion::convert(key, nlen);
     query q1, qmember;
@@ -248,7 +248,7 @@ int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
             auto kscore = byscore.key();
             if (!kscore.starts_with(member_prefix)) break;
             auto fkmember = byscore.value();
-            art_delete(get_art(vkey), fkmember);
+            art_delete(t, fkmember);
             if (byscore.remove()) {
                 ++removed;
             }
@@ -265,8 +265,6 @@ int cmd_ZINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
-    auto t = get_art(argv);
-    storage_release release(t->latch);
     int responses = 0;
     size_t nlen;
     int64_t updated = 0;
@@ -277,6 +275,9 @@ int cmd_ZINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (key_ok(key, nlen) != 0) {
         return ValkeyModule_ReplyWithNull(ctx);
     }
+    auto t = get_art(argv);
+    storage_release release(t->latch);
+
     size_t vlen;
     double incr = 0.0f;
     if (VALKEYMODULE_OK != ValkeyModule_StringToDouble(argv[2], &incr)) {

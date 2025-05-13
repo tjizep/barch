@@ -8,7 +8,7 @@ conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool 
     int64_t i;
     double d;
 
-    if (!noint && is_integer(v, vlen)) {
+    if (!noint) {
 #if 1
         auto ianswer = fast_float::from_chars(v, v + vlen, i); // check if it's an integer first
 

@@ -552,10 +552,9 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
     return 0;
 }
 
-extern art::tree *get_art(art::value_type shard_key);
 
-art::node_ptr art::find(value_type key) {
-    const tree *t = get_art(key);
+art::node_ptr art::find(const tree* t, value_type key) {
+    //const tree *t = get_art(get_shard(key));
     ++statistics::get_ops;
     try {
         node_ptr n = t->root;

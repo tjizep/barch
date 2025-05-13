@@ -346,7 +346,7 @@ int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         art::value_type reply{"", 0};
         auto fc = [&](art::node_ptr) -> void {
         };
-        auto t = get_art({k,klen});
+        auto t = get_art(get_shard(art::value_type(k,klen)));
         storage_release release(t->latch);
         art_insert(t, spec, converted.get_value(), {v, (unsigned) vlen}, fc);
 
@@ -428,8 +428,7 @@ int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
             ValkeyModule_ReplyWithNull(ctx);
         } else {
             auto converted = conversion::convert(k, klen);
-            //read_lock rl(get_lock());
-            auto t = get_art({k,klen});
+            auto t = get_art(get_shard(k,klen));
             storage_release release(t->latch);
             art::node_ptr r = art_search(t, converted.get_value());
             if (r.null()) {

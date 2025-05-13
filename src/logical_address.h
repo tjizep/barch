@@ -20,15 +20,15 @@ struct logical_address {
     logical_address &operator=(const logical_address &) = default;
 
     explicit logical_address(size_t index, void* alloc) : index(index), alloc(alloc) {
-        //if (alloc && *(int*)alloc != 1<<24) {
-        //    abort_with("invalid allocator pair");
-        //}
+        if (alloc && *(int*)alloc != 1<<24) {
+            abort_with("invalid allocator pair");
+        }
     }
 
     logical_address(size_t p, size_t o, void * alloc) :alloc(alloc){
-        //if (alloc && *(int*)alloc != 1<<24) {
-        //    abort_with("invalid allocator pair");
-        //}
+        if (alloc && *(int*)alloc != 1<<24) {
+            abort_with("invalid allocator pair");
+        }
         from_page_offset(p, o);
     }
 

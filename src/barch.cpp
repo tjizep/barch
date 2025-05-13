@@ -463,9 +463,9 @@ int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
         auto t = get_art(shard);
         art::node_ptr r = art_minimum(t);
         if (!t->size) continue;
-        if (the_min.empty()) {
+        if (r.is_leaf && the_min.empty()) {
             the_min = r.const_leaf()->get_key();
-        }else if (r.const_leaf()->get_key() < the_min){
+        }else if (r.is_leaf && r.const_leaf()->get_key() < the_min){
             the_min = r.const_leaf()->get_key();
         }
     }
@@ -502,10 +502,10 @@ int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int ) {
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
         if (!t->size) continue;
-        art::node_ptr r = art_minimum(t);
-        if (the_max.empty()) {
+        art::node_ptr r = art::maximum(t);
+        if (r.is_leaf && the_max.empty()) {
             the_max = r.const_leaf()->get_key();
-        }else if (the_max < r.const_leaf()->get_key()){
+        }else if (r.is_leaf && the_max < r.const_leaf()->get_key()){
             the_max = r.const_leaf()->get_key();
         }
     }
@@ -545,10 +545,10 @@ int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         auto t = get_art(shard);
         if (!t->size) continue;
         art::node_ptr r = art::lower_bound(t, converted.get_value());
-        if (the_lb.empty()) {
+        if (r.is_leaf && the_lb.empty()) {
             the_lb = r.const_leaf()->get_key();
 
-        }else if (r.const_leaf()->get_key() < the_lb){
+        }else if (r.is_leaf && r.const_leaf()->get_key() < the_lb){
             the_lb = r.const_leaf()->get_key();
         }
     }

@@ -9,7 +9,7 @@
 #include "logger.h"
 #include "sastam.h"
 #include "constants.h"
-
+#define _CHECK_AP_ 1
 struct logical_address {
     typedef uint64_t AddressIntType;
 

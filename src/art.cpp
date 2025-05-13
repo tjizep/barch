@@ -1654,8 +1654,9 @@ bool art::tree::load() {
         if (!get_leaves().load_extra(".dat", load_stats_and_root)) {
             return false;
         }
-
+        root = logical_address{root.address(), this};// translate root to the now
         if (is_leaf) {
+
             t->root = node_ptr{root};
         } else {
             t->root = resolve_read_node(root);

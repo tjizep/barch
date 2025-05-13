@@ -306,10 +306,13 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
                 n = t->root;
                 continue;
             }
-            while (last_el(trace).child.is_leaf &&
-                   last_el(trace).child.const_leaf()->get_key() < key) {
-                if (!increment_trace(t->root, trace)) return nullptr;
+            if (!trace.empty()) {
+                while (last_el(trace).child.is_leaf &&
+                       last_el(trace).child.const_leaf()->get_key() < key) {
+                    if (!increment_trace(t->root, trace)) return nullptr;
+                }
             }
+
             return n;
         }
         auto &d = n->data();
@@ -342,12 +345,15 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         depth++;
     }
     if (!extend_trace_min(t->root, trace)) return nullptr;
-
-    while (last_el(trace).child.is_leaf &&
-           last_el(trace).child.const_leaf()->get_key() < key) {
-        if (!increment_trace(t->root, trace)) return nullptr;
+    if (!trace.empty()) {
+        while (last_el(trace).child.is_leaf &&
+               last_el(trace).child.const_leaf()->get_key() < key) {
+            if (!increment_trace(t->root, trace)) return nullptr;
+        }
+        n = last_el(trace).child;
     }
-    n = last_el(trace).child;
+
+
     return n;
 }
 
@@ -487,7 +493,7 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
     try {
         art::trace_list tl;
         auto lb = inner_lower_bound(tl, t, key);
-        if (lb.null()) return 0;
+        if (lb.null() || tl.empty()) return 0;
         const art::leaf *al = lb.const_leaf();
         if (al) {
             do {

@@ -221,7 +221,7 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
-    auto t  = get_art(argv);
+    auto t = get_art(argv);
     storage_release release(t->latch);
     size_t klen, vlen;
     const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);

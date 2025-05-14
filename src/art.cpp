@@ -301,18 +301,20 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         if (n.is_leaf) {
             // Check if the expanded path matches
             auto l = n.const_leaf();
-            if (l->expired()) {
-                art_delete((art::tree *) t, l->get_key());
-                n = t->root;
-                continue;
-            }
-            if (!trace.empty()) {
-                while (last_el(trace).child.is_leaf &&
-                       last_el(trace).child.const_leaf()->get_key() < key) {
+            if (trace.empty())
+                return l->expired() ? nullptr : n;
+
+            while (true) {
+                auto c = last_el(trace).child;
+                if (!c.is_leaf) return nullptr;
+                l = c.const_leaf();
+                if (l->get_key() < key ||  l->expired()) {
                     if (!increment_trace(t->root, trace)) return nullptr;
+                }else {
+                    break;
                 }
             }
-
+            n = last_el(trace).child;
             return n;
         }
         auto &d = n->data();
@@ -345,13 +347,17 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         depth++;
     }
     if (!extend_trace_min(t->root, trace)) return nullptr;
-    if (!trace.empty()) {
-        while (last_el(trace).child.is_leaf &&
-               last_el(trace).child.const_leaf()->get_key() < key) {
+    while (true) {
+        auto c = last_el(trace).child;
+        if (!c.is_leaf) return nullptr;
+        auto l = c.const_leaf();
+        if (l->get_key() < key ||  l->expired()) {
             if (!increment_trace(t->root, trace)) return nullptr;
+        }else {
+            break;
         }
-        n = last_el(trace).child;
     }
+    n = last_el(trace).child;
 
 
     return n;

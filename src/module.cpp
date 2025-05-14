@@ -33,8 +33,9 @@ size_t get_shard(const char* key, size_t key_len) {
     }
     auto converted = conversion::convert(key, key_len);
     auto shard_key = converted.get_value();
-    size_t hash = ankerl::unordered_dense::detail::wyhash::hash(shard_key.chars(), shard_key.size);
-    return hash % shards.size();
+    size_t hash = 0;//ankerl::unordered_dense::detail::wyhash::hash(key, key_len);
+    memcpy(&hash, shard_key.bytes, std::min<size_t>(8,shard_key.size));
+    return hash % art::get_shard_count().size();
 }
 
 size_t get_shard(const std::string& key) {

@@ -31,7 +31,7 @@ local test = function()
         vk.call('B.REM',k)
         vk.call('B.SET',k,v)
         if math.mod(i,logperiod) == 0 then
-            vk.log(vk.LOG_NOTICE, "Adding "..i)
+            --vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
     end
     --vk.call('B.COMMIT')
@@ -40,13 +40,14 @@ local test = function()
         --vk.call('B.BEGIN')
         local k = convert(i-1)
         local v = '#'..i
-        if vk.call('B.GET',k) ~= v then
-            result[inc()] = {k, v, vk.call('B.GET',k)}
+        local actual = vk.call('B.GET',k)
+        if actual ~= v then
+            result[inc()] = {"could not find",k, v, actual}
         else
             successes = successes + 1
         end
         if math.mod(i,logperiod) == 0 then
-            vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
+            --vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
         end
         --vk.call('B.ROLLBACK')
     end
@@ -65,7 +66,7 @@ local clear = function()
         local v = '#'..i
 
         local before = vk.call('B.SIZE')
-        if vk.call('B.GET',k) == nil then
+        if vk.call('B.GET',k) ~= v then
             result[inc()] = {"Failed get before remove",k, v, vk.call('B.GET',k)}
             failures = failures + 1
         end
@@ -85,7 +86,7 @@ local clear = function()
             failures = failures + 1
         end
         if math.mod(i,logperiod) == 0 then
-            vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
+            --vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
         end
 
     end
@@ -103,9 +104,9 @@ end
 --[[ Testing num hash string key types]]
 result[inc()] = {"running test "..tests}
 vk.call('B.CLEAR')
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "5m")
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "150m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "on")
-result[inc()] = vk.call("B.CONFIG", "SET","compression", "zstd")
+result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "100")
 result[inc()] = vk.call("B.CONFIG", "SET","max_modifications_before_save", "1000")
 

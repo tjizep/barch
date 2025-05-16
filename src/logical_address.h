@@ -4,26 +4,31 @@
 
 #ifndef COMPRESSED_ADDRESS_H
 #define COMPRESSED_ADDRESS_H
-#include <limits>
+#include <cstddef>
+#include <cstdint>
+#include "logger.h"
+#include "sastam.h"
 #include "constants.h"
-
+#define _CHECK_AP_ 1
 struct logical_address {
     typedef uint64_t AddressIntType;
 
-    logical_address() = default;
-
+    logical_address() = delete;
+    logical_address(void * alloc) : alloc(alloc){};
     logical_address(const logical_address &) = default;
 
     logical_address &operator=(const logical_address &) = default;
 
-    void set_as_ptr(const uint8_t *addr) {
-        this->index = (AddressIntType) addr;
+    explicit logical_address(size_t index, void* alloc) : index(index), alloc(alloc) {
+        if (alloc && *(int*)alloc != 1<<24) {
+            abort_with("invalid allocator pair");
+        }
     }
 
-    explicit logical_address(size_t index) : index(index) {
-    }
-
-    logical_address(size_t p, size_t o) {
+    logical_address(size_t p, size_t o, void * alloc) :alloc(alloc){
+        if (alloc && *(int*)alloc != 1<<24) {
+            abort_with("invalid allocator pair");
+        }
         from_page_offset(p, o);
     }
 
@@ -95,9 +100,34 @@ struct logical_address {
     explicit operator size_t() const {
         return index;
     }
+    void check_ap() const {
+#if _CHECK_AP_
+        if (alloc == nullptr) {
+            abort_with("allocator pair not set");
+        }
+        if (*(int*)alloc != 1<<24) {
+            abort_with("invalid allocator pair");
+        }
+#endif
 
+    }
+    template<typename AT>
+    AT& get_ap() {
+        check_ap();
+        return *(AT*)alloc;
+    }
+    template<typename AT>
+    const AT& get_ap() const {
+        check_ap();
+        return *(AT*)alloc;
+    }
 private:
     AddressIntType index = 0;
+    // for better or worse the allocators associated for this addess is taken with the logical address
+    // it does have a 3% perf impact in single threaded perf, but hopefully we can have
+    // much better multithreaded perf because a seperate tree is allocated
+    // for each key shard associated with it's own processing thread
+    void * alloc = nullptr;
 };
 
 #endif //COMPRESSED_ADDRESS_H

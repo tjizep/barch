@@ -64,7 +64,7 @@ struct storage {
     uint64_t ticker = 0;
     uint64_t physical = 0;
     uint64_t logical = 0;
-    uint16_t fragmentation = 0;
+    uint32_t fragmentation = 0;
 };
 
 #endif //STORAGE_H

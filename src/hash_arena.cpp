@@ -22,10 +22,10 @@ void append(std::ofstream &out, size_t page, const storage &s, const uint8_t *da
     writep(out, s.write_position);
     size = 0;
     writep(out, size);
-    size = s.write_position; //s.decompressed.byte_size();
+    size = page_size; //s.write_position; //s.decompressed.byte_size();
     writep(out, size);
-    if (size)
-        out.write((const char *) data, size);
+    //if (size)
+    out.write((const char *) data, size);
 }
 
 static const uint64_t alloc_record_size = sizeof(uint64_t) * 2;
@@ -55,7 +55,7 @@ bool arena::base_hash_arena::save(const std::string &filename,
     uint64_t alloc_table_start = out.tellp();
     // write the initial allocation table
     size_t page_count = 0;
-    iterate_arena([&out,&page_count](size_t page, const storage &) {
+    iterate_arena([&out,&page_count](size_t page, const size_t &) {
         uint64_t p = page;
         uint64_t a = 0;
 
@@ -64,9 +64,10 @@ bool arena::base_hash_arena::save(const std::string &filename,
         ++page_count;
     });
     size_t record_pos = 0;
-    iterate_arena([&](size_t page, const storage &s) {
+    iterate_arena([&](size_t page, const size_t &) {
         uint64_t start = out.tellp();
-        append(out, page, s, get_page_data({page, 0},false));
+        const storage& s = *(const storage*)get_page_data({page, page_size - sizeof(storage), nullptr},false);
+        append(out, page, s, get_page_data({page, 0, nullptr},false));
 
         uint64_t finish = out.tellp();
         // write the allocation record
@@ -151,10 +152,12 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
             }
 
             readp(in, bsize);
-            if (bsize) {
-                in.read((char *) arena.get_alloc_page_data({page, 0}, bsize), bsize);
+            if (bsize != page_size) {
+                abort_with("invalid page size");
             }
-            arena.hidden_arena[page] = s;
+            uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, bsize);
+            in.read((char *) data, bsize);
+            arena.hidden_arena[page] = page;
             if (in.fail()) {
                 art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
                 return false;

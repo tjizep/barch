@@ -13,7 +13,7 @@ if (NOT ADD_FMT)
 endif ()
 
 if (NOT TEST_OD)
-    set(TEST_OD OFF)
+    set(TEST_OD ON)
 endif ()
 
 set(CMAKE_CPP_STANDARD 17)

@@ -4,36 +4,27 @@
 
 #ifndef HASH_ARENA_H
 #define HASH_ARENA_H
-#include "storage.h"
+//#include "storage.h"
 #include "logical_address.h"
 #include <fstream>
+#include <utility>
 #include <page_modifications.h>
 #include <ankerl/unordered_dense.h>
 #include <sys/mman.h>
 #include "configuration.h"
 #include "logger.h"
+#include "sastam.h"
 
 namespace arena {
-    struct page {
-        uint8_t data[page_size];
-        uint32_t write_position = 0;
-        uint32_t size = 0;
-        //uint32_t modifications = 0;
-        lru_list::iterator lru{};
-        uint64_t ticker = 0;
-        uint64_t physical = 0;
-        uint64_t logical = 0;
-        uint16_t fragmentation = 0;
-    };
     struct base_hash_arena {
         bool opt_use_vmmap = art::get_use_vmm_memory();
 
     protected:
-        typedef heap::allocator<std::pair<size_t, storage> > allocator_type;
+        typedef heap::allocator<std::pair<size_t, size_t> > allocator_type;
 
         typedef ankerl::unordered_dense::map<
             size_t
-            , storage
+            , size_t
             , ankerl::unordered_dense::hash<size_t>
             , std::equal_to<size_t>
             , allocator_type> hash_type;
@@ -64,7 +55,7 @@ namespace arena {
             if (!has_free()) {
                 throw std::runtime_error("no free pages available");
             }
-            hidden_arena[at] = storage{};
+            hidden_arena[at] = {};
             max_address_accessed = std::max(max_address_accessed, at);
             --free_pages;
         }
@@ -285,7 +276,7 @@ namespace arena {
             return has_page_no_source(at);
         }
 
-        storage &modify(size_t at) {
+        size_t &modify(size_t at) {
             if (at > top) {
                 throw std::runtime_error("invalid page");
             }
@@ -298,7 +289,7 @@ namespace arena {
             return pi->second;
         }
 
-        [[nodiscard]] const storage &read(size_t at) const {
+        [[nodiscard]] const size_t &read(size_t at) const {
             if (at > top) {
                 throw std::runtime_error("invalid page");
             }
@@ -312,7 +303,7 @@ namespace arena {
             return pi->second;
         }
 
-        [[nodiscard]] storage &read(size_t at) {
+        [[nodiscard]] size_t &read(size_t at) {
             if (at > top) {
                 throw std::runtime_error("invalid page");
             }
@@ -324,7 +315,7 @@ namespace arena {
             return pi->second;
         }
 
-        [[nodiscard]] storage &read_no_source(size_t at) {
+        [[nodiscard]] size_t &read_no_source(size_t at) {
             if (at > top) {
                 throw std::runtime_error("invalid page");
             }
@@ -337,7 +328,7 @@ namespace arena {
         }
 
 
-        void iterate_arena(const std::function<bool(size_t, storage &)> &iter) {
+        void iterate_arena(const std::function<bool(size_t, size_t &)> &iter) {
             for (auto &[at,str]: hidden_arena) {
                 if (!iter(at, str)) {
                     return;
@@ -345,13 +336,13 @@ namespace arena {
             }
         }
 
-        void iterate_arena(const std::function<void(size_t, storage &)> &iter) {
+        void iterate_arena(const std::function<void(size_t, size_t &)> &iter) {
             for (auto &[at,str]: hidden_arena) {
                 iter(at, str);
             }
         }
 
-        void iterate_arena(const std::function<void(size_t, const storage &)> &iter) const {
+        void iterate_arena(const std::function<void(size_t, const size_t &)> &iter) const {
             for (auto &[at,str]: hidden_arena) {
                 iter(at, str);
             }
@@ -409,7 +400,7 @@ namespace arena {
                         abort_with("failed to allocate virtual page data");
                     }
                     if (new_size > page_data_size) {
-                        memset(page_data + page_data_size, 0, new_size - page_data_size);
+                        //memset(page_data + page_data_size, 0, new_size - page_data_size);
                     }
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
@@ -419,7 +410,7 @@ namespace arena {
                     if (page_data == MAP_FAILED) {
                         abort_with("failed to allocate virtual page data");
                     }
-                    memset(page_data, 0, new_size);
+                    //memset(page_data, 0, new_size);
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
                     art::std_log("allocated", page_data_size, "virtual memory as page data");
@@ -462,12 +453,12 @@ namespace arena {
             if (!modified[page]) {
                 modified[page] = true;
                 if (page_pos + physical_page_size < page_data_size) {
-                    memcpy(cow + page_footer + page_pos, page_data + page_footer + page_pos, physical_page_size);
+                    memcpy(cow + page_pos, page_data + page_pos, physical_page_size);
                 }
                 page_modifications::inc_ticker(page);
             }
 
-            return cow + page_footer + page_pos + offset;
+            return cow + page_pos + offset;
         }
         uint8_t *get_alloc_page_data(logical_address r, size_t size) {
             // page size must be a power of two
@@ -478,7 +469,7 @@ namespace arena {
                 abort_with("invalid CoW page data");
             }
             if (std::max(page_data_size, cow_size) <= page_pos + offset + size) {
-                alloc_page_data((r.page() + 1024) * physical_page_size + size);
+                alloc_page_data((r.page() + 128) * physical_page_size + size);
             }
             if (std::max(page_data_size, cow_size) < page_pos + offset + size) {
                 abort_with("position not allocated");
@@ -488,7 +479,7 @@ namespace arena {
             }
 
 
-            return page_data + page_footer + page_pos + r.offset();
+            return page_data + page_pos + r.offset();
         }
 
         [[nodiscard]] uint8_t *get_page_data(logical_address r, bool) const {
@@ -504,7 +495,7 @@ namespace arena {
                 return get_cow_page(r.page(), r.offset());
             }
 
-            return page_data + page_footer + page_pos + offset;
+            return page_data + page_pos + offset;
         }
         void begin() {
             rollback();
@@ -533,6 +524,9 @@ namespace arena {
             cow = nullptr;
             cow_size = 0;
         }
+        bool empty() const {
+            return page_data_size == 0;
+        }
         bool save(const std::string &filename, const std::function<void(std::ofstream &)> &extra) const;
 
         bool load(const std::string &filename, const std::function<void(std::ifstream &)> &extra);
@@ -542,7 +536,11 @@ namespace arena {
     };
 
     struct hash_arena {
+        std::string name;
         base_hash_arena main{};
+        hash_arena(const hash_arena &) = default;
+        hash_arena& operator=(const hash_arena &) = default;
+        explicit hash_arena(std::string name) : name(std::move(name)) {}
         // arena virtualization functions
         [[nodiscard]] size_t page_count() const {
             return main.page_count();
@@ -572,31 +570,31 @@ namespace arena {
             return main.has_page(at);
         }
 
-        storage &modify(size_t at) {
+        size_t &modify(size_t at) {
             return main.modify(at);
         }
 
-        [[nodiscard]] const storage &read(size_t at) const {
+        [[nodiscard]] const size_t &read(size_t at) const {
             return main.read(at);
         }
 
-        [[nodiscard]] storage &read(size_t at) {
+        [[nodiscard]] size_t &read(size_t at) {
             return main.read(at);
         }
 
-        [[nodiscard]] const storage &retrieve_page(size_t at) const {
+        [[nodiscard]] const size_t &retrieve_page(size_t at) const {
             return main.read(at);
         }
 
-        void iterate_arena(const std::function<bool(size_t, storage &)> &iter) {
+        void iterate_arena(const std::function<bool(size_t, size_t &)> &iter) {
             main.iterate_arena(iter);
         }
 
-        void iterate_arena(const std::function<void(size_t, storage &)> &iter) {
+        void iterate_arena(const std::function<void(size_t, size_t &)> &iter) {
             main.iterate_arena(iter);
         }
 
-        void iterate_arena(const std::function<void(size_t, const storage &)> &iter) const {
+        void iterate_arena(const std::function<void(size_t, const size_t &)> &iter) const {
             main.iterate_arena(iter);
         }
 
@@ -645,6 +643,9 @@ namespace arena {
                 return (main.get_max_address_accessed() + 1) * physical_page_size;
             }
             return 0;
+        }
+        bool empty() const {
+            return main.empty();
         }
     };
 }

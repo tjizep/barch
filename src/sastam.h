@@ -885,7 +885,7 @@ namespace heap {
     template<typename K>
     using vector = std::vector
     <K
-        //,   allocator<K>
+        ,   allocator<K>
     >;
 }
 

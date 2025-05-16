@@ -5,11 +5,13 @@
 #ifndef NODE_IMPL_H
 #define NODE_IMPL_H
 #include "node_content.h"
+
 /**
 *  these are virtualized variable pointer nodes for external storage and or memory reduction using
 *  pointer offsets or compression
 */
 namespace art {
+
     /**
      * variable pointer size node with 4 children
      */
@@ -104,7 +106,7 @@ namespace art {
             if (data().occupants < 4) {
                 return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             } else {
-                auto new_node = alloc_node_ptr(sizeof(IntegerPtr), node_16, {child});
+                auto new_node = this->allocate_node(node_16, {child});
                 // Copy the child pointers and the key map
                 new_node.modify()->set_children(0, this, 0, data().occupants);
                 new_node.modify()->set_keys(nd().keys, data().occupants);
@@ -197,7 +199,8 @@ namespace art {
             this->remove_child(pos);
 
             if (this->data().occupants == 3) {
-                auto new_node = alloc_node_ptr(sizeof(IPtrType), node_4, {});
+
+                auto new_node = this->allocate_node(node_4, {});
                 new_node.modify()->copy_header(this);
                 new_node.modify()->set_keys(this->nd().keys, 3);
                 new_node.modify()->set_children(0, this, 0, 3);
@@ -233,7 +236,8 @@ namespace art {
             if (this->data().occupants < 16) {
                 return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             } else {
-                auto new_node = alloc_node_ptr(sizeof(IPtrType), node_48, {child});
+
+                auto new_node = this->allocate_node(node_48, {child});
 
                 // Copy the child pointers and populate the key map
                 new_node.modify()->set_children(0, this, 0, this->data().occupants);
@@ -359,7 +363,7 @@ namespace art {
             --nd().occupants;
 
             if (data().occupants == 12) {
-                auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_16, {});
+                auto new_node = this->allocate_node(node_16, {});
                 new_node.modify()->copy_header(this);
                 unsigned child = 0;
                 for (unsigned i = 0; i < 256; i++) {
@@ -405,7 +409,8 @@ namespace art {
             if (nd().occupants < 48) {
                 return this->expand_pointers(ref, {child}).modify()->add_child_inner(c, child);
             } else {
-                auto new_node = alloc_node_ptr(sizeof(PtrEncodedType), node_256, {});
+
+                auto new_node = this->allocate_node(node_256, {});
                 auto &dat = nd();
                 for (unsigned i = 0; i < 256; i++) {
                     if (dat.keys[i]) {
@@ -580,7 +585,8 @@ namespace art {
             // Resize to a node48 on underflow, not immediately to prevent
             // trashing if we sit on the 48/49 boundary
             if (dat.occupants == 37) {
-                auto new_node = alloc_node_ptr(sizeof(intptr_t), node_48, {});
+
+                auto new_node = this->allocate_node(node_48, {});
                 ref = new_node;
                 new_node.modify()->copy_header(this);
 

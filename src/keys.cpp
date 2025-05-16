@@ -82,9 +82,11 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     } else if (key_len >= 1 && *enck == art::tstring) {
         k = (const char *) &enck[1];
         kl = key_len - 2;
-        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, kl) == VALKEYMODULE_ERR) {
+        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, strnlen(k, kl)) == VALKEYMODULE_ERR) {
             return -1;
         }
+    } else if (key_len >= 1 && (*enck == art::tcomposite)) {
+        return reply_encoded_key(ctx, key.sub(2));
     } else {
         abort();
     }

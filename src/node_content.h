@@ -7,6 +7,7 @@
 #include "nodes.h"
 #include "statistics.h"
 #include "simd.h"
+#include "logical_allocator.h"
 
 namespace art {
     template<typename EncodingType>
@@ -59,12 +60,11 @@ namespace art {
             value = ptr.null() ? 0 : ptr.address();
         }
 
-        [[nodiscard]] logical_leaf get_leaf() const {
+        [[nodiscard]] node_ptr get_leaf(alloc_pair& alloc) const {
             if (!IsLeaf) {
                 abort();
             }
-            auto l = logical_leaf(value);
-            return l;
+            return logical_address(value,&alloc);
         }
 
         void set_node(const node *ptr) {
@@ -92,14 +92,22 @@ namespace art {
             return resolve_write_node(logical_address((int64_t) value + base));
         }
 
-        [[nodiscard]] node_ptr get_node() const {
+        [[nodiscard]] node_ptr get_node(alloc_pair& alloc) const {
             if (IsLeaf) {
-                abort();
+                abort_with("this cannot be a leaf");
             }
             if (value == 0) {
                 return nullptr;
             }
-            return resolve_read_node(logical_address((int64_t) value + base));
+            return resolve_read_node(logical_address((int64_t) value + base, &alloc));
+        }
+
+        node_ptr as_leaf(logical_address parent) const  {
+            return get_leaf(parent.get_ap<alloc_pair>());
+        }
+
+        node_ptr as_node(logical_address parent) const  {
+            return get_node(parent.get_ap<alloc_pair>());
         }
 
         [[nodiscard]] node_ptr cget() const {
@@ -121,25 +129,6 @@ namespace art {
             set_leaf(ptr);
             return *this;
         }
-
-        explicit operator logical_leaf() {
-            return get_leaf();
-        }
-
-        explicit operator node_ptr() {
-            if (IsLeaf) {
-                return node_ptr(get_leaf());
-            }
-            return node_ptr(get_node());
-        }
-
-        explicit operator node_ptr() const {
-            if (IsLeaf) {
-                return node_ptr(get_leaf());
-            }
-            return cget(); // well have to just cast it
-        }
-
 
         [[nodiscard]] bool exists() const {
             return value != 0;
@@ -213,14 +202,14 @@ namespace art {
             return *refresh_cache<encoded_data>();
         }
 
-        node_ptr create_node() {
-            create_data();
+        node_ptr create_node(alloc_pair& alloc) {
+            create_data(alloc);
             return this;
         }
 
-        logical_address create_data() final {
-            address = get_node_compression().new_address(alloc_size());
-            encoded_data *r = get_node_compression().modify<encoded_data>(address);
+        logical_address create_data(alloc_pair& alloc) final {
+            address = alloc.get_nodes().new_address(alloc_size());
+            encoded_data *r = alloc.get_nodes().modify<encoded_data>(address);
             r->type = node_type;
             r->pointer_size = sizeof(IntPtrType);
             dcache = r;
@@ -263,13 +252,13 @@ namespace art {
             }
             //if (address.is_null_base())
             //    abort();
-            get_node_compression().free(address, alloc_size());
+            address.get_ap<alloc_pair>().get_nodes().free(address, alloc_size());
         }
 
         encoded_node_content() = default;
 
-        encoded_node_content &create() {
-            create_data();
+        encoded_node_content &create(alloc_pair& alloc) {
+            create_data(alloc);
             return *this;
         }
 
@@ -288,6 +277,12 @@ namespace art {
 
         [[nodiscard]] logical_address get_address() const final {
             return address;
+        }
+
+        node_ptr allocate_node(unsigned nt, const art::children_t &c) {
+            alloc_pair& alloc = this->address.template get_ap<alloc_pair>();
+            auto new_node = alloc_node_ptr(alloc, sizeof(i_ptr_t), nt, c);
+            return new_node;
         }
 
         [[nodiscard]] size_t alloc_size() const final {
@@ -351,7 +346,7 @@ namespace art {
             check_object();
             if (at < SIZE) {
                 auto &dat = nd();
-                return dat.types[at] == leaf_type ? node_ptr(dat.leaves[at]) : dat.children[at].get_node();
+                return dat.types[at] == leaf_type ? dat.leaves[at].as_leaf(address) : dat.children[at].as_node(address);
             }
             return nullptr;
         }
@@ -359,7 +354,7 @@ namespace art {
         node_ptr get_node(unsigned at) final {
             check_object();
             if (at < SIZE)
-                return nd().types[at] == leaf_type ? node_ptr(nd().leaves[at]) : node_ptr(nd().children[at]);
+                return nd().types[at] == leaf_type ? nd().leaves[at].as_leaf(address) : nd().children[at].as_node(address);
 
             return nullptr;
         }
@@ -619,10 +614,13 @@ namespace art {
             }
         }
 
+        alloc_pair& get_logical() {
+            return this->address.template get_ap<alloc_pair>();
+        }
         [[nodiscard]] node_ptr expand_pointers(node_ptr &ref, const children_t &children) override {
             check_object();
             if (ok_children(children)) return this;
-            node_ptr n = alloc_8_node_ptr(type());
+            node_ptr n = alloc_8_node_ptr(get_logical(), type());
             n.modify()->copy_from(this);
             free_node(this);
             ref = n;
@@ -632,7 +630,7 @@ namespace art {
         [[nodiscard]] node_ptr expand_pointers(const children_t &children) override {
             check_object();
             if (ok_children(children)) return this;
-            node_ptr n = alloc_8_node_ptr(type());
+            node_ptr n = alloc_8_node_ptr(get_logical(), type());
             n.modify()->copy_from(this);
             free_node(this);
             return n;

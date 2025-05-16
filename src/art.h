@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+
+#include "composite.h"
 #include "nodes.h"
 #include "logical_allocator.h"
 #include "keyspec.h"
@@ -15,11 +17,7 @@ extern std::shared_mutex &get_lock();
 /**
  * context management
  */
-struct compressed_release {
-    compressed_release();
-
-    ~compressed_release();
-};
+typedef std::unique_lock<std::mutex> storage_release;
 
 /**
  * global statistics
@@ -72,23 +70,16 @@ typedef std::function<void(const art::node_ptr &)> NodeResult;
  * art tree and company
  */
 namespace art {
-    bool has_leaf_compression();
+    node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const children_t &c);
 
-    bool has_node_compression();
 
-    bool init_leaf_compression();
-
-    bool init_node_compression();
-
-    void destroy_node_compression();
-
-    void destroy_leaf_compression();
-
-    struct tree {
+    struct tree : public alloc_pair{
     private:
         trace_list trace{};
-
     public:
+        composite query{};
+        composite cmd_ZADD_q1{};
+        composite cmd_ZADD_qindex{};
         bool mexit = false;
         bool transacted = false;
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
@@ -122,9 +113,10 @@ namespace art {
 
         tree(const tree &) = delete;
 
-        tree(const art::node_ptr &root, uint64_t size) : root(root), size(size) {
+        tree(const art::node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard), root(root), size(size) {
             start_maintain();
         }
+        tree& operator=(const tree&) = delete;
 
         ~tree();
 
@@ -143,6 +135,13 @@ namespace art {
         void clear();
 
         void update_trace(int direction);
+
+
+        node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
+        node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c);
+        node_ptr alloc_8_node_ptr(unsigned nt);
+
+
     };
 }
 
@@ -301,12 +300,12 @@ namespace art {
          * @return an iterator
          */
 
-        explicit iterator(value_type key);
+        iterator(tree* t, value_type key);
 
         /**
          * starts the iterator at the first key (left most) in the tree
          */
-        iterator();
+        iterator(tree* t);
 
         iterator(const iterator &it) = default;
 
@@ -353,7 +352,7 @@ namespace art {
         void log_trace() const;
     };
 
-    node_ptr find(value_type key);
+    node_ptr find(const tree* t, value_type key);
 
     int range(const tree *t, value_type key, value_type key_end, CallBack cb, void *data);
 

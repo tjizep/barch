@@ -76,7 +76,6 @@ extern "C" {
 * and endkey. No more than 'count' items are emitted. */
 int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
 
     //read_lock rl(get_lock());
     if (argc != 4)
@@ -111,10 +110,10 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
         return is->iterate(key, value);
     };
-
-    art::range(get_art(), c1.get_value(), c2.get_value(), iter, &is);
-
-
+    for (auto shard : art::get_shard_count()) {
+        storage_release release(get_art(shard)->latch);
+        art::range(get_art(shard), c1.get_value(), c2.get_value(), iter, &is);
+    }
     ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
 
     /* Cleanup. */
@@ -127,7 +126,6 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 * and endkey. No more than 'count' items are emitted. */
 int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
 
     //read_lock rl(get_lock());
     if (argc != 3)
@@ -157,9 +155,10 @@ int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         ++count;
         return 0;
     };
-
-    art::range(get_art(), c1.get_value(), c2.get_value(), iter, &is);
-
+    for (auto shard : art::get_shard_count()) {
+        storage_release release(get_art(shard)->latch);
+        art::range(get_art(shard), c1.get_value(), c2.get_value(), iter, &is);
+    }
     ValkeyModule_ReplyWithLongLong(ctx, count);
 
     /* Cleanup. */
@@ -186,24 +185,27 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     const char *cpat = ValkeyModule_StringPtrLen(argv[1], &plen);
     art::value_type pattern{cpat, (unsigned) plen};
     if (spec.count) {
-        art::glob(get_art(), spec, pattern, [&](const art::leaf & unused(l)) -> bool {
-            ++replies;
-            return true;
-        });
+        for (auto shard : art::get_shard_count()) {
+            art::glob(get_art(shard), spec, pattern, [&](const art::leaf & unused(l)) -> bool {
+                ++replies;
+                return true;
+            });
+        }
         return ValkeyModule_ReplyWithLongLong(ctx, replies);
     } else {
         /* Reply with the matching items. */
         ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
 
-
-        art::glob(get_art(), spec, pattern, [&](const art::leaf &l) -> bool {
-            std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
-            if (0 != reply_encoded_key(ctx, l.get_key())) {
-                return false;
-            };
-            ++replies;
-            return true;
-        });
+        for (auto shard : art::get_shard_count()) {
+            art::glob(get_art(shard), spec, pattern, [&](const art::leaf &l) -> bool {
+                std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
+                if (0 != reply_encoded_key(ctx, l.get_key())) {
+                    return false;
+                };
+                ++replies;
+                return true;
+            });
+        }
 
 
         ValkeyModule_ReplySetArrayLength(ctx, replies);
@@ -217,9 +219,10 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  *
  * Set the specified key to the specified value. */
 int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    compressed_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
+    auto t = get_art(argv);
+    storage_release release(t->latch);
     size_t klen, vlen;
     const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
     const char *v = ValkeyModule_StringPtrLen(argv[2], &vlen);
@@ -241,7 +244,7 @@ int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         }
     };
 
-    art_insert(get_art(), spec, converted.get_value(), {v, (unsigned) vlen}, fc);
+    art_insert(t, spec, converted.get_value(), {v, (unsigned) vlen}, fc);
     if (spec.get) {
         if (reply.size) {
             ValkeyModule_AutoMemory(ctx);
@@ -250,14 +253,16 @@ int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
             return ValkeyModule_ReplyWithNull(ctx);
         }
     } else {
-        return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        ValkeyModule_AutoMemory(ctx);
+        return ValkeyModule_ReplyWithBool(ctx,1);//ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 }
 
 static int BarchMofifyInteger(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, long long by) {
-    compressed_release release;
+
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
+    storage_release release(get_art(argv)->latch);
     size_t klen;
     const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
     art::key_spec spec;
@@ -275,7 +280,7 @@ static int BarchMofifyInteger(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, i
         r = VALKEYMODULE_OK;
         return leaf_numeric_update(l, value, by);
     };
-    art::update(get_art(), converted.get_value(), updater);
+    art::update(get_art(argv), converted.get_value(), updater);
     if (r == VALKEYMODULE_OK) {
         return ValkeyModule_ReplyWithLongLong(ctx, l);
     } else {
@@ -321,7 +326,6 @@ int cmd_DECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
     if (argc < 3)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -342,8 +346,9 @@ int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         art::value_type reply{"", 0};
         auto fc = [&](art::node_ptr) -> void {
         };
-
-        art_insert(get_art(), spec, converted.get_value(), {v, (unsigned) vlen}, fc);
+        auto t = get_art(get_shard(art::value_type(k,klen)));
+        storage_release release(t->latch);
+        art_insert(t, spec, converted.get_value(), {v, (unsigned) vlen}, fc);
 
         ++responses;
     }
@@ -356,10 +361,10 @@ int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * Add the specified key only if its not there, with specified value. */
 int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+
     if (argc != 3)
         return ValkeyModule_WrongArity(ctx);
-
+    storage_release release(get_art(argv)->latch);
     size_t klen, vlen;
     const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
     const char *v = ValkeyModule_StringPtrLen(argv[2], &vlen);
@@ -371,7 +376,7 @@ int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     auto converted = conversion::convert(k, klen);
     art::key_spec spec(argv, argc);
     write_lock w(get_lock());
-    art_insert_no_replace(get_art(), spec, converted.get_value(), {v, (unsigned) vlen}, fc);
+    art_insert_no_replace(get_art(argv), spec, converted.get_value(), {v, (unsigned) vlen}, fc);
 
     return ValkeyModule_ReplyWithString(ctx, Constants.OK);
 }
@@ -389,10 +394,10 @@ int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     const char *k = ValkeyModule_StringPtrLen(argv[1], &klen);
     if (key_ok(k, klen) != 0)
         return key_check(ctx, k, klen);
-
-    compressed_release release;
+    auto t = get_art(argv);
+    storage_release release(t->latch);
     auto converted = conversion::convert(k, klen);
-    art::node_ptr r = art_search(get_art(), converted.get_value());
+    art::node_ptr r = art_search(t, converted.get_value());
 
     if (r.null()) {
         return ValkeyModule_ReplyWithNull(ctx);
@@ -411,7 +416,7 @@ int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * is not defined. */
 int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+
     if (argc < 2)
         return ValkeyModule_WrongArity(ctx);
     int responses = 0;
@@ -423,8 +428,9 @@ int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
             ValkeyModule_ReplyWithNull(ctx);
         } else {
             auto converted = conversion::convert(k, klen);
-            //read_lock rl(get_lock());
-            art::node_ptr r = art_search(get_art(), converted.get_value());
+            auto t = get_art(get_shard(k,klen));
+            storage_release release(t->latch);
+            art::node_ptr r = art_search(t, converted.get_value());
             if (r.null()) {
                 ValkeyModule_ReplyWithNull(ctx);
             } else {
@@ -446,20 +452,34 @@ int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * is not defined. */
 int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
-    //read_lock rl(get_lock());
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-
-    art::node_ptr r = art_minimum(get_art());
-
-    if (r.null()) {
-        return ValkeyModule_ReplyWithNull(ctx);
-    } else {
-        const auto *l = r.const_leaf();
-        auto found = l->get_key();
-        return reply_encoded_key(ctx, found);
+    art::value_type the_min;
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.lock();
     }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        art::node_ptr r = art_minimum(t);
+        if (!t->size) continue;
+        if (r.is_leaf && the_min.empty()) {
+            the_min = r.const_leaf()->get_key();
+        }else if (r.is_leaf && r.const_leaf()->get_key() < the_min){
+            the_min = r.const_leaf()->get_key();
+        }
+    }
+    int ok = 0;
+    if (the_min.empty()) {
+        ok = ValkeyModule_ReplyWithNull(ctx);
+    } else {
+        ok = reply_encoded_key(ctx, the_min);
+    }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.unlock();
+    }
+    return ok;
 }
 
 int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
@@ -472,20 +492,34 @@ int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
  *
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
-int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
+int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int ) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
-    //read_lock rl(get_lock());
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
-
-    art::node_ptr l = art::maximum(get_art());
-
-    if (l.null()) {
-        return ValkeyModule_ReplyWithNull(ctx);
-    } else {
-        return reply_encoded_key(ctx, l.const_leaf()->get_key());
+    art::value_type the_max;
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.lock();
     }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        if (!t->size) continue;
+        art::node_ptr r = art::maximum(t);
+        if (r.is_leaf && the_max.empty()) {
+            the_max = r.const_leaf()->get_key();
+        }else if (r.is_leaf && the_max < r.const_leaf()->get_key()){
+            the_max = r.const_leaf()->get_key();
+        }
+    }
+    int ok = 0;
+    if (the_max.empty()) {
+        ok = ValkeyModule_ReplyWithNull(ctx);
+    } else {
+        ok = reply_encoded_key(ctx, the_max);
+    }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.unlock();
+    }
+    return ok;
 }
 
 /* CDICT.LB <key>
@@ -494,7 +528,6 @@ int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  * is not defined. */
 int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     size_t klen;
@@ -503,18 +536,34 @@ int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         return key_check(ctx, k, klen);
 
     auto converted = conversion::convert(k, klen);
-    //read_lock rl(get_lock());
-
-    art::node_ptr r = art::lower_bound(get_art(), converted.get_value());
-
-
-    if (r.null()) {
-        return ValkeyModule_ReplyWithNull(ctx);
-    } else {
-        const auto *l = r.const_leaf();
-        auto k = l->get_key();
-        return reply_encoded_key(ctx, k);
+    art::value_type the_lb;
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.lock();
     }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        if (!t->size) continue;
+        art::node_ptr r = art::lower_bound(t, converted.get_value());
+        if (r.is_leaf && the_lb.empty()) {
+            the_lb = r.const_leaf()->get_key();
+
+        }else if (r.is_leaf && r.const_leaf()->get_key() < the_lb){
+            the_lb = r.const_leaf()->get_key();
+        }
+    }
+    int ok = 0;
+    if (the_lb.empty()) {
+        ok = ValkeyModule_ReplyWithNull(ctx);
+    } else {
+        ok = reply_encoded_key(ctx, the_lb);
+    }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.unlock();
+    }
+    return ok;
+
 }
 
 /* B.RM <key>
@@ -522,7 +571,7 @@ int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * remove the value associated with the key and return the key if such a key existed. */
 int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+
     if (argc != 2)
         return ValkeyModule_WrongArity(ctx);
     size_t klen;
@@ -542,9 +591,9 @@ int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
             r = ValkeyModule_ReplyWithString(ctx, ValkeyModule_CreateString(ctx, vt.chars(), vt.size));
         }
     };
-    //write_lock w(get_lock());
-    auto t = get_art();
 
+    auto t = get_art(argv);
+    storage_release release(t->latch);
     art_delete(t, converted.get_value(), fc);
 
     return r;
@@ -554,12 +603,15 @@ int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * @return the size or o.k.a. key count.
  */
 int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
-    //read_lock rl(get_lock());
 
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    auto size = (int64_t) art_size(get_art());
+    auto size = 0ll;
+    for (auto shard: art::get_shard_count()) {
+        auto t = get_art(shard);
+        storage_release release(t->latch);
+        size += (int64_t) art_size(t);
+    }
     return ValkeyModule_ReplyWithLongLong(ctx, size);
 }
 
@@ -570,8 +622,10 @@ int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    if (!get_art()->save()) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    for (auto shard : art::get_shard_count()) {
+        if (!get_art(shard)->save()) {
+            return ValkeyModule_ReplyWithNull(ctx);
+        }
     }
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
@@ -581,55 +635,53 @@ int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  * @return OK if successful
  */
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    //compressed_release release;
-    //write_lock rl(get_lock());
 
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    if (!get_art()->load
-        ()) {
-        return ValkeyModule_ReplyWithNull(ctx);
+
+    for (auto shard : art::get_shard_count()) {
+        if (!get_art(shard)->load()) {
+            return ValkeyModule_ReplyWithNull(ctx);
+        }
     }
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
 int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
-    //write_lock rl(get_lock());
 
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    get_art()->begin();
+    for (auto shard : art::get_shard_count()) {
+        get_art(shard)->begin();
+    }
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
 int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
-    //write_lock rl(get_lock());
 
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    get_art()->commit();
+    for (auto shard : art::get_shard_count()) {
+        get_art(shard)->commit();
+    }
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
 int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
-    //write_lock rl(get_lock());
-
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    get_art()->rollback();
+    for (auto shard : art::get_shard_count()) {
+        get_art(shard)->rollback();
+    }
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
 int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    //compressed_release release;
-    //write_lock rl(get_lock());
-
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    get_art()->clear();
+    for (auto shard : art::get_shard_count()) {
+        get_art(shard)->clear();
+    }
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
@@ -638,13 +690,16 @@ int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  *
  * get memory statistics. */
 int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
 
     long row_count = 0;
     art_statistics as = art::get_statistics();
-    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
+    auto vbytes = 0ll;
+    for (auto shard : art::get_shard_count()) {
+        storage_release release(get_art(shard)->latch);
+        vbytes += get_art(shard)->get_nodes().get_bytes_allocated() + get_art(shard)->get_leaves().get_bytes_allocated();
+    }
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
     ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
@@ -759,7 +814,6 @@ int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  *
  * get memory statistics. */
 int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
 
@@ -814,10 +868,10 @@ int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 }
 
 int cmd_VACUUM(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
+
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    size_t result = art::get_leaf_compression().vacuum();
+    size_t result = 0;
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) result);
 }
 
@@ -825,18 +879,25 @@ int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     //compressed_release release;
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);;
-    auto vbytes = art::get_node_compression().get_bytes_allocated() + art::get_leaf_compression().get_bytes_allocated();
-
+    auto vbytes = 0ll;
+    for (auto shard : art::get_shard_count()) {
+        storage_release release(get_art(shard)->latch);
+        vbytes += get_art(shard)->get_nodes().get_bytes_allocated() + get_art(shard)->get_leaves().get_bytes_allocated();
+    }
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) heap::allocated + vbytes);
 }
 
 int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    compressed_release release;
-    //write_lock w(get_lock());
+
     if (argc != 1)
         return ValkeyModule_WrongArity(ctx);
-    auto t = get_art();
-    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) art_evict_lru(t));
+    int64_t ev = 0;
+    for (auto shard : art::get_shard_count()) {
+        auto t = get_art(shard);
+        storage_release release(t->latch);
+        ev += art_evict_lru(t);
+    }
+    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)ev );
 }
 
 /* B.SET <key> <value>
@@ -844,10 +905,9 @@ int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
  * Set the specified key to the specified value. */
 int cmd_CONFIG(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
-    compressed_release release;
+
     if (argc != 4)
         return ValkeyModule_WrongArity(ctx);
-    //write_lock w(get_lock());
     size_t slen;
     const char *s = ValkeyModule_StringPtrLen(argv[1], &slen);
     if (strncmp("set", s, slen) == 0 || strncmp("SET", s, slen) == 0) {
@@ -970,18 +1030,15 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
-
-    if (get_art() == nullptr) {
-        return VALKEYMODULE_ERR;
+    for (auto shard : art::get_shard_count()) {
+        if (get_art(shard) == nullptr) {
+            return VALKEYMODULE_ERR;
+        }
     }
-
-    if (!art::init_leaf_compression())
-        return VALKEYMODULE_ERR;
-
-    if (!art::init_node_compression())
-        return VALKEYMODULE_ERR;
     try {
-        get_art()->load();
+        for (auto shard : art::get_shard_count()) {
+            get_art(shard)->load();
+        }
     } catch (std::exception &e) {
         art::std_log(e.what());
         return VALKEYMODULE_ERR;
@@ -990,8 +1047,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
 }
 
 int ValkeyModule_OnUnload(void *unused_arg) {
-    art::destroy_leaf_compression();
-    art::destroy_node_compression();
+    // TODO: destroy tree
     return VALKEYMODULE_OK;
 }
 }

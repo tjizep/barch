@@ -16,6 +16,8 @@ namespace art {
 
 int key_ok(const char *k, size_t klen);
 
+int key_ok(art::value_type v);
+
 int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen);
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key);

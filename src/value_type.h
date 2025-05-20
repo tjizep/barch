@@ -95,6 +95,17 @@ namespace art {
             return compare(other) >= 0;
         }
 
+        bool operator !=(const char* other) const {
+            return *this != value_type{other,strlen(other)};
+        }
+
+        bool operator ==(const char* other) const {
+            return *this == value_type{other,strlen(other)};
+        }
+
+        bool operator <(const char* other) const {
+            return *this < value_type{other,strlen(other)};
+        }
         [[nodiscard]] value_type sub(size_t start) const {
             if (start >= size) return value_type(nullptr);
             return {bytes + start, size - start};

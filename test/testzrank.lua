@@ -40,7 +40,8 @@ for i=1,1000 do
         failures = failures + 1
     end
 end
+local sz = vk.call('B.SIZE')
 vk.call('B.CLEAR')
 assert(failures == 0)
-return failures
+return {failures,sz}
 

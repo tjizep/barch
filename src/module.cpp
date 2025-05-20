@@ -45,6 +45,9 @@ size_t get_shard(const std::string& key) {
 size_t get_shard(art::value_type key) {
    return get_shard(key.chars(), key.size);
 }
+art::tree* get_art(art::value_type key) {
+    return get_art(get_shard(key.chars(), key.size));
+}
 size_t get_shard(ValkeyModuleString **argv) {
     size_t nlen = 0;
     const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);

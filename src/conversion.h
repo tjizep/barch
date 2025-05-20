@@ -5,6 +5,9 @@
 #include "sastam.h"
 
 namespace conversion {
+    bool to_ll(art::value_type vt, long long& l);
+    bool to_double(art::value_type vt, double& l);
+    bool to_i64(art::value_type v, int64_t &i);
     template<typename I>
     struct byte_comparable {
         byte_comparable() = default;
@@ -291,6 +294,8 @@ namespace conversion {
     // take a string and convert to a number as bytes or leave it alone
     // and return the bytes directly. the bytes will be copied
     comparable_key convert(const char *v, size_t vlen, bool noint = false);
+
+    comparable_key convert(art::value_type vt, bool noint = false);
 
     comparable_key convert(const std::string &str, bool noint = false);
 

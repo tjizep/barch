@@ -32,6 +32,9 @@ int key_ok(const char *k, size_t klen) {
 
     return 0;
 }
+int key_ok(art::value_type v) {
+    return key_ok(v.chars(), v.size);
+}
 
 int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
     if (k == nullptr)
@@ -43,6 +46,7 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
 
     return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
 }
+
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     double dk;

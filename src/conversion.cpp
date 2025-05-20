@@ -4,15 +4,34 @@
 #include "conversion.h"
 // take a string and convert to a number as bytes or leave it alone
 // and return the bytes directly. the bytes will be copied
+conversion::comparable_key conversion::convert(art::value_type vt, bool noint) {
+    return convert(vt.chars(),vt.size,noint);
+}
+template<typename T>
+bool to_t(art::value_type v, T &i) {
+
+    auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
+
+    return (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size) ;
+}
+bool conversion::to_ll(art::value_type v, long long &i) {
+    return to_t(v, i);
+}
+bool conversion::to_i64(art::value_type v, int64_t &i) {
+    return to_t(v, i);
+}
+bool conversion::to_double(art::value_type v, double &i) {
+
+return to_t(v, i);
+}
+
 conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool noint) {
     int64_t i;
     double d;
 
     if (!noint) {
 #if 1
-        auto ianswer = fast_float::from_chars(v, v + vlen, i); // check if it's an integer first
-
-        if (ianswer.ec == std::errc() && ianswer.ptr == v + vlen) {
+        if (to_i64({v,vlen},i)) {
             return comparable_key(i);
         }
 #else

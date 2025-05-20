@@ -4,7 +4,8 @@
 
 #ifndef SET_H
 #define SET_H
-
+#include "value_type.h"
+#include "caller.h"
 extern "C" {
 #include "valkeymodule.h"
 }
@@ -25,48 +26,43 @@ namespace art {
     }
 
     struct base_key_spec {
-        ValkeyModuleString *const*argv{};
+        arg_t argv{};
         static std::regex integer;
         int argc = 0;
         int r = 0;
         char empty[2] = {0x00, 0x00};
         mutable std::string s{};
+        base_key_spec() = default;
+        base_key_spec(const arg_t& argv):argv(argv),argc(argv.size()){};
 
         const std::string &tos(int at) const {
             s.clear();
             if (at >= argc) return s;
-            size_t vlen = 0;
-            const char *val = ValkeyModule_StringPtrLen(argv[at], &vlen);
-            if (val == nullptr) {
-                return s;
-            }
-
-            s.append(val, vlen);
+            auto vt = argv[at];
+            s.append(vt.chars(), vt.size);
             return s;
         }
 
         const char *toc(int at) const {
             if (at >= argc) return empty;
 
-            size_t vlen = 0;
-            const char *val = ValkeyModule_StringPtrLen(argv[at], &vlen);
-            if (val == nullptr) {
+            auto val = argv[at];
+            if (val.empty()) {
                 return empty;
             }
-            return val;
+            return val.chars();
         }
 
         std::string &tos(int at) {
             s.clear();
             if (at >= argc) return s;
 
-            size_t vlen = 0;
-            const char *val = ValkeyModule_StringPtrLen(argv[at], &vlen);
-            if (val == nullptr) {
+            auto val = argv[at];
+            if (val.empty()) {
                 return s;
             }
 
-            s.append(val, vlen);
+            s.append(val.chars(), val.size);
             return s;
         }
 
@@ -121,9 +117,8 @@ namespace art {
 
         key_spec() = default;
 
-        key_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        key_spec(const arg_t& vt) : base_key_spec(vt) {
+            argc = vt.size();
         }
 
         key_spec &operator=(ValkeyModuleString **) = delete;
@@ -195,9 +190,11 @@ namespace art {
 
         keys_spec(const keys_spec &) = delete;
 
-        keys_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        keys_spec(const arg_t& argv) :base_key_spec(argv) {
+
+        }
+        keys_spec() :base_key_spec(arg_t{}) {
+
         }
 
         bool count = false;
@@ -231,9 +228,7 @@ namespace art {
 
         hexpire_spec(const hexpire_spec &) = delete;
 
-        hexpire_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        hexpire_spec(const arg_t& argv) : base_key_spec(argv) {
         }
 
         bool NX{false};
@@ -297,9 +292,8 @@ namespace art {
 
         hgetex_spec(const hgetex_spec &) = delete;
 
-        hgetex_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        hgetex_spec(const arg_t& argv) : base_key_spec(argv) {
+
         }
 
         bool EX{false};
@@ -366,9 +360,7 @@ namespace art {
 
         httl_spec(const hgetex_spec &) = delete;
 
-        httl_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        httl_spec(const arg_t& argv) : base_key_spec(argv) {
         }
 
         int64_t fields{0};
@@ -404,9 +396,8 @@ namespace art {
 
         zadd_spec(const zadd_spec &) = delete;
 
-        zadd_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        zadd_spec(const arg_t& argv) : base_key_spec(argv){
+
         }
 
         bool NX{false};
@@ -479,9 +470,8 @@ namespace art {
 
         zops_spec(const zops_spec &) = delete;
 
-        zops_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        zops_spec(const arg_t& argv) : base_key_spec(argv) {
+
         }
 
         int64_t fields_start{0};
@@ -586,9 +576,7 @@ namespace art {
 
         zrange_spec(const zops_spec &) = delete;
 
-        zrange_spec(ValkeyModuleString **argvz, int argcz) {
-            argv = argvz;
-            argc = argcz;
+        zrange_spec(const arg_t& argv) : base_key_spec(argv) {
         }
 
         int64_t fields_start{0};

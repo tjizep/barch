@@ -92,7 +92,8 @@ file(GLOB SOURCES
     "src/*.c" "src/*.cpp"
 )
 
-add_library(barch SHARED ${SOURCES})
+add_library(barch SHARED ${SOURCES}
+        src/caller.h)
 
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)

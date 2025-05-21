@@ -18,7 +18,7 @@ art::tree *get_art(size_t s) {
         size_t shard_num = 0;
         for (auto &shard : shards) {
             shard = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0, shard_num);
-            //shard->load();
+            shard->load();
             ++shard_num;
         }
     }

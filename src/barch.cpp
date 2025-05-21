@@ -289,6 +289,34 @@ static int BarchMofifyInteger(caller& call,const arg_t& argv, long long by) {
         return call.null();
     }
 }
+    static int BarchMofifyDouble(caller& call,const arg_t& argv, double by) {
+
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    auto t = get_art(argv[1]);
+    storage_release release(t->latch);
+    auto k = argv[1];
+    art::key_spec spec;
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+
+    auto converted = conversion::convert(k);
+    int r = call.error();
+    double l = 0;
+    auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
+        if (value.null()) {
+            return nullptr;
+        }
+        r = call.ok();
+        return leaf_numeric_update(l, value, by);
+    };
+    art::update(t, converted.get_value(), updater);
+    if (r == call.ok()) {
+        return call.double_(l);
+    } else {
+        return call.null();
+    }
+}
 
 int INCR(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
@@ -302,14 +330,14 @@ int INCRBY(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    long long by = 0;
+    double by = 0;
 
-    if (!conversion::to_ll(argv[2], by)) {
+    if (!conversion::to_double(argv[2], by)) {
         return call.wrong_arity();
     }
     auto arg2 = argv;
     arg2.pop_back();
-    return BarchMofifyInteger(call, arg2, by);
+    return BarchMofifyDouble(call, arg2, by);
 }
 
 int cmd_INCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -329,13 +357,13 @@ int DECRBY(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    long long by = 0;
+    double by = 0;
 
-    if (!conversion::to_ll(argv[2], by)) {
+    if (!conversion::to_double(argv[2], by)) {
         return call.wrong_arity();
     }
 
-    return BarchMofifyInteger(call,argv, -by);
+    return BarchMofifyDouble(call,argv, -by);
 }
 int cmd_DECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;

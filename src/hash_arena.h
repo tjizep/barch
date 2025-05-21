@@ -642,7 +642,7 @@ namespace arena {
             if (main.opt_use_vmmap) {
                 return (main.get_max_address_accessed() + 1) * physical_page_size;
             }
-            return 0;
+            return main.get_max_address_accessed();
         }
         bool empty() const {
             return main.empty();

@@ -729,7 +729,6 @@ static int ZOPER(
         return call.long_long(replies);
     }
 
-
     return call.ok();
 }
 
@@ -755,6 +754,7 @@ int ZDIFFSTORE(caller& call, const arg_t& argv) {
     std::copy(++argv.begin(), argv.end(), std::back_inserter(narg));
     return ZOPER(call, narg, difference, member);
 }
+
 int cmd_ZDIFFSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZDIFFSTORE);
@@ -791,6 +791,7 @@ int ZINTER(caller& call, const arg_t& argv) {
     }
     return call.error("internal error");
 }
+
 int cmd_ZINTER(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZINTER);
@@ -934,6 +935,7 @@ int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     spec.BYLEX = false;
     return zrange(call, t, spec);
 }
+
 int cmd_ZRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZRANGEBYSCORE);

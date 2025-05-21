@@ -19,8 +19,8 @@ static long long getTotalPhysicalMemory() {
 
 enum {
     padding = 0,
-    heap_checks = 0,
-    use_malloc = 0
+    heap_checks = 1,
+    use_malloc = 1
 };
 
 static size_t check_size = (heap_checks != 1) ? 0 : sizeof(uint32_t);
@@ -121,7 +121,7 @@ uint64_t heap::get_physical_memory_bytes() {
 }
 
 double heap::get_physical_memory_ratio() {
-    double r = ValkeyModule_GetUsedMemoryRatio();
+    double r = use_malloc == 1 ? 0.0 : ValkeyModule_GetUsedMemoryRatio();
     if (r == 0.0f) {
         auto physical = (double) get_physical_memory_bytes();
         auto heap = (double) allocated;

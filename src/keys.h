@@ -22,6 +22,8 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen);
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key);
 
+std::string encoded_key_as_string(art::value_type key);
+
 unsigned log_encoded_key(art::value_type key, bool start = true);
 
 template<typename UT>

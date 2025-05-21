@@ -11,64 +11,66 @@ struct vk_caller : caller {
     virtual ~vk_caller() = default;
     ValkeyModuleCtx *ctx = nullptr;
 
-    heap::std_vector<art::value_type> args {};
-    heap::std_vector<art::value_type> responses {};
-
-    int null() {
+    int null() override {
         check_ctx();
         return ValkeyModule_ReplyWithNull(ctx);
     }
 
-    int boolean(bool val) {
+    int boolean(bool val) override {
         check_ctx();
         return ValkeyModule_ReplyWithBool(ctx, val ? 1 : 0);
     }
 
-    int vt(art::value_type v) {
+    int vt(art::value_type v) override {
         check_ctx();
         return ValkeyModule_ReplyWithString(ctx, ValkeyModule_CreateString(ctx,v.chars(),v.size));
         //return ValkeyModule_ReplyWithStringBuffer(ctx, v.chars(), v.size);
     }
+
     int start_array() override {
         check_ctx();
         return ValkeyModule_ReplyWithArray(ctx,VALKEYMODULE_POSTPONED_LEN);
     }
+
     int end_array(size_t length) override {
         check_ctx();
         ValkeyModule_ReplySetArrayLength(ctx,length);
         return 0;
     }
+
     int long_long(int64_t l) override {
         check_ctx();
         return ValkeyModule_ReplyWithLongLong(ctx,l);
     };
+
     int double_(double l) override {
         check_ctx();
         return ValkeyModule_ReplyWithDouble(ctx,l);
     };
+
     int reply_encoded_key(art::value_type key) override {
         check_ctx();
         return ::reply_encoded_key(ctx, key);
     }
 
-    [[nodiscard]] int ok() const override {
+    [[nodiscard]] int ok() override {
         return VALKEYMODULE_OK;
     }
-    [[nodiscard]] int wrong_arity() const override {
+
+    [[nodiscard]] int wrong_arity() override {
         check_ctx();
         return ValkeyModule_WrongArity(ctx);
     }
 
-    [[nodiscard]] int syntax_error() const override {
+    [[nodiscard]] int syntax_error() override {
         check_ctx();
         return ValkeyModule_ReplyWithError(ctx,"syntax error");
     }
 
-    [[nodiscard]] int error(const char * e) const  override {
+    [[nodiscard]] int error(const char * e)  override {
         check_ctx();
         return ValkeyModule_ReplyWithError(ctx,e);
     };
-
 
     void check_ctx() const {
         if (ctx == nullptr) {
@@ -79,7 +81,7 @@ struct vk_caller : caller {
         check_ctx();
         return ValkeyModule_ReplyWithSimpleString(ctx, v);
     };
-    [[nodiscard]] int error() const override {
+    [[nodiscard]] int error() override {
         return VALKEYMODULE_ERR;
     }
     int key_check_error(art::value_type k) override {
@@ -93,7 +95,7 @@ struct vk_caller : caller {
     template<typename TF>
     int vk_call(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, TF &&call) {
         this->ctx = ctx;
-        args.clear();
+        arg_t args {};
         ValkeyModule_AutoMemory(ctx);
         for (int i = 0; i < argc; i++) {
             size_t klen;

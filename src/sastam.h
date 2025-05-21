@@ -365,6 +365,18 @@ namespace heap {
         vtype content{};
 
     public:
+        typedef T value_type;
+        typedef size_t size_type;
+        typedef ptrdiff_t difference_type;
+        typedef T *pointer;
+        typedef const T *const_pointer;
+        typedef T &reference;
+        typedef const T &const_reference;
+        typedef __gnu_cxx::__normal_iterator<pointer, small_vector> iterator;
+        typedef __gnu_cxx::__normal_iterator<const_pointer, small_vector>
+        const_iterator;
+        typedef std::reverse_iterator<const_iterator>	const_reverse_iterator;
+        typedef std::reverse_iterator<iterator>		reverse_iterator;
         small_vector() {
         };
 
@@ -533,263 +545,6 @@ namespace heap {
             return &at(0);
         }
 
-        struct iterator {
-            T *ptr{};
-
-            T *operator ->() {
-                return ptr;
-            }
-
-            const T *operator ->() const {
-                return ptr;
-            }
-
-            T &operator *() {
-                return *ptr;
-            }
-
-            const T &operator *() const {
-                return *ptr;
-            }
-
-            iterator(T *start) : ptr(start) {
-            }
-
-            iterator(const iterator &other) = default;
-
-            iterator &operator++() {
-                ++ptr;
-                return *this;
-            }
-
-            iterator operator++(int) {
-                iterator r = *this;
-                ++ptr;
-                return r;
-            }
-
-            iterator &operator--() {
-                --ptr;
-                return *this;
-            }
-
-            iterator operator--(int) {
-                iterator r = *this;
-                --ptr;
-                return r;
-            }
-
-            bool operator==(const iterator &other) const {
-                return ptr == other.ptr;
-            }
-
-            bool operator!=(const iterator &other) const {
-                return ptr != other.ptr;
-            }
-        };
-
-        struct const_iterator {
-            const T *ptr{};
-
-            const T *operator ->() {
-                return ptr;
-            }
-
-            const T &operator *() const {
-                return *ptr;
-            }
-
-            const_iterator(const T *start) : ptr(start) {
-            }
-
-            const_iterator(const const_iterator &other) = default;
-
-            const_iterator(const iterator &other) : ptr(other.ptr) {
-            }
-
-            const_iterator &operator=(const const_iterator &other) {
-                ptr = other.ptr;
-                return *this;
-            }
-
-            const_iterator &operator=(const iterator &other) {
-                ptr = other.ptr;
-                return *this;
-            }
-
-            const_iterator &operator++() {
-                ++ptr;
-                return *this;
-            }
-
-            const_iterator operator++(int) {
-                const_iterator r = *this;
-                ++ptr;
-                return r;
-            }
-
-            const_iterator &operator--() {
-                --ptr;
-                return *this;
-            }
-
-            const_iterator operator--(int) {
-                const_iterator r = *this;
-                --ptr;
-                return r;
-            }
-
-            const T &operator*() {
-                return *ptr;
-            }
-
-            bool operator==(const const_iterator &other) const {
-                return ptr == other.ptr;
-            }
-
-            bool operator!=(const const_iterator &other) const {
-                return ptr != other.ptr;
-            }
-
-            bool operator==(const iterator &other) const {
-                return ptr == other.ptr;
-            }
-
-            bool operator!=(const iterator &other) const {
-                return ptr != other.ptr;
-            }
-        };
-
-        struct reverse_iterator {
-            T *ptr{};
-
-            T *operator ->() {
-                return ptr;
-            }
-
-            const T *operator ->() const {
-                return ptr;
-            }
-
-            T &operator *() {
-                return *ptr;
-            }
-
-            const T &operator *() const {
-                return *ptr;
-            }
-
-            reverse_iterator(T *start) : ptr(start) {
-            }
-
-            reverse_iterator(const reverse_iterator &other) = default;
-
-            reverse_iterator(const iterator &other) : ptr(other.ptr) {
-            }
-
-            reverse_iterator &operator=(const reverse_iterator &other) = default;
-
-            reverse_iterator &operator=(const iterator &other) {
-                ptr = other.ptr;
-                return *this;
-            }
-
-            reverse_iterator &operator++() {
-                --ptr;
-                return *this;
-            }
-
-            reverse_iterator &operator--() {
-                ++ptr;
-                return *this;
-            }
-
-            reverse_iterator operator++(int) {
-                reverse_iterator r = *this;
-                ++(*this);
-                return r;
-            }
-
-            reverse_iterator operator--(int) {
-                reverse_iterator r = *this;
-                --(*this);
-                return r;
-            }
-
-            bool operator==(const reverse_iterator &other) const {
-                return ptr == other.ptr;
-            }
-
-            bool operator!=(const reverse_iterator &other) const {
-                return ptr != other.ptr;
-            }
-        };
-
-        struct const_reverse_iterator {
-            const T *ptr{};
-
-            const T *operator ->() const {
-                return ptr;
-            }
-
-            const_reverse_iterator(const T *start) : ptr(start) {
-            }
-
-            const_reverse_iterator(const const_reverse_iterator &other) = default;
-
-            const_reverse_iterator(const iterator &other) : ptr(other.ptr) {
-            }
-
-            const_reverse_iterator(const const_iterator &other) : ptr(other.ptr) {
-            }
-
-            const_reverse_iterator &operator=(const const_iterator &other) {
-                ptr = other.ptr;
-                return *this;
-            }
-
-            const_reverse_iterator &operator=(const reverse_iterator &other) {
-                ptr = other.ptr;
-                return *this;
-            }
-
-            const_reverse_iterator &operator=(const iterator &other) {
-                ptr = other.ptr;
-                return *this;
-            }
-
-            const_reverse_iterator &operator++() {
-                --ptr;
-                return *this;
-            }
-
-            const_reverse_iterator operator++(int) {
-                const_reverse_iterator r = *this;
-                ++r;
-                return r;
-            }
-
-            const T &operator*() const {
-                return *ptr;
-            }
-
-            bool operator==(const const_reverse_iterator &other) const {
-                return ptr == other.ptr;
-            }
-
-            bool operator!=(const const_reverse_iterator &other) const {
-                return ptr != other.ptr;
-            }
-
-            bool operator==(const const_iterator &other) const {
-                return ptr == other.ptr;
-            }
-
-            bool operator!=(const const_iterator &other) const {
-                return ptr != other.ptr;
-            }
-        };
-
         iterator raw_begin() {
             if (ssize < scontent.size()) {
                 return (T *) scontent.begin();
@@ -799,9 +554,9 @@ namespace heap {
 
         const_iterator raw_begin() const {
             if (ssize < scontent.size()) {
-                return (T *) scontent.begin();
+                return const_iterator(&*scontent.cbegin());
             }
-            return &content[0];
+            return const_iterator(&*content.cbegin());
         };
 
         iterator begin() {
@@ -811,8 +566,9 @@ namespace heap {
         };
 
         const_iterator begin() const {
-            if (empty()) return nullptr;
-
+            if (empty()) {
+                throw_exception<std::out_of_range>("begin()");
+            }
             return raw_begin();
         }
 
@@ -851,8 +607,10 @@ namespace heap {
         }
 
         const_iterator end() const {
-            if (empty()) return nullptr;
-            return &at(0) + size();
+            if (empty()) {
+                throw_exception<std::out_of_range>("end()");
+            }
+            return const_iterator(&at(0) + size());
         }
 
         const_iterator cend() const {

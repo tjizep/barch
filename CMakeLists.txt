@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
-project(barch VERSION 0.0.1 LANGUAGES CXX)
+project(barch VERSION 0.1.5 LANGUAGES CXX)
 enable_testing()
+message("barch version: ${PROJECT_VERSION}")
+
 if (NOT ADD_ZSTD_COMPRESSION)
     set(ADD_ZSTD_COMPRESSION OFF)
 endif ()
@@ -8,12 +10,16 @@ if (NOT ADD_FAST_FLOAT)
     set(ADD_FAST_FLOAT ON)
 endif ()
 
+if (NOT ADD_SWIG)
+    set(ADD_SWIG ON)
+endif ()
+
 if (NOT ADD_FMT)
     set(ADD_FMT ON)
 endif ()
 
 if (NOT TEST_OD)
-    set(TEST_OD ON)
+    set(TEST_OD OFF)
 endif ()
 
 set(CMAKE_CPP_STANDARD 17)
@@ -68,9 +74,9 @@ endif ()
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
 #-Weffc++ is removed else fmtlib does not compile - because it's a little ...s
 
-
 include_directories(src)
 include_directories(external/include)
+
 include_directories(${fast_float_SOURCE_DIR}/include)
 include_directories(${zstd_SOURCE_DIR}/lib)
 
@@ -89,11 +95,46 @@ else()
 endif ()
 
 file(GLOB SOURCES
-    "src/*.c" "src/*.cpp"
+    "src/*.c" "src/*.cpp" "src/*.cxx"
 )
+if (ADD_SWIG)
+    find_package (Python3 COMPONENTS Interpreter Development)
+    find_package (SWIG)
+    include (UseSWIG)
+    set_property(SOURCE src/barch.i PROPERTY CPLUSPLUS ON)
+    if (${Python3_FOUND})
+        message("Python includes:${Python3_INCLUDE_DIRS}")
+        message("Python libraries:${Python3_LIBRARIES} '${PYTHON_LIBRARIES}'")
 
-add_library(barch SHARED ${SOURCES}
-        src/caller.h)
+        include_directories(${Python3_INCLUDE_DIRS})
+        #add_library(barch SHARED ${SOURCES})
+        swig_add_library(barch LANGUAGE python SOURCES src/barch.i ${SOURCES})
+        target_link_libraries(barch PRIVATE ${Python3_LIBRARIES})
+        set(PYTHON_INSTALL_FILES
+                ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.py
+                ${CMAKE_CURRENT_BINARY_DIR}/_${PROJECT_NAME}.so)
+
+        set(SETUP_PY_IN ${CMAKE_CURRENT_SOURCE_DIR}/src/python/setup.py.in)
+        set(SETUP_PY_OUT ${CMAKE_CURRENT_BINARY_DIR}/setup.py)
+        configure_file(${SETUP_PY_IN} ${SETUP_PY_OUT})
+
+        add_custom_target(install-python
+                DEPENDS _${PROJECT_NAME}
+                COMMAND python ${SETUP_PY_OUT} install)
+
+        set(PYBARCH_TEST ON)
+    else ()
+        message("SWIG python interface generation skipped - python not found")
+    endif ()
+else ()
+    message("SWIG local interface not used use -DADD_SWIG=ON")
+    message("building non SWIG library")
+    add_library(barch SHARED ${SOURCES})
+endif ()
+
+
+
+
 
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
@@ -164,3 +205,4 @@ else()
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
 
 endif ()
+

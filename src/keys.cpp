@@ -96,6 +96,45 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     }
     return 0;
 }
+std::string encoded_key_as_string(art::value_type key) {
+    double dk;
+    float fk;
+    int64_t ik;
+    int32_t sk;
+    const char *k;
+    //size_t kl;
+    const unsigned char *enck = key.bytes;
+    unsigned key_len = key.size;
+    // TODO: integers sometimes go in here as one longer than they should be
+    // we make the test a little more slack
+    if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
+        ik = conversion::enc_bytes_to_int(enck, key_len);
+        if (*enck == art::tdouble) {
+            memcpy(&dk, &ik, sizeof(ik));
+            return std::to_string(dk);
+        } else {
+            return std::to_string(ik);
+        }
+    } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
+        sk = conversion::enc_bytes_to_int32(enck, key_len);
+        if (*enck == art::tfloat) {
+            memcpy(&fk, &sk, sizeof(sk));
+            return std::to_string(fk);
+        } else {
+            return std::to_string(sk);
+        }
+    } else if (key_len >= 1 && *enck == art::tstring) {
+        k = (const char *) &enck[1];
+        // kl = key_len - 2;
+        return k;
+
+    } else if (key_len >= 1 && (*enck == art::tcomposite)) {
+        return encoded_key_as_string(key.sub(2));
+    } else {
+        abort();
+    }
+    return "";
+}
 
 unsigned log_encoded_key(art::value_type key, bool start) {
     double dk;

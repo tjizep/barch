@@ -35,6 +35,9 @@ namespace art {
         bool evict_allkeys_random{false};
         bool evict_volatile_ttl{false};
         bool log_page_access_trace{false};
+        std::string external_host{"localhost"};
+        std::string bind_interface{"127.0.0.1"};
+        int listen_port{12145};
     };
 
     int register_valkey_configuration(ValkeyModuleCtx *ctx);
@@ -79,6 +82,8 @@ namespace art {
     bool get_use_vmm_memory();
 
     int set_configuration_value(ValkeyModuleString *name, ValkeyModuleString *value);
+    int set_configuration_value(const std::string& name, const std::string &val);
+
     const std::vector<size_t>& get_shard_count();
 }
 #endif //CONFIGURATION_H

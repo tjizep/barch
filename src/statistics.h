@@ -1,7 +1,7 @@
 #pragma once
 #include <atomic>
 #include <exception>
-
+#include "logger.h"
 namespace statistics {
     /**
      * size stats
@@ -45,10 +45,23 @@ namespace statistics {
     extern std::atomic<uint64_t> incr_ops;
     extern std::atomic<uint64_t> decr_ops;
     extern std::atomic<uint64_t> update_ops;
+    /**
+     * replication + network stats
+     */
+    namespace repl {
+        extern std::atomic<uint64_t> push_connections_open;
+        extern std::atomic<uint64_t> key_add_recv;
+        extern std::atomic<uint64_t> key_rem_recv;
+        extern std::atomic<uint64_t> bytes_recv;
+        extern std::atomic<uint64_t> bytes_sent;
+        extern std::atomic<uint64_t> out_queue_size;
+        extern std::atomic<uint64_t> instructions_failed;
+    }
 }
 
 template<typename Ext>
 static void throw_exception(const char *name) {
     ++statistics::exceptions_raised;
+    art::std_err("exception", name);
     throw Ext(name);
 }

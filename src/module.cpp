@@ -5,6 +5,9 @@
 #include "module.h"
 #include "keys.h"
 art::tree *ad{};
+thread_local uint64_t stream_write_ctr = 0;
+thread_local uint64_t stream_read_ctr = 0;
+
 static std::shared_mutex shared{};
 constants Constants{};
 static std::vector<art::tree *> shards{};

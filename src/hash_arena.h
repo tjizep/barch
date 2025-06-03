@@ -527,12 +527,18 @@ namespace arena {
         bool empty() const {
             return page_data_size == 0;
         }
-        bool save(const std::string &filename, const std::function<void(std::ofstream &)> &extra) const;
+        bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const;
 
-        bool load(const std::string &filename, const std::function<void(std::ifstream &)> &extra);
+        bool load(const std::string &filename, const std::function<void(std::istream &)> &extra);
 
-        static bool arena_read(base_hash_arena &arena, const std::function<void(std::ifstream &)> &extra,
+        bool retrieve(std::istream& in, const std::function<void(std::istream &)> &extra);
+
+        bool send(std::ostream &out, const std::function<void(std::ostream &)> &extra, bool write_version) const ;
+
+        static bool arena_read(base_hash_arena &arena, const std::function<void(std::istream &)> &extra,
                                const std::string &filename);
+        static bool arena_retrieve(base_hash_arena &arena, std::istream& in, const std::function<void(std::istream &)> &exre);
+        static bool arena_send(base_hash_arena &arena, std::istream& in);
     };
 
     struct hash_arena {
@@ -618,12 +624,19 @@ namespace arena {
             main.borrow(other.main);
         }
 
-        bool save(const std::string &filename, const std::function<void(std::ofstream &)> &extra) const {
+        bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const {
             return main.save(filename, extra);
         };
+        bool send(std::ostream& out, const std::function<void(std::ostream &)> &extra) const {
+            return main.send(out, extra, true);
+        };
 
-        bool load(const std::string &filename, const std::function<void(std::ifstream &)> &extra) {
+        bool load(const std::string &filename, const std::function<void(std::istream &)> &extra) {
             return main.load(filename, extra);
+        };
+
+        bool receive(std::istream& in, const std::function<void(std::istream &)> &extra) {
+            return main.retrieve(in, extra);
         };
 
         uint8_t *get_alloc_page_data(logical_address r, size_t size) {

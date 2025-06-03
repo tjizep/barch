@@ -93,10 +93,9 @@ void insert_ordered(composite &score_key, composite &member_key, art::value_type
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    art_insert(t, {}, sk, value, update, [](const art::node_ptr &) -> void {
-    });
-    art_insert(t, {}, mk, sk, update, [](const art::node_ptr &) -> void {
-    });
+    storage_release release(t->latch);
+    t->insert(sk, value, update);
+    t->insert(mk, sk, update);
 }
 
 void remove_ordered(composite &score_key, composite &member_key) {
@@ -111,8 +110,9 @@ void remove_ordered(composite &score_key, composite &member_key) {
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    art_delete(t, sk);
-    art_delete(t, mk);
+    storage_release release(t->latch);
+    t->remove(sk);
+    t->remove(mk);
 }
 
 void insert_ordered(ordered_keys &thing, bool update = false) {
@@ -151,7 +151,7 @@ int ZADD(caller& call, const arg_t &argv) {
     };
     auto fcfk = [&](const art::node_ptr &val) -> void {
         if (val.is_leaf) {
-            art_delete(t, val.const_leaf()->get_value());
+            t->remove(val.const_leaf()->get_value());
         }
         --fkadded;
     };
@@ -225,8 +225,6 @@ int ZREM(caller& call, const arg_t& argv) {
     }
     auto t = get_art(argv[1]);
     storage_release release(t->latch);
-
-
     auto container = conversion::convert(key);
     query q1, qmember;
     q1->create({container});
@@ -248,7 +246,7 @@ int ZREM(caller& call, const arg_t& argv) {
             auto kscore = byscore.key();
             if (!kscore.starts_with(member_prefix)) break;
             auto fkmember = byscore.value();
-            art_delete(t, fkmember);
+            t->remove(fkmember);
             if (byscore.remove()) {
                 ++removed;
             }

@@ -687,7 +687,7 @@ art::value_type art::iterator::value() const {
 bool art::iterator::remove() const {
     if (end()) return false;
     auto bef = t->size;
-    art_delete(t, key());
+    t->remove(key());
     return bef > t->size;
 }
 
@@ -1598,7 +1598,7 @@ bool art::tree::save() {
     bool saved = false;
     node_ptr troot;
     size_t tsize;
-    auto save_stats_and_root = [&](std::ofstream &of) {
+    auto save_stats_and_root = [&](std::ostream &of) {
         if (!saved) {
             abort_with("synch error");
         }
@@ -1626,7 +1626,7 @@ bool art::tree::save() {
     }
 
 
-    if (!get_nodes().save_extra(nodes, ".dat", [&](std::ofstream &) {
+    if (!get_nodes().save_extra(nodes, ".dat", [&](std::ostream &) {
     })) {
         return false;
     }
@@ -1639,7 +1639,54 @@ bool art::tree::save() {
             "seconds");
     return true;
 }
+bool art::tree::send(std::ostream& out) {
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    auto *t = this;
+    if (nodes.get_main().get_bytes_allocated()==0) return true;
+    bool saved = false;
+    node_ptr troot;
+    size_t tsize;
+    auto save_stats_and_root = [&](std::ostream &of) {
+        if (!saved) {
+            abort_with("synch error");
+        }
+        stats_to_stream(of);
+        auto root = logical_address(troot.logical);
+        writep(of, root);
+        writep(of, troot.is_leaf);
+        writep(of, tsize);
+    };
 
+    auto st = std::chrono::high_resolution_clock::now();
+    transaction tx(this); // stabilize main while saving
+    arena::hash_arena leaves{get_leaves().get_name()};
+    arena::hash_arena nodes{get_nodes().get_name()};
+    {
+        storage_release release(latch); // only lock during partial copy
+        tsize = t->size;
+        troot = t->root;
+        saved = true;
+        leaves.borrow(get_leaves().get_main());
+        nodes.borrow(get_nodes().get_main());
+    }
+    if (!get_leaves().send_extra(leaves,out, save_stats_and_root)) {
+        return false;
+    }
+
+
+    if (!get_nodes().send_extra(nodes, out, [&](std::ostream &) {
+    })) {
+        return false;
+    }
+
+    auto current = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
+    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
+
+    std_log("sent barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+            "seconds");
+    return true;
+}
 bool art::tree::load() {
 
     //
@@ -1650,7 +1697,7 @@ bool art::tree::load() {
         logical_address root{nullptr};
         bool is_leaf = false;
         // save stats in the leaf storage
-        auto load_stats_and_root = [&](std::ifstream &in) {
+        auto load_stats_and_root = [&](std::istream &in) {
             stream_to_stats(in);
 
             readp(in, root);
@@ -1659,13 +1706,62 @@ bool art::tree::load() {
         };
         auto st = std::chrono::high_resolution_clock::now();
 
-        if (!get_nodes().load_extra(".dat", [&](std::ifstream &) {
+        if (!get_nodes().load_extra(".dat", [&](std::istream &) {
         })) {
             return false;
         }
         if (!get_leaves().load_extra(".dat", load_stats_and_root)) {
             return false;
         }
+        root = logical_address{root.address(), this};// translate root to the now
+        if (is_leaf) {
+
+            t->root = node_ptr{root};
+        } else {
+            t->root = resolve_read_node(root);
+        }
+        page_modifications::inc_all_tickers();
+        auto now = std::chrono::high_resolution_clock::now();
+        const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
+        const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
+        std_log("Done loading BARCH, keys loaded:", t->size, "");
+
+        std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
+        std_log("db memory when created", (float) heap::allocated / (1024 * 1024), "Mb");
+    }catch (std::exception &e) {
+        std_log("could not save",e.what());
+        return false;
+    }
+    return true;
+}
+bool art::tree::retrieve(std::istream& in) {
+
+    //
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    try {
+        storage_release release(latch);
+        auto *t = this;
+        logical_address root{nullptr};
+        bool is_leaf = false;
+        // save stats in the leaf storage
+        auto load_stats_and_root = [&](std::istream &in) {
+            stream_to_stats(in);
+
+            readp(in, root);
+            readp(in, is_leaf);
+            readp(in, t->size);
+        };
+        auto st = std::chrono::high_resolution_clock::now();
+
+        if (!get_leaves().receive_extra(in, load_stats_and_root)) {
+            return false;
+        }
+
+        if (!get_nodes().receive_extra(in, [&](std::istream &) {
+        })) {
+            return false;
+        }
+
         root = logical_address{root.address(), this};// translate root to the now
         if (is_leaf) {
 
@@ -1768,4 +1864,33 @@ void art::tree::update_trace(int direction) {
         }
     }
 #endif
+}
+bool art::tree::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
+    return this->insert({}, key, value, update, fc);
+}
+bool art::tree::insert(const key_spec& options, value_type key, value_type value, bool update, const NodeResult &fc) {
+    //storage_release release(latch);
+    size_t before = size;
+    art_insert(this, options, key, value, update, fc);
+    if (size > before) {
+
+    }
+    return size > before;
+}
+bool art::tree::insert(value_type key, value_type value, bool update) {
+    return this->insert(key, value, update, [](const node_ptr &) {
+
+    }) ;
+}
+bool art::tree::remove(value_type key, const NodeResult &fc) {
+    //storage_release release(latch);
+    size_t before = size;
+    art_delete(this, key, fc);
+    if (size < before) {
+        // replicate the delete
+    }
+    return size < before;
+}
+bool art::tree::remove(value_type key) {
+    return this->remove(key, [](const node_ptr &) {});
 }

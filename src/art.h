@@ -8,7 +8,7 @@
 #include "keyspec.h"
 #include "value_type.h"
 #include "vector_stream.h"
-
+#include "server.h"
 typedef std::unique_lock<std::shared_mutex> write_lock;
 typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
 //!typedef basic_ovectorstream<std::vector<char> >    ovectorstream;
@@ -92,7 +92,7 @@ namespace art {
         std::shared_mutex save_load_mutex{};
         bool opt_use_trace = true;
         node_ptr last_leaf_added{};
-
+        barch::repl::client repl_client{};
 
         void clear_trace() {
             if (opt_use_trace)
@@ -124,7 +124,11 @@ namespace art {
 
         bool save();
 
+        bool send(std::ostream& out);
+
         bool load();
+
+        bool retrieve(std::istream& in);
 
         void begin();
 
@@ -136,6 +140,12 @@ namespace art {
 
         void update_trace(int direction);
 
+        bool insert(const key_spec& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
+        bool insert(value_type key, value_type value, bool update = true);
+
+        bool remove(value_type key, const NodeResult &fc);
+        bool remove(value_type key);
 
         node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
         node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c);

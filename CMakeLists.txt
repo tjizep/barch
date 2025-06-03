@@ -9,7 +9,9 @@ endif ()
 if (NOT ADD_FAST_FLOAT)
     set(ADD_FAST_FLOAT ON)
 endif ()
-
+if (NOT USE_ASIO)
+    set(USE_ASIO ON)
+endif ()
 if (NOT ADD_SWIG)
     set(ADD_SWIG ON)
 endif ()
@@ -33,7 +35,32 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 
 include(FetchContent)
-
+if (USE_ASIO)
+    message("Using msgpack")
+    FetchContent_Declare(
+            msgpack
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            SOURCE_SUBDIR build/cmake
+            URL "https://github.com/msgpack/msgpack-c/archive/refs/tags/cpp-7.0.0.tar.gz"
+    )
+    FetchContent_MakeAvailable(msgpack)
+    include_directories(${msgpack_SOURCE_DIR}/include)
+else ()
+    message("Boost.Asio not used use -USE_ASIO=ON")
+endif()
+if (USE_ASIO)
+    message("Using std alone ASIO")
+    FetchContent_Declare(
+            asio
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            SOURCE_SUBDIR build/cmake
+            URL "https://sourceforge.net/projects/asio/files/asio/1.30.2%20%28Stable%29/asio-1.30.2.tar.gz/download"
+    )
+    FetchContent_MakeAvailable(asio)
+    include_directories(${asio_SOURCE_DIR}/include)
+else ()
+    message("asio not used use -USE_ASIO=ON")
+endif()
 if (ADD_ZSTD_COMPRESSION)
     message("Using ZSTD compression")
     set(ZSTD_BUILD_STATIC ON)
@@ -79,6 +106,7 @@ include_directories(external/include)
 
 include_directories(${fast_float_SOURCE_DIR}/include)
 include_directories(${zstd_SOURCE_DIR}/lib)
+
 
 if (NOT TEST_OD)
     message("Testing not enabled Use -DTEST_OD=ON")

@@ -39,3 +39,13 @@ std::atomic<uint64_t> statistics::max_ops = 0;
 std::atomic<uint64_t> statistics::incr_ops = 0;
 std::atomic<uint64_t> statistics::decr_ops = 0;
 std::atomic<uint64_t> statistics::update_ops = 0;
+
+namespace statistics::repl {
+    std::atomic<uint64_t> push_connections_open = 0;
+    std::atomic<uint64_t> key_add_recv = 0;
+    std::atomic<uint64_t> key_rem_recv = 0;
+    std::atomic<uint64_t> bytes_recv = 0;
+    std::atomic<uint64_t> out_queue_size = 0;
+    std::atomic<uint64_t> instructions_failed = 0;
+    std::atomic<uint64_t> bytes_sent = 0;
+}

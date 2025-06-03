@@ -245,7 +245,7 @@ int SET(caller& call,const arg_t& argv) {
         }
     };
 
-    art_insert(t, spec, converted.get_value(), v, fc);
+    t->insert(spec, converted.get_value(), v, true, fc);
     if (spec.get) {
         if (reply.size) {
 
@@ -419,7 +419,7 @@ int ADD(caller& call, const arg_t& argv) {
     };
     auto converted = conversion::convert(k);
     art::key_spec spec(argv);
-    art_insert_no_replace(t, spec, converted.get_value(), v, fc);
+    t->insert(spec, converted.get_value(), v, false, fc);
 
     return call.simple("OK");
 }
@@ -701,10 +701,71 @@ int LOAD(caller& call, const arg_t& argv) {
     }
     return call.simple("OK");
 }
+int START(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto interface = argv[1];
+    auto port = argv[2];
+    barch::server::start(interface.chars(), atoi(port.chars()));
+    return call.simple("OK");
+}
+int STOP(caller& call, const arg_t& ) {
+    barch::server::stop();
+    return call.simple("OK");
+}
+int PING(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto interface = argv[1];
+    auto port = argv[2];
+    //barch::server::start(interface.chars(), atoi(port.chars()));
+    barch::repl::client cli(interface.chars(), atoi(port.chars()), 0);
+    if (!cli.ping()) {
+        return call.error("could not ping");
+    }
+    return call.simple("OK");
+}
+int RETRIEVE(caller& call, const arg_t& argv) {
+
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto host = argv[1];
+    auto port = argv[2];
+
+    for (auto shard : art::get_shard_count()) {
+        barch::repl::client cli(host.chars(), atoi(port.chars()), shard);
+        if (!cli.load(shard)) {
+            if (shard > 0) {
+                for (auto s : art::get_shard_count()) {
+                    get_art(s)->clear();
+                }
+            }
+
+            return call.error("could not load shard - all shards cleared");
+        }
+    }
+    return call.simple("OK");
+}
 
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, LOAD);
+}
+int cmd_PING(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PING);
+}
+int cmd_RETRIEVE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, RETRIEVE);
+}
+int cmd_START(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, START);
+}
+int cmd_STOP(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, STOP);
 }
 
 int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
@@ -1055,6 +1116,18 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_CreateCommand(ctx, NAME(EVICT), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(START), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(STOP), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PING), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(RETRIEVE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+            return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(CONFIG), "write", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -1094,14 +1167,6 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         if (get_art(shard) == nullptr) {
             return VALKEYMODULE_ERR;
         }
-    }
-    try {
-        for (auto shard : art::get_shard_count()) {
-            get_art(shard)->load();
-        }
-    } catch (std::exception &e) {
-        art::std_log(e.what());
-        return VALKEYMODULE_ERR;
     }
     return VALKEYMODULE_OK;
 }

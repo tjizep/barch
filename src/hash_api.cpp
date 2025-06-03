@@ -40,7 +40,7 @@ int api_hset(caller& cc, const arg_t& args) {
         art::value_type key = t->query.create();
         art::value_type val = args[n+1];
 
-        art_insert(t, {}, key, val, fc);
+        t->insert(key, val, true, fc);
         t->query.pop_back();
         ++responses;
     }
@@ -285,7 +285,6 @@ int HDEL(caller& call, const arg_t &argv) {
         return call.null();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
     t->query.create({conversion::convert(n)});
     auto del_report = [&](art::node_ptr) -> void {
         ++responses;
@@ -302,7 +301,7 @@ int HDEL(caller& call, const arg_t &argv) {
         t->query.push(converted);
 
         art::value_type key = t->query.create();
-        art_delete(get_art(argv[1]), key, del_report);
+        get_art(argv[1])->remove(key, del_report);
         t->query.pop_back();
     }
     call.long_long(responses);
@@ -324,7 +323,6 @@ int HGETDEL(caller& call, const arg_t &argv) {
         return call.null();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
 
     if (argv[2] != "FIELDS") {
         return call.wrong_arity();
@@ -344,7 +342,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
         t->query.push(converted);
 
         art::value_type key = t->query.create();
-        art_delete(get_art(argv[1]), key, del_report);
+        get_art(argv[1])->remove(key, del_report);
         t->query.pop_back();
     }
     call.long_long(responses);

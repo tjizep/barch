@@ -213,7 +213,7 @@ void art::tree::run_defrag() {
                 page_iterator(page.first, page.second, [&fc,this](const leaf *l) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
-                    art_delete(this, l->get_key(), fc);
+                    this->remove(l->get_key(), fc);
                     if (c1 - 1 != this->size) {
                         abort_with("key does not exist anymore");
                     }
@@ -223,7 +223,7 @@ void art::tree::run_defrag() {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
                     options.ttl = l->ttl();
-                    art_insert(this, options, l->get_key(), l->get_value(), fc);
+                    art_insert(this, options, l->get_key(), l->get_value(), true, fc);
                     if (c1 + 1 != this->size) {
                         abort_with("key not added");
                     }

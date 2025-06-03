@@ -8,6 +8,7 @@
 #include <string>
 #include <regex>
 #include "art.h"
+#include "server.h"
 
 #define unused_arg
 art::configuration_record record;
@@ -25,6 +26,9 @@ static std::string log_page_access_trace{};
 static std::string save_interval{};
 static std::string max_modifications_before_save{};
 static std::string use_vmm_mem{};
+static std::string external_host{};
+static std::string bind_interface{"127.0.0.1"};
+static std::string listen_port{};
 
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
@@ -45,9 +49,7 @@ static ValkeyModuleString *GetMaxMemoryRatio(const char *unused_arg, void *unuse
     return ValkeyModule_CreateString(nullptr, max_memory_bytes.c_str(), max_memory_bytes.length());;
 }
 
-static int SetMaxMemoryBytes(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                             ValkeyModuleString **unused_arg) {
-    std::string test_max_memory_bytes = ValkeyModule_StringPtrLen(val, nullptr);
+static int SetMaxMemoryBytes(const std::string& test_max_memory_bytes) {
     std::regex check("[0-9]+[k,K,m,M,g,G]?");
     if (!std::regex_match(test_max_memory_bytes, check)) {
         return VALKEYMODULE_ERR;
@@ -82,6 +84,11 @@ static int SetMaxMemoryBytes(const char *unused_arg, ValkeyModuleString *val, vo
     return VALKEYMODULE_OK;
 }
 
+static int SetMaxMemoryBytes(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string test_max_memory_bytes = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMaxMemoryBytes(test_max_memory_bytes);
+}
 static int ApplyMaxMemoryRatio(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
@@ -112,17 +119,70 @@ static int ApplyUseVMMemory(ValkeyModuleCtx *unused_arg, void *unused_arg, Valke
     //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;
 }
+// ===========================================================================================================
+static ValkeyModuleString *GetExternalHost(const char *unused_arg, void *unused_arg) {
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, external_host.c_str(), external_host.length());
+}
 
+static int SetExternalHost(const std::string& test_external_host) {
+    std::unique_lock lock(config_mutex);
+    if (test_external_host.empty()) {
+        return VALKEYMODULE_ERR;
+    }
+    external_host = test_external_host;
+    record.external_host = external_host;
+    return VALKEYMODULE_OK;
+}
+static int SetExternalHost(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                          ValkeyModuleString **unused_arg) {
+    std::string test_external_host = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetExternalHost(test_external_host);
+}
+static int ApplyExternalHost(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    //get_art()->get_leaves().set_opt_use_vmm(record.use_vmm_memory);
+    //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+static ValkeyModuleString *GetListenPort(const char *unused_arg, void *unused_arg) {
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, listen_port.c_str(), listen_port.length());
+}
+
+static int SetListenPort(const std::string& test_listen_port) {
+    std::unique_lock lock(config_mutex);
+    if (test_listen_port.empty()) {
+        return VALKEYMODULE_ERR;
+    }
+    listen_port = test_listen_port;
+    record.listen_port = atoi(external_host.c_str());
+    return VALKEYMODULE_OK;
+}
+
+static int SetListenPort(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                          ValkeyModuleString **unused_arg) {
+    std::string test_listen_port = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetListenPort(test_listen_port);
+}
+
+static int ApplyListenPort(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    barch::server::stop();
+    barch::server::start(record.bind_interface, record.listen_port);
+    //get_art()->get_leaves().set_opt_use_vmm(record.use_vmm_memory);
+    //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
+    return VALKEYMODULE_OK;
+}
 // ===========================================================================================================
 static ValkeyModuleString *GetCompressionType(const char *unused_arg, void *unused_arg) {
     std::unique_lock lock(config_mutex);
     return ValkeyModule_CreateString(nullptr, compression_type.c_str(), compression_type.length());
 }
 
-static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                              ValkeyModuleString **unused_arg) {
+static int SetCompressionType(const std::string& val) {
     std::unique_lock lock(config_mutex);
-    std::string test_compression_type = ValkeyModule_StringPtrLen(val, nullptr);
+    std::string test_compression_type = val;
     std::transform(test_compression_type.begin(), test_compression_type.end(), test_compression_type.begin(),
                    ::tolower);
 
@@ -133,7 +193,11 @@ static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, v
     record.compression = (compression_type == "zstd") ? art::compression_zstd : art::compression_none;
     return VALKEYMODULE_OK;
 }
-
+static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                              ValkeyModuleString **unused_arg) {
+    std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetCompressionType(value);
+}
 static int ApplyCompressionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     //art::get_leaves().set_opt_enable_compression(art::get_compression_enabled());
     //art::get_nodes().set_opt_enable_compression(art::get_compression_enabled());
@@ -146,10 +210,9 @@ static ValkeyModuleString *GetMaxDefragPageCount(const char *unused_arg, void *u
     return ValkeyModule_CreateString(nullptr, max_defrag_page_count.c_str(), max_defrag_page_count.length());
 }
 
-static int SetMaxDefragPageCount(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                                 ValkeyModuleString **unused_arg) {
+static int SetMaxDefragPageCount(const std::string& val) {
     std::unique_lock lock(config_mutex);
-    std::string test_max_defrag_page_count = ValkeyModule_StringPtrLen(val, nullptr);
+    std::string test_max_defrag_page_count = val;
     std::regex check("[0-9]+");
     if (!std::regex_match(test_max_defrag_page_count, check)) {
         return VALKEYMODULE_ERR;
@@ -159,7 +222,11 @@ static int SetMaxDefragPageCount(const char *unused_arg, ValkeyModuleString *val
     record.max_defrag_page_count = std::strtoll(test_max_defrag_page_count.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
-
+static int SetMaxDefragPageCount(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMaxDefragPageCount(value);
+}
 static int ApplyMaxDefragPageCount(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
@@ -170,10 +237,8 @@ static ValkeyModuleString *GetIterationWorkerCount(const char *unused_arg, void 
     return ValkeyModule_CreateString(nullptr, iteration_worker_count.c_str(), iteration_worker_count.length());
 }
 
-static int SetIterationWorkerCount(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                                   ValkeyModuleString **unused_arg) {
+static int SetIterationWorkerCount(const std::string& test_iteration_worker_count) {
     std::unique_lock lock(config_mutex);
-    std::string test_iteration_worker_count = ValkeyModule_StringPtrLen(val, nullptr);
     std::regex check("[0-9]+");
     if (!std::regex_match(test_iteration_worker_count, check)) {
         return VALKEYMODULE_ERR;
@@ -183,7 +248,11 @@ static int SetIterationWorkerCount(const char *unused_arg, ValkeyModuleString *v
     record.iteration_worker_count = std::strtoll(test_iteration_worker_count.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
-
+static int SetIterationWorkerCount(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                   ValkeyModuleString **unused_arg) {
+    std::string test_iteration_worker_count = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetIterationWorkerCount(test_iteration_worker_count);
+}
 static int ApplyIterationWorkerCount(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
@@ -194,10 +263,8 @@ static ValkeyModuleString *GetSaveInterval(const char *unused_arg, void *unused_
     return ValkeyModule_CreateString(nullptr, save_interval.c_str(), save_interval.length());
 }
 
-static int SetSaveInterval(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                           ValkeyModuleString **unused_arg) {
+static int SetSaveInterval(const std::string& test_save_interval) {
     std::unique_lock lock(config_mutex);
-    std::string test_save_interval = ValkeyModule_StringPtrLen(val, nullptr);
     std::regex check("[0-9]+");
     if (!std::regex_match(test_save_interval, check)) {
         return VALKEYMODULE_ERR;
@@ -206,6 +273,11 @@ static int SetSaveInterval(const char *unused_arg, ValkeyModuleString *val, void
     char *ep = nullptr;
     record.save_interval = std::strtoll(test_save_interval.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
+}
+static int SetSaveInterval(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                           ValkeyModuleString **unused_arg) {
+    std::string test_save_interval = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetSaveInterval(test_save_interval);
 }
 
 static int ApplySaveInterval(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -219,10 +291,9 @@ static ValkeyModuleString *GetMaxModificationsBeforeSave(const char *unused_arg,
                                      max_modifications_before_save.length());
 }
 
-static int SetMaxModificationsBeforeSave(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                                         ValkeyModuleString **unused_arg) {
+static int SetMaxModificationsBeforeSave(const std::string& test_max_modifications_before_save) {
     std::unique_lock lock(config_mutex);
-    std::string test_max_modifications_before_save = ValkeyModule_StringPtrLen(val, nullptr);
+
     std::regex check("[0-9]+");
     if (!std::regex_match(test_max_modifications_before_save, check)) {
         return VALKEYMODULE_ERR;
@@ -231,6 +302,11 @@ static int SetMaxModificationsBeforeSave(const char *unused_arg, ValkeyModuleStr
     char *ep = nullptr;
     record.max_modifications_before_save = std::strtoll(test_max_modifications_before_save.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
+}
+static int SetMaxModificationsBeforeSave(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                         ValkeyModuleString **unused_arg) {
+    std::string test_max_modifications_before_save = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMaxModificationsBeforeSave(test_max_modifications_before_save);
 }
 
 static int ApplyMaxModificationsBeforeSave(ValkeyModuleCtx *unused_arg, void *unused_arg,
@@ -244,10 +320,8 @@ static ValkeyModuleString *GetMaintenancePollDelay(const char *unused_arg, void 
     return ValkeyModule_CreateString(nullptr, maintenance_poll_delay.c_str(), maintenance_poll_delay.length());
 }
 
-static int SetMaintenancePollDelay(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                                   ValkeyModuleString **unused_arg) {
+static int SetMaintenancePollDelay(const std::string& test_maintenance_poll_delay) {
     std::unique_lock lock(config_mutex);
-    std::string test_maintenance_poll_delay = ValkeyModule_StringPtrLen(val, nullptr);
     std::regex check("[0-9]+");
     if (!std::regex_match(test_maintenance_poll_delay, check)) {
         return VALKEYMODULE_ERR;
@@ -256,6 +330,12 @@ static int SetMaintenancePollDelay(const char *unused_arg, ValkeyModuleString *v
     char *ep = nullptr;
     record.maintenance_poll_delay = std::strtoll(test_maintenance_poll_delay.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
+}
+
+static int SetMaintenancePollDelay(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                   ValkeyModuleString **unused_arg) {
+    std::string test_maintenance_poll_delay = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMaintenancePollDelay(test_maintenance_poll_delay);
 }
 
 static int ApplyMaintenancePollDelay(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -268,12 +348,17 @@ static ValkeyModuleString *GetMinFragmentation(const char *unused_arg, void *unu
     return ValkeyModule_CreateString(nullptr, min_fragmentation_ratio.c_str(), min_fragmentation_ratio.length());
 }
 
-static int SetMinFragmentation(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                               ValkeyModuleString **unused_arg) {
+static int SetMinFragmentation(const std::string& val) {
     std::unique_lock lock(config_mutex);
-    min_fragmentation_ratio = ValkeyModule_StringPtrLen(val, nullptr);
+    min_fragmentation_ratio = val;
     record.min_fragmentation_ratio = std::stof(min_fragmentation_ratio);
     return VALKEYMODULE_OK;
+}
+
+static int SetMinFragmentation(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    std::string min_fragmentation_ratio = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMinFragmentation(min_fragmentation_ratio);
 }
 
 static int ApplyMinFragmentation(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -286,10 +371,8 @@ static ValkeyModuleString *GetActiveDefragType(const char *unused_arg, void *unu
     return ValkeyModule_CreateString(nullptr, active_defrag.c_str(), active_defrag.length());
 }
 
-static int SetActiveDefragType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                               ValkeyModuleString **unused_arg) {
+static int SetActiveDefragType(std::string test_active_defrag) {
     std::unique_lock lock(config_mutex);
-    std::string test_active_defrag = ValkeyModule_StringPtrLen(val, nullptr);
     std::transform(test_active_defrag.begin(), test_active_defrag.end(), test_active_defrag.begin(), ::tolower);
 
     if (!check_type(test_active_defrag, valid_defrag)) {
@@ -302,7 +385,11 @@ static int SetActiveDefragType(const char *unused_arg, ValkeyModuleString *val, 
 
     return VALKEYMODULE_OK;
 }
-
+static int SetActiveDefragType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    std::string test_active_defrag = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetActiveDefragType(test_active_defrag);
+}
 static int ApplyActiveDefragType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
@@ -313,10 +400,8 @@ static ValkeyModuleString *GetEnablePageTrace(const char *unused_arg, void *unus
     return ValkeyModule_CreateString(nullptr, log_page_access_trace.c_str(), log_page_access_trace.length());
 }
 
-static int SetEnablePageTrace(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                              ValkeyModuleString **unused_arg) {
+static int SetEnablePageTrace(std::string test_log_page_access_trace) {
     std::unique_lock lock(config_mutex);
-    std::string test_log_page_access_trace = ValkeyModule_StringPtrLen(val, nullptr);
     std::transform(test_log_page_access_trace.begin(), test_log_page_access_trace.end(),
                    test_log_page_access_trace.begin(), ::tolower);
 
@@ -329,6 +414,11 @@ static int SetEnablePageTrace(const char *unused_arg, ValkeyModuleString *val, v
             log_page_access_trace == "on" || log_page_access_trace == "true" || log_page_access_trace == "yes";
 
     return VALKEYMODULE_OK;
+}
+static int SetEnablePageTrace(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                              ValkeyModuleString **unused_arg) {
+    std::string test_log_page_access_trace = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetEnablePageTrace(test_log_page_access_trace);
 }
 
 static int ApplyEnablePageTrace(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -345,10 +435,8 @@ static ValkeyModuleString *GetEvictionType(const char *unused_arg, void *unused_
 }
 
 
-static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                           ValkeyModuleString **unused_arg) {
+static int SetEvictionType(std::string test_eviction_type) {
     std::unique_lock lock(config_mutex);
-    std::string test_eviction_type = ValkeyModule_StringPtrLen(val, nullptr);
     std::transform(test_eviction_type.begin(), test_eviction_type.end(), test_eviction_type.begin(), ::tolower);
 
     if (!check_type(test_eviction_type, valid_evictions)) {
@@ -370,6 +458,12 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
     // volatile-ttl -> Remove the key with the nearest expire time (minor TTL)
     record.evict_volatile_ttl = (eviction_type.find("volatile-ttl") != std::string::npos);
     return VALKEYMODULE_OK;
+}
+
+static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                           ValkeyModuleString **unused_arg) {
+    std::string test_eviction_type = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetEvictionType(test_eviction_type);
 }
 
 int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
@@ -403,43 +497,62 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "use_vmm_mem", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetUseVMMemory, SetUseVMMemory,
                                              ApplyUseVMMemory, nullptr);
-    return ret;
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "listen_port", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetListenPort, SetListenPort,
+                                             ApplyListenPort, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "external_host", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetExternalHost, SetExternalHost,
+                                             ApplyExternalHost, nullptr);return ret;
 }
 
 int art::set_configuration_value(ValkeyModuleString *Name, ValkeyModuleString *Value) {
     std::string name = ValkeyModule_StringPtrLen(Name, nullptr);
     std::string val = ValkeyModule_StringPtrLen(Value, nullptr);
+    return set_configuration_value(name, val);
+}
+int art::set_configuration_value(const std::string& name, const std::string &val) {
     art::std_log("setting", name, "to", val);
 
     if (name == "compression") {
-        int r = SetCompressionType(nullptr, Value, nullptr, nullptr);
+        int r = SetCompressionType(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyCompressionType(nullptr, nullptr, nullptr);
         }
         return r;
     } else if (name == "eviction_policy") {
-        return SetEvictionType(nullptr, Value, nullptr, nullptr);
+        return SetEvictionType(val);
     } else if (name == "max_memory_bytes") {
-        return SetMaxMemoryBytes(nullptr, Value, nullptr, nullptr);
+        return SetMaxMemoryBytes(val);
     } else if (name == "min_fragmentation_ratio") {
-        return SetMinFragmentation(nullptr, Value, nullptr, nullptr);
+        return SetMinFragmentation(val);
     } else if (name == "active_defrag") {
-        return SetActiveDefragType(nullptr, Value, nullptr, nullptr);
+        return SetActiveDefragType(val);
     } else if (name == "iteration_worker_count") {
-        return SetIterationWorkerCount(nullptr, Value, nullptr, nullptr);
+        return SetIterationWorkerCount(val);
     } else if (name == "maintenance_poll_delay") {
-        return SetMaintenancePollDelay(nullptr, Value, nullptr, nullptr);
+        return SetMaintenancePollDelay(val);
     } else if (name == "max_defrag_page_count") {
-        return SetMaxDefragPageCount(nullptr, Value, nullptr, nullptr);
+        return SetMaxDefragPageCount(val);
     } else if (name == "save_interval") {
-        return SetSaveInterval(nullptr, Value, nullptr, nullptr);
+        return SetSaveInterval(val);
     } else if (name == "max_modifications_before_save") {
-        return SetMaxModificationsBeforeSave(nullptr, Value, nullptr, nullptr);
+        return SetMaxModificationsBeforeSave(val);
+    } else if (name == "external_host") {
+        return SetExternalHost(val);
+    } else if (name == "listen_port") {
+        auto r = SetListenPort(val);
+        if ( VALKEYMODULE_OK == r) {
+            return ApplyListenPort(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "log_page_access_trace") {
-        auto r = SetEnablePageTrace(nullptr, Value, nullptr, nullptr);
+        auto r = SetEnablePageTrace(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyEnablePageTrace(nullptr, nullptr, nullptr);
         }

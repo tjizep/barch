@@ -30,6 +30,9 @@ namespace art {
         explicit value_type(const heap::vector<uint8_t> &value): bytes(value.data()), size(value.size()) {
         }
 
+        explicit value_type(const std::vector<uint8_t> &value): bytes(value.data()), size(value.size()) {
+        }
+
         explicit value_type(const heap::small_vector<uint8_t> &value): bytes(value.data()), size(value.size()) {
         }
 
@@ -116,10 +119,7 @@ namespace art {
             return {bytes + start, length};
         }
 
-        const unsigned char &operator[](unsigned i) const {
-            // TODO: this is a hack fix because there's some BUG in the insert code
-            // were assuming that the key has a magic 0 byte allocated after the last byte
-            // however this is not so for data
+        const unsigned char &operator[](unsigned i) const { // line with most keywords
             if (i < size) {
                 return bytes[i];
             }

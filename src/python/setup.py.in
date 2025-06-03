@@ -28,7 +28,7 @@ if __name__ == '__main__':
         name='${PROJECT_NAME}',
         version='${PROJECT_VERSION}',
         packages=['barch'],
-        license='Apache License 2.0',
+        license='MIT License',
         author='*',
         author_email='*',
         cmdclass={'install': CompiledLibInstall}

@@ -48,5 +48,8 @@ struct vector_stream {
     bool good() const {
         return pos <= buf.size();
     }
+    bool fail() const {
+        return !good();
+    }
 };
 #endif //VECTOR_STREAM_H

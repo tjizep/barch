@@ -7,31 +7,38 @@
 #include "keys.h"
 #include "caller.h"
 #include "module.h"
+#include "configuration.h"
+
 
 struct swig_caller : caller {
     std::vector<std::string> results{};
+    std::vector<std::string> errors{};
     [[nodiscard]] int wrong_arity()  override {
-        results.push_back("wrong_arity");
+        errors.emplace_back("wrong_arity");
         return 0;
     }
     [[nodiscard]] int syntax_error() override {
-        results.push_back("syntax_error");
+        errors.emplace_back("syntax_error");
         return 0;
     }
     [[nodiscard]] int error() override {
-        results.push_back("error");
+        errors.emplace_back("error");
         return 0;
     }
     [[nodiscard]] int error(const char * e) override {
-        results.push_back(e);
+        errors.emplace_back(e);
         return 0;
     }
     int key_check_error(art::value_type k) override {
-        results.push_back(k.chars());
+        if (k.empty()) {
+            errors.emplace_back("Key should not be empty");
+        }else {
+            errors.emplace_back("Unspecified key error");
+        }
         return 0;
     }
     int null() override {
-        results.push_back("");
+        results.emplace_back("");
         return 0;
     }
     [[nodiscard]] int ok() override {
@@ -42,32 +49,32 @@ struct swig_caller : caller {
         return 0;
     }
     int long_long(int64_t l) override {
-        results.push_back(std::to_string(l));
+        results.emplace_back(std::to_string(l));
         return 0;
     }
     int double_(double l) override {
-        results.push_back(std::to_string(l));
+        results.emplace_back(std::to_string(l));
         return 0;
     }
     int vt(art::value_type v) override {
-        results.push_back(v.chars());
+        results.emplace_back(v.chars());
         return 0;
     }
     int simple(const char * v) override {
-        results.push_back(v);
+        results.emplace_back(v);
         return 0;
     }
 
     int start_array() override {
-        results.push_back("start_array");
+        results.emplace_back("start_array");
         return 0;
     }
     int end_array(size_t ) override {
-        results.push_back("end_array");
+        results.emplace_back("end_array");
         return 0;
     }
     int reply_encoded_key(art::value_type key) override {
-        results.push_back(encoded_key_as_string(key));
+        results.emplace_back(encoded_key_as_string(key));
         return 0;
     }
     template<typename TC>
@@ -77,10 +84,49 @@ struct swig_caller : caller {
         for (const auto& s : params) {
             args.push_back({&*s.begin(),s.length()});
         }
-        return f(*this, args);
+        int r = f(*this, args);
+        if (!errors.empty()) {
+            r = -1;
+        }
+        return r;
     }
 };
 
+void setConfiguration(const std::string& name, const std::string& value) {
+    art::set_configuration_value(name,value);
+}
+void load(const std::string &host, const std::string& port) {
+    std::vector<std::string_view> params = {"b", host, port};
+    swig_caller sc;
+    int r = sc.call(params, RETRIEVE);
+    if (r == 0) {
+        art::std_log("loaded all shards from", host, port);
+    }
+}
+void start(const std::string &host, const std::string& port) {
+    std::vector<std::string_view> params = {"b", host, port};
+    swig_caller sc;
+    int r = sc.call(params, START);
+    if (r == 0) {
+        art::std_log("started server on", host, port);
+    }
+}
+void stop() {
+    std::vector<std::string_view> params = {"b"};
+    swig_caller sc;
+    int r = sc.call(params, STOP);
+    if (r == 0) {
+        art::std_log("stopped server");
+    }
+}
+void ping(const std::string &host, const std::string& port) {
+    std::vector<std::string_view> params = {"b", host, port};
+    swig_caller sc;
+    int r = sc.call(params, PING);
+    if (r != 0) {
+        art::std_log("ping failed", host, port);
+    }
+}
 KeyMap::KeyMap() {
 
 }
@@ -89,8 +135,8 @@ void KeyMap::set(const std::string &key, const std::string &value) {
     std::vector<std::string_view> params = {"b", key, value};
     swig_caller sc;
     int r = sc.call(params, SET);
-    if (r == 0) {
-
+    if (r != 0) {
+        art::std_err("set failed", key, value);
     }
 
 }
@@ -162,4 +208,48 @@ void KeyMap::decr(const std::string& key, double by) {
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
+std::vector<std::string> KeyMap::glob(const std::string &glob, int max_) const {
+    std::vector<std::string_view> params;
+    if ( max_ > 0) {
+        params = {"b", glob, "MAX", std::to_string(max_)} ;
+    }else {
+        params = {"b", glob} ;
+    }
+    swig_caller sc;
+    int r = sc.call(params, ::KEYS);
+    if (r == 0) {
+        return sc.results;
+    }
+    return {};
+}
+size_t KeyMap::globCount(const std::string& glob) const {
+    std::vector<std::string_view> params = {"b", glob, "COUNT"};
+    swig_caller sc;
+    int r = sc.call(params, ::KEYS);
+    if (r == 0) {
+        return sc.results.empty() ? 0: std::atoll(sc.results[0].c_str());
+    }
+    return 0;
+
+}
+std::string KeyMap::lowerBound(const std::string& key) const {
+
+    std::vector<std::string_view> params = {"b", key};
+    swig_caller sc;
+    int r = sc.call(params, ::LB);
+    if (r == 0) {
+        return sc.results.empty() ? "": sc.results[0];
+    }
+    return "";
+}
+
+void KeyMap::load() {
+    std::vector<std::string_view> params = {"b"};
+    swig_caller sc;
+    int r = sc.call(params, ::LOAD);
+    if (r != 0) {
+        art::std_err("load failed");
+    }
+}
+
 

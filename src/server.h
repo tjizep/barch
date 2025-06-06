@@ -23,21 +23,30 @@ namespace barch {
     };
 
     namespace repl {
-        struct client {
-            heap::vector<uint8_t> buffer{};
-            std::thread tpoll{};
-            bool connected = false;
+        struct repl_dest {
             std::string host {};
             int port {};
             size_t shard {};
+            repl_dest(std::string host, int port, size_t shard) : host(std::move(host)), port(port), shard(shard) {}
+            repl_dest() = default;
+            repl_dest(const repl_dest&) = default;
+            repl_dest(repl_dest&&) = default;
+            repl_dest& operator=(const repl_dest&) = default;
+        };
+        struct client : repl_dest {
+            heap::vector<uint8_t> buffer{};
+            heap::vector<repl_dest> destinations{};
+            std::mutex latch{};
+            std::thread tpoll{};
+            bool connected = false;
             client() = default;
-            client(std::string host, int port, size_t shard) : host(std::move(host)), port(port), shard(shard) {}
+            client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}
             ~client();
             [[nodiscard]] bool begin_transaction() const ;
             [[nodiscard]] bool commit_transaction() const ;
             bool load(size_t shard);
             [[nodiscard]] bool ping() const;
-            void connect(std::string host, int port, size_t shard, bool add_as_sink);
+            void add_destination(std::string host, int port, size_t shard);
             bool insert(art::value_type key, art::value_type value);
             bool remove(art::value_type key);
         };

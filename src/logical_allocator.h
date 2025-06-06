@@ -1004,10 +1004,12 @@ public:
 struct alloc_pair {
 
     int sentinel = 1<<24;
+    size_t shard{};
     std::mutex latch{};
+
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
-    explicit alloc_pair(size_t shard) : nodes(this,"nodes_"+std::to_string(shard)),leaves(this,"leaves_"+std::to_string(shard)) {}
+    explicit alloc_pair(size_t shard) : shard(shard), nodes(this,"nodes_"+std::to_string(shard)),leaves(this,"leaves_"+std::to_string(shard)) {}
     logical_allocator& get_nodes() {
         return nodes;
     };

@@ -709,6 +709,16 @@ int START(caller& call, const arg_t& argv) {
     barch::server::start(interface.chars(), atoi(port.chars()));
     return call.simple("OK");
 }
+int PUBLISH(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto interface = argv[1];
+    auto port = argv[2];
+    for (auto shard: art::get_shard_count()) {
+        if (!get_art(shard)->publish(interface.chars(), atoi(port.chars()))) {}
+    }
+    return call.simple("OK");
+}
 int STOP(caller& call, const arg_t& ) {
     barch::server::stop();
     return call.simple("OK");
@@ -745,6 +755,11 @@ int RETRIEVE(caller& call, const arg_t& argv) {
         }
     }
     return call.simple("OK");
+}
+
+int cmd_PUBLISH(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, LOAD);
 }
 
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1123,6 +1138,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(PING), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PUBLISH), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(RETRIEVE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)

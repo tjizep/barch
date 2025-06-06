@@ -42,6 +42,16 @@ using asio::ip::tcp;
 
 
 namespace barch {
+    struct net_stat {
+        net_stat() {
+            stream_write_ctr = 0;
+            stream_read_ctr = 0;
+        }
+        ~net_stat() {
+            statistics::repl::bytes_recv += stream_read_ctr;
+            statistics::repl::bytes_sent += stream_write_ctr;
+        }
+    };
     template<typename T>
     void push_size_t(heap::vector<uint8_t>& buffer,T s) {
         uint8_t tb[sizeof(T)];
@@ -88,7 +98,10 @@ namespace barch {
                         art::std_err("accept error",error.message(),error.value());
                         return; // this happens if there are not threads
                     }
-                    process_data(endpoint);
+                    {
+                        net_stat stat;
+                        process_data(endpoint);
+                    }
                     start_accept();
                 });
 
@@ -171,17 +184,18 @@ namespace barch {
                 tpoll.join();
         };
 
-        void client::connect(std::string host, int port, size_t shard, bool add_as_sink) {
-            this->host = std::move(host);
-            this->port = port;
-            this->shard = shard;
-
-            connected = true;
-            tpoll = std::thread([this,add_as_sink]() {
+        void client::add_destination(std::string host, int port, size_t shard) {
+            auto dest = repl_dest{std::move(host), port, shard};
+            std::lock_guard lock(this->latch);
+            destinations.emplace_back(dest);
+            if (!connected) {
+                connected = true;
+                tpoll = std::thread([this]() {
                 heap::vector<uint8_t> to_send;
                 to_send.reserve(rpc_max_buffer);
                 try {
                     asio::io_service io;
+
                     asio::ip::tcp::endpoint remote(asio::ip::address_v4::from_string(this->host),this->port);
                     auto conn = (tcp::socket{io});
                     while (connected) {
@@ -190,8 +204,7 @@ namespace barch {
                         }
 
                         {
-                            auto t = get_art(this->shard);
-                            std::lock_guard lock(t->latch);
+                            std::lock_guard lock(this->latch);
                             to_send.swap(this->buffer);
                         }
 
@@ -207,6 +220,8 @@ namespace barch {
                     art::std_err("failed to connect to remote server", this->host, this->port);
                 }
             });
+            }
+
         }
 
 
@@ -262,8 +277,7 @@ namespace barch {
                 }
                 int cmd = cmd_stream;
                 uint32_t s = shard;
-                stream_write_ctr = 0;
-                stream_read_ctr = 0;
+                net_stat stats;
                 writep(stream,cmd);
                 writep(stream, s);
                 if (!get_art(shard)->retrieve(stream)) {
@@ -271,6 +285,7 @@ namespace barch {
                     return false;
                 }
                 stream.close();
+
                 return true;
             }catch (std::exception& e) {
                 art::std_err("failed to load shard", shard, e.what());
@@ -293,6 +308,7 @@ namespace barch {
                     art::std_err("failed to connect to remote server", host, this->port);
                     return false;
                 }
+                net_stat stats;
                 int cmd = cmd_ping;
                 writep(stream,cmd);
                 int ping_result = 0;

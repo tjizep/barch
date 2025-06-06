@@ -25,6 +25,6 @@ enum {
     non_leaf_type = 2,
     comparable_key_static_size = 32,
     node_pointer_storage_size = 64,
-    log_streams = 1
+    log_streams = 0
 };
 #endif //CONSTANTS_H

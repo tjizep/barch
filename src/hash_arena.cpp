@@ -29,7 +29,6 @@ void append(std::ostream &out, size_t page, const storage &s, const uint8_t *dat
     writep(out, data, size);
 }
 
-static const uint64_t alloc_record_size = sizeof(uint64_t) * 2;
 
 /// file io
 bool arena::base_hash_arena::save(const std::string &filename,

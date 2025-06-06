@@ -22,6 +22,7 @@ int LB(caller& call, const arg_t& argv);
 int REM(caller& call, const arg_t& argv);
 int SIZE(caller& call, const arg_t& argv);
 int SAVE(caller& call, const arg_t& argv);
+int PUBLISH(caller& call, const arg_t& argv);
 int LOAD(caller& call, const arg_t& argv);
 int START(caller& call, const arg_t& argv);
 int STOP(caller& call, const arg_t& argv);

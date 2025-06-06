@@ -1590,7 +1590,10 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::pages_compressed);
     readp(in, statistics::max_page_bytes_uncompressed);
 }
-
+bool art::tree::publish(std::string host, int port) {
+    repl_client.add_destination(std::move(host), port, shard);
+    return true;
+}
 bool art::tree::save() {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;

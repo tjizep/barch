@@ -120,6 +120,7 @@ namespace art {
 
         ~tree();
 
+        bool publish(std::string host, int port);
         void run_defrag();
 
         bool save();

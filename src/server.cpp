@@ -31,6 +31,7 @@
 enum {
     cmd_ping = 1,
     cmd_stream = 2,
+    cmd_apply_changes = 3
 };
 enum {
     opt_max_workers = 8,
@@ -59,6 +60,15 @@ namespace barch {
         memcpy(tb, &size, sizeof(T));
         buffer.insert(buffer.end(), tb, tb + sizeof(T));
     }
+    template<typename T>
+    T get_size_t(size_t at, const heap::vector<uint8_t>& buffer) {
+        if (sizeof(T) > buffer.size()-at) {
+            throw_exception<std::runtime_error>("invalid size");
+        }
+        T size = 0;
+        memcpy(&size, buffer.data()+at, sizeof(T));
+        return ntohl(size);
+    }
     template<typename TBF>
     void timeout(TBF&& check, int max_to = 1000) {
         int to = max_to;
@@ -71,6 +81,13 @@ namespace barch {
         push_size_t<uint32_t>(buffer, v.size);
         buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
     }
+    std::pair<const art::value_type*,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
+        auto size = get_size_t<uint32_t>(at, buffer);
+        if (buffer.size()+sizeof(size)+at < size) {
+            throw_exception<std::runtime_error>("invalid size");
+        }
+        return {reinterpret_cast<const art::value_type*>(buffer.data() + at + sizeof(uint32_t)), at+sizeof(size)+size};
+    }
     host_id get_host_id() {
         return {"localhost", getpid() % 10000000000000000000ULL};
     }
@@ -81,6 +98,7 @@ namespace barch {
         tcp::acceptor acc;
         std::string interface;
         uint_least16_t port;
+        heap::vector<uint8_t> buffer{};
 
         void stop() {
             io.stop();
@@ -141,6 +159,41 @@ namespace barch {
                         art::std_err("failed to stream shard", e.what());
                     }
                     break;
+                case cmd_apply_changes:
+                    try {
+                        uint32_t buffers_size = 0;
+                        uint32_t shard = 0;
+                        readp(stream,buffers_size);
+                        readp(stream,shard);
+                        buffer.resize(buffers_size);
+                        readp(stream,buffer.data(),buffers_size);
+                        for (size_t i = 0; i < buffers_size;) {
+                            char cmd = buffer[i];
+                            switch (cmd) {
+                                case 'i': {
+                                        auto key = get_value(i+1, buffer);
+                                        auto value = get_value(key.second, buffer);
+                                        get_art(shard)->insert(*key.first, *value.first,true);
+                                        i += value.second;
+                                    }
+                                    break;
+                                    case 'r': {
+                                        auto key = get_value(i+1, buffer);
+                                        get_art(shard)->remove(*key.first);
+                                        i += key.second;
+                                    }
+                                    break;
+                                default:
+                                    art::std_err("unknown command", cmd);
+                                    return;
+                                    break;
+                            }
+                        }
+
+                    }catch (std::exception& e) {
+                        art::std_err("failed to apply changes", e.what());
+                    }
+                    break;
                 default:
                     art::std_err("unknown command", cmd);
             }
@@ -195,29 +248,39 @@ namespace barch {
                 to_send.reserve(rpc_max_buffer);
                 try {
                     asio::io_service io;
-
-                    asio::ip::tcp::endpoint remote(asio::ip::address_v4::from_string(this->host),this->port);
-                    auto conn = (tcp::socket{io});
+                    heap::vector<repl_dest> dests;
                     while (connected) {
-                        if (!conn.is_open()) {
-                            connected = false;
-                        }
 
                         {
                             std::lock_guard lock(this->latch);
                             to_send.swap(this->buffer);
+                            dests = destinations;
                         }
-
                         if (!to_send.empty()) {
-                            //to_send.clear();
+                            for (auto& dest : dests) {
+                                try {
+                                    tcp::iostream stream(dest.host, std::to_string(dest.port));
+                                    if (stream.fail()) {
+                                        continue;
+                                    }
+                                    int cmd = cmd_apply_changes;
+                                    uint32_t buffers_size = to_send.size();
+                                    uint32_t sh = this->shard;
+                                    writep(stream, cmd);
+                                    writep(stream, sh);
+                                    writep(stream, buffers_size);
+                                    writep(stream, to_send.data(), to_send.size());
+                                }catch (std::exception& e) {
+                                    art::std_err("failed to write to stream", e.what(),"to",dest.host,dest.port);
+                                }
+                            }
+                            to_send.clear();
                         }
-
                         std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
-
                     }
                 }catch (std::exception& e) {
                     this->connected = false;
-                    art::std_err("failed to connect to remote server", this->host, this->port);
+                    art::std_err("failed to connect to remote server", this->host, this->port,e.what());
                 }
             });
             }
@@ -228,8 +291,8 @@ namespace barch {
         bool client::insert(art::value_type key, art::value_type value) {
 
             if (!connected) {
-                ++statistics::repl::instructions_failed;
-                return false;
+                if (!destinations.empty()) ++statistics::repl::instructions_failed;
+                return destinations.empty();
             }
 
             if (buffer.size() > rpc_max_buffer) {
@@ -245,8 +308,8 @@ namespace barch {
 
         bool client::remove(art::value_type key) {
             if (!connected) {
-                ++statistics::repl::instructions_failed;
-                return false;
+                if (!destinations.empty()) ++statistics::repl::instructions_failed;
+                return destinations.empty();
             }
             if (buffer.size() > rpc_max_buffer) {
                 ++statistics::repl::instructions_failed;

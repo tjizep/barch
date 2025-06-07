@@ -21,7 +21,7 @@ static void writep(std::ostream &of, const T &data) {
     stream_write_ctr += sizeof(data);
 }
 template<typename T>
-static void writep(std::ostream &of, T* data, size_t size) {
+static void writep(std::ostream &of, const T* data, size_t size) {
     if (log_streams==1) art::std_log("writing",size,"bytes","at",stream_write_ctr);
     of.write(reinterpret_cast<const char *>(data), size);
     if (of.fail()) {

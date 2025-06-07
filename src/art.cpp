@@ -1875,9 +1875,7 @@ bool art::tree::insert(const key_spec& options, value_type key, value_type value
     //storage_release release(latch);
     size_t before = size;
     art_insert(this, options, key, value, update, fc);
-    if (size > before) {
-
-    }
+    this->repl_client.insert(key, value);
     return size > before;
 }
 bool art::tree::insert(value_type key, value_type value, bool update) {
@@ -1892,6 +1890,7 @@ bool art::tree::remove(value_type key, const NodeResult &fc) {
     if (size < before) {
         // replicate the delete
     }
+    this->repl_client.remove(key);
     return size < before;
 }
 bool art::tree::remove(value_type key) {

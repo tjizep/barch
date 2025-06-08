@@ -10,7 +10,6 @@
 #include <utility>
 enum {
     rpc_client_context_size = 128,
-    rpc_max_buffer = 32768,
     rpc_server_version = 21
 };
 namespace barch {
@@ -34,9 +33,9 @@ namespace barch {
             repl_dest& operator=(const repl_dest&) = default;
         };
         struct client : repl_dest {
+            std::atomic<uint32_t> messages = 0;
             heap::vector<uint8_t> buffer{};
             heap::vector<repl_dest> destinations{};
-            std::mutex latch{};
             std::thread tpoll{};
             bool connected = false;
             client() = default;
@@ -46,6 +45,7 @@ namespace barch {
             [[nodiscard]] bool commit_transaction() const ;
             bool load(size_t shard);
             [[nodiscard]] bool ping() const;
+            // dese function should already latched by the shard calling them
             void add_destination(std::string host, int port, size_t shard);
             bool insert(art::value_type key, art::value_type value);
             bool remove(art::value_type key);

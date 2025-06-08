@@ -134,7 +134,7 @@ namespace barch {
             stream_read_ctr = 0;
             auto stream = tcp::iostream{};
             stream.socket() = std::move(endpoint);
-            art::std_log("process data");
+
             readp(stream,cmd);
             switch (cmd) {
                 case cmd_ping:
@@ -164,25 +164,41 @@ namespace barch {
                     try {
                         uint32_t buffers_size = 0;
                         uint32_t shard = 0;
+                        uint32_t count = 0;
+                        uint32_t actual = 0;
                         readp(stream,shard);
+                        readp(stream,count);
                         readp(stream,buffers_size);
+
                         buffer.resize(buffers_size);
                         readp(stream,buffer.data(),buffers_size);
+                        auto t = get_art(shard);
                         for (size_t i = 0; i < buffers_size;) {
                             char cmd = buffer[i];
                             switch (cmd) {
                                 case 'i': {
                                         auto key = get_value(i+1, buffer);
                                         auto value = get_value(key.second, buffer);
+                                        storage_release release(t->latch);
 
-                                        get_art(shard)->insert(key.first, value.first,true);
-                                        i += value.second;
+                                        art_insert(t,{}, key.first, value.first,true,
+                                            [](const art::node_ptr &){
+                                                ++statistics::repl::key_add_recv_applied;
+                                        });
+                                        ++statistics::repl::key_add_recv;
+                                        ++actual;
+                                        i = value.second;
                                     }
                                     break;
                                     case 'r': {
                                         auto key = get_value(i+1, buffer);
-                                        get_art(shard)->remove(key.first);
-                                        i += key.second;
+                                        storage_release release(t->latch);
+                                        art_delete(t, key.first,[](const art::node_ptr &) {
+                                            ++statistics::repl::key_rem_recv_applied;
+                                        });
+                                        i = key.second;
+                                        ++statistics::repl::key_rem_recv;
+                                        ++actual;
                                     }
                                     break;
                                 default:
@@ -191,7 +207,7 @@ namespace barch {
                                     break;
                             }
                         }
-
+                        art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                     }catch (std::exception& e) {
                         art::std_err("failed to apply changes", e.what());
                     }
@@ -241,21 +257,32 @@ namespace barch {
 
         void client::add_destination(std::string host, int port, size_t shard) {
             auto dest = repl_dest{std::move(host), port, shard};
-            std::lock_guard lock(this->latch);
+            for (auto& d : destinations) {
+                if (d.host == dest.host && d.port == dest.port) {
+                    art::std_err("destination already added", d.host, d.port);
+                    return;
+                }
+            }
             destinations.emplace_back(dest);
             if (!connected) {
                 connected = true;
                 tpoll = std::thread([this]() {
                 heap::vector<uint8_t> to_send;
-                to_send.reserve(rpc_max_buffer);
+                to_send.reserve(art::get_rpc_max_buffer());
                 try {
                     asio::io_service io;
                     heap::vector<repl_dest> dests;
+                    uint32_t messages = 0;
+                    int64_t total_messages = 0;
                     while (connected) {
 
                         {
-                            std::lock_guard lock(this->latch);
+                            std::lock_guard lock(get_art(this->shard)->latch);
                             to_send.swap(this->buffer);
+                            messages = this->messages;
+                            total_messages += messages;
+                            this->buffer.clear();
+                            this->messages = 0;
                             dests = destinations;
                         }
                         if (!to_send.empty()) {
@@ -270,15 +297,20 @@ namespace barch {
                                     uint32_t sh = this->shard;
                                     writep(stream, cmd);
                                     writep(stream, sh);
+                                    writep(stream, messages);
                                     writep(stream, buffers_size);
                                     writep(stream, to_send.data(), to_send.size());
+                                    stream.flush();
+                                    stream.close();
+                                    art::std_log("sent", buffers_size, "bytes to", dest.host, dest.port, "total sent",total_messages,"still queued",(uint32_t)this->messages,"iq",(long long)statistics::repl::insert_requests);
                                 }catch (std::exception& e) {
                                     art::std_err("failed to write to stream", e.what(),"to",dest.host,dest.port);
                                 }
                             }
                             to_send.clear();
                         }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
+                        if (this->messages == 0) // send asap
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     }
                 }catch (std::exception& e) {
                     this->connected = false;
@@ -297,14 +329,17 @@ namespace barch {
                 return destinations.empty();
             }
 
-            if (buffer.size() > rpc_max_buffer) {
+            if (buffer.size() > art::get_rpc_max_buffer()) {
                 ++statistics::repl::instructions_failed;
+                art::std_err("replication buffer size exceeded", buffer.size());
                 return false;
             }
 
             buffer.push_back('i');
             push_value(buffer, key);
             push_value(buffer, value);
+            ++statistics::repl::insert_requests;
+            ++messages;
             return true;
         }
 
@@ -313,12 +348,17 @@ namespace barch {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-            if (buffer.size() > rpc_max_buffer) {
+            if (buffer.size() > art::get_rpc_max_buffer()) {
                 ++statistics::repl::instructions_failed;
+                art::std_err("replication buffer size exceeded", buffer.size());
                 return false;
             }
+
+
             buffer.push_back('r');
             push_value(buffer, key);
+            ++statistics::repl::remove_requests;
+            ++messages;
             return true;
         }
         [[nodiscard]] bool client::begin_transaction() const {

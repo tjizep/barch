@@ -273,17 +273,20 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, long long by) {
         return call.key_check_error(k);
 
     auto converted = conversion::convert(k);
-    int r = call.error();
+    int r = -1;
     long long l = 0;
     auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
         if (value.null()) {
             return nullptr;
         }
-        r = call.ok();
-        return leaf_numeric_update(l, value, by);
+        auto val = leaf_numeric_update(l, value, by);
+        if (!val.null()) {
+            r = 0;
+        }
+        return val;
     };
     t->update(converted.get_value(), updater);
-    if (r == call.ok()) {
+    if (r == 0) {
         return call.long_long(l);
     } else {
         return call.null();
@@ -302,7 +305,7 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
         return call.key_check_error(k);
 
     auto converted = conversion::convert(k);
-    int r = call.error();
+    int r = -1;
     double l = 0;
     auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
         if (value.null()) {
@@ -310,13 +313,13 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
         }
         auto val = leaf_numeric_update(l, value, by);
         if (!val.null()) {
-            r = call.ok();
+            r = 0;
         }
         return val;
     };
 
     t->update(converted.get_value(), updater);
-    if (r == call.ok()) {
+    if (r == 0) {
         return call.double_(l);
     } else {
         return call.null();

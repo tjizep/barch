@@ -190,11 +190,11 @@ int ZADD(caller& call, const arg_t &argv) {
         } else {
             if (zspec.LFI) {
                 auto member_key = t->cmd_ZADD_qindex.create({IX_MEMBER, container, member}); //, score
-                art_insert(t, {}, member_key, qkey, true, fcfk);
+                t->insert({}, member_key, qkey, true, fcfk);
                 ++fkadded;
             }
 
-            art_insert(t, {}, qkey, {}, !zspec.NX, fc);
+            t->insert({}, qkey, {}, !zspec.NX, fc);
         }
         ++responses;
     }

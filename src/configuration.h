@@ -23,6 +23,7 @@ namespace art {
         uint64_t max_defrag_page_count{1};
         uint64_t save_interval{120 * 1000};
         uint64_t max_modifications_before_save{1300000};
+        uint64_t rpc_max_buffer{32768*4};
         unsigned iteration_worker_count{2};
         float min_fragmentation_ratio = 0.6f;
         bool use_vmm_memory{true};
@@ -80,6 +81,8 @@ namespace art {
     bool get_log_page_access_trace();
 
     bool get_use_vmm_memory();
+
+    uint64_t get_rpc_max_buffer();
 
     int set_configuration_value(ValkeyModuleString *name, ValkeyModuleString *value);
     int set_configuration_value(const std::string& name, const std::string &val);

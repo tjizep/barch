@@ -51,11 +51,15 @@ namespace statistics {
     namespace repl {
         extern std::atomic<uint64_t> push_connections_open;
         extern std::atomic<uint64_t> key_add_recv;
+        extern std::atomic<uint64_t> key_add_recv_applied;
         extern std::atomic<uint64_t> key_rem_recv;
+        extern std::atomic<uint64_t> key_rem_recv_applied;
         extern std::atomic<uint64_t> bytes_recv;
         extern std::atomic<uint64_t> bytes_sent;
         extern std::atomic<uint64_t> out_queue_size;
         extern std::atomic<uint64_t> instructions_failed;
+        extern std::atomic<uint64_t> insert_requests;
+        extern std::atomic<uint64_t> remove_requests;
     }
 }
 

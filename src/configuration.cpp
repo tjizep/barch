@@ -29,6 +29,7 @@ static std::string use_vmm_mem{};
 static std::string external_host{};
 static std::string bind_interface{"127.0.0.1"};
 static std::string listen_port{};
+static std::string rpc_max_buffer{};
 
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
@@ -43,6 +44,57 @@ bool check_type(const std::string &et, const VT &valid) {
         return et.find(val) != std::string::npos;
     });
 }
+
+static ValkeyModuleString *GetRPCMaxBuffer(const char *unused_arg, void *unused_arg) {
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, max_memory_bytes.c_str(), max_memory_bytes.length());;
+}
+
+static int SetRPCMaxBuffer(const std::string& test_rpc_max_buffer) {
+    std::regex check("[0-9]+[k,K,m,M,g,G]?");
+    if (!std::regex_match(test_rpc_max_buffer, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::unique_lock lock(config_mutex);
+    rpc_max_buffer = test_rpc_max_buffer;
+    char *notn = nullptr;
+    const char *str = rpc_max_buffer.c_str();
+    const char *end = str + rpc_max_buffer.length();
+
+    uint64_t n_rpc_max_buffer = std::strtoll(str, &notn, 10);
+    while (notn != nullptr && notn != end) {
+        switch (*notn) {
+            case 'k':
+            case 'K':
+                n_rpc_max_buffer = n_rpc_max_buffer * 1024;
+                break;
+            case 'm':
+            case 'M':
+                n_rpc_max_buffer = n_rpc_max_buffer * 1024 * 1024;
+                break;
+            case 'g':
+            case 'G':
+                n_rpc_max_buffer = n_rpc_max_buffer * 1024 * 1024 * 1024;
+                break;
+            default: // just skip other noise
+                break;
+        }
+        ++notn;
+    }
+    record.rpc_max_buffer = n_rpc_max_buffer;
+    return VALKEYMODULE_OK;
+}
+
+static int SetRPCMaxBuffer(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string test_rpc_max_buffer = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetRPCMaxBuffer(test_rpc_max_buffer);
+}
+static int ApplyRPCMaxBuffer(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
 
 static ValkeyModuleString *GetMaxMemoryRatio(const char *unused_arg, void *unused_arg) {
     std::unique_lock lock(config_mutex);
@@ -508,7 +560,13 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "external_host", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetExternalHost, SetExternalHost,
-                                             ApplyExternalHost, nullptr);return ret;
+                                             ApplyExternalHost, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_max_buffer", "262144", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetRPCMaxBuffer, SetRPCMaxBuffer,
+                                             ApplyRPCMaxBuffer, nullptr);
+
+    return ret;
 }
 
 int art::set_configuration_value(ValkeyModuleString *Name, ValkeyModuleString *Value) {
@@ -545,6 +603,8 @@ int art::set_configuration_value(const std::string& name, const std::string &val
         return SetMaxModificationsBeforeSave(val);
     } else if (name == "external_host") {
         return SetExternalHost(val);
+    } else if (name == "rpc_max_buffer") {
+        return SetRPCMaxBuffer(val);
     } else if (name == "listen_port") {
         auto r = SetListenPort(val);
         if ( VALKEYMODULE_OK == r) {
@@ -646,6 +706,9 @@ uint64_t art::get_save_interval() {
 uint64_t art::get_max_modifications_before_save() {
     std::unique_lock lock(config_mutex);
     return record.max_modifications_before_save;
+}
+uint64_t art::get_rpc_max_buffer() {
+    return record.rpc_max_buffer;
 }
 
 bool art::get_log_page_access_trace() {

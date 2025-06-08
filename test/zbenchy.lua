@@ -67,7 +67,7 @@ local test = function()
     result[inc()] = {'VALIDS', valids}
     result[inc()] = {'B MEM', vk.call('B.HEAPBYTES')}
     result[inc()] = {'SIZE', vk.call('B.SIZE')}
-    --result[inc()] = {'SAVE B', vk.call('B.SAVE')}
+    result[inc()] = {'SAVE B', vk.call('B.SAVE')}
 
 end
 

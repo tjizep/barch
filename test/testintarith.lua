@@ -5,8 +5,9 @@ vk.call('B.SET','a',0)
 
 assert(vk.call('B.INCR','a')==1)
 assert(vk.call('B.DECR','a')==0)
-vk.call('B.SET','b','-0')
+vk.call('B.SET','b',-0)
 assert(vk.call('B.INCRBY','b',10)==10)
+
 assert(vk.call('B.DECRBY','b',10)==0)
 
 assert(vk.call('B.INCR','a')==1)

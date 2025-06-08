@@ -1883,6 +1883,17 @@ bool art::tree::insert(value_type key, value_type value, bool update) {
 
     }) ;
 }
+void art::tree::update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+    auto repl_updateresult = [&](const node_ptr &leaf) {
+        auto value = updater(leaf);
+        if (value.null()) {
+            return value;
+        }
+        this->repl_client.insert(key, value.const_leaf()->get_value());
+        return value;
+    };
+    art::update(this, key, repl_updateresult);
+}
 bool art::tree::remove(value_type key, const NodeResult &fc) {
     //storage_release release(latch);
     size_t before = size;

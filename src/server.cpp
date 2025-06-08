@@ -81,12 +81,13 @@ namespace barch {
         push_size_t<uint32_t>(buffer, v.size);
         buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
     }
-    std::pair<const art::value_type*,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
+    std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
         if (buffer.size()+sizeof(size)+at < size) {
             throw_exception<std::runtime_error>("invalid size");
         }
-        return {reinterpret_cast<const art::value_type*>(buffer.data() + at + sizeof(uint32_t)), at+sizeof(size)+size};
+        art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
+        return {r, at+sizeof(size)+size};
     }
     host_id get_host_id() {
         return {"localhost", getpid() % 10000000000000000000ULL};
@@ -163,8 +164,8 @@ namespace barch {
                     try {
                         uint32_t buffers_size = 0;
                         uint32_t shard = 0;
-                        readp(stream,buffers_size);
                         readp(stream,shard);
+                        readp(stream,buffers_size);
                         buffer.resize(buffers_size);
                         readp(stream,buffer.data(),buffers_size);
                         for (size_t i = 0; i < buffers_size;) {
@@ -173,13 +174,14 @@ namespace barch {
                                 case 'i': {
                                         auto key = get_value(i+1, buffer);
                                         auto value = get_value(key.second, buffer);
-                                        get_art(shard)->insert(*key.first, *value.first,true);
+
+                                        get_art(shard)->insert(key.first, value.first,true);
                                         i += value.second;
                                     }
                                     break;
                                     case 'r': {
                                         auto key = get_value(i+1, buffer);
-                                        get_art(shard)->remove(*key.first);
+                                        get_art(shard)->remove(key.first);
                                         i += key.second;
                                     }
                                     break;

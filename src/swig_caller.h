@@ -21,9 +21,8 @@ struct swig_caller : caller {
         errors.emplace_back("syntax_error");
         return 0;
     }
-    [[nodiscard]] int error() override {
-        errors.emplace_back("error");
-        return 0;
+    [[nodiscard]] int error() const override {
+        return -1;
     }
     [[nodiscard]] int error(const char * e) override {
         errors.emplace_back(e);

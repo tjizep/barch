@@ -81,7 +81,7 @@ struct vk_caller : caller {
         check_ctx();
         return ValkeyModule_ReplyWithSimpleString(ctx, v);
     };
-    [[nodiscard]] int error() override {
+    [[nodiscard]] int error() const override {
         return VALKEYMODULE_ERR;
     }
     int key_check_error(art::value_type k) override {

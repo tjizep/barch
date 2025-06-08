@@ -9,7 +9,7 @@ struct caller {
     virtual ~caller() = default;
     [[nodiscard]] virtual int wrong_arity() = 0;
     [[nodiscard]] virtual int syntax_error() = 0;
-    [[nodiscard]] virtual int error() = 0;
+    [[nodiscard]] virtual int error() const = 0;
     [[nodiscard]] virtual int error(const char * e) = 0;
     virtual int key_check_error(art::value_type k) = 0;
     virtual int null() = 0;

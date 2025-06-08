@@ -81,7 +81,7 @@ struct ordered_keys {
     art::value_type value;
 };
 
-void insert_ordered(composite &score_key, composite &member_key, art::value_type value, bool update = false) {
+static void insert_ordered(composite &score_key, composite &member_key, art::value_type value, bool update = false) {
     auto sk = score_key.create();
     auto mk = member_key.create();
     if (score_key.comp.size() < 2) {
@@ -93,12 +93,12 @@ void insert_ordered(composite &score_key, composite &member_key, art::value_type
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    storage_release release(t->latch);
+    //storage_release release(t->latch); // the shard should be latched
     t->insert(sk, value, update);
     t->insert(mk, sk, update);
 }
 
-void remove_ordered(composite &score_key, composite &member_key) {
+static void remove_ordered(composite &score_key, composite &member_key) {
     auto sk = score_key.create();
     auto mk = member_key.create();
     if (score_key.comp.size() < 2) {
@@ -110,7 +110,7 @@ void remove_ordered(composite &score_key, composite &member_key) {
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    storage_release release(t->latch);
+    //storage_release release(t->latch); // the shard should be latched
     t->remove(sk);
     t->remove(mk);
 }

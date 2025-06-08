@@ -278,12 +278,10 @@ namespace conversion {
 
     template<typename IntType>
     static bool convert_value(IntType &i, art::value_type v) {
-        if (is_integer(v.chars(), v.size)) {
-            auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
+        auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
 
-            if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size) {
-                return true;
-            }
+        if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size) {
+            return true;
         }
         return false;
     }

@@ -148,6 +148,7 @@ namespace art {
         bool remove(value_type key, const NodeResult &fc);
         bool remove(value_type key);
 
+        void update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
         node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
         node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c);
         node_ptr alloc_8_node_ptr(unsigned nt);

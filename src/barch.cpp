@@ -261,7 +261,7 @@ int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, SET);
 }
-static int BarchMofifyInteger(caller& call,const arg_t& argv, long long by) {
+static int BarchModifyInteger(caller& call,const arg_t& argv, long long by) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
@@ -282,14 +282,15 @@ static int BarchMofifyInteger(caller& call,const arg_t& argv, long long by) {
         r = call.ok();
         return leaf_numeric_update(l, value, by);
     };
-    art::update(t, converted.get_value(), updater);
+    t->update(converted.get_value(), updater);
     if (r == call.ok()) {
         return call.long_long(l);
     } else {
         return call.null();
     }
 }
-    static int BarchMofifyDouble(caller& call,const arg_t& argv, double by) {
+unused(
+static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
@@ -307,20 +308,24 @@ static int BarchMofifyInteger(caller& call,const arg_t& argv, long long by) {
         if (value.null()) {
             return nullptr;
         }
-        r = call.ok();
-        return leaf_numeric_update(l, value, by);
+        auto val = leaf_numeric_update(l, value, by);
+        if (!val.null()) {
+            r = call.ok();
+        }
+        return val;
     };
-    art::update(t, converted.get_value(), updater);
+
+    t->update(converted.get_value(), updater);
     if (r == call.ok()) {
         return call.double_(l);
     } else {
         return call.null();
     }
 }
-
+)
 int INCR(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
-    return BarchMofifyInteger(call, argv, 1);
+    return BarchModifyInteger(call, argv, 1);
 }
 int cmd_INCR(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -330,14 +335,14 @@ int INCRBY(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    double by = 0;
+    long long by = 0;
 
-    if (!conversion::to_double(argv[2], by)) {
-        return call.wrong_arity();
+    if (!conversion::to_ll(argv[2], by)) {
+        return call.error("not a valid integer");
     }
     auto arg2 = argv;
     arg2.pop_back();
-    return BarchMofifyDouble(call, arg2, by);
+    return BarchModifyInteger(call, arg2, by);
 }
 
 int cmd_INCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -346,7 +351,7 @@ int cmd_INCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 int DECR(caller& call, const arg_t& argv) {
     ++statistics::decr_ops;
-    return BarchMofifyInteger(call, argv, -1);
+    return BarchModifyInteger(call, argv, -1);
 }
 int cmd_DECR(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -363,7 +368,7 @@ int DECRBY(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     }
 
-    return BarchMofifyDouble(call,argv, -by);
+    return BarchModifyInteger(call,argv, -by);
 }
 int cmd_DECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -759,7 +764,7 @@ int RETRIEVE(caller& call, const arg_t& argv) {
 
 int cmd_PUBLISH(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
-    return call.vk_call(ctx, argv, argc, LOAD);
+    return call.vk_call(ctx, argv, argc, PUBLISH);
 }
 
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

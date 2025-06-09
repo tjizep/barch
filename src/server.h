@@ -8,6 +8,9 @@
 #include "value_type.h"
 #include <thread>
 #include <utility>
+
+#include "key_options.h"
+
 enum {
     rpc_client_context_size = 128,
     rpc_server_version = 21
@@ -47,7 +50,7 @@ namespace barch {
             [[nodiscard]] bool ping() const;
             // dese function should already latched by the shard calling them
             void add_destination(std::string host, int port, size_t shard);
-            bool insert(art::value_type key, art::value_type value);
+            bool insert(const art::key_options& options, art::value_type key, art::value_type value);
             bool remove(art::value_type key);
         };
     }

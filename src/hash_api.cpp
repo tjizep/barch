@@ -126,16 +126,16 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
         auto ttl = calc(ex_spec.seconds);
         bool do_set = false;
         if (ex_spec.NX) {
-            do_set = !l->is_ttl();
+            do_set = !l->is_expiry();
         }
         if (ex_spec.XX) {
-            do_set = l->is_ttl();
+            do_set = l->is_expiry();
         }
         if (ex_spec.GT) {
-            do_set = (l->ttl() > 0 && l->ttl() < ttl);
+            do_set = (l->expiry_ms() > 0 && l->expiry_ms() < ttl);
         }
         if (ex_spec.LT) {
-            do_set = (l->ttl() > 0 && l->ttl() >= ttl);
+            do_set = (l->expiry_ms() > 0 && l->expiry_ms() >= ttl);
         }
         if (do_set) {
             r |= call.long_long(1);
@@ -410,7 +410,7 @@ int HGET_(caller& call, const arg_t& argv,
 int HTTL(caller& call,const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
-        long long ttl = l->ttl();
+        long long ttl = l->expiry_ms();
         if (ttl == 0) {
             call.long_long(-1);
         } else {
@@ -478,7 +478,7 @@ int cmd_HMGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int HEXPIRETIME(caller& call, const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
-        call.long_long(l->ttl() / 1000);
+        call.long_long(l->expiry_ms() / 1000);
     };
     return HGET_(call, argv, reporter);
 }

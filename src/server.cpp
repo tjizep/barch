@@ -40,8 +40,6 @@ enum {
 };
 using asio::ip::tcp;
 
-
-
 namespace barch {
     struct net_stat {
         net_stat() {
@@ -77,10 +75,29 @@ namespace barch {
             --to;
         }
     }
+    void push_options(heap::vector<uint8_t>& buffer, const art::key_options& options) {
+        buffer.insert(buffer.end(), options.flags, 1);
+        if (options.has_expiry())
+            push_size_t<uint64_t>(buffer, options.get_expiry());
+    }
+    std::pair<art::key_options,size_t> get_options(size_t at, const heap::vector<uint8_t>& buffer) {
+        if (buffer.size() <= at+sizeof(uint64_t) + 1) {
+            throw_exception<std::runtime_error>("invalid size");
+        }
+        art::key_options r;
+        r.flags = buffer[at];
+        if (r.has_expiry()) {
+            r.set_expiry(get_size_t<uint64_t>(at+1, buffer));
+            return {r, at+sizeof(uint64_t)+1};
+        }
+        return {r, at+1};
+    }
     void push_value(heap::vector<uint8_t>& buffer, art::value_type v) {
         push_size_t<uint32_t>(buffer, v.size);
         buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
     }
+
+
     std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
         if (buffer.size()+sizeof(size)+at < size) {
@@ -129,11 +146,12 @@ namespace barch {
             }
         }
         void process_data( tcp::socket& endpoint) {
+            auto stream = tcp::iostream{};
+            stream.socket() = std::move(endpoint);
             int cmd = 0;
             stream_write_ctr = 0;
             stream_read_ctr = 0;
-            auto stream = tcp::iostream{};
-            stream.socket() = std::move(endpoint);
+            art::key_spec spec;
 
             readp(stream,cmd);
             switch (cmd) {
@@ -177,11 +195,12 @@ namespace barch {
                             char cmd = buffer[i];
                             switch (cmd) {
                                 case 'i': {
-                                        auto key = get_value(i+1, buffer);
+                                        auto options = get_options(i+1, buffer);
+                                        auto key = get_value(options.second, buffer);
                                         auto value = get_value(key.second, buffer);
                                         storage_release release(t->latch);
 
-                                        art_insert(t,{}, key.first, value.first,true,
+                                        art_insert(t, options.first, key.first, value.first,true,
                                             [](const art::node_ptr &){
                                                 ++statistics::repl::key_add_recv_applied;
                                         });
@@ -207,7 +226,7 @@ namespace barch {
                                     break;
                             }
                         }
-                        art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
+                        //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                     }catch (std::exception& e) {
                         art::std_err("failed to apply changes", e.what());
                     }
@@ -302,7 +321,7 @@ namespace barch {
                                     writep(stream, to_send.data(), to_send.size());
                                     stream.flush();
                                     stream.close();
-                                    art::std_log("sent", buffers_size, "bytes to", dest.host, dest.port, "total sent",total_messages,"still queued",(uint32_t)this->messages,"iq",(long long)statistics::repl::insert_requests);
+                                    //art::std_log("sent", buffers_size, "bytes to", dest.host, dest.port, "total sent",total_messages,"still queued",(uint32_t)this->messages,"iq",(long long)statistics::repl::insert_requests);
                                 }catch (std::exception& e) {
                                     art::std_err("failed to write to stream", e.what(),"to",dest.host,dest.port);
                                 }
@@ -322,7 +341,7 @@ namespace barch {
         }
 
 
-        bool client::insert(art::value_type key, art::value_type value) {
+        bool client::insert(const art::key_options& options, art::value_type key, art::value_type value) {
 
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
@@ -336,6 +355,7 @@ namespace barch {
             }
 
             buffer.push_back('i');
+            push_options(buffer, options);
             push_value(buffer, key);
             push_value(buffer, value);
             ++statistics::repl::insert_requests;

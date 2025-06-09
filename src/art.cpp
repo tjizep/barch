@@ -728,7 +728,7 @@ bool art::iterator::update(value_type value, int64_t ttl, bool volat) {
 
 bool art::iterator::update(value_type value) {
     return update([&](const art::leaf *l) -> node_ptr {
-        return t->make_leaf(l->get_key(), value, l->ttl(), l->is_volatile());
+        return t->make_leaf(l->get_key(), value, l->expiry_ms(), l->is_volatile());
     });
 }
 
@@ -936,12 +936,11 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
     }
     return idx;
 }
-
-static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options, art::node_ptr n, art::node_ptr &ref,
+static art::node_ptr recursive_insert(art::tree *t, const art::key_options &options, art::node_ptr n, art::node_ptr &ref,
                                       art::value_type key, art::value_type value, int depth, int *old, int replace,const NodeResult &fc) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
-        ref = t->make_leaf(key, value, options.ttl);
+        ref = t->make_leaf(key, value, options.get_expiry());
         t->last_leaf_added = ref;
         return nullptr;
     }
@@ -958,10 +957,12 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_spec &options
                 if (dl->val_len == value.size && !l->expired())
                 {
                     dl->set_value(value);
+                    dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
+                    options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
                 }
                 else
                 {
-                    ref = t->make_leaf(key, value, options.keepttl ? dl->ttl() : options.ttl, dl->is_volatile());
+                    ref = t->make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile());
                     t->last_leaf_added = ref;
                     // create a new leaf to carry the new value
                     ++statistics::leaf_nodes_replaced;
@@ -1078,7 +1079,7 @@ RECURSE_SEARCH:;
  */
 void art_insert
 (art::tree *t
- , const art::key_spec &options
+ , const art::key_options &options
  , art::value_type key
  , art::value_type value
  , bool replace
@@ -1110,7 +1111,7 @@ void art_insert
     }
 }
 
-void art_insert(art::tree *t, const art::key_spec &options, art::value_type key, art::value_type value,
+void art_insert(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                 const NodeResult &fc) {
     art_insert(t, options, key, value, true, fc);
 }
@@ -1124,7 +1125,7 @@ void art_insert(art::tree *t, const art::key_spec &options, art::value_type key,
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree *t, const art::key_spec &options, art::value_type key, art::value_type value,
+void art_insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                            const NodeResult &fc) {
     ++statistics::insert_ops;
     try {
@@ -1871,11 +1872,11 @@ void art::tree::update_trace(int direction) {
 bool art::tree::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
     return this->insert({}, key, value, update, fc);
 }
-bool art::tree::insert(const key_spec& options, value_type key, value_type value, bool update, const NodeResult &fc) {
+bool art::tree::insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) {
     //storage_release release(latch);
     size_t before = size;
     art_insert(this, options, key, value, update, fc);
-    this->repl_client.insert(key, value);
+    this->repl_client.insert(options, key, value);
     return size > before;
 }
 bool art::tree::insert(value_type key, value_type value, bool update) {
@@ -1884,12 +1885,15 @@ bool art::tree::insert(value_type key, value_type value, bool update) {
     }) ;
 }
 void art::tree::update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+
     auto repl_updateresult = [&](const node_ptr &leaf) {
         auto value = updater(leaf);
         if (value.null()) {
             return value;
         }
-        this->repl_client.insert(key, value.const_leaf()->get_value());
+        auto l = value.const_leaf();
+        key_options options = *l;
+        this->repl_client.insert(options, key, l->get_value());
         return value;
     };
     art::update(this, key, repl_updateresult);

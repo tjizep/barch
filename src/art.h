@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <netinet/in.h>
 
 #include "composite.h"
 #include "nodes.h"
@@ -69,7 +70,7 @@ typedef std::function<void(const art::node_ptr &)> NodeResult;
 /**
  * art tree and company
  */
-namespace art {
+namespace art{
     node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const children_t &c);
 
 
@@ -141,7 +142,7 @@ namespace art {
 
         void update_trace(int direction);
 
-        bool insert(const key_spec& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update = true);
 
@@ -185,7 +186,7 @@ uint64_t art_size(art::tree *t);
  */
 void art_insert
 (art::tree *t
- , const art::key_spec &options
+ , const art::key_options &options
  , art::value_type key
  , art::value_type value
  , const NodeResult &fc
@@ -193,7 +194,7 @@ void art_insert
 
 void art_insert
 (art::tree *t
- , const art::key_spec &options
+ , const art::key_options &options
  , art::value_type key
  , art::value_type value
  , bool replace
@@ -208,7 +209,7 @@ void art_insert
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree *t, const art::key_spec &options, art::value_type key, art::value_type value,
+void art_insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                            const NodeResult &fc);
 
 /**

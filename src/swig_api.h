@@ -11,6 +11,7 @@ void setConfiguration(const std::string& name, const std::string& value);
 void load(const std::string& host, const std::string& port);
 void ping(const std::string &host, const std::string& port);
 void start(const std::string &host, const std::string& port);
+void start(const std::string& port);
 void stop();
 unsigned long long size();
 void save();

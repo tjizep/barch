@@ -185,7 +185,7 @@ int ZADD(caller& call, const arg_t &argv) {
                 if (old.null()) return nullptr;
 
                 auto l = old.const_leaf();
-                return art::make_leaf(*t, qkey, {}, l->ttl(), l->is_volatile());
+                return art::make_leaf(*t, qkey, {}, l->expiry_ms(), l->is_volatile());
             });
         } else {
             if (zspec.LFI) {

@@ -8,6 +8,8 @@
 #include <fstream>
 #include "constants.h"
 #include "logger.h"
+#include <arpa/inet.h>
+
 extern thread_local uint64_t stream_write_ctr;
 extern thread_local uint64_t stream_read_ctr;
 

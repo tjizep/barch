@@ -31,6 +31,9 @@ void start(const std::string &host, const std::string& port) {
         art::std_log("started server on", host, port);
     }
 }
+void start(const std::string& port) {
+    start("127.0.0.1", port);
+}
 void stop() {
     std::vector<std::string_view> params = {"b"};
     swig_caller sc;

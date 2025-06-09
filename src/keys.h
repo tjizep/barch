@@ -37,7 +37,7 @@ static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by)
         (  alloc
         ,  leaf->get_key()
         ,  conversion::to_value(s)
-        ,  leaf->ttl()
+        ,  leaf->expiry_ms()
         ,  leaf->is_volatile()
         );
     }

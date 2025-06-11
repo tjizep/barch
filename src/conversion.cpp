@@ -7,6 +7,75 @@
 conversion::comparable_key conversion::convert(art::value_type vt, bool noint) {
     return convert(vt.chars(),vt.size,noint);
 }
+namespace conversion {
+    std::string to_string(const Variable &v) {
+        switch (v.index()) {
+            case 0:
+                return std::get<bool>(v) ? "true" : "false";
+            case 1:
+                return std::to_string(std::get<int64_t>(v));
+            case 2:
+                return std::to_string(std::get<double>(v));
+            case 3:
+                return std::get<std::string>(v);
+            case 4:
+                return {};
+            default:
+                abort_with("invalid type");
+        }
+    }
+
+    double to_double(const Variable& v) {
+        switch (v.index()) {
+            case 0:
+                return std::get<bool>(v) ? 1 : 0;
+            case 1:
+                return std::get<int64_t>(v);
+            case 2:
+                return std::get<double>(v);
+            case 3:
+                return std::atof(std::get<std::string>(v).c_str());
+            case 4:
+                return 0.0f;
+            default:
+                abort_with("invalid type");
+        }
+    }
+
+    bool to_bool(const Variable& v) {
+        switch (v.index()) {
+            case 0:
+                return std::get<bool>(v);
+            case 1:
+                return std::get<int64_t>(v) == 0 ;
+            case 2:
+                return std::get<double>(v) == 0.0f;
+            case 3:
+                return std::get<std::string>(v) == "true";
+            case 4:
+                return false;
+            default:
+                abort_with("invalid type");
+        }
+    }
+
+    int64_t to_int64(const Variable& v) {
+        switch (v.index()) {
+            case 0:
+                return std::get<bool>(v) ? 1 : 0;
+            case 1:
+                return std::get<int64_t>(v);
+            case 2:
+                return std::get<double>(v);
+            case 3:
+                return std::atoll(std::get<std::string>(v).c_str());
+            case 4:
+                return 0;
+            default:
+                abort_with("invalid type");
+        }
+    }
+}
 template<typename T>
 bool to_t(art::value_type v, T &i) {
 

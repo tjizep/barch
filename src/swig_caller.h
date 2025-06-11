@@ -7,11 +7,13 @@
 #include "caller.h"
 #include <string>
 #include <vector>
-
 #include "keys.h"
 
+
 struct swig_caller : caller {
-    std::vector<std::string> results{};
+
+
+    std::vector<conversion::Variable> results{};
     std::vector<std::string> errors{};
     [[nodiscard]] int wrong_arity()  override {
         errors.emplace_back("wrong_arity");
@@ -37,26 +39,26 @@ struct swig_caller : caller {
         return 0;
     }
     int null() override {
-        results.emplace_back("");
+        results.emplace_back(nullptr);
         return 0;
     }
     [[nodiscard]] int ok() override {
         return 0;
     }
     int boolean(bool value) override {
-        results.push_back(std::to_string(value));
+        results.push_back(value);
         return 0;
     }
     int long_long(int64_t l) override {
-        results.emplace_back(std::to_string(l));
+        results.emplace_back(l);
         return 0;
     }
     int double_(double l) override {
-        results.emplace_back(std::to_string(l));
+        results.emplace_back(l);
         return 0;
     }
     int vt(art::value_type v) override {
-        results.emplace_back(v.chars());
+        results.emplace_back(v.chars()); // values are currently always a string
         return 0;
     }
     int simple(const char * v) override {
@@ -65,15 +67,15 @@ struct swig_caller : caller {
     }
 
     int start_array() override {
-        results.emplace_back("start_array");
+        //results.emplace_back("start_array");
         return 0;
     }
     int end_array(size_t ) override {
-        results.emplace_back("end_array");
+        //results.emplace_back("end_array");
         return 0;
     }
     int reply_encoded_key(art::value_type key) override {
-        results.emplace_back(encoded_key_as_string(key));
+        results.emplace_back(encoded_key_as_variant(key));
         return 0;
     }
     template<typename TC>
@@ -85,8 +87,15 @@ struct swig_caller : caller {
             args.push_back({&*s.begin(),s.length()});
         }
         int r = f(*this, args);
+        if (r != 0) {
+            art::std_err("call failed");
+            return r;
+        }
         if (!errors.empty()) {
             r = -1;
+            for (auto& e: errors) {
+                art::std_err(e);
+            }
         }
         return r;
     }

@@ -11,8 +11,8 @@
 #include "module.h"
 #include "keys.h"
 #include "vk_caller.h"
-
-int api_hset(caller& cc, const arg_t& args) {
+extern "C"{
+int HSET(caller& cc, const arg_t& args) {
     int responses = 0;
     int r = 0;
     int64_t updated = 0;
@@ -46,9 +46,10 @@ int api_hset(caller& cc, const arg_t& args) {
     }
     return cc.boolean(updated);
 }
+}
 int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
-    return call.vk_call(ctx, argv, argc, api_hset);
+    return call.vk_call(ctx, argv, argc, HSET);
 }
 
 int cmd_HMSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -170,7 +171,7 @@ int cmd_HEXPIREAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, HEXPIREAT);
 
 }
-
+extern "C"
 int HGETEX(caller& call, const arg_t &argv) {
     art::hgetex_spec spec(argv);
     int r = 0;
@@ -219,7 +220,7 @@ int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx,argv,argc, HGETEX);
 }
-
+extern "C"
 int HINCRBY(caller& call, const arg_t &argv) {
     if (argv.size() != 4)
         return call.wrong_arity();
@@ -272,7 +273,7 @@ int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HINCRBYFLOAT);
 }
-
+extern "C"
 int HDEL(caller& call, const arg_t &argv) {
 
     if (argv.size() < 4)
@@ -311,7 +312,7 @@ int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HDEL);
 }
-
+extern "C"
 int HGETDEL(caller& call, const arg_t &argv) {
 
     if (argv.size() < 4)
@@ -354,10 +355,25 @@ int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, HGETDEL);
 }
 
-int HGETEX(caller& call,const arg_t& argv,
+int HQUERY(caller& call,const arg_t& argv, bool fancy,
            const std::function<void(art::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter) {
+
     if (argv.size() < 3)
         return call.wrong_arity();
+    int fields_start = 2;
+    if (fancy) {
+        art::hgetex_spec spec(argv);
+
+        if (spec.parse_options() != VALKEYMODULE_OK) {
+            return call.syntax_error();
+        }
+
+        if (spec.EX||spec.PX||spec.EXAT||spec.PXAT||spec.PERSIST) {
+            return call.syntax_error();
+        }
+        fields_start = spec.fields_start;
+    }
+
     int responses = 0;
     auto n = argv[1];
     if (key_ok(n) != 0) {
@@ -378,7 +394,7 @@ int HGETEX(caller& call,const arg_t& argv,
         }
     }
     call.start_array();
-    for (size_t arg = 2; arg < argv.size(); ++arg) {
+    for (size_t arg = fields_start; arg < argv.size(); ++arg) {
         auto k = argv[arg];
         if (key_ok(k) != 0) {
             call.null();
@@ -402,7 +418,7 @@ int HGETEX(caller& call,const arg_t& argv,
 
 int HGET_(caller& call, const arg_t& argv,
          const std::function<void(art::node_ptr leaf)> &reporter) {
-    return HGETEX(call, argv, reporter, [&]()-> void {
+    return HQUERY(call, argv, false, reporter, [&]()-> void {
         call.null();
     });
 }
@@ -420,13 +436,14 @@ int HTTL(caller& call,const arg_t& argv) {
     auto nullreport = [&]() -> void {
         call.long_long(-2);
     };
-    int r = HGETEX(call, argv, reporter, nullreport);
+    int r = HQUERY(call, argv, true, reporter, nullreport);
     return r;
 }
 int cmd_HTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HTTL);
 }
+extern "C"
 int HGET(caller& call, const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto vt = r.const_leaf()->get_value();
@@ -434,11 +451,21 @@ int HGET(caller& call, const arg_t& argv) {
     };
     return HGET_(call, argv, reporter);
 }
+
+extern "C"
+int HMGET(caller& call, const arg_t& argv) {
+    auto reporter = [&](art::node_ptr r) -> void {
+        auto vt = r.const_leaf()->get_value();
+        call.vt(vt);
+    };
+    return HGET_(call, argv, reporter);
+}
+
 int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HGET);
 }
-
+extern "C"
 int HLEN(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
@@ -474,20 +501,20 @@ int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int cmd_HMGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return cmd_HGET(ctx, argv, argc);
 }
-
+extern "C"
 int HEXPIRETIME(caller& call, const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
         call.long_long(l->expiry_ms() / 1000);
     };
-    return HGET_(call, argv, reporter);
+    return HQUERY(call, argv, true, reporter, [&]()-> void {call.null();});
 }
 
 int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HEXPIRETIME);
 }
-
+extern "C"
 int HGETALL(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
@@ -539,6 +566,7 @@ int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HGETALL);
 }
+extern "C"
 int HKEYS(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
@@ -572,31 +600,19 @@ int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HKEYS);
 }
+extern "C"
 int HEXISTS(caller& call, const arg_t& argv) {
-    if (argv.size() != 2)
-        return call.wrong_arity();
-    int responses = 0;
-    size_t nlen = 0;
-    auto n = argv[1];
-    if (key_ok(n) != 0) {
-        return call.null();
-    }
-    auto t = get_art(argv[1]);
-    storage_release release(t->latch);
-
-    art::value_type search_end = t->query.create({conversion::convert(n, nlen), art::ts_end});
-    art::value_type search_start = t->query.prefix(2);
-    art::value_type table_key = t->query.prefix(2);
-    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
-        if (!key.starts_with(table_key)) {
-            return -1;
-        }
-        ++responses;
-        return -1;
+    int cnt = 0;
+    auto reporter = [&](art::node_ptr unused(r)) -> void {
+        ++cnt;
     };
-    art::range(t, search_start, search_end, table_iter, nullptr);
+    int r = HQUERY(call, argv, false, reporter, [&]()-> void {
 
-    return call.boolean(responses > 0 ? 1 : 0);
+    });
+    if (r == call.ok()) {
+        return call.boolean(cnt>0);
+    }
+    return call.null();
 }
 
 int cmd_HEXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

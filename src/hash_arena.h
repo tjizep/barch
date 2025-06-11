@@ -371,7 +371,7 @@ namespace arena {
                     abort_with("failed to allocate virtual page data");
                 }
                 if (new_size > cow_size) {
-                    memset(cow + cow_size, 0, new_size - cow_size);
+                    //memset(cow + cow_size, 0, new_size - cow_size);
                 }
                 cow_size = new_size;
             } else {
@@ -380,7 +380,7 @@ namespace arena {
                 if (cow == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
-                memset(cow, 0, new_size);
+                //memset(cow, 0, new_size);
                 cow_size = new_size;
                 art::std_log("allocated ", cow_size, "virtual memory as CoW");
             }
@@ -469,7 +469,7 @@ namespace arena {
                 abort_with("invalid CoW page data");
             }
             if (std::max(page_data_size, cow_size) <= page_pos + offset + size) {
-                alloc_page_data((r.page() + 128) * physical_page_size + size);
+                alloc_page_data((r.page() + 8) * physical_page_size + size);
             }
             if (std::max(page_data_size, cow_size) < page_pos + offset + size) {
                 abort_with("position not allocated");

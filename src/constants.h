@@ -7,7 +7,7 @@
 
 enum {
     node_checks = 0,
-    page_size = 32768, // must be a power of twp
+    page_size = 32768*4, // must be a power of twp
     physical_page_size = page_size,
     initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,

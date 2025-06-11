@@ -3,8 +3,16 @@
 #include "nodes.h"
 #include <fast_float/fast_float.h>
 #include "sastam.h"
+#include <variant>
 
 namespace conversion {
+    typedef std::variant<bool, int64_t, double, std::string, nullptr_t> Variable;
+
+    std::string to_string(const Variable& v);
+    double to_double(const Variable& v);
+    bool to_bool(const Variable& v);
+    int64_t to_int64(const Variable& v);
+
     bool to_ll(art::value_type vt, long long& l);
     bool to_double(art::value_type vt, double& l);
     bool to_i64(art::value_type v, int64_t &i);

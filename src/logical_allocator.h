@@ -30,7 +30,7 @@
 #include "hash_arena.h"
 #include "page_modifications.h"
 
-typedef uint16_t PageSizeType;
+typedef uint32_t PageSizeType;
 typedef heap::set<size_t> address_set;
 enum {
     LPageSize = page_size - sizeof(storage)

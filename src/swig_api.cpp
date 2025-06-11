@@ -56,7 +56,7 @@ unsigned long long size()  {
     swig_caller sc;
     int r = sc.call(params, ::SIZE);
     if (r == 0) {
-        return sc.results.empty() ? 0: std::atoll(sc.results[0].c_str());
+        return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
     }
     return 0;
 }
@@ -90,7 +90,7 @@ std::string KeyMap::get(const std::string &key) const {
 
     int r = sc.call(params, ::GET);
     if (r == 0) {
-        return sc.results.empty() ? "": sc.results[0];
+        return sc.results.empty() ? "": conversion::to_string(sc.results[0]);
     }
     return "";
 }
@@ -100,7 +100,7 @@ void KeyMap::erase(const std::string &key) {
     int r = sc.call(params, ::REM);
     if (r == 0) {}
 }
-std::string KeyMap::min() const {
+Value KeyMap::min() const {
     params = {"b"};
 
     int r = sc.call(params, ::MIN);
@@ -109,14 +109,14 @@ std::string KeyMap::min() const {
     }
     return "";
 }
-std::string KeyMap::max() const {
+Value KeyMap::max() const {
     params = {"b"};
 
     int r = sc.call(params, ::MAX);
     if (r == 0) {
         return sc.results.empty() ? "": sc.results[0];
     }
-    return "";
+    return {""};
 }
 
 void KeyMap::incr(const std::string& key, double by) {
@@ -134,7 +134,7 @@ void KeyMap::decr(const std::string& key, double by) {
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
-std::vector<std::string>& KeyMap::glob(const std::string &glob, int max_) const {
+std::vector<Value> KeyMap::glob(const std::string &glob, int max_) const {
     result.clear();
 
     if ( max_ > 0) {
@@ -145,7 +145,9 @@ std::vector<std::string>& KeyMap::glob(const std::string &glob, int max_) const 
 
     int r = sc.call(params, ::KEYS);
     if (r == 0) {
-        return sc.results;
+        for (auto& v: sc.results) {
+            result.emplace_back(v);
+        }
     }
 
     return result;
@@ -155,12 +157,12 @@ size_t KeyMap::globCount(const std::string& glob) const {
 
     int r = sc.call(params, ::KEYS);
     if (r == 0) {
-        return sc.results.empty() ? 0: std::atoll(sc.results[0].c_str());
+        return sc.results.empty() ? 0: conversion::to_int64(sc.results[0]);
     }
     return 0;
 
 }
-std::string KeyMap::lowerBound(const std::string& key) const {
+Value KeyMap::lowerBound(const std::string& key) const {
 
     params = {"b", key};
 
@@ -181,3 +183,61 @@ void load() {
 }
 
 
+void Hash::set(const std::string &k, const std::vector<std::string>& members) {
+    params = {"b", k};
+    params.insert(params.end(), members.begin(), members.end());
+    int r = sc.call(params, ::HSET);
+    if (r != 0) {
+        art::std_err("set failed");
+    }
+}
+Value Hash::get(const std::string &k, const std::string &member) {
+    params = {"b", k, member};
+    sc.call(params, ::HGET);
+
+    if (!sc.results.empty()) {
+        return sc.results[0];
+    }
+    return {nullptr};
+}
+std::vector<Value> Hash::mget(const std::string& k, const std::vector<std::string> &fields) {
+    result.clear();
+    params = {"b", k};
+    params.insert(params.end(), fields.begin(), fields.end());
+    int r = sc.call(params, ::HMGET);
+    if (r != 0) {
+    }
+
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+
+    return result;
+}
+
+std::vector<Value> Hash::getall(const std::string& k) {
+    result.clear();
+    params = {"b", k};
+    sc.call(params, ::HGETALL);
+
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+
+    return result;
+}
+std::vector<Value> Hash::expiretime(const std::string &k, const std::vector<std::string> &fields) {
+    result.clear();
+    params = {"b", k, "FIELDS", std::to_string(fields.size())};
+
+    params.insert(params.end(), fields.begin(), fields.end());
+
+    sc.call(params, ::HEXPIRETIME);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+
+    return result;
+}
+Value Hash::exists(const std::string &k, const std::string &member) {
+    result.clear();
+    params = {"b", k, member};
+    sc.call(params, ::HEXISTS);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    if (result.empty()) return {false};
+    return result[0];
+}

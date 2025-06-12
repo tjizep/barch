@@ -182,8 +182,9 @@ void load() {
     }
 }
 
+HashSet::HashSet(){}
 
-void Hash::set(const std::string &k, const std::vector<std::string>& members) {
+void HashSet::set(const std::string &k, const std::vector<std::string>& members) {
     params = {"b", k};
     params.insert(params.end(), members.begin(), members.end());
     int r = sc.call(params, ::HSET);
@@ -191,7 +192,7 @@ void Hash::set(const std::string &k, const std::vector<std::string>& members) {
         art::std_err("set failed");
     }
 }
-Value Hash::get(const std::string &k, const std::string &member) {
+Value HashSet::get(const std::string &k, const std::string &member) {
     params = {"b", k, member};
     sc.call(params, ::HGET);
 
@@ -200,7 +201,7 @@ Value Hash::get(const std::string &k, const std::string &member) {
     }
     return {nullptr};
 }
-std::vector<Value> Hash::mget(const std::string& k, const std::vector<std::string> &fields) {
+std::vector<Value> HashSet::mget(const std::string& k, const std::vector<std::string> &fields) {
     result.clear();
     params = {"b", k};
     params.insert(params.end(), fields.begin(), fields.end());
@@ -213,7 +214,7 @@ std::vector<Value> Hash::mget(const std::string& k, const std::vector<std::strin
     return result;
 }
 
-std::vector<Value> Hash::getall(const std::string& k) {
+std::vector<Value> HashSet::getall(const std::string& k) {
     result.clear();
     params = {"b", k};
     sc.call(params, ::HGETALL);
@@ -222,7 +223,7 @@ std::vector<Value> Hash::getall(const std::string& k) {
 
     return result;
 }
-std::vector<Value> Hash::expiretime(const std::string &k, const std::vector<std::string> &fields) {
+std::vector<Value> HashSet::expiretime(const std::string &k, const std::vector<std::string> &fields) {
     result.clear();
     params = {"b", k, "FIELDS", std::to_string(fields.size())};
 
@@ -233,11 +234,51 @@ std::vector<Value> Hash::expiretime(const std::string &k, const std::vector<std:
 
     return result;
 }
-Value Hash::exists(const std::string &k, const std::string &member) {
+Value HashSet::exists(const std::string &k, const std::string &member) {
     result.clear();
     params = {"b", k, member};
     sc.call(params, ::HEXISTS);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     if (result.empty()) return {false};
     return result[0];
+}
+
+Value HashSet::remove(const std::string &k, const std::vector<std::string> &member) {
+    result.clear();
+    params = {"b", k};
+    params.insert(params.end(), member.begin(), member.end());
+    sc.call(params, ::HDEL);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    if (result.empty()) return {0ll};
+    return result[0];
+}
+
+Value HashSet::getdel(const std::string &k, const std::vector<std::string> &member) {
+    result.clear();
+    params = {"b", k , "FIELDS", std::to_string(member.size())};
+    params.insert(params.end(), member.begin(), member.end());
+    sc.call(params, ::HGETDEL);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    if (result.empty()) return {0ll};
+    return result[0];
+}
+std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::string> &member) {
+    result.clear();
+    params = {"b", k , "FIELDS", std::to_string(member.size())};
+    params.insert(params.end(), member.begin(), member.end());
+    sc.call(params, ::HTTL);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    return result;
+}
+std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields) {
+    result.clear();
+    params = {"b", k};
+    params.insert(params.end(), args.begin(), args.end());
+    params.emplace_back("FIELDS");
+    params.emplace_back(std::to_string(fields.size()));
+    params.insert(params.end(), fields.begin(), fields.end());
+
+    sc.call(params, ::HEXPIRE);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    return result;
 }

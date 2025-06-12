@@ -160,15 +160,24 @@ private:
     mutable swig_caller sc{};
 };
 
-class Hash {
+/**
+ * The has set like interface
+ */
+class HashSet {
 public:
-    Hash() = default;
+
+    HashSet();
     void set(const std::string &k, const std::vector<std::string>& members);
     Value get(const std::string &k, const std::string &member);
     std::vector<Value> mget(const std::string &k, const std::vector<std::string> &fields);
     std::vector<Value> getall(const std::string &k);
     std::vector<Value> expiretime(const std::string &k, const std::vector<std::string> &fields);
     Value exists(const std::string &k, const std::string &member);
+    Value remove(const std::string &k, const std::vector<std::string> &member);
+    Value getdel(const std::string &k, const std::vector<std::string> &member);
+    std::vector<Value> ttl(const std::string &k, const std::vector<std::string> &member);
+    std::vector<Value> expire(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields);
+
 private:
     mutable std::vector<std::string_view> params{};
     mutable std::vector<Value> result{};

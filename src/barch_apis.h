@@ -30,6 +30,7 @@ int RETRIEVE(caller& call, const arg_t& argv);
 int PING(caller& call, const arg_t& argv);
 int HSET(caller& cc, const arg_t& args);
 int HEXPIREAT(caller& call, const arg_t& args);
+int HEXPIRE(caller& call, const arg_t& args);
 //int HGETEX(caller& call, const arg_t &argv);
 int HMGET(caller& call, const arg_t& argv);
 int HINCRBY(caller& call, const arg_t &argv);

@@ -146,10 +146,12 @@ if (ADD_SWIG)
         set(SETUP_PY_OUT ${CMAKE_CURRENT_BINARY_DIR}/setup.py)
         configure_file(${SETUP_PY_IN} ${SETUP_PY_OUT})
 
-        add_custom_target(install-python
-                DEPENDS _${PROJECT_NAME}
-                COMMAND python ${SETUP_PY_OUT} install)
-
+        add_custom_command(
+                COMMAND python ${CMAKE_CURRENT_BINARY_DIR}/setup.py
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                OUTPUT  pipinstall.out
+                COMMENT "Installing barch python module..."
+        )
         set(PYBARCH_TEST ON)
     else ()
         message("SWIG python interface generation skipped - python not found")
@@ -232,5 +234,8 @@ else()
             COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
 
+    add_test(NAME TestPy
+            COMMAND "python" ${CMAKE_SOURCE_DIR}/test/testbarch.py
+            WORKING_DIRECTORY ${CMAKE_BUILD_DIR})
 endif ()
 

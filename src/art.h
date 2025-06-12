@@ -296,7 +296,7 @@ int art_iter_prefix(art::tree *t, art::value_type prefix, CallBack cb, void *dat
 
 /**
  * iterates through a range from small to large from key to key_end
- * the first key is located in log(n) time
+ * the first key is located in constant time
  * @return 0 on success, or the return of the callback.
  */
 namespace art {

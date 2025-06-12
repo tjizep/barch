@@ -302,7 +302,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
             // Check if the expanded path matches
             auto l = n.const_leaf();
             if (trace.empty())
-                return l->expired() ? nullptr : n;
+                return (l->get_key() < key ||  l->expired()) ? nullptr : n;
 
             while (true) {
                 auto c = last_el(trace).child;
@@ -529,18 +529,20 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
     return 0;
 }
 
-int art::range(const art::tree *t, art::value_type key, art::value_type key_end, LeafCallBack cb) {
+int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack cb) {
     ++statistics::range_ops;
     try {
-        art::trace_list tl;
+        trace_list tl;
         auto lb = inner_lower_bound(tl, t, key);
         if (lb.null()) return 0;
-        const art::leaf *al = lb.const_leaf();
+        const leaf *al = lb.const_leaf();
         if (al) {
             do {
-                art::node_ptr n = last_el(tl).child;
+                if (tl.empty())
+                    break;
+                node_ptr n = last_el(tl).child;
                 if (n.is_leaf) {
-                    const art::leaf *leaf = n.const_leaf();
+                    const leaf *leaf = n.const_leaf();
                     if (leaf->compare(key_end) <= 0) {
                         // upper bound is not
                         if (!leaf->expired()) {
@@ -624,7 +626,7 @@ art::iterator::iterator(tree* t, value_type key) : t(t) {
         if (!al) {
             tl.clear();
         } else {
-            c = last_node(tl);
+            c = t->size == 1 ? lb : last_node(tl);
         }
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
@@ -661,7 +663,7 @@ bool art::iterator::next() {
 }
 
 bool art::iterator::end() const {
-    return !c.is_leaf || tl.empty() || !t || t->size == 0;
+    return !c.is_leaf || (t->size > 1 && tl.empty()) || !t || t->size == 0;
 }
 
 bool art::iterator::ok() const {
@@ -780,7 +782,7 @@ static int64_t total(const art::trace_element &start, const art::trace_element &
 static int64_t indexed_distance(const art::trace_list &a, const art::trace_list &b) {
     if (b.empty() || a.empty()) return 0;
     if (b.back() == a.back()) return 0;
-    int64_t r = descendants(a.back()); //  + descendants(b.back());
+    int64_t r = descendants(a.back());
     size_t depth = std::min(a.size(), b.size());
     for (size_t i = 0; i < depth; ++i) {
         if (a[i] == b[i]) {

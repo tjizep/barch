@@ -149,6 +149,13 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
     return r | HUPDATE(call, argv, ex_spec.fields_start, updater);
 }
 
+extern "C"
+int HEXPIRE(caller& call, const arg_t& args) {
+    return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
+            return art::now() + 1000 * nr;
+        });
+}
+
 int cmd_HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
 
@@ -276,7 +283,7 @@ int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
 extern "C"
 int HDEL(caller& call, const arg_t &argv) {
 
-    if (argv.size() < 4)
+    if (argv.size() < 3)
         return call.wrong_arity();
 
     int responses = 0;
@@ -422,7 +429,7 @@ int HGET_(caller& call, const arg_t& argv,
         call.null();
     });
 }
-
+extern "C"
 int HTTL(caller& call,const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
@@ -525,41 +532,31 @@ int HGETALL(caller& call, const arg_t& argv) {
     }
     auto t = get_art(argv[1]);
     storage_release release(t->latch);
-    t->query.create({conversion::convert(n), art::ts_end});
+    art::value_type search_start = t->query.create({conversion::convert(n)});
 
-    art::value_type search_end = t->query.end();
-    art::value_type search_start = t->query.prefix(2);
     art::value_type table_key = search_start;
-    bool exists = false;
-    auto table_counter = [&](art::node_ptr leaf)-> int {
-        auto l = leaf.const_leaf();
-        if (!l->get_key().starts_with(table_key)) {
-            return -1;
-        }
-        exists = true;
-        return -1;
-    };
-    art::range(t, search_start, search_end, table_counter);
-    if (!exists) {
+    //bool exists = false;
+    art::iterator ai(t, search_start);
+    if (!ai.ok()) {
         return call.null();
     }
     call.start_array();
-    auto table_iter = [&](const art::node_ptr &leaf)-> int {
-        auto l = leaf.const_leaf();
-        auto key = l->get_key();
-        auto value = l->get_value();
+
+    while (ai.ok()) {
+        auto ik = ai.key();
+        if (!ik.starts_with(table_key)) break;
+        auto key = ai.key();
+        auto value = ai.value();
         if (!key.starts_with(table_key)) {
             return -1;
         }
         call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
         call.vt(value);
         responses += 2;
-
-        return 0;
-    };
-    art::range(t, search_start, search_end, table_iter);
-
+        ai.next();
+    }
     call.end_array(responses);
+
     return call.ok();
 }
 int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

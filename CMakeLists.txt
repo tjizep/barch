@@ -147,7 +147,7 @@ if (ADD_SWIG)
         configure_file(${SETUP_PY_IN} ${SETUP_PY_OUT})
 
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND mkdir ${CMAKE_CURRENT_BINARY_DIR}/b
+            COMMAND mkdir -p ${CMAKE_CURRENT_BINARY_DIR}/b
         )
         add_custom_command(TARGET barch POST_BUILD
             COMMAND cp "${CMAKE_CURRENT_BINARY_DIR}/_${PROJECT_NAME}.so" "${CMAKE_CURRENT_BINARY_DIR}/b"

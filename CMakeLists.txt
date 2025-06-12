@@ -234,8 +234,12 @@ else()
             COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
 
-    add_test(NAME TestPy
+    add_test(NAME TestBarchInstallPy
+            COMMAND "python" ${CMAKE_BINARY_DIR}/setup.py install
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    add_test(NAME TestBarchPy
             COMMAND "python" ${CMAKE_SOURCE_DIR}/test/testbarch.py
-            WORKING_DIRECTORY ${CMAKE_BUILD_DIR})
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif ()
 

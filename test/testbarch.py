@@ -1,4 +1,4 @@
-import barch
+from b import barch
 s = barch.size()
 k = barch.KeyMap()
 h = barch.HashSet()

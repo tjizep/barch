@@ -146,11 +146,14 @@ if (ADD_SWIG)
         set(SETUP_PY_OUT ${CMAKE_CURRENT_BINARY_DIR}/setup.py)
         configure_file(${SETUP_PY_IN} ${SETUP_PY_OUT})
 
-        add_custom_command(
-                COMMAND python ${CMAKE_CURRENT_BINARY_DIR}/setup.py
-                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-                OUTPUT  pipinstall.out
-                COMMENT "Installing barch python module..."
+        add_custom_command(TARGET barch POST_BUILD
+            COMMAND mkdir ${CMAKE_CURRENT_BINARY_DIR}/b
+        )
+        add_custom_command(TARGET barch POST_BUILD
+            COMMAND cp "${CMAKE_CURRENT_BINARY_DIR}/_${PROJECT_NAME}.so" "${CMAKE_CURRENT_BINARY_DIR}/b"
+        )
+        add_custom_command(TARGET barch POST_BUILD
+            COMMAND cp "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.py" "${CMAKE_CURRENT_BINARY_DIR}/b"
         )
         set(PYBARCH_TEST ON)
     else ()
@@ -161,10 +164,6 @@ else ()
     message("building non SWIG library")
     add_library(barch SHARED ${SOURCES})
 endif ()
-
-
-
-
 
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
@@ -233,10 +232,6 @@ else()
     add_test(NAME TestZRank
             COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
-
-    add_test(NAME TestBarchInstallPy
-            COMMAND "python" ${CMAKE_BINARY_DIR}/setup.py install
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestBarchPy
             COMMAND "python" ${CMAKE_SOURCE_DIR}/test/testbarch.py

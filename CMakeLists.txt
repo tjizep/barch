@@ -150,9 +150,11 @@ if (ADD_SWIG)
         add_custom_command(TARGET barch POST_BUILD
             COMMAND mkdir -p ${CMAKE_BINARY_DIR}/b
         )
+        message("COMMAND cp ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so ${CMAKE_BINARY_DIR}/b")
         add_custom_command(TARGET barch POST_BUILD
             COMMAND cp "${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so" "${CMAKE_BINARY_DIR}/b"
         )
+        message("COMMAND cp ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py ${CMAKE_BINARY_DIR}/b")
         add_custom_command(TARGET barch POST_BUILD
             COMMAND cp "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py" "${CMAKE_BINARY_DIR}/b"
         )
@@ -233,9 +235,11 @@ else()
     add_test(NAME TestZRank
             COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
-
-    add_test(NAME TestBarchPy
-            COMMAND "python" ${CMAKE_SOURCE_DIR}/test/testbarch.py
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    if (PYBARCH_TEST)
+        message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
+        add_test(NAME TestBarchPy
+                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/testbarch.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    endif ()
 endif ()
 

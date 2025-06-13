@@ -1568,7 +1568,20 @@ art_ops_statistics art::get_ops_statistics() {
     os.size_ops = (int64_t) statistics::size_ops;
     return os;
 }
-
+art_repl_statistics art::get_repl_statistics(){
+    art_repl_statistics rs;
+    rs.bytes_recv = (int64_t) statistics::repl::bytes_recv;
+    rs.bytes_sent = (int64_t) statistics::repl::bytes_sent;
+    rs.insert_requests = (int64_t) statistics::repl::insert_requests;
+    rs.remove_requests = (int64_t) statistics::repl::remove_requests;
+    rs.instructions_failed = (int64_t) statistics::repl::instructions_failed;
+    rs.key_add_recv = (int64_t) statistics::repl::key_add_recv;
+    rs.key_add_recv_applied = (int64_t) statistics::repl::key_add_recv_applied;
+    rs.key_rem_recv = (int64_t) statistics::repl::key_rem_recv;
+    rs.out_queue_size = (int64_t) statistics::repl::out_queue_size;
+    rs.key_rem_recv_applied = (int64_t) statistics::repl::key_rem_recv_applied;
+    return rs;
+}
 #include "ioutil.h"
 
 template<typename OutStream>

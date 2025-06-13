@@ -166,6 +166,11 @@ if (ADD_SWIG)
             COMMAND cp ${CMAKE_SOURCE_DIR}/test/testbarch.py ${CMAKE_BINARY_DIR}/testbarch.py
             BYPRODUCTS ${CMAKE_BINARY_DIR}/testbarch.py
         )
+        message("COMMAND cp ${CMAKE_SOURCE_DIR}/test/repltest.py ${CMAKE_BINARY_DIR}/repltest.py")
+        add_custom_command(TARGET barch POST_BUILD
+                COMMAND cp ${CMAKE_SOURCE_DIR}/test/repltest.py ${CMAKE_BINARY_DIR}/repltest.py
+                BYPRODUCTS ${CMAKE_BINARY_DIR}/repltest.py
+        )
         set(PYBARCH_TEST ON)
     else ()
         message("SWIG python interface generation skipped - python not found")
@@ -245,7 +250,12 @@ else()
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
+
         add_test(NAME TestBarchPy
+                COMMAND "python" ${CMAKE_BINARY_DIR}/testbarch.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestBarchReplicationPy
                 COMMAND "python" ${CMAKE_BINARY_DIR}/testbarch.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     endif ()

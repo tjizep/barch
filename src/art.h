@@ -25,43 +25,61 @@ typedef std::unique_lock<std::mutex> storage_release;
  */
 
 struct art_statistics {
-    int64_t leaf_nodes;
-    int64_t node4_nodes;
-    int64_t node16_nodes;
-    int64_t node48_nodes;
-    int64_t node256_nodes;
-    int64_t node256_occupants;
-    int64_t bytes_allocated;
-    int64_t bytes_interior;
-    int64_t heap_bytes_allocated;
-    int64_t page_bytes_compressed;
-    int64_t pages_uncompressed;
-    int64_t pages_compressed;
-    int64_t max_page_bytes_uncompressed;
-    int64_t page_bytes_uncompressed;
-    int64_t vacuums_performed;
-    int64_t last_vacuum_time;
-    int64_t leaf_nodes_replaced;
-    int64_t pages_evicted;
-    int64_t keys_evicted;
-    int64_t pages_defragged;
-    int64_t exceptions_raised;
+    art_statistics() {}
+    ~art_statistics() {}
+    long long leaf_nodes;
+    long long node4_nodes;
+    long long node16_nodes;
+    long long node48_nodes;
+    long long node256_nodes;
+    long long node256_occupants;
+    long long bytes_allocated;
+    long long bytes_interior;
+    long long heap_bytes_allocated;
+    long long page_bytes_compressed;
+    long long pages_uncompressed;
+    long long pages_compressed;
+    long long max_page_bytes_uncompressed;
+    long long page_bytes_uncompressed;
+    long long vacuums_performed;
+    long long last_vacuum_time;
+    long long leaf_nodes_replaced;
+    long long pages_evicted;
+    long long keys_evicted;
+    long long pages_defragged;
+    long long exceptions_raised;
 };
 
 struct art_ops_statistics {
-    int64_t delete_ops;
-    int64_t set_ops;
-    int64_t iter_ops;
-    int64_t iter_range_ops;
-    int64_t range_ops;
-    int64_t get_ops;
-    int64_t lb_ops;
-    int64_t size_ops;
-    int64_t insert_ops;
-    int64_t min_ops;
-    int64_t max_ops;
+    art_ops_statistics(){}
+    ~art_ops_statistics(){}
+    long long delete_ops;
+    long long set_ops;
+    long long iter_ops;
+    long long iter_range_ops;
+    long long range_ops;
+    long long get_ops;
+    long long lb_ops;
+    long long size_ops;
+    long long insert_ops;
+    long long min_ops;
+    long long max_ops;
 };
 
+struct art_repl_statistics {
+    art_repl_statistics(){}
+    ~art_repl_statistics(){}
+    long long key_add_recv;
+    long long key_add_recv_applied;
+    long long key_rem_recv;
+    long long key_rem_recv_applied;
+    long long bytes_recv;
+    long long bytes_sent;
+    long long out_queue_size;
+    long long instructions_failed;
+    long long insert_requests;
+    long long remove_requests;
+};
 typedef std::function<int(void *data, art::value_type key, art::value_type value)> CallBack;
 typedef std::function<int(const art::node_ptr &)> LeafCallBack;
 typedef std::function<void(const art::node_ptr &)> NodeResult;
@@ -122,6 +140,7 @@ namespace art{
         ~tree();
 
         bool publish(std::string host, int port);
+
         void run_defrag();
 
         bool save();
@@ -396,6 +415,10 @@ namespace art {
      */
     art_ops_statistics get_ops_statistics();
 
+    /**
+     * get replication and network statistics
+     */
+    art_repl_statistics get_repl_statistics();
     /**
      * glob match all the key value pairs except the deleted ones
      * This is a multi threaded iterator and care should be taken

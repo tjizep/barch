@@ -17,12 +17,17 @@ unsigned long long size();
 void save();
 void load();
 void clear();
+void publish(const std::string &ip, const std::string &port);
 
+art_repl_statistics repl_stats();
+art_ops_statistics ops_stats();
+art_statistics stats();
 /**
  * A value holds one of string, integer, double, bool or null
  */
 class Value {
 public:
+    int tuple = 0;
     Value(){};
     Value(nullptr_t): var(nullptr){};
     Value(const conversion::Variable& var) : var(var){};

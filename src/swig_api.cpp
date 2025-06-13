@@ -51,6 +51,14 @@ void ping(const std::string &host, const std::string& port) {
     }
 }
 
+void publish(const std::string &ip, const std::string &port) {
+    std::vector<std::string_view> params = {"b", ip, port};
+    swig_caller sc;
+    int r = sc.call(params, PUBLISH);
+    if (r != 0) {
+        art::std_err("publish failed", ip, port);
+    }
+}
 unsigned long long size()  {
     std::vector<std::string_view> params = {"b"};
     swig_caller sc;
@@ -180,6 +188,17 @@ void load() {
     if (r != 0) {
         art::std_err("load failed");
     }
+}
+art_repl_statistics repl_stats() {
+    return art::get_repl_statistics();
+}
+
+art_ops_statistics ops_stats() {
+    return art::get_ops_statistics();
+}
+
+art_statistics stats() {
+    return art::get_statistics();
 }
 
 HashSet::HashSet(){}

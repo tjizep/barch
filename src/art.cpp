@@ -681,6 +681,19 @@ const art::leaf *art::iterator::l() const {
 art::value_type art::iterator::key() const {
     return l()->get_key();
 }
+bool art::iterator::last() {
+    if (!t->size) return false;
+    if (!extend_trace_max(t->root, tl)) {
+        tl.clear();
+        return false;
+    }
+    c = last_node(tl);
+    if (!c.is_leaf) {
+        c = nullptr;
+        return false;
+    }
+    return true;
+}
 
 art::value_type art::iterator::value() const {
     return l()->get_value();

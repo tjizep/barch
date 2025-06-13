@@ -124,7 +124,7 @@ void remove_ordered(ordered_keys &thing) {
 }
 
 
-
+extern "C"
 int ZADD(caller& call, const arg_t &argv) {
 
     if (argv.size() < 4)
@@ -502,7 +502,7 @@ static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
 
     return 0;
 }
-
+extern "C"
 int ZRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -520,7 +520,7 @@ int cmd_ZRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx,argv,argc,ZRANGE);
 }
-
+extern "C"
 int ZCARD(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
@@ -729,7 +729,7 @@ static int ZOPER(
 
     return call.ok();
 }
-
+extern "C"
 int ZDIFF(caller& call, const arg_t& argv) {
     try {
         return ZOPER(call, argv, difference);
@@ -743,7 +743,7 @@ int cmd_ZDIFF(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZDIFF);
 }
-
+extern "C"
 int ZDIFFSTORE(caller& call, const arg_t& argv) {
     auto member = argv[1];
     if (member.empty())
@@ -757,7 +757,7 @@ int cmd_ZDIFFSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZDIFFSTORE);
 }
-
+extern "C"
 int ZINTERSTORE(caller& call, const arg_t& argv) {
     auto member = argv[1];
     if (member.empty())
@@ -771,7 +771,7 @@ int cmd_ZINTERSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZINTERSTORE);
 }
-
+extern "C"
 int ZINTERCARD(caller& call, const arg_t& argv) {
     return ZOPER(call, argv, intersect, {"#",1}, true);
 }
@@ -780,7 +780,7 @@ int cmd_ZINTERCARD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZINTERCARD);
 }
-
+extern "C"
 int ZINTER(caller& call, const arg_t& argv) {
     try {
         return ZOPER(call, argv, intersect);
@@ -794,7 +794,7 @@ int cmd_ZINTER(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZINTER);
 }
-
+extern "C"
 int ZPOPMIN(caller& call, const arg_t& argv) {
 
     if (argv.size() < 2)
@@ -841,7 +841,7 @@ int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZPOPMIN);
 }
-
+extern "C"
 int ZPOPMAX(caller& call, const arg_t& argv) {
 
     if (argv.size() < 2)
@@ -870,7 +870,10 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
     for (long long c = 0; c < count; ++c) {
         art::iterator i(t, upper);
         if (!i.ok()) {
-            break;
+            // this may be because upper > last item in tree and therefore there's none not less than
+            i.last();
+            if (!i.ok())
+                break;
         }
         auto v = i.key();
         if (!v.starts_with(lower)) {
@@ -900,7 +903,7 @@ int cmd_ZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZPOPMAX);
 }
-
+extern "C"
 int ZREVRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -919,7 +922,7 @@ int cmd_ZREVRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZREVRANGE);
 }
-
+extern "C"
 int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -938,7 +941,7 @@ int cmd_ZRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZRANGEBYSCORE);
 }
-
+extern "C"
 int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -956,6 +959,7 @@ int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int ar
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZREVRANGEBYSCORE);
 }
+extern "C"
 int ZREMRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -975,7 +979,7 @@ int cmd_ZREMRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZREMRANGEBYLEX);
 }
-
+extern "C"
 int ZRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -994,7 +998,7 @@ int cmd_ZRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZRANGEBYLEX);
 }
-
+extern "C"
 int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -1013,7 +1017,7 @@ int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZREVRANGEBYLEX);
 }
-
+extern "C"
 int ZRANK(caller& call, const arg_t& argv) {
     if (argv.size() != 4) {
         return call.wrong_arity();
@@ -1055,6 +1059,7 @@ int cmd_ZRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZRANK);
 }
+extern "C"
 int ZFASTRANK(caller& call, const arg_t& argv) {
     if (argv.size() != 4) {
         return call.wrong_arity();

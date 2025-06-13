@@ -283,14 +283,10 @@ std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
 }
-std::vector<Value> HashSet::expireat(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields) {
+std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const std::string &flags, const std::vector<std::string> &fields) {
     result.clear();
-    params = {"b", k};
-    params.insert(params.end(), args.begin(), args.end());
-    params.emplace_back("FIELDS");
-    params.emplace_back(std::to_string(fields.size()));
+    params = {"b", k, std::to_string(exp), flags,"FIELDS", std::to_string(fields.size())};
     params.insert(params.end(), fields.begin(), fields.end());
-
     sc.call(params, ::HEXPIREAT);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
@@ -302,3 +298,59 @@ Value HashSet::incrby(const std::string &k, const std::string& field, long long 
     if (sc.results.empty()) return {false};
     return sc.results[0];
 }
+
+OrderedSet::OrderedSet() {
+
+}
+Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members) {
+    result.clear();
+    params = {"b", k};
+    params.insert(params.end(), flags.begin(), flags.end());
+    params.insert(params.end(), members.begin(), members.end());
+    sc.call(params, ::ZADD);
+    if (sc.results.empty()) return {false};
+    return sc.results[0];
+}
+
+std::vector<Value> OrderedSet::range(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
+    result.clear();
+    params = {"b", k, std::to_string(start), std::to_string(stop)};
+    params.insert(params.end(), flags.begin(), flags.end());
+    sc.call(params, ::ZRANGE);
+    if (sc.results.empty()) return {false};
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    return result;
+}
+
+Value OrderedSet::card(const std::string &k) {
+    result.clear();
+    params = {"b", k};
+    sc.call(params, ::ZCARD);
+    if (sc.results.empty()) return {0ll};
+    return sc.results[0];
+}
+
+Value OrderedSet::popmin(const std::string &k) {
+    result.clear();
+    params = {"b", k};
+    sc.call(params, ::ZPOPMIN);
+    if (sc.results.empty()) return {0ll};
+    return sc.results[0];
+}
+
+Value OrderedSet::popmax(const std::string &k) {
+    result.clear();
+    params = {"b", k};
+    sc.call(params, ::ZPOPMAX);
+    if (sc.results.empty()) return {0ll};
+    return sc.results[0];
+}
+
+Value OrderedSet::rank(const std::string &k, double lower, double upper) {
+    result.clear();
+    params = {"b", k, std::to_string(lower), std::to_string(upper)};
+    sc.call(params, ::ZFASTRANK);
+    if (sc.results.empty()) return {0ll};
+    return sc.results[0];
+}
+

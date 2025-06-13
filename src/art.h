@@ -332,6 +332,8 @@ namespace art {
 
         bool previous();
 
+        bool last();
+
         [[nodiscard]] const leaf *l() const;
 
         [[nodiscard]] value_type key() const;

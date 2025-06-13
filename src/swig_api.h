@@ -183,7 +183,7 @@ public:
     Value getdel(const std::string &k, const std::vector<std::string> &member);
     std::vector<Value> ttl(const std::string &k, const std::vector<std::string> &member);
     std::vector<Value> expire(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields);
-    std::vector<Value> expireat(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields);
+    std::vector<Value> expireat(const std::string &k, long long exp, const std::string &flags, const std::vector<std::string> &fields);
     Value incrby(const std::string &k, const std::string& field, long long by);
 
 private:
@@ -192,4 +192,24 @@ private:
     mutable swig_caller sc{};
 };
 
+/**
+ * the ordered set like interface similar to Z* commands in redis or valkey
+ *
+ */
+class OrderedSet {
+public:
+
+    OrderedSet();
+    Value add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members);
+    std::vector<Value> range(const std::string &k, double start, double stop,const std::vector<std::string>& flags);
+    Value card(const std::string &k);
+    Value popmin(const std::string &k);
+    Value popmax(const std::string &k);
+    Value rank(const std::string &k, double lower, double upper);
+
+private:
+    mutable std::vector<std::string_view> params{};
+    mutable std::vector<Value> result{};
+    mutable swig_caller sc{};
+};
 #endif //SWIG_API_H

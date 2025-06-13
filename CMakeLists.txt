@@ -149,14 +149,17 @@ if (ADD_SWIG)
 
         add_custom_command(TARGET barch POST_BUILD
             COMMAND mkdir -p ${CMAKE_BINARY_DIR}/b
+            BYPRODUCTS ${CMAKE_BINARY_DIR}/b
         )
         message("COMMAND cp ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so ${CMAKE_BINARY_DIR}/b")
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND cp "${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so" "${CMAKE_BINARY_DIR}/b"
+            COMMAND cp ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so ${CMAKE_BINARY_DIR}/b
+            BYPRODUCTS ${CMAKE_BINARY_DIR}/b/_${PROJECT_NAME}.so
         )
         message("COMMAND cp ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py ${CMAKE_BINARY_DIR}/b")
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND cp "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py" "${CMAKE_BINARY_DIR}/b"
+            COMMAND cp ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py ${CMAKE_BINARY_DIR}/b
+            BYPRODUCTS ${CMAKE_BINARY_DIR}/b/${PROJECT_NAME}.py
         )
         set(PYBARCH_TEST ON)
     else ()

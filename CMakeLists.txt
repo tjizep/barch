@@ -120,6 +120,7 @@ else()
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
     execute_process(COMMAND make RESULT_VARIABLE result
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+
 endif ()
 
 file(GLOB SOURCES
@@ -139,21 +140,21 @@ if (ADD_SWIG)
         swig_add_library(barch LANGUAGE python SOURCES src/barch.i ${SOURCES})
         target_link_libraries(barch PRIVATE ${Python3_LIBRARIES})
         set(PYTHON_INSTALL_FILES
-                ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.py
-                ${CMAKE_CURRENT_BINARY_DIR}/_${PROJECT_NAME}.so)
+                ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py
+                ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so)
 
         set(SETUP_PY_IN ${CMAKE_CURRENT_SOURCE_DIR}/src/python/setup.py.in)
-        set(SETUP_PY_OUT ${CMAKE_CURRENT_BINARY_DIR}/setup.py)
+        set(SETUP_PY_OUT ${CMAKE_BINARY_DIR}/setup.py)
         configure_file(${SETUP_PY_IN} ${SETUP_PY_OUT})
 
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND mkdir -p ${CMAKE_CURRENT_BINARY_DIR}/b
+            COMMAND mkdir -p ${CMAKE_BINARY_DIR}/b
         )
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND cp "${CMAKE_CURRENT_BINARY_DIR}/_${PROJECT_NAME}.so" "${CMAKE_CURRENT_BINARY_DIR}/b"
+            COMMAND cp "${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so" "${CMAKE_BINARY_DIR}/b"
         )
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND cp "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.py" "${CMAKE_CURRENT_BINARY_DIR}/b"
+            COMMAND cp "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py" "${CMAKE_BINARY_DIR}/b"
         )
         set(PYBARCH_TEST ON)
     else ()

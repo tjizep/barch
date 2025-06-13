@@ -151,15 +151,20 @@ if (ADD_SWIG)
             COMMAND mkdir -p ${CMAKE_BINARY_DIR}/b
             BYPRODUCTS ${CMAKE_BINARY_DIR}/b
         )
-        message("COMMAND cp ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so ${CMAKE_BINARY_DIR}/b")
+        message("COMMAND cp ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so ${CMAKE_BINARY_DIR}/b/_${PROJECT_NAME}.so")
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND cp ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so ${CMAKE_BINARY_DIR}/b
+            COMMAND cp ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so ${CMAKE_BINARY_DIR}/b/_${PROJECT_NAME}.so
             BYPRODUCTS ${CMAKE_BINARY_DIR}/b/_${PROJECT_NAME}.so
         )
-        message("COMMAND cp ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py ${CMAKE_BINARY_DIR}/b")
+        message("COMMAND cp ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py ${CMAKE_BINARY_DIR}/b/${PROJECT_NAME}.py")
         add_custom_command(TARGET barch POST_BUILD
-            COMMAND cp ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py ${CMAKE_BINARY_DIR}/b
+            COMMAND cp ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py ${CMAKE_BINARY_DIR}/b/${PROJECT_NAME}.py
             BYPRODUCTS ${CMAKE_BINARY_DIR}/b/${PROJECT_NAME}.py
+        )
+        message("COMMAND cp ${CMAKE_CURRENT_SOURCE_DIR}/test/testbarch.py ${CMAKE_BINARY_DIR}/testbarch.py")
+        add_custom_command(TARGET barch POST_BUILD
+            COMMAND cp ${CMAKE_CURRENT_SOURCE_DIR}/test/testbarch.py ${CMAKE_BINARY_DIR}/testbarch.py
+            BYPRODUCTS ${CMAKE_BINARY_DIR}/testbarch.py
         )
         set(PYBARCH_TEST ON)
     else ()
@@ -241,7 +246,7 @@ else()
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
         add_test(NAME TestBarchPy
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/testbarch.py
+                COMMAND "python" ${CMAKE_BINARY_DIR}/testbarch.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     endif ()
 endif ()

@@ -270,6 +270,7 @@ std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::str
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
 }
+// k+args+fields
 std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields) {
     result.clear();
     params = {"b", k};
@@ -281,4 +282,23 @@ std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::
     sc.call(params, ::HEXPIRE);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
+}
+std::vector<Value> HashSet::expireat(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields) {
+    result.clear();
+    params = {"b", k};
+    params.insert(params.end(), args.begin(), args.end());
+    params.emplace_back("FIELDS");
+    params.emplace_back(std::to_string(fields.size()));
+    params.insert(params.end(), fields.begin(), fields.end());
+
+    sc.call(params, ::HEXPIREAT);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    return result;
+}
+Value HashSet::incrby(const std::string &k, const std::string& field, long long by) {
+    result.clear();
+    params = {"b", k, field, std::to_string(by)};
+    sc.call(params, ::HINCRBY);
+    if (sc.results.empty()) return {false};
+    return sc.results[0];
 }

@@ -57,6 +57,12 @@ namespace art {
         [[nodiscard]] const char *chars() const {
             return (const char *) bytes;
         }
+        [[nodiscard]] const char *begin() const {
+            return (const char *) bytes;
+        }
+        [[nodiscard]] const char *end() const {
+            return begin() + size;
+        }
 
         [[nodiscard]] bool starts_with(value_type other) const {
             if (size < other.size) return false;

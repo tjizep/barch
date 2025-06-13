@@ -121,6 +121,7 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
     if (ex_spec.parse_options() != VALKEYMODULE_OK) {
         return call.syntax_error();
     }
+    auto t = get_art(argv[1]);
     int r = 0;
     auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
         auto l = leaf.const_leaf();
@@ -140,7 +141,7 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
         }
         if (do_set) {
             r |= call.long_long(1);
-            return art::make_leaf(*get_art(argv[1]), l->get_key(), l->get_value(), ttl, l->is_volatile());
+            return art::make_leaf(*t, l->get_key(), l->get_value(), ttl, l->is_volatile());
         } else {
             r |= call.long_long( 0);
         }
@@ -166,7 +167,7 @@ int cmd_HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     });
 
 }
-
+extern "C"
 int HEXPIREAT(caller& call, const arg_t& args) {
     return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
         return 1000 * nr;

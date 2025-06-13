@@ -136,6 +136,12 @@ public:
     bool operator>=(const long long& r) const {
         return i() >= r;
     }
+    operator std::string() const {
+        return s();
+    }
+    operator std::string_view() const {
+        return s();
+    }
 private:
     conversion::Variable var{};
 };
@@ -177,6 +183,8 @@ public:
     Value getdel(const std::string &k, const std::vector<std::string> &member);
     std::vector<Value> ttl(const std::string &k, const std::vector<std::string> &member);
     std::vector<Value> expire(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields);
+    std::vector<Value> expireat(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields);
+    Value incrby(const std::string &k, const std::string& field, long long by);
 
 private:
     mutable std::vector<std::string_view> params{};

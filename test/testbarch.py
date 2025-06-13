@@ -1,3 +1,4 @@
+import time
 from b import barch
 s = barch.size()
 k = barch.KeyMap()
@@ -16,3 +17,12 @@ assert(h.ttl("k3",["f1"])[0].i() == -1)
 s = barch.size()
 h.remove("k3", ["f1"]).i()
 assert(s -1 == barch.size())
+assert(h.mget("k3",["f2"])[0].t() == 'string')
+h.set("kxp",["f1","v1","f2","v2"])
+h.expire("kxp",["10", "NX"],["f1","f2"])
+assert(h.mget("kxp",["f1","f2"])[0].s() == "v1")
+assert(h.ttl("kxp",["f1"])[0].i() >= 9)
+s = str(int(time.time()))
+assert(h.expireat("kxp",[s,"XX"],["f1"])[0].i()==1)
+h.set("kn",["f1","0","f2","1"])
+assert(h.incrby("kn","f1",1).i() == 1)

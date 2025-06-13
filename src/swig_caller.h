@@ -12,7 +12,7 @@
 
 struct swig_caller : caller {
 
-
+    std::string r{};
     std::vector<conversion::Variable> results{};
     std::vector<std::string> errors{};
     [[nodiscard]] int wrong_arity()  override {
@@ -58,7 +58,9 @@ struct swig_caller : caller {
         return 0;
     }
     int vt(art::value_type v) override {
-        results.emplace_back(v.chars()); // values are currently always a string
+        r.clear();
+        r.insert(r.end(), v.begin(), v.end());
+        results.emplace_back(r); // values are currently always a string
         return 0;
     }
     int simple(const char * v) override {

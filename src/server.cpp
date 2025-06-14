@@ -42,13 +42,13 @@ using asio::ip::tcp;
 
 namespace barch {
     struct net_stat {
+        uint64_t saved_writes = stream_write_ctr;
+        uint64_t saved_reads = stream_read_ctr;
         net_stat() {
-            stream_write_ctr = 0;
-            stream_read_ctr = 0;
         }
         ~net_stat() {
-            statistics::repl::bytes_recv += stream_read_ctr;
-            statistics::repl::bytes_sent += stream_write_ctr;
+            statistics::repl::bytes_recv += stream_read_ctr - saved_reads;
+            statistics::repl::bytes_sent += stream_write_ctr - saved_writes;
         }
     };
     template<typename T>
@@ -273,7 +273,11 @@ namespace barch {
             if (tpoll.joinable())
                 tpoll.join();
         };
-
+        void client::stop() {
+            connected = false;
+            if (tpoll.joinable())
+                tpoll.join();
+        }
         void client::add_destination(std::string host, int port, size_t shard) {
             auto dest = repl_dest{std::move(host), port, shard};
             for (auto& d : destinations) {
@@ -307,6 +311,7 @@ namespace barch {
                         if (!to_send.empty()) {
                             for (auto& dest : dests) {
                                 try {
+                                    net_stat stat;
                                     tcp::iostream stream(dest.host, std::to_string(dest.port));
                                     if (stream.fail()) {
                                         continue;

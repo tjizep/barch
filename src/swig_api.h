@@ -18,8 +18,22 @@ void save();
 void load();
 void clear();
 void publish(const std::string &ip, const std::string &port);
+struct repl_statistics {
+    repl_statistics(){}
+    ~repl_statistics(){}
+    long long key_add_recv{};
+    long long key_add_recv_applied{};
+    long long key_rem_recv{};
+    long long key_rem_recv_applied{};
+    long long bytes_recv{};
+    long long bytes_sent{};
+    long long out_queue_size{};
+    long long instructions_failed{};
+    long long insert_requests{};
+    long long remove_requests{};
+};
 
-art_repl_statistics repl_stats();
+repl_statistics repl_stats();
 art_ops_statistics ops_stats();
 art_statistics stats();
 /**

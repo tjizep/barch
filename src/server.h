@@ -44,6 +44,7 @@ namespace barch {
             client() = default;
             client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}
             ~client();
+            void stop();
             [[nodiscard]] bool begin_transaction() const ;
             [[nodiscard]] bool commit_transaction() const ;
             bool load(size_t shard);

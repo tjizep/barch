@@ -15,7 +15,7 @@ extern thread_local uint64_t stream_read_ctr;
 
 template<typename T>
 static void writep(std::ostream &of, const T &data) {
-    if (log_streams==1) art::std_log("writing",sizeof(data),(uint64_t)data,"at",stream_write_ctr);
+    if (log_streams==1) art::std_log("writing",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_write_ctr);
     of.write(reinterpret_cast<const char *>(&data), sizeof(data));
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
@@ -24,7 +24,7 @@ static void writep(std::ostream &of, const T &data) {
 }
 template<typename T>
 static void writep(std::ostream &of, const T* data, size_t size) {
-    if (log_streams==1) art::std_log("writing",size,"bytes","at",stream_write_ctr);
+    if (log_streams==1) art::std_log("writing",size,"bytes","at",(uint64_t)stream_write_ctr);
     of.write(reinterpret_cast<const char *>(data), size);
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
@@ -44,7 +44,7 @@ static void writep(OStream &of, const T &data) {
 template<typename IStream, typename T>
 static void readp(IStream &in, T &data) {
     in.read(reinterpret_cast<char *>(&data), sizeof(data));
-    if (log_streams==1) art::std_log("reading",sizeof(data),(uint64_t)data,"at",stream_read_ctr);
+    if (log_streams==1) art::std_log("reading",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_read_ctr);
     if (in.fail()) {
         throw_exception<std::runtime_error>("write failed");
     }
@@ -54,7 +54,7 @@ static void readp(IStream &in, T &data) {
 template<typename T>
 static void readp(std::istream &in, T *data, size_t size) {
     in.read(reinterpret_cast<char *>(data), size);
-    if (log_streams==1) art::std_log("reading",size,"bytes","at",stream_read_ctr);
+    if (log_streams==1) art::std_log("reading",size,"bytes","at",(uint64_t)stream_read_ctr);
     if (in.fail()) {
         throw_exception<std::runtime_error>("write failed");
     }

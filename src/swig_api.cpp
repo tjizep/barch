@@ -189,8 +189,20 @@ void load() {
         art::std_err("load failed");
     }
 }
-art_repl_statistics repl_stats() {
-    return art::get_repl_statistics();
+repl_statistics repl_stats() {
+    auto ar = art::get_repl_statistics();
+    repl_statistics r;
+    r.key_add_recv = ar.key_add_recv;
+    r.key_add_recv_applied = ar.key_add_recv_applied;
+    r.key_rem_recv = ar.key_rem_recv;
+    r.key_rem_recv_applied = ar.key_rem_recv_applied;
+    r.instructions_failed = ar.instructions_failed;
+    r.out_queue_size = ar.out_queue_size;
+    r.bytes_recv = ar.bytes_recv;
+    r.bytes_sent = ar.bytes_sent;
+    r.insert_requests = ar.insert_requests;
+    r.remove_requests = ar.remove_requests;
+    return r;
 }
 
 art_ops_statistics ops_stats() {

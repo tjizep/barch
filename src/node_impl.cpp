@@ -161,6 +161,7 @@ unsigned art::node::check_prefix(const unsigned char *key, unsigned key_len, uns
 }
 
 art::tree::~tree() {
+    repl_client.stop();
     mexit = true;
     if (tmaintain.joinable())
         tmaintain.join();

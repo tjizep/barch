@@ -2,7 +2,7 @@ from b import barch
 import time
 barch.start("127.0.0.1","13000")
 barch.publish("127.0.0.1","13000")
-k = barch.KeyMap()
+k = barch.KeyValue()
 k.set("one","1")
 k.set("two","2")
 k.set("three","3")

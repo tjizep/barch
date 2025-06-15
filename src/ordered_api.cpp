@@ -211,7 +211,7 @@ int cmd_ZADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZADD);
 }
-
+extern "C"
 int ZREM(caller& call, const arg_t& argv) {
 
     if (argv.size() < 3)

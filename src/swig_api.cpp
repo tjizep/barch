@@ -80,11 +80,11 @@ void clear() {
     }
 }
 
-KeyMap::KeyMap() {
+KeyValue::KeyValue() {
 
 }
 
-void KeyMap::set(const std::string &key, const std::string &value) {
+void KeyValue::set(const std::string &key, const std::string &value) {
     params = {"b", key, value};
 
     int r = sc.call(params, SET);
@@ -93,7 +93,7 @@ void KeyMap::set(const std::string &key, const std::string &value) {
     }
 
 }
-std::string KeyMap::get(const std::string &key) const {
+std::string KeyValue::get(const std::string &key) const {
     params = {"b", key};
 
     int r = sc.call(params, ::GET);
@@ -102,13 +102,13 @@ std::string KeyMap::get(const std::string &key) const {
     }
     return "";
 }
-void KeyMap::erase(const std::string &key) {
+void KeyValue::erase(const std::string &key) {
     params = {"b", key};
 
     int r = sc.call(params, ::REM);
     if (r == 0) {}
 }
-Value KeyMap::min() const {
+Value KeyValue::min() const {
     params = {"b"};
 
     int r = sc.call(params, ::MIN);
@@ -117,7 +117,7 @@ Value KeyMap::min() const {
     }
     return "";
 }
-Value KeyMap::max() const {
+Value KeyValue::max() const {
     params = {"b"};
 
     int r = sc.call(params, ::MAX);
@@ -127,7 +127,7 @@ Value KeyMap::max() const {
     return {""};
 }
 
-void KeyMap::incr(const std::string& key, double by) {
+void KeyValue::incr(const std::string& key, double by) {
     std::string b = std::to_string(by);
     params = {"b",key, b};
 
@@ -135,14 +135,14 @@ void KeyMap::incr(const std::string& key, double by) {
     if (r == 0) {}
 }
 
-void KeyMap::decr(const std::string& key, double by) {
+void KeyValue::decr(const std::string& key, double by) {
     std::string b = std::to_string(by);
     params = {"b", key,b};
 
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
-std::vector<Value> KeyMap::glob(const std::string &glob, int max_) const {
+std::vector<Value> KeyValue::glob(const std::string &glob, int max_) const {
     result.clear();
 
     if ( max_ > 0) {
@@ -160,7 +160,7 @@ std::vector<Value> KeyMap::glob(const std::string &glob, int max_) const {
 
     return result;
 }
-size_t KeyMap::globCount(const std::string& glob) const {
+size_t KeyValue::globCount(const std::string& glob) const {
     params = {"b", glob, "COUNT"};
 
     int r = sc.call(params, ::KEYS);
@@ -170,7 +170,7 @@ size_t KeyMap::globCount(const std::string& glob) const {
     return 0;
 
 }
-Value KeyMap::lowerBound(const std::string& key) const {
+Value KeyValue::lowerBound(const std::string& key) const {
 
     params = {"b", key};
 
@@ -205,12 +205,47 @@ repl_statistics repl_stats() {
     return r;
 }
 
-art_ops_statistics ops_stats() {
-    return art::get_ops_statistics();
+ops_statistics ops_stats() {
+    auto t =  art::get_ops_statistics();
+    ops_statistics r;
+    r.delete_ops = t.delete_ops;
+    r.get_ops = t.get_ops;
+    r.insert_ops = t.insert_ops;
+    r.iter_ops = t.iter_ops;
+    r.iter_range_ops = t.iter_range_ops;
+    r.lb_ops = t.lb_ops;
+    r.max_ops = t.max_ops;
+    r.min_ops = t.min_ops;
+    r.range_ops = t.range_ops;
+    r.set_ops = t.set_ops;
+    r.size_ops = t.size_ops;
+    return r;
 }
 
-art_statistics stats() {
-    return art::get_statistics();
+statistics_values stats() {
+    auto t = art::get_statistics();
+    statistics_values r;
+    r.bytes_allocated = t.bytes_allocated;
+    r.bytes_interior = t.bytes_interior;
+    r.exceptions_raised = t.exceptions_raised;
+    r.heap_bytes_allocated = t.heap_bytes_allocated;
+    r.keys_evicted = t.keys_evicted;
+    r.last_vacuum_time = t.last_vacuum_time;
+    r.leaf_nodes = t.leaf_nodes;
+    r.leaf_nodes_replaced = t.leaf_nodes_replaced;
+    r.max_page_bytes_uncompressed = t.max_page_bytes_uncompressed;
+    r.node4_nodes = t.node4_nodes;
+    r.node16_nodes = t.node16_nodes;
+    r.node48_nodes = t.node48_nodes;
+    r.node256_nodes = t.node256_nodes;
+    r.node256_occupants = t.node256_occupants;
+    r.page_bytes_compressed = t.page_bytes_compressed;
+    r.pages_compressed = t.pages_compressed;
+    r.pages_evicted = t.pages_evicted;
+    r.pages_defragged = t.pages_defragged;
+    r.pages_evicted = t.pages_evicted;
+    r.pages_uncompressed = t.pages_uncompressed;
+    r.vacuums_performed = t.vacuums_performed;
 }
 
 HashSet::HashSet(){}
@@ -383,5 +418,32 @@ Value OrderedSet::rank(const std::string &k, double lower, double upper) {
     sc.call(params, ::ZFASTRANK);
     if (sc.results.empty()) return {0ll};
     return sc.results[0];
+}
+
+Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& members) {
+    result.clear();
+    params = {"b", k};
+    params.insert(params.end(), members.begin(), members.end());
+    sc.call(params, ::ZREM);
+    if (sc.results.empty()) return {0ll};
+    return sc.results[0];
+}
+std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
+    result.clear();
+    params = {"b"};
+    params.insert(params.end(), keys.begin(), keys.end());
+    params.insert(params.end(), flags.begin(), flags.end());
+    sc.call(params, ::ZDIFF);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    return result;
+}
+std::vector<Value> OrderedSet::diffstore(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
+    result.clear();
+    params = {"b"};
+    params.insert(params.end(), keys.begin(), keys.end());
+    params.insert(params.end(), flags.begin(), flags.end());
+    sc.call(params, ::ZDIFFSTORE);
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    return result;
 }
 

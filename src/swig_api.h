@@ -32,10 +32,50 @@ struct repl_statistics {
     long long insert_requests{};
     long long remove_requests{};
 };
+struct ops_statistics {
+    ops_statistics(){}
+    ~ops_statistics(){}
+    long long delete_ops {};
+    long long set_ops {};
+    long long iter_ops {};
+    long long iter_range_ops {};
+    long long range_ops {};
+    long long get_ops {};
+    long long lb_ops {};
+    long long size_ops {};
+    long long insert_ops {};
+    long long min_ops {};
+    long long max_ops {};
+};
+struct statistics_values {
+    statistics_values() {}
+    ~statistics_values() {}
+    int64_t leaf_nodes {};
+    int64_t node4_nodes {};
+    int64_t node16_nodes {};
+    int64_t node48_nodes {};
+    int64_t node256_nodes {};
+    int64_t node256_occupants {};
+    int64_t bytes_allocated {};
+    int64_t bytes_interior {};
+    int64_t heap_bytes_allocated {};
+    int64_t page_bytes_compressed {};
+    int64_t pages_uncompressed {};
+    int64_t pages_compressed {};
+    int64_t max_page_bytes_uncompressed {};
+    int64_t page_bytes_uncompressed {};
+    int64_t vacuums_performed {};
+    int64_t last_vacuum_time {};
+    int64_t leaf_nodes_replaced {};
+    int64_t pages_evicted {};
+    int64_t keys_evicted {};
+    int64_t pages_defragged {};
+    int64_t exceptions_raised {};
+};
 
 repl_statistics repl_stats();
-art_ops_statistics ops_stats();
-art_statistics stats();
+ops_statistics ops_stats();
+statistics_values stats();
 /**
  * A value holds one of string, integer, double, bool or null
  */
@@ -165,9 +205,9 @@ private:
     conversion::Variable var{};
 };
 
-class KeyMap {
+class KeyValue {
 public:
-    KeyMap();
+    KeyValue();
     void set(const std::string &key, const std::string &value);
     std::string get(const std::string &key) const;
     void incr(const std::string& key, double by);
@@ -220,12 +260,27 @@ public:
 
     OrderedSet();
     Value add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members);
+    Value add(const std::string &k, const std::vector<std::string>& members) {
+        return add(k, {},members);
+    }
+
     std::vector<Value> range(const std::string &k, double start, double stop,const std::vector<std::string>& flags);
+    std::vector<Value> range(const std::string &k, double start, double stop) {
+        return range(k, start, stop, {});
+    }
     Value card(const std::string &k);
     Value popmin(const std::string &k);
     Value popmax(const std::string &k);
     Value rank(const std::string &k, double lower, double upper);
-
+    Value rank(const std::string &k, double upper) {
+        return rank(k, std::numeric_limits<double>::min(), upper);
+    }
+    Value remove(const std::string &k, const std::vector<std::string>& members);
+    Value count(const std::string &k, double min, double max) {
+        return rank(k, min, max);
+    }
+    std::vector<Value> diff(const std::vector<std::string>& keys, const std::vector<std::string>& flags);
+    std::vector<Value> diffstore(const std::vector<std::string>& keys, const std::vector<std::string>& flags);
 private:
     mutable std::vector<std::string_view> params{};
     mutable std::vector<Value> result{};

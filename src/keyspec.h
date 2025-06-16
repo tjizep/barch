@@ -405,7 +405,7 @@ namespace art {
         bool GT{false};
         bool LT{false};
         bool CH{false};
-        bool LFI{false};
+        bool LFI{true};
 
         int64_t which_flag_n{3};
         int64_t which_flag_g{3};

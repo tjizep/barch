@@ -90,6 +90,21 @@ public:
     Value(const char* var) : var(var){};
     Value(const double& var) : var(var){};
     Value(const long long& var) : var((int64_t)var){};
+    bool isBoolean() const {
+        return var.index() == 0;
+    }
+    bool isInteger() const {
+        return var.index() == 1;
+    }
+    bool isDouble() const {
+        return var.index() == 2;
+    }
+    bool isString() const {
+        return var.index() == 3;
+    }
+    bool isNull() const {
+        return var.index() == 4;
+    }
     Value& operator=(const std::string& v) {
         var = v;
         return *this;
@@ -268,6 +283,10 @@ public:
     std::vector<Value> range(const std::string &k, double start, double stop) {
         return range(k, start, stop, {});
     }
+    std::vector<Value> revrange(const std::string &k, double start, double stop,const std::vector<std::string>& flags);
+    std::vector<Value> revrange(const std::string &k, double start, double stop) {
+        return revrange(k, start, stop, {});
+    }
     Value card(const std::string &k);
     Value popmin(const std::string &k);
     Value popmax(const std::string &k);
@@ -280,7 +299,18 @@ public:
         return rank(k, min, max);
     }
     std::vector<Value> diff(const std::vector<std::string>& keys, const std::vector<std::string>& flags);
-    std::vector<Value> diffstore(const std::vector<std::string>& keys, const std::vector<std::string>& flags);
+    std::vector<Value> diff(const std::vector<std::string>& keys) {
+        return diff(keys, {});
+    };
+    Value diffstore(const std::string &destkey, const std::vector<std::string>& keys);
+    Value incrby(const std::string &key, double val, const std::string &field);
+    std::vector<Value> inter(const std::vector<std::string>& keys, const std::vector<std::string>& flags);
+    std::vector<Value> inter(const std::vector<std::string>& keys) {
+        return inter(keys, {});
+    };
+    Value interstore(const std::string &destkey, const std::vector<std::string>& keys);
+    Value intercard(const std::vector<std::string>& keys);
+    Value remrangebylex(const std::string &key, const std::string& lower, const std::string& upper);
 private:
     mutable std::vector<std::string_view> params{};
     mutable std::vector<Value> result{};

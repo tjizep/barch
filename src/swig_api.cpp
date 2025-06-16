@@ -305,7 +305,7 @@ Value HashSet::exists(const std::string &k, const std::string &member) {
     params = {"b", k, member};
     sc.call(params, ::HEXISTS);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
-    if (result.empty()) return {false};
+    if (result.empty()) return {nullptr};
     return result[0];
 }
 
@@ -315,7 +315,7 @@ Value HashSet::remove(const std::string &k, const std::vector<std::string> &memb
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HDEL);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
-    if (result.empty()) return {0ll};
+    if (result.empty()) return {nullptr};
     return result[0];
 }
 
@@ -325,7 +325,7 @@ Value HashSet::getdel(const std::string &k, const std::vector<std::string> &memb
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HGETDEL);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
-    if (result.empty()) return {0ll};
+    if (result.empty()) return {nullptr};
     return result[0];
 }
 std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::string> &member) {
@@ -361,7 +361,7 @@ Value HashSet::incrby(const std::string &k, const std::string& field, long long 
     result.clear();
     params = {"b", k, field, std::to_string(by)};
     sc.call(params, ::HINCRBY);
-    if (sc.results.empty()) return {false};
+    if (sc.results.empty()) return {nullptr};
     return sc.results[0];
 }
 
@@ -374,7 +374,7 @@ Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flag
     params.insert(params.end(), flags.begin(), flags.end());
     params.insert(params.end(), members.begin(), members.end());
     sc.call(params, ::ZADD);
-    if (sc.results.empty()) return {false};
+    if (sc.results.empty()) return {nullptr};
     return sc.results[0];
 }
 
@@ -383,7 +383,16 @@ std::vector<Value> OrderedSet::range(const std::string &k, double start, double 
     params = {"b", k, std::to_string(start), std::to_string(stop)};
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZRANGE);
-    if (sc.results.empty()) return {false};
+    if (sc.results.empty()) return {nullptr};
+    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    return result;
+}
+std::vector<Value> OrderedSet::revrange(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
+    result.clear();
+    params = {"b", k, std::to_string(start), std::to_string(stop)};
+    params.insert(params.end(), flags.begin(), flags.end());
+    sc.call(params, ::ZREVRANGE);
+    if (sc.results.empty()) return {nullptr};
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
 }
@@ -392,7 +401,7 @@ Value OrderedSet::card(const std::string &k) {
     result.clear();
     params = {"b", k};
     sc.call(params, ::ZCARD);
-    if (sc.results.empty()) return {0ll};
+    if (sc.results.empty()) return {nullptr};
     return sc.results[0];
 }
 
@@ -400,7 +409,7 @@ Value OrderedSet::popmin(const std::string &k) {
     result.clear();
     params = {"b", k};
     sc.call(params, ::ZPOPMIN);
-    if (sc.results.empty()) return {0ll};
+    if (sc.results.empty()) return {nullptr};
     return sc.results[0];
 }
 
@@ -408,7 +417,7 @@ Value OrderedSet::popmax(const std::string &k) {
     result.clear();
     params = {"b", k};
     sc.call(params, ::ZPOPMAX);
-    if (sc.results.empty()) return {0ll};
+    if (sc.results.empty()) return {nullptr};
     return sc.results[0];
 }
 
@@ -416,7 +425,7 @@ Value OrderedSet::rank(const std::string &k, double lower, double upper) {
     result.clear();
     params = {"b", k, std::to_string(lower), std::to_string(upper)};
     sc.call(params, ::ZFASTRANK);
-    if (sc.results.empty()) return {0ll};
+    if (sc.results.empty()) return {nullptr};
     return sc.results[0];
 }
 
@@ -425,25 +434,67 @@ Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& m
     params = {"b", k};
     params.insert(params.end(), members.begin(), members.end());
     sc.call(params, ::ZREM);
-    if (sc.results.empty()) return {0ll};
+    if (sc.results.empty()) return {nullptr};
     return sc.results[0];
 }
 std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
     result.clear();
-    params = {"b"};
+    params = {"b", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZDIFF);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
 }
-std::vector<Value> OrderedSet::diffstore(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
+
+Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::string>& keys) {
     result.clear();
-    params = {"b"};
+    params = {"b", destkey, std::to_string(keys.size())};
+    params.insert(params.end(), keys.begin(), keys.end());
+    sc.call(params, ::ZDIFFSTORE);
+    return sc.results[0];
+}
+
+Value OrderedSet::incrby(const std::string &key, double val, const std::string &field) {
+    result.clear();
+    params = {"b", key, std::to_string(val), field};
+    sc.call(params, ::ZINCRBY);
+    if (sc.results.empty()) return {nullptr};
+    return sc.results[0];
+}
+
+std::vector<Value> OrderedSet::inter(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
+    result.clear();
+    params = {"b", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
     params.insert(params.end(), flags.begin(), flags.end());
-    sc.call(params, ::ZDIFFSTORE);
+    sc.call(params, ::ZINTER);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
 }
 
+Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::string>& keys) {
+    result.clear();
+    params = {"b", destkey, std::to_string(keys.size())};
+    params.insert(params.end(), keys.begin(), keys.end());
+    sc.call(params, ::ZINTERSTORE);
+    if (sc.results.empty()) return {nullptr};
+    return sc.results[0];
+}
+
+Value OrderedSet::intercard(const std::vector<std::string>& keys) {
+    result.clear();
+    params = {"b", std::to_string(keys.size())};
+    params.insert(params.end(), keys.begin(), keys.end());
+    sc.call(params, ::ZINTERCARD);
+    if (sc.results.empty()) return {nullptr};
+    return sc.results[0];
+}
+
+Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower, const std::string& upper) {
+    result.clear();
+    params = {"b", key, lower, upper};
+    sc.call(params, ::ZREMRANGEBYLEX);
+    if (sc.results.empty()) return {nullptr};
+    return sc.results[0];
+}

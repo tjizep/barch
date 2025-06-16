@@ -173,7 +173,6 @@ int ZADD(caller& call, const arg_t &argv) {
 
         auto score = conversion::convert(k, true);
         auto member = conversion::convert(v);
-        conversion::comparable_key id{++counter};
         if (score.ctype() != art::tfloat && score.ctype() != art::tdouble) {
             r |= call.null();
             ++responses;
@@ -262,20 +261,21 @@ int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, ZREM);
 }
 
+extern "C"
 int ZINCRBY(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     int responses = 0;
     int64_t updated = 0;
-    auto fc = [&](art::node_ptr) -> void {
-        ++updated;
-    };
     auto key = argv[1];
     if (key_ok(key) != 0) {
         return call.null();
     }
     auto t = get_art(argv[1]);
     storage_release release(t->latch);
+    auto fcfk = [&](const art::node_ptr& ) -> void {
+        ++updated;
+    };
 
     double incr = 0.0f;
     if (!conversion::to_double(argv[2], incr)) {
@@ -289,38 +289,45 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     auto target = conversion::convert(v, true);
     auto target_member = target.get_value();
     auto container = conversion::convert(key);
-    query q1, q2;
+    query q1, q2, qfield;
+    art::value_type field_key = qfield->create({IX_MEMBER, container, target});
     auto prefix = q1->create({container});
-    art::iterator scores(t, prefix);
-    // we'll just add a bucket index to make scanning these faster without adding
-    // too much data
-    while (scores.ok()) {
-        auto k = scores.key();
-        auto val = scores.value();
-        if (!k.starts_with(prefix)) break;
-        auto encoded_number = k.sub(prefix.size, numeric_key_size);
-        auto member = k.sub(prefix.size + numeric_key_size);
-        if (target_member == member) {
-            double number = conversion::enc_bytes_to_dbl(encoded_number);
-            number += incr;
-            conversion::comparable_key id{++counter};
-            q1->push(conversion::comparable_key(number));
-            q1->push(member);
-            art::value_type qkey = q1->create();
-            art_insert(t, {}, qkey, val, true, fc);
 
-            q1->pop(2);
-            if (!scores.remove()) // remove the current one
-            {
-                return call.error("internal error");
-            };
+    art::iterator fields(t, field_key);
+    if (fields.ok()) {
+        auto kf = fields.key();
+        if (kf.starts_with(field_key)) {
+            art::iterator scores(t, fields.value());
+            if (scores.ok()) {
+                auto k = scores.key();
+                auto val = scores.value();
+                if (k.starts_with(prefix)) {
+                    auto encoded_number = k.sub(prefix.size, numeric_key_size);
+                    auto member = k.sub(prefix.size + numeric_key_size);
+                    if (target_member == member) {
+                        double number = conversion::enc_bytes_to_dbl(encoded_number);
+                        number += incr;
+                        q1->push(conversion::comparable_key(number));
+                        q1->push(member);
+                        art::value_type qkey = q1->create();
+                        t->insert({}, qkey, val, true, fcfk);
+                        t->insert( kf, qkey, true);
 
-            ++responses;
-            return call.double_(number);
-        }
+                        q1->pop(2);
+                        if (!scores.remove()) // remove the current one
+                        {
+                            return call.error("internal error");
+                        };
 
-        scores.next();
+                        ++responses;
+                        return call.double_(number);
+                    }
+                }
+            }
+        };
     }
+
+
     if (responses == 0) {
         auto score = conversion::comparable_key(incr);
         auto member = conversion::convert(v);
@@ -328,7 +335,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
         q1->push(member);
         art::value_type qkey = q1->create();
         art::value_type qv = v ;
-        art_insert(t, {}, qkey, qv, true, fc);
+        t->insert( {}, qkey, qv, true, fcfk);
         q1->pop(2);
         return call.double_(incr);
     }
@@ -922,6 +929,7 @@ int cmd_ZREVRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZREVRANGE);
 }
+// this is deprecated in later redis and can be replaced by range using BYSCORE command
 extern "C"
 int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
@@ -941,6 +949,7 @@ int cmd_ZRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZRANGEBYSCORE);
 }
+// also deprecated can be replaced by REVRANGE with BYSCORE arg
 extern "C"
 int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)

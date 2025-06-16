@@ -63,5 +63,5 @@ assert(z.card("zi").i()==3)
 assert(z.range("zi", 10.5, 20)[0].s()=="one")
 
 assert (s==barch.size())
-print(z.remrangebylex("zi", "one", "one").string())
+print(z.remrangebylex("zi", "one", "one").s())
 assert (s==barch.size()+2)

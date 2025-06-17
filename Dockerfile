@@ -6,9 +6,9 @@ RUN useradd -ms /bin/bash barch
 WORKDIR /home/barch
 USER barch
 RUN mkdir -p /home/barch/setup/test
-COPY cmake-build-release/_barch.so /home/barch/setup/_barch.so
-COPY cmake-build-release/barch.py /home/barch/setup/barch.py
-COPY cmake-build-release/setup.py /home/barch/setup/setup.py
+COPY Release/_barch.so /home/barch/setup/_barch.so
+COPY Release/barch.py /home/barch/setup/barch.py
+COPY Release/setup.py /home/barch/setup/setup.py
 COPY ./test/*.py /home/barch/setup/test/
 COPY ./docker/valkey/valkey.conf ./valkey.conf
 COPY ./docker/valkey/valkey.conf ./setup/valkey.conf

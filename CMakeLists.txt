@@ -140,8 +140,8 @@ if (ADD_SWIG)
         swig_add_library(barch LANGUAGE python SOURCES src/barch.i ${SOURCES})
         target_link_libraries(barch PRIVATE ${Python3_LIBRARIES})
         set(PYTHON_INSTALL_FILES
-                ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.py
-                ${CMAKE_BINARY_DIR}/_${PROJECT_NAME}.so)
+                /home/barch/setup/${PROJECT_NAME}.py
+                /home/barch/setup/_${PROJECT_NAME}.so)
 
         set(SETUP_PY_IN ${CMAKE_CURRENT_SOURCE_DIR}/src/python/setup.py.in)
         set(SETUP_PY_OUT ${CMAKE_BINARY_DIR}/setup.py)

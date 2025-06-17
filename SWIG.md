@@ -10,3 +10,7 @@ It usually fails because setuptools and pip versions are incompatible
 python -m pip install --upgrade pip
 python -m pip install --upgrade setuptools wheel twine check-wheel-contents
 ```
+kill all dockers
+```bash
+sudo docker stop $(sudo docker ps -q)
+```

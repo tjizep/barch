@@ -1531,6 +1531,9 @@ art_statistics art::get_statistics() {
     as.keys_evicted = (int64_t) statistics::keys_evicted;
     as.pages_defragged = (int64_t) statistics::pages_defragged;
     as.exceptions_raised = (int64_t) statistics::exceptions_raised;
+    as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
+    as.shards = (int64_t) statistics::shards;
+    as.local_calls = (int64_t) statistics::local_calls;
     return as;
 }
 

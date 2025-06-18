@@ -23,6 +23,7 @@ art::tree *get_art(size_t s) {
             shard->load();
             ++shard_num;
         }
+        statistics::shards = shards.size();
     }
     if (shards.empty()) {
         abort_with("shard configuration is empty");

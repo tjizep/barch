@@ -27,6 +27,9 @@ namespace statistics {
     extern std::atomic<uint64_t> vacuums_performed;
     extern std::atomic<uint64_t> last_vacuum_time;
     extern std::atomic<uint64_t> leaf_nodes_replaced;
+    extern std::atomic<uint64_t> maintenance_cycles;
+    extern std::atomic<uint64_t> shards;
+    extern std::atomic<uint64_t> local_calls;
     /**
      * ops stats
      */

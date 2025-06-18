@@ -21,6 +21,10 @@ std::atomic<uint64_t> statistics::pages_evicted = 0;
 std::atomic<uint64_t> statistics::keys_evicted = 0;
 std::atomic<uint64_t> statistics::pages_defragged = 0;
 std::atomic<uint64_t> statistics::exceptions_raised = 0;
+std::atomic<uint64_t> statistics::maintenance_cycles = 0;
+std::atomic<uint64_t> statistics::shards = 0;
+std::atomic<uint64_t> statistics::local_calls = 0;
+
 /**
  * ops stats
  */

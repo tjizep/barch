@@ -4,54 +4,143 @@ import barch
 app = Flask(__name__)
 app.secret_key = 'barch_demo_secret_key'  # for flash messages
 
-# HTML template with Bootstrap for styling
+
+# Enumerate all public data members / properties of `statistics_values`
+STAT_FIELDS = [
+    "bytes_allocated",
+    "bytes_interior",
+    "exceptions_raised",
+    "heap_bytes_allocated",
+    "keys_evicted",
+    "last_vacuum_time",
+    "leaf_nodes",
+    "leaf_nodes_replaced",
+    "max_page_bytes_uncompressed",
+    "node4_nodes",
+    "node16_nodes",
+    "node48_nodes",
+    "node256_nodes",
+    "node256_occupants",
+    "page_bytes_compressed",
+    "pages_compressed",
+    "pages_evicted",
+    "pages_defragged",
+    "pages_uncompressed",
+    "vacuums_performed",
+    "maintenance_cycles",
+    "shards",
+    "local_calls"
+]
+
+CONFIG_FIELDS = [
+    "compression",
+    "n_max_memory_bytes",
+    "maintenance_poll_delay",
+    "max_defrag_page_count",
+    "save_interval",
+    "max_modifications_before_save",
+    "rpc_max_buffer",
+    "iteration_worker_count",
+    "min_fragmentation_ratio",
+    "use_vmm_memory",
+    "active_defrag",
+    "evict_volatile_lru",
+    "evict_allkeys_lru",
+    "evict_volatile_lfu",
+    "evict_allkeys_lfu",
+    "evict_volatile_random",
+    "evict_allkeys_random",
+    "evict_volatile_ttl",
+    "log_page_access_trace",
+    "external_host",
+    "bind_interface",
+    "listen_port",
+]
+
+TABLE_TEMPLATE = """
+<div class="card mb-4">
+    <h5 class="card-header">{{ title }}</h5>
+    <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+            <thead class="table-light"><tr><th>Field</th><th class="text-end">Value</th></tr></thead>
+            <tbody>
+            {% for field, value in items.items() %}
+                <tr><td>{{ field }}</td><td class="text-end">{{ value }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+"""
+
+
+STATS_TEMPLATE = """
+<div class="card mb-4">
+    <h5 class="card-header">Barch Statistics</h5>
+    <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+            <thead class="table-light">
+            <tr><th>Field</th><th class="text-end">Value</th></tr>
+            </thead>
+            <tbody>
+            {% for field, value in stats_dict.items() %}
+                <tr>
+                    <td>{{ field }}</td>
+                    <td class="text-end">{{ value }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+"""
+
+
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Barch API Demo</title>
+    <title>Barch Python API Demo</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { padding-top: 20px; }
-        .container { max-width: 800px; }
-        .result-box { 
-            background-color: #f8f9fa; 
-            padding: 15px; 
-            border-radius: 5px;
-            margin-top: 15px;
-        }
-        .nav-tabs { margin-bottom: 20px; }
+        body        { padding-top: 20px; }
+        .container  { max-width: 800px; }
+        .result-box { background:#f8f9fa;padding:15px;border-radius:5px;margin-top:15px; }
+        .nav-tabs   { margin-bottom:20px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Barch API Demo</h1>
-        
-        <ul class="nav nav-tabs" id="myTab" role="tablist">
-            <li class="nav-item" role="presentation">
-                <button class="nav-link {% if active_tab == 'keyvalue' %}active{% endif %}" onclick="window.location.href='/'">KeyValue API</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link {% if active_tab == 'orderedset' %}active{% endif %}" onclick="window.location.href='/orderedset'">OrderedSet API</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link {% if active_tab == 'status' %}active{% endif %}" onclick="window.location.href='/status'">Database Status</button>
-            </li>
-        </ul>
-        
-        {% if messages %}
-            {% for message in messages %}
-                <div class="alert alert-info">{{ message }}</div>
-            {% endfor %}
-        {% endif %}
-        
-        {{ content|safe }}
+<div class="container">
+    <h1>Barch Python API Demo</h1>
+
+    <ul class="nav nav-tabs">
+        <li class="nav-item"><button class="nav-link {% if active_tab=='keyvalue' %}active{% endif %}"  onclick="location.href='/'">KeyValue API</button></li>
+        <li class="nav-item"><button class="nav-link {% if active_tab=='orderedset' %}active{% endif %}" onclick="location.href='/orderedset'">OrderedSet API</button></li>
+        <li class="nav-item"><button class="nav-link {% if active_tab=='status' %}active{% endif %}"     onclick="location.href='/status'">Database Status</button></li>
+        <li class="nav-item"><button class="nav-link {% if active_tab=='statistics' %}active{% endif %}" onclick="location.href='/statistics'">Statistics</button></li>
+        <li class="nav-item"><button class="nav-link {% if active_tab=='configuration' %}active{% endif %}" onclick="location.href='/configuration'">Configuration</button></li>
+    </ul>
+
+    {% if messages %}
+        {% for msg in messages %}
+            <div class="alert alert-info">{{ msg }}</div>
+        {% endfor %}
+    {% endif %}
+
+    {{ content|safe }}
+
+    {% if result %}
+    <div class="result-box">
+        <h4>Result:</h4>
+        <pre class="mb-0">{{ result }}</pre>
     </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    {% endif %}
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 '''
+
 
 # KeyValue form template
 KEYVALUE_TEMPLATE = '''
@@ -335,6 +424,13 @@ STATUS_TEMPLATE = '''
 '''
 
 # Routes
+def build_items(obj, fields):
+    """Return dict(field -> value|n/a) for the given object."""
+    return {f: getattr(obj, f, "n/a") for f in fields}
+
+def render_table(title, items):
+    return render_template_string(TABLE_TEMPLATE, title=title, items=items)
+
 
 # Routes
 @app.route('/')
@@ -349,6 +445,39 @@ def index():
         HTML_TEMPLATE,
         content=content_html,          # already-rendered HTML
         active_tab='keyvalue',
+        messages=messages
+    )
+
+@app.route('/statistics')
+def statistics():
+    messages = request.args.getlist("message")
+    try:
+        items = build_items(barch.stats(), STAT_FIELDS)
+    except Exception as exc:
+        items = {"error": f"Unable to fetch statistics: {exc}"}
+
+    content_html = render_table("Barch Statistics", items)
+    return render_template_string(
+        HTML_TEMPLATE,
+        content=content_html,
+        active_tab="statistics",
+        messages=messages
+    )
+
+@app.route('/configuration')
+def configuration():
+    """Show configuration values exposed by the C++ `configuration_values` object."""
+    messages = request.args.getlist("message")
+    try:
+        items = build_items(barch.config(), CONFIG_FIELDS)
+    except Exception as exc:
+        items = {"error": f"Unable to fetch configuration: {exc}"}
+
+    content_html = render_table("Barch Configuration", items)
+    return render_template_string(
+        HTML_TEMPLATE,
+        content=content_html,
+        active_tab="configuration",
         messages=messages
     )
 

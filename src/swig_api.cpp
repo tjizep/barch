@@ -246,8 +246,38 @@ statistics_values stats() {
     r.pages_evicted = t.pages_evicted;
     r.pages_uncompressed = t.pages_uncompressed;
     r.vacuums_performed = t.vacuums_performed;
+    r.maintenance_cycles = t.maintenance_cycles;
+    r.shards = t.shards;
+    r.local_calls = t.local_calls;
+    return r;
 }
-
+configuration_values config() {
+    configuration_values r;
+    auto i = art::get_configuration();
+    r.active_defrag = i.active_defrag;
+    r.bind_interface = i.bind_interface;
+    r.compression = i.compression;
+    r.evict_allkeys_lfu = i.evict_allkeys_lfu;
+    r.evict_allkeys_lru = i.evict_allkeys_lru;
+    r.evict_allkeys_random = i.evict_allkeys_random;
+    r.evict_volatile_lfu = i.evict_volatile_lfu;
+    r.evict_volatile_random = i.evict_volatile_random;
+    r.evict_volatile_lru = i.evict_volatile_lru;
+    r.evict_volatile_ttl = i.evict_volatile_ttl;
+    r.external_host = i.external_host;
+    r.iteration_worker_count = i.iteration_worker_count;
+    r.listen_port = i.listen_port;
+    r.log_page_access_trace = i.log_page_access_trace;
+    r.maintenance_poll_delay = i.maintenance_poll_delay;
+    r.max_defrag_page_count = i.max_defrag_page_count;
+    r.max_modifications_before_save = i.max_modifications_before_save;
+    r.min_fragmentation_ratio = i.min_fragmentation_ratio;
+    r.n_max_memory_bytes = i.n_max_memory_bytes;
+    r.rpc_max_buffer = i.rpc_max_buffer;
+    r.save_interval = i.save_interval;
+    r.use_vmm_memory = i.use_vmm_memory;
+    return r;
+}
 HashSet::HashSet(){}
 
 void HashSet::set(const std::string &k, const std::vector<std::string>& members) {

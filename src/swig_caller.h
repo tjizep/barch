@@ -82,6 +82,7 @@ struct swig_caller : caller {
     }
     template<typename TC>
     int call(const std::vector<std::string_view>& params, TC&& f) {
+        ++statistics::local_calls;
         arg_t args;
         errors.clear();
         results.clear();

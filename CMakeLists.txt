@@ -112,14 +112,14 @@ if (NOT TEST_OD)
     message("Testing not enabled Use -DTEST_OD=ON")
 else()
     ## CMake sub project executables only works if you pretend they are not subprojects
-    execute_process(COMMAND rm -rf ${CMAKE_BUILD_TYPE} RESULT_VARIABLE result
+    execute_process(COMMAND rm -rf build RESULT_VARIABLE result
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test)
-    execute_process(COMMAND mkdir ${CMAKE_BUILD_TYPE} RESULT_VARIABLE result
+    execute_process(COMMAND mkdir build RESULT_VARIABLE result
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test)
     execute_process(COMMAND cmake -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} ".."  RESULT_VARIABLE result
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
     execute_process(COMMAND make RESULT_VARIABLE result
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
 endif ()
 
@@ -194,60 +194,60 @@ if (NOT TEST_OD)
 else()
 
     add_test(NAME TestIntegers
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testintegers.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testintegers.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestDoubles
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testdouble.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testdouble.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME BicycleTest
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testbicycle.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testbicycle.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestAbc
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testabc.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testabc.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME Test123
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} test123.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} test123.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestRandom
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testrnd.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testrnd.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestBounds
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testbounds.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testbounds.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestKeys
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testkeys.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testkeys.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME LargeKeys
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testgloblarge.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testgloblarge.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME Test1111111
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} test111111.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} test111111.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestMSG
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testmulti.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testmulti.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestIntArithmetic
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testintarith.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testintarith.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestComposites
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testcomposites.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testcomposites.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
 
     add_test(NAME TestZRank
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE}/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${CMAKE_BUILD_TYPE})
+            COMMAND ${CMAKE_SOURCE_DIR}/test/build/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
 

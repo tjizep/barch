@@ -1,10 +1,10 @@
-name: Ubuntu 22.02 CI (GCC 11)
+name: Ubuntu 22.04 CI (GCC 11)
 
 on: [push, pull_request]
 
 jobs:
   ubuntu-build:
-    runs-on: ubuntu-22.02
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Use cmake
@@ -13,6 +13,10 @@ jobs:
           cmake -B build \
              -DTEST_OD=ON \
              -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
+      - name: build
+        run: |
           cmake --build build --parallel
           ( cd build ; ctest --output-on-failure )
+      - name: build docker
+        run: |
           docker build --progress=plain -t barch:api .

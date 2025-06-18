@@ -4,7 +4,9 @@
 
 #include "module.h"
 #include "keys.h"
-art::tree *ad{};
+thread_local uint64_t stream_write_ctr = 0;
+thread_local uint64_t stream_read_ctr = 0;
+
 static std::shared_mutex shared{};
 constants Constants{};
 static std::vector<art::tree *> shards{};
@@ -18,9 +20,10 @@ art::tree *get_art(size_t s) {
         size_t shard_num = 0;
         for (auto &shard : shards) {
             shard = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0, shard_num);
-            //shard->load();
+            shard->load();
             ++shard_num;
         }
+        statistics::shards = shards.size();
     }
     if (shards.empty()) {
         abort_with("shard configuration is empty");
@@ -33,7 +36,7 @@ size_t get_shard(const char* key, size_t key_len) {
     }
     auto converted = conversion::convert(key, key_len);
     auto shard_key = converted.get_value();
-    size_t hash = 0;//ankerl::unordered_dense::detail::wyhash::hash(key, key_len);
+    size_t hash = 0; //ankerl::unordered_dense::detail::wyhash::hash(key, key_len);
     memcpy(&hash, shard_key.bytes, std::min<size_t>(8,shard_key.size));
     return hash % art::get_shard_count().size();
 }
@@ -44,6 +47,9 @@ size_t get_shard(const std::string& key) {
 
 size_t get_shard(art::value_type key) {
    return get_shard(key.chars(), key.size);
+}
+art::tree* get_art(art::value_type key) {
+    return get_art(get_shard(key.chars(), key.size));
 }
 size_t get_shard(ValkeyModuleString **argv) {
     size_t nlen = 0;

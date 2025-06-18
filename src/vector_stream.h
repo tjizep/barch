@@ -7,17 +7,27 @@
 #include "sastam.h"
 #include <vector>
 #include <algorithm>
-
-struct vector_stream {
+struct vector_stream  {
     size_t pos{};
     heap::std_vector<uint8_t> buf{};
 
     void write(const char *data, size_t size) {
-        if (pos > buf.size()) {
-            buf.resize(pos);
+        if (nullptr == data) {
+            throw_exception<std::invalid_argument>("parameter null");
         }
-        buf.insert(buf.end(), data, data + size);
-        pos = buf.size();
+
+        if (buf.size() < pos + size)
+            buf.resize(pos + size);
+
+        size_t at = pos;
+
+        for (; at < pos + size; ++at) {
+            buf[at] = *data;
+            ++data;
+        }
+
+        pos = at;
+        assert(pos <= buf.size());
     }
 
     void read(char *data, size_t size) {
@@ -47,6 +57,9 @@ struct vector_stream {
 
     bool good() const {
         return pos <= buf.size();
+    }
+    bool fail() const {
+        return !good();
     }
 };
 #endif //VECTOR_STREAM_H

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <netinet/in.h>
 
 #include "composite.h"
 #include "nodes.h"
@@ -8,7 +9,7 @@
 #include "keyspec.h"
 #include "value_type.h"
 #include "vector_stream.h"
-
+#include "server.h"
 typedef std::unique_lock<std::shared_mutex> write_lock;
 typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
 //!typedef basic_ovectorstream<std::vector<char> >    ovectorstream;
@@ -24,43 +25,62 @@ typedef std::unique_lock<std::mutex> storage_release;
  */
 
 struct art_statistics {
-    int64_t leaf_nodes;
-    int64_t node4_nodes;
-    int64_t node16_nodes;
-    int64_t node48_nodes;
-    int64_t node256_nodes;
-    int64_t node256_occupants;
-    int64_t bytes_allocated;
-    int64_t bytes_interior;
-    int64_t heap_bytes_allocated;
-    int64_t page_bytes_compressed;
-    int64_t pages_uncompressed;
-    int64_t pages_compressed;
-    int64_t max_page_bytes_uncompressed;
-    int64_t page_bytes_uncompressed;
-    int64_t vacuums_performed;
-    int64_t last_vacuum_time;
-    int64_t leaf_nodes_replaced;
-    int64_t pages_evicted;
-    int64_t keys_evicted;
-    int64_t pages_defragged;
-    int64_t exceptions_raised;
+    art_statistics() {}
+    ~art_statistics() {}
+    int64_t leaf_nodes {};
+    int64_t node4_nodes {};
+    int64_t node16_nodes {};
+    int64_t node48_nodes {};
+    int64_t node256_nodes {};
+    int64_t node256_occupants {};
+    int64_t bytes_allocated {};
+    int64_t bytes_interior {};
+    int64_t heap_bytes_allocated {};
+    int64_t page_bytes_compressed {};
+    int64_t pages_uncompressed {};
+    int64_t pages_compressed {};
+    int64_t max_page_bytes_uncompressed {};
+    int64_t page_bytes_uncompressed {};
+    int64_t vacuums_performed {};
+    int64_t last_vacuum_time {};
+    int64_t leaf_nodes_replaced {};
+    int64_t pages_evicted {};
+    int64_t keys_evicted {};
+    int64_t pages_defragged {};
+    int64_t exceptions_raised {};
+    int64_t maintenance_cycles {};
+    int64_t shards {};
+    int64_t local_calls {};
 };
 
 struct art_ops_statistics {
-    int64_t delete_ops;
-    int64_t set_ops;
-    int64_t iter_ops;
-    int64_t iter_range_ops;
-    int64_t range_ops;
-    int64_t get_ops;
-    int64_t lb_ops;
-    int64_t size_ops;
-    int64_t insert_ops;
-    int64_t min_ops;
-    int64_t max_ops;
+    art_ops_statistics(){}
+    ~art_ops_statistics(){}
+    int64_t delete_ops {};
+    int64_t set_ops {};
+    int64_t iter_ops {};
+    int64_t iter_range_ops {};
+    int64_t range_ops {};
+    int64_t get_ops {};
+    int64_t lb_ops {};
+    int64_t size_ops {};
+    int64_t insert_ops {};
+    int64_t min_ops {};
+    int64_t max_ops {};
 };
 
+struct art_repl_statistics {
+    int64_t key_add_recv{};
+    int64_t key_add_recv_applied{};
+    int64_t key_rem_recv{};
+    int64_t key_rem_recv_applied{};
+    int64_t bytes_recv{};
+    int64_t bytes_sent{};
+    int64_t out_queue_size{};
+    int64_t instructions_failed{};
+    int64_t insert_requests{};
+    int64_t remove_requests{};
+};
 typedef std::function<int(void *data, art::value_type key, art::value_type value)> CallBack;
 typedef std::function<int(const art::node_ptr &)> LeafCallBack;
 typedef std::function<void(const art::node_ptr &)> NodeResult;
@@ -69,7 +89,7 @@ typedef std::function<void(const art::node_ptr &)> NodeResult;
 /**
  * art tree and company
  */
-namespace art {
+namespace art{
     node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const children_t &c);
 
 
@@ -92,7 +112,7 @@ namespace art {
         std::shared_mutex save_load_mutex{};
         bool opt_use_trace = true;
         node_ptr last_leaf_added{};
-
+        barch::repl::client repl_client{};
 
         void clear_trace() {
             if (opt_use_trace)
@@ -120,11 +140,17 @@ namespace art {
 
         ~tree();
 
+        bool publish(std::string host, int port);
+
         void run_defrag();
 
         bool save();
 
+        bool send(std::ostream& out);
+
         bool load();
+
+        bool retrieve(std::istream& in);
 
         void begin();
 
@@ -136,7 +162,14 @@ namespace art {
 
         void update_trace(int direction);
 
+        bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
+        bool insert(value_type key, value_type value, bool update = true);
 
+        bool remove(value_type key, const NodeResult &fc);
+        bool remove(value_type key);
+
+        void update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
         node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
         node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c);
         node_ptr alloc_8_node_ptr(unsigned nt);
@@ -173,7 +206,7 @@ uint64_t art_size(art::tree *t);
  */
 void art_insert
 (art::tree *t
- , const art::key_spec &options
+ , const art::key_options &options
  , art::value_type key
  , art::value_type value
  , const NodeResult &fc
@@ -181,7 +214,7 @@ void art_insert
 
 void art_insert
 (art::tree *t
- , const art::key_spec &options
+ , const art::key_options &options
  , art::value_type key
  , art::value_type value
  , bool replace
@@ -196,7 +229,7 @@ void art_insert
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree *t, const art::key_spec &options, art::value_type key, art::value_type value,
+void art_insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                            const NodeResult &fc);
 
 /**
@@ -283,7 +316,7 @@ int art_iter_prefix(art::tree *t, art::value_type prefix, CallBack cb, void *dat
 
 /**
  * iterates through a range from small to large from key to key_end
- * the first key is located in log(n) time
+ * the first key is located in constant time
  * @return 0 on success, or the return of the callback.
  */
 namespace art {
@@ -318,6 +351,8 @@ namespace art {
         bool next();
 
         bool previous();
+
+        bool last();
 
         [[nodiscard]] const leaf *l() const;
 
@@ -381,6 +416,10 @@ namespace art {
      */
     art_ops_statistics get_ops_statistics();
 
+    /**
+     * get replication and network statistics
+     */
+    art_repl_statistics get_repl_statistics();
     /**
      * glob match all the key value pairs except the deleted ones
      * This is a multi threaded iterator and care should be taken

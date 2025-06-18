@@ -371,7 +371,7 @@ namespace arena {
                     abort_with("failed to allocate virtual page data");
                 }
                 if (new_size > cow_size) {
-                    memset(cow + cow_size, 0, new_size - cow_size);
+                    //memset(cow + cow_size, 0, new_size - cow_size);
                 }
                 cow_size = new_size;
             } else {
@@ -380,7 +380,7 @@ namespace arena {
                 if (cow == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
                 }
-                memset(cow, 0, new_size);
+                //memset(cow, 0, new_size);
                 cow_size = new_size;
                 art::std_log("allocated ", cow_size, "virtual memory as CoW");
             }
@@ -469,7 +469,7 @@ namespace arena {
                 abort_with("invalid CoW page data");
             }
             if (std::max(page_data_size, cow_size) <= page_pos + offset + size) {
-                alloc_page_data((r.page() + 128) * physical_page_size + size);
+                alloc_page_data((r.page() + 8) * physical_page_size + size);
             }
             if (std::max(page_data_size, cow_size) < page_pos + offset + size) {
                 abort_with("position not allocated");
@@ -527,12 +527,18 @@ namespace arena {
         bool empty() const {
             return page_data_size == 0;
         }
-        bool save(const std::string &filename, const std::function<void(std::ofstream &)> &extra) const;
+        bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const;
 
-        bool load(const std::string &filename, const std::function<void(std::ifstream &)> &extra);
+        bool load(const std::string &filename, const std::function<void(std::istream &)> &extra);
 
-        static bool arena_read(base_hash_arena &arena, const std::function<void(std::ifstream &)> &extra,
+        bool retrieve(std::istream& in, const std::function<void(std::istream &)> &extra);
+
+        bool send(std::ostream &out, const std::function<void(std::ostream &)> &extra, bool write_version) const ;
+
+        static bool arena_read(base_hash_arena &arena, const std::function<void(std::istream &)> &extra,
                                const std::string &filename);
+        static bool arena_retrieve(base_hash_arena &arena, std::istream& in, const std::function<void(std::istream &)> &exre);
+        static bool arena_send(base_hash_arena &arena, std::istream& in);
     };
 
     struct hash_arena {
@@ -618,12 +624,19 @@ namespace arena {
             main.borrow(other.main);
         }
 
-        bool save(const std::string &filename, const std::function<void(std::ofstream &)> &extra) const {
+        bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const {
             return main.save(filename, extra);
         };
+        bool send(std::ostream& out, const std::function<void(std::ostream &)> &extra) const {
+            return main.send(out, extra, true);
+        };
 
-        bool load(const std::string &filename, const std::function<void(std::ifstream &)> &extra) {
+        bool load(const std::string &filename, const std::function<void(std::istream &)> &extra) {
             return main.load(filename, extra);
+        };
+
+        bool receive(std::istream& in, const std::function<void(std::istream &)> &extra) {
+            return main.retrieve(in, extra);
         };
 
         uint8_t *get_alloc_page_data(logical_address r, size_t size) {
@@ -642,7 +655,7 @@ namespace arena {
             if (main.opt_use_vmmap) {
                 return (main.get_max_address_accessed() + 1) * physical_page_size;
             }
-            return 0;
+            return main.get_max_address_accessed();
         }
         bool empty() const {
             return main.empty();

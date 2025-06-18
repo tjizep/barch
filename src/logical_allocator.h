@@ -30,7 +30,7 @@
 #include "hash_arena.h"
 #include "page_modifications.h"
 
-typedef uint16_t PageSizeType;
+typedef uint32_t PageSizeType;
 typedef heap::set<size_t> address_set;
 enum {
     LPageSize = page_size - sizeof(storage)
@@ -849,8 +849,8 @@ public:
 
 public:
     bool save_extra(const arena::hash_arena &copy, const std::string &filename,
-                    const std::function<void(std::ofstream &of)> &extra1) const {
-        auto writer = [&](std::ofstream &of) -> void {
+                    const std::function<void(std::ostream &of)> &extra1) const {
+        auto writer = [&](std::ostream &of) -> void {
             long ts = 0;
             writep(of, ts);
 
@@ -871,6 +871,29 @@ public:
         return copy.save(copy.name+filename, writer);
     }
 
+    bool send_extra(const arena::hash_arena &copy, std::ostream &out,
+                    const std::function<void(std::ostream &of)> &extra1) const {
+        auto writer = [&](std::ostream &of) -> void {
+            long ts = 0;
+            writep(of, ts);
+
+            writep(of, opt_enable_lru);
+            writep(of, opt_validate_addresses);
+            writep(of, opt_move_decompressed_pages);
+            writep(of, opt_iterate_workers);
+
+            writep(of, last_page_allocated);
+            writep(of, highest_reserve_address);
+            writep(of, last_heap_bytes);
+            writep(of, ticker);
+            writep(of, allocated);
+            writep(of, fragmentation);
+            extra1(of);
+        };
+
+        return copy.send(out, writer);
+    }
+
     [[nodiscard]] const arena::hash_arena &get_main() const {
         return main;
     }
@@ -878,8 +901,8 @@ public:
         return main;
     }
 
-    bool load_extra(const std::string &filenname, const std::function<void(std::ifstream &of)> &extra1) {
-        auto reader = [&](std::ifstream &in) -> void {
+    bool load_extra(const std::string &filenname, const std::function<void(std::istream &of)> &extra1) {
+        auto reader = [&](std::istream &in) -> void {
             long ts = 0;
             readp(in, ts);
 
@@ -910,6 +933,36 @@ public:
 
     void begin() {
         main.begin();
+    }
+
+    bool receive_extra(std::istream& in, const std::function<void(std::istream &of)> &extra1) {
+        auto reader = [&](std::istream &in) -> void {
+            long ts = 0;
+            readp(in, ts);
+
+            readp(in, opt_enable_lru);
+            readp(in, opt_validate_addresses);
+            readp(in, opt_move_decompressed_pages);
+            readp(in, opt_iterate_workers);
+
+            readp(in, last_page_allocated);
+            readp(in, highest_reserve_address);
+            readp(in, last_heap_bytes);
+            readp(in, ticker);
+            readp(in, allocated);
+            readp(in, fragmentation);
+            last_page_allocated = 0;
+            extra1(in);
+        };
+        try {
+            emancipated.clear();
+            return main.receive(in, reader);
+        } catch (std::exception &e) {
+            art::log(e,__FILE__,__LINE__);
+            ++statistics::exceptions_raised;
+        }
+
+        return false;
     }
 
     void commit() {
@@ -951,10 +1004,12 @@ public:
 struct alloc_pair {
 
     int sentinel = 1<<24;
+    size_t shard{};
     std::mutex latch{};
+
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
-    explicit alloc_pair(size_t shard) : nodes(this,"nodes_"+std::to_string(shard)),leaves(this,"leaves_"+std::to_string(shard)) {}
+    explicit alloc_pair(size_t shard) : shard(shard), nodes(this,"nodes_"+std::to_string(shard)),leaves(this,"leaves_"+std::to_string(shard)) {}
     logical_allocator& get_nodes() {
         return nodes;
     };

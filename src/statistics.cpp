@@ -21,6 +21,10 @@ std::atomic<uint64_t> statistics::pages_evicted = 0;
 std::atomic<uint64_t> statistics::keys_evicted = 0;
 std::atomic<uint64_t> statistics::pages_defragged = 0;
 std::atomic<uint64_t> statistics::exceptions_raised = 0;
+std::atomic<uint64_t> statistics::maintenance_cycles = 0;
+std::atomic<uint64_t> statistics::shards = 0;
+std::atomic<uint64_t> statistics::local_calls = 0;
+
 /**
  * ops stats
  */
@@ -39,3 +43,18 @@ std::atomic<uint64_t> statistics::max_ops = 0;
 std::atomic<uint64_t> statistics::incr_ops = 0;
 std::atomic<uint64_t> statistics::decr_ops = 0;
 std::atomic<uint64_t> statistics::update_ops = 0;
+
+namespace statistics::repl {
+    std::atomic<uint64_t> push_connections_open = 0;
+    std::atomic<uint64_t> key_add_recv = 0;
+    std::atomic<uint64_t> key_add_recv_applied = 0;
+    std::atomic<uint64_t> key_rem_recv = 0;
+    std::atomic<uint64_t> key_rem_recv_applied = 0;
+    std::atomic<uint64_t> bytes_recv = 0;
+    std::atomic<uint64_t> out_queue_size = 0;
+    std::atomic<uint64_t> instructions_failed = 0;
+    std::atomic<uint64_t> bytes_sent = 0;
+    std::atomic<uint64_t> insert_requests = 0;
+    std::atomic<uint64_t> remove_requests = 0;
+
+}

@@ -118,7 +118,8 @@ namespace art {
         }
 
         [[nodiscard]] node_ptr last() const override {
-            unsigned idx = data().occupants - 1;
+            auto &dat = nd();
+            unsigned idx = dat.occupants - 1;
             return get_child(idx);
         }
 

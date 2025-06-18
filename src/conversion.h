@@ -3,8 +3,19 @@
 #include "nodes.h"
 #include <fast_float/fast_float.h>
 #include "sastam.h"
+#include <variant>
 
 namespace conversion {
+    typedef std::variant<bool, int64_t, double, std::string, nullptr_t> Variable;
+
+    std::string to_string(const Variable& v);
+    double to_double(const Variable& v);
+    bool to_bool(const Variable& v);
+    int64_t to_int64(const Variable& v);
+
+    bool to_ll(art::value_type vt, long long& l);
+    bool to_double(art::value_type vt, double& l);
+    bool to_i64(art::value_type v, int64_t &i);
     template<typename I>
     struct byte_comparable {
         byte_comparable() = default;
@@ -275,12 +286,10 @@ namespace conversion {
 
     template<typename IntType>
     static bool convert_value(IntType &i, art::value_type v) {
-        if (is_integer(v.chars(), v.size)) {
-            auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
+        auto ianswer = fast_float::from_chars(v.chars(), v.chars() + v.size, i); // check if it's an integer first
 
-            if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size) {
-                return true;
-            }
+        if (ianswer.ec == std::errc() && ianswer.ptr == v.chars() + v.size) {
+            return true;
         }
         return false;
     }
@@ -291,6 +300,8 @@ namespace conversion {
     // take a string and convert to a number as bytes or leave it alone
     // and return the bytes directly. the bytes will be copied
     comparable_key convert(const char *v, size_t vlen, bool noint = false);
+
+    comparable_key convert(art::value_type vt, bool noint = false);
 
     comparable_key convert(const std::string &str, bool noint = false);
 

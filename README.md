@@ -4,23 +4,29 @@
 
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 
-## Whats New (2 May 2025)
-### Ordered Set API's
+## Whats New (17 June 2025)
+### Replication to Facilitate micro second local level api's
 
-All are O(1) (+N where applicable) time except ZRANK which is O(m) ZFASTRANK is a O(1) replacement.
-Not all flags on ZADD are supported yet except XX and NX.
+Barch contains two modes of replication now
+- Block retrieve using barch.load("ip","port")
+- Publish to another instance of barch barch.publish("ip","port")
+- replication and local server example at /test/repltest.py
 
-B.ZPOPMIN,B.ZPOPMAX, B.ZADD, B.ZREM, B.ZCOUNT, B.ZCARD, B.ZDIFF, B.ZDIFFSTORE, B.ZINTERSTORE, B.ZINCRBY, B.ZREMRANGEBYLEX, B.ZINTERCARD, B.ZINTER, B.ZRANGE, B.ZREVRANGE, B.ZRANGEBYSCORE, B.ZREVRANGEBYSCORE, B.ZREVRANGEBYLEX, B.ZRANGEBYLEX, B.ZRANK, B.ZFASTRANK
+These can be used in conjunction to facilitate ultra low latency read caching. 
 
-### Hash Set Functions added
+### Python API
 
-All are O(1) time
+Barch has a new python api with many functions - these mostly follows redis api's but runs on the local in process barch db created by the client. This facilitates very low read latency
+- Api examples are under examples/flask/example.py showing how barch can be used as a low latency cache while being replicated to from an existing 
+- a docker demo image is located at docker hub teejip/barch:apis
+- test/testbarch.py
 
-B.HSET, B.HGETDEL, B.HGETEX, B.HMSET, B.HEXPIRE, B.HDEL, B.HINCRBY, B.HINCRBYFLOAT, B.HGET, B.HTTL, B.HLEN, B.HEXPIRETIME, B.HMGET, B.HGETALL, B.HKEYS, B.HEXISTS
-Other functions
+### Docker Demo Image
+The `Dockerfile` contains a python and flask build to demonstrate some of barch's features
 
-BSIZE is replaced by B.SIZE
-B.STATS is used for statistics about the internal data structures
+### Fixes
+- fixed lowerbound and iterators 
+- fixed large page support
 
 ### Notes on ZFASTRANK
 
@@ -112,76 +118,3 @@ CONFIG SET B.eviction_policy allkeys-lru
 ```redis
 CONFIG SET B.compression zstd
 ```
-
-# Statistics 
-An example of statistics returned
-```
- 1) "'B.STATS'"
-    2)  1) 1) heap_bytes_allocated
-           2) (integer) 1562240
-        2) 1) page_bytes_compressed
-           2) (integer) 0
-        3) 1) max_page_bytes_uncompressed
-           2) (integer) 0
-        4) 1) last_vacuum_time
-           2) (integer) 0
-        5) 1) vacuum_count
-           2) (integer) 0
-        6) 1) page_bytes_uncompressed
-           2) (integer) 0
-        7) 1) bytes_addressable
-           2) (integer) 0
-        8) 1) interior_bytes_addressable
-           2) (integer) 0
-        9) 1) leaf_nodes
-           2) (integer) 0
-       10) 1) size_4_nodes
-           2) (integer) 0
-       11) 1) size_16_nodes
-           2) (integer) 0
-       12) 1) size_48_nodes
-           2) (integer) 0
-       13) 1) size_256_nodes
-           2) (integer) 0
-       14) 1) size_256_occupancy
-           2) (integer) 0
-       15) 1) leaf_nodes_replaced
-           2) (integer) 0
-       16) 1) pages_uncompressed
-           2) (integer) 0
-       17) 1) pages_compressed
-           2) (integer) 0
-       18) 1) pages_evicted
-           2) (integer) 0
-       19) 1) keys_evicted
-           2) (integer) 0
-       20) 1) pages_defragged
-           2) (integer) 3508
-       21) 1) exceptions_raised
-           2) (integer) 0
-60) 1) "'B.SIZE'"
-    2) (integer) 0
-61) 1) "'B.OPS'"
-    2)  1) 1) delete_ops
-           2) (integer) 1648923
-        2) 1) retrieve_ops
-           2) (integer) 1000000
-        3) 1) insert_ops
-           2) (integer) 1648923
-        4) 1) iterations
-           2) (integer) 0
-        5) 1) range_iterations
-           2) (integer) 0
-        6) 1) lower_bound_ops
-           2) (integer) 0
-        7) 1) maximum_ops
-           2) (integer) 5
-        8) 1) minimum_ops
-           2) (integer) 5
-        9) 1) range_ops
-           2) (integer) 5
-       10) 1) set_ops
-           2) (integer) 0
-       11) 1) size_ops
-           2) (integer) 1000010
-           ```

@@ -8,6 +8,7 @@ using namespace std;
 static std::string valkey_cli = "_deps/valkey-src/src/valkey-cli";
 static std::string ping_cmd = valkey_cli + " -e PING ";
 static std::string failed = "failure: ";
+static std::string binary_name = "_barch.so";
 static unsigned max_iterations = 100;
 int wait_to_stop(){
     if(0 != std::system("pkill -9 valkey-server")){
@@ -41,20 +42,20 @@ int wait_to_start() {
 int main(int argc, char *argv[]) {
     if(argc != 3)
     {
-        std::cerr << "Usage: " << argv[0] << " <directory containing libbarch.so> <lua test file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <directory containing "<< binary_name <<"> <lua test file>" << std::endl;
         return -1;
     }
     if ( 0 != wait_to_stop()) return -1;
 
     std::string bindir = argv[1];
     std::string luatest = argv[2];
-    std::cout << "directory for : libbarch.so " << bindir << std::endl;
+    std::cout << "directory for : "<< binary_name << " " << bindir << std::endl;
     auto run_server = [&]()
     {
         cout << "server start" << endl;
         std::string server_cmd = "_deps/valkey-src/src/valkey-server --loadmodule ";
         server_cmd += bindir + "/";
-        server_cmd += "libbarch.so &";
+        server_cmd += binary_name + " &";
         cout << server_cmd << endl;
         if (0 != std::system(server_cmd.c_str())) {
           std::cerr << failed << server_cmd << std::endl;

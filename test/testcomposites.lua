@@ -10,6 +10,7 @@ assert(vk.call('B.HINCRBY','counter','value', 2) == 3)
 assert(vk.call('B.HINCRBYFLOAT','counter','value', 0.5) == "3.5")
 
 assert(vk.call('B.HGET','tires','pirelli')[1] == 'p2')
+
 assert(vk.call('B.HEXPIRE','tires','1000','NX','FIELDS','2','pirelli','rarbg')[1] == 1)
 assert(vk.call('B.HEXPIRE','tires','1000','NX','FIELDS','2','pirelli','chips')[1] == 0)
 assert(vk.call('B.HEXPIRE','tires','1000','XX','FIELDS','1','pirelli')[1] == 1)
@@ -103,4 +104,5 @@ assert(#vk.call('B.ZPOPMIN','cbgame')==2)
 assert(vk.call('B.ZCARD','cbgame')==0)
 assert(vk.call('B.ZREMRANGEBYLEX', 'rcgame','a','z') == 3)
 assert(vk.call('B.ZCARD','rcgame')==0)
+--[[]]
 return {"OK"}

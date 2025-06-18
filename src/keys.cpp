@@ -32,6 +32,9 @@ int key_ok(const char *k, size_t klen) {
 
     return 0;
 }
+int key_ok(art::value_type v) {
+    return key_ok(v.chars(), v.size);
+}
 
 int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
     if (k == nullptr)
@@ -43,6 +46,7 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
 
     return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
 }
+
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     double dk;
@@ -91,6 +95,63 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
         abort();
     }
     return 0;
+}
+conversion::Variable encoded_key_as_variant(art::value_type key) {
+    double dk;
+    float fk;
+    int64_t ik;
+    int32_t sk;
+    const char *k;
+    //size_t kl;
+    const unsigned char *enck = key.bytes;
+    unsigned key_len = key.size;
+    // TODO: integers sometimes go in here as one longer than they should be
+    // we make the test a little more slack
+    if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
+        ik = conversion::enc_bytes_to_int(enck, key_len);
+        if (*enck == art::tdouble) {
+            memcpy(&dk, &ik, sizeof(ik));
+            return dk;
+        } else {
+            return ik;
+        }
+    } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
+        sk = conversion::enc_bytes_to_int32(enck, key_len);
+        if (*enck == art::tfloat) {
+            memcpy(&fk, &sk, sizeof(sk));
+            return fk;
+        } else {
+            return sk;
+        }
+    } else if (key_len >= 1 && *enck == art::tstring) {
+        k = (const char *) &enck[1];
+        // kl = key_len - 2;
+        return k;
+
+    } else if (key_len >= 1 && (*enck == art::tcomposite)) {
+        return encoded_key_as_variant(key.sub(2));
+    } else {
+        abort();
+    }
+    return "";
+}
+std::string encoded_key_as_string(art::value_type key) {
+    conversion::Variable v = encoded_key_as_variant(key);
+    switch (v.index()) {
+        case 0:
+            return std::to_string(std::get<bool>(v));
+        case 1:
+            return std::to_string(std::get<int64_t>(v));
+        case 2:
+            return std::to_string(std::get<double>(v));
+        case 3:
+            return std::get<std::string>(v);
+        case 4:
+            return {};
+        default:
+            abort_with("invalid type");
+    }
+    return "";
 }
 
 unsigned log_encoded_key(art::value_type key, bool start) {

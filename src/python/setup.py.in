@@ -1,0 +1,12 @@
+from distutils.core import setup
+setup(
+    name='${PROJECT_NAME}',
+    version='${PROJECT_VERSION}',
+    description='multi environment caching, build using cmake install using pip install .',
+    packages=[''],
+    py_modules=['barch'],
+    license='MIT License',
+    author='CE Pretorius',
+    author_email='chrisep 2 at gmail dot com',
+    package_data={'': '${PYTHON_INSTALL_FILES}'.split(';')}
+)

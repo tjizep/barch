@@ -13,7 +13,7 @@
 
 #define unused_arg
 #define unused(x)
-
+#include "key_options.h"
 namespace art {
     template<typename I>
     int64_t i64max() {
@@ -60,7 +60,7 @@ namespace art {
     };
 
     enum {
-        leaf_ttl_flag = 1,
+        leaf_expiry_flag = 1,
         leaf_volatile_flag = 2,
         leaf_deleted_flag = 4
     };
@@ -496,12 +496,12 @@ namespace art {
 
         leaf() = delete;
 
-        leaf(unsigned kl, unsigned vl, uint64_t ttl, bool is_volatile) : key_len(std::min<unsigned>(
+        leaf(unsigned kl, unsigned vl, uint64_t expiry, bool is_volatile) : key_len(std::min<unsigned>(
                                                                              kl, std::numeric_limits<LeafSize>::max()))
                                                                          , val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max())) {
-            if (ttl > 0) set_ttl();
+            if (expiry > 0) set_is_expiry();
             if (is_volatile) set_volatile();
-            set_ttl(ttl);
+            set_expiry(expiry);
         }
 
         uint8_t flags{};
@@ -525,24 +525,24 @@ namespace art {
             return (flags & (uint8_t) leaf_volatile_flag) == (uint8_t) leaf_volatile_flag;
         }
 
-        [[nodiscard]] bool is_ttl() const {
-            return (flags & (uint8_t) leaf_ttl_flag) == (uint8_t) leaf_ttl_flag;
+        [[nodiscard]] bool is_expiry() const {
+            return (flags & (uint8_t) leaf_expiry_flag) == (uint8_t) leaf_expiry_flag;
         }
 
-        void set_ttl() {
-            flags |= (uint8_t) leaf_ttl_flag;
+        void set_is_expiry() {
+            flags |= (uint8_t) leaf_expiry_flag;
         }
 
-        void unset_ttl() {
-            flags &= ~(uint8_t) leaf_ttl_flag;
+        void unset_is_expiry() {
+            flags &= ~(uint8_t) leaf_expiry_flag;
         }
 
         [[nodiscard]] size_t byte_size() const {
-            return key_len + 1 + val_len + ((is_ttl()) ? sizeof(uint64_t) : 0) + sizeof(leaf);
+            return key_len + 1 + val_len + ((is_expiry()) ? sizeof(uint64_t) : 0) + sizeof(leaf);
         }
 
         [[nodiscard]] bool expired() const {
-            long expiry = ttl();
+            ExpiryType expiry = expiry_ms();
             if (!expiry) return false;
             return now() > expiry;
         }
@@ -608,15 +608,15 @@ namespace art {
             memcpy(val(), v, l);
         }
 
-        [[nodiscard]] ExpiryType ttl() const {
-            if (!is_ttl()) return 0;
+        [[nodiscard]] ExpiryType expiry_ms() const {
+            if (!is_expiry()) return 0;
             ExpiryType r = 0;
             memcpy(&r, val() + val_len, sizeof(ExpiryType));
             return r;
         }
 
-        bool set_ttl(ExpiryType v) {
-            if (!is_ttl()) return false;
+        bool set_expiry(ExpiryType v) {
+            if (!is_expiry()) return false;
             memcpy(val() + val_len, &v, sizeof(ExpiryType));
             return true;
         }
@@ -678,6 +678,12 @@ namespace art {
             if (left_len < right_len) return -1;
             int r = memcmp(this->data, key, std::min<unsigned>(left_len, right_len));
             return r;
+        }
+        operator art::key_options() const {
+            key_options opts;
+            opts.set_expiry(this->expiry_ms());
+            opts.set_volatile(is_volatile());
+            return opts;
         }
     };
 

@@ -6,89 +6,82 @@
 #include "value_type.h"
 #include "valkeymodule.h"
 #include "art.h"
+#include "caller.h"
 #include "composite.h"
 #include "module.h"
 #include "keys.h"
-int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc < 4)
-        return ValkeyModule_WrongArity(ctx);
-
+#include "vk_caller.h"
+extern "C"{
+int HSET(caller& cc, const arg_t& args) {
     int responses = 0;
-    int r = VALKEYMODULE_OK;
-    size_t nlen;
-    //thread_local composite query;
-    //art::key_spec spec;
+    int r = 0;
     int64_t updated = 0;
 
     auto fc = [&](art::node_ptr) -> void {
         ++updated;
     };
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    if (key_ok(args[1]) != 0) {
+        return cc.null();
     }
-    auto t = get_art(argv);
+    auto t = get_art(args[1]);
     storage_release release(t->latch);
-    art::value_type shard_key{n, nlen};
-    auto container = conversion::convert(n, nlen);
+    auto container = conversion::convert(args[1]);
     t->query.create({container});
-    for (int n = 2; n < argc; n += 2) {
-        size_t klen, vlen;
-        const char *k = ValkeyModule_StringPtrLen(argv[n], &klen);
-        const char *v = ValkeyModule_StringPtrLen(argv[n + 1], &vlen);
+    for (size_t n = 2; n < args.size(); n += 2) {
 
-        if (key_ok(k, klen) != 0) {
-            r |= ValkeyModule_ReplyWithNull(ctx);
+        if (key_ok(args[n]) != 0) {
+            r |= cc.null();
             ++responses;
             continue;
         }
 
-        auto field = conversion::convert(k, klen);
+        auto field = conversion::convert(args[n]);
         t->query.push(field);
         art::value_type key = t->query.create();
-        art::value_type val = {v, (unsigned) vlen};
+        art::value_type val = args[n+1];
 
-        art_insert(t, {}, key, val, fc);
+        t->insert(key, val, true, fc);
         t->query.pop_back();
         ++responses;
     }
-    ValkeyModule_ReplyWithBool(ctx, updated > 0 ? 0 : 1);
-    return 0;
+    return cc.boolean(updated);
+}
+}
+int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HSET);
 }
 
 int cmd_HMSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return cmd_HSET(ctx, argv, argc);
 }
 
-int HUPDATEEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fields_start,
+int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
               bool replies,
               const std::function<art::node_ptr(const art::node_ptr &old)> &modify) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc < 3)
-        return ValkeyModule_WrongArity(ctx);
+    if (argv.size() < 3)
+        return call.wrong_arity();
     int responses = 0;
-    int r = VALKEYMODULE_OK;
-    size_t nlen;
-    art::key_spec spec;
+    int r = 0;
+    art::key_spec spec(argv);
 
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.null();
     }
-    auto t = get_art(argv);
+    auto t = get_art(argv[1]);
     storage_release release(t->latch);
 
-    t->query.create({conversion::convert(n, nlen)});
+    t->query.create({conversion::convert(n)});
     if (replies)
-        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    for (int n = fields_start; n < argc; ++n) {
-        size_t klen;
-        const char *k = ValkeyModule_StringPtrLen(argv[n], &klen);
+        call.start_array();
+    for (size_t n = fields_start; n < argv.size(); ++n) {
 
-        if (key_ok(k, klen) != 0) {
+        auto k = argv[n];
+
+        if (key_ok(k) != 0) {
             if (replies)
-                r |= ValkeyModule_ReplyWithNull(ctx);
+                r |= call.null();
             ++responses;
             continue;
         }
@@ -97,13 +90,13 @@ int HUPDATEEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fie
         auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
             if (leaf.null()) {
                 if (replies)
-                    r |= ValkeyModule_ReplyWithLongLong(ctx, -2);
+                    r |= call.long_long(-2);
             } else {
                 return modify(leaf);
             }
             return nullptr;
         };
-        auto converted = conversion::convert(k, klen);
+        auto converted = conversion::convert(k);
         t->query.push(converted);
         art::value_type key = t->query.create();
         art::update(t, key, updater);
@@ -111,72 +104,92 @@ int HUPDATEEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fie
         ++responses;
     }
     if (replies)
-        ValkeyModule_ReplySetArrayLength(ctx, responses);
-    return 0;
+        call.end_array(responses);
+    return call.ok();
 }
 
-int HUPDATE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, int fields_start,
+
+int HUPDATE(caller& call,const arg_t& argv, int fields_start,
             const std::function<art::node_ptr(const art::node_ptr &old)> &modify) {
-    return HUPDATEEX(ctx, argv, argc, fields_start, true, modify);
+    return HUPDATEEX(call, argv, fields_start, true, modify);
 }
 
-int HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, const std::function<int64_t(int64_t)> &calc) {
-    if (argc < 4)
-        return ValkeyModule_WrongArity(ctx);
-    art::hexpire_spec ex_spec(argv, argc);
+int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t)> &calc) {
+    if (argv.size() < 4)
+        return call.wrong_arity();
+    art::hexpire_spec ex_spec(argv);
     if (ex_spec.parse_options() != VALKEYMODULE_OK) {
-        return ValkeyModule_ReplyWithSimpleString(ctx, "ERR");
+        return call.syntax_error();
     }
+    auto t = get_art(argv[1]);
     int r = 0;
     auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
         auto l = leaf.const_leaf();
         auto ttl = calc(ex_spec.seconds);
         bool do_set = false;
         if (ex_spec.NX) {
-            do_set = !l->is_ttl();
+            do_set = !l->is_expiry();
         }
         if (ex_spec.XX) {
-            do_set = l->is_ttl();
+            do_set = l->is_expiry();
         }
         if (ex_spec.GT) {
-            do_set = (l->ttl() > 0 && l->ttl() < ttl);
+            do_set = (l->expiry_ms() > 0 && l->expiry_ms() < ttl);
         }
         if (ex_spec.LT) {
-            do_set = (l->ttl() > 0 && l->ttl() >= ttl);
+            do_set = (l->expiry_ms() > 0 && l->expiry_ms() >= ttl);
         }
         if (do_set) {
-            r |= ValkeyModule_ReplyWithLongLong(ctx, 1);
-            return art::make_leaf(*get_art(argv), l->get_key(), l->get_value(), ttl, l->is_volatile());
+            r |= call.long_long(1);
+            return art::make_leaf(*t, l->get_key(), l->get_value(), ttl, l->is_volatile());
         } else {
-            r |= ValkeyModule_ReplyWithLongLong(ctx, 0);
+            r |= call.long_long( 0);
         }
         return nullptr;
     };
-    return r | HUPDATE(ctx, argv, argc, ex_spec.fields_start, updater);
+    return r | HUPDATE(call, argv, ex_spec.fields_start, updater);
+}
+
+extern "C"
+int HEXPIRE(caller& call, const arg_t& args) {
+    return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
+            return art::now() + 1000 * nr;
+        });
 }
 
 int cmd_HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    return HEXPIRE(ctx, argv, argc, [](int64_t nr) -> int64_t {
-        return art::now() + 1000 * nr;
-    });
-}
+    vk_caller call;
 
-int cmd_HEXPIREAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    return HEXPIRE(ctx, argv, argc, [](int64_t nr) -> int64_t {
+    return call.vk_call(ctx, argv,argc, [](caller& call, const arg_t& args) {
+        return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
+            return art::now() + 1000 * nr;
+        });
+    });
+
+}
+extern "C"
+int HEXPIREAT(caller& call, const arg_t& args) {
+    return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
         return 1000 * nr;
     });
 }
 
-int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    art::hgetex_spec spec(argv, argc);
+int cmd_HEXPIREAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HEXPIREAT);
+
+}
+extern "C"
+int HGETEX(caller& call, const arg_t &argv) {
+    art::hgetex_spec spec(argv);
     int r = 0;
     if (spec.parse_options() != VALKEYMODULE_OK) {
-        return ValkeyModule_ReplyWithSimpleString(ctx, "ERR");
+        return call.syntax_error();
     }
     long responses = 0;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    r = r | HUPDATEEX(ctx, argv, argc, spec.fields_start, false,
-                      [argv,&spec,&r,ctx,&responses](const art::node_ptr &leaf) -> art::node_ptr {
+    call.start_array();
+    r = r | HUPDATEEX(call, argv, spec.fields_start, false,
+                      [&](const art::node_ptr &leaf) -> art::node_ptr {
                           auto l = leaf.const_leaf();
                           int64_t ttl = 0;
                           bool do_set = false;
@@ -201,80 +214,95 @@ int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
                               do_set = true;
                           }
 
-                          r |= ValkeyModule_ReplyWithStringBuffer(ctx, l->get_value().chars(), l->get_value().size);
+                          r |= call.vt(l->get_value());
                           ++responses;
                           if (do_set) {
-                              return art::make_leaf(*get_art(argv), l->get_key(), l->get_value(), ttl, l->is_volatile());
+                              return art::make_leaf(*get_art(argv[1]), l->get_key(), l->get_value(), ttl, l->is_volatile());
                           }
                           return nullptr;
                       });
-    ValkeyModule_ReplySetArrayLength(ctx, responses);
+    call.end_array(responses);
     return r;
 }
+int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx,argv,argc, HGETEX);
+}
+extern "C"
+int HINCRBY(caller& call, const arg_t &argv) {
+    if (argv.size() != 4)
+        return call.wrong_arity();
 
-int cmd_HINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc != 4)
-        return ValkeyModule_WrongArity(ctx);
     long long by = 0;
 
-    if (ValkeyModule_StringToLongLong(argv[3], &by) != VALKEYMODULE_OK) {
-        return ValkeyModule_WrongArity(ctx);
+    if (!conversion::to_ll(argv[3], by)) {
+        return call.wrong_arity();
     }
     long long l = 0;
-    int r = HUPDATEEX(ctx, argv, argc - 1, 2, false,
-                      [by,&l](const art::node_ptr &old) -> art::node_ptr {
+    auto vmin = argv;
+    vmin.pop_back();
+    int r = HUPDATEEX(call, vmin, 2, false,
+                      [&](const art::node_ptr &old) -> art::node_ptr {
                           return leaf_numeric_update(l, old, by);
                       });
     if (r == VALKEYMODULE_OK) {
-        return ValkeyModule_ReplyWithLongLong(ctx, l);
+        return call.long_long(l);
     }
-    return ValkeyModule_ReplyWithNull(ctx);
+    return call.null();
 }
 
-int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc != 4)
-        return ValkeyModule_WrongArity(ctx);
+int cmd_HINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HINCRBY);
+}
+
+int HINCRBYFLOAT(caller& call, const arg_t &argv) {
+    if (argv.size() != 4)
+        return call.wrong_arity();
     double by = 0;
-    if (ValkeyModule_StringToDouble(argv[3], &by) != VALKEYMODULE_OK) {
-        return ValkeyModule_WrongArity(ctx);
+    if (!conversion::to_double(argv[3], by)) {
+        return call.wrong_arity();
     }
     int r = 0;
     double l = 0;
-    r = HUPDATEEX(ctx, argv, argc - 1, 2, false,
+    auto arg2 = argv;
+    arg2.pop_back();
+    r = HUPDATEEX(call, arg2, 2, false,
                   [&l,by](const art::node_ptr &old) -> art::node_ptr {
                       return leaf_numeric_update(l, old, by);
                   });
     if (r == VALKEYMODULE_OK) {
-        return ValkeyModule_ReplyWithDouble(ctx, l);
+        return call.double_(l);
     }
-    return ValkeyModule_ReplyWithNull(ctx);
+    return call.null();
 }
 
+int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HINCRBYFLOAT);
+}
+extern "C"
+int HDEL(caller& call, const arg_t &argv) {
 
-int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-
-    if (argc < 4)
-        return ValkeyModule_WrongArity(ctx);
+    if (argv.size() < 3)
+        return call.wrong_arity();
 
     int responses = 0;
-    size_t nlen;
     art::key_spec spec;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.null();
     }
-    auto t = get_art(argv);
-    storage_release release(t->latch);
-    t->query.create({conversion::convert(n, nlen)});
+    auto t = get_art(argv[1]);
+    t->query.create({conversion::convert(n)});
     auto del_report = [&](art::node_ptr) -> void {
         ++responses;
     };
-    for (int n = 2; n < argc; ++n) {
+    for (size_t n = 2; n < argv.size(); ++n) {
         size_t klen = 0;
-        const char *k = ValkeyModule_StringPtrLen(argv[n], &klen);
+        auto k = argv[n];
 
-        if (key_ok(k, klen) != 0) {
+        if (key_ok(k) != 0) {
             continue;
         }
 
@@ -282,90 +310,107 @@ int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         t->query.push(converted);
 
         art::value_type key = t->query.create();
-        art_delete(get_art(argv), key, del_report);
+        get_art(argv[1])->remove(key, del_report);
         t->query.pop_back();
     }
-    ValkeyModule_ReplyWithLongLong(ctx, responses);
-    return 0;
+    call.long_long(responses);
+    return call.ok();
+}
+int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HDEL);
+}
+extern "C"
+int HGETDEL(caller& call, const arg_t &argv) {
+
+    if (argv.size() < 4)
+        return call.wrong_arity();
+    int responses = 0;
+    art::key_spec spec;
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.null();
+    }
+    auto t = get_art(argv[1]);
+
+    if (argv[2] != "FIELDS") {
+        return call.wrong_arity();
+    }
+    t->query.create({conversion::convert(n)});
+    auto del_report = [&](art::node_ptr) -> void {
+        ++responses;
+    };
+    for (size_t n = 3; n < argv.size(); ++n) {
+        auto k = argv[n];
+
+        if (key_ok(k) != 0) {
+            continue;
+        }
+
+        auto converted = conversion::convert(k);
+        t->query.push(converted);
+
+        art::value_type key = t->query.create();
+        get_art(argv[1])->remove(key, del_report);
+        t->query.pop_back();
+    }
+    call.long_long(responses);
+    return call.ok();
 }
 
 int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-
-    if (argc < 4)
-        return ValkeyModule_WrongArity(ctx);
-    int responses = 0;
-    size_t nlen;
-    art::key_spec spec;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
-    }
-    auto t = get_art(argv);
-    storage_release release(t->latch);
-
-    if (ValkeyModule_StringCompare(argv[2], Constants.FIELDS) != 0) {
-        return ValkeyModule_WrongArity(ctx);
-    }
-    t->query.create({conversion::convert(n, nlen)});
-    auto del_report = [&](art::node_ptr) -> void {
-        ++responses;
-    };
-    for (int n = 3; n < argc; ++n) {
-        size_t klen = 0;
-        const char *k = ValkeyModule_StringPtrLen(argv[n], &klen);
-
-        if (key_ok(k, klen) != 0) {
-            continue;
-        }
-
-        auto converted = conversion::convert(k, klen);
-        t->query.push(converted);
-
-        art::value_type key = t->query.create();
-        art_delete(get_art(argv), key, del_report);
-        t->query.pop_back();
-    }
-    ValkeyModule_ReplyWithLongLong(ctx, responses);
-    return 0;
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HGETDEL);
 }
 
-int HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
+int HQUERY(caller& call,const arg_t& argv, bool fancy,
            const std::function<void(art::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc < 3)
-        return ValkeyModule_WrongArity(ctx);
-    int responses = 0;
-    size_t nlen = 0;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    int fields_start = 2;
+    if (fancy) {
+        art::hgetex_spec spec(argv);
+
+        if (spec.parse_options() != VALKEYMODULE_OK) {
+            return call.syntax_error();
+        }
+
+        if (spec.EX||spec.PX||spec.EXAT||spec.PXAT||spec.PERSIST) {
+            return call.syntax_error();
+        }
+        fields_start = spec.fields_start;
     }
-    auto t = get_art(argv);
+
+    int responses = 0;
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.null();
+    }
+    auto t = get_art(n);
     storage_release release(t->latch);
 
-    art::value_type any_key = t->query.create({conversion::convert(n, nlen)});
-    art::node_ptr lb = lower_bound(get_art(argv), any_key);
+    art::value_type any_key = t->query.create({conversion::convert(n)});
+    art::node_ptr lb = lower_bound(t, any_key);
     if (lb.null()) {
-        return ValkeyModule_ReplyWithNull(ctx);
+        return call.null();
     }
     if (lb.is_leaf) {
         // Check if the expanded path matches
         if (lb.const_leaf()->prefix(any_key) != 0) {
-            return ValkeyModule_ReplyWithNull(ctx);
+            return call.null();
         }
     }
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    for (int arg = 2; arg < argc; ++arg) {
-        size_t klen;
-        const char *k = ValkeyModule_StringPtrLen(argv[arg], &klen);
-        if (key_ok(k, klen) != 0) {
-            ValkeyModule_ReplyWithNull(ctx);
+    call.start_array();
+    for (size_t arg = fields_start; arg < argv.size(); ++arg) {
+        auto k = argv[arg];
+        if (key_ok(k) != 0) {
+            call.null();
         } else {
-            auto converted = conversion::convert(k, klen);
+            auto converted = conversion::convert(k);
             t->query.push(converted);
             art::value_type search_key = t->query.create();
-            art::node_ptr r = art_search(get_art(argv), search_key);
+            art::node_ptr r = art_search(t, search_key);
             if (r.null()) {
                 nullreporter();
             } else {
@@ -375,55 +420,70 @@ int HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
             ++responses;
         }
     }
-    ValkeyModule_ReplySetArrayLength(ctx, responses);
-    return VALKEYMODULE_OK;
+    call.end_array(responses);
+    return call.ok();
 }
 
-int HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
+int HGET_(caller& call, const arg_t& argv,
          const std::function<void(art::node_ptr leaf)> &reporter) {
-    return HGETEX(ctx, argv, argc, reporter, [&]()-> void {
-        ValkeyModule_ReplyWithNull(ctx);
+    return HQUERY(call, argv, false, reporter, [&]()-> void {
+        call.null();
     });
 }
-
-int cmd_HTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+extern "C"
+int HTTL(caller& call,const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
-        long long ttl = l->ttl();
+        long long ttl = l->expiry_ms();
         if (ttl == 0) {
-            ValkeyModule_ReplyWithLongLong(ctx, -1);
+            call.long_long(-1);
         } else {
-            ValkeyModule_ReplyWithLongLong(ctx, (ttl - art::now()) / 1000);
+            call.long_long((ttl - art::now()) / 1000);
         }
     };
     auto nullreport = [&]() -> void {
-        ValkeyModule_ReplyWithLongLong(ctx, -2);
+        call.long_long(-2);
     };
-    int r = HGETEX(ctx, argv, argc, reporter, nullreport);
+    int r = HQUERY(call, argv, true, reporter, nullreport);
     return r;
+}
+int cmd_HTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HTTL);
+}
+extern "C"
+int HGET(caller& call, const arg_t& argv) {
+    auto reporter = [&](art::node_ptr r) -> void {
+        auto vt = r.const_leaf()->get_value();
+        call.vt(vt);
+    };
+    return HGET_(call, argv, reporter);
+}
+
+extern "C"
+int HMGET(caller& call, const arg_t& argv) {
+    auto reporter = [&](art::node_ptr r) -> void {
+        auto vt = r.const_leaf()->get_value();
+        call.vt(vt);
+    };
+    return HGET_(call, argv, reporter);
 }
 
 int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    auto reporter = [&](art::node_ptr r) -> void {
-        auto vt = r.const_leaf()->get_value();
-
-        auto *val = ValkeyModule_CreateString(ctx, vt.chars(), vt.size);
-        ValkeyModule_ReplyWithString(ctx, val);
-    };
-    return HGET(ctx, argv, argc, reporter);
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HGET);
 }
-
-int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc != 2)
-        return ValkeyModule_WrongArity(ctx);
+extern "C"
+int HLEN(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
     int responses = 0;
     size_t nlen = 0;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.null();
     }
-    auto t = get_art(argv);
+    auto t = get_art(argv[1]);
     storage_release release(t->latch);
     t->query.create({conversion::convert(n, nlen), art::ts_end});
     auto search_end = t->query.end();
@@ -437,132 +497,125 @@ int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
         return 0;
     };
-    art::range(get_art(argv), search_start, search_end, table_iter, nullptr);
+    art::range(t, search_start, search_end, table_iter, nullptr);
 
-    return ValkeyModule_ReplyWithLongLong(ctx, responses);
+    return call.long_long(responses);
+}
+int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HLEN);
 }
 
 int cmd_HMGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return cmd_HGET(ctx, argv, argc);
 }
-
-int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+extern "C"
+int HEXPIRETIME(caller& call, const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
-        ValkeyModule_ReplyWithLongLong(ctx, l->ttl() / 1000);
+        call.long_long(l->expiry_ms() / 1000);
     };
-    return HGET(ctx, argv, argc, reporter);
+    return HQUERY(call, argv, true, reporter, [&]()-> void {call.null();});
 }
 
-int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc != 2)
-        return ValkeyModule_WrongArity(ctx);
+int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HEXPIRETIME);
+}
+extern "C"
+int HGETALL(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
     int responses = 0;
-    size_t nlen = 0;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.null();
     }
-    auto t = get_art(argv);
+    auto t = get_art(argv[1]);
     storage_release release(t->latch);
-    t->query.create({conversion::convert(n, nlen), art::ts_end});
+    art::value_type search_start = t->query.create({conversion::convert(n)});
 
-    art::value_type search_end = t->query.end();
-    art::value_type search_start = t->query.prefix(2);
     art::value_type table_key = search_start;
-    bool exists = false;
-    auto table_counter = [&](art::node_ptr leaf)-> int {
-        auto l = leaf.const_leaf();
-        if (!l->get_key().starts_with(table_key)) {
-            return -1;
-        }
-        exists = true;
-        return -1;
-    };
-    art::range(get_art(argv), search_start, search_end, table_counter);
-    if (!exists) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    //bool exists = false;
+    art::iterator ai(t, search_start);
+    if (!ai.ok()) {
+        return call.null();
     }
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    auto table_iter = [&](const art::node_ptr &leaf)-> int {
-        auto l = leaf.const_leaf();
-        auto key = l->get_key();
-        auto value = l->get_value();
+    call.start_array();
+
+    while (ai.ok()) {
+        auto ik = ai.key();
+        if (!ik.starts_with(table_key)) break;
+        auto key = ai.key();
+        auto value = ai.value();
         if (!key.starts_with(table_key)) {
             return -1;
         }
-        reply_encoded_key(ctx, art::value_type{key.bytes + table_key.size, key.size - table_key.size});
-        auto *val = ValkeyModule_CreateString(ctx, value.chars(), value.size);
-        ValkeyModule_ReplyWithString(ctx, val);
+        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.vt(value);
         responses += 2;
+        ai.next();
+    }
+    call.end_array(responses);
 
-        return 0;
-    };
-    art::range(get_art(argv), search_start, search_end, table_iter);
-
-    ValkeyModule_ReplySetArrayLength(ctx, responses);
-    return VALKEYMODULE_OK;
+    return call.ok();
 }
-
-int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc != 2)
-        return ValkeyModule_WrongArity(ctx);
+int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HGETALL);
+}
+extern "C"
+int HKEYS(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
 
     int responses = 0;
-    size_t nlen = 0;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.null();
     };
-    auto t = get_art(argv);
+    auto t = get_art(argv[1]);
     storage_release release(t->latch);
-    art::value_type search_end = t->query.create({conversion::convert(n, nlen), art::ts_end});
+    art::value_type search_end = t->query.create({conversion::convert(n), art::ts_end});
     art::value_type search_start = t->query.prefix(2);
     art::value_type table_key = search_start;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+    call.start_array();
     auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
         if (!key.starts_with(search_start)) {
             return -1;
         }
-        reply_encoded_key(ctx, art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
         responses += 1;
 
         return 0;
     };
-    art::range(get_art(argv), search_start, search_end, table_iter, nullptr);
+    art::range(t, search_start, search_end, table_iter, nullptr);
 
-    ValkeyModule_ReplySetArrayLength(ctx, responses);
-    return VALKEYMODULE_OK;
+    call.end_array(responses);
+    return call.ok();
+}
+int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HKEYS);
+}
+extern "C"
+int HEXISTS(caller& call, const arg_t& argv) {
+    int cnt = 0;
+    auto reporter = [&](art::node_ptr unused(r)) -> void {
+        ++cnt;
+    };
+    int r = HQUERY(call, argv, false, reporter, [&]()-> void {
+
+    });
+    if (r == call.ok()) {
+        return call.boolean(cnt>0);
+    }
+    return call.null();
 }
 
 int cmd_HEXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc != 2)
-        return ValkeyModule_WrongArity(ctx);
-    int responses = 0;
-    size_t nlen = 0;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
-    }
-    auto t = get_art(argv);
-    storage_release release(t->latch);
-
-    art::value_type search_end = t->query.create({conversion::convert(n, nlen), art::ts_end});
-    art::value_type search_start = t->query.prefix(2);
-    art::value_type table_key = t->query.prefix(2);
-    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
-        if (!key.starts_with(table_key)) {
-            return -1;
-        }
-        ++responses;
-        return -1;
-    };
-    art::range(get_art(argv), search_start, search_end, table_iter, nullptr);
-
-    return ValkeyModule_ReplyWithBool(ctx, responses > 0 ? 1 : 0);
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HEXISTS);
 }
 
 int add_hash_api(ValkeyModuleCtx *ctx) {

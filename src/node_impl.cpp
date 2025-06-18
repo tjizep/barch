@@ -161,6 +161,7 @@ unsigned art::node::check_prefix(const unsigned char *key, unsigned key_len, uns
 }
 
 art::tree::~tree() {
+    repl_client.stop();
     mexit = true;
     if (tmaintain.joinable())
         tmaintain.join();
@@ -213,7 +214,7 @@ void art::tree::run_defrag() {
                 page_iterator(page.first, page.second, [&fc,this](const leaf *l) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
-                    art_delete(this, l->get_key(), fc);
+                    this->remove(l->get_key(), fc);
                     if (c1 - 1 != this->size) {
                         abort_with("key does not exist anymore");
                     }
@@ -222,8 +223,8 @@ void art::tree::run_defrag() {
                 page_iterator(page.first, page.second, [&fc,&options,this](const leaf *l) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
-                    options.ttl = l->ttl();
-                    art_insert(this, options, l->get_key(), l->get_value(), fc);
+                    options.ttl = l->expiry_ms();
+                    art_insert(this, options, l->get_key(), l->get_value(), true, fc);
                     if (c1 + 1 != this->size) {
                         abort_with("key not added");
                     }
@@ -330,6 +331,7 @@ void art::tree::start_maintain() {
                     mods = get_modifications();
                 }
             }
+            ++statistics::maintenance_cycles;
             // TODO: we should wait on a join signal not just sleep else server wont stop quickly
             std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
         }

@@ -30,6 +30,9 @@ namespace art {
         explicit value_type(const heap::vector<uint8_t> &value): bytes(value.data()), size(value.size()) {
         }
 
+        explicit value_type(const std::vector<uint8_t> &value): bytes(value.data()), size(value.size()) {
+        }
+
         explicit value_type(const heap::small_vector<uint8_t> &value): bytes(value.data()), size(value.size()) {
         }
 
@@ -53,6 +56,12 @@ namespace art {
 
         [[nodiscard]] const char *chars() const {
             return (const char *) bytes;
+        }
+        [[nodiscard]] const char *begin() const {
+            return (const char *) bytes;
+        }
+        [[nodiscard]] const char *end() const {
+            return begin() + size;
         }
 
         [[nodiscard]] bool starts_with(value_type other) const {
@@ -95,6 +104,17 @@ namespace art {
             return compare(other) >= 0;
         }
 
+        bool operator !=(const char* other) const {
+            return *this != value_type{other,strlen(other)};
+        }
+
+        bool operator ==(const char* other) const {
+            return *this == value_type{other,strlen(other)};
+        }
+
+        bool operator <(const char* other) const {
+            return *this < value_type{other,strlen(other)};
+        }
         [[nodiscard]] value_type sub(size_t start) const {
             if (start >= size) return value_type(nullptr);
             return {bytes + start, size - start};
@@ -105,10 +125,7 @@ namespace art {
             return {bytes + start, length};
         }
 
-        const unsigned char &operator[](unsigned i) const {
-            // TODO: this is a hack fix because there's some BUG in the insert code
-            // were assuming that the key has a magic 0 byte allocated after the last byte
-            // however this is not so for data
+        const unsigned char &operator[](unsigned i) const { // line with most keywords
             if (i < size) {
                 return bytes[i];
             }

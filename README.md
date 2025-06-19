@@ -1,6 +1,21 @@
 # Introducing *BARCH*
 
-`BARCH` is a low memory, dynamically configurable, constant access time ordered key value store for [valkey](https://valkey.io/)
+`BARCH` is a low memory, dynamically configurable, constant access time ordered cache similar to [valkey](https://valkey.io/) and redis
+
+Additionally it has an in-situ client for python which can reduce read latency to micro-seconds.
+It implements the Z* (OrderedSet), H* (HashSet) and key value API's available in redis.
+A demo ubuntu 22.04 docker image is available at teejip/barch:apis
+
+Run below to expose an example flask application to see the API's in action
+```
+sudo docker run -p 127.0.0.1:8000:8000 barch:apis
+```
+binaries are located under `/home/barch/setup` within the docker image
+
+It's also usable as a valkey module and can be started as
+```
+valkey-server --loadmodule _barch.so
+```
 
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 

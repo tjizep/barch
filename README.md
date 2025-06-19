@@ -2,7 +2,7 @@
 
 `BARCH` is a low memory, dynamically configurable, constant access time ordered cache similar to [valkey](https://valkey.io/) and redis
 
-Additionally it has an in-situ client for python which can reduce read latency to micro-seconds.
+Additionally it has an embedded server+client for python which can reduce read latency to micro-seconds.
 It implements the Z* (OrderedSet), H* (HashSet) and key value API's available in redis.
 A demo ubuntu 22.04 docker image is available at teejip/barch:apis
 
@@ -16,6 +16,16 @@ It's also usable as a valkey module and can be started as
 ```
 valkey-server --loadmodule _barch.so
 ```
+
+### Advantages of the embedded server
+
+- far lower latency
+- automatic scaling
+- concurrency through sharding
+- serverless 
+
+The embedded server can also run in a multi-writer replication configuration in conjunction with a standalone server.
+An embedded server can also be quickly synchronized with a standalone server using the block load api.
 
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 

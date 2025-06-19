@@ -19,13 +19,34 @@ valkey-server --loadmodule _barch.so
 
 ### Advantages of the embedded server
 
-- far lower latency
+- far lower read latency (micro-seconds instead of milli-seconds)
 - automatic scaling
 - concurrency through sharding
-- serverless 
+- optionally serverless 
 
 The embedded server can also run in a multi-writer replication configuration in conjunction with a standalone server.
 An embedded server can also be quickly synchronized with a standalone server using the block load api.
+
+The python code whould look something like this
+Client/Server A
+```python
+import barch
+barch.start("127.0.0.1","13000")
+barch.publish("w.x.y.b","13000")
+h = barch.HashSet()
+h.add("ka",["field1","value1","field2","value2"]) # gets sent to b
+...
+```
+
+Client/Server B
+```python
+import barch
+barch.start("127.0.0.1","13000")
+barch.publish("w.x.y.a","13000")
+h = barch.HashSet() 
+h.add("kb",["field1","value1","field2","value2"]) # gets sent to a
+...
+```
 
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 
@@ -41,7 +62,7 @@ These can be used in conjunction to facilitate ultra low latency read caching.
 
 ### Python API
 
-Barch has a new python api with many functions - these mostly follows redis api's but runs on the local in process barch db created by the client. This facilitates very low read latency
+Barch has a new python api - these mostly follows redis api's but runs on the local in process barch db created by the client. This facilitates very low read latency
 - Api examples are under examples/flask/example.py showing how barch can be used as a low latency cache while being replicated to from an existing 
 - a docker demo image is located at docker hub teejip/barch:apis
 - test/testbarch.py

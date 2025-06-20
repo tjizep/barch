@@ -257,8 +257,9 @@ int SET(caller& call,const arg_t& argv) {
         return call.boolean(1);//ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 }
+vk_caller call;
 int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
+
     return call.vk_call(ctx, argv, argc, SET);
 }
 static int BarchModifyInteger(caller& call,const arg_t& argv, long long by) {

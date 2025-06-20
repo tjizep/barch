@@ -91,11 +91,11 @@ struct vk_caller : caller {
 
         return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
     }
-
+    arg_t args {};
     template<typename TF>
     int vk_call(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, TF &&call) {
         this->ctx = ctx;
-        arg_t args {};
+        args.clear();
         ValkeyModule_AutoMemory(ctx);
         for (int i = 0; i < argc; i++) {
             size_t klen;

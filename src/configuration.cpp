@@ -720,7 +720,7 @@ bool art::get_use_vmm_memory() {
     std::unique_lock lock(config_mutex);
     return record.use_vmm_memory;
 }
-static std::vector<size_t> shards = {0,1,2,3,4,5,6,7,8,9,10}; //
+static std::vector<size_t> shards = {0,1,2}; //
 const std::vector<size_t>& art::get_shard_count() {
     return shards;
 }

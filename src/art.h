@@ -97,6 +97,7 @@ namespace art{
     private:
         trace_list trace{};
     public:
+        mutable trace_list tlb{};
         composite query{};
         composite cmd_ZADD_q1{};
         composite cmd_ZADD_qindex{};

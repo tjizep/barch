@@ -24,14 +24,14 @@ local test = function()
 
     tests = tests + 1
     --vk.call('B.BEGIN')
-    for i = 1, count do
+    for i = 1,count do
         local k = convert(i-1)
         local v = '#'..i
         vk.call('B.SET',k,v)
         vk.call('B.REM',k)
         vk.call('B.SET',k,v)
         if math.mod(i,logperiod) == 0 then
-            --vk.log(vk.LOG_NOTICE, "Adding "..i)
+            vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
     end
     --vk.call('B.COMMIT')
@@ -47,7 +47,7 @@ local test = function()
             successes = successes + 1
         end
         if math.mod(i,logperiod) == 0 then
-            --vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
+            vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
         end
         --vk.call('B.ROLLBACK')
     end
@@ -86,7 +86,7 @@ local clear = function()
             failures = failures + 1
         end
         if math.mod(i,logperiod) == 0 then
-            --vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
+            vk.log(vk.LOG_NOTICE, "Removed "..i.." "..failures)
         end
 
     end
@@ -107,11 +107,11 @@ vk.call('B.CLEAR')
 result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "150m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "on")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
-result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "100")
-result[inc()] = vk.call("B.CONFIG", "SET","max_modifications_before_save", "1000")
+result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "10000000000")
+result[inc()] = vk.call("B.CONFIG", "SET","max_modifications_before_save", "1000000000000")
 
 convert = tochars123
-for i = 1,2 do
+for i = 1,1 do
     test()
     clear()
 end

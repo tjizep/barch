@@ -166,46 +166,22 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list &trace) {
  * @arg key_len The length of the key
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
- */
+ */static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key);
 art::node_ptr art_search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     try {
-        art::node_ptr n = t->root;
-        unsigned depth = 0;
-        while (!n.null()) {
-            // Might be a leaf
-            if (n.is_leaf) {
-                const auto *l = n.const_leaf();
-                if (l->expired()) return nullptr;
-
-                if (0 == l->compare(key)) {
-                    return n;
-                }
-                return nullptr;
-            }
-            // Bail if the prefix does not match
-            const auto &d = n->data();
-            if (d.partial_len) {
-                unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-                if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len))
-                    return nullptr;
-                depth += d.partial_len;
-                if (depth >= key.length()) {
-                    return nullptr;
-                }
-            }
-            //node_ptr p = n;
-            unsigned at = n->index(key[depth]);
-            n = n->get_child(at);
-            //trace_element te = {p,n,at, key[depth]};
-            //trace.push_back(te);
-            depth++;
+        art::node_ptr al;
+        t->tlb.clear();
+        al = inner_lower_bound(t->tlb, t, key);
+        if (!al.null() && al.const_leaf()->get_key() == key) {
+            return al;
         }
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
+
 }
 
 void art::update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
@@ -482,8 +458,8 @@ art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
     try {
         art::node_ptr al;
-        art::trace_list tl;
-        al = inner_lower_bound(tl, t, key);
+        t->tlb.clear();
+        al = inner_lower_bound(t->tlb, t, key);
         if (!al.null()) {
             return al;
         }

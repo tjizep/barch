@@ -3,7 +3,7 @@ vk = redis
 vk.call('B.CLEAR')
 
 local chars= {'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z'}
-local count = 10
+local count = 17
 local result = {}
 local index = 0
 local convert
@@ -36,7 +36,7 @@ local test = function()
     if vk.call('B.MIN') == 'a' then
         successes = successes + 1
     end
-    if vk.call('B.MAX') == 'j' then
+    if vk.call('B.MAX') == chars[count] then
         successes = successes + 1
     end
     result[inc()] = {"'B.RANGE',convert(2), convert(8), 6", rtest}

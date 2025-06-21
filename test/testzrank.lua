@@ -2,7 +2,7 @@ local vk
 vk = redis
 
 local t = vk.call('B.MILLIS')
-local count = 120000
+local count = 320000
 local key = 'z'
 
 if vk.call('B.SIZE') < count then

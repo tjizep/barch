@@ -96,12 +96,12 @@ struct vk_caller : caller {
     int vk_call(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, TF &&call) {
         this->ctx = ctx;
         arg_t args {};
-        args.clear();
+        args.resize(argc);
         ValkeyModule_AutoMemory(ctx);
         for (int i = 0; i < argc; i++) {
             size_t klen;
             const char *k = ValkeyModule_StringPtrLen(argv[i], &klen);
-            args.push_back({k, klen});
+            args[i]= {k, klen};
         }
 
         int r = call(*this,args);

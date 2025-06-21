@@ -34,42 +34,6 @@ extern "C" {
 
 static auto startTime = std::chrono::high_resolution_clock::now();
 
-struct iter_state {
-    ValkeyModuleCtx *ctx;
-    ValkeyModuleString **argv;
-    int64_t replylen;
-    int64_t count;
-
-    iter_state(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int64_t count)
-        : ctx(ctx), argv(argv), replylen(0), count(count) {
-    }
-
-    iter_state(const iter_state &is) = delete;
-
-    iter_state &operator=(const iter_state &) = delete;
-
-    int iterate(art::value_type key, art::value_type) {
-        if (key.size == 0) {
-            ///
-            return -1;
-        }
-
-        if (key.bytes == nullptr) {
-            return -1;
-        }
-
-        if (0 != reply_encoded_key(ctx, key)) {
-            return -1;
-        };
-
-        if (replylen >= count)
-            return -1;
-
-        replylen++;
-        return 0;
-    }
-};
-
 
 extern "C" {
 /* CDICT.RANGE <startkey> <endkey> <count>
@@ -101,22 +65,27 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     auto c1 = conversion::convert(k1, k1len);
     auto c2 = conversion::convert(k2, k2len);
 
-    /* Seek the iterator. */
-    iter_state is(ctx, argv, count);
 
     /* Reply with the matching items. */
     ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
     //std::function<int (void *, const unsigned char *, uint32_t , void *)>
-    auto iter = [](void *data, art::value_type key, art::value_type value) -> int {
-        auto *is = (iter_state *) data;
-
-        return is->iterate(key, value);
-    };
+    long long replies = 0;
     for (auto shard : art::get_shard_count()) {
-        storage_release release(get_art(shard)->latch);
-        art::range(get_art(shard), c1.get_value(), c2.get_value(), iter, &is);
+        auto t = get_art(shard);
+        storage_release release(t->latch);
+        art::iterator i(t,c1.get_value());
+        while (i.ok()) {
+            auto k = i.key();
+            if (k >= c1.get_value() && k < c2.get_value()) {
+                reply_encoded_key(ctx, k);
+                ++replies;
+            }else {
+                break;
+            }
+            i.next();
+        }
     }
-    ValkeyModule_ReplySetArrayLength(ctx, is.replylen);
+    ValkeyModule_ReplySetArrayLength(ctx, replies);
 
     /* Cleanup. */
     return VALKEYMODULE_OK;
@@ -148,18 +117,22 @@ int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     auto c2 = conversion::convert(k2, k2len);
 
     /* Seek the iterator. */
-    iter_state is(ctx, argv, std::numeric_limits<int64_t>::max());
 
     /* Reply with the matching items. */
     int64_t count = 0;
-    //std::function<int (void *, const unsigned char *, uint32_t , void *)>
-    auto iter = [&count](void * unused(data), art::value_type unused(key), art::value_type unused(value)) -> int {
-        ++count;
-        return 0;
-    };
     for (auto shard : art::get_shard_count()) {
-        storage_release release(get_art(shard)->latch);
-        art::range(get_art(shard), c1.get_value(), c2.get_value(), iter, &is);
+        auto t = get_art(shard);
+        storage_release release(t->latch);
+        art::iterator i(t,c1.get_value());
+        while (i.ok()) {
+            auto k = i.key();
+            if (k >= c1.get_value() && k <= c2.get_value()) {
+                ++count;
+            }else {
+                break;
+            }
+            i.next();
+        }
     }
     ValkeyModule_ReplyWithLongLong(ctx, count);
 
@@ -257,6 +230,7 @@ int SET(caller& call,const arg_t& argv) {
         return call.boolean(1);//ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     }
 }
+
 
 int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -453,6 +427,13 @@ int GET(caller& call, const arg_t& argv) {
     art::node_ptr r = art_search(t, converted.get_value());
 
     if (r.null()) {
+        art::iterator i(t, converted.get_value());
+        if (i.ok()) {
+            if (i.key() == converted.get_value()) {
+                return call.vt(i.value());
+            }
+            return call.null();
+        }
         return call.null();
     } else {
         auto vt = r.const_leaf()->get_value();
@@ -556,10 +537,14 @@ int MAX(caller& call, const arg_t& ) {
         auto t = get_art(shard);
         if (!t->size) continue;
         art::node_ptr r = art::maximum(t);
-        if (r.is_leaf && the_max.empty()) {
-            the_max = r.const_leaf()->get_key();
-        }else if (r.is_leaf && the_max < r.const_leaf()->get_key()){
-            the_max = r.const_leaf()->get_key();
+        if (!r.is_leaf) {
+            continue;
+        }
+        auto cur = r.const_leaf()->get_key();
+        if (the_max.empty()) {
+            the_max = cur;
+        }else if (r.is_leaf && the_max < cur){
+            the_max = cur;
         }
     }
     int ok = call.ok();

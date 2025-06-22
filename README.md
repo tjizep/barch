@@ -64,7 +64,7 @@ These can be used in conjunction to facilitate ultra low latency read caching.
 
 Barch has a new python api - these mostly follows redis api's but runs on the local in process barch db created by the client. This facilitates very low read latency
 - Api examples are under examples/flask/example.py showing how barch can be used as a low latency cache while being replicated to from an existing 
-- a docker demo image is located at docker hub teejip/barch:apis
+- a docker demo image is located at docker hub teejip/barch:main
 - test/testbarch.py
 
 ### Docker Demo Image

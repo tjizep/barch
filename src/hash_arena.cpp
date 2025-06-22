@@ -136,8 +136,14 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
 
         //uint64_t start = in.tellg();
         readp(in, page);
-        if (page > size)
-            break;
+        if (page > arena.max_address_accessed) {
+            art::std_err("invalid page");
+            return false;
+        }
+        if (arena.hidden_arena.contains(page)) {
+            art::std_err("invalid page - already loaded");
+            return false;
+        }
         readp(in, s.fragmentation);
         uint32_t mods = 0;
         readp(in, mods);

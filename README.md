@@ -128,6 +128,67 @@ Barch has on average 80% less latency the difference increases with key count an
 14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
 15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
 
+# Other VALKEY API's implemented 
+```
+SET
+KEYS
+INCR
+INCRBY
+DECR
+DECRBY
+MSET
+ADD
+GET
+MGET
+MIN
+MAX
+LB
+REM
+SIZE
+SAVE
+PUBLISH
+LOAD
+START
+STOP
+RETRIEVE
+PING
+HSET
+HEXPIREAT
+HEXPIRE
+HMGET
+HINCRBY
+HINCRBYFLOAT
+HDEL
+HGETDEL
+HTTL
+HGET
+HLEN
+HEXPIRETIME
+HGETALL
+HKEYS
+HEXISTS
+ZADD
+ZREM
+ZINCRBY
+ZRANGE
+ZCARD
+ZDIFF
+ZDIFFSTORE
+ZINTERSTORE
+ZINTERCARD
+ZINTER
+ZPOPMIN
+ZPOPMAX
+ZREVRANGE
+ZRANGEBYSCORE
+ZREVRANGEBYSCORE
+ZREMRANGEBYLEX
+ZRANGEBYLEX
+ZREVRANGEBYLEX
+ZRANK
+
+``` 
+
 # Installation
 1. Checkout and build on (linux only) with gcc 10 or above
 2. `mkdir build`

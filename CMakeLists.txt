@@ -250,6 +250,9 @@ else()
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
+        add_test(NAME TestBarchInstallPy
+                COMMAND "pip install ."
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPy
                 COMMAND "python" ${CMAKE_BINARY_DIR}/testbarch.py

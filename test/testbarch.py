@@ -1,5 +1,5 @@
 import time
-from b import barch
+import barch
 barch.clear()
 s = barch.size()
 assert(s == 0)

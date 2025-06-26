@@ -8,5 +8,5 @@ setup(
     license='MIT License',
     author='CE Pretorius',
     author_email='chrisep 2 at gmail dot com',
-    package_data={'': '${PYTHON_INSTALL_FILES}'.split(';')}
+    package_data={'': './barch.py;./_barch.so'.split(';')}
 )

@@ -13,14 +13,17 @@
 
 enum {
     rpc_client_context_size = 128,
-    rpc_server_version = 21
+    rpc_server_version = 21,
+    rpc_server_version_min = 21,
+    rpc_server_version_max = 21,
+    rpc_client_max_wait_default_ms = 30000
 };
 namespace barch {
 
     typedef std::pair<std::string, size_t> host_id;
     host_id get_host_id();
     namespace server {
-        void start(std::string interface, uint_least16_t port);
+        void start(const std::string& interface, uint_least16_t port);
         void stop();
     };
 

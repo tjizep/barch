@@ -41,6 +41,23 @@ enum {
 using asio::ip::tcp;
 
 namespace barch {
+    template<typename T>
+    bool time_wait(int64_t millis, T&& fwait ) {
+        if (fwait()) {
+            return true;
+        }
+        auto start = std::chrono::steady_clock::now();
+        while (true) {
+            if (fwait()) {
+                return true;
+            }
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > millis) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
     struct net_stat {
         uint64_t saved_writes = stream_write_ctr;
         uint64_t saved_reads = stream_read_ctr;
@@ -248,7 +265,7 @@ namespace barch {
         }
     };
     std::shared_ptr<server_context>  srv = nullptr;
-    void server::start(std::string interface, uint_least16_t port) {
+    void server::start(const std::string& interface, uint_least16_t port) {
         if (srv) srv->stop();
         srv = std::make_shared<server_context>(interface, port);
     }
@@ -257,9 +274,7 @@ namespace barch {
         if (srv) srv->stop();
     }
     struct module_stopper {
-        module_stopper() {
-
-        }
+        module_stopper() = default;
         ~module_stopper() {
             server::stop();
         }
@@ -352,7 +367,9 @@ namespace barch {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-
+            time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
+                return buffer.size() < art::get_rpc_max_buffer();
+            });
             if (buffer.size() > art::get_rpc_max_buffer()) {
                 ++statistics::repl::instructions_failed;
                 art::std_err("replication buffer size exceeded", buffer.size());
@@ -373,6 +390,9 @@ namespace barch {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
+            time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
+                return buffer.size() < art::get_rpc_max_buffer();
+            });
             if (buffer.size() > art::get_rpc_max_buffer()) {
                 ++statistics::repl::instructions_failed;
                 art::std_err("replication buffer size exceeded", buffer.size());

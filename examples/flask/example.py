@@ -40,6 +40,7 @@ CONFIG_FIELDS = [
     "save_interval",
     "max_modifications_before_save",
     "rpc_max_buffer",
+    "rpc_client_max_wait_ms",
     "iteration_worker_count",
     "min_fragmentation_ratio",
     "use_vmm_memory",
@@ -54,7 +55,7 @@ CONFIG_FIELDS = [
     "log_page_access_trace",
     "external_host",
     "bind_interface",
-    "listen_port",
+    "listen_port"
 ]
 
 TABLE_TEMPLATE = """

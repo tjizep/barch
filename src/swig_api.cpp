@@ -274,6 +274,7 @@ configuration_values config() {
     r.min_fragmentation_ratio = i.min_fragmentation_ratio;
     r.n_max_memory_bytes = i.n_max_memory_bytes;
     r.rpc_max_buffer = i.rpc_max_buffer;
+    r.rpc_client_max_wait_ms = i.rpc_client_max_wait_ms;
     r.save_interval = i.save_interval;
     r.use_vmm_memory = i.use_vmm_memory;
     return r;

@@ -84,6 +84,7 @@ struct configuration_values {
     long long save_interval{120 * 1000};
     long long max_modifications_before_save{1300000};
     long long rpc_max_buffer{32768*4};
+    long long rpc_client_max_wait_ms{30000};
     unsigned iteration_worker_count{2};
     float min_fragmentation_ratio = 0.6f;
     bool use_vmm_memory{true};

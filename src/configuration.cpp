@@ -30,6 +30,7 @@ static std::string external_host{};
 static std::string bind_interface{"127.0.0.1"};
 static std::string listen_port{};
 static std::string rpc_max_buffer{};
+static std::string rpc_client_max_wait_ms{};
 
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
@@ -91,6 +92,40 @@ static int SetRPCMaxBuffer(const char *unused_arg, ValkeyModuleString *val, void
     return SetRPCMaxBuffer(test_rpc_max_buffer);
 }
 static int ApplyRPCMaxBuffer(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+static ValkeyModuleString *GetRPCClientMaxWait(const char *unused_arg, void *unused_arg) {
+    std::unique_lock lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, max_memory_bytes.c_str(), max_memory_bytes.length());;
+}
+
+static int SetRPCClientMaxWait(const std::string& test_rpc_client_max_wait_ms) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_rpc_client_max_wait_ms, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::unique_lock lock(config_mutex);
+    rpc_client_max_wait_ms = test_rpc_client_max_wait_ms;
+    char *notn = nullptr;
+    const char *str = rpc_max_buffer.c_str();
+    const char *end = str + rpc_max_buffer.length();
+
+    uint64_t n_rpc_max_client_wait_ms = std::strtoll(str, &notn, 10);
+    if (notn != nullptr && notn != end) {
+        return VALKEYMODULE_ERR;
+    }
+    record.rpc_client_max_wait_ms = n_rpc_max_client_wait_ms;
+    return VALKEYMODULE_OK;
+}
+
+static int SetRPCClientMaxWait(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string test_rpc_client_max_wait_ms = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetRPCClientMaxWait(test_rpc_client_max_wait_ms);
+}
+static int ApplyRPCClientMaxWait(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 
@@ -565,6 +600,9 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_max_buffer", "262144", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetRPCMaxBuffer, SetRPCMaxBuffer,
                                              ApplyRPCMaxBuffer, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_client_max_wait_ms", "30000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetRPCClientMaxWait, SetRPCClientMaxWait,
+                                                 ApplyRPCClientMaxWait, nullptr);
 
     return ret;
 }
@@ -615,6 +653,12 @@ int art::set_configuration_value(const std::string& name, const std::string &val
         auto r = SetEnablePageTrace(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyEnablePageTrace(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "rpc_client_max_wait_ms") {
+        auto r = SetRPCClientMaxWait(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyRPCClientMaxWait(nullptr, nullptr, nullptr);
         }
         return r;
     } else {
@@ -710,6 +754,11 @@ uint64_t art::get_max_modifications_before_save() {
 uint64_t art::get_rpc_max_buffer() {
     return record.rpc_max_buffer;
 }
+
+int64_t art::get_rpc_max_client_wait_ms() {
+    return record.rpc_client_max_wait_ms;
+}
+
 
 bool art::get_log_page_access_trace() {
     std::unique_lock lock(config_mutex);

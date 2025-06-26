@@ -43,6 +43,8 @@ namespace barch {
             heap::vector<uint8_t> buffer{};
             heap::vector<repl_dest> destinations{};
             std::thread tpoll{};
+            std::mutex latch{};
+
             bool connected = false;
             client() = default;
             client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}

@@ -56,6 +56,7 @@ namespace statistics {
         extern std::atomic<uint64_t> key_add_recv;
         extern std::atomic<uint64_t> key_add_recv_applied;
         extern std::atomic<uint64_t> key_rem_recv;
+        extern std::atomic<uint64_t> key_find_recv;
         extern std::atomic<uint64_t> key_rem_recv_applied;
         extern std::atomic<uint64_t> bytes_recv;
         extern std::atomic<uint64_t> bytes_sent;

@@ -31,7 +31,7 @@
 enum {
     cmd_ping = 1,
     cmd_stream = 2,
-    cmd_apply_changes = 3
+    cmd_art_fun = 3
 };
 enum {
     opt_max_workers = 8,
@@ -195,12 +195,14 @@ namespace barch {
                         art::std_err("failed to stream shard", e.what());
                     }
                     break;
-                case cmd_apply_changes:
+                case cmd_art_fun:
                     try {
                         uint32_t buffers_size = 0;
                         uint32_t shard = 0;
                         uint32_t count = 0;
                         uint32_t actual = 0;
+                        art::node_ptr found ;
+                        heap::vector<uint8_t> tosend;
                         readp(stream,shard);
                         readp(stream,count);
                         readp(stream,buffers_size);
@@ -237,11 +239,53 @@ namespace barch {
                                         ++actual;
                                     }
                                     break;
+                                case 'f': {
+                                        auto key = get_value(i+1, buffer);
+                                        storage_release release(t->latch);
+                                        found = art::find(t, key.first);
+                                        if (found.is_leaf) {
+                                            tosend.push_back('v');
+                                            push_value(tosend, found.const_leaf()->get_value());
+                                        }
+                                        tosend.push_back('\0');
+                                        i = key.second;
+                                        ++statistics::repl::key_find_recv;
+                                        ++actual;
+                                    }
+                                    break;
+                                case 'a': {
+                                    auto lkey = get_value(i+1, buffer);
+                                    auto ukey = get_value(lkey.second, buffer);
+                                    storage_release release(t->latch);
+                                    art::iterator ai(t, lkey.first);
+                                    while (ai.ok()) {
+                                        auto k = ai.key();
+                                        if (k >= lkey.first && k <= ukey.first) {
+                                            tosend.push_back('v');
+                                            push_value(tosend, found.const_leaf()->get_value());
+                                        }else {
+                                            break;
+                                        }
+                                        ai.next();
+                                    }
+                                    tosend.push_back('\0');
+                                    i = ukey.second;
+                                    ++statistics::repl::key_find_recv;
+                                    ++actual;
+                                }
+                                break;
                                 default:
                                     art::std_err("unknown command", cmd);
                                     return;
                                     break;
                             }
+                        }
+                        if (!tosend.empty()) {
+                            auto s = (uint32_t)tosend.size();
+                            s = htonl(s);
+                            writep(stream,s);
+                            writep(stream,tosend.data(),tosend.size());
+                            stream.flush();
                         }
                         //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                     }catch (std::exception& e) {
@@ -295,13 +339,16 @@ namespace barch {
         }
         void client::add_destination(std::string host, int port, size_t shard) {
             auto dest = repl_dest{std::move(host), port, shard};
-            for (auto& d : destinations) {
-                if (d.host == dest.host && d.port == dest.port) {
-                    art::std_err("destination already added", d.host, d.port);
-                    return;
+            {
+                std::lock_guard lock(this->latch);
+                for (auto& d : destinations) {
+                    if (d.host == dest.host && d.port == dest.port) {
+                        art::std_err("destination already added", d.host, d.port);
+                        return;
+                    }
                 }
+                destinations.emplace_back(dest);
             }
-            destinations.emplace_back(dest);
             if (!connected) {
                 connected = true;
                 tpoll = std::thread([this]() {
@@ -315,7 +362,7 @@ namespace barch {
                     while (connected) {
 
                         {
-                            std::lock_guard lock(get_art(this->shard)->latch);
+                            std::lock_guard lock(this->latch);
                             to_send.swap(this->buffer);
                             messages = this->messages;
                             total_messages += messages;
@@ -331,7 +378,7 @@ namespace barch {
                                     if (stream.fail()) {
                                         continue;
                                     }
-                                    int cmd = cmd_apply_changes;
+                                    int cmd = cmd_art_fun;
                                     uint32_t buffers_size = to_send.size();
                                     uint32_t sh = this->shard;
                                     writep(stream, cmd);
@@ -367,15 +414,16 @@ namespace barch {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-            time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
+            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
                 return buffer.size() < art::get_rpc_max_buffer();
             });
-            if (buffer.size() > art::get_rpc_max_buffer()) {
+
+            if (!ok) {
                 ++statistics::repl::instructions_failed;
                 art::std_err("replication buffer size exceeded", buffer.size());
                 return false;
             }
-
+            std::lock_guard lock(this->latch);
             buffer.push_back('i');
             push_options(buffer, options);
             push_value(buffer, key);
@@ -390,16 +438,16 @@ namespace barch {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-            time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
+            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
                 return buffer.size() < art::get_rpc_max_buffer();
             });
-            if (buffer.size() > art::get_rpc_max_buffer()) {
+            if (!ok) {
                 ++statistics::repl::instructions_failed;
                 art::std_err("replication buffer size exceeded", buffer.size());
                 return false;
             }
 
-
+            std::lock_guard lock(this->latch);
             buffer.push_back('r');
             push_value(buffer, key);
             ++statistics::repl::remove_requests;

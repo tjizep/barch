@@ -49,6 +49,7 @@ namespace statistics::repl {
     std::atomic<uint64_t> key_add_recv = 0;
     std::atomic<uint64_t> key_add_recv_applied = 0;
     std::atomic<uint64_t> key_rem_recv = 0;
+    std::atomic<uint64_t> key_find_recv = 0;
     std::atomic<uint64_t> key_rem_recv_applied = 0;
     std::atomic<uint64_t> bytes_recv = 0;
     std::atomic<uint64_t> out_queue_size = 0;

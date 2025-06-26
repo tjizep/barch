@@ -48,7 +48,8 @@ h.add("kb",["field1","value1","field2","value2"]) # gets sent to a
 ...
 ```
 
-[![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
+[![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml)
+[![Ubuntu 22.04 CI (GCC 11)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 
 ## Whats New (17 June 2025)
 ### Replication to Facilitate micro second local level api's
@@ -65,7 +66,7 @@ These can be used in conjunction to facilitate ultra low latency read caching.
 Barch has a new python api - these mostly follows redis api's but runs on the local in process barch db created by the client. This facilitates very low read latency
 - Api examples are under examples/flask/example.py showing how barch can be used as a low latency cache while being replicated to from an existing 
 - a docker demo image is located at docker hub teejip/barch:main
-- test/testbarch.py
+- Further examples can be found at test/testbarch.py
 
 ### Docker Demo Image
 The `Dockerfile` contains a python and flask build to demonstrate some of barch's features
@@ -91,8 +92,7 @@ Valkey ZADD benchmark
 ./valkey-benchmark -t zadd -r 10000000 -n 40000000 -P 16 -q
 ZADD: 176270.47 requests per second, p50=4.647 msec
 ```
-Barch has on average 80% less latency the difference increases with key count and requests
-
+Barch has on average 50% less latency the difference increases with key count and requests
 
 
 

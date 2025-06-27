@@ -261,6 +261,10 @@ else()
         add_test(NAME TestBarchReplicationPy
                 COMMAND "python" ${CMAKE_BINARY_DIR}/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestBarchReplicationPy
+                COMMAND "python" ${CMAKE_BINARY_DIR}/repltest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     endif ()
 endif ()
 

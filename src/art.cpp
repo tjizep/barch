@@ -1849,8 +1849,6 @@ void art::tree::clear() {
     statistics::pages_uncompressed = 0;
     statistics::pages_compressed = 0;
     statistics::max_page_bytes_uncompressed = 0;
-    //destroy_leaf_compression();
-    //destroy_node_compression();
 }
 
 void art::tree::update_trace(int direction) {

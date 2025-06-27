@@ -262,7 +262,7 @@ else()
                 COMMAND "python" ${CMAKE_BINARY_DIR}/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-        add_test(NAME TestBarchReplicationPy
+        add_test(NAME TestBarchReplicationPy2
                 COMMAND "python" ${CMAKE_BINARY_DIR}/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     endif ()

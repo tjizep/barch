@@ -46,11 +46,7 @@ bool arena::base_hash_arena::save(const std::string &filename,
         return false;
     }
     out.close();
-    out.open(filename, std::ios::out | std::ios::binary | std::ios::app);
-    if (!out.is_open()) {
-        art::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
-        return false;
-    }
+    out.open(filename, std::ios::out | std::ios::binary);
     out.seekp(0);
     completed = storage_version;
     writep(out, completed);

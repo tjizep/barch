@@ -11,7 +11,7 @@ for i in range(1000000):
 for i in range(1000000):
     k.erase(str(i))
 
-time.sleep(3)
+time.sleep(2)
 stats = barch.repl_stats()
 assert(stats.key_add_recv > 0)
 assert(stats.key_add_recv_applied > 0)

@@ -248,7 +248,8 @@ struct free_list {
         }
 
         if (size >= free_bins.size()) {
-            for (unsigned i = free_bins.size(); i < size + 1; ++i) {
+            size_t s = free_bins.size();
+            for (unsigned i = s; i < size + 1; ++i) {
                 free_bins.emplace_back(i, alloc);
             }
         }

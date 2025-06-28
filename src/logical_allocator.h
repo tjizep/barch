@@ -626,7 +626,7 @@ public:
             auto tp = at.page();
 
             if (is_free(tp)) {
-                abort();
+                abort_with("freeing a free page");
             }
             if (last_page_allocated == tp) {
                 last_page_allocated = 0;
@@ -634,7 +634,7 @@ public:
             t.size = 0;
             //t.modifications = 0;
             if (fragmentation < t.fragmentation) {
-                abort();
+                abort_with("invalid fragmentation");
             }
             fragmentation -= t.fragmentation;
 
@@ -648,7 +648,7 @@ public:
             //free_pages.push_back(at.page());
 
             if (fragmentation < t.fragmentation) {
-                abort();
+                abort_with("invalid fragmentation");
             }
         } else {
             emancipated.add(at, size); // add a free allocation for later re-use

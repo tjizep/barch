@@ -201,7 +201,11 @@ void art::tree::run_defrag() {
     try {
         if (lc.fragmentation_ratio() > -1) //get_min_fragmentation_ratio())
         {
-            auto fl = lc.create_fragmentation_list(get_max_defrag_page_count());
+            heap::vector<size_t> fl;
+            {
+                storage_release releaser(this->latch);
+                fl = lc.create_fragmentation_list(get_max_defrag_page_count());
+            }
             key_spec options;
             for (auto p: fl) {
                 storage_release releaser(this->latch);

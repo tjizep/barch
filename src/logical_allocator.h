@@ -231,9 +231,7 @@ struct free_list {
         return *this;
     }
     free_list(alloc_pair* alloc): alloc(alloc) {
-        for (unsigned i = 0; i < LPageSize; ++i) {
-            free_bins.emplace_back(i,alloc);
-        }
+
     }
     void clear() {
         added = 0;
@@ -241,18 +239,27 @@ struct free_list {
         max_bin = 0;
         min_bin = LPageSize;
         free_bins.clear();
-        for (unsigned i = 0; i < LPageSize; ++i) {
-            free_bins.emplace_back(i,alloc);
-        }
     }
 
     void inner_add(logical_address address, unsigned size) {
-        if (size >= free_bins.size()) {
-            return;
+
+        if (LPageSize < size) {
+            abort_with("invalid allocation size");
         }
+
+        if (size >= free_bins.size()) {
+            for (unsigned i = free_bins.size(); i < size + 1; ++i) {
+                free_bins.emplace_back(i, alloc);
+            }
+        }
+        if (size >= free_bins.size()) {
+            abort_with("bin not initialized");
+        }
+
         if (address.is_null_base()) {
             return;
         }
+
         if (test_memory == 1) {
             if (addresses.count(address.address()) > 0) {
                 abort_with("address already freed");

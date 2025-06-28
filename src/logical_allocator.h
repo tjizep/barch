@@ -333,10 +333,6 @@ struct free_list {
 
 
 struct logical_allocator {
-    enum {
-        min_training_size = 1024 * 70,
-        compression_level = 1
-    };
 
     logical_allocator(alloc_pair* ap,std::string name): ap(ap), main(std::move(name)), emancipated(ap) {}
 

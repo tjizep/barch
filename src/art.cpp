@@ -12,7 +12,7 @@
 #include "glob.h"
 #include "keys.h"
 #include "logger.h"
-
+#include "module.h"
 extern art::tree *get_art(size_t shard);
 /**
  * Initializes an ART tree
@@ -1738,7 +1738,7 @@ bool art::tree::load() {
         std_log("Done loading BARCH, keys loaded:", t->size, "");
 
         std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (float) heap::allocated / (1024 * 1024), "Mb");
+        std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");
     }catch (std::exception &e) {
         std_log("could not save",e.what());
         return false;
@@ -1787,7 +1787,7 @@ bool art::tree::retrieve(std::istream& in) {
         std_log("Done loading BARCH, keys loaded:", t->size, "");
 
         std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (float) heap::allocated / (1024 * 1024), "Mb");
+        std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");
     }catch (std::exception &e) {
         std_log("could not save",e.what());
         return false;

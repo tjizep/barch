@@ -352,6 +352,7 @@ private:
     arena::hash_arena main;
     bool opt_page_trace = false;
     bool opt_enable_lru = false;
+    bool opt_enable_lfu = false;
     bool opt_validate_addresses = false;
     bool opt_move_decompressed_pages = false;
     unsigned opt_iterate_workers = 1;
@@ -464,7 +465,9 @@ private:
         if (opt_enable_lru) {
             lru.emplace_back(at);
             page.lru = --lru.end();
-            page.ticker = ++ticker;;
+        }
+        if (opt_enable_lfu||opt_enable_lru) {
+            page.ticker = ++ticker;
         }
     }
 
@@ -994,6 +997,14 @@ public:
         erased = {}; // for runtime use after free tests
         last_created_page = {};
         last_page_ptr = {};
+    }
+
+    void set_opt_enable_lru(bool enable_lru) {
+        opt_enable_lru = enable_lru;
+    }
+
+    void set_opt_enable_lfu(bool enable_lfu) {
+        opt_enable_lfu = enable_lfu;
     }
 
     void set_opt_use_vmm(bool use_vmm_mem) {

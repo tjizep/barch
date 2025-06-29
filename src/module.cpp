@@ -65,3 +65,13 @@ size_t get_shard(ValkeyModuleString **argv) {
 art::tree * get_art(ValkeyModuleString **argv) {
     return get_art(get_shard(argv));
 }
+
+uint64_t get_total_memory() {
+    auto vbytes = 0ll;
+    //for (auto shard : art::get_shard_count()) {
+    //    auto t = get_art(shard);
+    //    storage_release release(t->latch);
+    //    vbytes += t->get_nodes().get_bytes_allocated() + t->get_leaves().get_bytes_allocated();
+    //}
+    return heap::allocated + vbytes;
+}

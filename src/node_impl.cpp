@@ -8,6 +8,7 @@
 #include "node_impl.h"
 
 #include <algorithm>
+#include "module.h"
 namespace art {
     node_ptr tree::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
         return art::make_leaf(*this, key, v, ttl, is_volatile);
@@ -29,6 +30,7 @@ namespace art {
         if (l->byte_size() != leaf_size) {
             abort_with("invalid leaf size");
         }
+        statistics::max_leaf_size = std::max<uint64_t>(statistics::max_leaf_size, l->byte_size());
         return logical;
     }
 }
@@ -175,15 +177,21 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
 
     auto e = page_data.begin() + size;
     size_t deleted = 0;
-    for (auto i = page_data.begin(); i != e;) {
+    size_t pos = 0;
+    for (auto i = page_data.begin(); i < e;) {
         const art::leaf *l = (art::leaf *) i;
-
+        auto ks = l->byte_size();
+        if (ks > statistics::max_leaf_size) {
+            art::std_log("unusual leaf size",ks);
+        }
         if (l->deleted()) {
             deleted++;
         } else {
             cb(l);
         }
+        pos += l->byte_size() + test_memory;
         i += (l->byte_size() + test_memory);
+
     }
 }
 
@@ -245,13 +253,14 @@ void art::tree::run_defrag() {
 
 void abstract_eviction(art::tree *t,
                        const std::function<bool(const art::leaf *l)> &predicate,
-                       const std::function<std::pair<const heap::buffer<uint8_t> &, size_t> ()> &src) {
+                       const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
     if (heap::get_physical_memory_ratio() < 0.99)
-        if (heap::allocated < art::get_max_module_memory()) return;
+        if (get_total_memory() < art::get_max_module_memory()) return;
     auto fc = [](const art::node_ptr & unused(n)) -> void {
     };
-    auto page = src();
     write_lock lock(get_lock());
+    auto page = src();
+
     page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf *l) {
         if (predicate(l))
             art_delete(t, l->get_key(), fc);
@@ -259,14 +268,14 @@ void abstract_eviction(art::tree *t,
 }
 
 void abstract_lru_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
-    if (heap::allocated < art::get_max_module_memory()) return;
+    if (get_total_memory() < art::get_max_module_memory()) return;
     storage_release release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 
 void abstract_lfu_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
-    if (heap::allocated < art::get_max_module_memory()) return;
+    if (get_total_memory() < art::get_max_module_memory()) return;
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }

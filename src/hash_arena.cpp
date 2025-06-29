@@ -4,6 +4,7 @@
 #include "hash_arena.h"
 #include "art.h"
 #include "server.h"
+#include "module.h"
 
 void append(std::ostream &out, size_t page, const storage &s, const uint8_t *data) {
     if (out.fail()) {
@@ -130,7 +131,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
     for (size_t i = 0; i < size; i++) {
         storage s{};
         size_t page = 0;
-        if (heap::allocated > art::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99) {
+        if (get_total_memory() > art::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99) {
             art::log(std::runtime_error("module or server out of memory"),__FILE__,__LINE__);
             return false;
         }

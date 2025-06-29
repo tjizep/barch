@@ -24,6 +24,7 @@ std::atomic<uint64_t> statistics::exceptions_raised = 0;
 std::atomic<uint64_t> statistics::maintenance_cycles = 0;
 std::atomic<uint64_t> statistics::shards = 0;
 std::atomic<uint64_t> statistics::local_calls = 0;
+std::atomic<uint64_t> statistics::max_leaf_size = 0;
 
 /**
  * ops stats

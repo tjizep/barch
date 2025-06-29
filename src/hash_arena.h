@@ -147,6 +147,7 @@ namespace arena {
                     heap::allocated += new_page_data_size;
 
                     munmap(page_data, page_data_size);
+                    heap::allocated -= page_data_size;
                     page_data_size = new_page_data_size;
                     page_data = npd;
                     page_modifications::inc_all_tickers();
@@ -169,6 +170,7 @@ namespace arena {
                 if (page_data != nullptr) {
                     if (opt_use_vmmap) {
                         munmap(page_data, page_data_size);
+                        heap::allocated -= page_data_size;
                     } else {
                         free(page_data);
                         heap::allocated -= page_data_size;
@@ -373,6 +375,7 @@ namespace arena {
                 if (new_size > cow_size) {
                     //memset(cow + cow_size, 0, new_size - cow_size);
                 }
+                heap::allocated += new_size - cow_size;
                 cow_size = new_size;
             } else {
                 cow = (uint8_t *) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
@@ -381,6 +384,7 @@ namespace arena {
                     abort_with("failed to allocate virtual page data");
                 }
                 //memset(cow, 0, new_size);
+                heap::allocated += new_size - cow_size;
                 cow_size = new_size;
                 art::std_log("allocated ", cow_size, "virtual memory as CoW");
             }
@@ -402,6 +406,7 @@ namespace arena {
                     if (new_size > page_data_size) {
                         //memset(page_data + page_data_size, 0, new_size - page_data_size);
                     }
+                    heap::allocated += new_size - page_data_size;
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
                 } else {
@@ -411,6 +416,7 @@ namespace arena {
                         abort_with("failed to allocate virtual page data");
                     }
                     //memset(page_data, 0, new_size);
+                    heap::allocated += new_size - page_data_size;
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
                     art::std_log("allocated", page_data_size, "virtual memory as page data");
@@ -519,8 +525,10 @@ namespace arena {
 
         void rollback() {
             modified.clear();
-            if (cow)
+            if (cow) {
                 munmap(cow, cow_size);
+                heap::allocated -= cow_size;
+            }
             cow = nullptr;
             cow_size = 0;
         }

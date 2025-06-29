@@ -29,4 +29,5 @@ size_t get_shard(const std::string& key);
 size_t get_shard(ValkeyModuleString **argv);
 art::tree * get_art(ValkeyModuleString **argv);
 art::tree * get_art(art::value_type key);
+uint64_t get_total_memory();
 #endif //MODULE_H

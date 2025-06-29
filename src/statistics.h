@@ -22,6 +22,8 @@ namespace statistics {
     extern std::atomic<uint64_t> pages_defragged;
     extern std::atomic<uint64_t> exceptions_raised;
     extern std::atomic<uint64_t> max_leaf_size;
+    extern std::atomic<uint64_t> logical_allocated;
+    extern std::atomic<uint64_t> oom_avoided_inserts;
     /**
     * internal stats
     */

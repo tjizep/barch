@@ -218,11 +218,17 @@ namespace barch {
                                         auto key = get_value(options.second, buffer);
                                         auto value = get_value(key.second, buffer);
                                         storage_release release(t->latch);
+                                        if (statistics::logical_allocated > art::get_max_module_memory()) {
+                                            // do not add data if memory limit is reached
+                                            statistics::oom_avoided_inserts++;
 
-                                        art_insert(t, options.first, key.first, value.first,true,
-                                            [](const art::node_ptr &){
-                                                ++statistics::repl::key_add_recv_applied;
-                                        });
+                                        } else {
+                                            art_insert(t, options.first, key.first, value.first,true,
+                                                [](const art::node_ptr &){
+                                                    ++statistics::repl::key_add_recv_applied;
+                                            });
+
+                                        }
                                         ++statistics::repl::key_add_recv;
                                         ++actual;
                                         i = value.second;

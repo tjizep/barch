@@ -1510,6 +1510,8 @@ art_statistics art::get_statistics() {
     as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
     as.shards = (int64_t) statistics::shards;
     as.local_calls = (int64_t) statistics::local_calls;
+    as.logical_allocated = (int64_t) statistics::logical_allocated;
+    as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
     return as;
 }
 
@@ -1576,6 +1578,9 @@ static void stats_to_stream(OutStream &of) {
     writep(of, statistics::pages_uncompressed);
     writep(of, statistics::pages_compressed);
     writep(of, statistics::max_page_bytes_uncompressed);
+    writep(of, statistics::oom_avoided_inserts);
+    writep(of, statistics::logical_allocated);
+
     if (!of.good()) {
         throw std::runtime_error("art::stats_to_stream: bad output stream");
     }
@@ -1597,6 +1602,8 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::pages_uncompressed);
     readp(in, statistics::pages_compressed);
     readp(in, statistics::max_page_bytes_uncompressed);
+    readp(in, statistics::oom_avoided_inserts);
+    readp(in, statistics::logical_allocated);
 }
 bool art::tree::publish(std::string host, int port) {
     repl_client.add_destination(std::move(host), port, shard);
@@ -1740,7 +1747,7 @@ bool art::tree::load() {
         std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
         std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");
     }catch (std::exception &e) {
-        std_log("could not save",e.what());
+        std_log("could not load",e.what());
         return false;
     }
     return true;
@@ -1789,7 +1796,7 @@ bool art::tree::retrieve(std::istream& in) {
         std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
         std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");
     }catch (std::exception &e) {
-        std_log("could not save",e.what());
+        std_log("could not load",e.what());
         return false;
     }
     return true;
@@ -1849,6 +1856,8 @@ void art::tree::clear() {
     statistics::pages_uncompressed = 0;
     statistics::pages_compressed = 0;
     statistics::max_page_bytes_uncompressed = 0;
+    statistics::oom_avoided_inserts = 0;
+    statistics::logical_allocated = 0;
 }
 
 void art::tree::update_trace(int direction) {
@@ -1879,6 +1888,11 @@ bool art::tree::insert(value_type key, value_type value, bool update, const Node
 }
 bool art::tree::insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) {
     //storage_release release(latch);
+    if (statistics::logical_allocated > get_max_module_memory()) {
+        // do not add data if memory limit is reached
+        ++statistics::oom_avoided_inserts;
+        return false;
+    }
     size_t before = size;
     art_insert(this, options, key, value, update, fc);
     this->repl_client.insert(options, key, value);

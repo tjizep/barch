@@ -40,7 +40,7 @@ local test = function()
 end
 
 
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "64m")
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "128m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "1000000")

@@ -603,7 +603,7 @@ public:
 
         uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size) {
-            abort();
+            abort_with("invalid allocation data");
         }
         allocated -= size;
         if (at.address() == 0 || size == 0) {
@@ -628,7 +628,7 @@ public:
             }
             erased.insert(at.address());
         }
-
+        statistics::logical_allocated -= size;
         if (t.size == 1) {
             auto tp = at.page();
 
@@ -644,7 +644,6 @@ public:
                 abort_with("invalid fragmentation");
             }
             fragmentation -= t.fragmentation;
-
             if (!lru.empty())
                 lru.erase(t.lru);
             t.clear();
@@ -752,7 +751,6 @@ public:
                 abort_with(" no fragmentation?");
             }
             at.second.fragmentation -= size;
-
             invalid(r);
             auto *data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0) {
@@ -762,10 +760,13 @@ public:
                 data[sz] = r.address() % 255;
 
             allocated += size;
+            statistics::logical_allocated += size;
             uint8_t *pd = get_alloc_page_data(r, sz);
             if (initialize_memory == 1) {
                 memset(pd, 0, sz);
             }
+
+
             return pd;
         }
         auto at = create_if_required(size);
@@ -799,6 +800,7 @@ public:
         }
 
         allocated += size;
+        statistics::logical_allocated += size;
         r = ca;
 
         return rd;

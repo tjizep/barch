@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 1000000
+local count = 10000
 local result = {}
 local index = 0
 local convert

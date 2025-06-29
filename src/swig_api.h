@@ -74,6 +74,8 @@ struct statistics_values {
     long long maintenance_cycles {};
     long long shards {};
     long long local_calls {};
+    long long logical_allocated {};
+    long long oom_avoided_inserts {};
 };
 
 struct configuration_values {

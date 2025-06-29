@@ -35,7 +35,8 @@ void append(std::ostream &out, size_t page, const storage &s, const uint8_t *dat
 bool arena::base_hash_arena::save(const std::string &filename,
                                   const std::function<void(std::ostream &)> &extra) const {
     art::log("writing to " + filename);
-    std::ofstream out{filename, std::ios::out | std::ios::binary};
+    //std::string wal_filename = filename + ".wal";
+    std::ofstream out{filename, std::ios::out | std::ios::binary}; // the wal file is truncated if it exists
     if (!out.is_open()) {
         art::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
 
@@ -46,13 +47,13 @@ bool arena::base_hash_arena::save(const std::string &filename,
     if (!send(out, extra, false)) {
         return false;
     }
-    out.close();
-    out.open(filename, std::ios::out | std::ios::binary);
     out.seekp(0);
     completed = storage_version;
     writep(out, completed);
     out.flush();
     out.close();
+    //std::remove(filename.c_str());
+    //std::rename(wal_filename.c_str(), filename.c_str());
     art::log("completed writing to " + filename);
 
     return !out.fail();
@@ -79,6 +80,7 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
         ++record_pos;
     });
     art::std_log("saved [",record_pos,"] out of [",size,"] pages");
+    art::std_log("memory used by data",(double)statistics::logical_allocated/(1024.0*1024.0),"MB");
     if (out.fail()) {
         art::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
         return false; // usually disk full at this stage

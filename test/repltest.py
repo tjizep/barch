@@ -24,6 +24,6 @@ assert(stats.instructions_failed == 0)
 assert(stats.insert_requests > 0)
 assert(stats.remove_requests > 0)
 #print(barch.repl_stats().bytes_recv)
-#barch.save()
-print("not saving")
+
+barch.save()
 barch.stop()

@@ -51,6 +51,8 @@ struct art_statistics {
     int64_t maintenance_cycles {};
     int64_t shards {};
     int64_t local_calls {};
+    int64_t logical_allocated {};
+    int64_t oom_avoided_inserts {};
 };
 
 struct art_ops_statistics {

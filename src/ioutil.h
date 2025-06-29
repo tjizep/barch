@@ -46,7 +46,7 @@ static void readp(IStream &in, T &data) {
     in.read(reinterpret_cast<char *>(&data), sizeof(data));
     if (log_streams==1) art::std_log("reading",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_read_ctr);
     if (in.fail()) {
-        throw_exception<std::runtime_error>("write failed");
+        throw_exception<std::runtime_error>("read failed");
     }
     stream_read_ctr+=sizeof(data);
 }
@@ -56,7 +56,7 @@ static void readp(std::istream &in, T *data, size_t size) {
     in.read(reinterpret_cast<char *>(data), size);
     if (log_streams==1) art::std_log("reading",size,"bytes","at",(uint64_t)stream_read_ctr);
     if (in.fail()) {
-        throw_exception<std::runtime_error>("write failed");
+        throw_exception<std::runtime_error>("read failed");
     }
     stream_read_ctr+=size;
 }

@@ -114,6 +114,7 @@ convert = tocharsnum
 vk.call('B.CLEAR')
 test()
 result[inc()] = {'B.SAVE', vk.call('B.SAVE')}
+result[inc()] = {'B.CLEAR', vk.call('B.CLEAR')}
 result[inc()] = {'B.LOAD', vk.call('B.LOAD')}
 clear()
 assert(successes==count*2, "test failures")

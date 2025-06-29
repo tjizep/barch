@@ -384,7 +384,7 @@ namespace arena {
                     abort_with("failed to allocate virtual page data");
                 }
                 //memset(cow, 0, new_size);
-                heap::allocated += new_size - cow_size;
+                heap::allocated += new_size;
                 cow_size = new_size;
                 art::std_log("allocated ", cow_size, "virtual memory as CoW");
             }
@@ -416,7 +416,7 @@ namespace arena {
                         abort_with("failed to allocate virtual page data");
                     }
                     //memset(page_data, 0, new_size);
-                    heap::allocated += new_size - page_data_size;
+                    heap::allocated += new_size;
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
                     art::std_log("allocated", page_data_size, "virtual memory as page data");

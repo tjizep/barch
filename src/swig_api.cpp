@@ -249,6 +249,8 @@ statistics_values stats() {
     r.maintenance_cycles = t.maintenance_cycles;
     r.shards = t.shards;
     r.local_calls = t.local_calls;
+    r.logical_allocated = t.logical_allocated;
+    r.oom_avoided_inserts = t.oom_avoided_inserts;
     return r;
 }
 configuration_values config() {

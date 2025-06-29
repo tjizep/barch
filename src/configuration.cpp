@@ -693,7 +693,6 @@ bool art::get_compression_enabled() {
 }
 
 uint64_t art::get_max_module_memory() {
-    std::lock_guard lock(config_mutex);
     return record.n_max_memory_bytes;
 }
 

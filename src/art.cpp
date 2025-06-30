@@ -1628,25 +1628,24 @@ bool art::tree::save() {
     };
 
     auto st = std::chrono::high_resolution_clock::now();
-    transaction tx(this); // stabilize main while saving
-    arena::hash_arena leaves{get_leaves().get_name()};
-    arena::hash_arena nodes{get_nodes().get_name()};
+    //transaction tx(this); // stabilize main while saving
+    //arena::hash_arena leaves{get_leaves().get_name()};
+    //arena::hash_arena nodes{get_nodes().get_name()};
     {
         storage_release release(latch); // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
-        leaves.borrow(get_leaves().get_main());
-        nodes.borrow(get_nodes().get_main());
-    }
-    if (!get_leaves().save_extra(leaves, ".dat", save_stats_and_root)) {
-        return false;
-    }
+        //leaves.borrow(get_leaves().get_main());
+        //nodes.borrow(get_nodes().get_main());
+        if (!get_leaves().self_save_extra(".dat", save_stats_and_root)) {
+            return false;
+        }
 
-
-    if (!get_nodes().save_extra(nodes, ".dat", [&](std::ostream &) {
-    })) {
-        return false;
+        if (!get_nodes().self_save_extra( ".dat", [&](std::ostream &) {
+        })) {
+            return false;
+        }
     }
 
     auto current = std::chrono::high_resolution_clock::now();

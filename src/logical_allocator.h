@@ -879,6 +879,11 @@ public:
 
         return copy.save(copy.name+filename, writer);
     }
+    bool self_save_extra(const std::string &filename,
+                    const std::function<void(std::ostream &of)> &extra1) const {
+
+        return save_extra(main, filename, extra1);
+    }
 
     bool send_extra(const arena::hash_arena &copy, std::ostream &out,
                     const std::function<void(std::ostream &of)> &extra1) const {

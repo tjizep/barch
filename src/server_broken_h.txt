@@ -42,6 +42,7 @@ namespace barch {
             std::atomic<uint32_t> messages = 0;
             heap::vector<uint8_t> buffer{};
             heap::vector<repl_dest> destinations{};
+            heap::vector<repl_dest> sources{};
             std::thread tpoll{};
             std::mutex latch{};
 
@@ -55,9 +56,20 @@ namespace barch {
             bool load(size_t shard);
             [[nodiscard]] bool ping() const;
             // dese function should already latched by the shard calling them
-            void add_destination(std::string host, int port, size_t shard);
+            bool add_destination(std::string host, int port, size_t shard);
+            bool add_source(std::string host, int port, size_t shard);
             bool insert(const art::key_options& options, art::value_type key, art::value_type value);
             bool remove(art::value_type key);
+
+            /**
+             * finds a key in the tree
+             * @param t the tree that receives the key if it does not exist
+             * @param key the key which we want to retrieve
+             * @return the node of the added key
+             */
+            bool find_insert(art::value_type key);
+        private:
+            void send_art_fun(std::iostream& stream, heap::vector<uint8_t>& to_send);
         };
     }
 }

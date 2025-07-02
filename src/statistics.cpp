@@ -60,5 +60,7 @@ namespace statistics::repl {
     std::atomic<uint64_t> bytes_sent = 0;
     std::atomic<uint64_t> insert_requests = 0;
     std::atomic<uint64_t> remove_requests = 0;
+    std::atomic<uint64_t> find_requests = 0;
+    std::atomic<uint64_t> request_errors = 0;
 
 }

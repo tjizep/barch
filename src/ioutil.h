@@ -9,21 +9,25 @@
 #include "constants.h"
 #include "logger.h"
 #include <arpa/inet.h>
+#include "configuration.h"
+template <typename Type, typename = void>
+struct has_expires_from_now : std::false_type{
 
+};
+
+template <typename Type>
+struct has_expires_from_now<Type,
+    typename std::enable_if<std::is_member_function_pointer<decltype(&Type::expires_from_now)>::value>::type> : std::true_type
+{
+
+};
 extern thread_local uint64_t stream_write_ctr;
 extern thread_local uint64_t stream_read_ctr;
-
-template<typename T>
-static void writep(std::ostream &of, const T &data) {
-    if (log_streams==1) art::std_log("writing",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_write_ctr);
-    of.write(reinterpret_cast<const char *>(&data), sizeof(data));
-    if (of.fail()) {
-        throw_exception<std::runtime_error>("write failed");
+template<typename OStream, typename T>
+static void writep(OStream &of, const T* data, size_t size) {
+    if  constexpr (has_expires_from_now<OStream>::value) {
+        of.expires_from_now(art::get_rpc_write_to_s());
     }
-    stream_write_ctr += sizeof(data);
-}
-template<typename T>
-static void writep(std::ostream &of, const T* data, size_t size) {
     if (log_streams==1) art::std_log("writing",size,"bytes","at",(uint64_t)stream_write_ctr);
     of.write(reinterpret_cast<const char *>(data), size);
     if (of.fail()) {
@@ -34,6 +38,9 @@ static void writep(std::ostream &of, const T* data, size_t size) {
 
 template<typename OStream, typename T>
 static void writep(OStream &of, const T &data) {
+    if  constexpr (has_expires_from_now<OStream>::value) {
+        of.expires_from_now(art::get_rpc_write_to_s());
+    }
 
     of.write(reinterpret_cast<const char *>(&data), sizeof(data));
     if (of.fail()) {
@@ -43,6 +50,10 @@ static void writep(OStream &of, const T &data) {
 
 template<typename IStream, typename T>
 static void readp(IStream &in, T &data) {
+    if  constexpr (has_expires_from_now<IStream>::value) {
+        in.expires_from_now(art::get_rpc_read_to_s());
+    }
+
     in.read(reinterpret_cast<char *>(&data), sizeof(data));
     if (log_streams==1) art::std_log("reading",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_read_ctr);
     if (in.fail()) {
@@ -51,8 +62,11 @@ static void readp(IStream &in, T &data) {
     stream_read_ctr+=sizeof(data);
 }
 
-template<typename T>
-static void readp(std::istream &in, T *data, size_t size) {
+template<typename IStream, typename T>
+static void readp(IStream &in, T *data, size_t size) {
+    if  constexpr (has_expires_from_now<IStream>::value) {
+        in.expires_from_now(art::get_rpc_read_to_s());
+    }
     in.read(reinterpret_cast<char *>(data), size);
     if (log_streams==1) art::std_log("reading",size,"bytes","at",(uint64_t)stream_read_ctr);
     if (in.fail()) {

@@ -25,6 +25,9 @@ namespace art {
         uint64_t max_modifications_before_save{1300000};
         uint64_t rpc_max_buffer{32768*4};
         uint64_t rpc_client_max_wait_ms{30000};
+        uint64_t rpc_connect_to_s{30};
+        uint64_t rpc_read_to_s{30};
+        uint64_t rpc_write_to_s{30};
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
         bool use_vmm_memory{true};
@@ -44,7 +47,7 @@ namespace art {
 
     int register_valkey_configuration(ValkeyModuleCtx *ctx);
 
-    configuration_record get_configuration();
+    const configuration_record& get_configuration();
 
     // all sizes in bytes, time/delay in milliseconds
     bool get_compression_enabled();
@@ -87,6 +90,9 @@ namespace art {
 
     int64_t get_rpc_max_client_wait_ms();
 
+    std::chrono::seconds get_rpc_connect_to_s();
+    std::chrono::seconds get_rpc_read_to_s() ;
+    std::chrono::seconds get_rpc_write_to_s() ;
     int set_configuration_value(ValkeyModuleString *name, ValkeyModuleString *value);
     int set_configuration_value(const std::string& name, const std::string &val);
 

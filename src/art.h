@@ -12,7 +12,6 @@
 #include "server.h"
 typedef std::unique_lock<std::shared_mutex> write_lock;
 typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
-//!typedef basic_ovectorstream<std::vector<char> >    ovectorstream;
 extern std::shared_mutex &get_lock();
 
 /**
@@ -82,6 +81,8 @@ struct art_repl_statistics {
     int64_t instructions_failed{};
     int64_t insert_requests{};
     int64_t remove_requests{};
+    int64_t find_requests{};
+    int64_t request_errors{};
 };
 typedef std::function<int(void *data, art::value_type key, art::value_type value)> CallBack;
 typedef std::function<int(const art::node_ptr &)> LeafCallBack;

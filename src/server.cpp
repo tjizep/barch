@@ -58,6 +58,7 @@ namespace barch {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+
     struct net_stat {
         uint64_t saved_writes = stream_write_ctr;
         uint64_t saved_reads = stream_read_ctr;
@@ -83,6 +84,16 @@ namespace barch {
         T size = 0;
         memcpy(&size, buffer.data()+at, sizeof(T));
         return ntohl(size);
+    }
+    bool recv_buffer(std::iostream& stream, heap::vector<uint8_t>& buffer) {
+        uint32_t buffers_size = 0;
+        readp(stream,buffers_size);
+        if (buffers_size == 0) {
+            return false;
+        }
+        buffer.resize(buffers_size);
+        readp(stream, buffer.data(), buffer.size());
+        return true;
     }
     template<typename TBF>
     void timeout(TBF&& check, int max_to = 1000) {
@@ -113,7 +124,22 @@ namespace barch {
         push_size_t<uint32_t>(buffer, v.size);
         buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
     }
+    void buffer_insert
+    (   heap::vector<uint8_t>& buffer
+    ,   art::key_options options
+    ,   art::value_type key
+    ,   art::value_type value
+    ) {
+        buffer.push_back('i');
+        push_options(buffer, options);
+        push_value(buffer, key);
+        push_value(buffer, value);
+        ++statistics::repl::insert_requests;
+    }
 
+    void push_leaf_insert(heap::vector<uint8_t>& buffer, const art::leaf* leaf) {
+        buffer_insert(buffer, *leaf, leaf->get_key(), leaf->get_value());
+    }
 
     std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
@@ -122,6 +148,118 @@ namespace barch {
         }
         art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
         return {r, at+sizeof(size)+size};
+    }
+    struct af_result {
+        size_t add_called {};
+        size_t add_applied {};
+        size_t remove_called {};
+        size_t remove_applied {};
+        size_t find_called {};
+        size_t find_applied {};
+        bool error{false};
+    };
+    /**
+     * process a cmd_art_fun buffer
+     * Note: no latching in this function all latches are set outside
+     * @param t
+     * @param buffer buffer containing commands and data
+     * @param buffers_size size of the buffer (from 0)
+     * @param stream for writing reply data
+     * @return true if no errors occurred
+     */
+    af_result process_art_fun(art::tree* t, heap::vector<uint8_t>& buffer, uint32_t buffers_size, std::iostream& stream) {
+        af_result r;
+        heap::vector<uint8_t> tosend;
+        art::node_ptr found ;
+        uint32_t actual = 0;
+        bool returning = false;
+        for (size_t i = 0; i < buffers_size;) {
+            char cmd = buffer[i];
+            switch (cmd) {
+                case 'i': {
+                        auto options = get_options(i+1, buffer);
+                        auto key = get_value(options.second, buffer);
+                        auto value = get_value(key.second, buffer);
+
+                        if (statistics::logical_allocated > art::get_max_module_memory()) {
+                            // do not add data if memory limit is reached
+                            ++statistics::oom_avoided_inserts;
+                        } else {
+                            art_insert(t, options.first, key.first, value.first,true,
+                                [&r](const art::node_ptr &){
+                                    ++statistics::repl::key_add_recv_applied;
+                                    ++r.add_applied;
+                            });
+
+                        }
+                        ++statistics::repl::key_add_recv;
+                        ++r.add_called;
+                        ++actual;
+                        i = value.second;
+                    }
+                    break;
+                case 'r': {
+                        auto key = get_value(i+1, buffer);
+                        art_delete(t, key.first,[&r](const art::node_ptr &) {
+                            ++statistics::repl::key_rem_recv_applied;
+                            ++r.remove_applied;
+                        });
+                        i = key.second;
+                        ++statistics::repl::key_rem_recv;
+                        ++r.remove_called;
+                        ++actual;
+                    }
+                    break;
+                case 'f': {
+                        returning = true;
+                        auto key = get_value(i+1, buffer);
+                        found = art::find(t, key.first);
+                        if (found.is_leaf) {
+                            ++r.find_applied;
+                            auto leaf = found.const_leaf();
+                            push_leaf_insert(tosend, leaf);
+                        }
+                        i = key.second;
+                        ++statistics::repl::key_find_recv;
+                        ++r.find_called;
+                        ++actual;
+                    }
+                    break;
+                case 'a': {
+                    returning = true;
+                    auto lkey = get_value(i+1, buffer);
+                    auto ukey = get_value(lkey.second, buffer);
+                    art::iterator ai(t, lkey.first);
+                    while (ai.ok()) {
+                        auto k = ai.l();
+                        if (k->get_key() >= lkey.first && k->get_key() <= ukey.first) {
+                            ++r.find_applied;
+                            push_leaf_insert(tosend, found.const_leaf());
+                        }else {
+                            break;
+                        }
+                        ai.next();
+                    }
+                    i = ukey.second;
+                    ++statistics::repl::key_find_recv;
+                    ++r.find_called;
+                    ++actual;
+                }
+                break;
+                default:
+                    art::std_err("unknown command", cmd);
+                    r.error = true;
+                    return r;
+                    break;
+            }
+        }
+        if (returning) {
+            auto s = (uint32_t)tosend.size();
+            writep(stream, s);
+            writep(stream, tosend.data(), tosend.size());
+            stream.flush();
+        }
+        return r;
     }
     host_id get_host_id() {
         return {"localhost", getpid() % 10000000000000000000ULL};
@@ -142,6 +280,7 @@ namespace barch {
             server_thread = {};
             port = 0;
         }
+
         void start_accept() {
             try {
 
@@ -162,7 +301,8 @@ namespace barch {
                 art::std_err("failed to start/run replication server", interface, port, e.what());
             }
         }
-        void process_data( tcp::socket& endpoint) {
+
+        void process_data(tcp::socket& endpoint) {
             auto stream = tcp::iostream{};
             stream.socket() = std::move(endpoint);
             int cmd = 0;
@@ -200,99 +340,16 @@ namespace barch {
                         uint32_t buffers_size = 0;
                         uint32_t shard = 0;
                         uint32_t count = 0;
-                        uint32_t actual = 0;
-                        art::node_ptr found ;
-                        heap::vector<uint8_t> tosend;
                         readp(stream,shard);
                         readp(stream,count);
-                        readp(stream,buffers_size);
-
-                        buffer.resize(buffers_size);
-                        readp(stream,buffer.data(),buffers_size);
+                        if (!recv_buffer(stream,buffer)) {
+                            art::std_err("failed to read buffer");
+                            break;
+                        }
                         auto t = get_art(shard);
-                        for (size_t i = 0; i < buffers_size;) {
-                            char cmd = buffer[i];
-                            switch (cmd) {
-                                case 'i': {
-                                        auto options = get_options(i+1, buffer);
-                                        auto key = get_value(options.second, buffer);
-                                        auto value = get_value(key.second, buffer);
-                                        storage_release release(t->latch);
-                                        if (statistics::logical_allocated > art::get_max_module_memory()) {
-                                            // do not add data if memory limit is reached
-                                            statistics::oom_avoided_inserts++;
+                        storage_release release(t->latch);
+                        process_art_fun(t, buffer, buffers_size,stream);
 
-                                        } else {
-                                            art_insert(t, options.first, key.first, value.first,true,
-                                                [](const art::node_ptr &){
-                                                    ++statistics::repl::key_add_recv_applied;
-                                            });
-
-                                        }
-                                        ++statistics::repl::key_add_recv;
-                                        ++actual;
-                                        i = value.second;
-                                    }
-                                    break;
-                                    case 'r': {
-                                        auto key = get_value(i+1, buffer);
-                                        storage_release release(t->latch);
-                                        art_delete(t, key.first,[](const art::node_ptr &) {
-                                            ++statistics::repl::key_rem_recv_applied;
-                                        });
-                                        i = key.second;
-                                        ++statistics::repl::key_rem_recv;
-                                        ++actual;
-                                    }
-                                    break;
-                                case 'f': {
-                                        auto key = get_value(i+1, buffer);
-                                        storage_release release(t->latch);
-                                        found = art::find(t, key.first);
-                                        if (found.is_leaf) {
-                                            tosend.push_back('v');
-                                            push_value(tosend, found.const_leaf()->get_value());
-                                        }
-                                        tosend.push_back('\0');
-                                        i = key.second;
-                                        ++statistics::repl::key_find_recv;
-                                        ++actual;
-                                    }
-                                    break;
-                                case 'a': {
-                                    auto lkey = get_value(i+1, buffer);
-                                    auto ukey = get_value(lkey.second, buffer);
-                                    storage_release release(t->latch);
-                                    art::iterator ai(t, lkey.first);
-                                    while (ai.ok()) {
-                                        auto k = ai.key();
-                                        if (k >= lkey.first && k <= ukey.first) {
-                                            tosend.push_back('v');
-                                            push_value(tosend, found.const_leaf()->get_value());
-                                        }else {
-                                            break;
-                                        }
-                                        ai.next();
-                                    }
-                                    tosend.push_back('\0');
-                                    i = ukey.second;
-                                    ++statistics::repl::key_find_recv;
-                                    ++actual;
-                                }
-                                break;
-                                default:
-                                    art::std_err("unknown command", cmd);
-                                    return;
-                                    break;
-                            }
-                        }
-                        if (!tosend.empty()) {
-                            auto s = (uint32_t)tosend.size();
-                            s = htonl(s);
-                            writep(stream,s);
-                            writep(stream,tosend.data(),tosend.size());
-                            stream.flush();
-                        }
                         //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                     }catch (std::exception& e) {
                         art::std_err("failed to apply changes", e.what());
@@ -343,14 +400,29 @@ namespace barch {
             if (tpoll.joinable())
                 tpoll.join();
         }
-        void client::add_destination(std::string host, int port, size_t shard) {
+
+        bool client::add_source(std::string host, int port, size_t shard) {
+            auto src = repl_dest{std::move(host), port, shard};
+            {
+                std::lock_guard lock(this->latch);
+                for (auto& d : sources) {
+                    if (d.host == src.host && d.port == src.port) {
+                        art::std_err("source already added", d.host, d.port);
+                        return false;
+                    }
+                }
+                sources.emplace_back(src);
+            }
+            return true;
+        }
+        bool client::add_destination(std::string host, int port, size_t shard) {
             auto dest = repl_dest{std::move(host), port, shard};
             {
                 std::lock_guard lock(this->latch);
                 for (auto& d : destinations) {
                     if (d.host == dest.host && d.port == dest.port) {
                         art::std_err("destination already added", d.host, d.port);
-                        return;
+                        return false;
                     }
                 }
                 destinations.emplace_back(dest);
@@ -380,23 +452,17 @@ namespace barch {
                             for (auto& dest : dests) {
                                 try {
                                     net_stat stat;
-                                    tcp::iostream stream(dest.host, std::to_string(dest.port));
+                                    tcp::iostream stream(dest.host, std::to_string(dest.port)); //,art::get_rpc_connect_to_s()
                                     if (stream.fail()) {
+                                        ++statistics::repl::request_errors;
                                         continue;
                                     }
-                                    int cmd = cmd_art_fun;
-                                    uint32_t buffers_size = to_send.size();
-                                    uint32_t sh = this->shard;
-                                    writep(stream, cmd);
-                                    writep(stream, sh);
-                                    writep(stream, messages);
-                                    writep(stream, buffers_size);
-                                    writep(stream, to_send.data(), to_send.size());
-                                    stream.flush();
+                                    send_art_fun(stream, to_send);
                                     stream.close();
                                     //art::std_log("sent", buffers_size, "bytes to", dest.host, dest.port, "total sent",total_messages,"still queued",(uint32_t)this->messages,"iq",(long long)statistics::repl::insert_requests);
                                 }catch (std::exception& e) {
                                     art::std_err("failed to write to stream", e.what(),"to",dest.host,dest.port);
+                                    ++statistics::repl::request_errors;
                                 }
                             }
                             to_send.clear();
@@ -406,13 +472,26 @@ namespace barch {
                     }
                 }catch (std::exception& e) {
                     this->connected = false;
-                    art::std_err("failed to connect to remote server", this->host, this->port,e.what());
+                    art::std_err("failed client send thread", this->host, this->port,e.what());
+
                 }
             });
+
             }
+            return true;
+        }
+        void client::send_art_fun(std::iostream& stream, heap::vector<uint8_t>& to_send) {
+            int cmd = cmd_art_fun;
+            uint32_t buffers_size = to_send.size();
+            uint32_t sh = this->shard;
+            writep(stream, cmd);
+            writep(stream, sh);
+            writep(stream, messages);
+            writep(stream, buffers_size);
+            writep(stream, to_send.data(), to_send.size());
+            stream.flush();
 
         }
-
 
         bool client::insert(const art::key_options& options, art::value_type key, art::value_type value) {
 
@@ -430,13 +509,50 @@ namespace barch {
                 return false;
             }
             std::lock_guard lock(this->latch);
-            buffer.push_back('i');
-            push_options(buffer, options);
-            push_value(buffer, key);
-            push_value(buffer, value);
-            ++statistics::repl::insert_requests;
+            buffer_insert(buffer, options, key, value);
             ++messages;
             return true;
+        }
+        bool client::find_insert(art::value_type key) {
+            bool added = false;
+            heap::vector<uint8_t> to_send, rbuff;
+            to_send.push_back('f');// <-- to find a key
+            push_value(to_send, key);
+            // todo: r we choosing a random 1
+            for (auto& source : sources) {
+                try {
+
+                    net_stat stat;
+                    tcp::iostream stream;
+                    stream.expires_from_now(art::get_rpc_connect_to_s());
+                    stream.connect(source.host, std::to_string(source.port));
+                    if (stream.fail()) {
+                        art::std_err("failed to connect to remote server", host, this->port);
+                        continue;
+                    }
+
+                    send_art_fun(stream, rbuff);
+                    if (!recv_buffer(stream, rbuff)) {
+                        art::std_err("failed to read buffer");
+                        ++statistics::repl::request_errors;
+                        continue;
+                    }
+                    auto t = get_art(this->shard);
+                    //storage_release release(t->latch); // the latch should be called outside
+                    t->last_leaf_added = nullptr;
+                    auto r = process_art_fun(t, rbuff, buffer.size(),stream);
+                    if (r.add_applied > 0) {
+                        added = true;
+                        break; // don't call the other servers
+                    }
+                }catch (std::exception& e) {
+                    art::std_err("failed to write to stream", e.what(),"to",source.host,source.port);
+                    ++statistics::repl::request_errors;
+                }
+                ++statistics::repl::find_requests;
+            }
+            ++messages;
+            return added;
         }
 
         bool client::remove(art::value_type key) {
@@ -453,7 +569,7 @@ namespace barch {
                 return false;
             }
 
-            std::lock_guard lock(this->latch);
+            //std::lock_guard lock(this->latch);
             buffer.push_back('r');
             push_value(buffer, key);
             ++statistics::repl::remove_requests;

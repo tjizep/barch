@@ -742,7 +742,7 @@ bool art::get_evict_volatile_ttl() {
     return record.evict_volatile_ttl;
 }
 
-art::configuration_record art::get_configuration() {
+const art::configuration_record& art::get_configuration() {
     std::lock_guard lock(config_mutex);
     return record;
 }
@@ -785,6 +785,15 @@ bool art::get_log_page_access_trace() {
     return record.log_page_access_trace;
 }
 
+std::chrono::seconds art::get_rpc_connect_to_s() {
+    return std::chrono::seconds(record.rpc_connect_to_s);
+}
+std::chrono::seconds art::get_rpc_read_to_s() {
+    return std::chrono::seconds(record.rpc_read_to_s);
+}
+std::chrono::seconds art::get_rpc_write_to_s() {
+    return std::chrono::seconds(record.rpc_write_to_s);
+}
 bool art::get_use_vmm_memory() {
     std::lock_guard lock(config_mutex);
     return record.use_vmm_memory;

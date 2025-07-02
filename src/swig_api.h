@@ -31,6 +31,8 @@ struct repl_statistics {
     long long instructions_failed{};
     long long insert_requests{};
     long long remove_requests{};
+    long long find_requests{};
+    long long request_errors{};
 };
 struct ops_statistics {
     ops_statistics(){}

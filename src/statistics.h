@@ -67,6 +67,8 @@ namespace statistics {
         extern std::atomic<uint64_t> instructions_failed;
         extern std::atomic<uint64_t> insert_requests;
         extern std::atomic<uint64_t> remove_requests;
+        extern std::atomic<uint64_t> find_requests;
+        extern std::atomic<uint64_t> request_errors;
     }
 }
 

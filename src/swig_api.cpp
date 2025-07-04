@@ -59,6 +59,16 @@ void publish(const std::string &ip, const std::string &port) {
         art::std_err("publish failed", ip, port);
     }
 }
+
+void pull(const std::string &ip, const std::string &port) {
+    std::vector<std::string_view> params = {"b", ip, port};
+    swig_caller sc;
+    int r = sc.call(params, PULL);
+    if (r != 0) {
+        art::std_err("publish failed", ip, port);
+    }
+}
+
 unsigned long long size()  {
     std::vector<std::string_view> params = {"b"};
     swig_caller sc;

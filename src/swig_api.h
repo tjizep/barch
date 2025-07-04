@@ -18,6 +18,7 @@ void save();
 void load();
 void clear();
 void publish(const std::string &ip, const std::string &port);
+void pull(const std::string &ip, const std::string &port);
 struct repl_statistics {
     repl_statistics(){}
     ~repl_statistics(){}

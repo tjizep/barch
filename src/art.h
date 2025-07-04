@@ -137,14 +137,28 @@ namespace art{
 
         tree(const tree &) = delete;
 
-        tree(const art::node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard), root(root), size(size) {
+        tree(const node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard), root(root), size(size) {
+            repl_client.shard = shard;
             start_maintain();
+
         }
         tree& operator=(const tree&) = delete;
 
         ~tree();
 
         bool publish(std::string host, int port);
+
+        /**
+         * register a pull source on this shard/tree
+         * currently non-existing hosts will also be added (they can come online later)
+         * but at a perf cost if keys are not found
+         * keys can also be retrieved asynchronously becoming available later but at greater
+         * throughput
+         * @param host
+         * @param port
+         * @return true if host and port combo does not exist
+         */
+        bool pull(std::string host, int port);
 
         void run_defrag();
 
@@ -173,7 +187,24 @@ namespace art{
         bool remove(value_type key, const NodeResult &fc);
         bool remove(value_type key);
 
+        /**
+         * find a key. if the key does not exist pull sources will be queried for the key
+         * if the key is no-were a null is returned
+         * @param key any valid value
+         * @return not null key if it exists (incl. pull sources)
+         */
+        node_ptr search(value_type key);
+
         void update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
+
+        /**
+         * leaf allocation
+         * @param key
+         * @param v value associated with key
+         * @param ttl how long it may live
+         * @param is_volatile it may be evicted if the lru/lfu-evict volatile flags are on
+         * @return address of leaf created
+         */
         node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
         node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c);
         node_ptr alloc_8_node_ptr(unsigned nt);

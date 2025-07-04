@@ -1,6 +1,8 @@
 import barch
 import time
 barch.start("127.0.0.1","13000")
+barch.stop()
+barch.start("127.0.0.1","13000")
 barch.publish("127.0.0.1","13000")
 k = barch.KeyValue()
 k.set("one","1")

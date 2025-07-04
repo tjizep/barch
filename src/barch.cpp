@@ -424,7 +424,7 @@ int GET(caller& call, const arg_t& argv) {
     auto t = get_art(argv[1]);
     storage_release release(t->latch);
     auto converted = conversion::convert(k);
-    art::node_ptr r = art_search(t, converted.get_value());
+    art::node_ptr r = t->search(converted.get_value());
 
     if (r.null()) {
         art::iterator i(t, converted.get_value());
@@ -713,6 +713,16 @@ int PUBLISH(caller& call, const arg_t& argv) {
     }
     return call.simple("OK");
 }
+int PULL(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto interface = argv[1];
+    auto port = argv[2];
+    for (auto shard: art::get_shard_count()) {
+        if (!get_art(shard)->pull(interface.chars(), atoi(port.chars()))) {}
+    }
+    return call.simple("OK");
+}
 int STOP(caller& call, const arg_t& ) {
     barch::server::stop();
     return call.simple("OK");
@@ -754,6 +764,11 @@ int RETRIEVE(caller& call, const arg_t& argv) {
 int cmd_PUBLISH(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, PUBLISH);
+}
+
+int cmd_PULL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PULL);
 }
 
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1135,6 +1150,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(PUBLISH), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PULL), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(RETRIEVE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)

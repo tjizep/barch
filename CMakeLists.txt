@@ -249,6 +249,10 @@ else()
         add_test(NAME TestBarchLru
                 COMMAND "python" ${CMAKE_SOURCE_DIR}/test/lrutest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestBarchPull
+                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/pulltest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
     endif ()
 endif ()
 

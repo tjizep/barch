@@ -19,12 +19,13 @@ It's also usable as a valkey module and can be started as
 valkey-server --loadmodule _barch.so
 ```
 
-### Advantages of the embedded server
+### Advantages of the embedded L1 server
 
-- far lower read latency (micro-seconds instead of milli-seconds)
-- automatic scaling
+- far lower read latency (sub micro-second instead of milli-seconds)
+- automatic scaling (to a point)
 - concurrency through sharding
-- optionally serverless 
+- optionally serverless (L1 only or L1 + L2)
+- future work may add object stores such as S3 or dynamo as L2 or even L3 layers
 
 The embedded server can also run in a multi-writer replication configuration in conjunction with a standalone server.
 An embedded server can also be quickly synchronized with a standalone server using the block load api.

@@ -932,6 +932,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
         ref = t->make_leaf(key, value, options.get_expiry());
+        // The last leaf added must match the `key` parameter
         t->last_leaf_added = ref;
         return nullptr;
     }
@@ -942,6 +943,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
         if (l->compare(key) == 0) {
             *old = 1;
             if (replace) {
+                // call back indicates replacement
                 fc(n);
                 art::leaf *dl = n.l();
 
@@ -966,7 +968,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
         // Create a new leaf
         art::node_ptr l2 = t->make_leaf(key, value);
         t->last_leaf_added = l2;
-        // New value, we must split the leaf into a node_4, pasts the new children to get optimal pointer size
+        // New value, we must split the leaf into a initial_node, pasts the new children to get optimal pointer size
         auto new_stored = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
         auto *new_node = new_stored.modify();
         // Determine longest prefix
@@ -975,7 +977,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
         new_node->data().partial_len = longest_prefix;
         memcpy(new_node->data().partial, key.bytes + depth,
                std::min<unsigned>(art::max_prefix_llength, longest_prefix));
-        // Add the leafs to the new node_4
+        // Add the leaves to the new initial_node
         ref = new_node;
         ref.modify()->add_child(l->key()[depth + longest_prefix], ref, l1);
         if (l1.is_leaf) // because l1 isnt going to be in the path
@@ -1030,7 +1032,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
 
         return nullptr;
     }
-    // if node doesnt have a prefix search more
+    // if node does not have a prefix - search more
 RECURSE_SEARCH:;
 
     // Find a child to recurse to
@@ -1050,9 +1052,10 @@ RECURSE_SEARCH:;
         return r;
     }
 
-    // No child, node goes within us
+    // No child, node goes within the current node (n)
     art::node_ptr l = t->make_leaf(key, value);
     t->last_leaf_added = l;
+    // check to see if pointers need to expand to 8 bytes (usually starts at 4 bytes for compression)
     n = n.modify()->expand_pointers(ref, {l});
     auto idx = n.modify()->add_child(key[depth], ref, l);
     t->push_trace({ref, l, idx, key[depth]});
@@ -1063,8 +1066,8 @@ RECURSE_SEARCH:;
  * inserts a new value into the art tree
  * @arg t the tree
  * @arg key the key
- * @arg key_len the length of the key
  * @arg value opaque value.
+ * @arg fc os the callback when node is replaced
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
@@ -1091,10 +1094,7 @@ void art_insert
             if (!old.is_leaf) {
                 abort_with("not a leaf");
             }
-            //fc(old);
             free_leaf_node(old);
-        } else if (old_val == 1) {
-            //fc(old);
         }
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
@@ -1608,7 +1608,11 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::logical_allocated);
 }
 bool art::tree::publish(std::string host, int port) {
-    repl_client.add_destination(std::move(host), port, shard);
+    repl_client.add_destination(std::move(host), port);
+    return true;
+}
+bool art::tree::pull(std::string host, int port) {
+    repl_client.add_source(std::move(host), port);
     return true;
 }
 bool art::tree::save() {
@@ -1863,6 +1867,8 @@ void art::tree::clear() {
 
 void art::tree::update_trace(int direction) {
 #if 1
+    // this loop is extremely effective at detecting any kind of corruption in the tree
+    // although it has a performance penalty
     if (!trace.empty()) {
         if (trace[0].parent != root) {
             std_log("trace root invalid");
@@ -1930,4 +1936,13 @@ bool art::tree::remove(value_type key, const NodeResult &fc) {
 }
 bool art::tree::remove(value_type key) {
     return this->remove(key, [](const node_ptr &) {});
+}
+art::node_ptr art::tree::search(value_type key) {
+    auto r = art_search(this, key);
+    if (r.null()) {
+        last_leaf_added = nullptr; // clear it before trying to retrieve
+        this->repl_client.find_insert(key);
+        return this->last_leaf_added;
+    }
+    return r;
 }

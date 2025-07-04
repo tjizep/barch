@@ -279,7 +279,10 @@ namespace barch {
         uint_least16_t port;
 
         void stop() {
-            acc.close();
+            try {
+                acc.close();
+            }catch (...){}
+
             io.stop();
             if (server_thread.joinable())
                 server_thread.join();

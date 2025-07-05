@@ -105,7 +105,7 @@ Barch has on average 50% less latency the difference increases with key count an
 5. Scalability: All reads are concurrent and scales linearly with core count
 
 # Use Cases
-1. [Fast Ranged Queries, Prefix Queries and Aggregates](https://github.com/tjizep/barch/blob/main/USECASE.md)
+1. [Fast Ranged Queries, Prefix Queries and Aggregates](https://github.com/tjizep/barch/blob/main/docs/USECASE.md)
 2. Prefix-cache for fast loading of hints  
 3. Z-Order/Morton code range queries for quick spatial bounds checking
 4. Fast and accurate counting of small ranges (age, population etc)
@@ -113,13 +113,13 @@ Barch has on average 50% less latency the difference increases with key count an
 6. Constant time access priority queue
 
 # Commands and API
-1. `B.ADD K V` add a key and value [more](https://github.com/tjizep/barch/blob/main/ADD.md)
-2. `B.SET K V` set a key overriding existing value [more](https://github.com/tjizep/barch/blob/main/SET.md)
-3. `B.GET K` retrieve a key, returns nil if no key exists [more](https://github.com/tjizep/barch/blob/main/GET.md)
-4. `B.REM K` removes a key, returns value if success [more](https://github.com/tjizep/barch/blob/main/REM.md)
+1. `B.ADD K V` add a key and value [more](https://github.com/tjizep/barch/blob/main/docs/ADD.md)
+2. `B.SET K V` set a key overriding existing value [more](https://github.com/tjizep/barch/blob/main/docs/SET.md)
+3. `B.GET K` retrieve a key, returns nil if no key exists [more](https://github.com/tjizep/barch/blob/main/docs/GET.md)
+4. `B.REM K` removes a key, returns value if success [more](https://github.com/tjizep/barch/blob/main/docs/REM.md)
 5. `B.MAX` returns largest key  (or nil) - numbers are less than text
 6. `B.MIN` returns smallest key (or nil) if there are no keys
-7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://github.com/tjizep/barch/blob/main/USECASE.md)
+7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://github.com/tjizep/barch/blob/main/docs/USECASE.md)
 8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://github.com/tjizep/barch/blob/main/USECASE.md) 
 9. `B.LB K1` lower bound: first key not less than K1 
 10. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys

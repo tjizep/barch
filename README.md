@@ -153,6 +153,9 @@ START
 STOP
 RETRIEVE
 PING
+```
+## Hash Set API's Implemented
+```
 HSET
 HEXPIREAT
 HEXPIRE
@@ -168,6 +171,9 @@ HEXPIRETIME
 HGETALL
 HKEYS
 HEXISTS
+```
+## ZOrder API's Implemented
+```
 ZADD
 ZREM
 ZINCRBY

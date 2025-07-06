@@ -174,6 +174,8 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
             art::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
             return false;
         }
+        storage& ps = *(storage*)arena.get_page_data({page,LPageSize,nullptr}, false);
+        ps.lru = lru_list::iterator();
     };
 
     if (!in.eof() && in.fail()) {

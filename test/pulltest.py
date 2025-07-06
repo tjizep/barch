@@ -14,18 +14,6 @@ serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
 print(f"serverdir{serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 
-# We should not have to do this
-df = [f"rm {barchdir}/*.dat"]
-print(f"delete dat files {df}")
-
-process = subprocess.run(
-    df,
-    shell=True,
-    capture_output=True,
-    text=True
-)
-time.sleep(1)
-
 serverCmd = [f"{serverdir}valkey-server", f"--loadmodule", f"{barchdir}/_barch.so"]
 serverProc = subprocess.Popen(serverCmd,cwd=barchdir)
 time.sleep(1)

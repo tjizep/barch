@@ -228,7 +228,7 @@ CONFIG SET B.active_defrag on
 ```redis
 CONFIG SET B.eviction_policy allkeys-lru
 ```
-4. Set compression [zstd,off,none]
+4. Set compression [zstd,fsst,off,none]
 ```redis
 CONFIG SET B.compression zstd
 ```

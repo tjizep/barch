@@ -538,7 +538,7 @@ private:
 
     uint8_t *basic_resolve(logical_address at, bool modify = false) {
         if (opt_page_trace) {
-            art::std_log("page trace[", main.name, "]:", at.address(), at.page(), at.offset(), modify);
+            art::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), modify);
         }
         if (at.null()) return nullptr;
         if (opt_enable_lru) {

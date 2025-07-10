@@ -267,6 +267,7 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, long long by) {
         return call.null();
     }
 }
+
 unused(
 static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
 

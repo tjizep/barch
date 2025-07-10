@@ -41,6 +41,10 @@ int HSET(caller& cc, const arg_t& args) {
         art::value_type val = args[n+1];
 
         t->insert(key, val, true, fc);
+        auto np  = t->search(key);
+        if (np.null()) {
+            abort_with("not added");
+        }
         t->query.pop_back();
         ++responses;
     }
@@ -490,7 +494,7 @@ int HLEN(caller& call, const arg_t& argv) {
     auto search_start = t->query.prefix(2);
     auto table_key = t->query.prefix(2);
     auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
-        if (!key.starts_with(table_key)) {
+        if (!key.starts_with(table_key.pref(1))) {
             return -1;
         }
         ++responses;
@@ -533,7 +537,7 @@ int HGETALL(caller& call, const arg_t& argv) {
     }
     auto t = get_art(argv[1]);
     storage_release release(t->latch);
-    art::value_type search_start = t->query.create({conversion::convert(n)});
+    art::value_type search_start = t->query.create({conversion::convert(n)},false);
 
     art::value_type table_key = search_start;
     //bool exists = false;
@@ -581,7 +585,7 @@ int HKEYS(caller& call, const arg_t& argv) {
     art::value_type table_key = search_start;
     call.start_array();
     auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
-        if (!key.starts_with(search_start)) {
+        if (!key.starts_with(search_start.pref(1))) {
             return -1;
         }
         call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});

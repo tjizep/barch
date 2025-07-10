@@ -243,7 +243,7 @@ int ZREM(caller& call, const arg_t& argv) {
         art::iterator byscore(t, qmember->create());
         if (byscore.ok()) {
             auto kscore = byscore.key();
-            if (!kscore.starts_with(member_prefix)) break;
+            if (!kscore.starts_with(member_prefix.pref(1))) break;
             auto fkmember = byscore.value();
             t->remove(fkmember);
             if (byscore.remove()) {
@@ -291,7 +291,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     auto container = conversion::convert(key);
     query q1, q2, qfield;
     art::value_type field_key = qfield->create({IX_MEMBER, container, target});
-    auto prefix = q1->create({container});
+    auto prefix = q1->create({container},false);
 
     art::iterator fields(t, field_key);
     if (fields.ok()) {
@@ -372,7 +372,7 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     art::iterator ai(t, lower);
     while (ai.ok()) {
         auto ik = ai.key();
-        if (!ik.starts_with(prefix)) break;
+        if (!ik.starts_with(prefix.pref(1))) break;
         if (ik.sub(0, prefix.size + numeric_key_size) <= upper) {
             ++count;
         } else {
@@ -396,14 +396,14 @@ static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
     if (spec.BYLEX) {
         // it is implied that mn and mx are non-numeric strings
         lower = lq->create({IX_MEMBER, container, mn});
-        prefix = pq->create({IX_MEMBER, container});
-        nprefix = tq->create({container});
-        upper = uq->create({IX_MEMBER, container, mx});
+        prefix = pq->create({IX_MEMBER, container},false);
+        nprefix = tq->create({container},false);
+        upper = uq->create({IX_MEMBER, container, mx},false);
     } else {
         lower = lq->create({container, mn});
-        prefix = pq->create({container});
+        prefix = pq->create({container},false);
         nprefix = prefix;
-        upper = uq->create({container, mx});
+        upper = uq->create({container, mx},false);
     }
     long long count = 0;
     long long replies = 0;
@@ -425,7 +425,6 @@ static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
         } else {
             current_comp = v.sub(0, prefix.size + numeric_key_size);
         }
-
         if (current_comp <= upper) {
             bool doprint = !spec.count;
 
@@ -546,7 +545,7 @@ int ZCARD(caller& call, const arg_t& argv) {
     long long count = 0;
     art::iterator ai(t, lower);
     while (ai.ok()) {
-        if (!ai.key().starts_with(lower)) break;
+        if (!ai.key().starts_with(lower.pref(1))) break;
         if (ai.key() <= upper) {
             ++count;
         } else {
@@ -630,7 +629,7 @@ static int ZOPER(
 
         for (; i.ok();) {
             auto v = i.key();
-            if (!v.starts_with(lower)) break;
+            if (!v.starts_with(lower.pref(1))) break;
             auto encoded_number = v.sub(lower.size, numeric_key_size);
             auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
             auto number = conversion::enc_bytes_to_dbl(encoded_number);
@@ -648,7 +647,7 @@ static int ZOPER(
                 bool found = false;
                 if (j.ok()) {
                     auto kf = j.key();
-                    if (!kf.starts_with(check)) break;
+                    if (!kf.starts_with(check.pref(1))) break;
 
                     auto efn = kf.sub(check_tainer.size, numeric_key_size);
                     auto fn = conversion::enc_bytes_to_dbl(efn);
@@ -831,7 +830,7 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
             break;
         }
         auto v = i.key();
-        if (!v.starts_with(lower)) break;
+        if (!v.starts_with(lower.pref(1))) break;
         auto encoded_number = v.sub(lower.size, numeric_key_size);
         auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
         call.reply_encoded_key(encoded_number);
@@ -870,10 +869,9 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
 
     auto container = conversion::convert(k);
     query l, u;
-    auto lower = l->create({container});
+    auto lower = l->create({container},false);
     auto upper = u->create({container, art::ts_end});
     call.start_array();
-
     for (long long c = 0; c < count; ++c) {
         art::iterator i(t, upper);
         if (!i.ok()) {
@@ -891,7 +889,6 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
             v = i.key();
         };
         if (!v.starts_with(lower)) break;
-
         auto encoded_number = v.sub(lower.size, numeric_key_size);
         auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
         call.reply_encoded_key(encoded_number);
@@ -1050,8 +1047,8 @@ int ZRANK(caller& call, const arg_t& argv) {
     auto container = conversion::convert(c);
     auto lower = conversion::convert(a, true);
     auto upper = conversion::convert(b, true);
-    auto min_key = qlower.create({container, lower});
-    auto max_key = qupper.create({container, upper});
+    auto min_key = qlower.create({container, lower},false);
+    auto max_key = qupper.create({container, upper}, false);
     if (max_key < min_key) {
         return call.long_long(0);
     }
@@ -1092,8 +1089,8 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
     auto container = conversion::convert(c);
     auto lower = conversion::convert(a, true);
     auto upper = conversion::convert(b, true);
-    auto min_key = qlower.create({container, lower});
-    auto max_key = qupper.create({container, upper});
+    auto min_key = qlower.create({container, lower},false);
+    auto max_key = qupper.create({container, upper}, false);
     if (max_key < min_key) {
         return call.long_long(0);
     }

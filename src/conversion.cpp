@@ -89,11 +89,14 @@ bool conversion::to_ll(art::value_type v, long long &i) {
 bool conversion::to_i64(art::value_type v, int64_t &i) {
     return to_t(v, i);
 }
-bool conversion::to_double(art::value_type v, double &i) {
 
-return to_t(v, i);
+bool conversion::to_double(art::value_type v, double &i) {
+    return to_t(v, i);
 }
 
+conversion::Variable conversion::as_variable(art::value_type v, bool noint) {
+    return as_variable(v.chars(), v.size, noint);
+}
 conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool noint) {
     int64_t i;
     double d;
@@ -128,6 +131,41 @@ conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool 
 
 #endif
     return {v, vlen + 1};
+}
+conversion::Variable conversion::as_variable(const char *v, size_t vlen, bool noint) {
+    int64_t i;
+    double d;
+
+    if (!noint) {
+#if 1
+        if (to_i64({v,vlen},i)) {
+            return {i};
+        }
+#else
+        char * ep;
+        i = strtoll(v,&ep,10 );
+        if (ep == v + vlen)
+        {
+            return {i};
+        }
+#endif
+    }
+#if 1
+    auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
+
+    if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen) {
+        return d;
+    }
+#else
+    char * ep;
+    d = strtod(v,&ep);
+    if (ep == v + vlen)
+    {
+        return comparable_key(d);
+    }
+
+#endif
+    return std::string(v,vlen);
 }
 
 conversion::comparable_key conversion::convert(const std::string &str, bool noint) {

@@ -120,6 +120,11 @@ namespace art {
             return {bytes + start, size - start};
         }
 
+        [[nodiscard]] value_type pref(unsigned less) const {
+            if (less >= size) return value_type(nullptr);
+            return {bytes, size - less};
+        }
+
         [[nodiscard]] value_type sub(size_t start, size_t length) const {
             if (start + length >= size) return sub(start);
             return {bytes + start, length};

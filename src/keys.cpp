@@ -5,6 +5,14 @@
 #include "keys.h"
 #include <cstdlib>
 #include "conversion.h"
+static size_t encoded_str_len(const char* str, size_t len) {
+    size_t i = 0;
+    for (; i < len; ++i) {
+        if (str[i] == 0 || str[i] == key_terminator)
+            break;
+    }
+    return i;
+}
 
 unsigned art::key_type_size(value_type key) {
     switch (key.bytes[0]) {
@@ -86,7 +94,7 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     } else if (key_len >= 1 && *enck == art::tstring) {
         k = (const char *) &enck[1];
         kl = key_len - 2;
-        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, strnlen(k, kl)) == VALKEYMODULE_ERR) {
+        if (ValkeyModule_ReplyWithStringBuffer(ctx, k, encoded_str_len(k, kl)) == VALKEYMODULE_ERR) {
             return -1;
         }
     } else if (key_len >= 1 && (*enck == art::tcomposite)) {
@@ -96,6 +104,12 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     }
     return 0;
 }
+
+/**
+ * function just returns the first key in a composite
+ * @param key
+ * @return
+ */
 conversion::Variable encoded_key_as_variant(art::value_type key) {
     double dk;
     float fk;
@@ -126,7 +140,9 @@ conversion::Variable encoded_key_as_variant(art::value_type key) {
     } else if (key_len >= 1 && *enck == art::tstring) {
         k = (const char *) &enck[1];
         // kl = key_len - 2;
-        return k;
+        std::string s;
+        s.insert(s.end(), k, k + encoded_str_len(k, key_len - 2));
+        return s;
 
     } else if (key_len >= 1 && (*enck == art::tcomposite)) {
         return encoded_key_as_variant(key.sub(2));
@@ -153,7 +169,6 @@ std::string encoded_key_as_string(art::value_type key) {
     }
     return "";
 }
-
 unsigned log_encoded_key(art::value_type key, bool start) {
     double dk;
     float fk;
@@ -172,11 +187,11 @@ unsigned log_encoded_key(art::value_type key, bool start) {
             memcpy(&dk, &ik, sizeof(ik));
             art::std_continue("{double}[", dk, "]");
             if (start) art::std_end();
-            return 10;
+            return numeric_key_size;
         } else {
-            art::std_continue("[{integer}[", ik, "]");
+            art::std_continue("{integer}[", ik, "]");
             if (start) art::std_end();
-            return 10;
+            return numeric_key_size;
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
         sk = conversion::enc_bytes_to_int32(enck, key_len);
@@ -186,14 +201,16 @@ unsigned log_encoded_key(art::value_type key, bool start) {
             if (start) art::std_end();
             return num32_key_size;
         } else {
-            art::std_continue("[{short}[", sk, "]");
+            art::std_continue("{short}[", sk, "]");
             if (start) art::std_end();
             return num32_key_size;
         }
     } else if (key_len >= 1 && *enck == art::tstring) {
         k = (const char *) &enck[1];
         kl = key_len - 2;
-        art::std_continue("{string}[", k, "][", kl, "]");
+        std::string s;
+        s.insert(s.end(), k, k + kl);
+        art::std_continue("{string}[", s, "][", kl, "]");
         if (start) art::std_end();
         return 2 + kl;
     } else if (key_len > 1 && *enck == art::tcomposite) {
@@ -207,16 +224,19 @@ unsigned log_encoded_key(art::value_type key, bool start) {
             switch (*ptr) {
                 case art::tinteger:
                 case art::tdouble:
-                    len = 10;
+                    len = numeric_key_size;
                     break;
                 case art::tfloat:
                 case art::tshort:
-                    len = 6;
+                    len = num32_key_size;
                     break;
-                case art::tstring:
-                    len = strnlen(ptr + 1, key_len - kl) + 2;
+                case art::tstring: {
+                    len = encoded_str_len(ptr + 1,key_len - kl) + 2;
+                }
                     break;
                 default:
+                    art::std_continue("<key or data error>");
+                    if (start) art::std_end();
                     return 0;
             }
             art::std_continue("<", len, ">");

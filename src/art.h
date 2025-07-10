@@ -100,6 +100,9 @@ namespace art{
     private:
         trace_list trace{};
     public:
+        void log_trace() const ;
+
+
         mutable trace_list tlb{};
         composite query{};
         composite cmd_ZADD_q1{};
@@ -121,6 +124,7 @@ namespace art{
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();
+            tlb.clear();
         }
 
         void pop_trace() {
@@ -232,8 +236,11 @@ uint64_t art_size(art::tree *t);
 
 /**
  * inserts a new value into the art tree
+ * a key cannot contain any embedded nulls. a terminating null char will
+ * be added if it does not exist
+ * TODO: no checks for embedded nulls are currently done
  * @arg t the tree
- * @arg key the key
+ * @arg key the key the key cannot have embedded 0 chars a terminating 0 char will be added if it does not exist
  * @arg key_len the length of the key
  * @arg value opaque value.
  * @return null if the item was newly inserted, otherwise
@@ -257,6 +264,7 @@ void art_insert
 
 /**
  * inserts a new value into the art tree (not replacing)
+ * check above for notes on embedded nulls
  * @arg t the tree
  * @arg key the key
  * @arg key_len the length of the key

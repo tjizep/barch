@@ -253,6 +253,17 @@ public:
 private:
     conversion::Variable var{};
 };
+class List {
+public:
+    List();
+    long long push(const std::string &key, const std::vector<std::string> &items);
+    long long len(const std::string &key);
+    long pop(const std::string &key,long long count);
+private:
+    mutable std::vector<std::string_view> params {};
+    mutable std::vector<Value> result{};
+    mutable swig_caller sc{};
+};
 
 class KeyValue {
 public:
@@ -260,7 +271,9 @@ public:
     void set(const std::string &key, const std::string &value);
     std::string get(const std::string &key) const;
     void incr(const std::string& key, double by);
+    void incr(const std::string& key, long long by);
     void decr(const std::string& key, double by);
+    void decr(const std::string& key, long long by);
     void erase(const std::string &key);
     std::vector<Value> glob(const std::string& glob, int max_ = 0) const;
     size_t globCount(const std::string& glob) const;

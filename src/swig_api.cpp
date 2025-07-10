@@ -89,6 +89,40 @@ void clear() {
         get_art(shard)->clear();
     }
 }
+List::List() {
+
+}
+long long List::push(const std::string &key, const std::vector<std::string> &items) {
+    params = {"b", key};
+    params.insert(params.end(), items.begin(), items.end());
+
+    int r = sc.call(params, LPUSH);
+    if (r != 0) {
+        art::std_err("set failed", key);
+    }
+    return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+
+}
+long long List::len(const std::string &key) {
+    params = {"b", key};
+
+    int r = sc.call(params, LLEN);
+    if (r != 0) {
+        art::std_err("len failed", key);
+    }
+    return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+
+}
+
+long List::pop(const std::string &key, long long count) {
+    params = {"b", key, std::to_string(count)};
+
+    int r = sc.call(params, LPOP);
+    if (r != 0) {
+        art::std_err("pop failed", key);
+    }
+    return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+}
 
 KeyValue::KeyValue() {
 
@@ -146,6 +180,21 @@ void KeyValue::incr(const std::string& key, double by) {
 }
 
 void KeyValue::decr(const std::string& key, double by) {
+    std::string b = std::to_string(by);
+    params = {"b", key,b};
+
+    int r = sc.call(params, ::DECRBY);
+    if (r == 0) {}
+}
+void KeyValue::incr(const std::string& key, long long by) {
+    std::string b = std::to_string(by);
+    params = {"b",key, b};
+
+    int r = sc.call(params, ::INCRBY);
+    if (r == 0) {}
+}
+
+void KeyValue::decr(const std::string& key, long long by) {
     std::string b = std::to_string(by);
     params = {"b", key,b};
 

@@ -300,7 +300,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
                 break;
             }
             depth += d.partial_len;
-            if (depth >= key.length()) {
+            if (depth >= key.size) {
                 break;
             }
         }
@@ -952,6 +952,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
                     dl->set_value(value);
                     dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
                     options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
+                    t->last_leaf_added = n;
                 }
                 else
                 {
@@ -961,6 +962,8 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
                     ++statistics::leaf_nodes_replaced;
                     return n;
                 }
+            }else {
+                t->last_leaf_added = n;
             }
             return nullptr;
         }
@@ -979,23 +982,23 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
                std::min<unsigned>(art::max_prefix_llength, longest_prefix));
         // Add the leaves to the new initial_node
         ref = new_node;
-        ref.modify()->add_child(l->key()[depth + longest_prefix], ref, l1);
-        if (l1.is_leaf) // because l1 isnt going to be in the path
+        ref.modify()->add_child(l->get_key()[depth + longest_prefix], ref, l1);
+        if (l1.is_leaf) // because l1 isn't going to be in the path
         {
             ++ref.modify()->data().descendants;
         }
-        auto l2k = l2.const_leaf()->key()[depth + longest_prefix];
+        auto l2k = l2.const_leaf()->get_key()[depth + longest_prefix];
         auto l2idx = ref.modify()->add_child(l2k, ref, l2);
         t->push_trace({ref, l2, l2idx, l2k});
         return nullptr;
     }
-
+    auto &d = n->data();
     // Check if given node has a prefix
-    if (n->data().partial_len) {
+    if (d.partial_len) {
         // Determine if the prefixes differ, since we need to split
         int prefix_diff = prefix_mismatch(n, key, depth);
-        if ((uint32_t) prefix_diff >= n->data().partial_len) {
-            depth += n->data().partial_len;
+        if ((uint32_t) prefix_diff >= d.partial_len) {
+            depth += d.partial_len;
             goto RECURSE_SEARCH;
         }
 
@@ -1864,6 +1867,28 @@ void art::tree::clear() {
     statistics::oom_avoided_inserts = 0;
     statistics::logical_allocated = 0;
 }
+static void log_trace(const art::tree* t , const std::string& name, const art::trace_list& tl)  {
+    size_t ctr = 0;
+    art::std_log("====-tree trace-",name,"====");
+    art::std_log("  tree size: ", t->size);
+    for (auto &el: tl) {
+        auto tp = el.parent->type();
+        auto checked = el.parent->check_data();
+        art::std_log(++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
+                el.child_ix, "k",el.k,"tp", tp, "checked", checked);
+        if (el.child.is_leaf) {
+            auto l = el.child.const_leaf();
+            //art::std_log(++ctr, "address:", el.child.logical.address(), "type:", "leaf","value size",l->get_value().size);
+            log_encoded_key(l->get_key());
+
+        }
+    }
+    art::std_log("=====-end tree trace-======");
+}
+void art::tree::log_trace() const {
+    ::log_trace(this, "tlb", tlb);
+    ::log_trace(this, "trace", trace);
+}
 
 void art::tree::update_trace(int direction) {
 #if 1
@@ -1905,6 +1930,7 @@ bool art::tree::insert(const key_options& options, value_type key, value_type va
     this->repl_client.insert(options, key, value);
     return size > before;
 }
+
 bool art::tree::insert(value_type key, value_type value, bool update) {
     return this->insert(key, value, update, [](const node_ptr &) {
 

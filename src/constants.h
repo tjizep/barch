@@ -17,7 +17,7 @@ enum {
     initialize_memory = 1,
     storage_version = 7,
     ticker_size = 64,
-    numeric_key_size = 10,
+    numeric_key_size = 12,
     num32_key_size = 6,
     composite_key_size = 2,
     max_queries_per_call = 32,
@@ -25,6 +25,9 @@ enum {
     non_leaf_type = 2,
     comparable_key_static_size = 32,
     node_pointer_storage_size = 64,
-    log_streams = 0
+    log_streams = 0,
+    encoding_width = 128,
+    encoding_delta = 0,
+    key_terminator = 0x01
 };
 #endif //CONSTANTS_H

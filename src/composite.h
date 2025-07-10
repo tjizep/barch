@@ -26,19 +26,27 @@ struct composite {
 
 
     template<typename VT>
-    static art::value_type build_key(byte_vector &result, const VT &v) {
+    static art::value_type build_key(byte_vector &result, const VT &v, bool zt = true) {
         size_t count = 0;
         for (const auto &i: v) {
             art::value_type k = i.get_value();
             count += k.size;
         }
         result.resize(count);
-        auto p = result.data();
+        auto first = result.data();
+        auto p = first;
+        auto last_null = p;
         for (const auto &i: v) {
             art::value_type k = i.get_value();
             memcpy(p, k.bytes, k.size);
             p += k.size;
+            if (p[-1] == 0) {
+                last_null = &p[-1];
+                *last_null = key_terminator;
+            }
         }
+        if (zt)
+            *last_null = 0;
         return {result.data(), result.size()};
     }
 
@@ -49,13 +57,16 @@ struct composite {
 
     composite(const composite &) = default;
 
-    art::value_type create(std::initializer_list<conversion::comparable_key> from) {
+    composite(std::initializer_list<conversion::comparable_key> from) {
+        create(from);
+    }
+    art::value_type create(std::initializer_list<conversion::comparable_key> from, bool zt = true) {
         comp.clear();
         comp.push_back(art::ts_composite);
         for (const auto &i: from) {
             comp.push_back(i);
         }
-        return create();
+        return create(zt);
     }
 
     void push(const conversion::comparable_key &k) {
@@ -71,8 +82,8 @@ struct composite {
         comp.resize(count - std::min(count, n));
     }
 
-    art::value_type create() {
-        return build_key(key_buffer, comp);
+    art::value_type create(bool zt = true) {
+        return build_key(key_buffer, comp, zt);
     }
 
     [[nodiscard]] art::value_type end() const {

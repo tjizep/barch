@@ -46,7 +46,9 @@ assert(vk.call('B.ZCARD', 'bgame') == 2)
 assert(vk.call('B.ZCARD', 'zgame') == 3)
 assert(vk.call('B.ZCARD', 'ygame') == 3)
 assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3) == 2)
+
 assert(vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3, 'AGGREGATE','SUM') == "16.5")
+
 assert(vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 3, 3, 3, 'AGGREGATE','SUM') == "19.8")
 assert(vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 1, 2, 3, 'AGGREGATE','SUM') == "15.6")
 assert(vk.call('B.ZINTER', 2, 'zgame', 'yzgame', 'WEIGHTS', 1, 1, 1, 'AGGREGATE','SUM') == "0")
@@ -104,5 +106,5 @@ assert(#vk.call('B.ZPOPMIN','cbgame')==2)
 assert(vk.call('B.ZCARD','cbgame')==0)
 assert(vk.call('B.ZREMRANGEBYLEX', 'rcgame','a','z') == 3)
 assert(vk.call('B.ZCARD','rcgame')==0)
---[[]]
+
 return {"OK"}

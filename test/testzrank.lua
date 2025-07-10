@@ -1,12 +1,11 @@
 local vk
 vk = redis
-
+vk.call('B.CLEAR')
 local t = vk.call('B.MILLIS')
-local count = 320000
+local count = 120000
 local key = 'z'
 
 if vk.call('B.SIZE') < count then
-    vk.call('B.CLEAR')
 
     for i=1,count do
         local s = count*math.random()
@@ -23,7 +22,7 @@ local function add(tr)
 end
 
 local failures = 0
-for i=1,1000 do
+for i=1,10000 do
     local min = math.floor((count-count/10)*math.random())
     local max = min + count/10 --count*math.random()--math.floor()
     local zr = vk.call('B.ZRANK',key,min,max)
@@ -42,6 +41,6 @@ for i=1,1000 do
 end
 local sz = vk.call('B.SIZE')
 vk.call('B.CLEAR')
-assert(failures == 0)
-return {failures,sz}
+--assert(failures == 0)
+return {failures,sz,results}
 

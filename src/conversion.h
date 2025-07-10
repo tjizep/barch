@@ -6,6 +6,7 @@
 #include <variant>
 
 namespace conversion {
+
     typedef std::variant<bool, int64_t, double, std::string, nullptr_t> Variable;
 
     std::string to_string(const Variable& v);
@@ -16,41 +17,55 @@ namespace conversion {
     bool to_ll(art::value_type vt, long long& l);
     bool to_double(art::value_type vt, double& l);
     bool to_i64(art::value_type v, int64_t &i);
+    inline Variable as_variable(const Variable& var) {
+        return var;
+    };
+
+    Variable as_variable(const char *v, size_t vlen, bool noint = false);
+    Variable as_variable(art::value_type v, bool noint = false);
+
     template<typename I>
     struct byte_comparable {
         byte_comparable() = default;
 
         explicit byte_comparable(const uint8_t *data, size_t len) {
             memcpy(&bytes[0], data, std::min(sizeof(bytes) - 1, len));
-            bytes[sizeof(I) + 1] = 0;
+            bytes[sizeof(I) + 3] = 0; // there's a hidden trailing 0
         }
 
         // probably cpp will optimize this
         [[nodiscard]] size_t get_size() const {
             return sizeof(bytes);
         }
+        void clear() {
+            memset(bytes, 0, sizeof(bytes));
+        }
 
-        uint8_t bytes[sizeof(I) + 2]{}; // there's a hidden trailing 0 added
+        uint8_t bytes[sizeof(I) + 4]{0}; // there's a hidden trailing 0 added
     };
 
     inline int64_t dec_bytes_to_int(const byte_comparable<int64_t> &i) {
         int64_t r = 0;
-
-        r += (i.bytes[1] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[2] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[3] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[4] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[5] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[6] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[7] & 0xFF);
-        r <<= 8;
-        r += (i.bytes[8] & 0xFF);
+        int64_t delta = -1;
+        r += (i.bytes[1] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[2] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[3] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[4] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[5] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[6] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[7] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[8] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[9] & 0xFF) + delta;
+        r *= encoding_width;
+        r += (i.bytes[10] & 0xFF) + delta;
         int64_t v = (r - (1ll << 63));
         return v;
     }
@@ -73,25 +88,37 @@ namespace conversion {
     // regardless of memory representation
     static inline byte_comparable<int64_t> comparable_bytes(int64_t n, uint8_t type_byte) {
         byte_comparable<int64_t> r;
+        uint8_t delta = 1;
         uint64_t t = n + (1ull << 63); // so that negative numbers compare to less than positive numbers
         r.bytes[0] = type_byte; // most significant is the type (overriding any value bytes)
 
-        r.bytes[8] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[7] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[6] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[5] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[4] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[3] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[2] = (uint8_t) (t & 0xFF);
-        t >>= 8;
-        r.bytes[1] = (uint8_t) (t & 0xFF);
+        r.bytes[10] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[9] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[8] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[7] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[6] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[5] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[4] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[3] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        r.bytes[2] = (uint8_t) (t % encoding_width) + delta;
+        t /= encoding_width;
+        if (t > 255) {
+            abort_with("encoding challenge");
+        }
+        r.bytes[1] = (uint8_t) (t % encoding_width) + delta;
         return r;
+    }
+
+    static inline byte_comparable<int64_t> make_int64_bytes(int64_t n) {
+        return comparable_bytes(n, art::tinteger);
     }
 
     static inline byte_comparable<int32_t> comparable_bytes32(int32_t n, uint8_t type_byte) {

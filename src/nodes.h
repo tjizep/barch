@@ -26,12 +26,12 @@ namespace art {
     }
 
     enum key_types {
-        tinteger = 0u,
-        tdouble = 1u,
-        tstring = 2u,
-        tcomposite = 3u,
-        tshort = 4u,
-        tfloat = 5u,
+        tinteger = 1u,
+        tdouble = 2u,
+        tstring = 3u,
+        tcomposite = 4u,
+        tshort = 5u,
+        tfloat = 6u,
         tend = 255u,
         tnone = 65536
     };

@@ -6,3 +6,6 @@ assert(l.push("l",["b1","b2"])==4)
 
 assert(l.len("l")==4)
 assert(l.pop("l",1)==3)
+assert(l.back("l")=="b1")
+print(l.front("l"))
+assert(l.front("l")=="a1")

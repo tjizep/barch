@@ -174,4 +174,56 @@ extern "C"{
         return cc.long_long(end - start);
 
     }
+    int LBACK(caller& cc, const arg_t& args) {
+        if (args.size() < 2) {
+            return cc.wrong_arity();
+        }
+        if (key_ok(args[1]) != 0) {
+            return cc.null();
+        }
+        auto t = get_art(args[1]);
+        storage_release release(t->latch);
+        auto container = conversion::convert(args[1]);
+        auto key = t->query.create({container});
+        auto value = t->search(key);
+        if (value.null()) {
+            return cc.null();
+
+        }
+        list_header header {value.const_leaf()->get_value()};
+        int64_t end = conversion::dec_bytes_to_int(header.end);
+        composite li;
+        li.create({container,conversion::comparable_key(--end)});
+        auto back = t->search(li.create());
+        if (back.null()) {
+            return cc.null();
+        }
+        return cc.vt(back.const_leaf()->get_value());
+    }
+
+    int LFRONT(caller& cc, const arg_t& args) {
+        if (args.size() < 2) {
+            return cc.wrong_arity();
+        }
+        if (key_ok(args[1]) != 0) {
+            return cc.null();
+        }
+        auto t = get_art(args[1]);
+        storage_release release(t->latch);
+        auto container = conversion::convert(args[1]);
+        auto key = t->query.create({container});
+        auto value = t->search(key);
+        if (value.null()) {
+            return cc.null();
+        }
+        list_header header {value.const_leaf()->get_value()};
+        int64_t start = conversion::dec_bytes_to_int(header.start);
+        composite li;
+        li.create({container,conversion::comparable_key(start)});
+        auto front = t->search(li.create());
+        if (front.null()) {
+            return cc.null();
+        }
+        return cc.vt(front.const_leaf()->get_value());
+    }
 }

@@ -258,6 +258,8 @@ public:
     List();
     long long push(const std::string &key, const std::vector<std::string> &items);
     long long len(const std::string &key);
+    std::string back(const std::string &key);
+    std::string front(const std::string &key);
     long pop(const std::string &key,long long count);
 private:
     mutable std::vector<std::string_view> params {};

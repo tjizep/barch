@@ -25,6 +25,9 @@ extern "C"{
     int PUBLISH(caller& call, const arg_t& argv);
     int PULL(caller& call, const arg_t& argv);
     int LOAD(caller& call, const arg_t& argv);
+
+    int LBACK(caller& cc, const arg_t& args);
+    int LFRONT(caller& cc, const arg_t& args);
     int LPUSH(caller& cc, const arg_t& args);
     int LPOP(caller& cc, const arg_t& args);
     int LLEN(caller& cc, const arg_t& args);

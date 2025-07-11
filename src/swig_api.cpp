@@ -123,6 +123,23 @@ long List::pop(const std::string &key, long long count) {
     }
     return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
 }
+std::string List::back(const std::string &key) {
+    params = {"b", key};
+    int r = sc.call(params, LBACK);
+    if (r != 0) {
+        art::std_err("back failed", key);
+    }
+    return sc.results.empty() ? "" : conversion::to_string(sc.results[0]);
+}
+
+std::string List::front(const std::string &key) {
+    params = {"b", key};
+    int r = sc.call(params, LFRONT);
+    if (r != 0) {
+        art::std_err("front failed", key);
+    }
+    return sc.results.empty() ? "" : conversion::to_string(sc.results[0]);
+}
 
 KeyValue::KeyValue() {
 

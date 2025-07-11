@@ -425,7 +425,7 @@ static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
         } else {
             current_comp = v.sub(0, prefix.size + numeric_key_size);
         }
-        if (current_comp <= upper) {
+        if (current_comp.pref(1) <= upper) {
             bool doprint = !spec.count;
 
             if (spec.count && count >= spec.offset && (count - spec.offset < spec.count)) {

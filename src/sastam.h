@@ -623,7 +623,7 @@ namespace heap {
     using map = ankerl::unordered_dense::map
     <K
         , V
-        , ankerl::unordered_dense::hash<size_t>
+        , std::hash<size_t>
         , std::equal_to<size_t>
         , allocator<std::pair<K, V> >
     >;

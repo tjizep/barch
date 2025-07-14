@@ -94,7 +94,7 @@ bool conversion::to_double(art::value_type v, double &i) {
     return to_t(v, i);
 }
 
-conversion::Variable conversion::as_variable(art::value_type v, bool noint) {
+Variable conversion::as_variable(art::value_type v, bool noint) {
     return as_variable(v.chars(), v.size, noint);
 }
 conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool noint) {
@@ -132,7 +132,7 @@ conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool 
 #endif
     return {v, vlen + 1};
 }
-conversion::Variable conversion::as_variable(const char *v, size_t vlen, bool noint) {
+Variable conversion::as_variable(const char *v, size_t vlen, bool noint) {
     int64_t i;
     double d;
 

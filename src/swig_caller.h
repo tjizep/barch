@@ -8,12 +8,14 @@
 #include <string>
 #include <vector>
 #include "keys.h"
-
+#include "server.h"
 
 struct swig_caller : caller {
 
+    std::string host {};
+    int port {};
     std::string r{};
-    std::vector<conversion::Variable> results{};
+    std::vector<Variable> results{};
     std::vector<std::string> errors{};
     [[nodiscard]] int wrong_arity()  override {
         errors.emplace_back("wrong_arity");
@@ -82,10 +84,14 @@ struct swig_caller : caller {
     }
     template<typename TC>
     int call(const std::vector<std::string_view>& params, TC&& f) {
+
         ++statistics::local_calls;
         arg_t args;
         errors.clear();
         results.clear();
+        if (!host.empty()) {
+            return barch::repl::call(results, params, host, port);
+        }
         for (const auto& s : params) {
             args.push_back({&*s.begin(),s.length()});
         }

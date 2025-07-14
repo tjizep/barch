@@ -118,7 +118,7 @@ public:
     int tuple = 0;
     Value(){};
     Value(nullptr_t): var(nullptr){};
-    Value(const conversion::Variable& var) : var(var){};
+    Value(const Variable& var) : var(var){};
     Value(const bool var) : var(var){};
     Value(const std::string& var) : var(var){};
     Value(const char* var) : var(var){};
@@ -182,7 +182,7 @@ public:
         }
     }
 
-    void set(const conversion::Variable& v) {
+    void set(const Variable& v) {
         this->var = v;
     }
 
@@ -251,7 +251,7 @@ public:
         return s();
     }
 private:
-    conversion::Variable var{};
+    Variable var{};
 };
 class List {
 public:
@@ -270,6 +270,7 @@ private:
 class KeyValue {
 public:
     KeyValue();
+    KeyValue(const std::string& host, int port);
     void set(const std::string &key, const std::string &value);
     std::string get(const std::string &key) const;
     void incr(const std::string& key, double by);
@@ -277,7 +278,7 @@ public:
     void decr(const std::string& key, double by);
     void decr(const std::string& key, long long by);
     void erase(const std::string &key);
-    std::vector<Value> glob(const std::string& glob, int max_ = 0) const;
+    std::vector<Value> glob(const std::string& glob, unsigned long long max_ = 0) const;
     size_t globCount(const std::string& glob) const;
     Value lowerBound(const std::string& key) const ;
 

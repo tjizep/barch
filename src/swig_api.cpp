@@ -15,7 +15,7 @@ void setConfiguration(const std::string& name, const std::string& value) {
 }
 
 void load(const std::string &host, const std::string& port) {
-    std::vector<std::string_view> params = {"b", host, port};
+    std::vector<std::string_view> params = {"RETRIEVE", host, port};
     swig_caller sc;
     int r = sc.call(params, RETRIEVE);
     if (r == 0) {
@@ -24,7 +24,7 @@ void load(const std::string &host, const std::string& port) {
 }
 
 void start(const std::string &host, const std::string& port) {
-    std::vector<std::string_view> params = {"b", host, port};
+    std::vector<std::string_view> params = {"START", host, port};
     swig_caller sc;
     int r = sc.call(params, START);
     if (r == 0) {
@@ -35,7 +35,7 @@ void start(const std::string& port) {
     start("127.0.0.1", port);
 }
 void stop() {
-    std::vector<std::string_view> params = {"b"};
+    std::vector<std::string_view> params = {"STOP"};
     swig_caller sc;
     int r = sc.call(params, STOP);
     if (r == 0) {
@@ -43,7 +43,7 @@ void stop() {
     }
 }
 void ping(const std::string &host, const std::string& port) {
-    std::vector<std::string_view> params = {"b", host, port};
+    std::vector<std::string_view> params = {"PING", host, port};
     swig_caller sc;
     int r = sc.call(params, PING);
     if (r != 0) {
@@ -52,7 +52,7 @@ void ping(const std::string &host, const std::string& port) {
 }
 
 void publish(const std::string &ip, const std::string &port) {
-    std::vector<std::string_view> params = {"b", ip, port};
+    std::vector<std::string_view> params = {"PUBLISH", ip, port};
     swig_caller sc;
     int r = sc.call(params, PUBLISH);
     if (r != 0) {
@@ -61,7 +61,7 @@ void publish(const std::string &ip, const std::string &port) {
 }
 
 void pull(const std::string &ip, const std::string &port) {
-    std::vector<std::string_view> params = {"b", ip, port};
+    std::vector<std::string_view> params = {"PULL", ip, port};
     swig_caller sc;
     int r = sc.call(params, PULL);
     if (r != 0) {
@@ -70,7 +70,7 @@ void pull(const std::string &ip, const std::string &port) {
 }
 
 unsigned long long size()  {
-    std::vector<std::string_view> params = {"b"};
+    std::vector<std::string_view> params = {"SIZE"};
     swig_caller sc;
     int r = sc.call(params, ::SIZE);
     if (r == 0) {
@@ -79,7 +79,7 @@ unsigned long long size()  {
     return 0;
 }
 void save() {
-    std::vector<std::string_view> params = {"b"};
+    std::vector<std::string_view> params = {"SAVE"};
     swig_caller sc;
     int r = sc.call(params, ::SAVE);
     if (r == 0) {}
@@ -93,7 +93,7 @@ List::List() {
 
 }
 long long List::push(const std::string &key, const std::vector<std::string> &items) {
-    params = {"b", key};
+    params = {"LPUSH", key};
     params.insert(params.end(), items.begin(), items.end());
 
     int r = sc.call(params, LPUSH);
@@ -104,7 +104,7 @@ long long List::push(const std::string &key, const std::vector<std::string> &ite
 
 }
 long long List::len(const std::string &key) {
-    params = {"b", key};
+    params = {"LLEN", key};
 
     int r = sc.call(params, LLEN);
     if (r != 0) {
@@ -115,7 +115,7 @@ long long List::len(const std::string &key) {
 }
 
 long List::pop(const std::string &key, long long count) {
-    params = {"b", key, std::to_string(count)};
+    params = {"LPOP", key, std::to_string(count)};
 
     int r = sc.call(params, LPOP);
     if (r != 0) {
@@ -124,7 +124,7 @@ long List::pop(const std::string &key, long long count) {
     return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
 }
 std::string List::back(const std::string &key) {
-    params = {"b", key};
+    params = {"LBACK", key};
     int r = sc.call(params, LBACK);
     if (r != 0) {
         art::std_err("back failed", key);
@@ -133,7 +133,7 @@ std::string List::back(const std::string &key) {
 }
 
 std::string List::front(const std::string &key) {
-    params = {"b", key};
+    params = {"LFRONT", key};
     int r = sc.call(params, LFRONT);
     if (r != 0) {
         art::std_err("front failed", key);
@@ -144,9 +144,12 @@ std::string List::front(const std::string &key) {
 KeyValue::KeyValue() {
 
 }
-
+KeyValue::KeyValue(const std::string& host, int port) {
+    sc.host = host;
+    sc.port = port;
+}
 void KeyValue::set(const std::string &key, const std::string &value) {
-    params = {"b", key, value};
+    params = {"SET", key, value};
 
     int r = sc.call(params, SET);
     if (r != 0) {
@@ -154,8 +157,9 @@ void KeyValue::set(const std::string &key, const std::string &value) {
     }
 
 }
+
 std::string KeyValue::get(const std::string &key) const {
-    params = {"b", key};
+    params = {"GET", key};
 
     int r = sc.call(params, ::GET);
     if (r == 0) {
@@ -163,14 +167,16 @@ std::string KeyValue::get(const std::string &key) const {
     }
     return "";
 }
+
 void KeyValue::erase(const std::string &key) {
-    params = {"b", key};
+    params = {"REM", key};
 
     int r = sc.call(params, ::REM);
     if (r == 0) {}
 }
+
 Value KeyValue::min() const {
-    params = {"b"};
+    params = {"MIN"};
 
     int r = sc.call(params, ::MIN);
     if (r == 0) {
@@ -179,7 +185,7 @@ Value KeyValue::min() const {
     return "";
 }
 Value KeyValue::max() const {
-    params = {"b"};
+    params = {"MAX"};
 
     int r = sc.call(params, ::MAX);
     if (r == 0) {
@@ -190,7 +196,7 @@ Value KeyValue::max() const {
 
 void KeyValue::incr(const std::string& key, double by) {
     std::string b = std::to_string(by);
-    params = {"b",key, b};
+    params = {"INCRBY",key, b};
 
     int r = sc.call(params, ::INCRBY);
     if (r == 0) {}
@@ -198,14 +204,15 @@ void KeyValue::incr(const std::string& key, double by) {
 
 void KeyValue::decr(const std::string& key, double by) {
     std::string b = std::to_string(by);
-    params = {"b", key,b};
+    params = {"DECRBY", key,b};
 
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
+
 void KeyValue::incr(const std::string& key, long long by) {
     std::string b = std::to_string(by);
-    params = {"b",key, b};
+    params = {"INCRBY",key, b};
 
     int r = sc.call(params, ::INCRBY);
     if (r == 0) {}
@@ -213,18 +220,19 @@ void KeyValue::incr(const std::string& key, long long by) {
 
 void KeyValue::decr(const std::string& key, long long by) {
     std::string b = std::to_string(by);
-    params = {"b", key,b};
+    params = {"DECRBY", key,b};
 
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
-std::vector<Value> KeyValue::glob(const std::string &glob, int max_) const {
+
+std::vector<Value> KeyValue::glob(const std::string &glob, unsigned long long max_) const {
     result.clear();
 
     if ( max_ > 0) {
-        params = {"b", glob, "MAX", std::to_string(max_)} ;
+        params = {"KEYS", glob, "MAX", std::to_string(max_)} ;
     }else {
-        params = {"b", glob} ;
+        params = {"KEYS", glob} ;
     }
 
     int r = sc.call(params, ::KEYS);
@@ -237,7 +245,7 @@ std::vector<Value> KeyValue::glob(const std::string &glob, int max_) const {
     return result;
 }
 size_t KeyValue::globCount(const std::string& glob) const {
-    params = {"b", glob, "COUNT"};
+    params = {"KEYS", glob, "COUNT"};
 
     int r = sc.call(params, ::KEYS);
     if (r == 0) {
@@ -248,7 +256,7 @@ size_t KeyValue::globCount(const std::string& glob) const {
 }
 Value KeyValue::lowerBound(const std::string& key) const {
 
-    params = {"b", key};
+    params = {"LB", key};
 
     int r = sc.call(params, ::LB);
     if (r == 0) {
@@ -258,7 +266,7 @@ Value KeyValue::lowerBound(const std::string& key) const {
 }
 
 void load() {
-    std::vector<std::string_view> params = {"b"};
+    std::vector<std::string_view> params = {"LOAD"};
     swig_caller sc;
     int r = sc.call(params, ::LOAD);
     if (r != 0) {
@@ -360,7 +368,7 @@ configuration_values config() {
 HashSet::HashSet(){}
 
 void HashSet::set(const std::string &k, const std::vector<std::string>& members) {
-    params = {"b", k};
+    params = {"HSET", k};
     params.insert(params.end(), members.begin(), members.end());
     int r = sc.call(params, ::HSET);
     if (r != 0) {
@@ -368,7 +376,7 @@ void HashSet::set(const std::string &k, const std::vector<std::string>& members)
     }
 }
 Value HashSet::get(const std::string &k, const std::string &member) {
-    params = {"b", k, member};
+    params = {"HGET", k, member};
     sc.call(params, ::HGET);
 
     if (!sc.results.empty()) {
@@ -378,7 +386,7 @@ Value HashSet::get(const std::string &k, const std::string &member) {
 }
 std::vector<Value> HashSet::mget(const std::string& k, const std::vector<std::string> &fields) {
     result.clear();
-    params = {"b", k};
+    params = {"HMGET", k};
     params.insert(params.end(), fields.begin(), fields.end());
     int r = sc.call(params, ::HMGET);
     if (r != 0) {
@@ -391,7 +399,7 @@ std::vector<Value> HashSet::mget(const std::string& k, const std::vector<std::st
 
 std::vector<Value> HashSet::getall(const std::string& k) {
     result.clear();
-    params = {"b", k};
+    params = {"HGETALL", k};
     sc.call(params, ::HGETALL);
 
     result.insert(result.end(), sc.results.begin(), sc.results.end());
@@ -400,7 +408,7 @@ std::vector<Value> HashSet::getall(const std::string& k) {
 }
 std::vector<Value> HashSet::expiretime(const std::string &k, const std::vector<std::string> &fields) {
     result.clear();
-    params = {"b", k, "FIELDS", std::to_string(fields.size())};
+    params = {"HEXPIRETIME", k, "FIELDS", std::to_string(fields.size())};
 
     params.insert(params.end(), fields.begin(), fields.end());
 
@@ -411,7 +419,7 @@ std::vector<Value> HashSet::expiretime(const std::string &k, const std::vector<s
 }
 Value HashSet::exists(const std::string &k, const std::string &member) {
     result.clear();
-    params = {"b", k, member};
+    params = {"HEXISTS", k, member};
     sc.call(params, ::HEXISTS);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     if (result.empty()) return {nullptr};
@@ -420,7 +428,7 @@ Value HashSet::exists(const std::string &k, const std::string &member) {
 
 Value HashSet::remove(const std::string &k, const std::vector<std::string> &member) {
     result.clear();
-    params = {"b", k};
+    params = {"HDEL", k};
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HDEL);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
@@ -430,7 +438,7 @@ Value HashSet::remove(const std::string &k, const std::vector<std::string> &memb
 
 Value HashSet::getdel(const std::string &k, const std::vector<std::string> &member) {
     result.clear();
-    params = {"b", k , "FIELDS", std::to_string(member.size())};
+    params = {"HGETDEL", k , "FIELDS", std::to_string(member.size())};
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HGETDEL);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
@@ -439,7 +447,7 @@ Value HashSet::getdel(const std::string &k, const std::vector<std::string> &memb
 }
 std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::string> &member) {
     result.clear();
-    params = {"b", k , "FIELDS", std::to_string(member.size())};
+    params = {"HTTL", k , "FIELDS", std::to_string(member.size())};
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HTTL);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
@@ -448,7 +456,7 @@ std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::str
 // k+args+fields
 std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields) {
     result.clear();
-    params = {"b", k};
+    params = {"HEXPIRE", k};
     params.insert(params.end(), args.begin(), args.end());
     params.emplace_back("FIELDS");
     params.emplace_back(std::to_string(fields.size()));
@@ -460,7 +468,7 @@ std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::
 }
 std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const std::string &flags, const std::vector<std::string> &fields) {
     result.clear();
-    params = {"b", k, std::to_string(exp), flags,"FIELDS", std::to_string(fields.size())};
+    params = {"HEXPIREAT", k, std::to_string(exp), flags,"FIELDS", std::to_string(fields.size())};
     params.insert(params.end(), fields.begin(), fields.end());
     sc.call(params, ::HEXPIREAT);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
@@ -468,7 +476,7 @@ std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const 
 }
 Value HashSet::incrby(const std::string &k, const std::string& field, long long by) {
     result.clear();
-    params = {"b", k, field, std::to_string(by)};
+    params = {"HINCRBY", k, field, std::to_string(by)};
     sc.call(params, ::HINCRBY);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -479,7 +487,7 @@ OrderedSet::OrderedSet() {
 }
 Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members) {
     result.clear();
-    params = {"b", k};
+    params = {"ZADD", k};
     params.insert(params.end(), flags.begin(), flags.end());
     params.insert(params.end(), members.begin(), members.end());
     sc.call(params, ::ZADD);
@@ -489,7 +497,7 @@ Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flag
 
 std::vector<Value> OrderedSet::range(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
     result.clear();
-    params = {"b", k, std::to_string(start), std::to_string(stop)};
+    params = {"ZRANGE", k, std::to_string(start), std::to_string(stop)};
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZRANGE);
     if (sc.results.empty()) return {nullptr};
@@ -498,7 +506,7 @@ std::vector<Value> OrderedSet::range(const std::string &k, double start, double 
 }
 std::vector<Value> OrderedSet::revrange(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
     result.clear();
-    params = {"b", k, std::to_string(start), std::to_string(stop)};
+    params = {"ZREVRANGE", k, std::to_string(start), std::to_string(stop)};
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZREVRANGE);
     if (sc.results.empty()) return {nullptr};
@@ -508,7 +516,7 @@ std::vector<Value> OrderedSet::revrange(const std::string &k, double start, doub
 
 Value OrderedSet::card(const std::string &k) {
     result.clear();
-    params = {"b", k};
+    params = {"ZCARD", k};
     sc.call(params, ::ZCARD);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -516,7 +524,7 @@ Value OrderedSet::card(const std::string &k) {
 
 Value OrderedSet::popmin(const std::string &k) {
     result.clear();
-    params = {"b", k};
+    params = {"ZPOPMIN", k};
     sc.call(params, ::ZPOPMIN);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -524,7 +532,7 @@ Value OrderedSet::popmin(const std::string &k) {
 
 Value OrderedSet::popmax(const std::string &k) {
     result.clear();
-    params = {"b", k};
+    params = {"ZPOPMAX", k};
     sc.call(params, ::ZPOPMAX);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -532,7 +540,7 @@ Value OrderedSet::popmax(const std::string &k) {
 
 Value OrderedSet::rank(const std::string &k, double lower, double upper) {
     result.clear();
-    params = {"b", k, std::to_string(lower), std::to_string(upper)};
+    params = {"ZFASTRANK", k, std::to_string(lower), std::to_string(upper)};
     sc.call(params, ::ZFASTRANK);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -540,7 +548,7 @@ Value OrderedSet::rank(const std::string &k, double lower, double upper) {
 
 Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& members) {
     result.clear();
-    params = {"b", k};
+    params = {"ZREM", k};
     params.insert(params.end(), members.begin(), members.end());
     sc.call(params, ::ZREM);
     if (sc.results.empty()) return {nullptr};
@@ -548,7 +556,7 @@ Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& m
 }
 std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
     result.clear();
-    params = {"b", std::to_string(keys.size())};
+    params = {"ZDIFF", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZDIFF);
@@ -558,7 +566,7 @@ std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const 
 
 Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::string>& keys) {
     result.clear();
-    params = {"b", destkey, std::to_string(keys.size())};
+    params = {"ZDIFFSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
     sc.call(params, ::ZDIFFSTORE);
     return sc.results[0];
@@ -566,7 +574,7 @@ Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::s
 
 Value OrderedSet::incrby(const std::string &key, double val, const std::string &field) {
     result.clear();
-    params = {"b", key, std::to_string(val), field};
+    params = {"ZINCRBY", key, std::to_string(val), field};
     sc.call(params, ::ZINCRBY);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -574,7 +582,7 @@ Value OrderedSet::incrby(const std::string &key, double val, const std::string &
 
 std::vector<Value> OrderedSet::inter(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
     result.clear();
-    params = {"b", std::to_string(keys.size())};
+    params = {"ZINTER", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZINTER);
@@ -584,7 +592,7 @@ std::vector<Value> OrderedSet::inter(const std::vector<std::string>& keys, const
 
 Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::string>& keys) {
     result.clear();
-    params = {"b", destkey, std::to_string(keys.size())};
+    params = {"ZINTERSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
     sc.call(params, ::ZINTERSTORE);
     if (sc.results.empty()) return {nullptr};
@@ -593,7 +601,7 @@ Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::
 
 Value OrderedSet::intercard(const std::vector<std::string>& keys) {
     result.clear();
-    params = {"b", std::to_string(keys.size())};
+    params = {"ZINTERCARD", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
     sc.call(params, ::ZINTERCARD);
     if (sc.results.empty()) return {nullptr};
@@ -602,7 +610,7 @@ Value OrderedSet::intercard(const std::vector<std::string>& keys) {
 
 Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower, const std::string& upper) {
     result.clear();
-    params = {"b", key, lower, upper};
+    params = {"ZREMRANGEBYLEX", key, lower, upper};
     sc.call(params, ::ZREMRANGEBYLEX);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];

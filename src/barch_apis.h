@@ -5,6 +5,7 @@
 #ifndef BARCH_APIS_H
 #define BARCH_APIS_H
 #include "caller.h"
+typedef std::function<int (caller& call, const arg_t& argv)> barch_function;
 extern "C"{
     int SET(caller& call,const arg_t& argv);
     int KEYS(caller& call, const arg_t& argv);
@@ -74,4 +75,6 @@ extern "C"{
 
 
 }
+
+std::unordered_map<std::string, barch_function> functions_by_name();
 #endif //BARCH_APIS_H

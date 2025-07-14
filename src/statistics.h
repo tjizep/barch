@@ -73,7 +73,7 @@ namespace statistics {
 }
 
 template<typename Ext>
-static void throw_exception(const char *name) {
+[[ noreturn ]] static void throw_exception(const char *name) {
     ++statistics::exceptions_raised;
     art::std_err("exception", name);
     throw Ext(name);

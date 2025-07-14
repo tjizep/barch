@@ -25,13 +25,18 @@
 
 #include <cstdio>
 
+#include "barch_apis.h"
+#include "swig_api.h"
+#include "swig_caller.h"
+#include "vk_caller.h"
 #include "asio/io_service.hpp"
 #pragma GCC diagnostic pop
 
 enum {
     cmd_ping = 1,
     cmd_stream = 2,
-    cmd_art_fun = 3
+    cmd_art_fun = 3,
+    cmd_barch_call = 4
 };
 enum {
     opt_max_workers = 8,
@@ -41,6 +46,7 @@ enum {
 using asio::ip::tcp;
 
 namespace barch {
+    static auto barch_functions = functions_by_name();
     template<typename T>
     bool time_wait(int64_t millis, T&& fwait ) {
         if (fwait()) {
@@ -68,6 +74,13 @@ namespace barch {
             statistics::repl::bytes_sent += stream_write_ctr - saved_writes;
         }
     };
+
+    double htonl(double x) {
+        return __builtin_bswap32(x);
+    }
+    double ntohl(double x) {
+        return __builtin_bswap32(x);
+    }
     template<typename T>
     void push_size_t(heap::vector<uint8_t>& buffer,T s) {
         uint8_t tb[sizeof(T)];
@@ -109,12 +122,6 @@ namespace barch {
         }
         return {r, at+1};
     }
-    void push_value(heap::vector<uint8_t>& buffer, art::value_type v) {
-        push_size_t<uint32_t>(buffer, v.size);
-        buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
-    }
-
-
     std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
         if (buffer.size()+sizeof(size)+at < size) {
@@ -123,6 +130,80 @@ namespace barch {
         art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
         return {r, at+sizeof(size)+size};
     }
+
+    void push_value(heap::vector<uint8_t>& buffer, art::value_type v) {
+        push_size_t<uint32_t>(buffer, v.size);
+        buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
+    }
+    void push_value(heap::vector<uint8_t>& buffer, const std::string& v) {
+        push_value(buffer, art::value_type{v});
+    }
+    void push_value(heap::vector<uint8_t>& buffer, const Variable& v) {
+        uint8_t i = v.index();
+        if (i >= 255) {
+            throw_exception<std::runtime_error>("invalid index");
+        }
+        buffer.push_back(i);
+        switch (i) {
+            case 0:
+                buffer.push_back(*std::get_if<bool>(&v) ? 1 : 0);
+                break;
+            case 1:
+                push_size_t<uint64_t>(buffer, *std::get_if<int64_t>(&v));
+                break;
+            case 2:
+                push_size_t<double>(buffer, *std::get_if<double>(&v));
+                break;
+            case 3:
+                push_value(buffer, *std::get_if<std::string>(&v));
+                break;
+            case 4:
+                break;
+            default:
+                break;
+        }
+
+    }
+
+    std::pair<Variable,size_t> get_variable(size_t at, const heap::vector<uint8_t>& buffer) {
+        std::pair<art::value_type,size_t> vt;
+        auto bsize = buffer.size();
+        if (at >= bsize) {
+            throw_exception<std::runtime_error>("invalid at");
+        }
+        uint8_t i = buffer[at];
+        if (i >= 255) {
+            throw_exception<std::runtime_error>("invalid index");
+        }
+        ++at;
+        switch (i) {
+            case 0:
+                if (at >= bsize) {
+                    throw_exception<std::runtime_error>("invalid at");
+                }
+                return { buffer[at] == 1,at+1} ;
+            case 1:
+                if (at + sizeof(int64_t) >= bsize) {
+                    throw_exception<std::runtime_error>("invalid at");
+                }
+                return  {get_size_t<int64_t>(at, buffer),at+sizeof(int64_t)};
+            case 2:
+                if (at + sizeof(double) >= bsize) {
+                    throw_exception<std::runtime_error>("invalid at");
+                }
+                return { get_size_t<double>(at, buffer), at+sizeof(double)};
+            case 3:
+                vt = get_value(at, buffer);
+                return { std::string(vt.first.chars(), vt.first.size),vt.second};
+            case 4:
+                return { nullptr,at};
+            default:
+                break;
+        }
+        throw_exception<std::runtime_error>("invalid index");
+        return {};
+    }
+
     bool recv_buffer(std::iostream& stream, heap::vector<uint8_t>& buffer) {
         uint32_t buffers_size = 0;
         readp(stream,buffers_size);
@@ -135,7 +216,7 @@ namespace barch {
         return true;
     }
     void send_art_fun(uint32_t shard, uint32_t messages, std::iostream& stream, heap::vector<uint8_t>& to_send) {
-        int cmd = cmd_art_fun;
+        uint32_t cmd = cmd_art_fun;
         uint32_t buffers_size = to_send.size();
         uint32_t sh = shard;
         writep(stream, cmd);
@@ -179,6 +260,9 @@ namespace barch {
         for (size_t i = 0; i < buffers_size;) {
             char cmd = buffer[i];
             switch (cmd) {
+                case 'c': {
+
+                }
                 case 'i': {
                         auto options = get_options(i+1, buffer);
                         auto key = get_value(options.second, buffer);
@@ -314,7 +398,7 @@ namespace barch {
             heap::vector<uint8_t> buffer{};
             auto stream = tcp::iostream{};
             stream.socket() = std::move(endpoint);
-            int cmd = 0;
+            uint32_t cmd = 0;
             stream_write_ctr = 0;
             stream_read_ctr = 0;
             art::key_spec spec;
@@ -341,6 +425,48 @@ namespace barch {
 
                     }catch (std::exception& e) {
                         art::std_err("failed to stream shard", e.what());
+                    }
+                    break;
+                case cmd_barch_call:
+                    try {
+                        uint32_t buffers_size = 0;
+                        uint32_t replies_size = 0;
+                        swig_caller caller;
+                        readp(stream,buffers_size);
+                        if (buffers_size == 0) {
+                            art::std_err("invalid buffer size", buffers_size);
+                            return;
+                        }
+
+                        buffer.resize(buffers_size);
+                        readp(stream, buffer.data(), buffers_size);
+                        std::vector<std::string_view> params;
+                        for (size_t i = 0; i < buffers_size;) {
+                            auto vp = get_value(i, buffer);
+                            params.push_back({vp.first.chars(), vp.first.size});
+                            i += vp.second;
+                        }
+                        std::string cn = std::string{params[0]};
+                        auto ic = barch_functions.find(cn);
+                        if (ic == barch_functions.end()) {
+                            art::std_err("invalid call", cn);
+                            writep(stream, replies_size);
+                            return;
+                        }
+                        auto f = ic->second;
+                        int32_t r = caller.call(params,f);
+                        heap::vector<uint8_t> replies;
+
+                        for (auto &v: caller.results) {
+                            push_value(replies,v);
+                        }
+                        replies_size = replies.size();
+                        writep(stream, r);
+                        writep(stream, replies_size);
+                        writep(stream, replies.data(), replies_size);
+
+                    }catch (std::exception& e) {
+                        art::std_err("failed to make barch call", e.what());
                     }
                     break;
                 case cmd_art_fun:
@@ -399,18 +525,57 @@ namespace barch {
     };
     static module_stopper stopper;
     namespace repl {
+        int call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port) {
+            heap::vector<uint8_t> to_send;
+            int32_t r = 0;
+            if (params.empty()) {
+                return -1;
+            }
+            try {
 
+                art::std_log("calling rpc",params[0],"on",host,port);
+                tcp::iostream stream(host, std::to_string(port));
+                if (!stream) {
+                    art::std_err("failed to connect to remote server", host, port);
+                    return false;
+                }
+                for (auto p: params) {
+                    push_value(to_send, art::value_type{p});
+                }
+                uint32_t cmd = cmd_barch_call;
+                uint32_t buffers_size = to_send.size();
+                writep(stream, cmd);
+                writep(stream, buffers_size);
+                writep(stream, to_send.data(), to_send.size());
+                heap::vector<uint8_t> replies;
+                readp(stream, r);
+                recv_buffer(stream, replies);
+
+                for (size_t i = 0; i < replies.size(); i++) {
+                    auto v = get_variable(i, replies);
+                    result.emplace_back(v.first);
+                    i += v.second;
+                }
+
+            }catch (std::exception& e) {
+                art::std_err("failed to write to stream", e.what(),"to",host,port);
+                return -1;
+            }
+            return r;
+        }
 
         client::~client() {
             connected = false;
             if (tpoll.joinable())
                 tpoll.join();
         };
+
         void client::stop() {
             connected = false;
             if (tpoll.joinable())
                 tpoll.join();
         }
+
         void client::add_destination(std::string host, int port) {
             auto dest = repl_dest{std::move(host), port, shard};
             {
@@ -453,7 +618,7 @@ namespace barch {
                                     if (stream.fail()) {
                                         continue;
                                     }
-                                    int cmd = cmd_art_fun;
+                                    uint32_t cmd = cmd_art_fun;
                                     uint32_t buffers_size = to_send.size();
                                     uint32_t sh = this->shard;
                                     writep(stream, cmd);
@@ -547,7 +712,7 @@ namespace barch {
             return true;
         }
         void client::send_art_fun(std::iostream& stream, const heap::vector<uint8_t>& to_send) {
-            int cmd = cmd_art_fun;
+            uint32_t cmd = cmd_art_fun;
             uint32_t buffers_size = to_send.size();
             uint32_t sh = this->shard;
             writep(stream, cmd);
@@ -577,7 +742,7 @@ namespace barch {
                     art::std_err("failed to connect to remote server", host, this->port);
                     return false;
                 }
-                int cmd = cmd_stream;
+                uint32_t cmd = cmd_stream;
                 uint32_t s = shard;
                 net_stat stats;
                 writep(stream,cmd);
@@ -651,7 +816,7 @@ namespace barch {
                     return false;
                 }
                 net_stat stats;
-                int cmd = cmd_ping;
+                uint32_t cmd = cmd_ping;
                 writep(stream,cmd);
                 int ping_result = 0;
                 readp(stream, ping_result);

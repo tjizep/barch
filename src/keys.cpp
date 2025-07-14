@@ -110,7 +110,7 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
  * @param key
  * @return
  */
-conversion::Variable encoded_key_as_variant(art::value_type key) {
+Variable encoded_key_as_variant(art::value_type key) {
     double dk;
     float fk;
     int64_t ik;
@@ -152,7 +152,7 @@ conversion::Variable encoded_key_as_variant(art::value_type key) {
     return "";
 }
 std::string encoded_key_as_string(art::value_type key) {
-    conversion::Variable v = encoded_key_as_variant(key);
+    Variable v = encoded_key_as_variant(key);
     switch (v.index()) {
         case 0:
             return std::to_string(std::get<bool>(v));

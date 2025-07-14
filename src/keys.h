@@ -22,8 +22,8 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen);
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key);
 
-conversion::Variable param_as_variant(art::value_type param);
-conversion::Variable encoded_key_as_variant(art::value_type key);
+Variable param_as_variant(art::value_type param);
+Variable encoded_key_as_variant(art::value_type key);
 
 std::string encoded_key_as_string(art::value_type key);
 

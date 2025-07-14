@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "key_options.h"
+#include "variable.h"
 
 enum {
     rpc_client_context_size = 128,
@@ -28,6 +29,8 @@ namespace barch {
     };
 
     namespace repl {
+        extern int call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port);
+
         struct repl_dest {
             std::string host {};
             int port {};
@@ -58,6 +61,7 @@ namespace barch {
             // dese functions should already be latched by the shard calling them
             void add_destination(std::string host, int port);
             bool add_source(std::string host, int port);
+            bool call(const std::string& name, const std::vector<std::string_view>& params, const std::string& host, int port);
             bool insert(const art::key_options& options, art::value_type key, art::value_type value);
             bool remove(art::value_type key);
             /**

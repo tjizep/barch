@@ -3,11 +3,9 @@
 #include "nodes.h"
 #include <fast_float/fast_float.h>
 #include "sastam.h"
-#include <variant>
+#include "variable.h"
 
 namespace conversion {
-
-    typedef std::variant<bool, int64_t, double, std::string, nullptr_t> Variable;
 
     std::string to_string(const Variable& v);
     double to_double(const Variable& v);
@@ -423,3 +421,4 @@ namespace conversion {
         return dbl;
     }
 }
+

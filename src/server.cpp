@@ -75,10 +75,7 @@ namespace barch {
         }
     };
 
-    double htonl(double x) {
-        return __builtin_bswap32(x);
-    }
-    double ntohl(double x) {
+    inline double ntohl(double x) {
         return __builtin_bswap32(x);
     }
     template<typename T>

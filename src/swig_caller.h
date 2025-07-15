@@ -12,8 +12,7 @@
 
 struct swig_caller : caller {
 
-    std::string host {};
-    int port {};
+    std::shared_ptr<barch::repl::rpc> host {};
     std::string r{};
     std::vector<Variable> results{};
     std::vector<std::string> errors{};
@@ -89,8 +88,8 @@ struct swig_caller : caller {
         arg_t args;
         errors.clear();
         results.clear();
-        if (!host.empty()) {
-            return barch::repl::call(results, params, host, port);
+        if (host != nullptr) {
+            return host->call(results, params);
         }
         for (const auto& s : params) {
             args.push_back({&*s.begin(),s.length()});

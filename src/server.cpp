@@ -400,100 +400,108 @@ namespace barch {
             stream_write_ctr = 0;
             stream_read_ctr = 0;
             art::key_spec spec;
-            readp(stream,cmd);
-            switch (cmd) {
-                case cmd_ping:
-                    try {
-                        writep(stream,rpc_server_version);
-                    }catch (std::exception& e) {
-                        art::std_err("error",e.what());
-                    }
-
-                    break;
-                case cmd_stream:
-                    try {
-                        uint32_t shard = 0;
-                        readp(stream,shard);
-                        if (shard < art::get_shard_count().size()) {
-                            get_art(shard)->send(stream);
-                            stream.flush();
-                        }else {
-                            art::std_err("invalid shard", shard);
+                if (stream.fail())
+                    return;
+                readp(stream,cmd);
+                switch (cmd) {
+                    case cmd_ping:
+                        try {
+                            writep(stream,rpc_server_version);
+                        }catch (std::exception& e) {
+                            art::std_err("error",e.what());
                         }
 
-                    }catch (std::exception& e) {
-                        art::std_err("failed to stream shard", e.what());
-                    }
-                    break;
-                case cmd_barch_call:
-                    try {
-                        uint32_t buffers_size = 0;
-                        uint32_t replies_size = 0;
-                        swig_caller caller;
-                        readp(stream,buffers_size);
-                        if (buffers_size == 0) {
-                            art::std_err("invalid buffer size", buffers_size);
+                        break;
+                    case cmd_stream:
+                        try {
+                            uint32_t shard = 0;
+                            readp(stream,shard);
+                            if (shard < art::get_shard_count().size()) {
+                                get_art(shard)->send(stream);
+                                stream.flush();
+                            }else {
+                                art::std_err("invalid shard", shard);
+                            }
+
+                        }catch (std::exception& e) {
+                            art::std_err("failed to stream shard", e.what());
                             return;
                         }
+                        break;
+                    case cmd_barch_call:
+                        try {
+                            uint32_t buffers_size = 0;
+                            uint32_t replies_size = 0;
+                            swig_caller caller;
+                            readp(stream,buffers_size);
+                            if (buffers_size == 0) {
+                                art::std_err("invalid buffer size", buffers_size);
+                                return;
+                            }
 
-                        buffer.resize(buffers_size);
-                        readp(stream, buffer.data(), buffers_size);
-                        std::vector<std::string_view> params;
-                        for (size_t i = 0; i < buffers_size;) {
-                            auto vp = get_value(i, buffer);
-                            params.push_back({vp.first.chars(), vp.first.size});
-                            i = vp.second;
-                        }
-                        std::string cn = std::string{params[0]};
-                        auto ic = barch_functions.find(cn);
-                        if (ic == barch_functions.end()) {
-                            art::std_err("invalid call", cn);
+                            buffer.resize(buffers_size);
+                            readp(stream, buffer.data(), buffers_size);
+                            std::vector<std::string_view> params;
+                            for (size_t i = 0; i < buffers_size;) {
+                                auto vp = get_value(i, buffer);
+                                params.push_back({vp.first.chars(), vp.first.size});
+                                i = vp.second;
+                            }
+                            std::string cn = std::string{params[0]};
+                            auto ic = barch_functions.find(cn);
+                            if (ic == barch_functions.end()) {
+                                art::std_err("invalid call", cn);
+                                writep(stream, replies_size);
+                                stream.flush();
+                                return;
+                            }
+                            auto f = ic->second;
+                            int32_t r = caller.call(params,f);
+                            heap::vector<uint8_t> replies;
+
+                            for (auto &v: caller.results) {
+                                push_value(replies,v);
+                            }
+                            replies_size = replies.size();
+                            writep(stream, r);
                             writep(stream, replies_size);
+                            writep(stream, replies.data(), replies_size);
+                            stream.flush();
+
+                        }catch (std::exception& e) {
+                            art::std_err("failed to make barch call", e.what());
                             return;
                         }
-                        auto f = ic->second;
-                        int32_t r = caller.call(params,f);
-                        heap::vector<uint8_t> replies;
+                        break;
+                    case cmd_art_fun:
+                        try {
+                            uint32_t buffers_size = 0;
+                            uint32_t shard = 0;
+                            uint32_t count = 0;
+                            readp(stream,shard);
+                            readp(stream,count);
+                            readp(stream,buffers_size);
+                            if (buffers_size == 0) {
+                                art::std_err("invalid buffer size", buffers_size);
+                                return;
+                            }
 
-                        for (auto &v: caller.results) {
-                            push_value(replies,v);
-                        }
-                        replies_size = replies.size();
-                        writep(stream, r);
-                        writep(stream, replies_size);
-                        writep(stream, replies.data(), replies_size);
-                        stream.flush();
-
-                    }catch (std::exception& e) {
-                        art::std_err("failed to make barch call", e.what());
-                    }
-                    break;
-                case cmd_art_fun:
-                    try {
-                        uint32_t buffers_size = 0;
-                        uint32_t shard = 0;
-                        uint32_t count = 0;
-                        readp(stream,shard);
-                        readp(stream,count);
-                        readp(stream,buffers_size);
-                        if (buffers_size == 0) {
-                            art::std_err("invalid buffer size", buffers_size);
+                            buffer.resize(buffers_size);
+                            readp(stream, buffer.data(), buffers_size);
+                            auto t = get_art(shard);
+                            storage_release release(t->latch);
+                            process_art_fun_cmd(t, stream, buffer);
+                            //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
+                        }catch (std::exception& e) {
+                            art::std_err("failed to apply changes", e.what());
                             return;
                         }
+                        break;
+                    default:
+                        art::std_err("unknown command", cmd);
+                        return;
+                }
 
-                        buffer.resize(buffers_size);
-                        readp(stream, buffer.data(), buffers_size);
-                        auto t = get_art(shard);
-                        storage_release release(t->latch);
-                        process_art_fun_cmd(t, stream, buffer);
-                        //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
-                    }catch (std::exception& e) {
-                        art::std_err("failed to apply changes", e.what());
-                    }
-                    break;
-                default:
-                    art::std_err("unknown command", cmd);
-            }
         }
         server_context(std::string interface, uint_least16_t port)
         :   acc(io, tcp::endpoint(tcp::v4(), port))
@@ -524,6 +532,66 @@ namespace barch {
     };
     static module_stopper stopper;
     namespace repl {
+        class rpc_impl : public rpc{
+        private:
+            heap::vector<uint8_t> to_send{};
+            std::string host;
+            int port;
+        public:
+            rpc_impl(const std::string& host, int port) : host(host), port(port) {
+                //if (stream.fail())
+                //    art::std_err("failed to connect to remote server",host,port);
+            }
+            virtual ~rpc_impl() {
+                try {
+                    //stream.close();
+                }catch (std::exception& e) {
+                    art::std_err(e.what());
+                }
+            }
+            int call(std::vector<Variable>& result, const std::vector<std::string_view>& params) {
+                to_send.clear();
+                int32_t r = 0;
+                if (params.empty()) {
+                    return -1;
+                }
+                try {
+
+                    //art::std_log("calling rpc",params[0],"on",host,port);
+                    net_stat stat;
+                    tcp::iostream stream(host, std::to_string(port));
+                    if (!stream) {
+                        art::std_err("failed to connect to remote server");
+                        return -1;
+                    }
+                    for (auto p: params) {
+                        push_value(to_send, art::value_type{p});
+                    }
+                    uint32_t cmd = cmd_barch_call;
+                    uint32_t buffers_size = to_send.size();
+                    writep(stream, cmd);
+                    writep(stream, buffers_size);
+                    writep(stream, to_send.data(), to_send.size());
+                    heap::vector<uint8_t> replies;
+                    readp(stream, r);
+                    recv_buffer(stream, replies);
+
+                    for (size_t i = 0; i < replies.size(); i++) {
+                        auto v = get_variable(i, replies);
+                        result.emplace_back(v.first);
+                        i = v.second;
+                    }
+
+                }catch (std::exception& e) {
+                    art::std_err("failed to write to stream", e.what(),"to",host,port);
+                    return -1;
+                }
+                return r;
+            }
+        };
+        std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
+            return std::make_shared<rpc_impl>(host, port);
+        }
         int call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port) {
             heap::vector<uint8_t> to_send;
             int32_t r = 0;

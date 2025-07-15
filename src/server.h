@@ -29,6 +29,13 @@ namespace barch {
     };
 
     namespace repl {
+        class rpc {
+        public:
+            virtual ~rpc() = default;
+            virtual int call(std::vector<Variable>& result, const std::vector<std::string_view>& params) = 0;
+        };
+        std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port);
+
         extern int call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port);
 
         struct repl_dest {

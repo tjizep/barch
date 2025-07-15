@@ -107,8 +107,7 @@ List::List() {
 }
 
 List::List(const std::string &host, int port) {
-    sc.host = host;
-    sc.port = port;
+    sc.host = barch::repl::create(host,port);
 }
 
 long long List::push(const std::string &key, const std::vector<std::string> &items) {
@@ -164,8 +163,7 @@ KeyValue::KeyValue() {
 
 }
 KeyValue::KeyValue(const std::string& host, int port) {
-    sc.host = host;
-    sc.port = port;
+    sc.host = barch::repl::create(host,port);
 }
 void KeyValue::set(const std::string &key, const std::string &value) {
     params = {"SET", key, value};
@@ -387,8 +385,7 @@ configuration_values config() {
 HashSet::HashSet(){}
 
 HashSet::HashSet(const std::string &host, int port) {
-    sc.host = host;
-    sc.port = port;
+    sc.host = barch::repl::create(host,port);
 }
 void HashSet::set(const std::string &k, const std::vector<std::string>& members) {
     params = {"HSET", k};
@@ -510,8 +507,7 @@ OrderedSet::OrderedSet() {
 }
 
 OrderedSet::OrderedSet(const std::string &host, int port) {
-    sc.host = host;
-    sc.port = port;
+    sc.host = barch::repl::create(host,port);
 }
 
 Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members) {

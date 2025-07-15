@@ -9,8 +9,11 @@
 #include <vector>
 void setConfiguration(const std::string& name, const std::string& value);
 void load(const std::string& host, const std::string& port);
+void load(const std::string& host, int port);
 void ping(const std::string &host, const std::string& port);
+void ping(const std::string &host, int port);
 void start(const std::string &host, const std::string& port);
+void start(const std::string &host, int port);
 void start(const std::string& port);
 void stop();
 unsigned long long size();
@@ -18,7 +21,9 @@ void save();
 void load();
 void clear();
 void publish(const std::string &ip, const std::string &port);
+void publish(const std::string &ip, int port);
 void pull(const std::string &ip, const std::string &port);
+void pull(const std::string &ip, int port);
 struct repl_statistics {
     repl_statistics(){}
     ~repl_statistics(){}
@@ -256,6 +261,7 @@ private:
 class List {
 public:
     List();
+    List(const std::string& host, int port);
     long long push(const std::string &key, const std::vector<std::string> &items);
     long long len(const std::string &key);
     std::string back(const std::string &key);
@@ -297,6 +303,7 @@ class HashSet {
 public:
 
     HashSet();
+    HashSet(const std::string& host, int port);
     void set(const std::string &k, const std::vector<std::string>& members);
     Value get(const std::string &k, const std::string &member);
     std::vector<Value> mget(const std::string &k, const std::vector<std::string> &fields);
@@ -324,6 +331,7 @@ class OrderedSet {
 public:
 
     OrderedSet();
+    OrderedSet(const std::string& host, int port);
     Value add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members);
     Value add(const std::string &k, const std::vector<std::string>& members) {
         return add(k, {},members);

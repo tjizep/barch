@@ -124,16 +124,17 @@ namespace barch {
     }
     std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
-        if (buffer.size()+sizeof(size)+at < size) {
+        if (buffer.size()+sizeof(size)+at + 1< size) {
             throw_exception<std::runtime_error>("invalid size");
         }
         art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
-        return {r, at+sizeof(size)+size};
+        return {r, at+sizeof(size)+size + 1};
     }
 
     void push_value(heap::vector<uint8_t>& buffer, art::value_type v) {
         push_size_t<uint32_t>(buffer, v.size);
         buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
+        buffer.push_back(0x00);
     }
     void push_value(heap::vector<uint8_t>& buffer, const std::string& v) {
         push_value(buffer, art::value_type{v});
@@ -178,17 +179,17 @@ namespace barch {
         ++at;
         switch (i) {
             case 0:
-                if (at >= bsize) {
+                if (at + 1 > bsize) {
                     throw_exception<std::runtime_error>("invalid at");
                 }
                 return { buffer[at] == 1,at+1} ;
             case 1:
-                if (at + sizeof(int64_t) >= bsize) {
+                if (at + sizeof(int64_t) > bsize) {
                     throw_exception<std::runtime_error>("invalid at");
                 }
                 return  {get_size_t<int64_t>(at, buffer),at+sizeof(int64_t)};
             case 2:
-                if (at + sizeof(double) >= bsize) {
+                if (at + sizeof(double) > bsize) {
                     throw_exception<std::runtime_error>("invalid at");
                 }
                 return { get_size_t<double>(at, buffer), at+sizeof(double)};
@@ -444,7 +445,7 @@ namespace barch {
                         for (size_t i = 0; i < buffers_size;) {
                             auto vp = get_value(i, buffer);
                             params.push_back({vp.first.chars(), vp.first.size});
-                            i += vp.second;
+                            i = vp.second;
                         }
                         std::string cn = std::string{params[0]};
                         auto ic = barch_functions.find(cn);
@@ -464,6 +465,7 @@ namespace barch {
                         writep(stream, r);
                         writep(stream, replies_size);
                         writep(stream, replies.data(), replies_size);
+                        stream.flush();
 
                     }catch (std::exception& e) {
                         art::std_err("failed to make barch call", e.what());
@@ -533,11 +535,12 @@ namespace barch {
             }
             try {
 
-                art::std_log("calling rpc",params[0],"on",host,port);
+                //art::std_log("calling rpc",params[0],"on",host,port);
+                net_stat stat;
                 tcp::iostream stream(host, std::to_string(port));
                 if (!stream) {
                     art::std_err("failed to connect to remote server", host, port);
-                    return false;
+                    return -1;
                 }
                 for (auto p: params) {
                     push_value(to_send, art::value_type{p});
@@ -554,7 +557,7 @@ namespace barch {
                 for (size_t i = 0; i < replies.size(); i++) {
                     auto v = get_variable(i, replies);
                     result.emplace_back(v.first);
-                    i += v.second;
+                    i = v.second;
                 }
 
             }catch (std::exception& e) {

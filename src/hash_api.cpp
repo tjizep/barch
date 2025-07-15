@@ -259,7 +259,7 @@ int cmd_HINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HINCRBY);
 }
-
+extern "C"
 int HINCRBYFLOAT(caller& call, const arg_t &argv) {
     if (argv.size() != 4)
         return call.wrong_arity();

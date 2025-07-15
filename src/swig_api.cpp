@@ -22,7 +22,9 @@ void load(const std::string &host, const std::string& port) {
         art::std_log("loaded all shards from", host, port);
     }
 }
-
+void load(const std::string &host, int port) {
+    load(host, std::to_string(port));
+}
 void start(const std::string &host, const std::string& port) {
     std::vector<std::string_view> params = {"START", host, port};
     swig_caller sc;
@@ -30,6 +32,9 @@ void start(const std::string &host, const std::string& port) {
     if (r == 0) {
         art::std_log("started server on", host, port);
     }
+}
+void start(const std::string &host, int port) {
+    start(host, std::to_string(port));
 }
 void start(const std::string& port) {
     start("127.0.0.1", port);
@@ -50,7 +55,9 @@ void ping(const std::string &host, const std::string& port) {
         art::std_log("ping failed", host, port);
     }
 }
-
+void ping(const std::string &host, int port) {
+    ping(host, std::to_string(port));
+}
 void publish(const std::string &ip, const std::string &port) {
     std::vector<std::string_view> params = {"PUBLISH", ip, port};
     swig_caller sc;
@@ -58,6 +65,9 @@ void publish(const std::string &ip, const std::string &port) {
     if (r != 0) {
         art::std_err("publish failed", ip, port);
     }
+}
+void publish(const std::string &host, int port) {
+    publish(host, std::to_string(port));
 }
 
 void pull(const std::string &ip, const std::string &port) {
@@ -67,6 +77,9 @@ void pull(const std::string &ip, const std::string &port) {
     if (r != 0) {
         art::std_err("publish failed", ip, port);
     }
+}
+void pull(const std::string &host, int port) {
+    pull(host, std::to_string(port));
 }
 
 unsigned long long size()  {
@@ -92,6 +105,12 @@ void clear() {
 List::List() {
 
 }
+
+List::List(const std::string &host, int port) {
+    sc.host = host;
+    sc.port = port;
+}
+
 long long List::push(const std::string &key, const std::vector<std::string> &items) {
     params = {"LPUSH", key};
     params.insert(params.end(), items.begin(), items.end());
@@ -367,6 +386,10 @@ configuration_values config() {
 }
 HashSet::HashSet(){}
 
+HashSet::HashSet(const std::string &host, int port) {
+    sc.host = host;
+    sc.port = port;
+}
 void HashSet::set(const std::string &k, const std::vector<std::string>& members) {
     params = {"HSET", k};
     params.insert(params.end(), members.begin(), members.end());
@@ -485,6 +508,12 @@ Value HashSet::incrby(const std::string &k, const std::string& field, long long 
 OrderedSet::OrderedSet() {
 
 }
+
+OrderedSet::OrderedSet(const std::string &host, int port) {
+    sc.host = host;
+    sc.port = port;
+}
+
 Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members) {
     result.clear();
     params = {"ZADD", k};

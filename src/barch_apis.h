@@ -76,5 +76,5 @@ extern "C"{
 
 }
 
-std::unordered_map<std::string, barch_function> functions_by_name();
+extern std::unordered_map<std::string, barch_function> functions_by_name();
 #endif //BARCH_APIS_H

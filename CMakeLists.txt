@@ -257,6 +257,11 @@ else()
         add_test(NAME TestBarchList
                 COMMAND "python" ${CMAKE_SOURCE_DIR}/test/listtest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
+
+        add_test(NAME TestBarchRPC
+                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/remotetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/build)
+
     endif ()
 endif ()
 

@@ -3,8 +3,9 @@
 //
 // Created by teejip on 7/13/25.
 //
-std::unordered_map<std::string, std::function<int >> functions_by_name() {
-    heap::map<std::string, barch_function> r;
+
+std::unordered_map<std::string, barch_function> functions_by_name() {
+    std::unordered_map<std::string, barch_function> r;
     r["SET"] = ::SET;
     r["KEYS"] = ::KEYS;
     r["INCR"] = ::INCR;

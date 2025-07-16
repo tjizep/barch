@@ -129,14 +129,14 @@ namespace redis {
         state_error,
         state_max
     };
-    std::vector<std::string> redis_parser::read_new_request(){
+    const std::vector<std::string>& redis_parser::read_new_request(){
         while (state != state_end) {
             // Assumes each RESP request is an array of bulk strings
             switch (state) {
                 case state_start: {
                     std::string arr_size_item = read_next_item();
                     if (arr_size_item.empty()) {
-                        return {};
+                        return empty;
                     }
                     if (!validate_array_size(arr_size_item)){
                         throw_exception<std::domain_error>("invalid array size");
@@ -161,7 +161,7 @@ namespace redis {
                     // Read size of the bulk string
                     std::string bstr_size_item = read_next_item();
                     if (bstr_size_item.empty()) {
-                        return {};
+                        return empty;
                     }
                     if (!validate_bstr_size(bstr_size_item)){
                         throw_exception<std::domain_error>("invalid bulk string size");
@@ -184,7 +184,7 @@ namespace redis {
                     // Read the bulk string
                     std::string bstr_item = read_next_item();
                     if (bstr_item.empty()) {
-                        return {};
+                        return empty;
                     }
                     if (!validate_crlf(bstr_item)) {
                         throw_exception<std::domain_error>("Bulk string not terminated by CRLF");
@@ -203,6 +203,6 @@ namespace redis {
                     throw_exception<std::domain_error>("Bulk string not terminated by CRLF");
             }
         }
-        return {};
+        return empty;
     }
 }

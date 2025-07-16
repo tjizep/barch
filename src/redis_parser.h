@@ -26,11 +26,12 @@ namespace redis {
         bool validate_array_size(const std::string& size_item);
         bool validate_bstr_size(const std::string& size_item);
         bool validate_crlf(const std::string& bstr);
+        std::vector<std::string> empty{};
     public:
         redis_parser() = default;
         void init(char cs){ buffer += cs;};
         void add_data(const char * data, size_t len);
-        std::vector<std::string> read_new_request();
+        const std::vector<std::string>& read_new_request();
         int state = 0;
         int size = 0;
         std::vector<std::string> req{};

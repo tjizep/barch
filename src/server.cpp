@@ -417,7 +417,7 @@ namespace barch {
                     if (!ec){
 
                         parser.add_data(data_, length);
-                        auto params = parser.read_new_request();
+                        auto &params = parser.read_new_request();
                         if (!params.empty()) {
                             do_write(params);
                         }
@@ -426,7 +426,7 @@ namespace barch {
                 });
             }
 
-            void do_write(std::vector<std::string>& params) {
+            void do_write(const std::vector<std::string>& params) {
                 auto self(shared_from_this());
 
                 stream.clear();

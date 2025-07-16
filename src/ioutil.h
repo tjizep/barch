@@ -56,6 +56,17 @@ static void writep(OStream &of, const T &data) {
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
     }
+    stream_write_ctr += sizeof(data);
+}
+template<typename OStream>
+static void writep(OStream &of, const char* data) {
+    write_expires(of);
+    size_t size = strlen(data);
+    of.write(data, size);
+    if (of.fail()) {
+        throw_exception<std::runtime_error>("write failed");
+    }
+    stream_write_ctr += size;
 }
 
 template<typename IStream, typename T>

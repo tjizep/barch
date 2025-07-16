@@ -81,6 +81,7 @@ struct swig_caller : caller {
         results.emplace_back(encoded_key_as_variant(key));
         return 0;
     }
+
     template<typename TC>
     int call(const std::vector<std::string_view>& params, TC&& f) {
 
@@ -106,6 +107,15 @@ struct swig_caller : caller {
             }
         }
         return r;
+    }
+    template<typename TC>
+int call(const std::vector<std::string>& params, TC&& f) {
+        std::vector<std::string_view> sv;
+
+        for (auto &p: params) {
+            sv.emplace_back(p.data(),p.size());
+        }
+        return call(sv, std::forward<TC>(f));
     }
 };
 

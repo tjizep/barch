@@ -31,6 +31,7 @@ namespace redis {
         redis_parser() = default;
         void init(char cs){ buffer += cs;};
         void add_data(const char * data, size_t len);
+        size_t remaining() const ;
         const std::vector<std::string>& read_new_request();
         int state = 0;
         int size = 0;
@@ -47,13 +48,17 @@ namespace redis {
     inline void rwrite(TS& io, const std::string& v) {
         if (is_bulk(v)) {
             writep(io,'$');
-            writep(io, std::to_string(v.size()));
+            std::string size = std::to_string(v.size()-1);
+            writep(io, size.data(), size.size());
+            writep(io, CRLF);
+            writep(io, v.data()+1, v.size()-1);
+            writep(io, CRLF);
         }else {
             writep(io,'+');
+            writep(io, v.data(), v.size());
+            writep(io, CRLF);
         }
 
-        writep(io, v.data(), v.size());
-        writep(io, CRLF);
     }
     template<typename TS>
     inline void rwrite(TS& io, const error& v) {
@@ -63,8 +68,9 @@ namespace redis {
     }
     template<typename TS>
     inline void rwrite(TS& io, bool v) {
-        std::string val = v ? "true":"false";
-        rwrite(io, val);
+        writep(io,':');
+        writep(io, v ? '1':'0');
+        writep(io, CRLF);
     }
 
     template<typename TS>
@@ -77,7 +83,7 @@ namespace redis {
     template<typename TS>
     inline void rwrite(TS& io, double d) {
         std::string v = std::to_string(d);
-        rwrite(io, v);
+        rwrite(io, v.c_str());
     }
 
     template<typename TS>

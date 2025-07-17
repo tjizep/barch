@@ -38,7 +38,9 @@ namespace redis {
     void redis_parser::add_data(const char * data, size_t len) {
         buffer.append(data, len);
     }
-
+    size_t redis_parser::remaining() const {
+        return buffer.size();
+    }
     std::string redis_parser::read_next_item() {
         std::string item;
         if(!buffer_has_valid_item(item)) {

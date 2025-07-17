@@ -7,19 +7,35 @@
 conversion::comparable_key conversion::convert(art::value_type vt, bool noint) {
     return convert(vt.chars(),vt.size,noint);
 }
+inline bool is_bulk(const std::string& item) {
+    if (item.empty()) { return false;}
+    return item[0] == '$';
+}
+inline const char* bulk_str(const std::string& item) {
+    if (is_bulk(item)) return item.data()+1;
+    return item.c_str();
+}
 namespace conversion {
     std::string to_string(const Variable &v) {
         switch (v.index()) {
-            case 0:
+            case var_bool:
                 return std::get<bool>(v) ? "true" : "false";
-            case 1:
+            case var_int64:
                 return std::to_string(std::get<int64_t>(v));
-            case 2:
+            case var_double:
                 return std::to_string(std::get<double>(v));
-            case 3:
-                return std::get<std::string>(v);
-            case 4:
+            case var_string: {
+                auto &s = std::get<std::string>(v);
+                if (is_bulk(s)) {
+                    return {s.data()+1,s.size()-1};
+                }
+                return s;
+            }
+
+            case var_null:
                 return {};
+            case var_error:
+                return std::get<error>(v).name;
             default:
                 abort_with("invalid type");
         }
@@ -27,16 +43,21 @@ namespace conversion {
 
     double to_double(const Variable& v) {
         switch (v.index()) {
-            case 0:
+            case var_bool:
                 return std::get<bool>(v) ? 1 : 0;
-            case 1:
+            case var_int64:
                 return std::get<int64_t>(v);
-            case 2:
+            case var_double:
                 return std::get<double>(v);
-            case 3:
-                return std::atof(std::get<std::string>(v).c_str());
-            case 4:
+            case var_string: {
+                auto &s = std::get<std::string>(v);
+
+                return std::atof(bulk_str(s));
+            }
+            case var_null:
                 return 0.0f;
+            case var_error:
+                return std::numeric_limits<double>::quiet_NaN();
             default:
                 abort_with("invalid type");
         }
@@ -44,15 +65,20 @@ namespace conversion {
 
     bool to_bool(const Variable& v) {
         switch (v.index()) {
-            case 0:
+            case var_bool:
                 return std::get<bool>(v);
-            case 1:
+            case var_int64:
                 return std::get<int64_t>(v) == 0 ;
-            case 2:
+            case var_double:
                 return std::get<double>(v) == 0.0f;
-            case 3:
-                return std::get<std::string>(v) == "true";
-            case 4:
+            case var_string: {
+                auto &s = std::get<std::string>(v);
+
+                return std::atoi(bulk_str(s)) > 0;
+            }
+            case var_null:
+                return false;
+            case var_error:
                 return false;
             default:
                 abort_with("invalid type");
@@ -61,15 +87,18 @@ namespace conversion {
 
     int64_t to_int64(const Variable& v) {
         switch (v.index()) {
-            case 0:
+            case var_bool:
                 return std::get<bool>(v) ? 1 : 0;
-            case 1:
+            case var_int64:
                 return std::get<int64_t>(v);
-            case 2:
+            case var_double:
                 return std::get<double>(v);
-            case 3:
-                return std::atoll(std::get<std::string>(v).c_str());
-            case 4:
+            case var_string: {
+                auto &s = std::get<std::string>(v);
+                return std::atoll(bulk_str(s));
+            }
+            case var_null:
+            case var_error:
                 return 0;
             default:
                 abort_with("invalid type");

@@ -39,6 +39,7 @@ struct repl_statistics {
     long long remove_requests{};
     long long find_requests{};
     long long request_errors{};
+    long long redis_sessions{};
 };
 struct ops_statistics {
     ops_statistics(){}

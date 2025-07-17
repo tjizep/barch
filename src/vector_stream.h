@@ -10,7 +10,9 @@
 struct vector_stream  {
     size_t pos{};
     heap::std_vector<uint8_t> buf{};
-
+    bool empty() const {
+        return buf.empty();
+    }
     void write(const char *data, size_t size) {
         if (nullptr == data) {
             throw_exception<std::invalid_argument>("parameter null");

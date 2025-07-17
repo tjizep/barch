@@ -60,6 +60,7 @@ struct swig_caller : caller {
     }
     int vt(art::value_type v) override {
         r.clear();
+        r.push_back('$');
         r.insert(r.end(), v.begin(), v.end());
         results.emplace_back(r); // values are currently always a string
         return 0;
@@ -93,7 +94,7 @@ struct swig_caller : caller {
             return host->call(results, params);
         }
         for (const auto& s : params) {
-            args.push_back({&*s.begin(),s.length()});
+            args.push_back({s.data(),s.size()});
         }
         int r = f(*this, args);
         if (r != 0) {

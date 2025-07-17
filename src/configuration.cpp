@@ -576,7 +576,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetCompressionType, SetCompressionType, ApplyCompressionType, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "eviction_policy", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEvictionType, SetEvictionType, ApplyEvictionType, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", "1g", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", "32g", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxMemoryRatio, SetMaxMemoryBytes, ApplyMaxMemoryRatio, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);

@@ -354,8 +354,11 @@ namespace barch {
         return r;
     }
     struct server_context {
-        std::thread server_thread{};
-        asio::io_service io{16};
+        enum {
+            io_thread_count = 8
+        };
+        std::thread server_thread[io_thread_count]{};
+        asio::io_service io{io_thread_count};
         tcp::acceptor acc;
         std::string interface;
         uint_least16_t port;
@@ -363,12 +366,14 @@ namespace barch {
         void stop() {
             try {
                 acc.close();
-            }catch (...){}
-
+            }catch (std::exception& e) {}
             io.stop();
-            if (server_thread.joinable())
-                server_thread.join();
-            server_thread = {};
+            for (int it = 0; it < io_thread_count; ++it) {
+
+                if (server_thread[it].joinable())
+                    server_thread[it].join();
+                server_thread[it] = {};
+            }
             port = 0;
         }
         void start_accept() {
@@ -399,6 +404,10 @@ namespace barch {
               : socket_(std::move(socket))
             {
                 parser.init(init_char);
+                ++statistics::repl::redis_sessions;
+            }
+            ~redis_session() {
+                --statistics::repl::redis_sessions;
             }
 
             void start()
@@ -407,31 +416,8 @@ namespace barch {
             }
 
         private:
-            void do_read()
-            {
-                auto self(shared_from_this());
-                socket_.async_read_some(asio::buffer(data_, max_length),
-                    [this, self](std::error_code ec, std::size_t length)
-                {
-
-                    if (!ec){
-
-                        parser.add_data(data_, length);
-                        auto &params = parser.read_new_request();
-                        if (!params.empty()) {
-                            do_write(params);
-                        }
-
-                    }
-                });
-            }
-
-            void do_write(const std::vector<std::string>& params) {
-                auto self(shared_from_this());
-
-                stream.clear();
-                art::std_log(params[0] );
-
+            void run_params(vector_stream& stream, const std::vector<std::string>& params) {
+                //art::std_log("run:",params[0],params[1]);
                 if (params[0] == "COMMAND") {
                     if (params[1] == "DOCS") {
                         std::vector<Variable> results;
@@ -450,7 +436,7 @@ namespace barch {
                     auto ic = barch_functions.find(cn);
                     if (ic == barch_functions.end()) {
                         redis::rwrite(stream, error{"unknown command"});
-                    }else {
+                    } else {
                         auto f = ic->second;
                         int32_t r = caller.call(params,f);
                         if (r < 0) {
@@ -460,6 +446,39 @@ namespace barch {
                         }
                     }
                 }
+            }
+            void do_read()
+            {
+                auto self(shared_from_this());
+                socket_.async_read_some(asio::buffer(data_, max_length),
+                    [this, self](std::error_code ec, std::size_t length)
+                {
+
+                    if (!ec){
+                        parser.add_data(data_, length);
+                        try {
+                            vector_stream stream;
+                            while (parser.remaining() > 0) {
+                                auto &params = parser.read_new_request();
+                                if (!params.empty()) {
+                                    run_params(stream, params);
+                                }else {
+                                    break;
+                                }
+                            }
+                            if (!stream.empty()) {
+                                do_write(stream);
+                            }
+                        }catch (std::exception& e) {
+                            art::std_err("error", e.what());
+                        }
+                    }
+                });
+            }
+
+            void do_write(const vector_stream& stream) {
+                auto self(shared_from_this());
+
                 asio::async_write(socket_, asio::buffer(stream.buf),
                     [this, self](std::error_code ec, std::size_t /*length*/){
                         if (!ec){
@@ -473,27 +492,25 @@ namespace barch {
             char data_[max_length];
             redis::redis_parser parser{};
             swig_caller caller{};
-            vector_stream stream{};
+            //vector_stream stream{};
         };
 
         void process_data(tcp::socket& endpoint) {
-            tcp::iostream stream ;
-            heap::vector<uint8_t> buffer{};
-            uint32_t cmd = 0;
-            stream_write_ctr = 0;
-            stream_read_ctr = 0;
-            art::key_spec spec;
             try {
                 char cs[1] ;
                 //readp(stream, cs);
                 endpoint.read_some(asio::buffer(cs));
                 if (cs[0]) {
-                    //auto state = std::make_shared<redis_async_shared>(stream);
-                    //state->redis_start(cs);
                     std::make_shared<redis_session>(std::move(endpoint),cs[0])->start();
 
                     return;
                 }
+                heap::vector<uint8_t> buffer{};
+                uint32_t cmd = 0;
+                stream_write_ctr = 0;
+                stream_read_ctr = 0;
+                art::key_spec spec;
+
                 tcp::iostream stream(std::move(endpoint));
                 if (stream.fail())
                     return;
@@ -612,11 +629,13 @@ namespace barch {
         ,   interface(interface)
         ,   port(port){
             start_accept();
-            server_thread = std::thread([this]() {
-                art::std_log("server started on", this->interface,this->port);
-                io.run();
-                art::std_log("server stopped");
-            });
+            for (int it = 0; it < io_thread_count; ++it) {
+                server_thread[it] = std::thread([this,it]() {
+                    art::std_log("server started on", this->interface,this->port,"using thread",it);
+                    io.run();
+                    art::std_log("server stopped on thread",it);
+                });
+            }
         }
     };
     std::shared_ptr<server_context>  srv = nullptr;

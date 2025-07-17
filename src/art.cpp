@@ -1560,6 +1560,7 @@ art_repl_statistics art::get_repl_statistics(){
     rs.remove_requests = (int64_t) statistics::repl::remove_requests;
     rs.find_requests = (int64_t) statistics::repl::find_requests;
     rs.request_errors = (int64_t) statistics::repl::request_errors;
+    rs.redis_sessions = (int64_t) statistics::repl::redis_sessions;
     rs.instructions_failed = (int64_t) statistics::repl::instructions_failed;
     rs.key_add_recv = (int64_t) statistics::repl::key_add_recv;
     rs.key_add_recv_applied = (int64_t) statistics::repl::key_add_recv_applied;

@@ -355,7 +355,7 @@ namespace barch {
     }
     struct server_context {
         enum {
-            io_thread_count = 8
+            io_thread_count = 6
         };
         std::thread server_thread[io_thread_count]{};
         asio::io_service io{io_thread_count};

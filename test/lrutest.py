@@ -11,8 +11,8 @@ for i in range(MAXK):
 assert(barch.size() == MAXK)
 barch.setConfiguration("max_memory_bytes","1m")
 print("sleeping")
-for i in range(3):
-    time.sleep(1)
+for i in range(1):
+    time.sleep(0.5)
     print(barch.size())
 
 for i in range(MAXK+1,MAXK + 10):

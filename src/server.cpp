@@ -354,11 +354,9 @@ namespace barch {
         return r;
     }
     struct server_context {
-        enum {
-            io_thread_count = 6
-        };
-        std::thread server_thread[io_thread_count]{};
-        asio::io_service io{io_thread_count};
+
+        std::thread server_thread[rpc_io_thread_count]{};
+        asio::io_service io{rpc_io_thread_count};
         tcp::acceptor acc;
         std::string interface;
         uint_least16_t port;
@@ -368,7 +366,7 @@ namespace barch {
                 acc.close();
             }catch (std::exception& e) {}
             io.stop();
-            for (int it = 0; it < io_thread_count; ++it) {
+            for (int it = 0; it < rpc_io_thread_count; ++it) {
 
                 if (server_thread[it].joinable())
                     server_thread[it].join();
@@ -629,7 +627,7 @@ namespace barch {
         ,   interface(interface)
         ,   port(port){
             start_accept();
-            for (int it = 0; it < io_thread_count; ++it) {
+            for (int it = 0; it < rpc_io_thread_count; ++it) {
                 server_thread[it] = std::thread([this,it]() {
                     art::std_log("server started on", this->interface,this->port,"using thread",it);
                     io.run();

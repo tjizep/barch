@@ -870,11 +870,14 @@ namespace barch {
             heap::vector<uint8_t> to_send{};
             std::string host;
             int port;
+            asio::io_context io_context{};
+            tcp::socket s;
+
+            heap::vector<uint8_t> replies{};
+            vector_stream stream{};
+
         public:
-            rpc_impl(const std::string& host, int port) : host(host), port(port) {
-                //if (stream.fail())
-                //    art::std_err("failed to connect to remote server",host,port);
-            }
+            rpc_impl(const std::string& host, int port) : host(host), port(port), s(io_context) {}
             virtual ~rpc_impl() {
                 try {
                     //stream.close();
@@ -889,37 +892,37 @@ namespace barch {
                     return -1;
                 }
                 try {
-
-                    //art::std_log("calling rpc",params[0],"on",host,port);
+                    stream.clear();
                     net_stat stat;
-                    tcp::iostream stream(host, std::to_string(port));
-                    if (!stream) {
-                        art::std_err("failed to connect to remote server");
-                        return -1;
+                    if (!s.is_open()) {
+                        tcp::resolver resolver(io_context);
+                        asio::connect(s, resolver.resolve(host,std::to_string(port)));
+                        uint32_t cmd = cmd_barch_call;
+                        writep(stream,uint8_t{0x00});
+                        writep(stream, cmd);
                     }
+
                     for (auto p: params) {
                         push_value(to_send, art::value_type{p});
                     }
-                    uint32_t cmd = cmd_barch_call;
-                    writep(stream,uint8_t{0x00});
-                    writep(stream, cmd);
 
                     uint32_t calls = 1;
                     uint32_t buffers_size = to_send.size();
                     writep(stream, calls);
                     writep(stream, buffers_size);
                     writep(stream, to_send.data(), to_send.size());
-                    heap::vector<uint8_t> replies;
-                    readp(stream, r);
-                    recv_buffer(stream, replies);
+                    asio::write(s, asio::buffer(stream.buf.data(), stream.buf.size()));
 
-                    for (size_t i = 0; i < replies.size(); i++) {
+                    asio::read(s,asio::buffer(&r,sizeof(r)));
+                    asio::read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
+                    replies.resize(buffers_size);
+                    size_t reply_length = asio::read(s,asio::buffer(replies));
+
+                    for (size_t i = 0; i < reply_length; i++) {
                         auto v = get_variable(i, replies);
                         result.emplace_back(v.first);
                         i = v.second;
                     }
-                    stream.flush();
-                    stream.close();
                 }catch (std::exception& e) {
                     art::std_err("failed to write to stream", e.what(),"to",host,port);
                     return -1;
@@ -930,7 +933,7 @@ namespace barch {
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
             return std::make_shared<rpc_impl>(host, port);
         }
-        int call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port) {
+        int _D_call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port) {
             heap::vector<uint8_t> to_send;
             int32_t r = 0;
             if (params.empty()) {

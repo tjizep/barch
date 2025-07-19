@@ -45,6 +45,7 @@ extern "C" {
 
 int RANGE(caller& call, const arg_t& argv) {
 
+    int r = 0;
     //read_lock rl(get_lock());
     if (argv.size() != 4)
         return call.wrong_arity();
@@ -92,7 +93,7 @@ int RANGE(caller& call, const arg_t& argv) {
         }
         call.end_array(0);
     }catch (std::exception& e) {
-        art::std_err(e.what());
+        r = call.error(e.what());
     }
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
@@ -100,10 +101,10 @@ int RANGE(caller& call, const arg_t& argv) {
     }
 
     /* Cleanup. */
-    return 0;
+    return r;
 }
 int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
+
     vk_caller caller;
 
     return caller.vk_call(ctx, argv, argc, ::RANGE);

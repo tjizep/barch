@@ -395,16 +395,16 @@ namespace barch {
         }
 
 
-        class redis_session : public std::enable_shared_from_this<redis_session>
+        class resp_session : public std::enable_shared_from_this<resp_session>
         {
         public:
-            redis_session(tcp::socket socket, char init_char)
+            resp_session(tcp::socket socket, char init_char)
               : socket_(std::move(socket))
             {
                 parser.init(init_char);
                 ++statistics::repl::redis_sessions;
             }
-            ~redis_session() {
+            ~resp_session() {
                 --statistics::repl::redis_sessions;
             }
 
@@ -415,33 +415,22 @@ namespace barch {
 
         private:
             void run_params(vector_stream& stream, const std::vector<std::string>& params) {
-                //art::std_log("run:",params[0],params[1]);
-                if (params[0] == "COMMAND") {
-                    if (params[1] == "DOCS") {
-                        std::vector<Variable> results;
+                const std::string &cn = params[0];
+                auto ic = barch_functions.find(cn);
+                if (ic == barch_functions.end()) {
+                    redis::rwrite(stream, error{"unknown command"});
+                } else {
+                    auto &f = ic->second.call;
+                    ++ic->second.calls;
 
-                        for (auto& p: barch_functions) {
-                            results.emplace_back(p.first);
-                            results.emplace_back("function");
-                        }
-                        redis::rwrite(stream, results);
-                    }else {
-                        redis::rwrite(stream, error{"unknown command"});
-                    }
-
-                }else {
-                    std::string cn = std::string{params[0]};
-                    auto ic = barch_functions.find(cn);
-                    if (ic == barch_functions.end()) {
-                        redis::rwrite(stream, error{"unknown command"});
+                    int32_t r = caller.call(params,f);
+                    if (r < 0) {
+                        if (!caller.errors.empty())
+                            redis::rwrite(stream, error{caller.errors[0]});
+                        else
+                            redis::rwrite(stream, error{"null error"});
                     } else {
-                        auto f = ic->second;
-                        int32_t r = caller.call(params,f);
-                        if (r < 0) {
-                            redis::rwrite(stream, error{"command failed"});
-                        } else {
-                            redis::rwrite(stream, caller.results);
-                        }
+                        redis::rwrite(stream, caller.results);
                     }
                 }
             }
@@ -456,6 +445,7 @@ namespace barch {
                         parser.add_data(data_, length);
                         try {
                             vector_stream stream;
+
                             while (parser.remaining() > 0) {
                                 auto &params = parser.read_new_request();
                                 if (!params.empty()) {
@@ -465,8 +455,10 @@ namespace barch {
                                 }
                             }
                             if (!stream.empty()) {
+                                net_stat stat;
                                 do_write(stream);
                             }
+
                         }catch (std::exception& e) {
                             art::std_err("error", e.what());
                         }
@@ -490,7 +482,6 @@ namespace barch {
             char data_[max_length];
             redis::redis_parser parser{};
             swig_caller caller{};
-            //vector_stream stream{};
         };
 
         void process_data(tcp::socket& endpoint) {
@@ -499,14 +490,12 @@ namespace barch {
                 //readp(stream, cs);
                 endpoint.read_some(asio::buffer(cs));
                 if (cs[0]) {
-                    std::make_shared<redis_session>(std::move(endpoint),cs[0])->start();
+                    std::make_shared<resp_session>(std::move(endpoint),cs[0])->start();
 
                     return;
                 }
                 heap::vector<uint8_t> buffer{};
                 uint32_t cmd = 0;
-                stream_write_ctr = 0;
-                stream_read_ctr = 0;
                 art::key_spec spec;
 
                 tcp::iostream stream(std::move(endpoint));
@@ -570,7 +559,8 @@ namespace barch {
                                     stream.flush();
                                     return;
                                 }
-                                auto f = ic->second;
+                                auto f = ic->second.call;
+                                ++ic->second.calls;
                                 int32_t r = caller.call(params,f);
                                 replies.clear();
 
@@ -1027,5 +1017,75 @@ namespace barch {
             }
             return true;
         }
+        static std::vector<route> routes;
+        void set_route(size_t shard, const route& destination) {
+            if (routes.empty()) routes.resize(art::get_shard_count().size());
+            if (shard >= routes.size()) {
+                art::std_err("invalid shard",shard, routes.size());
+                return;
+            }
+            routes[shard] = destination;
+        }
+        void clear_route(size_t shard) {
+            if (routes.empty()) routes.resize(art::get_shard_count().size());
+            if (shard >= routes.size()) {
+                art::std_err("invalid shard",shard, routes.size());
+                return;
+            }
+            routes[shard] = {};
+        }
+        route get_route(size_t shard) {
+            if (routes.empty()) routes.resize(art::get_shard_count().size());
+            if (shard >= routes.size()) {
+                art::std_err("invalid shard",shard, routes.size());
+                return {};
+            }
+            return routes[shard];
+        }
+    }
+}
+
+extern "C"{
+    int ADDROUTE(caller& call, const arg_t& argv) {
+        if (argv.size() != 4)
+            return call.wrong_arity();
+        size_t shard = conversion::as_variable(argv[1].chars()).i();
+        if (shard >= art::get_shard_count().size())
+            return call.error("invalid shard");
+        auto host = conversion::as_variable(argv[2]).s();
+        auto port = conversion::as_variable(argv[3].chars()).i();
+        if (port <= 0 || port >= 65536)
+            return call.error("invalid port");
+        if (host.empty())
+            return call.error("no host");
+        barch::repl::set_route(shard, {host,port});
+        return call.simple(host.c_str());
+    }
+    int ROUTE(caller& call, const arg_t& argv) {
+        if (argv.size() != 2)
+            return call.wrong_arity();
+        size_t shard = atoi(argv[1].chars());
+        if (shard >= art::get_shard_count().size())
+            return call.error("invalid shard");
+        auto route = barch::repl::get_route(shard);
+        call.start_array();
+        call.simple(route.ip.c_str());
+        call.long_long(route.port);
+        call.end_array(0);
+        return 0;
+    }
+    int REMROUTE(caller& call, const arg_t& argv) {
+        if (argv.size() != 2)
+            return call.wrong_arity();
+        size_t shard = atoi(argv[1].chars());
+        if (shard >= art::get_shard_count().size())
+            return call.error("invalid shard");
+        auto route = barch::repl::get_route(shard);
+        barch::repl::clear_route(shard);
+        call.start_array();
+        call.simple(route.ip.c_str());
+        call.long_long(route.port);
+        call.end_array(0);
+        return 0;
     }
 }

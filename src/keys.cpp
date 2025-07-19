@@ -104,6 +104,25 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     }
     return 0;
 }
+int reply_variable(ValkeyModuleCtx *ctx, const Variable var) {
+    switch (var.index()) {
+        case var_bool:
+            return ValkeyModule_ReplyWithBool(ctx, std::get<bool>(var));
+        case var_int64:
+            return ValkeyModule_ReplyWithLongLong(ctx, std::get<int64_t>(var));
+        case var_double:
+            return ValkeyModule_ReplyWithDouble(ctx, std::get<double>(var));
+        case var_string:
+            return ValkeyModule_ReplyWithStringBuffer(ctx, std::get<std::string>(var).c_str(), std::get<std::string>(var).size());
+        case var_null:
+            return ValkeyModule_ReplyWithNull(ctx);
+        case var_error:
+            return ValkeyModule_ReplyWithError(ctx, std::get<error>(var).name.c_str());
+        default:
+            return ValkeyModule_ReplyWithNull(ctx);
+    }
+    return 0;
+}
 
 /**
  * function just returns the first key in a composite

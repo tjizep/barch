@@ -5,6 +5,7 @@
 #ifndef CALLER_H
 #define CALLER_H
 #include "value_type.h"
+#include "variable.h"
 struct caller {
     virtual ~caller() = default;
     [[nodiscard]] virtual int wrong_arity() = 0;
@@ -23,6 +24,7 @@ struct caller {
     virtual int start_array() = 0;
     virtual int end_array(size_t length) = 0;
     virtual int reply_encoded_key(art::value_type key) = 0;
+    virtual int reply_values(const std::initializer_list<Variable>& keys) = 0;
 };
 typedef heap::small_vector<art::value_type> arg_t;
 #endif //CALLER_H

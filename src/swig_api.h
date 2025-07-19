@@ -16,6 +16,8 @@ void start(const std::string &host, const std::string& port);
 void start(const std::string &host, int port);
 void start(const std::string& port);
 void stop();
+
+
 unsigned long long size();
 void save();
 void load();
@@ -131,24 +133,20 @@ public:
     Value(const double& var) : var(var){};
     Value(const long long& var) : var((int64_t)var){};
     bool isBoolean() const {
-        return var.index() == 0;
+        return var.isBoolean();
     }
     bool isInteger() const {
-        return var.index() == 1;
+        return var.isInteger();
     }
     bool isDouble() const {
-        return var.index() == 2;
+        return var.isDouble();
     }
     bool isString() const {
-        return var.index() == 3;
+        return var.isString();
     }
     bool isNull() const {
-        return var.index() == 4;
+        return var.isNull();
     }
-    Value& operator=(const std::string& v) {
-        var = v;
-        return *this;
-    };
     void set(const char* v)  {
         var = v;
     };
@@ -160,32 +158,23 @@ public:
     };
 
     std::string s() const {
-        return conversion::to_string(var);
+        return var.s();
     }
 
     double d() const {
-        return conversion::to_double(var);
+        return var.d();
     }
 
     long long i() const {
-        return conversion::to_int64(var);
+        return var.i();
     }
 
     long long b() const {
-        return conversion::to_bool(var);
+        return var.b();
     }
 
     std::string t() const {
-        switch (var.index()) {
-            case 0: return "boolean";
-            case 1: return "integer";
-            case 2: return "double";
-            case 3: return "string";
-            case 4: return "null";
-
-            default:
-                return "<unknown>";
-        }
+        return var.t();
     }
 
     void set(const Variable& v) {
@@ -259,6 +248,15 @@ public:
 private:
     Variable var{};
 };
+struct Route {
+    Route(const Value& h, const Value& p) : host(h), port(p) {}
+    Route() {}
+    Value host{};
+    Value port{};
+};
+void setRoute(int shard, const std::string& host, int port);
+void removeRoute(int shard);
+Route getRoute(int shard);
 class List {
 public:
     List();

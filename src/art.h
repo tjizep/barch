@@ -144,6 +144,7 @@ namespace art{
 
         tree(const node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard), root(root), size(size) {
             repl_client.shard = shard;
+            barch::repl::clear_route(shard);
             start_maintain();
 
         }

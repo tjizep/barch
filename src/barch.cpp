@@ -2,6 +2,8 @@
 // Created by me on 11/9/24.
 //
 
+#include "barch_apis.h"
+#include "redis_parser.h"
 #include "vk_caller.h"
 /* cdict --
  *
@@ -40,57 +42,72 @@ extern "C" {
 *
 * Return a list of matching keys, lexicographically between startkey
 * and endkey. No more than 'count' items are emitted. */
-int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
+
+int RANGE(caller& call, const arg_t& argv) {
 
     //read_lock rl(get_lock());
-    if (argc != 4)
-        return ValkeyModule_WrongArity(ctx);
+    if (argv.size() != 4)
+        return call.wrong_arity();
 
     /* Parse the count argument. */
-    long long count;
-    if (ValkeyModule_StringToLongLong(argv[3], &count) != VALKEYMODULE_OK) {
-        return ValkeyModule_ReplyWithError(ctx, "ERR invalid count");
+    long long count = std::atoll(argv[3].chars());
+    if (count < 0) {
+        return call.error("count must be positive");
     }
-    size_t k1len;
-    size_t k2len;
-    const char *k1 = ValkeyModule_StringPtrLen(argv[1], &k1len);
-    const char *k2 = ValkeyModule_StringPtrLen(argv[2], &k2len);
+    auto k1 = argv[1];
+    auto k2 = argv[2];
 
-    if (key_ok(k1, k1len) != 0)
-        return key_check(ctx, k1, k1len);
-    if (key_ok(k2, k2len) != 0)
-        return key_check(ctx, k2, k2len);
+    if (key_ok(k1) != 0)
+        return call.key_check_error(k1);
+    if (key_ok(k2) != 0)
+        return call.key_check_error(k2);
 
-    auto c1 = conversion::convert(k1, k1len);
-    auto c2 = conversion::convert(k2, k2len);
-
-
+    auto c1 = conversion::convert(k1);
+    auto c2 = conversion::convert(k2);
     /* Reply with the matching items. */
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
-    //std::function<int (void *, const unsigned char *, uint32_t , void *)>
-    long long replies = 0;
+    heap::std_vector<art::value_type> sorted{};
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
-        storage_release release(t->latch);
-        art::iterator i(t,c1.get_value());
-        while (i.ok()) {
-            auto k = i.key();
-            if (k >= c1.get_value() && k < c2.get_value()) {
-                reply_encoded_key(ctx, k);
-                ++replies;
-            }else {
-                break;
-            }
-            i.next();
-        }
+        t->latch.lock();
     }
-    ValkeyModule_ReplySetArrayLength(ctx, replies);
+    try {
+        for (auto shard : art::get_shard_count()) {
+            auto t = get_art(shard);
+            art::iterator i(t,c1.get_value());
+            while (i.ok()) {
+                auto k = i.key();
+                if (k >= c1.get_value() && k < c2.get_value()) {
+                    sorted.push_back(k);
+                }else {
+                    break;
+                }
+                i.next();
+            }
+        }
+        std::sort(sorted.begin(), sorted.end());
+        call.start_array();
+        for (auto&k : sorted) {
+            call.reply_encoded_key(k);
+            if (--count == 0) break;
+        }
+        call.end_array(0);
+    }catch (std::exception& e) {
+        art::std_err(e.what());
+    }
+    for (auto shard : art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.unlock();
+    }
 
     /* Cleanup. */
-    return VALKEYMODULE_OK;
+    return 0;
 }
+int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    ValkeyModule_AutoMemory(ctx);
+    vk_caller caller;
 
+    return caller.vk_call(ctx, argv, argc, ::RANGE);
+}
 /* CDICT.RANGE <startkey> <endkey> <count>
 *
 * Return a count of matching keys, lexicographically or numericallyordered between startkey
@@ -822,195 +839,93 @@ int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
-int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
+int CLEAR(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
     for (auto shard : art::get_shard_count()) {
         get_art(shard)->clear();
     }
-    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+    return call.simple("OK");
 }
 
+int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, CLEAR);
+}
 
-/* B.STATISTICS
- *
- * get memory statistics. */
-int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
-
-    long row_count = 0;
+int STATS(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
     art_statistics as = art::get_statistics();
     auto vbytes = 0ll;
     for (auto shard : art::get_shard_count()) {
         storage_release release(get_art(shard)->latch);
         vbytes += get_art(shard)->get_nodes().get_bytes_allocated() + get_art(shard)->get_leaves().get_bytes_allocated();
     }
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "heap_bytes_allocated");
-    ValkeyModule_ReplyWithLongLong(ctx, as.heap_bytes_allocated + vbytes);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "page_bytes_compressed");
-    ValkeyModule_ReplyWithLongLong(ctx, as.page_bytes_compressed);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "max_page_bytes_uncompressed");
-    ValkeyModule_ReplyWithLongLong(ctx, as.max_page_bytes_uncompressed);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "last_vacuum_time");
-    ValkeyModule_ReplyWithLongLong(ctx, as.last_vacuum_time);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "vacuum_count");
-    ValkeyModule_ReplyWithLongLong(ctx, as.vacuums_performed);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "page_bytes_uncompressed");
-    ValkeyModule_ReplyWithLongLong(ctx, as.page_bytes_uncompressed);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "bytes_addressable");
-    ValkeyModule_ReplyWithLongLong(ctx, as.bytes_allocated);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "interior_bytes_addressable");
-    ValkeyModule_ReplyWithLongLong(ctx, as.bytes_interior);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "leaf_nodes");
-    ValkeyModule_ReplyWithLongLong(ctx, as.leaf_nodes);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "size_4_nodes");
-    ValkeyModule_ReplyWithLongLong(ctx, as.node4_nodes);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "size_16_nodes");
-    ValkeyModule_ReplyWithLongLong(ctx, as.node16_nodes);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "size_48_nodes");
-    ValkeyModule_ReplyWithLongLong(ctx, as.node48_nodes);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "size_256_nodes");
-    ValkeyModule_ReplyWithLongLong(ctx, as.node256_nodes);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "size_256_occupancy");
-    ValkeyModule_ReplyWithLongLong(ctx, as.node256_occupants);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "leaf_nodes_replaced");
-    ValkeyModule_ReplyWithLongLong(ctx, as.leaf_nodes_replaced);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "pages_uncompressed");
-    ValkeyModule_ReplyWithLongLong(ctx, as.pages_uncompressed);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "pages_compressed");
-    ValkeyModule_ReplyWithLongLong(ctx, as.pages_compressed);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "pages_evicted");
-    ValkeyModule_ReplyWithLongLong(ctx, as.pages_evicted);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "keys_evicted");
-    ValkeyModule_ReplyWithLongLong(ctx, as.keys_evicted);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "pages_defragged");
-    ValkeyModule_ReplyWithLongLong(ctx, as.pages_defragged);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "exceptions_raised");
-    ValkeyModule_ReplyWithLongLong(ctx, as.exceptions_raised);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ++row_count;
-    ValkeyModule_ReplySetArrayLength(ctx, row_count);
+    call.start_array();
+    call.reply_values({"heap_bytes_allocated", as.heap_bytes_allocated + vbytes});
+    call.reply_values({"page_bytes_compressed",as.page_bytes_compressed});
+    call.reply_values({ "max_page_bytes_uncompressed", as.max_page_bytes_uncompressed});
+    call.reply_values({ "last_vacuum_time", as.last_vacuum_time});
+    call.reply_values({ "vacuum_count", as.vacuums_performed});
+    call.reply_values({ "page_bytes_uncompressed", as.page_bytes_uncompressed});
+    call.reply_values({ "bytes_addressable", as.bytes_allocated});
+    call.reply_values({ "interior_bytes_addressable", as.bytes_interior});
+    call.reply_values({ "leaf_nodes", as.leaf_nodes});
+    call.reply_values({ "size_4_nodes", as.node4_nodes});
+    call.reply_values({ "size_16_nodes", as.node16_nodes});
+    call.reply_values({ "size_48_nodes", as.node48_nodes});
+    call.reply_values({ "size_256_nodes", as.node256_nodes});
+    call.reply_values({ "size_256_occupancy", as.node256_occupants});
+    call.reply_values({ "leaf_nodes_replaced", as.leaf_nodes_replaced});
+    call.reply_values({ "pages_uncompressed", as.pages_uncompressed});
+    call.reply_values({ "pages_compressed", as.pages_compressed});
+    call.reply_values({ "pages_evicted", as.pages_evicted});
+    call.reply_values({ "keys_evicted", as.keys_evicted});
+    call.reply_values({ "pages_defragged", as.pages_defragged});
+    call.reply_values({ "exceptions_raised", as.exceptions_raised});
+    call.reply_values({ "maintenance_cycles", as.maintenance_cycles});
+    call.reply_values({ "shards", as.shards});
+    call.reply_values({ "local_calls", as.local_calls});
+    call.reply_values({"logical_allocated", as.logical_allocated});
+    call.reply_values({"oom_avoided_inserts", as.oom_avoided_inserts});
+    call.end_array(0);
     return 0;
 }
-
 /* B.STATISTICS
  *
  * get memory statistics. */
-int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
+int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, STATS);
+}
+int OPS(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
 
     art_ops_statistics as = art::get_ops_statistics();
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "delete_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.delete_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "retrieve_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.get_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "insert_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.insert_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "iterations");
-    ValkeyModule_ReplyWithLongLong(ctx, as.iter_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "range_iterations");
-    ValkeyModule_ReplyWithLongLong(ctx, as.iter_range_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "lower_bound_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.lb_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "maximum_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.max_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "minimum_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.min_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "range_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.range_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "set_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.set_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
-    ValkeyModule_ReplyWithSimpleString(ctx, "size_ops");
-    ValkeyModule_ReplyWithLongLong(ctx, as.size_ops);
-    ValkeyModule_ReplySetArrayLength(ctx, 2);
-    ValkeyModule_ReplySetArrayLength(ctx, 11);
+    call.start_array();
+    call.reply_values({"delete_ops", as.delete_ops});
+    call.reply_values({"retrieve_ops", as.get_ops});
+    call.reply_values({"insert_ops", as.insert_ops});
+    call.reply_values({"iterations", as.iter_ops});
+    call.reply_values({"range_iterations", as.iter_range_ops});
+    call.reply_values({"lower_bound_ops", as.lb_ops});
+    call.reply_values({"maximum_ops", as.max_ops});
+    call.reply_values({"minimum_ops", as.min_ops});
+    call.reply_values({"range_ops", as.range_ops});
+    call.reply_values({"set_ops", as.set_ops});
+    call.reply_values({"size_ops", as.size_ops});
+    call.end_array(0);
     return 0;
+}
+
+/* B.OPS
+ *
+ * get data structure ops. */
+int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, OPS);
 }
 
 int cmd_VACUUM(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
@@ -1045,27 +960,43 @@ int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     }
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)ev );
 }
+int CONFIG(caller& call, const arg_t& argv) {
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    auto s = argv[1];
+    if (strncmp("set", s.chars(), s.size) == 0 || strncmp("SET", s.chars(), s.size) == 0) {
+        int r = art::set_configuration_value(argv[2].chars(), argv[3].chars());
+        if (r == 0) {
+            return call.simple("OK");
+        }
 
-/* B.SET <key> <value>
+    }
+    return call.error("could not set configuration value");
+}
+/* B.CONFIG [SET|GET] <key> [<value>]
  *
  * Set the specified key to the specified value. */
 int cmd_CONFIG(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-
-    if (argc != 4)
-        return ValkeyModule_WrongArity(ctx);
-    size_t slen;
-    const char *s = ValkeyModule_StringPtrLen(argv[1], &slen);
-    if (strncmp("set", s, slen) == 0 || strncmp("SET", s, slen) == 0) {
-        int r = art::set_configuration_value(argv[2], argv[3]);
-        if (r == VALKEYMODULE_OK) {
-            return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-        }
-        return r;
-    }
-    return VALKEYMODULE_ERR;
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, CONFIG);
 }
 
+int COMMAND(caller& call, const arg_t& params) {
+    if (params.size() < 2) {
+        return call.wrong_arity();
+    }
+    if (params[1] == "DOCS") {
+        std::vector<Variable> results;
+        call.start_array();
+        for (auto& p: functions_by_name()) {
+            call.simple(p.first.c_str());
+            call.simple("function");
+        }
+        call.end_array(0);
+        return call.simple("OK");
+    }
+    return call.error("unknown command");
+}
 /* This function must be present on each module. It is used in order to
  * register the commands into the server. */
 int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {

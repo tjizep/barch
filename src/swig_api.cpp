@@ -14,6 +14,35 @@ void setConfiguration(const std::string& name, const std::string& value) {
     art::set_configuration_value(name,value);
 }
 
+void setRoute(int shard, const std::string& host, int port) {
+    std::vector<std::string_view> params = {"ADDROUTE", std::to_string(shard), host, std::to_string(port)};
+    swig_caller sc;
+    int r = sc.call(params, ADDROUTE);
+    if (r == 0) {
+        art::std_log("add route", host, port);
+    }
+}
+void removeRoute(int shard) {
+    std::vector<std::string_view> params = {"REMROUTE", std::to_string(shard)};
+    swig_caller sc;
+    int r = sc.call(params, REMROUTE);
+    if (r == 0) {
+        art::std_log("removed route", shard);
+    }
+}
+
+Route getRoute(int shard) {
+    std::vector<std::string_view> params = {"ROUTE", std::to_string(shard)};
+    swig_caller sc;
+    int r = sc.call(params, ROUTE);
+    if (r == 0 && sc.results.size() == 2) {
+        return{sc.results[0], sc.results[1]};
+    }
+    return {};
+
+}
+
+
 void load(const std::string &host, const std::string& port) {
     std::vector<std::string_view> params = {"RETRIEVE", host, port};
     swig_caller sc;

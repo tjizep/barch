@@ -20,7 +20,6 @@ namespace redis {
 
     class redis_parser {
     private:
-        std::string buffer{};
         bool buffer_has_valid_item(std::string& item);
         std::string read_next_item();
         bool validate_array_size(const std::string& size_item);
@@ -33,11 +32,14 @@ namespace redis {
         void add_data(const char * data, size_t len);
         size_t remaining() const ;
         const std::vector<std::string>& read_new_request();
+    private:
         int state = 0;
         int size = 0;
         std::vector<std::string> req{};
         int item_nr = 0;
         int32_t bstr_size = 0;
+        std::string item{};
+        std::string buffer{};
     };
 
     inline bool is_bulk(const std::string& item) {

@@ -21,6 +21,7 @@ int key_ok(art::value_type v);
 int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen);
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key);
+int reply_variable(ValkeyModuleCtx *ctx, const Variable var) ;
 
 Variable param_as_variant(art::value_type param);
 Variable encoded_key_as_variant(art::value_type key);

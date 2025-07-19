@@ -42,7 +42,7 @@ namespace redis {
         return buffer.size();
     }
     std::string redis_parser::read_next_item() {
-        std::string item;
+        item.clear();
         if(!buffer_has_valid_item(item)) {
             if (item.length() > redis_max_item_len) {
                 throw_exception<std::domain_error>("item exceeds maximum length");

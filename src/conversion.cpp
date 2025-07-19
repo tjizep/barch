@@ -17,92 +17,19 @@ inline const char* bulk_str(const std::string& item) {
 }
 namespace conversion {
     std::string to_string(const Variable &v) {
-        switch (v.index()) {
-            case var_bool:
-                return std::get<bool>(v) ? "true" : "false";
-            case var_int64:
-                return std::to_string(std::get<int64_t>(v));
-            case var_double:
-                return std::to_string(std::get<double>(v));
-            case var_string: {
-                auto &s = std::get<std::string>(v);
-                if (is_bulk(s)) {
-                    return {s.data()+1,s.size()-1};
-                }
-                return s;
-            }
-
-            case var_null:
-                return {};
-            case var_error:
-                return std::get<error>(v).name;
-            default:
-                abort_with("invalid type");
-        }
+        return v.to_string();
     }
 
     double to_double(const Variable& v) {
-        switch (v.index()) {
-            case var_bool:
-                return std::get<bool>(v) ? 1 : 0;
-            case var_int64:
-                return std::get<int64_t>(v);
-            case var_double:
-                return std::get<double>(v);
-            case var_string: {
-                auto &s = std::get<std::string>(v);
-
-                return std::atof(bulk_str(s));
-            }
-            case var_null:
-                return 0.0f;
-            case var_error:
-                return std::numeric_limits<double>::quiet_NaN();
-            default:
-                abort_with("invalid type");
-        }
+        return v.to_double();
     }
 
     bool to_bool(const Variable& v) {
-        switch (v.index()) {
-            case var_bool:
-                return std::get<bool>(v);
-            case var_int64:
-                return std::get<int64_t>(v) == 0 ;
-            case var_double:
-                return std::get<double>(v) == 0.0f;
-            case var_string: {
-                auto &s = std::get<std::string>(v);
-
-                return std::atoi(bulk_str(s)) > 0;
-            }
-            case var_null:
-                return false;
-            case var_error:
-                return false;
-            default:
-                abort_with("invalid type");
-        }
+        return v.to_bool();
     }
 
     int64_t to_int64(const Variable& v) {
-        switch (v.index()) {
-            case var_bool:
-                return std::get<bool>(v) ? 1 : 0;
-            case var_int64:
-                return std::get<int64_t>(v);
-            case var_double:
-                return std::get<double>(v);
-            case var_string: {
-                auto &s = std::get<std::string>(v);
-                return std::atoll(bulk_str(s));
-            }
-            case var_null:
-            case var_error:
-                return 0;
-            default:
-                abort_with("invalid type");
-        }
+        return v.to_int64();
     }
 }
 template<typename T>

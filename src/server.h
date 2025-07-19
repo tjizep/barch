@@ -18,7 +18,7 @@ enum {
     rpc_server_version_min = 21,
     rpc_server_version_max = 21,
     rpc_client_max_wait_default_ms = 30000,
-    rpc_io_thread_count = 6
+    rpc_io_thread_count = 8
 };
 namespace barch {
 
@@ -82,6 +82,13 @@ namespace barch {
         private:
             void send_art_fun(std::iostream& stream,  const heap::vector<uint8_t>& to_send);
         };
+        struct route {
+            std::string ip{};
+            int64_t port{};
+        };
+        void clear_route(size_t shard);
+        void set_route(size_t shard, const route& destination);
+        route get_route(size_t shard);
     }
 }
 

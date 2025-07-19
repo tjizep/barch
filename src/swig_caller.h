@@ -83,6 +83,13 @@ struct swig_caller : caller {
         return 0;
     }
 
+    int reply_values(const std::initializer_list<Variable>& keys) override {
+        for (auto &k : keys) {
+            results.emplace_back(k);
+        }
+        return 0;
+    };
+
     template<typename TC>
     int call(const std::vector<std::string_view>& params, TC&& f) {
 
@@ -98,19 +105,17 @@ struct swig_caller : caller {
         }
         int r = f(*this, args);
         if (r != 0) {
-            art::std_err("call failed");
+            if (errors.empty())
+                errors.emplace_back("call failed");
             return r;
         }
         if (!errors.empty()) {
             r = -1;
-            for (auto& e: errors) {
-                art::std_err(e);
-            }
         }
         return r;
     }
     template<typename TC>
-int call(const std::vector<std::string>& params, TC&& f) {
+    int call(const std::vector<std::string>& params, TC&& f) {
         std::vector<std::string_view> sv;
 
         for (auto &p: params) {

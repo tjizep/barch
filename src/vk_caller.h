@@ -10,46 +10,63 @@
 struct vk_caller : caller {
     virtual ~vk_caller() = default;
     ValkeyModuleCtx *ctx = nullptr;
-
+    size_t call_counter{};
     int null() override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithNull(ctx);
     }
 
     int boolean(bool val) override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithBool(ctx, val ? 1 : 0);
     }
 
     int vt(art::value_type v) override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithString(ctx, ValkeyModule_CreateString(ctx,v.chars(),v.size));
         //return ValkeyModule_ReplyWithStringBuffer(ctx, v.chars(), v.size);
     }
 
     int start_array() override {
         check_ctx();
+        call_counter = 0;
         return ValkeyModule_ReplyWithArray(ctx,VALKEYMODULE_POSTPONED_LEN);
     }
 
-    int end_array(size_t length) override {
+    int end_array(size_t) override {
         check_ctx();
-        ValkeyModule_ReplySetArrayLength(ctx,length);
+        ValkeyModule_ReplySetArrayLength(ctx, call_counter);
         return 0;
     }
 
     int long_long(int64_t l) override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithLongLong(ctx,l);
     };
 
     int double_(double l) override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithDouble(ctx,l);
     };
 
+    int reply_values(const std::initializer_list<Variable>& keys) override {
+        ++call_counter;
+        ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_ARRAY_LEN);
+        for (auto &k : keys) {
+            reply_variable(ctx, k);
+        }
+        ValkeyModule_ReplySetArrayLength(ctx, keys.size());
+        return 0;
+    }
+
     int reply_encoded_key(art::value_type key) override {
         check_ctx();
+        ++call_counter;
         return ::reply_encoded_key(ctx, key);
     }
 
@@ -59,16 +76,19 @@ struct vk_caller : caller {
 
     [[nodiscard]] int wrong_arity() override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_WrongArity(ctx);
     }
 
     [[nodiscard]] int syntax_error() override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithError(ctx,"syntax error");
     }
 
     [[nodiscard]] int error(const char * e)  override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithError(ctx,e);
     };
 
@@ -79,6 +99,7 @@ struct vk_caller : caller {
     }
     int simple(const char * v) override {
         check_ctx();
+        ++call_counter;
         return ValkeyModule_ReplyWithSimpleString(ctx, v);
     };
     [[nodiscard]] int error() const override {
@@ -86,6 +107,7 @@ struct vk_caller : caller {
     }
     int key_check_error(art::value_type k) override {
         check_ctx();
+        ++call_counter;
         if (k.empty())
             return ValkeyModule_ReplyWithError(ctx, "No null keys");
 

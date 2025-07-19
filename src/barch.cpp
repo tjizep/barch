@@ -52,9 +52,7 @@ int RANGE(caller& call, const arg_t& argv) {
 
     /* Parse the count argument. */
     long long count = std::atoll(argv[3].chars());
-    if (count < 0) {
-        return call.error("count must be positive");
-    }
+
     auto k1 = argv[1];
     auto k2 = argv[2];
 

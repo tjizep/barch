@@ -366,7 +366,12 @@ namespace barch {
             try {
                 acc.close();
             }catch (std::exception& e) {}
-            io.stop();
+            try {
+                io.stop();
+            }catch (std::exception& e) {
+                art::std_err("failed to stop io service", e.what());
+            }
+
             for (int it = 0; it < rpc_io_thread_count; ++it) {
 
                 if (server_thread[it].joinable())
@@ -566,36 +571,42 @@ namespace barch {
             }
             void do_read()
             {
-                auto self(shared_from_this());
-                socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                    [this, self](std::error_code ec, std::size_t length)
-                {
+                    auto self(shared_from_this());
+                    socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
+                        [this, self](std::error_code ec, std::size_t length)
+                    {
 
-                    if (!ec){
-                        parser.add_data(data_, length);
-                        try {
-                            vector_stream stream;
+                        if (!ec){
+                            parser.add_data(data_, length);
+                            try {
+                                vector_stream stream;
 
-                            while (parser.remaining() > 0) {
-                                auto &params = parser.read_new_request();
-                                if (!params.empty()) {
-                                    run_params(stream, params);
-                                }else {
-                                    break;
+                                while (parser.remaining() > 0) {
+                                    auto &params = parser.read_new_request();
+                                    if (!params.empty()) {
+                                        run_params(stream, params);
+                                    }else {
+                                        break;
+                                    }
                                 }
-                            }
-                            if (!stream.empty()) {
-                                net_stat stat;
-                                do_write(stream);
-                            }else {
-                                do_read();
-                            }
+                                if (!stream.empty()) {
+                                    net_stat stat;
+                                    do_write(stream);
+                                }else {
+                                    try {
+                                        do_read();
+                                    }catch (std::exception& e) {
+                                        art::std_err("error", e.what());
+                                    }
 
-                        }catch (std::exception& e) {
-                            art::std_err("error", e.what());
+                                }
+
+                            }catch (std::exception& e) {
+                                art::std_err("error", e.what());
+                            }
                         }
-                    }
-                });
+                    });
+
             }
 
             void do_write(const vector_stream& stream) {
@@ -604,7 +615,12 @@ namespace barch {
                 asio::async_write(socket_, asio::buffer(stream.buf),
                     [this, self](std::error_code ec, std::size_t /*length*/){
                         if (!ec){
-                            do_read();
+                            try {
+                                do_read();
+                            }catch (std::exception& e) {
+                                art::std_err("error", e.what());
+                            }
+
                         }else {
                             //art::std_err("error", ec.message(), ec.value());
                         }
@@ -689,8 +705,8 @@ namespace barch {
                 uint32_t cmd = 0;
                 endpoint.read_some(asio::buffer(&cmd, sizeof(cmd)));
                 if (cmd == cmd_barch_call) {
-                    //std::make_shared<barch_session>(std::move(endpoint))->start();
-                    //return;
+                    std::make_shared<barch_session>(std::move(endpoint))->start();
+                    return;
                 }
                 heap::vector<uint8_t> buffer{};
                 art::key_spec spec;
@@ -816,7 +832,12 @@ namespace barch {
             for (int it = 0; it < rpc_io_thread_count; ++it) {
                 server_thread[it] = std::thread([this,it]() {
                     art::std_log("server started on", this->interface,this->port,"using thread",it);
-                    io.run();
+                    try {
+                        io.run();
+                    }catch (std::exception& e) {
+                        art::std_err("failed to run server", e.what());
+                    }
+
                     art::std_log("server stopped on thread",it);
                 });
             }
@@ -825,7 +846,12 @@ namespace barch {
     std::shared_ptr<server_context>  srv = nullptr;
     void server::start(const std::string& interface, uint_least16_t port) {
         if (srv) srv->stop();
-        srv = std::make_shared<server_context>(interface, port);
+        try {
+            srv = std::make_shared<server_context>(interface, port);
+        }catch (std::exception& e) {
+            art::std_err("failed to start server", e.what());
+        }
+
     }
 
     void server::stop() {
@@ -844,8 +870,6 @@ namespace barch {
             heap::vector<uint8_t> to_send{};
             std::string host;
             int port;
-            tcp::iostream stream{};
-            bool is_opened = false;
         public:
             rpc_impl(const std::string& host, int port) : host(host), port(port) {
                 //if (stream.fail())
@@ -868,13 +892,7 @@ namespace barch {
 
                     //art::std_log("calling rpc",params[0],"on",host,port);
                     net_stat stat;
-                    if (!is_opened) {
-                        stream = std::move(tcp::iostream(host, std::to_string(port)));
-                        uint32_t cmd = cmd_barch_call;
-                        writep(stream,uint8_t{0x00});
-                        writep(stream, cmd);
-                        is_opened = true;
-                    }
+                    tcp::iostream stream(host, std::to_string(port));
                     if (!stream) {
                         art::std_err("failed to connect to remote server");
                         return -1;
@@ -882,6 +900,10 @@ namespace barch {
                     for (auto p: params) {
                         push_value(to_send, art::value_type{p});
                     }
+                    uint32_t cmd = cmd_barch_call;
+                    writep(stream,uint8_t{0x00});
+                    writep(stream, cmd);
+
                     uint32_t calls = 1;
                     uint32_t buffers_size = to_send.size();
                     writep(stream, calls);
@@ -898,7 +920,6 @@ namespace barch {
                     }
                     stream.flush();
                     stream.close();
-                    is_opened = false;
                 }catch (std::exception& e) {
                     art::std_err("failed to write to stream", e.what(),"to",host,port);
                     return -1;

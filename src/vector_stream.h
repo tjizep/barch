@@ -10,6 +10,22 @@
 struct vector_stream  {
     size_t pos{};
     heap::std_vector<uint8_t> buf{};
+    vector_stream() = default;
+    vector_stream(const vector_stream&) = default;
+    vector_stream& operator=(const vector_stream&) = default;
+
+    vector_stream(vector_stream&& other) {
+        pos = other.pos;
+        buf = std::move(other.buf);
+        other.pos = 0;
+    }
+
+    vector_stream& operator=(vector_stream&& other) {
+        pos = other.pos;
+        buf = std::move(other.buf);
+        other.pos = 0;
+        return *this;
+    }
     bool empty() const {
         return buf.empty();
     }
@@ -36,7 +52,7 @@ struct vector_stream  {
         if (pos + size > buf.size()) {
             throw std::out_of_range("vector_stream::read");
         }
-        std::copy(data, data + size, &buf[pos]);
+        memcpy(data, buf.data()+pos, size);
         pos += size;
     }
 

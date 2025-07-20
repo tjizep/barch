@@ -38,8 +38,6 @@ namespace barch {
         };
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port);
 
-        extern int _D_call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port);
-
         struct repl_dest {
             std::string host {};
             int port {};

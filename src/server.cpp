@@ -870,14 +870,21 @@ namespace barch {
             heap::vector<uint8_t> to_send{};
             std::string host;
             int port;
-            asio::io_context io_context{};
+            asio::io_context ioc{};
             tcp::socket s;
 
             heap::vector<uint8_t> replies{};
             vector_stream stream{};
-
         public:
-            rpc_impl(const std::string& host, int port) : host(host), port(port), s(io_context) {}
+            rpc_impl(const std::string& host, int port)
+            : host(host), port(port), s(ioc) {
+                const auto read_to_s  = art::get_rpc_read_to_s();   // seconds
+                const auto write_to_s = art::get_rpc_write_to_s();  // seconds
+
+            }
+            void check_timers() {
+
+            }
             virtual ~rpc_impl() {
                 try {
                     //stream.close();
@@ -885,6 +892,51 @@ namespace barch {
                     art::std_err(e.what());
                 }
             }
+            void run(std::chrono::steady_clock::duration timeout) {
+                ioc.restart();
+                ioc.run_for(timeout);
+                if (!ioc.stopped()) {
+                    s.close();
+                    ioc.run();
+                }
+            }
+
+            template<typename SockT,typename BufT>
+            size_t write(SockT& sock, const BufT& buf) {
+                size_t r = 0;
+                std::error_code error;
+                asio::async_write(sock, buf,[&](const std::error_code& result_error,
+                std::size_t result_n)
+                {
+                    r += result_n;
+                    stream_write_ctr += result_n;
+                    error = result_error;
+                });
+                run(art::get_rpc_write_to_s());
+                if (error) {
+                    throw_exception<std::runtime_error>("failed to write");
+                };
+                return r;
+            }
+
+            template<typename SockT,typename BufT>
+            size_t read(SockT& sock, BufT buf) {
+                size_t r = 0;
+                std::error_code error;
+                asio::async_read(sock, buf,[&](const std::error_code& result_error,
+                std::size_t result_n)
+                {
+                    r += result_n;
+                    stream_read_ctr += result_n;
+                    error = result_error;
+                });
+                run(art::get_rpc_read_to_s());
+                if (error) {
+                    throw_exception<std::runtime_error>("failed to read");
+                };
+                return r;
+            }
+
             int call(std::vector<Variable>& result, const std::vector<std::string_view>& params) {
                 to_send.clear();
                 int32_t r = 0;
@@ -895,7 +947,7 @@ namespace barch {
                     stream.clear();
                     net_stat stat;
                     if (!s.is_open()) {
-                        tcp::resolver resolver(io_context);
+                        tcp::resolver resolver(ioc);
                         asio::connect(s, resolver.resolve(host,std::to_string(port)));
                         uint32_t cmd = cmd_barch_call;
                         writep(stream,uint8_t{0x00});
@@ -911,14 +963,16 @@ namespace barch {
                     writep(stream, calls);
                     writep(stream, buffers_size);
                     writep(stream, to_send.data(), to_send.size());
-                    asio::write(s, asio::buffer(stream.buf.data(), stream.buf.size()));
+                    write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
 
-                    asio::read(s,asio::buffer(&r,sizeof(r)));
-                    asio::read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
+                    read(s,asio::buffer(&r,sizeof(r)));
+                    read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
                     replies.resize(buffers_size);
-                    size_t reply_length = asio::read(s,asio::buffer(replies));
-
-                    for (size_t i = 0; i < reply_length; i++) {
+                    size_t reply_length = read(s,asio::buffer(replies));
+                    if (reply_length != buffers_size) {
+                        art::std_err(reply_length,"!=",buffers_size);
+                    }
+                    for (size_t i = 0; i < buffers_size; i++) {
                         auto v = get_variable(i, replies);
                         result.emplace_back(v.first);
                         i = v.second;
@@ -932,46 +986,6 @@ namespace barch {
         };
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
             return std::make_shared<rpc_impl>(host, port);
-        }
-        int _D_call(std::vector<Variable>& result, const std::vector<std::string_view>& params, const std::string& host, int port) {
-            heap::vector<uint8_t> to_send;
-            int32_t r = 0;
-            if (params.empty()) {
-                return -1;
-            }
-            try {
-
-                //art::std_log("calling rpc",params[0],"on",host,port);
-                net_stat stat;
-                tcp::iostream stream(host, std::to_string(port));
-                if (!stream) {
-                    art::std_err("failed to connect to remote server", host, port);
-                    return -1;
-                }
-                for (auto p: params) {
-                    push_value(to_send, art::value_type{p});
-                }
-                uint32_t cmd = cmd_barch_call;
-                uint32_t buffers_size = to_send.size();
-                writep(stream,uint8_t{0x00});
-                writep(stream, cmd);
-                writep(stream, buffers_size);
-                writep(stream, to_send.data(), to_send.size());
-                heap::vector<uint8_t> replies;
-                readp(stream, r);
-                recv_buffer(stream, replies);
-
-                for (size_t i = 0; i < replies.size(); i++) {
-                    auto v = get_variable(i, replies);
-                    result.emplace_back(v.first);
-                    i = v.second;
-                }
-
-            }catch (std::exception& e) {
-                art::std_err("failed to write to stream", e.what(),"to",host,port);
-                return -1;
-            }
-            return r;
         }
 
         client::~client() {

@@ -35,6 +35,7 @@ namespace barch {
         public:
             virtual ~rpc() = default;
             virtual int call(std::vector<Variable>& result, const std::vector<std::string_view>& params) = 0;
+            virtual std::error_code net_error() const = 0;
         };
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port);
 

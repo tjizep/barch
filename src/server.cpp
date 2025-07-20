@@ -875,22 +875,16 @@ namespace barch {
 
             heap::vector<uint8_t> replies{};
             vector_stream stream{};
+            std::error_code error{};
         public:
             rpc_impl(const std::string& host, int port)
             : host(host), port(port), s(ioc) {
-                const auto read_to_s  = art::get_rpc_read_to_s();   // seconds
-                const auto write_to_s = art::get_rpc_write_to_s();  // seconds
 
             }
-            void check_timers() {
-
+            std::error_code net_error() const {
+                return error;
             }
             virtual ~rpc_impl() {
-                try {
-                    //stream.close();
-                }catch (std::exception& e) {
-                    art::std_err(e.what());
-                }
             }
             void run(std::chrono::steady_clock::duration timeout) {
                 ioc.restart();
@@ -904,7 +898,6 @@ namespace barch {
             template<typename SockT,typename BufT>
             size_t write(SockT& sock, const BufT& buf) {
                 size_t r = 0;
-                std::error_code error;
                 asio::async_write(sock, buf,[&](const std::error_code& result_error,
                 std::size_t result_n)
                 {
@@ -922,7 +915,6 @@ namespace barch {
             template<typename SockT,typename BufT>
             size_t read(SockT& sock, BufT buf) {
                 size_t r = 0;
-                std::error_code error;
                 asio::async_read(sock, buf,[&](const std::error_code& result_error,
                 std::size_t result_n)
                 {
@@ -945,13 +937,22 @@ namespace barch {
                 }
                 try {
                     stream.clear();
-                    net_stat stat;
+
                     if (!s.is_open()) {
                         tcp::resolver resolver(ioc);
-                        asio::connect(s, resolver.resolve(host,std::to_string(port)));
-                        uint32_t cmd = cmd_barch_call;
-                        writep(stream,uint8_t{0x00});
-                        writep(stream, cmd);
+                        auto resolution = resolver.resolve(host,std::to_string(port));
+                        asio::async_connect(s, resolution,[this](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
+                            if (!ec) {
+                                uint32_t cmd = cmd_barch_call;
+                                writep(stream,uint8_t{0x00});
+                                writep(stream, cmd);
+                            }
+                            error = ec;
+                        });
+                        run(art::get_rpc_connect_to_s());
+                        if (error) {
+                            throw_exception<std::runtime_error>("failed to connect");
+                        };
                     }
 
                     for (auto p: params) {
@@ -963,6 +964,7 @@ namespace barch {
                     writep(stream, calls);
                     writep(stream, buffers_size);
                     writep(stream, to_send.data(), to_send.size());
+                    net_stat stat;
                     write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
 
                     read(s,asio::buffer(&r,sizeof(r)));
@@ -978,7 +980,7 @@ namespace barch {
                         i = v.second;
                     }
                 }catch (std::exception& e) {
-                    art::std_err("failed to write to stream", e.what(),"to",host,port);
+                    art::std_err("call failed [", e.what(),"] to",host,port,"because [",error.message(),error.value(),"]");
                     return -1;
                 }
                 return r;

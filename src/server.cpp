@@ -907,6 +907,7 @@ namespace barch {
                 });
                 run(art::get_rpc_write_to_s());
                 if (error) {
+                    ++statistics::repl::request_errors;
                     throw_exception<std::runtime_error>("failed to write");
                 };
                 return r;
@@ -924,6 +925,7 @@ namespace barch {
                 });
                 run(art::get_rpc_read_to_s());
                 if (error) {
+                    ++statistics::repl::request_errors;
                     throw_exception<std::runtime_error>("failed to read");
                 };
                 return r;

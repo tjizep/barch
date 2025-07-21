@@ -38,7 +38,7 @@ assert(k.get("1") == "one:test")
 print(barch.size())
 assert(barch.size() > 900)
 for i in range(200,1000):
-    k.set(str(i),str(i))
+    assert(k.get(str(i))==f"data{str(i)}")
     if i%100==0:
         print(i)
 stats = barch.repl_stats()
@@ -49,3 +49,13 @@ assert (stats.routes_succeeded == 194)
 barch.stop()
 serverProc.kill()
 cliProcess.kill()
+
+assert(barch.size() > 900)
+# the routing resolver should now fall-back on local data while completing the task
+for i in range(200,1000):
+    assert(k.get(str(i))==f"data{str(i)}")
+    if i%100==0:
+        print(i)
+stats = barch.repl_stats()
+assert (stats.attempted_routes > stats.routes_succeeded)
+assert (stats.request_errors > 0) # check if there actually where errors

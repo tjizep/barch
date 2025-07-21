@@ -120,6 +120,7 @@ struct swig_caller : caller {
                             return true;
                         } else {
                             // TODO: should we => if the data route network fails we will continue with other functions
+                            routes[shard] = nullptr;
                             return false;
                         }
                     }

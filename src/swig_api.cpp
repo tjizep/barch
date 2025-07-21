@@ -334,6 +334,7 @@ repl_statistics repl_stats() {
     r.remove_requests = ar.remove_requests;
     r.routes_succeeded = ar.routes_succeeded;
     r.attempted_routes = ar.attempted_routes;
+    r.request_errors = ar.request_errors;
     return r;
 }
 

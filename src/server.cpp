@@ -482,28 +482,36 @@ namespace barch {
                                 return false; // nothing to do - wait for more data
                             }
                             readp(in, buffer.data(), buffers_size);
-                            std::vector<std::string_view> params;
-                            for (size_t i = 0; i < buffers_size;) {
-                                auto vp = get_value(i, buffer);
-                                params.push_back({vp.first.chars(), vp.first.size});
-                                i = vp.second;
+                            int32_t r = 0;
+                            if (buffers_size > rpc_max_param_buffer_size) {
+                                r = -1;
+                                replies.clear();
+                                push_value(replies, error{"parameter buffer too large"});
+                            }else {
+                                // TODO: max buffer size check
+                                std::vector<std::string_view> params;
+                                for (size_t i = 0; i < buffers_size;) {
+                                    auto vp = get_value(i, buffer);
+                                    params.push_back({vp.first.chars(), vp.first.size});
+                                    i = vp.second;
+                                }
+                                std::string cn = std::string{params[0]};
+                                auto ic = barch_functions.find(cn);
+                                if (ic == barch_functions.end()) {
+                                    art::std_err("invalid call", cn);
+                                    writep(out, replies_size);
+                                    clear();
+                                    return true;
+                                }
+                                auto f = ic->second.call;
+                                ++ic->second.calls;
+                                r = caller.call(params,f);
+                                replies.clear();
+                                for (auto &v: caller.results) {
+                                    push_value(replies,v);
+                                }
                             }
-                            std::string cn = std::string{params[0]};
-                            auto ic = barch_functions.find(cn);
-                            if (ic == barch_functions.end()) {
-                                art::std_err("invalid call", cn);
-                                writep(out, replies_size);
-                                clear();
-                                return true;
-                            }
-                            auto f = ic->second.call;
-                            ++ic->second.calls;
-                            int32_t r = caller.call(params,f);
-                            replies.clear();
 
-                            for (auto &v: caller.results) {
-                                push_value(replies,v);
-                            }
                             replies_size = replies.size();
                             writep(out, r);
                             writep(out, replies_size);
@@ -740,50 +748,7 @@ namespace barch {
                         }
                         break;
                     case cmd_barch_call:
-                        try {
-                            swig_caller caller;
-                            heap::vector<uint8_t> replies;
-                            uint32_t calls = 0;
-                            readp(stream,calls);
-                            for (uint32_t c = 0; c < calls; ++c) {
-                                uint32_t buffers_size = 0;
-                                uint32_t replies_size = 0;
-                                readp(stream,buffers_size);
-                                if (buffers_size == 0) {
-                                    art::std_err("invalid buffer size", buffers_size);
-                                    return;
-                                }
-
-                                buffer.resize(buffers_size);
-                                readp(stream, buffer.data(), buffers_size);
-                                std::vector<std::string_view> params;
-                                for (size_t i = 0; i < buffers_size;) {
-                                    auto vp = get_value(i, buffer);
-                                    params.push_back({vp.first.chars(), vp.first.size});
-                                    i = vp.second;
-                                }
-                                std::string cn = std::string{params[0]};
-                                auto ic = barch_functions.find(cn);
-                                if (ic == barch_functions.end()) {
-                                    art::std_err("invalid call", cn);
-                                    writep(stream, replies_size);
-                                    stream.flush();
-                                    return;
-                                }
-                                auto f = ic->second.call;
-                                ++ic->second.calls;
-                                int32_t r = caller.call(params,f);
-                                replies.clear();
-
-                                for (auto &v: caller.results) {
-                                    push_value(replies,v);
-                                }
-                                replies_size = replies.size();
-                                writep(stream, r);
-                                writep(stream, replies_size);
-                                writep(stream, replies.data(), replies_size);
-                                stream.flush();
-                            }
+                        try{
                         }catch (std::exception& e) {
                             art::std_err("failed to make barch call", e.what());
                             return;

@@ -20,6 +20,7 @@ enum {
     rpc_client_max_wait_default_ms = 30000,
     rpc_io_thread_count = 8,
     rpc_io_buffer_size = 1024 * 4,
+    rpc_max_param_buffer_size = 1024 * 1024 * 10,
 };
 namespace barch {
 

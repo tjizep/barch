@@ -63,5 +63,7 @@ namespace statistics::repl {
     std::atomic<uint64_t> find_requests = 0;
     std::atomic<uint64_t> request_errors = 0;
     std::atomic<uint64_t> redis_sessions = 0;
+    std::atomic<uint64_t> attempted_routes = 0;
+    std::atomic<uint64_t> routes_succeeded = 0;
 
 }

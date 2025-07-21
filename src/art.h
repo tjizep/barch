@@ -84,6 +84,8 @@ struct art_repl_statistics {
     int64_t find_requests{};
     int64_t request_errors{};
     int64_t redis_sessions{};
+    int64_t attempted_routes{};
+    int64_t routes_succeeded{};
 };
 typedef std::function<int(void *data, art::value_type key, art::value_type value)> CallBack;
 typedef std::function<int(const art::node_ptr &)> LeafCallBack;

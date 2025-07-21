@@ -549,7 +549,7 @@ namespace barch {
             }
 
         private:
-            void run_params(vector_stream& stream, const std::vector<std::string>& params) {
+            void run_params(vector_stream& stream, const heap::vector<std::string>& params) {
                 const std::string &cn = params[0];
                 auto ic = barch_functions.find(cn);
                 if (ic == barch_functions.end()) {
@@ -929,9 +929,8 @@ namespace barch {
                 return r;
             }
 
-            int call(std::vector<Variable>& result, const std::vector<std::string_view>& params) {
+            int call(int& callr, heap::vector<Variable>& result, const std::vector<std::string_view>& params) {
                 to_send.clear();
-                int32_t r = 0;
                 if (params.empty()) {
                     return -1;
                 }
@@ -967,7 +966,7 @@ namespace barch {
                     net_stat stat;
                     write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
 
-                    read(s,asio::buffer(&r,sizeof(r)));
+                    read(s,asio::buffer(&callr,sizeof(callr)));
                     read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
                     replies.resize(buffers_size);
                     size_t reply_length = read(s,asio::buffer(replies));
@@ -983,7 +982,7 @@ namespace barch {
                     art::std_err("call failed [", e.what(),"] to",host,port,"because [",error.message(),error.value(),"]");
                     return -1;
                 }
-                return r;
+                return 0;
             }
         };
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
@@ -1261,7 +1260,7 @@ namespace barch {
             }
             return true;
         }
-        static std::vector<route> routes;
+        static heap::vector<route> routes;
         void set_route(size_t shard, const route& destination) {
             if (routes.empty()) routes.resize(art::get_shard_count().size());
             if (shard >= routes.size()) {

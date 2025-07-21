@@ -18,7 +18,7 @@ serverCmd = [f"{serverdir}valkey-server", f"--loadmodule", f"{barchdir}/_barch.s
 serverProc = subprocess.Popen(serverCmd,cwd=barchdir)
 time.sleep(1)
 
-cliCmd = [f"{clidir}valkey-cli", f"--eval", f"{srcdir}/sourcestart.lua"]
+cliCmd = [f"{clidir}valkey-cli", f"--eval", f"{srcdir}/smallsourcestart.lua"]
 cliProcess = subprocess.Popen(cliCmd)
 time.sleep(1)
 # published keys are received here

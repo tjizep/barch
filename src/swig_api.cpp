@@ -332,6 +332,8 @@ repl_statistics repl_stats() {
     r.bytes_sent = ar.bytes_sent;
     r.insert_requests = ar.insert_requests;
     r.remove_requests = ar.remove_requests;
+    r.routes_succeeded = ar.routes_succeeded;
+    r.attempted_routes = ar.attempted_routes;
     return r;
 }
 

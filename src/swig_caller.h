@@ -8,14 +8,30 @@
 #include <string>
 #include <vector>
 #include "keys.h"
+#include "module.h"
 #include "server.h"
-
+#include "barch_apis.h"
+#include "sastam.h"
 struct swig_caller : caller {
 
     std::shared_ptr<barch::repl::rpc> host {};
+    heap::vector<std::shared_ptr<barch::repl::rpc>> routes {};
+    size_t valid_routes{};
     std::string r{};
-    std::vector<Variable> results{};
-    std::vector<std::string> errors{};
+    heap::vector<Variable> results{};
+    heap::vector<std::string> errors{};
+    swig_caller() {
+        routes.reserve(art::get_shard_count().size());
+        for (size_t shard : art::get_shard_count()) {
+            auto route = barch::repl::get_route(shard);
+            if (route.ip.empty()) {
+                routes[shard] = nullptr;
+            }else {
+                ++valid_routes;
+                routes.emplace_back(barch::repl::create(route.ip,route.port));
+            }
+        }
+    }
     [[nodiscard]] int wrong_arity()  override {
         errors.emplace_back("wrong_arity");
         return 0;
@@ -89,6 +105,29 @@ struct swig_caller : caller {
         }
         return 0;
     };
+    bool call_route(int &r, const std::vector<std::string_view>& params) {
+        if (valid_routes && params.size() > 1) {
+            size_t shard = get_shard(params[1]);
+            if (shard < routes.size()) {
+                if (routes[shard] != nullptr) { // dont do any lookups if there's no route for perf
+                    auto &fbn = functions_by_name();
+                    std::string n = {params[0].data(),params[0].size()};
+                    auto fi = fbn.find(n);
+                    if (fi != fbn.end() && fi->second.data) { // only route data calls
+                        ++statistics::repl::attempted_routes;
+                        if (routes[shard]->call(r, results, params) == 0) {
+                            ++statistics::repl::routes_succeeded;
+                            return true;
+                        } else {
+                            // TODO: should we => if the data route network fails we will continue with other functions
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
 
     template<typename TC>
     int call(const std::vector<std::string_view>& params, TC&& f) {
@@ -97,13 +136,21 @@ struct swig_caller : caller {
         arg_t args;
         errors.clear();
         results.clear();
+        int r = 0;
+        if (call_route(r, params)) {
+            return r;
+        }
         if (host != nullptr) {
-            return host->call(results, params);
+            if (host->call(r, results, params) == 0) {
+                return r;
+            }else {
+                return -1;
+            }
         }
         for (const auto& s : params) {
             args.push_back({s.data(),s.size()});
         }
-        int r = f(*this, args);
+        r = f(*this, args);
         if (r != 0) {
             if (errors.empty())
                 errors.emplace_back("call failed");
@@ -115,7 +162,7 @@ struct swig_caller : caller {
         return r;
     }
     template<typename TC>
-    int call(const std::vector<std::string>& params, TC&& f) {
+    int call(const heap::vector<std::string>& params, TC&& f) {
         std::vector<std::string_view> sv;
 
         for (auto &p: params) {

@@ -42,6 +42,8 @@ struct repl_statistics {
     long long find_requests{};
     long long request_errors{};
     long long redis_sessions{};
+    long long attempted_routes{};
+    long long routes_succeeded{};
 };
 struct ops_statistics {
     ops_statistics(){}

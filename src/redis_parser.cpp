@@ -5,7 +5,7 @@
 #include "redis_parser.h"
 
 #include <thread>
-
+#include "sastam.h"
 #include "statistics.h"
 #include "asio/buffer.hpp"
 
@@ -131,7 +131,7 @@ namespace redis {
         state_error,
         state_max
     };
-    const std::vector<std::string>& redis_parser::read_new_request(){
+    const heap::vector<std::string>& redis_parser::read_new_request(){
         while (state != state_end) {
             // Assumes each RESP request is an array of bulk strings
             switch (state) {

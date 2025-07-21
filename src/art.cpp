@@ -1561,12 +1561,16 @@ art_repl_statistics art::get_repl_statistics(){
     rs.find_requests = (int64_t) statistics::repl::find_requests;
     rs.request_errors = (int64_t) statistics::repl::request_errors;
     rs.redis_sessions = (int64_t) statistics::repl::redis_sessions;
+    rs.attempted_routes = (int64_t) statistics::repl::attempted_routes;
+    rs.routes_succeeded = (int64_t) statistics::repl::routes_succeeded;
     rs.instructions_failed = (int64_t) statistics::repl::instructions_failed;
     rs.key_add_recv = (int64_t) statistics::repl::key_add_recv;
     rs.key_add_recv_applied = (int64_t) statistics::repl::key_add_recv_applied;
     rs.key_rem_recv = (int64_t) statistics::repl::key_rem_recv;
     rs.out_queue_size = (int64_t) statistics::repl::out_queue_size;
     rs.key_rem_recv_applied = (int64_t) statistics::repl::key_rem_recv_applied;
+    rs.routes_succeeded = (int64_t) statistics::repl::routes_succeeded;
+    rs.attempted_routes = (int64_t) statistics::repl::attempted_routes;
     return rs;
 }
 #include "ioutil.h"

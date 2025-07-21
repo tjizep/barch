@@ -51,6 +51,38 @@ h.add("kb",["field1","value1","field2","value2"]) # gets sent to a
 ...
 ```
 
+# Release 2025-07-21 0.03.0b
+
+## New Features
+
+1. RESP interface
+   Barch provides a RESP (Redis .. Protocol) interface created by the START function or barch.start(interface,port)
+   This is a multi threaded asynchronous server provided by the ASIO C++ library
+   Performance characteristics are excellent and latency can be 4 times less while throughput at least 2x more than valkey and redis
+   (for the API's exposed i.e. SET GET HSET HGET ZADD etc)
+   This allows Barch to be used by standard redis clients
+   Example performance using standard valkey benchmark
+```
+./valkey-benchmark -t set -r 10000000 -n 40000000 -P 16 -q --threads 4 -p 14000
+WARNING: Could not fetch server CONFIG
+SET: 1926411.12 requests per second, p50=0.399 msec  
+```
+Benchmark latency can go as low as 0.07 ms using these benchmark settings (not possible with valkey or redis)
+```
+./valkey-benchmark -t set -r 10000000 -n 40000000 -P 1 -q --threads 4 -p 14000
+WARNING: Could not fetch server CONFIG
+SET: 428908.41 requests per second, p50=0.071 msec 
+```
+2. ASIO based rpc server on the same port as above
+   This is used by the new clustering mechanisms described in the `routetest.py`
+
+3. ROUTE, ROUTEADD, REMROUTE
+   To define routes to internal shards in other servers and clients in a cluster.
+
+4. Transparent Failure Recovery
+   Cluster network or node failures recover transparently
+
+5. Many Fixes
 
 ## Whats New (17 June 2025)
 ### Replication to Facilitate micro second local level api's

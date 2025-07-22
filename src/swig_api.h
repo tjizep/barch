@@ -278,6 +278,7 @@ class KeyValue {
 public:
     KeyValue();
     KeyValue(const std::string& host, int port);
+    std::vector<Value> range(const std::string &start, const std::string &end, long long limit = -1);
     void set(const std::string &key, const std::string &value);
     std::string get(const std::string &key) const;
     void incr(const std::string& key, double by);

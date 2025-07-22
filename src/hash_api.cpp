@@ -41,10 +41,7 @@ int HSET(caller& cc, const arg_t& args) {
         art::value_type val = args[n+1];
 
         t->insert(key, val, true, fc);
-        auto np  = t->search(key);
-        if (np.null()) {
-            abort_with("not added");
-        }
+
         t->query.pop_back();
         ++responses;
     }

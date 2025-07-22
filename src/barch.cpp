@@ -243,7 +243,7 @@ int SET(caller& call,const arg_t& argv) {
             return call.null();
         }
     } else {
-        return call.boolean(1);//ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        return call.simple("OK");
     }
 }
 

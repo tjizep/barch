@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <set>
 #include <netinet/in.h>
 
 #include "composite.h"
@@ -95,13 +96,53 @@ typedef std::function<void(const art::node_ptr &)> NodeResult;
 /**
  * art tree and company
  */
-namespace art{
+namespace art {
     node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const children_t &c);
 
-
+    struct kv_buf {
+        uint8_t buf[64];
+        kv_buf(key_options options, value_type k, value_type v) {
+            if (k.size + v.size + 2 < sizeof(buf)) {
+                memcpy(buf, k.bytes, k.size+1);
+                memcpy(&buf[k.size+1], v.bytes, v.size);
+                key = {&buf[0], k.size};
+                value = {&buf[k.size+1], v.size};
+            }
+            opts = options;
+        }
+        kv_buf(const kv_buf& r) {
+            memcpy(buf, r.buf, r.value.size + r.key.size + 1);
+            key = {&buf[0], r.key.size};
+            value = {&buf[r.key.size+1], r.value.size};
+            opts = r.opts;
+        }
+        kv_buf& operator=(const kv_buf& r) {
+            memcpy(buf, r.buf, sizeof(buf));
+            key = {&buf[0], r.key.size};
+            value = {&buf[r.key.size+1], r.value.size};
+            opts = r.opts;
+            return *this;
+        }
+        bool operator==(const kv_buf& r) const {
+            return  key == r.key;
+        }
+        bool operator<(const kv_buf& r) const {
+            return  key < r.key;
+        }
+        key_options opts{};
+        value_type key{};
+        value_type value{};
+    };
+    struct kv_hash{
+        size_t operator()(const kv_buf& k) const {
+            uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(k.key.chars(), k.key.size);
+            return hash;
+        }
+    };
     struct tree : public alloc_pair{
     private:
         trace_list trace{};
+        std::set<kv_buf> buffers{};
     public:
         void log_trace() const ;
 

@@ -272,6 +272,19 @@ void KeyValue::decr(const std::string& key, long long by) {
     if (r == 0) {}
 }
 
+std::vector<Value> KeyValue::range(const std::string &start, const std::string &end, long long limit) {
+    result.clear();
+    params = {"RANGE", start, end, std::to_string(limit)} ;
+    int r = sc.call(params, ::RANGE);
+    if (r == 0) {
+        for (auto& v: sc.results) {
+            result.emplace_back(v);
+        }
+    }
+
+    return result;
+}
+
 std::vector<Value> KeyValue::glob(const std::string &glob, unsigned long long max_) const {
     result.clear();
 

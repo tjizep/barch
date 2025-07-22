@@ -75,3 +75,11 @@ assert(z.remrangebylex("zi", "ona", "ond").s()=="0")
 assert(z.remrangebylex("zi", "ona", "onf").s()=="1")
 assert(z.remrangebylex("zi", "tw", "two").s()=="1")
 assert (s==barch.size()+4)
+
+for i in range(10000):
+    k.set(f"z{str(i)}",str(i))
+# the range end is not inclusive
+r = k.range(f"z1000",f"z1009",11)
+assert(len(r)==9)
+assert(r[0].s()=="z1000")
+assert(r[1].s()=="z1001")

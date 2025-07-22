@@ -354,9 +354,10 @@ namespace barch {
         return r;
     }
     struct server_context {
-
+        struct single_thread_pool : asio::thread_pool { single_thread_pool() : thread_pool(1) {} };
+        std::vector<single_thread_pool> pools{art::get_shard_count().size()};
         std::thread server_thread[rpc_io_thread_count]{};
-        asio::io_service io{rpc_io_thread_count};
+        asio::io_context io{rpc_io_thread_count};
         tcp::acceptor acc;
         std::string interface;
         uint_least16_t port;
@@ -367,6 +368,7 @@ namespace barch {
                 acc.close();
             }catch (std::exception& e) {}
             try {
+
                 io.stop();
             }catch (std::exception& e) {
                 art::std_err("failed to stop io service", e.what());
@@ -410,8 +412,14 @@ namespace barch {
                 barch_wait_for_buffer,
                 barch_parse_params
             };
-            barch_parser() = default;
+            barch_parser& operator=(const barch_parser&) = delete;
+            barch_parser(const barch_parser&) = delete;
+
+            barch_parser(server_context* io) : io(io){
+            };
+
             ~barch_parser() = default;
+            server_context* io;
             vector_stream in{};
             int state = barch_wait_for_header;
             uint32_t calls = 0;
@@ -420,8 +428,8 @@ namespace barch {
             uint32_t replies_size = 0;
 
             swig_caller caller{};
-            heap::vector<uint8_t> replies;
-            heap::vector<uint8_t> buffer;
+            heap::vector<uint8_t> replies{};
+            heap::vector<uint8_t> buffer{};
             void clear() {
                 state = barch_wait_for_header;
                 calls = 0;
@@ -541,8 +549,10 @@ namespace barch {
         class resp_session : public std::enable_shared_from_this<resp_session>
         {
         public:
-            resp_session(tcp::socket socket, char init_char)
-              : socket_(std::move(socket))
+            resp_session(const resp_session&) = delete;
+            resp_session& operator=(const resp_session&) = delete;
+            resp_session(tcp::socket socket,server_context* io, char init_char)
+              : io(io), socket_(std::move(socket))
             {
                 parser.init(init_char);
                 ++statistics::repl::redis_sessions;
@@ -555,17 +565,16 @@ namespace barch {
             {
                 do_read();
             }
-
         private:
             void run_params(vector_stream& stream, const heap::vector<std::string>& params) {
                 const std::string &cn = params[0];
+
                 auto ic = barch_functions.find(cn);
                 if (ic == barch_functions.end()) {
                     redis::rwrite(stream, error{"unknown command"});
                 } else {
                     auto &f = ic->second.call;
                     ++ic->second.calls;
-
                     int32_t r = caller.call(params,f);
                     if (r < 0) {
                         if (!caller.errors.empty())
@@ -585,30 +594,25 @@ namespace barch {
                     {
 
                         if (!ec){
+
                             parser.add_data(data_, length);
                             try {
-                                vector_stream stream;
 
+                                heap::vector<heap::vector<std::string>> calls;
                                 while (parser.remaining() > 0) {
                                     auto &params = parser.read_new_request();
                                     if (!params.empty()) {
-                                        run_params(stream, params);
+                                        calls.push_back(params);
                                     }else {
                                         break;
                                     }
                                 }
-                                if (!stream.empty()) {
-                                    net_stat stat;
-                                    do_write(stream);
-                                }else {
-                                    try {
-                                        do_read();
-                                    }catch (std::exception& e) {
-                                        art::std_err("error", e.what());
-                                    }
-
+                                vector_stream stream;
+                                for (auto&params:calls) {
+                                    run_params(stream, params);
                                 }
-
+                                do_write(stream);
+                                do_read();
                             }catch (std::exception& e) {
                                 art::std_err("error", e.what());
                             }
@@ -617,14 +621,20 @@ namespace barch {
 
             }
 
-            void do_write(const vector_stream& stream) {
+            void do_write(vector_stream& stream) {
                 auto self(shared_from_this());
-
+                if (stream.empty()) return;
+                size_t length = asio::write(socket_, asio::buffer(stream.buf));
+                net_stat stat;
+                stream_write_ctr += length;
+#if 0
                 asio::async_write(socket_, asio::buffer(stream.buf),
-                    [this, self](std::error_code ec, std::size_t /*length*/){
+                    [this, self](std::error_code ec, std::size_t length){
                         if (!ec){
                             try {
-                                do_read();
+                                net_stat stat;
+
+                                stream_write_ctr += length;
                             }catch (std::exception& e) {
                                 art::std_err("error", e.what());
                             }
@@ -633,19 +643,23 @@ namespace barch {
                             //art::std_err("error", ec.message(), ec.value());
                         }
                     });
+#endif
             }
-
+            server_context* io;
             tcp::socket socket_;
             char data_[rpc_io_buffer_size];
             redis::redis_parser parser{};
             swig_caller caller{};
+
         };
 
         class barch_session : public std::enable_shared_from_this<barch_session>
         {
         public:
-            barch_session(tcp::socket socket)
-              : socket_(std::move(socket))
+            barch_session(const barch_session&) = delete;
+            barch_session& operator=(const barch_session&) = delete;
+            barch_session(tcp::socket socket, server_context* io)
+              : io(io), socket_(std::move(socket)), parser(io)
             {
                 ++statistics::repl::redis_sessions;
             }
@@ -695,10 +709,10 @@ namespace barch {
                         }
                     });
             }
-
+            server_context * io{};
             tcp::socket socket_;
             uint8_t data_[rpc_io_buffer_size];
-            barch_parser parser{};
+            barch_parser parser;
         };
 
         void process_data(tcp::socket& endpoint) {
@@ -707,13 +721,13 @@ namespace barch {
                 //readp(stream, cs);
                 endpoint.read_some(asio::buffer(cs));
                 if (cs[0]) {
-                    std::make_shared<resp_session>(std::move(endpoint),cs[0])->start();
+                    std::make_shared<resp_session>(std::move(endpoint),this,cs[0])->start();
                     return;
                 }
                 uint32_t cmd = 0;
                 endpoint.read_some(asio::buffer(&cmd, sizeof(cmd)));
                 if (cmd == cmd_barch_call) {
-                    std::make_shared<barch_session>(std::move(endpoint))->start();
+                    std::make_shared<barch_session>(std::move(endpoint),this)->start();
                     return;
                 }
                 heap::vector<uint8_t> buffer{};
@@ -1259,11 +1273,11 @@ extern "C"{
     int ADDROUTE(caller& call, const arg_t& argv) {
         if (argv.size() != 4)
             return call.wrong_arity();
-        size_t shard = conversion::as_variable(argv[1].chars()).i();
+        size_t shard = conversion::as_variable(argv[1]).i();
         if (shard >= art::get_shard_count().size())
             return call.error("invalid shard");
         auto host = conversion::as_variable(argv[2]).s();
-        auto port = conversion::as_variable(argv[3].chars()).i();
+        auto port = conversion::as_variable(argv[3]).i();
         if (port <= 0 || port >= 65536)
             return call.error("invalid port");
         if (host.empty())

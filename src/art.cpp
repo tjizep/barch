@@ -1930,6 +1930,17 @@ bool art::tree::insert(const key_options& options, value_type key, value_type va
         ++statistics::oom_avoided_inserts;
         return false;
     }
+    //if (buffers.size() < 100000){
+        kv_buf b{options,key,value};
+        if (b.key.size == key.size) {
+            //buffers.insert(b);
+            //return true;
+        }
+    //}
+    //for (auto &el: buffers) {
+        //art_insert(this, el.opts, el.key, el.value, update, fc);
+    //}
+    buffers.clear();
     size_t before = size;
     art_insert(this, options, key, value, update, fc);
     this->repl_client.insert(options, key, value);

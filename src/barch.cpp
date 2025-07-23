@@ -716,13 +716,18 @@ int LOAD(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-
+    std::vector<std::thread> loaders{art::get_shard_count().size()};
+    size_t errors = 0;
     for (auto shard : art::get_shard_count()) {
-        if (!get_art(shard)->load()) {
-            return call.null();
-        }
+        loaders[shard] = std::thread([&errors,shard]() {
+            if (!get_art(shard)->load()) ++errors;
+        });
     }
-    return call.simple("OK");
+    for (auto &loader : loaders) {
+        if (loader.joinable())
+            loader.join();
+    }
+    return errors>0 ? call.error("some shards did not load") : call.simple("OK");
 }
 int START(caller& call, const arg_t& argv) {
     if (argv.size() != 3)

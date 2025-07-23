@@ -1627,7 +1627,7 @@ bool art::tree::pull(std::string host, int port) {
     return true;
 }
 bool art::tree::save() {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
     if (nodes.get_main().get_bytes_allocated()==0) return true;
     bool saved = false;

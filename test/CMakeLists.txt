@@ -5,7 +5,7 @@ include(FetchContent)
 FetchContent_Declare(
         valkey
         GIT_REPOSITORY https://github.com/valkey-io/valkey.git
-        GIT_TAG 7.2
+        GIT_TAG 8.1
 )
 FetchContent_Populate(valkey)
 

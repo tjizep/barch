@@ -798,7 +798,14 @@ bool art::get_use_vmm_memory() {
     std::lock_guard lock(config_mutex);
     return record.use_vmm_memory;
 }
-static std::vector<size_t> shards = {0,1,2,3,4,5,6,7,8,9,10};
+static std::vector<size_t> init_shard_sizes() {
+    std::vector<size_t> r;
+    for (size_t s = 0; s < 31;++s) {
+        r.push_back(s);
+    }
+    return r;
+}
+static std::vector<size_t> shards = init_shard_sizes();
 const std::vector<size_t>& art::get_shard_count() {
     return shards;
 }

@@ -18,7 +18,8 @@ extern std::shared_mutex &get_lock();
 /**
  * context management
  */
-typedef std::unique_lock<std::mutex> storage_release;
+typedef std::unique_lock<std::shared_mutex> storage_release;
+typedef std::shared_lock<std::shared_mutex> read_release;
 
 /**
  * global statistics
@@ -147,7 +148,7 @@ namespace art {
         void log_trace() const ;
 
 
-        mutable trace_list tlb{};
+
         composite query{};
         composite cmd_ZADD_q1{};
         composite cmd_ZADD_qindex{};
@@ -168,7 +169,7 @@ namespace art {
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();
-            tlb.clear();
+
         }
 
         void pop_trace() {

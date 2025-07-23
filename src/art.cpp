@@ -166,13 +166,16 @@ static bool extend_trace_max(art::node_ptr root, art::trace_list &trace) {
  * @arg key_len The length of the key
  * @return NULL if the item was not found, otherwise
  * the value pointer is returned.
- */static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key);
+ *
+ */
+thread_local art::trace_list tlb{};
+static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key);
 art::node_ptr art_search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     try {
         art::node_ptr al;
-        t->tlb.clear();
-        al = inner_lower_bound(t->tlb, t, key);
+        tlb.clear();
+        al = inner_lower_bound(tlb, t, key);
         if (!al.null() && al.const_leaf()->get_key() == key) {
             return al;
         }
@@ -458,8 +461,8 @@ art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
     try {
         art::node_ptr al;
-        t->tlb.clear();
-        al = inner_lower_bound(t->tlb, t, key);
+        tlb.clear();
+        al = inner_lower_bound(tlb, t, key);
         if (!al.null()) {
             return al;
         }

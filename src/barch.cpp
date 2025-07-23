@@ -67,7 +67,7 @@ int RANGE(caller& call, const arg_t& argv) {
     heap::std_vector<art::value_type> sorted{};
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
-        t->latch.lock();
+        t->latch.lock_shared();
     }
     try {
         for (auto shard : art::get_shard_count()) {
@@ -439,7 +439,7 @@ int GET(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    read_lock release(t->latch);
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
 
@@ -684,12 +684,24 @@ int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int SAVE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    for (auto shard : art::get_shard_count()) {
-        if (!get_art(shard)->save()) {
-            return call.null();
-        }
+    std::vector<std::thread> saviors{art::get_shard_count().size()};
+    size_t shard = 0;
+    std::atomic<size_t> errors = 0;
+    for (auto& t: saviors) {
+        t = std::thread([&errors,shard]() {
+            if (!get_art(shard)->save()) {
+                art::std_err("could not save",shard);
+                ++errors;
+            }
+        });
+        ++shard;
     }
-    return call.simple("OK");
+    for (auto& t: saviors) {
+        if (t.joinable())
+            t.join();
+    }
+
+    return errors ? call.error("some shards not saved"): call.simple("OK");
 }
 
 int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {

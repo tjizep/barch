@@ -823,7 +823,7 @@ public:
         return 0;
     }
 
-    void iterate_pages(std::mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
+    void iterate_pages(std::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
         opt_iterate_workers = art::get_iteration_worker_count();
         std::thread workers[opt_iterate_workers];
         std::atomic<bool> stop = false;
@@ -1027,7 +1027,7 @@ struct alloc_pair {
 
     int sentinel = 1<<24;
     size_t shard{};
-    std::mutex latch{};
+    std::shared_mutex latch{};
 
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};

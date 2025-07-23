@@ -356,7 +356,7 @@ namespace barch {
     struct server_context {
         struct single_thread_pool : asio::thread_pool { single_thread_pool() : thread_pool(1) {} };
         //std::vector<single_thread_pool> pools{art::get_shard_count().size()};
-        asio::thread_pool pool{rpc_io_thread_count};
+        std::vector<std::thread> pool{rpc_io_thread_count};
         asio::io_context io{rpc_io_thread_count};
         tcp::acceptor acc;
         std::string interface;
@@ -373,14 +373,13 @@ namespace barch {
             }catch (std::exception& e) {
                 art::std_err("failed to stop io service", e.what());
             }
-#if 0
-            for (int it = 0; it < rpc_io_thread_count; ++it) {
 
-                if (server_thread[it].joinable())
-                    server_thread[it].join();
-                server_thread[it] = {};
+            for (auto& t : pool) {
+
+                if (t.joinable())
+                    t.join();
+                t = {};
             }
-#endif
             port = 0;
         }
         void start_accept() {
@@ -809,11 +808,14 @@ namespace barch {
         ,   port(port){
             start_accept();
 
-            for (int it = 0; it < rpc_io_thread_count; ++it) {
-                pool.get_executor().execute( [this,it]{
-                    //art::std_log("server started on", this->interface,this->port,"using thread",it);
+
+            size_t tid = 0;
+            for (auto &t: pool) {
+                t = std::thread( [this,tid]{
+                    art::std_log("server started on", this->interface,this->port,"using thread",tid);
                     io.run();
                 });
+                ++tid;
             }
 
         }

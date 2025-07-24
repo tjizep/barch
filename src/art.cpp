@@ -311,8 +311,9 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
         if (te.child.null()) {
             // there is no lower bound on this node
-            increment_trace(t->root, trace);
-            break;
+            //increment_trace(t->root, trace);
+            //break;
+            return nullptr;
         }
         if (!is_equal && !te.child.is_leaf) {
             // only for internal nodes - the lb has skipped some child nodes so we have to go back one
@@ -456,7 +457,9 @@ static bool decrement_trace(const art::node_ptr &root, art::trace_list &trace) {
     trace.back() = decrement_te(last);
     return extend_trace_max(root, trace);
 }
-
+art::trace_list& art::get_tlb() {
+    return tlb;
+}
 art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
     try {
@@ -662,6 +665,7 @@ art::value_type art::iterator::key() const {
 }
 bool art::iterator::last() {
     if (!t->size) return false;
+    tl.clear();
     if (!extend_trace_max(t->root, tl)) {
         tl.clear();
         return false;

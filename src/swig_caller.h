@@ -151,7 +151,13 @@ struct swig_caller : caller {
         for (const auto& s : params) {
             args.push_back({s.data(),s.size()});
         }
-        r = f(*this, args);
+        try {
+            r = f(*this, args);
+        }catch (const std::exception& e) {
+            ++statistics::exceptions_raised;
+            errors.emplace_back(e.what());
+            r = -1;
+        }
         if (r != 0) {
             if (errors.empty())
                 errors.emplace_back("call failed");

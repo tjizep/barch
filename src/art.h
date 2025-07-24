@@ -147,8 +147,6 @@ namespace art {
     public:
         void log_trace() const ;
 
-
-
         composite query{};
         composite cmd_ZADD_q1{};
         composite cmd_ZADD_qindex{};
@@ -374,7 +372,14 @@ namespace art {
      * @return the lower bound or NULL if there is no value not less than key
      */
 
-    node_ptr lower_bound(const art::tree *t, art::value_type key);
+    node_ptr lower_bound(const tree *t, value_type key);
+
+    /**
+     *  gets the thread local trace list for the last lb operation
+     *  it can be used to navigate from there
+     * @return the trace list for the last lb operation
+     */
+    trace_list& get_tlb();
 }
 
 /**

@@ -111,7 +111,8 @@ START                      STOP
 RETRIEVE                   LOAD  
 ADDROUTE                   ROUTE
 REMROUTE                   OPS
-STATS
+STATS                      UB
+COUNT
 ```
 
 # Other VALKEY API's implemented (Mostly Key Value + TTL)

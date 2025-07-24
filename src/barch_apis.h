@@ -48,7 +48,9 @@ extern "C"{
     int MIN(caller& call, const arg_t& argv);
     int MAX(caller& call, const arg_t& );
     int LB(caller& call, const arg_t& argv);
+    int UB(caller& call, const arg_t& argv);
     int RANGE(caller& call, const arg_t& argv);
+    int COUNT(caller& call, const arg_t& argv);
     int REM(caller& call, const arg_t& argv);
     int TTL(caller& call, const arg_t& argv);
 

@@ -14,6 +14,7 @@ std::unordered_map<std::string, barch_info>& functions_by_name() {
     r["INCRBY"] = {::INCRBY};
     r["DECR"] = {::DECR};
     r["DECRBY"] = {::DECRBY};
+    r["COUNT"] = {::COUNT};
     r["EXISTS"] = {::EXISTS};
     r["EXPIRE"] = {::EXPIRE};
     r["MSET"] = {::MSET};
@@ -23,6 +24,7 @@ std::unordered_map<std::string, barch_info>& functions_by_name() {
     r["MIN"] = {::MIN};
     r["MAX"] = {::MAX};
     r["LB"] = {::LB};
+    r["UB"] = {::UB};
     r["REM"] = {::REM};
     r["RANGE"] = {::RANGE};
     r["TTL"] = {::TTL};

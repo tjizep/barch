@@ -279,6 +279,7 @@ public:
     KeyValue();
     KeyValue(const std::string& host, int port);
     std::vector<Value> range(const std::string &start, const std::string &end, long long limit = -1);
+    long long count(const std::string &start, const std::string &end);
     void set(const std::string &key, const std::string &value);
     std::string get(const std::string &key) const;
     void incr(const std::string& key, double by);
@@ -295,6 +296,8 @@ public:
 
     Value min() const ;
     Value max() const ;
+    Value upperBound(const std::string& key) const ;
+    long long size() const ;
 private:
     mutable std::vector<std::string_view> params {};
     mutable std::vector<Value> result{};

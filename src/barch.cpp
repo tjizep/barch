@@ -107,53 +107,44 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
     return caller.vk_call(ctx, argv, argc, ::RANGE);
 }
-/* B.RANGE <startkey> <endkey> <count>
-*
-* Return a count of matching keys, lexicographically or numericallyordered between startkey
-* and endkey. No more than 'count' items are emitted. */
-int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
 
-    //read_lock rl(get_lock());
-    if (argc != 3)
-        return ValkeyModule_WrongArity(ctx);
+int COUNT(caller& call, const arg_t& argv) {
 
+    if (argv.size() != 3)
+        return call.wrong_arity();
 
-    size_t k1len;
-    size_t k2len;
-    const char *k1 = ValkeyModule_StringPtrLen(argv[1], &k1len);
-    const char *k2 = ValkeyModule_StringPtrLen(argv[2], &k2len);
+    auto k1 = argv[1];
+    auto k2 = argv[2];
 
-    if (key_ok(k1, k1len) != 0)
-        return key_check(ctx, k1, k1len);
-    if (key_ok(k2, k2len) != 0)
-        return key_check(ctx, k2, k2len);
-
-    auto c1 = conversion::convert(k1, k1len);
-    auto c2 = conversion::convert(k2, k2len);
-
-    /* Seek the iterator. */
-
-    /* Reply with the matching items. */
-    int64_t count = 0;
+    if (key_ok(k1) != 0)
+        return call.key_check_error(k1);
+    if (key_ok(k2) != 0)
+        return call.key_check_error(k2);
+    long long count = 0;
+    auto c1 = conversion::convert(k1);
+    auto c2 = conversion::convert(k2);
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
-        storage_release release(t->latch);
+        read_lock release(t->latch);
+
         art::iterator i(t,c1.get_value());
-        while (i.ok()) {
-            auto k = i.key();
-            if (k >= c1.get_value() && k <= c2.get_value()) {
-                ++count;
-            }else {
-                break;
-            }
-            i.next();
+        art::iterator j(t,c2.get_value());
+        if (i.ok() && !j.ok()) {
+            j.last(); // last key in the range
+            ++count;
+        }
+        if (i.ok() && j.ok()) {
+            auto c = i.fast_distance(j) ;
+            count += c; // they're all unique ?
         }
     }
-    ValkeyModule_ReplyWithLongLong(ctx, count);
+    return call.long_long(count);
+}
+int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
-    /* Cleanup. */
-    return VALKEYMODULE_OK;
+    vk_caller caller;
+
+    return caller.vk_call(ctx, argv, argc, ::COUNT);
 }
 
 /* B.KEYS
@@ -726,6 +717,51 @@ int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, LB);
 }
+int UB(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+
+    auto converted = conversion::convert(k);
+    art::value_type the_lb;
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.lock();
+    }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        if (!t->size) continue;
+        auto key = converted.get_value();
+        art::iterator ilb(t, key);
+        if (ilb.ok() && ilb.key() == key) {
+            ilb.next();
+        }
+        if (ilb.ok()) {
+            if (the_lb.empty() || ilb.key() < the_lb) {
+                the_lb = ilb.key();
+            }
+        }
+    }
+    int ok = call.ok();
+    if (the_lb.empty()) {
+        ok = call.null();
+    } else {
+        ok = call.reply_encoded_key(the_lb);
+    }
+    for (auto shard:art::get_shard_count()) {
+        auto t = get_art(shard);
+        t->latch.unlock();
+    }
+    return ok;
+
+}
+int cmd_UB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, UB);
+}
+
 /* B.RM <key>
  *
  * remove the value associated with the key and return the key if such a key existed. */

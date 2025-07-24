@@ -300,7 +300,18 @@ void KeyValue::decr(const std::string& key, long long by) {
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
+long long KeyValue::count(const std::string &start, const std::string &end) {
+    result.clear();
+    params = {"COUNT", start, end} ;
+    int r = sc.call(params, ::COUNT);
+    if (r == 0) {
+        if (!sc.results.empty()) {
+            return sc.results[0].i();
+        }
+    }
 
+    return 0;
+}
 std::vector<Value> KeyValue::range(const std::string &start, const std::string &end, long long limit) {
     result.clear();
     params = {"RANGE", start, end, std::to_string(limit)} ;
@@ -351,6 +362,26 @@ Value KeyValue::lowerBound(const std::string& key) const {
         return sc.results.empty() ? "": sc.results[0];
     }
     return "";
+}
+
+Value KeyValue::upperBound(const std::string& key) const {
+
+    params = {"UB", key};
+
+    int r = sc.call(params, ::UB);
+    if (r == 0) {
+        return sc.results.empty() ? "": sc.results[0];
+    }
+    return "";
+}
+
+long long KeyValue::size() const {
+    std::vector<std::string_view> params = {"SIZE"};
+    int r = sc.call(params, ::SIZE);
+    if (r == 0) {
+        return sc.results.empty() ? 0 : sc.results[0].i();
+    }
+    return 0;
 }
 
 void load() {

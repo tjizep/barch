@@ -112,7 +112,7 @@ namespace art {
         bool get = false;
         bool nx = false;
         bool xx = false;
-        bool keepttl = true;
+        bool keepttl = false;
         int64_t ttl = 0;
 
         key_spec() = default;
@@ -159,6 +159,9 @@ namespace art {
                     ttl = tol(++spos) * 1000 + now();
                 } else {
                     ttl = tol(++spos) + now();
+                }
+                if (!is_integer(spos)) {
+                    return VALKEYMODULE_ERR;
                 }
                 ++spos;
             } else if (has("exat", spos) || has("pxat", spos)) {

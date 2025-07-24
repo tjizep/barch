@@ -21,7 +21,7 @@ local test = function()
     tests = tests + 1
     result[inc()] = {"running test "..tests}
     local call = 1
-    local res = vk.call('B.SET','a',1,'px',100000)
+    local res = vk.call('B.SET','a',1,'px',11000)
     if res then
         successes = successes + 1
         result[inc()] = {call, res, successes, 'ok'}
@@ -29,6 +29,7 @@ local test = function()
         result[inc()] = {call, res, successes, 'faile'}
     end
     assert(vk.call('B.TTL','a') > 0)
+    assert(vk.call('B.TTL','a') < 12)
     assert(vk.call('B.EXPIRE','a',9,'nx') == -1)
     assert(vk.call('B.EXPIRE','a',9,'gt') == -1)
     assert(vk.call('B.EXPIRE','a',9,'lt') == 1)

@@ -478,7 +478,7 @@ int TTL(caller& call, const arg_t& argv) {
     }
     auto l = r.const_leaf();
     if (l->is_expiry())
-        return call.long_long(l->expiry_ms()/1000);
+        return call.long_long((l->expiry_ms() - art::now())/1000);
     return call.long_long(-2);
 
 }
@@ -553,7 +553,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
             return leaf;
         }
         auto l = leaf.const_leaf();
-        return art::make_leaf(*t, l->get_key(), l->get_value(), spec.ttl, l->is_volatile());
+        return art::make_leaf(*t, l->get_key(), l->get_value(),  art::now() + spec.ttl, l->is_volatile());
     };
     t->update(l->get_key(), updater);
     return call.long_long(1);

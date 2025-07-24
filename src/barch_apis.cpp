@@ -25,7 +25,7 @@ std::unordered_map<std::string, barch_info>& functions_by_name() {
     r["LB"] = {::LB};
     r["REM"] = {::REM};
     r["RANGE"] = {::RANGE};
-    r["TTL"] = {::RANGE};
+    r["TTL"] = {::TTL};
     r["SIZE"] = {::SIZE};
     r["DBSIZE"] = {::SIZE};
     r["SAVE"] = {::SAVE,false};

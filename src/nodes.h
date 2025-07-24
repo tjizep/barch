@@ -496,9 +496,12 @@ namespace art {
 
         leaf() = delete;
 
-        leaf(unsigned kl, unsigned vl, uint64_t expiry, bool is_volatile) : key_len(std::min<unsigned>(
+        leaf(unsigned kl, unsigned vl, int64_t expiry, bool is_volatile) : key_len(std::min<unsigned>(
                                                                              kl, std::numeric_limits<LeafSize>::max()))
-                                                                         , val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max())) {
+                                                                             , val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max())) {
+            if (expiry && now() > expiry) {
+                std_err("key already expired:");
+            }
             if (expiry > 0) set_is_expiry();
             if (is_volatile) set_volatile();
             set_expiry(expiry);
@@ -544,7 +547,8 @@ namespace art {
         [[nodiscard]] bool expired() const {
             ExpiryType expiry = expiry_ms();
             if (!expiry) return false;
-            return now() > expiry;
+            auto n = now();
+            return n > expiry;
         }
 
         [[nodiscard]] bool deleted() const {

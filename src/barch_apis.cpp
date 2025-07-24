@@ -14,6 +14,8 @@ std::unordered_map<std::string, barch_info>& functions_by_name() {
     r["INCRBY"] = {::INCRBY};
     r["DECR"] = {::DECR};
     r["DECRBY"] = {::DECRBY};
+    r["EXISTS"] = {::EXISTS};
+    r["EXPIRE"] = {::EXPIRE};
     r["MSET"] = {::MSET};
     r["ADD"] = {::ADD};
     r["GET"] = {::GET};
@@ -23,6 +25,7 @@ std::unordered_map<std::string, barch_info>& functions_by_name() {
     r["LB"] = {::LB};
     r["REM"] = {::REM};
     r["RANGE"] = {::RANGE};
+    r["TTL"] = {::RANGE};
     r["SIZE"] = {::SIZE};
     r["DBSIZE"] = {::SIZE};
     r["SAVE"] = {::SAVE,false};

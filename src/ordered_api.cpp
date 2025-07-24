@@ -180,7 +180,7 @@ int ZADD(caller& call, const arg_t &argv) {
         }
         art::value_type qkey = t->cmd_ZADD_q1.create({container, score, member});
         if (zspec.XX) {
-            art::update(t, qkey, [&](const art::node_ptr &old) -> art::node_ptr {
+            t->update(qkey, [&](const art::node_ptr &old) -> art::node_ptr {
                 if (old.null()) return nullptr;
 
                 auto l = old.const_leaf();

@@ -183,6 +183,49 @@ namespace art {
         }
     };
 
+    struct key_expire_spec : base_key_spec {
+        bool nx = false;
+        bool xx = false;
+        bool gt = false;
+        bool lt = false;
+        int64_t ttl = 0;
+
+        key_expire_spec() = default;
+
+        key_expire_spec(const arg_t& vt) : base_key_spec(vt) {
+            argc = vt.size();
+        }
+
+        key_spec &operator=(ValkeyModuleString **) = delete;
+
+        key_spec &operator=(const key_spec &) = delete;
+
+        key_expire_spec(const key_spec &) = delete;
+
+        int parse_options() {
+
+            int spos = 2; // the keys at one
+            if (!is_integer(spos))
+                return VALKEYMODULE_ERR;
+
+            ttl = tol(spos++);
+            ttl *= 1000;
+
+            if (argc <= spos)
+                return VALKEYMODULE_OK;
+
+            nx = has("nx", spos);
+            xx = has("xx", spos);
+            gt = has("gt", spos);
+            lt = has("lt", spos);
+            ++spos;
+            if (argc <= spos)
+                return VALKEYMODULE_OK;
+
+            return VALKEYMODULE_ERR;
+        }
+    };
+
     struct keys_spec : base_key_spec {
         keys_spec &operator=(ValkeyModuleString **) = delete;
 

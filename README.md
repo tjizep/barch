@@ -102,20 +102,29 @@ Barch has on average 50% less latency the difference increases with key count an
 14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
 15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
 
-# Other VALKEY API's implemented 
+# BARCH specific API's implemented
+```
+MIN                        MAX
+SIZE                       SAVE
+PUBLISH                    LB        
+START                      STOP   
+RETRIEVE                   LOAD  
+ADDROUTE                   ROUTE
+REMROUTE                   OPS
+STATS
+```
+
+# Other VALKEY API's implemented (Mostly Key Value + TTL)
 ```
 SET                        KEYS
 INCR                       INCRBY
 DECR                       DECRBY
-MSET                       ADD
+MSET                       
 GET                        MGET
-MIN                        MAX
-LB                         REM
-SIZE                       SAVE
-PUBLISH                    FLUSHDB/FLUSHALL
-LOAD                       START
-STOP                       RETRIEVE
-PING
+REM                        FLUSHDB/FLUSHALL                   
+PING                       TTL
+EXPIRE                     EXISTS
+DBSIZE
 ```
 ## Hash Set API's Implemented
 ```

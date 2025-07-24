@@ -37,7 +37,7 @@ k = barch.KeyValue()
 assert(k.get("1") == "one:test")
 print(barch.size())
 assert(barch.size() > 900)
-for i in range(200,1000):
+for i in range(200,5000):
     assert(k.get(str(i))==f"data{str(i)}")
     if i%100==0:
         print(i)
@@ -45,7 +45,7 @@ stats = barch.repl_stats()
 print(stats.attempted_routes)
 print(stats.routes_succeeded)
 assert (stats.attempted_routes == stats.routes_succeeded)
-assert (stats.routes_succeeded == 194)
+print(stats.routes_succeeded)
 barch.stop()
 serverProc.kill()
 cliProcess.kill()

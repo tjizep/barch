@@ -38,7 +38,7 @@ static auto startTime = std::chrono::high_resolution_clock::now();
 
 
 extern "C" {
-/* CDICT.RANGE <startkey> <endkey> <count>
+/* B.RANGE <startkey> <endkey> <count>
 *
 * Return a list of matching keys, lexicographically between startkey
 * and endkey. No more than 'count' items are emitted. */
@@ -107,7 +107,7 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
     return caller.vk_call(ctx, argv, argc, ::RANGE);
 }
-/* CDICT.RANGE <startkey> <endkey> <count>
+/* B.RANGE <startkey> <endkey> <count>
 *
 * Return a count of matching keys, lexicographically or numericallyordered between startkey
 * and endkey. No more than 'count' items are emitted. */
@@ -156,7 +156,7 @@ int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return VALKEYMODULE_OK;
 }
 
-/* CDICT.KEYS
+/* B.KEYS
 *
 * match against all keys using a glob pattern
 * */
@@ -207,7 +207,7 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, KEYS);
 }
-/* CDICT.SET <key> <value>
+/* B.SET <key> <value>
  *
  * Set the specified key to the specified value. */
 int SET(caller& call,const arg_t& argv) {
@@ -402,7 +402,7 @@ int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, MSET);
 }
-/* CDICT.ADD <key> <value>
+/* B.ADD <key> <value>
  *
  * Add the specified key only if its not there, with specified value. */
 int ADD(caller& call, const arg_t& argv) {
@@ -428,7 +428,7 @@ int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ADD);
 }
-/* CDICT.GET <key>
+/* B.GET <key>
  *
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
@@ -457,11 +457,112 @@ int GET(caller& call, const arg_t& argv) {
         return call.vt(vt);
     }
 }
+
 int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, GET);
 }
-/* CDICT.MGET <keys>
+
+int TTL(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto t = get_art(argv[1]);
+    read_lock release(t->latch);
+    auto converted = conversion::convert(k);
+    art::node_ptr r = t->search(converted.get_value());
+    if (r.null()) {
+        return call.long_long(-1);
+    }
+    auto l = r.const_leaf();
+    if (l->is_expiry())
+        return call.long_long(l->expiry_ms()/1000);
+    return call.long_long(-2);
+
+}
+int cmd_TTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, TTL);
+}
+int EXISTS(caller& call, const arg_t& argv) {
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    for (size_t i = 1; i < argv.size(); ++i) {
+        auto k = argv[i];
+        if (key_ok(k) != 0)
+            return call.key_check_error(k);
+
+        auto t = get_art(argv[i]);
+        read_lock release(t->latch);
+        auto converted = conversion::convert(k);
+        art::node_ptr r = t->search(converted.get_value());
+        if (r.null()) {
+            return call.boolean(false);
+        }
+    }
+    return call.boolean(true);
+}
+
+int cmd_EXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, EXISTS);
+}
+
+int EXPIRE(caller& call, const arg_t& argv) {
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto t = get_art(argv[1]);
+    read_lock release(t->latch);
+    auto converted = conversion::convert(k);
+    art::node_ptr r = t->search(converted.get_value());
+    if (r.null()) {
+        return call.long_long(-1);
+    }
+    art::key_expire_spec spec(argv);
+    if (spec.parse_options() != call.ok()) {
+        return call.syntax_error();
+    }
+
+    auto l = r.const_leaf();
+    if (spec.nx) {
+        if (l->is_expiry()) {
+            return call.long_long(-1);
+        }
+
+    } else if (spec.xx) {
+        if (!l->is_expiry()) {
+            return call.long_long(-1);
+        }
+
+    } else if (spec.gt) {
+        if (spec.ttl + art::now() < l->expiry_ms()) {
+            return call.long_long(-1);
+        }
+    } else if (spec.lt) {
+        if (spec.ttl + art::now() > l->expiry_ms()) {
+            return call.long_long(-1);
+        }
+    }
+    auto updater = [&t,spec](const art::node_ptr &leaf) -> art::node_ptr {
+        if (leaf.null()) {
+            return leaf;
+        }
+        auto l = leaf.const_leaf();
+        return art::make_leaf(*t, l->get_key(), l->get_value(), spec.ttl, l->is_volatile());
+    };
+    t->update(l->get_key(), updater);
+    return call.long_long(1);
+}
+int cmd_EXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, EXPIRE);
+}
+/* B.MGET <keys>
  *
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
@@ -496,7 +597,7 @@ int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, MGET);
 }
-/* CDICT.MINIMUM
+/* B.MINIMUM
  *
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
@@ -540,7 +641,7 @@ int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     return ValkeyModule_ReplyWithLongLong(ctx, d.count());
 }
 
-/* CDICT.MAXIMUM
+/* B.MAXIMUM
  *
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
@@ -580,7 +681,7 @@ int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, MAX);
 }
-/* CDICT.LB <key>
+/* B.LB <key>
  *
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
@@ -1022,6 +1123,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_CreateCommand(ctx, NAME(SET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(EXPIRE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(INCR), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -1041,6 +1145,12 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(GET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(EXISTS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(TTL), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(MGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)

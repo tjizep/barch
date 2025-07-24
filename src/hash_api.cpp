@@ -100,7 +100,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
         auto converted = conversion::convert(k);
         t->query.push(converted);
         art::value_type key = t->query.create();
-        art::update(t, key, updater);
+        t->update(key, updater);
         t->query.pop_back();
         ++responses;
     }

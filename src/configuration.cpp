@@ -800,7 +800,7 @@ bool art::get_use_vmm_memory() {
 }
 static std::vector<size_t> init_shard_sizes() {
     std::vector<size_t> r;
-    for (size_t s = 0; s < 31;++s) {
+    for (size_t s = 0; s < 17;++s) {
         r.push_back(s);
     }
     return r;

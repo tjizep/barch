@@ -220,6 +220,35 @@ void KeyValue::erase(const std::string &key) {
     int r = sc.call(params, ::REM);
     if (r == 0) {}
 }
+bool KeyValue::exists(const std::string &key) {
+    params = {"EXISTS", key};
+
+    int r = sc.call(params, ::EXISTS);
+    if (r == 0) {
+        return sc.results.empty() ? false: sc.results[0].b();
+    }
+    return false;
+}
+
+bool KeyValue::expire(const std::string &key, const std::string& flag) {
+    params = {"EXPIRE", key, flag};
+
+    int r = sc.call(params, ::EXPIRE);
+    if (r == 0) {
+        return sc.results.empty() ? false: sc.results[0].i() == 1;
+    }
+    return false;
+}
+
+long long KeyValue::ttl(const std::string &key) {
+    params = {"TTL", key};
+
+    int r = sc.call(params, ::TTL);
+    if (r == 0) {
+        return sc.results.empty() ? 0: sc.results[0].i();
+    }
+    return 0;
+}
 
 Value KeyValue::min() const {
     params = {"MIN"};

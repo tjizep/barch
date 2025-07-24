@@ -39,6 +39,8 @@ extern "C"{
     int INCRBY(caller& call, const arg_t& argv);
     int DECR(caller& call, const arg_t& argv);
     int DECRBY(caller& call, const arg_t& argv);
+    int EXISTS(caller& call, const arg_t& argv);
+    int EXPIRE(caller& call, const arg_t& argv);
     int MSET(caller& call, const arg_t& argv);
     int ADD(caller& call, const arg_t& argv);
     int GET(caller& call, const arg_t& argv);
@@ -48,6 +50,7 @@ extern "C"{
     int LB(caller& call, const arg_t& argv);
     int RANGE(caller& call, const arg_t& argv);
     int REM(caller& call, const arg_t& argv);
+    int TTL(caller& call, const arg_t& argv);
 
     // database
     int SIZE(caller& call, const arg_t& argv);

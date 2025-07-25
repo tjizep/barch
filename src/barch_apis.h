@@ -6,6 +6,7 @@
 #define BARCH_APIS_H
 #include "caller.h"
 typedef std::function<int (caller& call, const arg_t& argv)> barch_function;
+
 struct barch_info {
     barch_info() = default;
     barch_info(const barch_function& call, bool data = true) : call(call), data(data){}
@@ -27,7 +28,7 @@ struct barch_info {
     bool pub {false};
     std::atomic<uint64_t> calls {0};
 };
-
+typedef std::unordered_map<std::string, barch_info> function_map;
 extern "C"{
     // Misc
     int COMMAND(caller& call,const arg_t& argv);
@@ -127,5 +128,5 @@ extern "C"{
 
 }
 
-extern std::unordered_map<std::string, barch_info>& functions_by_name();
+extern function_map& functions_by_name();
 #endif //BARCH_APIS_H

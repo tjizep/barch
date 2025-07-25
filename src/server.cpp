@@ -568,11 +568,12 @@ namespace barch {
         private:
             void run_params(vector_stream& stream, const heap::vector<std::string>& params) {
                 const std::string &cn = params[0];
-
-                auto ic = barch_functions.find(cn);
+                if (prev_cn != cn)
+                    ic = barch_functions.find(cn);
                 if (ic == barch_functions.end()) {
                     redis::rwrite(stream, error{"unknown command"});
                 } else {
+                    prev_cn = cn;
                     auto &f = ic->second.call;
                     ++ic->second.calls;
                     int32_t r = caller.call(params,f);
@@ -598,19 +599,16 @@ namespace barch {
                             parser.add_data(data_, length);
                             try {
 
-                                heap::vector<heap::vector<std::string>> calls;
+                                stream.clear();
                                 while (parser.remaining() > 0) {
                                     auto &params = parser.read_new_request();
                                     if (!params.empty()) {
-                                        calls.push_back(params);
+                                        run_params(stream, params);
                                     }else {
                                         break;
                                     }
                                 }
-                                vector_stream stream;
-                                for (auto&params:calls) {
-                                    run_params(stream, params);
-                                }
+
                                 do_write(stream);
                                 do_read();
                             }catch (std::exception& e) {
@@ -650,7 +648,9 @@ namespace barch {
             char data_[rpc_io_buffer_size];
             redis::redis_parser parser{};
             swig_caller caller{};
-
+            vector_stream stream{};
+            std::string prev_cn{};
+            function_map::iterator ic{};
         };
 
         class barch_session : public std::enable_shared_from_this<barch_session>

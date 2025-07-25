@@ -4,8 +4,8 @@
 // Created by teejip on 7/13/25.
 //
 
-std::unordered_map<std::string, barch_info>& functions_by_name() {
-    static std::unordered_map<std::string, barch_info> r;
+function_map& functions_by_name() {
+    static function_map r;
     if (!r.empty()) return r;
 
     r["SET"] = {::SET};

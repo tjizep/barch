@@ -3,7 +3,7 @@
 ## New Features
 
 1. Added `TTL`, `COUNT`, `EXPIRE` and `RANGE` commands
-2. `COUNT a b` command uses cumulative index
+2. `COUNT a b` command uses the cumulative index
 3. Performance Improvements (3X throughput and 3.5x less latency than valkey)
    After 10 Million Keys where added
    Machine is 8 core AMD Zen 4 32 GiB Ram, Ubuntu 20.04

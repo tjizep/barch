@@ -8,7 +8,7 @@
    After 10 Million Keys where added
    Machine is 8 core AMD Zen 4 32 GiB Ram, Ubuntu 20.04
    CPU Usage 32% for Barch, 10% for Valkey and 22% for Benchmark
-   BARCH throughput
+   BARCH Throughput
    ```
    ./valkey-benchmark -t get -r 10000000 -n 40000000 -P 12 -q --threads 3 -p 14000
    GET: rps=3314784.0 (overall: 3291016.0) avg_msec=0.118 (overall: 0.127)

@@ -24,6 +24,9 @@ namespace statistics {
     extern std::atomic<uint64_t> max_leaf_size;
     extern std::atomic<uint64_t> logical_allocated;
     extern std::atomic<uint64_t> oom_avoided_inserts;
+    extern std::atomic<uint64_t> keys_found;
+    extern std::atomic<uint64_t> new_keys_added;
+    extern std::atomic<uint64_t> keys_replaced;
     /**
     * internal stats
     */

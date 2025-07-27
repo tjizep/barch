@@ -177,6 +177,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         tlb.clear();
         al = inner_lower_bound(tlb, t, key);
         if (!al.null() && al.const_leaf()->get_key() == key) {
+            ++statistics::keys_found;
             return al;
         }
     } catch (std::exception &e) {
@@ -1097,8 +1098,10 @@ void art_insert
             t->size++;
             t->update_trace(+1);
             ++statistics::insert_ops;
+            ++statistics::new_keys_added;
         } else {
             ++statistics::set_ops;
+            ++statistics::keys_replaced;
         }
         if (!old.null()) {
             if (!old.is_leaf) {
@@ -1522,6 +1525,9 @@ art_statistics art::get_statistics() {
     as.local_calls = (int64_t) statistics::local_calls;
     as.logical_allocated = (int64_t) statistics::logical_allocated;
     as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
+    as.keys_found = (int64_t) statistics::keys_found;
+    as.new_keys_added = (int64_t) statistics::new_keys_added;
+    as.keys_replaced = (int64_t) statistics::keys_replaced;
     return as;
 }
 
@@ -1877,6 +1883,9 @@ void art::tree::clear() {
     statistics::pages_compressed = 0;
     statistics::max_page_bytes_uncompressed = 0;
     statistics::oom_avoided_inserts = 0;
+    statistics::keys_found = 0;
+    statistics::new_keys_added = 0;
+    statistics::keys_replaced = 0;
     statistics::logical_allocated = 0;
 }
 static void log_trace(const art::tree* t , const std::string& name, const art::trace_list& tl)  {
@@ -1937,17 +1946,25 @@ bool art::tree::insert(const key_options& options, value_type key, value_type va
         ++statistics::oom_avoided_inserts;
         return false;
     }
-    //if (buffers.size() < 100000){
+    if (key.bytes[key.size - 1] != 0) {
+        temp_key = {key.chars(), key.size};// copy the data so that we don't cause potential buffer overflow
+        key = {temp_key.data(),temp_key.size()+1}; // include the null term
+    }
+#if 0
+    if (buffers.size() < 100000){
         kv_buf b{options,key,value};
         if (b.key.size == key.size) {
-            //buffers.insert(b);
-            //return true;
+            buffers.insert(b);
+            return true;
         }
-    //}
-    //for (auto &el: buffers) {
-        //art_insert(this, el.opts, el.key, el.value, update, fc);
-    //}
+    }
+
+    for (auto &el: buffers) {
+        art_insert(this, el.opts, el.key, el.value, update, fc);
+    }
     buffers.clear();
+#endif
+
     size_t before = size;
     art_insert(this, options, key, value, update, fc);
     this->repl_client.insert(options, key, value);

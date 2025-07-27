@@ -89,6 +89,9 @@ struct statistics_values {
     long long local_calls {};
     long long logical_allocated {};
     long long oom_avoided_inserts {};
+    long long keys_found {};
+    long long new_keys_added {};
+    long long keys_replaced {};
 };
 
 struct configuration_values {

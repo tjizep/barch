@@ -27,6 +27,9 @@ std::atomic<uint64_t> statistics::local_calls = 0;
 std::atomic<uint64_t> statistics::max_leaf_size = 0;
 std::atomic<uint64_t> statistics::logical_allocated = 0;
 std::atomic<uint64_t> statistics::oom_avoided_inserts = 0;
+std::atomic<uint64_t> statistics::keys_found = 0;
+std::atomic<uint64_t> statistics::new_keys_added = 0;
+std::atomic<uint64_t> statistics::keys_replaced = 0;
 
 /**
  * ops stats

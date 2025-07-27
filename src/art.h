@@ -54,6 +54,9 @@ struct art_statistics {
     int64_t local_calls {};
     int64_t logical_allocated {};
     int64_t oom_avoided_inserts {};
+    int64_t keys_found {};
+    int64_t new_keys_added {};
+    int64_t keys_replaced {};
 };
 
 struct art_ops_statistics {
@@ -144,6 +147,7 @@ namespace art {
     private:
         trace_list trace{};
         std::set<kv_buf> buffers{};
+        std::string temp_key{};
     public:
         void log_trace() const ;
 

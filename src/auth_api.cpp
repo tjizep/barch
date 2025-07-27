@@ -110,6 +110,7 @@ extern "C"
                 return call.error("ACL category not found");
             }
         }
+        spec.cat.emplace("data",true);
         write_lock write(a->latch);
         std::string key;
         for (auto& cat : spec.cat) {

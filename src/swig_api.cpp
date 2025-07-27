@@ -457,6 +457,9 @@ statistics_values stats() {
     r.local_calls = t.local_calls;
     r.logical_allocated = t.logical_allocated;
     r.oom_avoided_inserts = t.oom_avoided_inserts;
+    r.keys_found = t.keys_found;
+    r.new_keys_added = t.new_keys_added;
+    r.keys_replaced = t.keys_replaced;
     return r;
 }
 configuration_values config() {

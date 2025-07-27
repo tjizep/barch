@@ -1032,7 +1032,7 @@ struct alloc_pair {
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
     explicit alloc_pair(size_t shard) : shard(shard), nodes(this,"nodes_"+std::to_string(shard)),leaves(this,"leaves_"+std::to_string(shard)) {}
-    alloc_pair(size_t shard,const std::string& name) : shard(shard), nodes(this,name+std::to_string(shard)),leaves(this,"leaves_"+std::to_string(shard)) {}
+    alloc_pair(size_t shard,const std::string& name) : shard(shard), nodes(this,"nodes_"+name+std::to_string(shard)),leaves(this,"leaves_"+name+std::to_string(shard)) {}
     logical_allocator& get_nodes() {
         return nodes;
     };

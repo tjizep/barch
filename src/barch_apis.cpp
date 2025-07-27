@@ -4,7 +4,7 @@
 // Created by teejip on 7/13/25.
 //
 static std::mutex& latch() {
-    static std::mutex l;
+    static std::mutex l{};
     return l;
 }
 catmap& get_category_map() {

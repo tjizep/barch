@@ -9,5 +9,5 @@
 #include "sastam.h"
 
 const heap::vector<bool>& get_all_acl();
-
+void save_auth();
 #endif //AUTH_API_H

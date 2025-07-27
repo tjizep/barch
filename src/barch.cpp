@@ -2,6 +2,7 @@
 // Created by me on 11/9/24.
 //
 
+#include "auth_api.h"
 #include "barch_apis.h"
 #include "redis_parser.h"
 #include "vk_caller.h"
@@ -833,6 +834,7 @@ int SAVE(caller& call, const arg_t& argv) {
         });
         ++shard;
     }
+    save_auth();
     for (auto& t: saviors) {
         if (t.joinable())
             t.join();

@@ -53,7 +53,9 @@ namespace art {
 
         value_type(const unsigned char *v, size_t l): bytes(v), size(l) {
         }
-
+        value_type ex() const { // function for incl null term
+            return {bytes, size+1};
+        }
         [[nodiscard]] unsigned empty() const {
             return size == 0;
         }
@@ -62,7 +64,9 @@ namespace art {
             if (!size) return 0;
             return size - 1; // implied in the data is a null terminator
         }
-
+        std::string to_string() const {
+            return std::string(chars(), size);
+        }
         [[nodiscard]] const char *chars() const {
             return (const char *) bytes;
         }

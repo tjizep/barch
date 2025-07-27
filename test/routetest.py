@@ -57,5 +57,7 @@ for i in range(200,1000):
     if i%100==0:
         print(i)
 stats = barch.repl_stats()
+print(f"stats.attempted_routes:{stats.attempted_routes}")
+print(f"stats.routes_succeeded:{stats.routes_succeeded}")
 assert (stats.attempted_routes > stats.routes_succeeded)
 assert (stats.request_errors > 0) # check if there actually where errors

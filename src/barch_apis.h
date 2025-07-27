@@ -19,7 +19,7 @@ struct barch_info {
             mycats[c] = true;
         }
         this->cats = cats2vec(mycats);
-        this->dp = get_category_map()["data"];
+        this->dp = get_category_map().at("data");
     }
     barch_info(const barch_function& call, const std::initializer_list<const char *>& cats) : call(call) {
         set_cats(cats);
@@ -27,10 +27,14 @@ struct barch_info {
     barch_info(const barch_info& binfo) {
         call = binfo.call;
         calls = (uint64_t)binfo.calls;
+        cats = binfo.cats;
+        dp = binfo.dp;
     }
     barch_info& operator=(const barch_info& binfo) {
         call = binfo.call;
         calls = (uint64_t)binfo.calls;
+        cats = binfo.cats;
+        dp = binfo.dp;
         return *this;
     }
     bool is_data() const {

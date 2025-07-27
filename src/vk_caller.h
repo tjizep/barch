@@ -11,6 +11,20 @@ struct vk_caller : caller {
     virtual ~vk_caller() = default;
     ValkeyModuleCtx *ctx = nullptr;
     size_t call_counter{};
+    std::string user{"default"};
+    heap::vector<bool> acl{};
+    const std::string& get_user() const override  {
+        return user;
+    }
+    const heap::vector<bool>& get_acl() const override {
+        return acl;
+    }
+    void set_acl(const std::string& user,const heap::vector<bool>& acl) override {
+        this->user = user;
+        this->acl = acl;
+    };
+
+
     int null() override {
         check_ctx();
         ++call_counter;

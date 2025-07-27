@@ -190,6 +190,12 @@ namespace art {
             start_maintain();
 
         }
+        tree(const std::string& name,const node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard,name), root(root), size(size) {
+            repl_client.shard = shard;
+            barch::repl::clear_route(shard);
+            start_maintain();
+
+        }
         tree& operator=(const tree&) = delete;
 
         ~tree();

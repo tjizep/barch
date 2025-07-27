@@ -8,7 +8,7 @@
 #include "caller.h"
 #include "module.h"
 #include "configuration.h"
-#include "swig_caller.h"
+#include "rpc_caller.h"
 
 void setConfiguration(const std::string& name, const std::string& value) {
     art::set_configuration_value(name,value);
@@ -16,7 +16,7 @@ void setConfiguration(const std::string& name, const std::string& value) {
 
 void setRoute(int shard, const std::string& host, int port) {
     std::vector<std::string_view> params = {"ADDROUTE", std::to_string(shard), host, std::to_string(port)};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, ADDROUTE);
     if (r == 0) {
         art::std_log("add route", host, port);
@@ -24,7 +24,7 @@ void setRoute(int shard, const std::string& host, int port) {
 }
 void removeRoute(int shard) {
     std::vector<std::string_view> params = {"REMROUTE", std::to_string(shard)};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, REMROUTE);
     if (r == 0) {
         art::std_log("removed route", shard);
@@ -33,7 +33,7 @@ void removeRoute(int shard) {
 
 Route getRoute(int shard) {
     std::vector<std::string_view> params = {"ROUTE", std::to_string(shard)};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, ROUTE);
     if (r == 0 && sc.results.size() == 2) {
         return{sc.results[0], sc.results[1]};
@@ -45,7 +45,7 @@ Route getRoute(int shard) {
 
 void load(const std::string &host, const std::string& port) {
     std::vector<std::string_view> params = {"RETRIEVE", host, port};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, RETRIEVE);
     if (r == 0) {
         art::std_log("loaded all shards from", host, port);
@@ -56,7 +56,7 @@ void load(const std::string &host, int port) {
 }
 void start(const std::string &host, const std::string& port) {
     std::vector<std::string_view> params = {"START", host, port};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, START);
     if (r == 0) {
         art::std_log("started server on", host, port);
@@ -70,7 +70,7 @@ void start(const std::string& port) {
 }
 void stop() {
     std::vector<std::string_view> params = {"STOP"};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, STOP);
     if (r == 0) {
         art::std_log("stopped server");
@@ -78,7 +78,7 @@ void stop() {
 }
 void ping(const std::string &host, const std::string& port) {
     std::vector<std::string_view> params = {"PING", host, port};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, PING);
     if (r != 0) {
         art::std_log("ping failed", host, port);
@@ -89,7 +89,7 @@ void ping(const std::string &host, int port) {
 }
 void publish(const std::string &ip, const std::string &port) {
     std::vector<std::string_view> params = {"PUBLISH", ip, port};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, PUBLISH);
     if (r != 0) {
         art::std_err("publish failed", ip, port);
@@ -101,7 +101,7 @@ void publish(const std::string &host, int port) {
 
 void pull(const std::string &ip, const std::string &port) {
     std::vector<std::string_view> params = {"PULL", ip, port};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, PULL);
     if (r != 0) {
         art::std_err("publish failed", ip, port);
@@ -113,7 +113,7 @@ void pull(const std::string &host, int port) {
 
 unsigned long long size()  {
     std::vector<std::string_view> params = {"SIZE"};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, ::SIZE);
     if (r == 0) {
         return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
@@ -122,7 +122,7 @@ unsigned long long size()  {
 }
 void save() {
     std::vector<std::string_view> params = {"SAVE"};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, ::SAVE);
     if (r == 0) {}
 }
@@ -386,7 +386,7 @@ long long KeyValue::size() const {
 
 void load() {
     std::vector<std::string_view> params = {"LOAD"};
-    swig_caller sc;
+    rpc_caller sc;
     int r = sc.call(params, ::LOAD);
     if (r != 0) {
         art::std_err("load failed");

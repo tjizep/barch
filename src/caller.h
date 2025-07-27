@@ -26,6 +26,9 @@ struct caller {
     virtual int end_array(size_t length) = 0;
     virtual int reply_encoded_key(art::value_type key) = 0;
     virtual int reply_values(const std::initializer_list<Variable>& keys) = 0;
+    virtual const std::string& get_user() const = 0;
+    virtual const heap::vector<bool>& get_acl() const = 0;
+    virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
 };
 typedef heap::small_vector<art::value_type> arg_t;
 #endif //CALLER_H

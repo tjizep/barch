@@ -15,6 +15,7 @@ extern "C" {
 #include <chrono>
 #include <initializer_list>
 #include "sastam.h"
+#include "glob.h"
 
 namespace art {
     /**
@@ -98,7 +99,22 @@ namespace art {
             }
             return ctr;
         }
-
+        bool match(const char* pat, int at) const {
+            if (at >= argc) return false;
+            const char *it = toc(at);
+            return  (1 == glob::stringmatchlen({pat},{it}, true));
+        }
+        int match(const std::initializer_list<const char *> &names, int at) {
+            const char *token = toc(at);
+            int ctr = 0;
+            for (const char *name: names) {
+                if (1 == glob::stringmatchlen({name},{token}, true)){
+                    return ctr;
+                }
+                ++ctr;
+            }
+            return ctr;
+        }
         bool has(const char *what, int at) const {
             if (at >= argc) return false;
 
@@ -702,6 +718,112 @@ namespace art {
                         return VALKEYMODULE_ERR;
                 }
             } while (spos < argc);
+            return VALKEYMODULE_OK;
+        }
+    };
+    struct acl_spec : base_key_spec {
+        acl_spec &operator=(ValkeyModuleString **) = delete;
+
+        acl_spec &operator=(const zrange_spec &) = delete;
+
+        acl_spec(const acl_spec &) = delete;
+
+        acl_spec(const arg_t& argv) : base_key_spec(argv) {
+        }
+        enum {
+            cmd_set = 0,
+            cmd_get = 1,
+            cmd_del = 2,
+            cmd_users = 3,
+            cmd_reset = 4,
+            cmd_help = 5,
+            cmd_count = 6
+        };
+        enum {
+            flag_filter = 0,
+            flag_cat_add = 1,
+            flag_cat_rem = 2,
+            flag_secret = 3,
+            flag_none = 4
+        };
+        bool set = false;
+        bool get = false;
+        bool del = false;
+        bool users = false;
+        bool reset = false;
+        bool count = false;
+        bool is_filter = false;
+        bool is_cat = false;
+        bool is_secret = false;
+        std::string user{};
+        std::string secret{};
+        heap::string_set filters{};
+        heap::string_map<bool> cat{};
+        int parse_set(int spos) {
+
+            user = tos(spos++);
+            if (!has("on",spos++)) {
+                return VALKEYMODULE_ERR;
+            }
+
+            while (argc != spos) {
+                int filter = match({"~*","+*","-*",">*"},spos);
+                const char * value = toc(spos++);
+                if (*value == 0x00) {
+                    return VALKEYMODULE_ERR;
+                }
+                switch (filter) {
+                    case flag_filter:
+                        filters.insert(&value[1]);
+                        is_filter = true;
+                        break;
+                    case flag_cat_add:
+                    case flag_cat_rem:
+                        cat[&value[1]] = *value == '+';
+                        is_cat = true;
+                        break;
+                    case flag_secret:
+                        secret = &value[1];
+                        is_secret = true;
+                        break;
+                    default:
+                        return VALKEYMODULE_ERR;
+                }
+            }
+            return VALKEYMODULE_OK;
+        }
+        int parse_options() {
+
+            int spos = 1; // the command is the first one
+            if (argc < 4) {
+                return VALKEYMODULE_ERR;
+            }
+            int which = has_enum({"setuser", "getuser", "del", "users", "reset", "help", "count"}, spos);
+            switch (which) {
+                case cmd_set:
+                    set = true;
+                    ++spos;
+                    return parse_set(spos);
+                case cmd_get:
+                    get = true;
+                    break;
+                case cmd_del:
+                    del = true;
+                    break;
+                case cmd_users:
+                    users = true;
+                    break;
+                case cmd_reset:
+                    reset = true;
+                    break;
+                case cmd_help:
+                    break;
+                case cmd_count:
+                    count = true;
+                    break;
+                default:
+                    return VALKEYMODULE_ERR;
+            }
             return VALKEYMODULE_OK;
         }
     };

@@ -6,32 +6,47 @@
 #define BARCH_APIS_H
 #include "caller.h"
 typedef std::function<int (caller& call, const arg_t& argv)> barch_function;
+typedef heap::string_map<size_t> catmap;
+heap::vector<std::string> categories();
+catmap& get_category_map();
+heap::vector<bool> cats2vec(const heap::string_map<bool>& icats);
 
 struct barch_info {
     barch_info() = default;
-    barch_info(const barch_function& call, bool data = true) : call(call), data(data){}
+    void set_cats(const std::initializer_list<const char *>& icats) {
+        heap::string_map<bool> mycats;
+        for (auto c : icats) {
+            mycats[c] = true;
+        }
+        this->cats = cats2vec(mycats);
+        this->dp = get_category_map()["data"];
+    }
+    barch_info(const barch_function& call, const std::initializer_list<const char *>& cats) : call(call) {
+        set_cats(cats);
+    }
     barch_info(const barch_info& binfo) {
         call = binfo.call;
-        data = binfo.data;
-        pub = binfo.pub;
         calls = (uint64_t)binfo.calls;
     }
     barch_info& operator=(const barch_info& binfo) {
         call = binfo.call;
-        data = binfo.data;
-        pub = binfo.pub;
         calls = (uint64_t)binfo.calls;
         return *this;
     }
+    bool is_data() const {
+        return cats[dp];
+    }
     barch_function call{};
-    bool data {true};
-    bool pub {false};
+    heap::vector<bool> cats{};
     std::atomic<uint64_t> calls {0};
+    int dp = 0;
 };
 typedef std::unordered_map<std::string, barch_info> function_map;
 extern "C"{
-    // Misc
+    // Misc/sys
     int COMMAND(caller& call,const arg_t& argv);
+    int AUTH(caller& call,const arg_t& argv);
+    int ACL(caller& call,const arg_t& argv);
 
     // Keys
     int SET(caller& call,const arg_t& argv);

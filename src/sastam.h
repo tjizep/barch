@@ -619,21 +619,42 @@ namespace heap {
         }
     };
 
-    template<typename K, typename V>
+    struct string_hash{
+        size_t operator()(const std::string& k) const {
+            uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(k.data(), k.size());
+            return hash;
+        }
+    };
+
+    template<typename K, typename V >
     using map = ankerl::unordered_dense::map
-    <K
+    <     K
         , V
-        , std::hash<size_t>
-        , std::equal_to<size_t>
+        , std::hash<K>
+        , std::equal_to<K>
         , allocator<std::pair<K, V> >
+    >;
+    template<typename V >
+    using string_map = ankerl::unordered_dense::map
+    <     std::string
+        , V
+        , string_hash
+        , std::equal_to<std::string>
+        , allocator<std::pair<std::string, V> >
     >;
 
     template<typename K>
     using set = ankerl::unordered_dense::set
     <K
-        , ankerl::unordered_dense::hash<size_t>
-        , std::equal_to<size_t>
+        , std::hash<K>
+        , std::equal_to<K>
         , allocator<K>
+    >;
+    using string_set = ankerl::unordered_dense::set
+    <   std::string
+        , string_hash
+        , std::equal_to<std::string>
+        , allocator<std::string>
     >;
     template<typename K>
     using std_vector = std::vector

@@ -39,8 +39,12 @@ namespace art {
         value_type(const char *v, size_t l): bytes((const unsigned char *) v), size(l) {
         }
 
+        value_type(const char *v): bytes((const unsigned char *) v), size(strlen(v)) {
+        }
+
         value_type(const std::string& v): bytes((const unsigned char *) v.data()), size(v.size()) {
         }
+
         value_type(const std::string_view& v): bytes((const unsigned char *) v.data()), size(v.size()) {
         }
 

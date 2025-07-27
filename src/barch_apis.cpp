@@ -4,90 +4,124 @@
 // Created by teejip on 7/13/25.
 //
 
+catmap& get_category_map() {
+    static catmap r;
+    if (!r.empty()) return r;
+    size_t at = 0;
+    for (auto& c : categories()) {
+        r[c] = at++;
+    }
+    return r;
+}
+
+
+heap::vector<std::string> categories() {
+    heap::vector<std::string> r = {"read","write","data", "stats",
+        "dangerous","acl", "keyspace",
+        "keys", "orderedset","hash","list",
+        "connection","config"};
+
+    return r;
+}
+heap::vector<bool> cats2vec(const heap::string_map<bool>& icats) {
+    heap::vector<bool> cats;
+    auto &catm = get_category_map();
+    cats.resize(get_category_map().size());
+    for (auto &c : icats) {
+        auto i = catm.find(c.first);
+        if (i != catm.end()) {
+            cats[i->second] = c.second;
+        } //ignore unknown cats
+    }
+    return cats;
+}
 function_map& functions_by_name() {
     static function_map r;
     if (!r.empty()) return r;
 
-    r["SET"] = {::SET};
-    r["KEYS"] = {::KEYS};
-    r["INCR"] = {::INCR};
-    r["INCRBY"] = {::INCRBY};
-    r["DECR"] = {::DECR};
-    r["DECRBY"] = {::DECRBY};
-    r["COUNT"] = {::COUNT};
-    r["EXISTS"] = {::EXISTS};
-    r["EXPIRE"] = {::EXPIRE};
-    r["MSET"] = {::MSET};
-    r["ADD"] = {::ADD};
-    r["GET"] = {::GET};
-    r["MGET"] = {::MGET};
-    r["MIN"] = {::MIN};
-    r["MAX"] = {::MAX};
-    r["LB"] = {::LB};
-    r["UB"] = {::UB};
-    r["REM"] = {::REM};
-    r["RANGE"] = {::RANGE};
-    r["TTL"] = {::TTL};
-    r["SIZE"] = {::SIZE};
-    r["DBSIZE"] = {::SIZE};
-    r["SAVE"] = {::SAVE,false};
-    r["FLUSHDB"] = {::CLEAR,false};
-    r["FLUSHALL"] = {::CLEAR,false};
-    r["STATS"] = {::STATS,false};
-    r["OPS"] = {OPS,false};
+    r["SET"] = {::SET,{"write","keys","data"}};
+    r["KEYS"] = {::KEYS,{"read","keys","data"}};
+    r["INCR"] = {::INCR,{"write","keys","data"}};
+    r["INCRBY"] = {::INCRBY,{"write","keys","data"}};
+    r["DECR"] = {::DECR,{"write","keys","data"}};
+    r["DECRBY"] = {::DECRBY,{"write","keys","data"}};
+    r["COUNT"] = {::COUNT,{"read","keys","data"}};
+    r["EXISTS"] = {::EXISTS,{"read","keys","data"}};
+    r["EXPIRE"] = {::EXPIRE,{"write","keys","data"}};
+    r["MSET"] = {::MSET,{"write","keys","data"}};
+    r["ADD"] = {::ADD,{"write","keys","data"}};
+    r["GET"] = {::GET,{"read","keys","data"}};
+    r["MGET"] = {::MGET,{"read","keys","data"}};
+    r["MIN"] = {::MIN,{"read","keys","data"}};
+    r["MAX"] = {::MAX,{"read","keys","data"}};
+    r["LB"] = {::LB,{"read","keys","data"}};
+    r["UB"] = {::UB,{"read","keys","data"}};
+    r["REM"] = {::REM,{"write","keys","data"}};
+    r["RANGE"] = {::RANGE,{"read","keys","data"}};
+    r["TTL"] = {::TTL,{"read","keys","data"}};
+    r["SIZE"] = {::SIZE,{"read"}};
+    r["DBSIZE"] = {::SIZE,{"read"}};
+    r["SAVE"] = {::SAVE,{"read"}};
+    r["AUTH"] = {::AUTH,{"read","acl"}};
+    r["ACL"] = {::ACL,{"write","acl"}};
 
-    r["ADDROUTE"] = {::ADDROUTE,false};
-    r["ROUTE"] = {::ROUTE,false};
-    r["REMROUTE"] = {::REMROUTE,false};
-    r["PUBLISH"] = {::PUBLISH,false};
-    r["PULL"] = {::PULL,false};
-    r["LOAD"] = {::LOAD,false};
-    r["CONFIG"] = {::CONFIG,false};
+    r["FLUSHDB"] = {::CLEAR,{"write","dangerous"}};
+    r["FLUSHALL"] = {::CLEAR,{"write","dangerous"}};
+    r["STATS"] = {::STATS,{"read","stats"}};
+    r["OPS"] = {OPS,{"read","stats"}};
 
-    r["LBACK"] = {::LBACK};
-    r["LFRONT"] = {::LFRONT};
-    r["LPUSH"] = {::LPUSH};
-    r["LPOP"] = {::LPOP};
-    r["LLEN"] = {::LLEN};
-    r["START"] = {::START,false};
-    r["STOP"] = {::STOP,false};
-    r["RETRIEVE"] = {::RETRIEVE,false};
-    r["PING"] = {::PING,false};
-    r["HSET"] = {::HSET};
-    r["HEXPIREAT"] = {::HEXPIREAT};
-    r["HEXPIRE"] = {::HEXPIRE};
+    r["ADDROUTE"] = {::ADDROUTE,{"write","connection"}};
+    r["ROUTE"] = {::ROUTE,{"read","connection"}};
+    r["REMROUTE"] = {::REMROUTE,{"write","connection"}};
+    r["PUBLISH"] = {::PUBLISH,{"write","connection"}};
+    r["PULL"] = {::PULL,{"write","dangerous"}};
+    r["LOAD"] = {::LOAD,{"write","dangerous"}};
+    r["CONFIG"] = {::CONFIG,{"write","read","config"}};
+
+    r["LBACK"] = {::LBACK,{"write","list","data"}};
+    r["LFRONT"] = {::LFRONT,{"read","list","data"}};
+    r["LPUSH"] = {::LPUSH,{"write","list","data"}};
+    r["LPOP"] = {::LPOP,{"write","list","data"}};
+    r["LLEN"] = {::LLEN,{"read","list","data"}};
+    r["START"] = {::START,{"write","connection","data"}};
+    r["STOP"] = {::STOP,{"write","connection","data"}};
+    r["RETRIEVE"] = {::RETRIEVE,{"write","dangerous","data"}};
+    r["PING"] = {::PING,{"read","connection","data"}};
+    r["HSET"] = {::HSET,{"write","hash","data"}};
+    r["HEXPIREAT"] = {::HEXPIREAT,{"write","hash","data"}};
+    r["HEXPIRE"] = {::HEXPIRE,{"write","hash","data"}};
     //r["HGETEX"] = ::HGETEX;
-    r["HMGET"] = {::HMGET};
-    r["HINCRBY"] = {::HINCRBY};
-    r["HINCRBYFLOAT"] = {::HINCRBYFLOAT};
-    r["HDEL"] = {::HDEL};
-    r["HGETDEL"] = {::HGETDEL};
-    r["HTTL"] = {::HTTL};
-    r["HGET"] = {::HGET};
-    r["HLEN"] = {::HLEN};
-    r["HEXPIRETIME"] = {::HEXPIRETIME};
-    r["HGETALL"] = {::HGETALL};
-    r["HKEYS"] = {::HKEYS};
-    r["HEXISTS"] = {::HEXISTS};
-    r["ZADD"] = {::ZADD};
-    r["ZREM"] = {::ZREM};
-    r["ZINCRBY"] = {::ZINCRBY};
-    r["ZRANGE"] = {::ZRANGE};
-    r["ZCARD"] = {::ZCARD};
-    r["ZDIFF"] = {::ZDIFF};
-    r["ZDIFFSTORE"] = {::ZDIFFSTORE};
-    r["ZINTERSTORE"] = {::ZINTERSTORE};
-    r["ZINTERCARD"] = {::ZINTERCARD};
-    r["ZINTER"] = {::ZINTER};
-    r["ZPOPMIN"] = {::ZPOPMIN};
-    r["ZPOPMAX"] = {::ZPOPMAX};
-    r["ZREVRANGE"] = {::ZREVRANGE};
-    r["ZRANGEBYSCORE"] = {::ZRANGEBYSCORE};
-    r["ZREVRANGEBYSCORE"] = {::ZREVRANGEBYSCORE};
-    r["ZREMRANGEBYLEX"] = {::ZREMRANGEBYLEX};
-    r["ZRANGEBYLEX"] = {::ZRANGEBYLEX};
-    r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX};
-    r["ZRANK"] = {::ZRANK};
-    r["ZFASTRANK"] = {::ZFASTRANK};
+    r["HMGET"] = {::HMGET,{"read","hash","data"}};
+    r["HINCRBY"] = {::HINCRBY,{"write","hash","data"}};
+    r["HINCRBYFLOAT"] = {::HINCRBYFLOAT,{"write","hash","data"}};
+    r["HDEL"] = {::HDEL,{"write","hash","data"}};
+    r["HGETDEL"] = {::HGETDEL,{"write","hash","data"}};
+    r["HTTL"] = {::HTTL,{"read","hash","data"}};
+    r["HGET"] = {::HGET,{"read","hash","data"}};
+    r["HLEN"] = {::HLEN,{"read","hash","data"}};
+    r["HEXPIRETIME"] = {::HEXPIRETIME,{"write","hash","data"}};
+    r["HGETALL"] = {::HGETALL,{"read","hash","data"}};
+    r["HKEYS"] = {::HKEYS,{"read","hash","data"}};
+    r["HEXISTS"] = {::HEXISTS,{"read","hash","data"}};
+    r["ZADD"] = {::ZADD,{"write","ordered","data"}};
+    r["ZREM"] = {::ZREM,{"write","ordered","data"}};
+    r["ZINCRBY"] = {::ZINCRBY,{"write","ordered","data"}};
+    r["ZRANGE"] = {::ZRANGE,{"write","ordered","data"}};
+    r["ZCARD"] = {::ZCARD,{"write","ordered","data"}};
+    r["ZDIFF"] = {::ZDIFF,{"write","ordered","data"}};
+    r["ZDIFFSTORE"] = {::ZDIFFSTORE,{"write","ordered","data"}};
+    r["ZINTERSTORE"] = {::ZINTERSTORE,{"write","ordered","data"}};
+    r["ZINTERCARD"] = {::ZINTERCARD,{"write","ordered","data"}};
+    r["ZINTER"] = {::ZINTER,{"read","ordered","data"}};
+    r["ZPOPMIN"] = {::ZPOPMIN,{"write","ordered","data"}};
+    r["ZPOPMAX"] = {::ZPOPMAX,{"write","ordered","data"}};
+    r["ZREVRANGE"] = {::ZREVRANGE,{"read","ordered","data"}};
+    r["ZRANGEBYSCORE"] = {::ZRANGEBYSCORE,{"read","ordered","data"}};
+    r["ZREVRANGEBYSCORE"] = {::ZREVRANGEBYSCORE,{"read","ordered","data"}};
+    r["ZREMRANGEBYLEX"] = {::ZREMRANGEBYLEX,{"write","ordered","data"}};
+    r["ZRANGEBYLEX"] = {::ZRANGEBYLEX,{"read","ordered","data"}};
+    r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX,{"read","ordered","data"}};
+    r["ZRANK"] = {::ZRANK,{"read","ordered","data"}};
+    r["ZFASTRANK"] = {::ZFASTRANK,{"read","ordered","data"}};
     return r;
 }

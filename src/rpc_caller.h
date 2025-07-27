@@ -12,7 +12,8 @@
 #include "server.h"
 #include "barch_apis.h"
 #include "sastam.h"
-struct swig_caller : caller {
+#include "auth_api.h"
+struct rpc_caller : caller {
 
     std::shared_ptr<barch::repl::rpc> host {};
     heap::vector<std::shared_ptr<barch::repl::rpc>> routes {};
@@ -20,7 +21,9 @@ struct swig_caller : caller {
     std::string r{};
     heap::vector<Variable> results{};
     heap::vector<std::string> errors{};
-    swig_caller() {
+    heap::vector<bool> acl{get_all_acl()};
+    std::string user = "default";
+    rpc_caller() {
         routes.reserve(art::get_shard_count().size());
         for (size_t shard : art::get_shard_count()) {
             auto route = barch::repl::get_route(shard);
@@ -113,7 +116,7 @@ struct swig_caller : caller {
                     auto &fbn = functions_by_name();
                     std::string n = {params[0].data(),params[0].size()};
                     auto fi = fbn.find(n);
-                    if (fi != fbn.end() && fi->second.data) { // only route data calls
+                    if (fi != fbn.end() && fi->second.is_data()) { // only route data calls
                         ++statistics::repl::attempted_routes;
                         if (routes[shard]->call(r, results, params) == 0) {
                             ++statistics::repl::routes_succeeded;
@@ -177,6 +180,16 @@ struct swig_caller : caller {
         }
         return call(sv, std::forward<TC>(f));
     }
+    const std::string& get_user() const override  {
+        return user;
+    }
+    const heap::vector<bool>& get_acl() const override {
+        return acl;
+    }
+    void set_acl(const std::string& user,const heap::vector<bool>& acl) override {
+        this->user = user;
+        this->acl = acl;
+    };
 };
 
 #endif //SWIG_CALLER_H

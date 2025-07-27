@@ -28,7 +28,7 @@
 #include <cstdio>
 #include "barch_apis.h"
 #include "swig_api.h"
-#include "swig_caller.h"
+#include "rpc_caller.h"
 #include "vk_caller.h"
 #include "redis_parser.h"
 enum {
@@ -427,7 +427,7 @@ namespace barch {
             uint32_t buffers_size = 0;
             uint32_t replies_size = 0;
 
-            swig_caller caller{};
+            rpc_caller caller{};
             heap::vector<uint8_t> replies{};
             heap::vector<uint8_t> buffer{};
             void clear() {
@@ -565,6 +565,14 @@ namespace barch {
             {
                 do_read();
             }
+            bool is_authorized(const heap::vector<bool>& func,const heap::vector<bool>& user) {
+                for (size_t i = 0; i < func.size(); ++i) {
+                    bool user_flag = user.size() > i && user[i];
+                    if (func[i] && !user_flag)
+                        return false;
+                }
+                return true;
+            }
         private:
             void run_params(vector_stream& stream, const heap::vector<std::string>& params) {
                 const std::string &cn = params[0];
@@ -576,6 +584,10 @@ namespace barch {
                     prev_cn = cn;
                     auto &f = ic->second.call;
                     ++ic->second.calls;
+                    if (!is_authorized(ic->second.cats,caller.get_acl())) {
+                        redis::rwrite(stream, error{"not authorized"});
+                        return;
+                    }
                     int32_t r = caller.call(params,f);
                     if (r < 0) {
                         if (!caller.errors.empty())
@@ -647,7 +659,7 @@ namespace barch {
             tcp::socket socket_;
             char data_[rpc_io_buffer_size];
             redis::redis_parser parser{};
-            swig_caller caller{};
+            rpc_caller caller{};
             vector_stream stream{};
             std::string prev_cn{};
             function_map::iterator ic{};

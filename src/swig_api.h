@@ -4,7 +4,7 @@
 
 #ifndef SWIG_API_H
 #define SWIG_API_H
-#include "swig_caller.h"
+#include "rpc_caller.h"
 #include <string>
 #include <vector>
 void setConfiguration(const std::string& name, const std::string& value);
@@ -271,7 +271,7 @@ public:
 private:
     mutable std::vector<std::string_view> params {};
     mutable std::vector<Value> result{};
-    mutable swig_caller sc{};
+    mutable rpc_caller sc{};
 };
 
 class KeyValue {
@@ -301,7 +301,7 @@ public:
 private:
     mutable std::vector<std::string_view> params {};
     mutable std::vector<Value> result{};
-    mutable swig_caller sc{};
+    mutable rpc_caller sc{};
 };
 
 /**
@@ -328,7 +328,7 @@ public:
 private:
     mutable std::vector<std::string_view> params{};
     mutable std::vector<Value> result{};
-    mutable swig_caller sc{};
+    mutable rpc_caller sc{};
 };
 
 /**
@@ -380,6 +380,6 @@ public:
 private:
     mutable std::vector<std::string_view> params{};
     mutable std::vector<Value> result{};
-    mutable swig_caller sc{};
+    mutable rpc_caller sc{};
 };
 #endif //SWIG_API_H

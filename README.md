@@ -117,6 +117,7 @@ COUNT
 
 # Other VALKEY API's implemented (Mostly Key Value + TTL)
 ```
+AUTH                       ACL
 SET                        KEYS
 INCR                       INCRBY
 DECR                       DECRBY

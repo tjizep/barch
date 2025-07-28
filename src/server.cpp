@@ -576,18 +576,22 @@ namespace barch {
         private:
             void run_params(vector_stream& stream, const heap::vector<std::string>& params) {
                 const std::string &cn = params[0];
-                if (prev_cn != cn)
+                if (prev_cn != cn) {
                     ic = barch_functions.find(cn);
-                if (ic == barch_functions.end()) {
-                    redis::rwrite(stream, error{"unknown command"});
-                } else {
                     prev_cn = cn;
-                    auto &f = ic->second.call;
-                    ++ic->second.calls;
-                    if (!is_authorized(ic->second.cats,caller.get_acl())) {
+                    if (ic != barch_functions.end() &&
+                        !is_authorized(ic->second.cats,caller.get_acl())) {
                         redis::rwrite(stream, error{"not authorized"});
                         return;
                     }
+                }
+                if (ic == barch_functions.end()) {
+                    redis::rwrite(stream, error{"unknown command"});
+                } else {
+
+                    auto &f = ic->second.call;
+                    ++ic->second.calls;
+
                     int32_t r = caller.call(params,f);
                     if (r < 0) {
                         if (!caller.errors.empty())

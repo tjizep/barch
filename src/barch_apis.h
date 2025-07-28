@@ -45,7 +45,7 @@ struct barch_info {
     std::atomic<uint64_t> calls {0};
     int dp = 0;
 };
-typedef std::unordered_map<std::string, barch_info> function_map;
+typedef heap::string_map<barch_info> function_map;
 extern "C"{
     // Misc/sys
     int COMMAND(caller& call,const arg_t& argv);

@@ -792,10 +792,17 @@ namespace art {
             }
             return VALKEYMODULE_OK;
         }
+        int parse_get(int spos) {
+
+            user = tos(++spos);
+
+            return VALKEYMODULE_OK;
+        }
+
         int parse_options() {
 
             int spos = 1; // the command is the first one
-            if (argc < 4) {
+            if (argc < 3) {
                 return VALKEYMODULE_ERR;
             }
             int which = has_enum({"setuser", "getuser", "del", "users", "reset", "help", "count"}, spos);
@@ -806,10 +813,10 @@ namespace art {
                     return parse_set(spos);
                 case cmd_get:
                     get = true;
-                    break;
+                    return parse_get(spos);
                 case cmd_del:
                     del = true;
-                    break;
+                    return parse_get(spos);
                 case cmd_users:
                     users = true;
                     break;

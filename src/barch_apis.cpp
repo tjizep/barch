@@ -24,19 +24,25 @@ catmap& get_category_map() {
 heap::vector<std::string> categories() {
     heap::vector<std::string> r = {"read","write","data", "stats",
         "dangerous","acl", "keyspace",
-        "keys", "orderedset","hash","list",
+        "keys", "orderedset","hash","list","auth",
         "connection","config"};
 
     return r;
 }
-heap::vector<bool> cats2vec(const heap::string_map<bool>& icats) {
+heap::vector<bool> cats2vec(const catmap& icats) {
     heap::vector<bool> cats;
     auto &catm = get_category_map();
     cats.resize(get_category_map().size());
     for (auto &c : icats) {
+        if (c.first == "all") {
+            for (size_t i = 0;i < cats.size();++i) {
+                cats[i] = c.second != 0;
+            }
+            continue;
+        }
         auto i = catm.find(c.first);
         if (i != catm.end()) {
-            cats[i->second] = c.second;
+            cats[i->second] = c.second != 0;
         } //ignore unknown cats
     }
     return cats;
@@ -69,7 +75,7 @@ function_map& functions_by_name() {
         r["SIZE"] = {::SIZE,{"read"}};
         r["DBSIZE"] = {::SIZE,{"read"}};
         r["SAVE"] = {::SAVE,{"read"}};
-        r["AUTH"] = {::AUTH,{"read","acl"}};
+        r["AUTH"] = {::AUTH,{"auth"}};
         r["ACL"] = {::ACL,{"write","acl"}};
 
         r["FLUSHDB"] = {::CLEAR,{"write","dangerous"}};

@@ -600,9 +600,10 @@ art::iterator::iterator(tree* t) : t(t) {
     }
 }
 
-art::iterator::iterator(tree* t, value_type key) : t(t) {
+art::iterator::iterator(tree* t, value_type unfiltered_key) : t(t) {
     ++statistics::lb_ops;
     try {
+        value_type key = t->filter_key(unfiltered_key);
         auto lb = inner_lower_bound(tl, t, key); //inner_min_bound(tl, t, key);
         if (lb.null()) return;
         const art::leaf *al = lb.const_leaf();
@@ -1939,17 +1940,22 @@ void art::tree::update_trace(int direction) {
 bool art::tree::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
     return this->insert({}, key, value, update, fc);
 }
-bool art::tree::insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) {
+
+art::value_type art::tree::filter_key(value_type key) const {
+    if (key.bytes[key.size - 1] != 0) {
+        temp_key = {key.chars(), key.size};// copy the data so that we don't cause potential buffer overflow
+        return  {temp_key.data(),temp_key.size()+1}; // include the null term
+    }
+    return key;
+}
+bool art::tree::insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
     //storage_release release(latch);
     if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
         return false;
     }
-    if (key.bytes[key.size - 1] != 0) {
-        temp_key = {key.chars(), key.size};// copy the data so that we don't cause potential buffer overflow
-        key = {temp_key.data(),temp_key.size()+1}; // include the null term
-    }
+    value_type key = filter_key(unfiltered_key);
 #if 0
     if (buffers.size() < 100000){
         kv_buf b{options,key,value};
@@ -1976,8 +1982,8 @@ bool art::tree::insert(value_type key, value_type value, bool update) {
 
     }) ;
 }
-void art::tree::update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
-
+void art::tree::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+    auto key = filter_key(unfiltered_key);
     auto repl_updateresult = [&](const node_ptr &leaf) {
         auto value = updater(leaf);
         if (value.null()) {
@@ -1990,9 +1996,10 @@ void art::tree::update(value_type key, const std::function<node_ptr(const node_p
     };
     art::update(this, key, repl_updateresult);
 }
-bool art::tree::remove(value_type key, const NodeResult &fc) {
+bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
     //storage_release release(latch);
     size_t before = size;
+    auto key = filter_key(unfiltered_key);
     art_delete(this, key, fc);
     if (size < before) {
         // replicate the delete
@@ -2001,9 +2008,11 @@ bool art::tree::remove(value_type key, const NodeResult &fc) {
     return size < before;
 }
 bool art::tree::remove(value_type key) {
+
     return this->remove(key, [](const node_ptr &) {});
 }
-art::node_ptr art::tree::search(value_type key) {
+art::node_ptr art::tree::search(value_type unfiltered_key) {
+    value_type key = filter_key(unfiltered_key);
     auto r = art_search(this, key);
     if (r.null()) {
         last_leaf_added = nullptr; // clear it before trying to retrieve

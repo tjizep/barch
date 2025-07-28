@@ -18,6 +18,20 @@ It's also usable as a valkey module and can be started as
 ```
 valkey-server --loadmodule _barch.so
 ```
+### Some preliminary benchmark(s)
+
+Machine is 8 core AMD Zen 4 32 GiB Ram, Ubuntu 20.04
+CPU Usage 32% for Barch, 10% for Valkey and 22% for Benchmark
+BARCH Throughput
+   ```
+   ./valkey-benchmark -t get -r 10000000 -n 40000000 -P 12 -q --threads 3 -p 14000
+   GET: rps=3314784.0 (overall: 3291016.0) avg_msec=0.118 (overall: 0.127)
+   ```
+Valkey Throughput
+   ```
+   ./valkey-benchmark -t get -r 10000000 -n 40000000 -P 12 -q --threads 3
+   GET: 1066126.62 requests per second, p50=0.519 msec
+   ```
 
 ### Advantages of the embedded L1 server
 
@@ -93,14 +107,15 @@ Barch has on average 50% less latency the difference increases with key count an
 5. `B.MAX` returns largest key  (or nil) - numbers are less than text
 6. `B.MIN` returns smallest key (or nil) if there are no keys
 7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://github.com/tjizep/barch/blob/main/docs/USECASE.md)
-8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://github.com/tjizep/barch/blob/main/USECASE.md) 
+8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://github.com/tjizep/barch/blob/main/docs/USECASE.md) 
 9. `B.LB K1` lower bound: first key not less than K1 
 10. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys
 11. `B.HEAPBYTES` bytes allocated by `BARCH` alone
 12. `B.STATS` lots of statistics on internal datastructures, node count, defrag, pages etc.
 13. `B.OPS` operation counts of various `BARCH` api commands
-14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
-15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/KEYS.md)
+14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/docs/KEYS.md)
+15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/docs/KEYS.md)
+15. `ACL` and `AUTH` [more](https://github.com/tjizep/barch/blob/main/docs/ACL.md)
 
 # BARCH specific API's implemented
 ```

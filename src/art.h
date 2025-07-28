@@ -147,10 +147,11 @@ namespace art {
     private:
         trace_list trace{};
         std::set<kv_buf> buffers{};
-        std::string temp_key{};
+        mutable std::string temp_key{};
+
     public:
         void log_trace() const ;
-
+        value_type filter_key(value_type key) const;
         composite query{};
         composite cmd_ZADD_q1{};
         composite cmd_ZADD_qindex{};

@@ -9,12 +9,12 @@ typedef std::function<int (caller& call, const arg_t& argv)> barch_function;
 typedef heap::string_map<size_t> catmap;
 heap::vector<std::string> categories();
 catmap& get_category_map();
-heap::vector<bool> cats2vec(const heap::string_map<bool>& icats);
+heap::vector<bool> cats2vec(const catmap& icats);
 
 struct barch_info {
     barch_info() = default;
     void set_cats(const std::initializer_list<const char *>& icats) {
-        heap::string_map<bool> mycats;
+        catmap mycats;
         for (auto c : icats) {
             mycats[c] = true;
         }

@@ -34,6 +34,10 @@ struct rpc_caller : caller {
                 routes.emplace_back(barch::repl::create(route.ip,route.port));
             }
         }
+        std::vector<std::string_view> auth = {"AUTH","default","empty"};
+        if (this->call( auth,::AUTH) != 0) {
+            art::std_err("could not authenticate `default`");
+        }
     }
     [[nodiscard]] int wrong_arity()  override {
         errors.emplace_back("wrong_arity");

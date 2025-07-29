@@ -690,7 +690,9 @@ public:
     lru_list create_lru_list() {
         return lru;
     }
-
+    size_t get_page_count() const {
+        return main.page_count();
+    }
     std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer(size_t at) {
         return get_page_buffer_inner(at);
     }
@@ -1028,6 +1030,7 @@ struct alloc_pair {
     int sentinel = 1<<24;
     size_t shard{};
     std::shared_mutex latch{};
+    bool is_debug = false;
 
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};

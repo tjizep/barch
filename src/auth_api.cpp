@@ -33,7 +33,7 @@ static void init_auth(art::tree* auth) {
             write_lock write(auth->latch);
             add_cats(auth,"default","empty",cats);
         }
-        auth->save();
+        auth->save(false);
         art::std_log("Saved initial acl");
     }
 }
@@ -68,8 +68,8 @@ art::tree * get_auth() {
 }
 void save_auth() {
     auto a = get_auth();
-    a->save();
-}
+    a->save(false); //no stats
+ }
 static void add_cats(art::tree * a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats) {
     std::string key;
     if (user.empty()) return;

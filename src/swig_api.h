@@ -97,7 +97,7 @@ struct statistics_values {
 struct configuration_values {
     int compression = 0;
     long long n_max_memory_bytes{std::numeric_limits<long long>::max()};
-    long long maintenance_poll_delay{10};
+    long long maintenance_poll_delay{40};
     long long max_defrag_page_count{1};
     long long save_interval{120 * 1000};
     long long max_modifications_before_save{1300000};
@@ -292,7 +292,7 @@ public:
     void erase(const std::string &key);
     long long ttl(const std::string &key);
     bool exists(const std::string &key);
-    bool expire(const std::string &key, const std::string& flag);
+    bool expire(const std::string &key, long long sec, const std::string& flag = "");
     std::vector<Value> glob(const std::string& glob, unsigned long long max_ = 0) const;
     size_t globCount(const std::string& glob) const;
     Value lowerBound(const std::string& key) const ;

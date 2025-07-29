@@ -188,61 +188,52 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
 
 }
 
-void art::update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+bool art::update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     ++statistics::update_ops;
     try {
-        art::node_ptr r;
-        art::node_ptr n = t->root;
-        unsigned depth = 0;
-        art::node_ptr last = t->root;
-        unsigned last_index = 0;
-        while (!n.null()) {
-            // Might be a leaf
-            if (n.is_leaf) {
-                const auto *l = n.const_leaf();
-                if (l->expired()) {
-                    r = updater(r);
-                    return;
+        art::node_ptr n = lower_bound(t, key);
+        if (!n.is_leaf || n.const_leaf()->get_key() != key) return false;
+        auto &trace = get_tlb();
+
+
+        if (n.is_leaf) {
+            const leaf *leaf = n.const_leaf();
+            if (!leaf->expired()) {
+                node_ptr new_leaf = updater(n);
+                if (new_leaf.null()) {
+                    return false;
                 }
-                if (0 == l->compare(key)) {
-                    auto updated_child = updater(n);
-                    if (updated_child.null()) return;
-                    if (last.is_leaf) {
-                        t->root = updated_child;
-                    } else {
-                        last = last.modify()->expand_pointers(last, {updated_child});
-                        last.modify()->set_child(last_index, updated_child);
+                if (new_leaf.const_leaf()->get_key() != n.const_leaf()->get_key()) {
+                    return false;
+                }
+                if (!trace.empty()) {
+                    auto &el = last_el(get_tlb());
+                    node_ptr p = el.parent;
+                    if (!p.null()) {
+                        node_ptr p1 = p.modify()->expand_pointers(n, {new_leaf});
+                        if (p1 != p) {
+                            std_err("parent cannot expand here");
+                        }
+                        p1.modify()->set_child(el.child_ix, new_leaf);
+                    }else {
+                        return false;
                     }
-                    free_leaf_node(n);
-                } else {
-                    r = updater(r);
-                }
-                return;
-            }
-            const auto &d = n->data();
-            if (d.partial_len) {
-                unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
-                if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
-                    r = updater(r);
-                    return;
+                }else {
+
+                    t->root = new_leaf;
                 }
 
-                depth += d.partial_len;
-                if (depth >= key.length()) {
-                    r = updater(r);
-                    return;
-                }
-            }
-            last = n;
-            last_index = n->index(key[depth]);
-            n = n->get_child(last_index);
-            depth++;
+                destroy_node(n);
+                return true;
+            } //skip this one if it's expired
         }
-        r = updater(r);
+
+
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
+    return false;
 }
 
 // Find the maximum leaf under a node
@@ -311,10 +302,14 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
 
         art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
         if (te.child.null()) {
-            // there is no lower bound on this node
-            //increment_trace(t->root, trace);
-            //break;
-            return nullptr;
+            // there may be no lower bound on this node
+            art::node_ptr mx = inner_maximum(t->root);
+            if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+                return nullptr;
+            }
+            increment_trace(t->root, trace);
+            break;
+            //return nullptr;
         }
         if (!is_equal && !te.child.is_leaf) {
             // only for internal nodes - the lb has skipped some child nodes so we have to go back one
@@ -956,7 +951,8 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
                 fc(n);
                 art::leaf *dl = n.l();
 
-                if (dl->val_len == value.size && !l->expired())
+                if (dl->val_len == value.size && !l->expired() &&
+                    ((options.get_expiry() > 0) == dl->is_expiry()))
                 {
                     dl->set_value(value);
                     dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
@@ -978,7 +974,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
         }
         art::node_ptr l1 = n;
         // Create a new leaf
-        art::node_ptr l2 = t->make_leaf(key, value);
+        art::node_ptr l2 = t->make_leaf(key, value, options.get_expiry(), options.is_volatile());
         t->last_leaf_added = l2;
         // New value, we must split the leaf into a initial_node, pasts the new children to get optimal pointer size
         auto new_stored = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
@@ -1065,7 +1061,7 @@ RECURSE_SEARCH:;
     }
 
     // No child, node goes within the current node (n)
-    art::node_ptr l = t->make_leaf(key, value);
+    art::node_ptr l = t->make_leaf(key, value, options.get_expiry(), options.is_volatile());
     t->last_leaf_added = l;
     // check to see if pointers need to expand to 8 bytes (usually starts at 4 bytes for compression)
     n = n.modify()->expand_pointers(ref, {l});
@@ -1637,7 +1633,7 @@ bool art::tree::pull(std::string host, int port) {
     repl_client.add_source(std::move(host), port);
     return true;
 }
-bool art::tree::save() {
+bool art::tree::save(bool stats) {
     //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
     if (nodes.get_main().get_bytes_allocated()==0) return true;
@@ -1648,7 +1644,14 @@ bool art::tree::save() {
         if (!saved) {
             abort_with("synch error");
         }
-        stats_to_stream(of);
+        uint32_t w_stats = 0;
+        if (stats) {
+            w_stats = 1;
+        }
+        writep(of, w_stats);
+        if (w_stats == 1) {
+            stats_to_stream(of);
+        }
         auto root = logical_address(troot.logical);
         writep(of, root);
         writep(of, troot.is_leaf);
@@ -1732,7 +1735,7 @@ bool art::tree::send(std::ostream& out) {
             "seconds");
     return true;
 }
-bool art::tree::load() {
+bool art::tree::load(bool) {
 
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
@@ -1743,8 +1746,11 @@ bool art::tree::load() {
         bool is_leaf = false;
         // save stats in the leaf storage
         auto load_stats_and_root = [&](std::istream &in) {
-            stream_to_stats(in);
-
+            uint32_t w_stats = 0;
+            readp(in, w_stats);
+            if (w_stats != 0) {
+                stream_to_stats(in);
+            }
             readp(in, root);
             readp(in, is_leaf);
             readp(in, t->size);
@@ -1790,7 +1796,11 @@ bool art::tree::retrieve(std::istream& in) {
         bool is_leaf = false;
         // save stats in the leaf storage
         auto load_stats_and_root = [&](std::istream &in) {
-            stream_to_stats(in);
+            uint32_t w_stats = 0;
+            readp(in, w_stats);
+            if (w_stats != 0) {
+                stream_to_stats(in);
+            }
 
             readp(in, root);
             readp(in, is_leaf);
@@ -1982,7 +1992,7 @@ bool art::tree::insert(value_type key, value_type value, bool update) {
 
     }) ;
 }
-void art::tree::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     auto key = filter_key(unfiltered_key);
     auto repl_updateresult = [&](const node_ptr &leaf) {
         auto value = updater(leaf);
@@ -1994,7 +2004,7 @@ void art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
         this->repl_client.insert(options, key, l->get_value());
         return value;
     };
-    art::update(this, key, repl_updateresult);
+    return art::update(this, key, repl_updateresult);
 }
 bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
     //storage_release release(latch);

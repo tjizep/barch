@@ -500,7 +500,7 @@ namespace art {
                                                                              kl, std::numeric_limits<LeafSize>::max()))
                                                                              , val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max())) {
             if (expiry && now() > expiry) {
-                std_err("key already expired:");
+                //std_err("key already expired:");
             }
             if (expiry > 0) set_is_expiry();
             if (is_volatile) set_volatile();
@@ -719,6 +719,7 @@ namespace art {
     void free_node(node_ptr n);
 
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
+    node_ptr make_stable_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
 
     node_ptr alloc_8_node_ptr(alloc_pair& alloc, unsigned nt);
 

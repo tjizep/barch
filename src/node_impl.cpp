@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <random>
 
 #include "art.h"
 #include "statistics.h"
@@ -15,15 +16,23 @@ namespace art {
     }
 
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile ){
+
         unsigned val_len = v.size;
         unsigned key_len = key.length();
         unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
         unsigned sol = sizeof(leaf);
+        std::string sk = key.to_string();
+        std::string sv = v.to_string();
+        key = sk;
+        v = sv;
         size_t leaf_size = sol + key_len + ttl_size + 1 + val_len;
         // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
         logical_address logical{&alloc};
         auto ldata = alloc.get_leaves().new_address(logical, leaf_size);
         auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile);
+        if (alloc.is_debug) {
+            std_log("allocated leaf at", logical.address(),"size", leaf_size);
+        }
         ++statistics::leaf_nodes;
         l->set_key(key);
         l->set_value(v);
@@ -180,10 +189,12 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
     size_t pos = 0;
     for (auto i = page_data.begin(); i < e;) {
         const art::leaf *l = (art::leaf *) i;
+#if 0
         auto ks = l->byte_size();
         if (ks > statistics::max_leaf_size) {
             art::std_log("unusual leaf size",ks);
         }
+#endif
         if (l->deleted()) {
             deleted++;
         } else {
@@ -214,7 +225,7 @@ void art::tree::run_defrag() {
                 storage_release releaser(this->latch);
                 fl = lc.create_fragmentation_list(get_max_defrag_page_count());
             }
-            key_spec options;
+            key_options options;
             for (auto p: fl) {
                 storage_release releaser(this->latch);
                 // for some reason we have to not do this while a transaction is active
@@ -235,7 +246,8 @@ void art::tree::run_defrag() {
                 page_iterator(page.first, page.second, [&fc,&options,this](const leaf *l) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
-                    options.ttl = l->expiry_ms();
+                    options.set_expiry(l->expiry_ms());
+                    options.set_volatile(l->is_volatile());
                     art_insert(this, options, l->get_key(), l->get_value(), true, fc);
                     if (c1 + 1 != this->size) {
                         abort_with("key not added");
@@ -254,17 +266,19 @@ void art::tree::run_defrag() {
 void abstract_eviction(art::tree *t,
                        const std::function<bool(const art::leaf *l)> &predicate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
-    if (heap::get_physical_memory_ratio() < 0.99)
-        if (statistics::logical_allocated < art::get_max_module_memory()) return;
+
+    if (statistics::logical_allocated < art::get_max_module_memory()) return;
     auto fc = [](const art::node_ptr & unused(n)) -> void {
     };
     write_lock lock(get_lock());
     auto page = src();
-
     page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf *l) {
-        if (predicate(l))
-            art_delete(t, l->get_key(), fc);
+        if (!l->deleted() && predicate(l)) {
+            ++statistics::keys_evicted;
+            art_delete(t, l->get_key(), fc); // will get cleaned up by defrag
+        }
     });
+
 }
 
 void abstract_lru_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
@@ -272,6 +286,32 @@ void abstract_lru_eviction(art::tree *t, const std::function<bool(const art::lea
     storage_release release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
+}
+void abstract_random_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
+    if (statistics::logical_allocated < art::get_max_module_memory()) return;
+    storage_release release(t->latch);
+    auto &lc = t->get_leaves();
+    auto page_count = lc.get_page_count();
+
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    if (page_count > 10) {
+        std::uniform_int_distribution<size_t> dist(0, page_count - 1);
+        size_t random_page = dist(gen);
+        abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
+    }
+}
+void abstract_iter_eviction(art::tree *t, size_t ctr, const std::function<bool(const art::leaf *l)> &predicate) {
+    if (statistics::logical_allocated < art::get_max_module_memory()) return;
+    storage_release release(t->latch);
+    auto &lc = t->get_leaves();
+    auto page_count = lc.get_page_count();
+
+    if (page_count > 10) {
+        size_t random_page = page_count % ctr;
+        //art::std_log("choose page",random_page,"to evict from",ctr);
+        abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
+    }
 }
 
 void abstract_lfu_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
@@ -300,9 +340,14 @@ void run_evict_volatile_keys_lfu(art::tree *t) {
     abstract_lfu_eviction(t, [](const art::leaf *l) -> bool { return l->is_volatile(); });
 }
 
-void run_evict_expired_keys(art::tree *t) {
+void run_evict_volatile_expired_keys(art::tree *t) {
     if (!art::get_evict_volatile_ttl()) return;
     abstract_lru_eviction(t, [](const art::leaf *l) -> bool { return l->expired(); });
+}
+void run_sweep_expired_keys(art::tree *t) {
+    abstract_random_eviction(t, [](const art::leaf *l) -> bool {
+        return l->expired();
+    });
 }
 
 static uint64_t get_modifications() {
@@ -325,13 +370,13 @@ void art::tree::start_maintain() {
     tmaintain = std::thread([&]() -> void {
         auto start_save_time = std::chrono::high_resolution_clock::now();
         auto mods = get_modifications();
-
         while (!this->mexit) {
             run_evict_all_keys_lru(this);
             run_evict_all_keys_lfu(this);
             run_evict_volatile_keys_lru(this);
             run_evict_volatile_keys_lfu(this);
-            run_evict_expired_keys(this);
+            run_evict_volatile_expired_keys(this);
+            run_sweep_expired_keys(this);
             // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
             if (art::get_active_defrag())
                 run_defrag(); // periodic
@@ -339,7 +384,7 @@ void art::tree::start_maintain() {
                 || get_modifications() - mods > get_max_modifications_before_save()
             ) {
                 if (get_modifications() - mods > 0) {
-                    this->save();
+                    this->save(with_stats);
                     start_save_time = std::chrono::high_resolution_clock::now();
                     mods = get_modifications();
                 }

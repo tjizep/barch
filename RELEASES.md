@@ -1,3 +1,18 @@
+# Release v0.3.2b 2025-07-29
+
+## New Features
+
+1. Added `AUTH`, `ACL` with persistent db
+
+## Fixes
+
+1. a grievous update reallocation bug was fixed
+2. cleanup expired keys and release memory - adds test (also test issue 1)
+3. lower bound can sometimes take very long. now returns quickly
+4. update did not really work, works now
+5. expiry time not added back during active defrag., now adds it back
+6. do not add expired keys back during defrag.
+
 # Release v0.3.1b 2025-07-25
 
 ## New Features

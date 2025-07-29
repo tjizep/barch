@@ -230,8 +230,11 @@ bool KeyValue::exists(const std::string &key) {
     return false;
 }
 
-bool KeyValue::expire(const std::string &key, const std::string& flag) {
-    params = {"EXPIRE", key, flag};
+bool KeyValue::expire(const std::string &key, long long sec, const std::string& flag) {
+    if (flag.empty()) {
+        params = {"EXPIRE", key, std::to_string(sec)};
+    }else
+        params = {"EXPIRE", key, std::to_string(sec), flag};
 
     int r = sc.call(params, ::EXPIRE);
     if (r == 0) {

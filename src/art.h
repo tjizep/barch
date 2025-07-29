@@ -148,7 +148,7 @@ namespace art {
         trace_list trace{};
         std::set<kv_buf> buffers{};
         mutable std::string temp_key{};
-
+        bool with_stats{true};
     public:
         void log_trace() const ;
         value_type filter_key(value_type key) const;
@@ -195,7 +195,7 @@ namespace art {
             start_maintain();
 
         }
-        tree(const std::string& name,const node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard,name), root(root), size(size) {
+        tree(const std::string& name,const node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard,name), with_stats(false), root(root), size(size) {
             repl_client.shard = shard;
             barch::repl::clear_route(shard);
             start_maintain();
@@ -221,11 +221,11 @@ namespace art {
 
         void run_defrag();
 
-        bool save();
+        bool save(bool stats = true);
 
         bool send(std::ostream& out);
 
-        bool load();
+        bool load(bool stats = true);
 
         bool retrieve(std::istream& in);
 
@@ -254,7 +254,7 @@ namespace art {
          */
         node_ptr search(value_type key);
 
-        void update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
+        bool update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
 
         /**
          * leaf allocation
@@ -370,7 +370,7 @@ namespace art {
      * @param key key to find
      * @param updater function to call for supplying modified key
      */
-    void update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
+    bool update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
 
     art::node_ptr maximum(art::tree *t);
 

@@ -469,8 +469,11 @@ int TTL(caller& call, const arg_t& argv) {
         return call.long_long(-1);
     }
     auto l = r.const_leaf();
-    if (l->is_expiry())
-        return call.long_long((l->expiry_ms() - art::now())/1000);
+    if (l->is_expiry()) {
+        long long e = (l->expiry_ms() - art::now())/1000;
+        return call.long_long(e);
+    }
+
     return call.long_long(-2);
 
 }
@@ -545,10 +548,15 @@ int EXPIRE(caller& call, const arg_t& argv) {
             return leaf;
         }
         auto l = leaf.const_leaf();
+        if (art::now() + spec.ttl == 0) {
+            art::std_log("why");
+        }
         return art::make_leaf(*t, l->get_key(), l->get_value(),  art::now() + spec.ttl, l->is_volatile());
     };
-    t->update(l->get_key(), updater);
-    return call.long_long(1);
+    art::key_options opts{spec.ttl,true,false};
+    if (t->update(l->get_key(),updater))
+        return call.long_long(1);
+    return call.long_long(-2);
 }
 int cmd_EXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -827,7 +835,7 @@ int SAVE(caller& call, const arg_t& argv) {
     std::atomic<size_t> errors = 0;
     for (auto& t: saviors) {
         t = std::thread([&errors,shard]() {
-            if (!get_art(shard)->save()) {
+            if (!get_art(shard)->save(false)) {
                 art::std_err("could not save",shard);
                 ++errors;
             }
@@ -1126,6 +1134,8 @@ int CONFIG(caller& call, const arg_t& argv) {
             return call.simple("OK");
         }
 
+    }else {
+        return call.error("only SET keyword currently supported");
     }
     return call.error("could not set configuration value");
 }

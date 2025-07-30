@@ -187,7 +187,21 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
     return nullptr;
 
 }
+static bool zip_update(art::trace_list::reverse_iterator it, art::trace_list::reverse_iterator rend, art::node_ptr new_node) {
+    if (it == rend) return true;
+    art::trace_element &te = *it;
+    art::node_ptr p = te.parent;
+    if (!p.null() && p != new_node) {
 
+        art::node_ptr p1 = p.modify()->expand_pointers(te.child, {new_node});
+        p1.modify()->set_child(te.child_ix, new_node);
+        if (p1 != p) {
+            return zip_update(++it, rend, p1);
+        }
+        return true;
+    }
+    return false;
+}
 bool art::update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     ++statistics::update_ops;
     try {
@@ -207,15 +221,8 @@ bool art::update(tree *t, value_type key, const std::function<node_ptr(const nod
                     return false;
                 }
                 if (!trace.empty()) {
-                    auto &el = last_el(get_tlb());
-                    node_ptr p = el.parent;
-                    if (!p.null()) {
-                        node_ptr p1 = p.modify()->expand_pointers(n, {new_leaf});
-                        if (p1 != p) {
-                            std_err("parent cannot expand here");
-                        }
-                        p1.modify()->set_child(el.child_ix, new_leaf);
-                    }else {
+                    if (!zip_update(trace.rbegin(), trace.rend(), new_leaf)) {
+                        abort_with("zip update failed");
                         return false;
                     }
                 }else {

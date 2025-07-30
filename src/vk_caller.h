@@ -139,8 +139,13 @@ struct vk_caller : caller {
             const char *k = ValkeyModule_StringPtrLen(argv[i], &klen);
             args[i]= {k, klen};
         }
+        int r = 0;
+        try {
+            r = call(*this,args);
+        }catch (const std::exception& e) {
+            r = error(e.what());
+        }
 
-        int r = call(*this,args);
         ctx = nullptr;
         return r;
     }

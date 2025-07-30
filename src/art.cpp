@@ -1095,6 +1095,9 @@ void art_insert
  , const NodeResult &fc) {
     try {
         int old_val = 0;
+        if (key.size + value.size > maximum_allocation_size) {
+            throw std::runtime_error("value too large");
+        }
         t->clear_trace();
 
         art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
@@ -1137,6 +1140,9 @@ void art_insert_no_replace(art::tree *t, const art::key_options &options, art::v
                            const NodeResult &fc) {
     ++statistics::insert_ops;
     try {
+        if (key.size + value.size > maximum_allocation_size) {
+            throw_exception<std::runtime_error>("value too large");
+        }
         int old_val = 0;
         art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0,fc);
         if (r.null()) {
@@ -1157,7 +1163,9 @@ static const art::node_ptr recursive_delete(art::tree *t, art::node_ptr n, art::
                                             int depth) {
     // Search terminated
     if (n.null()) return nullptr;
-
+    if (key.size > maximum_allocation_size) {
+        throw_exception<std::runtime_error>("value too large");
+    }
     // Handle hitting a leaf node
     if (n.is_leaf) {
         const art::leaf *l = n.const_leaf();
@@ -1231,6 +1239,9 @@ void art_delete(art::tree *t, art::value_type key) {
 void art_delete(art::tree *t, art::value_type key, const NodeResult &fc) {
     ++statistics::delete_ops;
     try {
+        if (key.size > maximum_allocation_size) {
+            throw_exception<std::runtime_error>("value too large");
+        }
         t->clear_trace();
         art::node_ptr l = recursive_delete(t, t->root, t->root, key, 0);
         if (!l.null()) {
@@ -1349,6 +1360,9 @@ int art_iter_prefix(art::tree *t, art::value_type key, CallBack cb, void *data) 
     try {
         if (!t) {
             return -1;
+        }
+        if (key.size > maximum_allocation_size) {
+            throw_exception<std::runtime_error>("value too large");
         }
 
         art::node_ptr n = t->root;
@@ -1959,6 +1973,17 @@ bool art::tree::insert(value_type key, value_type value, bool update, const Node
 }
 
 art::value_type art::tree::filter_key(value_type key) const {
+    if (key.size > maximum_allocation_size) {
+        throw_exception<std::runtime_error>("value too large");
+    }
+    if (key.size <= 1) {
+        throw_exception<std::runtime_error>("key too short");
+    }
+    for (size_t i = 0; i < key.size-1; ++i) {
+        if (key.bytes[i] == 0) {
+            throw_exception<std::runtime_error>("key contains null byte");
+        }
+    }
     if (key.bytes[key.size - 1] != 0) {
         temp_key = {key.chars(), key.size};// copy the data so that we don't cause potential buffer overflow
         return  {temp_key.data(),temp_key.size()+1}; // include the null term

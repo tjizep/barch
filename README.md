@@ -87,9 +87,8 @@ Barch has on average 50% less latency the difference increases with key count an
 # Features
 1. Ordered: minimum, lower-bound and maximum operations are constant time
 2. Low memory footprint: Half that of standard hash map while providing similar single threaded latency 
-3. Compression: Memory use can be lowered even further using zstd compression at the expense of latency
-4. Dynamic config: All options can be configured at runtime without restarts or reload
-5. Scalability: All reads are concurrent and scales linearly with core count
+3. Dynamic config: All options can be configured at runtime without restarts or reload
+4. Scalability: All reads are concurrent and scales linearly with core count
 
 # Use Cases
 1. [Fast Ranged Queries, Prefix Queries and Aggregates](https://github.com/tjizep/barch/blob/main/docs/USECASE.md)
@@ -100,6 +99,8 @@ Barch has on average 50% less latency the difference increases with key count an
 6. Constant time access priority queue
 
 # Commands and API
+All api's are also available on the built in RESP interface without the `B.` prefix.
+
 1. `B.ADD K V` add a key and value [more](https://github.com/tjizep/barch/blob/main/docs/ADD.md)
 2. `B.SET K V` set a key overriding existing value [more](https://github.com/tjizep/barch/blob/main/docs/SET.md)
 3. `B.GET K` retrieve a key, returns nil if no key exists [more](https://github.com/tjizep/barch/blob/main/docs/GET.md)
@@ -116,17 +117,19 @@ Barch has on average 50% less latency the difference increases with key count an
 14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/docs/KEYS.md)
 15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/docs/KEYS.md)
 15. `ACL` and `AUTH` [more](https://github.com/tjizep/barch/blob/main/docs/ACL.md)
+16. `B.FIRST` or `B.LB` the lower bound or first key not less than the input
+17. `B.NEXT` or `B.UB` the upper bound or next key larger than the input
 
 # BARCH specific API's implemented
 ```
 MIN                        MAX
 SIZE                       SAVE
-PUBLISH                    LB        
+PUBLISH                    LB, FIRST  
 START                      STOP   
 RETRIEVE                   LOAD  
 ADDROUTE                   ROUTE
 REMROUTE                   OPS
-STATS                      UB
+STATS                      UB, NEXT
 COUNT
 ```
 

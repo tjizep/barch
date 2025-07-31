@@ -69,6 +69,8 @@ function_map& functions_by_name() {
         r["MAX"] = {::MAX,{"read","keys","data"}};
         r["LB"] = {::LB,{"read","keys","data"}};
         r["UB"] = {::UB,{"read","keys","data"}};
+        r["FIRST"] = r["LB"]; // alias
+        r["NEXT"] = r["UB"];
         r["REM"] = {::REM,{"write","keys","data"}};
         r["RANGE"] = {::RANGE,{"read","keys","data"}};
         r["TTL"] = {::TTL,{"read","keys","data"}};

@@ -1,5 +1,5 @@
 FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y python3 python3-pip
+RUN apt-get update -y && apt-get install -y python3 python3-pip
 RUN pip install flask==3.0.*
 RUN pip install notebook
 RUN useradd -ms /bin/bash barch
@@ -17,10 +17,13 @@ RUN pip install IPython
 COPY ./test/build/_deps/valkey-src/src/valkey-server /home/barch/setup/valkey-server
 COPY ./test/build/_deps/valkey-src/src/valkey-cli /home/barch/setup/valkey-cli
 COPY ./test/build/_deps/valkey-src/src/valkey-benchmark /home/barch/setup/valkey-benchmark
-
 COPY ./examples/flask/example.py ./example.py
-
+COPY ./docker/start.sh ./start.sh
+USER root
+RUN chmod +x start.sh
+USER barch
 ENV FLASK_APP=example
 EXPOSE 8000
-CMD ["flask", "run", "--host", "0.0.0.0", "--port", "8000"]
-
+EXPOSE 6379
+EXPOSE 14000
+CMD ["./start.sh"]

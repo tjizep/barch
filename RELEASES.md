@@ -3,6 +3,7 @@
 ## New Features
 
 1. Added `UINCR`, `UINCRBY`, `APPEND` and `PREPEND`
+2. Unsigned 64-bit integer support (64-bit signed already there)
 
 # Release v0.3.2.3b 2025-07-31
 

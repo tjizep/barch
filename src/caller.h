@@ -18,6 +18,12 @@ struct caller {
     [[nodiscard]] virtual int ok() = 0;
     virtual int boolean(bool value) = 0;
     virtual int long_long(int64_t l) = 0;
+    virtual int any_int(long long l) = 0;
+    virtual int any_int(unsigned long long l) = 0;
+    virtual int any_int(int64_t l) = 0;
+    virtual int any_int(uint64_t l) = 0;
+    virtual int any_int(int32_t l) = 0;
+    virtual int any_int(uint32_t l) = 0;
     virtual int double_(double l) = 0;
     virtual int vt(art::value_type v) = 0;
     virtual int simple(const char * v) = 0;

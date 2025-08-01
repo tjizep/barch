@@ -60,6 +60,36 @@ struct vk_caller : caller {
         check_ctx();
         ++call_counter;
         return ValkeyModule_ReplyWithLongLong(ctx,l);
+    };int any_int(int64_t l) override {
+        check_ctx();
+        ++call_counter;
+        return ValkeyModule_ReplyWithLongLong(ctx,l);
+    };int any_int(uint64_t l) override {
+        check_ctx();
+        ++call_counter;
+        return ValkeyModule_ReplyWithLongLong(ctx,l);
+    };
+    int any_int(long long l) override {
+        check_ctx();
+        ++call_counter;
+        return ValkeyModule_ReplyWithLongLong(ctx,l);
+    };
+    int any_int(unsigned long long l) override {
+        check_ctx();
+        ++call_counter;
+        return ValkeyModule_ReplyWithLongLong(ctx,l);
+    };
+
+    int any_int(uint32_t l) override {
+        check_ctx();
+        ++call_counter;
+        return ValkeyModule_ReplyWithLongLong(ctx,l);
+    };
+
+    int any_int(int32_t l) override {
+        check_ctx();
+        ++call_counter;
+        return ValkeyModule_ReplyWithLongLong(ctx,l);
     };
 
     int double_(double l) override {

@@ -15,6 +15,7 @@ namespace conversion {
     bool to_ll(art::value_type vt, long long& l);
     bool to_double(art::value_type vt, double& l);
     bool to_i64(art::value_type v, int64_t &i);
+    bool to_ui64(art::value_type v, uint64_t &i);
     inline Variable as_variable(const Variable& var) {
         return var;
     };

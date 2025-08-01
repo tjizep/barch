@@ -42,6 +42,12 @@ bool to_t(art::value_type v, T &i) {
 bool conversion::to_ll(art::value_type v, long long &i) {
     return to_t(v, i);
 }
+bool to_ui64(art::value_type v, uint64_t &i) {
+    return to_t(v, i);
+}
+bool conversion::to_ui64(art::value_type v, uint64_t &i) {
+    return to_t(v, i);
+}
 bool conversion::to_i64(art::value_type v, int64_t &i) {
     return to_t(v, i);
 }

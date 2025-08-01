@@ -490,6 +490,19 @@ namespace heap {
             at(ssize - 1) = T(std::forward<Args>(arg)...);
         }
 
+        template<typename VType>
+        void append(const VType &other) {
+            if (other.empty()) return;
+            if (ssize + other.size() > scontent.size()) {
+                content.resize(ssize + other.size());
+                std::copy(other.begin(), other.end(), content.begin() + ssize);
+                ssize += other.size();
+            } else {
+                std::copy(other.begin(), other.end(), scontent.begin() + ssize);
+                ssize += other.size();
+            }
+        }
+
         void emplace_back() {
             emplace_back(T());
         }

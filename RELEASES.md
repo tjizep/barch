@@ -1,3 +1,9 @@
+# Release v0.3.3b 2025-08-01
+
+## New Features
+
+1. Added `UINCR`, `UINCRBY`, `APPEND` and `PREPEND`
+
 # Release v0.3.2.3b 2025-07-31
 
 ## New Features

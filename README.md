@@ -138,6 +138,7 @@ COUNT
 AUTH                       ACL
 SET                        KEYS
 INCR                       INCRBY
+UINCRBY                    UDECRBY
 DECR                       DECRBY
 MSET                       
 GET                        MGET

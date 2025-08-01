@@ -77,6 +77,31 @@ struct rpc_caller : caller {
         results.emplace_back(l);
         return 0;
     }
+    int any_int(long long l) override {
+        results.emplace_back(l);
+        return 0;
+    }
+    int any_int(unsigned long long l) override {
+        results.emplace_back(l);
+        return 0;
+    }
+    int any_int(int64_t l) override {
+        results.emplace_back(l);
+        return 0;
+    }
+    int any_int(uint64_t l) override {
+        results.emplace_back(l);
+        return 0;
+    }
+    int any_int(int32_t l) override {
+        results.emplace_back((int64_t)l);
+        return 0;
+    }
+    int any_int(uint32_t l) override {
+        results.emplace_back((uint64_t)l);
+        return 0;
+    }
+
     int double_(double l) override {
         results.emplace_back(l);
         return 0;

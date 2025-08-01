@@ -7,20 +7,24 @@
 #include <cstdint>
 #include <string>
 #include <variant>
+#include "value_type.h"
 #include "ioutil.h"
+
 enum {
     var_bool = 0,
     var_int64 = 1,
-    var_double = 2,
-    var_string = 3,
-    var_null = 4,
-    var_error = 5,
-    var_max = 6,
+    var_uint64 = 2,
+    var_double = 3,
+    var_string = 4,
+    var_null = 5,
+    var_error = 6,
+    var_max = 7,
 };
 struct error {
     std::string name;
 };
-typedef std::variant<bool, int64_t, double, std::string, nullptr_t, error> variable_t;
+typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error> variable_t;
+extern bool to_ui64(art::value_type v, uint64_t &i);
 class Variable : public variable_t {
 public:
     Variable() = default;
@@ -37,6 +41,9 @@ public:
     bool isInteger() const {
         return index() == var_int64;
     }
+    bool isUnsignedInteger() const {
+         return index() == var_uint64;
+     }
     bool isDouble() const {
         return index() == var_double;
     }
@@ -58,6 +65,10 @@ public:
          if (is_bulk(item)) return item.data()+1;
          return item.c_str();
      }
+    art::value_type bulk_vt(const std::string& item) const {
+         if (is_bulk(item)) return {item.data()+1,item.size()-1};
+         return {item.data(),item.size()};
+     }
 
     std::string to_string() const {
         switch (index()) {
@@ -65,6 +76,8 @@ public:
                 return std::get<bool>(*this) ? "true" : "false";
             case var_int64:
                 return std::to_string(std::get<int64_t>(*this));
+            case var_uint64:
+                return std::to_string(std::get<uint64_t>(*this));
             case var_double:
                 return std::to_string(std::get<double>(*this));
             case var_string: {
@@ -90,6 +103,8 @@ public:
                 return std::get<bool>(*this) ? 1 : 0;
             case var_int64:
                 return std::get<int64_t>(*this);
+            case var_uint64:
+                return std::get<uint64_t>(*this);
             case var_double:
                 return std::get<double>(*this);
             case var_string: {
@@ -112,6 +127,8 @@ public:
                 return std::get<bool>(*this);
             case var_int64:
                 return std::get<int64_t>(*this) == 0 ;
+            case var_uint64:
+                return std::get<uint64_t>(*this) == 0 ;
             case var_double:
                 return std::get<double>(*this) == 0.0f;
             case var_string: {
@@ -134,11 +151,36 @@ public:
                 return std::get<bool>(*this) ? 1 : 0;
             case var_int64:
                 return std::get<int64_t>(*this);
+            case var_uint64:
+                return std::get<uint64_t>(*this);
             case var_double:
                 return std::get<double>(*this);
             case var_string: {
                 auto &s = std::get<std::string>(*this);
                 return std::atoll(bulk_str(s));
+            }
+            case var_null:
+            case var_error:
+                return 0;
+            default:
+                abort_with("invalid type");
+        }
+    }
+    int64_t to_uint64() const {
+         uint64_t v = 0;
+        switch (index()) {
+            case var_bool:
+                return std::get<bool>(*this) ? 1 : 0;
+            case var_int64:
+                return std::get<int64_t>(*this);
+            case var_uint64:
+                return std::get<uint64_t>(*this);
+            case var_double:
+                return std::get<double>(*this);
+            case var_string: {
+                auto &s = std::get<std::string>(*this);
+                to_ui64(bulk_vt(s),v);
+                return v;
             }
             case var_null:
             case var_error:
@@ -159,6 +201,9 @@ public:
     long long i() const {
         return to_int64();
     }
+    unsigned long long ui() const {
+        return to_uint64();
+    }
 
     long long b() const {
         return to_bool();
@@ -168,6 +213,7 @@ public:
         switch (index()) {
             case var_bool: return "boolean";
             case var_int64: return "integer";
+            case var_uint64: return "unsigned";
             case var_double: return "double";
             case var_string: return "string";
             case var_null: return "null";
@@ -199,6 +245,9 @@ public:
 
     bool operator<(const long long& r)  const {
         return i() < r;
+    }
+    bool operator<(const unsigned long long& r)  const {
+        return ui() < r;
     }
 
     bool operator>(const std::string& r)  const {
@@ -253,6 +302,9 @@ inline void writep(std::ostream& os, const Variable& v) {
         case var_int64:
             writep(os, *std::get_if<int64_t>(&v));
             break;
+        case var_uint64:
+            writep(os, *std::get_if<uint64_t>(&v));
+            break;
         case var_double:
             writep(os, *std::get_if<double>(&v));
             break;
@@ -281,6 +333,7 @@ inline void readp(std::istream& is, Variable& v) {
     uint32_t l = 0;
     bool b;
     int64_t i64;
+    uint64_t ui64;
     double d;
     std::string s;
     switch (i) {
@@ -292,6 +345,10 @@ inline void readp(std::istream& is, Variable& v) {
         case var_int64:
             readp(is, i64);
             v = i64;
+            break;
+        case var_uint64:
+            readp(is, ui64);
+            v = ui64;
             break;
         case var_double:
             readp(is, d);

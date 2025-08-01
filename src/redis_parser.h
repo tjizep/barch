@@ -83,6 +83,13 @@ namespace redis {
         writep(io, CRLF);
     }
     template<typename TS>
+    inline void rwrite(TS& io, uint64_t i) {
+        std::string v = std::to_string(i);
+        writep(io,':');
+        writep(io, v.data(), v.size());
+        writep(io, CRLF);
+    }
+    template<typename TS>
     inline void rwrite(TS& io, double d) {
         std::string v = std::to_string(d);
         rwrite(io, v.c_str());
@@ -104,6 +111,9 @@ namespace redis {
                 break;
             case var_int64:
                 rwrite(io, *std::get_if<int64_t>(&v));
+                break;
+            case var_uint64:
+                rwrite(io, *std::get_if<uint64_t>(&v));
                 break;
             case var_double:
                 rwrite(io, *std::get_if<double>(&v));

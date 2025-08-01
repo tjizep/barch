@@ -67,6 +67,9 @@ namespace art {
         std::string to_string() const {
             return std::string(chars(), size);
         }
+        std::string_view to_view() const {
+            return std::string_view(chars(), size);
+        }
         [[nodiscard]] const char *chars() const {
             return (const char *) bytes;
         }

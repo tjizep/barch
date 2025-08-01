@@ -147,7 +147,10 @@ namespace barch {
                 buffer.push_back(*std::get_if<bool>(&v) ? 1 : 0);
                 break;
             case var_int64:
-                push_size_t<uint64_t>(buffer, *std::get_if<int64_t>(&v));
+                push_size_t<int64_t>(buffer, *std::get_if<int64_t>(&v));
+                break;
+            case var_uint64:
+                push_size_t<uint64_t>(buffer, *std::get_if<uint64_t>(&v));
                 break;
             case var_double:
                 push_size_t<double>(buffer, *std::get_if<double>(&v));
@@ -185,6 +188,11 @@ namespace barch {
                     throw_exception<std::runtime_error>("invalid at");
                 }
                 return  {get_size_t<int64_t>(at, buffer),at+sizeof(int64_t)};
+            case var_uint64:
+                if (at + sizeof(uint64_t) > bsize) {
+                    throw_exception<std::runtime_error>("invalid at");
+                }
+                return  {get_size_t<uint64_t>(at, buffer),at+sizeof(int64_t)};
             case var_double:
                 if (at + sizeof(double) > bsize) {
                     throw_exception<std::runtime_error>("invalid at");

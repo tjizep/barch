@@ -270,7 +270,7 @@ void abstract_eviction(art::tree *t,
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
     auto fc = [](const art::node_ptr & unused(n)) -> void {
     };
-    write_lock lock(get_lock());
+    //write_lock lock(get_lock());
     auto page = src();
     page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf *l) {
         if (!l->deleted() && predicate(l)) {

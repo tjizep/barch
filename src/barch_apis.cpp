@@ -53,11 +53,15 @@ function_map& functions_by_name() {
         //std::lock_guard lock(latch());
         //if (!r.empty()) return r;
         r["SET"] = {::SET,{"write","keys","data"}};
+        r["APPEND"] = {::APPEND,{"write","keys","data"}};
+        r["PREPEND"] = {::PREPEND,{"write","keys","data"}};
         r["KEYS"] = {::KEYS,{"read","keys","data"}};
         r["INCR"] = {::INCR,{"write","keys","data"}};
         r["INCRBY"] = {::INCRBY,{"write","keys","data"}};
+        r["UINCRBY"] = {::UINCRBY,{"write","keys","data"}};
         r["DECR"] = {::DECR,{"write","keys","data"}};
         r["DECRBY"] = {::DECRBY,{"write","keys","data"}};
+        r["UDECRBY"] = {::UDECRBY,{"write","keys","data"}};
         r["COUNT"] = {::COUNT,{"read","keys","data"}};
         r["EXISTS"] = {::EXISTS,{"read","keys","data"}};
         r["EXPIRE"] = {::EXPIRE,{"write","keys","data"}};

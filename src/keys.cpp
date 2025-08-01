@@ -110,6 +110,8 @@ int reply_variable(ValkeyModuleCtx *ctx, const Variable var) {
             return ValkeyModule_ReplyWithBool(ctx, std::get<bool>(var));
         case var_int64:
             return ValkeyModule_ReplyWithLongLong(ctx, std::get<int64_t>(var));
+        case var_uint64:
+            return ValkeyModule_ReplyWithLongLong(ctx, std::get<uint64_t>(var));
         case var_double:
             return ValkeyModule_ReplyWithDouble(ctx, std::get<double>(var));
         case var_string:

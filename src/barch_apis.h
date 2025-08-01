@@ -54,11 +54,15 @@ extern "C"{
 
     // Keys
     int SET(caller& call,const arg_t& argv);
+    int APPEND(caller& call,const arg_t& argv);
+    int PREPEND(caller& call,const arg_t& argv);
     int KEYS(caller& call, const arg_t& argv);
     int INCR(caller& call, const arg_t& argv);
     int INCRBY(caller& call, const arg_t& argv);
+    int UINCRBY(caller& call, const arg_t& argv);
     int DECR(caller& call, const arg_t& argv);
     int DECRBY(caller& call, const arg_t& argv);
+    int UDECRBY(caller& call, const arg_t& argv);
     int EXISTS(caller& call, const arg_t& argv);
     int EXPIRE(caller& call, const arg_t& argv);
     int MSET(caller& call, const arg_t& argv);

@@ -6,6 +6,7 @@
 #include "barch_apis.h"
 #include "redis_parser.h"
 #include "vk_caller.h"
+#include "keys.h"
 /* cdict --
  *
  * This module implements a volatile key-value store on top of the
@@ -36,6 +37,38 @@ extern "C" {
 #include "caller.h"
 
 static auto startTime = std::chrono::high_resolution_clock::now();
+template<typename IntT>
+static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
+
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    auto t = get_art(argv[1]);
+    storage_release release(t->latch);
+    auto k = argv[1];
+    art::key_spec spec;
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+
+    auto converted = conversion::convert(k);
+    int r = -1;
+    IntT l = 0;
+    auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
+        if (value.null()) {
+            return nullptr;
+        }
+        auto val = leaf_numeric_update(l, value, by);
+        if (!val.null()) {
+            r = 0;
+        }
+        return val;
+    };
+    t->update(converted.get_value(), updater);
+    if (r == 0) {
+        return call.any_int(l);
+    } else {
+        return call.null();
+    }
+}
 
 
 extern "C" {
@@ -139,7 +172,7 @@ int COUNT(caller& call, const arg_t& argv) {
             count += c; // they're all unique ?
         }
     }
-    return call.long_long(count);
+    return call.any_int(count);
 }
 int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
@@ -244,37 +277,6 @@ int cmd_SET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, SET);
 }
-static int BarchModifyInteger(caller& call,const arg_t& argv, long long by) {
-
-    if (argv.size() < 2)
-        return call.wrong_arity();
-    auto t = get_art(argv[1]);
-    storage_release release(t->latch);
-    auto k = argv[1];
-    art::key_spec spec;
-    if (key_ok(k) != 0)
-        return call.key_check_error(k);
-
-    auto converted = conversion::convert(k);
-    int r = -1;
-    long long l = 0;
-    auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
-        if (value.null()) {
-            return nullptr;
-        }
-        auto val = leaf_numeric_update(l, value, by);
-        if (!val.null()) {
-            r = 0;
-        }
-        return val;
-    };
-    t->update(converted.get_value(), updater);
-    if (r == 0) {
-        return call.long_long(l);
-    } else {
-        return call.null();
-    }
-}
 
 unused(
 static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
@@ -332,14 +334,131 @@ int INCRBY(caller& call, const arg_t& argv) {
     return BarchModifyInteger(call, arg2, by);
 }
 
+int UINCRBY(caller& call, const arg_t& argv) {
+    ++statistics::incr_ops;
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    uint64_t by = 0;
+
+    if (!conversion::to_ui64(argv[2], by)) {
+        return call.error("not a valid integer");
+    }
+    auto arg2 = argv;
+    arg2.pop_back();
+    return BarchModifyInteger(call, arg2, by);
+}
+int APPEND(caller& call, const arg_t& argv) {
+    ++statistics::set_ops;
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto t = get_art(argv[1]);
+    storage_release release(t->latch);
+    auto k = argv[1];
+    auto v = argv[2];
+    art::key_spec spec;
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+
+    auto converted = conversion::convert(k);
+    int r = -1;
+    auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
+        if (old.null()) {
+            return nullptr;
+        }
+        const art::leaf *leaf = old.const_leaf();
+        auto& alloc = const_cast<alloc_pair&>(old.logical.get_ap<alloc_pair>());
+        heap::small_vector<uint8_t, 128> s;
+        s.append(leaf->get_value().to_view());
+        s.append(v.to_view());
+        art::node_ptr l = make_leaf
+        (  alloc
+        ,  leaf->get_key()
+        ,  {s.data(),s.size()}
+        ,  leaf->expiry_ms()
+        ,  leaf->is_volatile()
+        );
+
+        if (!l.null()) {
+            r = 0;
+        }
+        return l;
+    };
+    t->update(converted.get_value(), updater);
+    if (r == 0) {
+        return call.simple("OK");
+    } else {
+        return call.null();
+    }
+}
+int PREPEND(caller& call, const arg_t& argv) {
+    ++statistics::set_ops;
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto t = get_art(argv[1]);
+    storage_release release(t->latch);
+    auto k = argv[1];
+    auto v = argv[2];
+    art::key_spec spec;
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+
+    auto converted = conversion::convert(k);
+    int r = -1;
+    auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
+        if (old.null()) {
+            return nullptr;
+        }
+        const art::leaf *leaf = old.const_leaf();
+        auto& alloc = const_cast<alloc_pair&>(old.logical.get_ap<alloc_pair>());
+        heap::small_vector<uint8_t, 128> s;
+        s.append(v.to_view());
+        s.append(leaf->get_value().to_view());
+        art::node_ptr l = make_leaf
+        (  alloc
+        ,  leaf->get_key()
+        ,  {s.data(),s.size()}
+        ,  leaf->expiry_ms()
+        ,  leaf->is_volatile()
+        );
+
+        if (!l.null()) {
+            r = 0;
+        }
+        return l;
+    };
+    t->update(converted.get_value(), updater);
+    if (r == 0) {
+        return call.simple("OK");
+    } else {
+        return call.null();
+    }
+}
+
+int cmd_PREPEND(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PREPEND);
+}
+
+int cmd_APPEND(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, APPEND);
+}
+
 int cmd_INCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, INCRBY);
 }
+
+int cmd_UINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, INCRBY);
+}
+
 int DECR(caller& call, const arg_t& argv) {
     ++statistics::decr_ops;
     return BarchModifyInteger(call, argv, -1);
 }
+
 int cmd_DECR(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, DECR);
@@ -349,18 +468,35 @@ int DECRBY(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    double by = 0;
+    int64_t by = 0;
 
-    if (!conversion::to_double(argv[2], by)) {
+    if (!conversion::to_i64(argv[2], by)) {
         return call.wrong_arity();
     }
 
     return BarchModifyInteger(call,argv, -by);
 }
+int UDECRBY(caller& call, const arg_t& argv) {
+    ++statistics::incr_ops;
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    uint64_t by = 0;
+
+    if (!conversion::to_ui64(argv[2], by)) {
+        return call.wrong_arity();
+    }
+
+    return BarchModifyInteger(call,argv, -by);
+}
+int cmd_UDECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, UDECRBY);
+}
 int cmd_DECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, DECRBY);
 }
+
 int MSET(caller& call, const arg_t& argv) {
     if (argv.size() < 3)
         return call.wrong_arity();
@@ -436,13 +572,6 @@ int GET(caller& call, const arg_t& argv) {
     art::node_ptr r = t->search(converted.get_value());
 
     if (r.null()) {
-        art::iterator i(t, converted.get_value());
-        if (i.ok()) {
-            if (i.key() == converted.get_value()) {
-                return call.vt(i.value());
-            }
-            return call.null();
-        }
         return call.null();
     } else {
         auto vt = r.const_leaf()->get_value();
@@ -1172,6 +1301,12 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_CreateCommand(ctx, NAME(SET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(APPEND), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PREPEND), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(EXPIRE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -1185,6 +1320,12 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(DECRBY), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(UINCRBY), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(UDECRBY), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(MSET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)

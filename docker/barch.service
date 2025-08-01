@@ -1,0 +1,14 @@
+[Unit]
+Description=Barch stack Valkey
+Wants=network-online.target
+After=network.target
+
+[Service]
+Type=simple
+User=barch
+WorkingDirectory=/home/barch/setup
+ExecStart=/home/barch/setup/valkey-server --loadmodule ./_barch.so
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

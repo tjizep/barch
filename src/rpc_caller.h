@@ -200,15 +200,6 @@ struct rpc_caller : caller {
         }
         return r;
     }
-    template<typename TC>
-    int call(const heap::vector<std::string>& params, TC&& f) {
-        std::vector<std::string_view> sv;
-
-        for (auto &p: params) {
-            sv.emplace_back(p.data(),p.size());
-        }
-        return call(sv, std::forward<TC>(f));
-    }
     const std::string& get_user() const override  {
         return user;
     }

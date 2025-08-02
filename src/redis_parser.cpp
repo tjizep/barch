@@ -8,54 +8,94 @@
 #include "sastam.h"
 #include "statistics.h"
 #include "asio/buffer.hpp"
-
+#include <charconv>
+#include <fast_float/fast_float.h>
 namespace redis {
+    template<typename T>
+    bool to_t(const std::string_view& v, T &i) {
 
+        auto ianswer = fast_float::from_chars(v.data(), v.data() + v.size(), i);
+        return (ianswer.ec == std::errc() && ianswer.ptr == v.data() + v.size()) ;
+    }
+    template<typename T>
+    bool to_ts(const std::string_view& sv, T &i) {
+
+        auto result = std::from_chars(sv.data(), sv.data() + sv.size(), i);
+        return !(result.ec == std::errc::invalid_argument) ;
+    }
     /**
      * If there is a valid (CRLF terminated) item in cache,
      * populate 'item' with it and return true.
      *
      * Returns false otherwise.
     */
-    bool redis_parser::buffer_has_valid_item(std::string& item) {
-
-        for (size_t i = 0; i < buffer.length(); i++) {
-
-            item += buffer[i];
-
-            if(item.length() >= 2 &&
-               item[item.length()-2] == '\r' &&
-               item[item.length()-1] == '\n') {
-
-                // Remove the part read
-                buffer = buffer.substr(i+1);
+    bool redis_parser::buffer_get_valid_item(art::value_type &item) {
+        for (size_t i = buffer_start; i < buffer_size; i++) {
+            item.size++;
+            size_t tis = item.size;
+            if(item.size >= 2 &&
+               item[tis-2] == '\r' &&
+               item[tis-1] == '\n') {
+                buffer_start += tis;
+                ++parameters_processed;
                 return true;
             }
         }
+#if 0
+        if (!broken) {
+            art::std_err("test error",test_item.size,test_item.to_string(),item.length(),item);
+        }
+        size_t olen = item.length();
+        size_t ilen ;
+        for (size_t i = 0; i < buffer.length(); i++) {
+            item += buffer[i];
+            ilen = olen + i + 1;
+            if(ilen + i >= 2 &&
+               item[ilen-2] == '\r' &&
+               item[ilen-1] == '\n') {
+                // Remove the part read
+                buffer = buffer.substr(i+1);
+                if (test_item.to_string() != item) {
+                    art::std_err("test error",test_item.size,test_item.to_string(),item.length(),item);
+                }
+
+                return true;
+            }
+        }
+        art::std_log("buffer not exhausted, it will scan again");
+#endif
         return false;
     }
 
     void redis_parser::add_data(const char * data, size_t len) {
-        buffer.append(data, len);
+        //buffer.append(data, len);
+        if (buffer_size >= 2 && buffer_start >= buffer_size) {
+            buffer_start = 0;
+            full_buffer.clear();
+            buffer_size = 0;
+        }
+        full_buffer.append(data, len);
+        buffer_size+=len;
     }
     size_t redis_parser::remaining() const {
-        return buffer.size();
+        return std::max(buffer_size, buffer_start) - buffer_start; //buffer.size();
     }
-    std::string redis_parser::read_next_item() {
-        item.clear();
-        if(!buffer_has_valid_item(item)) {
-            if (item.length() > redis_max_item_len) {
+    std::string_view redis_parser::read_next_item() {
+        //item.clear();
+        auto item = art::value_type{full_buffer.data() + buffer_start, 0};
+        if(!buffer_get_valid_item(item)) {
+            if (item.size > redis_max_item_len) {
                 throw_exception<std::domain_error>("item exceeds maximum length");
             }
         }
-        return item;
+        return std::string_view{item.chars(),item.size};
     }
 
     /**
      * size_item must look like:
      * "*<number-of-elements>\r\n"
     */
-    bool redis_parser::validate_array_size(const std::string& size_item) {
+    bool redis_parser::validate_array_size(const std::string_view& size_item) {
 
         int len = size_item.length();
         // Must be atleast 4 characters
@@ -71,11 +111,11 @@ namespace redis {
             return false;
         }
         // Rest should be a number
-        for (int i = 1; i <= len-3; i++) {
-            if (size_item[i] < '0' || size_item[i] > '9') {
-                return false;
-            }
-        }
+        //for (int i = 1; i <= len-3; i++) {
+        //    if (size_item[i] < '0' || size_item[i] > '9') {
+        //        return false;
+        //    }
+        //}
         // valid
         return true;
     }
@@ -84,7 +124,7 @@ namespace redis {
      * size_item must look like:
      * $<length>\r\n
     */
-    bool redis_parser::validate_bstr_size(const std::string& size_item) {
+    bool redis_parser::validate_bstr_size(const std::string_view& size_item) {
 
         size_t len = size_item.length();
         // Must be atleast 4 characters
@@ -100,11 +140,11 @@ namespace redis {
             return false;
         }
         // Rest should be a number
-        for (size_t i = 1; i <= len-3; i++) {
-            if (size_item[i] < '0' || size_item[i] > '9') {
-                return false;
-            }
-        }
+        //for (size_t i = 1; i <= len-3; i++) {
+        //    if (size_item[i] < '0' || size_item[i] > '9') {
+        //        return false;
+        //    }
+        //}
         // valid
         return true;
     }
@@ -112,7 +152,7 @@ namespace redis {
     /**
      * Returns true is bstr is terminated with CRLF
     */
-    bool redis_parser::validate_crlf(const std::string& bstr) {
+    bool redis_parser::validate_crlf(const std::string_view& bstr) {
 
         size_t len = bstr.length();
         if (len < 2) {
@@ -131,19 +171,22 @@ namespace redis {
         state_error,
         state_max
     };
-    const heap::vector<std::string>& redis_parser::read_new_request(){
+    const std::vector<std::string_view>& redis_parser::read_new_request(){
         while (state != state_end) {
             // Assumes each RESP request is an array of bulk strings
             switch (state) {
                 case state_start: {
-                    std::string arr_size_item = read_next_item();
+                    arr_size_item = read_next_item();
                     if (arr_size_item.empty()) {
                         return empty;
                     }
                     if (!validate_array_size(arr_size_item)){
                         throw_exception<std::domain_error>("invalid array size");
                     }
-                    size = std::stoi(arr_size_item.substr(1, arr_size_item.length()-3));
+                    auto sv = std::string_view{arr_size_item.data()+1, arr_size_item.length()-3};
+                    if (!to_t(sv, size)) {
+                        throw_exception<std::domain_error>("invalid array size");
+                    }
                     state = state_array_size;
                 }
                     break;
@@ -157,18 +200,23 @@ namespace redis {
                         state = state_start;
                         size = 0;
                         item_nr = 0;
+                        ++messages_processed;
                         return req;
                     }
                     // Read <size> bulk strings
                     // Read size of the bulk string
-                    std::string bstr_size_item = read_next_item();
+                    bstr_size_item = read_next_item();
                     if (bstr_size_item.empty()) {
                         return empty;
                     }
                     if (!validate_bstr_size(bstr_size_item)){
                         throw_exception<std::domain_error>("invalid bulk string size");
                     }
-                    bstr_size = std::stoi(bstr_size_item.substr(1, bstr_size_item.length()-3));
+
+                    auto sv = std::string_view{bstr_size_item.data()+1, bstr_size_item.length()-3};
+                    if (!to_t(sv, bstr_size)) {
+                        throw_exception<std::domain_error>("invalid array size");
+                    }
 
                     if (bstr_size == -1) {
                         // null bulk string
@@ -184,19 +232,19 @@ namespace redis {
                     break;
                 case state_bstr_size: {
                     // Read the bulk string
-                    std::string bstr_item = read_next_item();
+                    bstr_item = read_next_item();
                     if (bstr_item.empty()) {
                         return empty;
                     }
                     if (!validate_crlf(bstr_item)) {
                         throw_exception<std::domain_error>("Bulk string not terminated by CRLF");
                     }
-                    std::string bstr = bstr_item.substr(0, bstr_item.length()-2);
+                    std::string_view bstr = std::string_view{bstr_item.data(),bstr_item.length()-2};
                     if (bstr.length() != (size_t)bstr_size) {
                         throw_exception<std::domain_error>("Bulk string size does not match");
                     }
-
-                    req[item_nr++] = bstr;
+                    *(char*)(bstr.data()+bstr.size()) = 0x00; // we need to do this because string views are not null terminated
+                    req[item_nr++] = std::string_view{bstr.data(),bstr.length()};
 
                     state = state_bstr;
                 }

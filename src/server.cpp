@@ -582,11 +582,14 @@ namespace barch {
                 return true;
             }
         private:
-            void run_params(vector_stream& stream, const heap::vector<std::string>& params) {
-                const std::string &cn = params[0];
-                if (prev_cn != cn) {
-                    ic = barch_functions.find(cn);
-                    prev_cn = cn;
+            void run_params(vector_stream& stream, const std::vector<std::string_view>& params) {
+                if (!params.empty()) {
+                    //redis::rwrite(stream, OK);
+                    //return;
+                }
+                if (prev_cn != params[0]) {
+                    prev_cn = params[0];
+                    ic = barch_functions.find(prev_cn);
                     if (ic != barch_functions.end() &&
                         !is_authorized(ic->second.cats,caller.get_acl())) {
                         redis::rwrite(stream, error{"not authorized"});
@@ -674,6 +677,7 @@ namespace barch {
             rpc_caller caller{};
             vector_stream stream{};
             std::string prev_cn{};
+            Variable OK = "OK";
             function_map::iterator ic{};
         };
 

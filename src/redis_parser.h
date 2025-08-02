@@ -20,26 +20,33 @@ namespace redis {
 
     class redis_parser {
     private:
-        bool buffer_has_valid_item(std::string& item);
-        std::string read_next_item();
-        bool validate_array_size(const std::string& size_item);
-        bool validate_bstr_size(const std::string& size_item);
-        bool validate_crlf(const std::string& bstr);
-        heap::vector<std::string> empty{};
+        bool buffer_get_valid_item(art::value_type &item);
+        std::string_view read_next_item();
+        bool validate_array_size(const std::string_view& size_item);
+        bool validate_bstr_size(const std::string_view& size_item);
+        bool validate_crlf(const std::string_view& bstr);
+        std::vector<std::string_view> empty{};
     public:
         redis_parser() = default;
-        void init(char cs){ buffer += cs;};
+        void init(char cs){ buffer += cs;full_buffer+=cs;buffer_size=1;};
         void add_data(const char * data, size_t len);
-        size_t remaining() const ;
-        const heap::vector<std::string>& read_new_request();
+        [[nodiscard]] size_t remaining() const ;
+        const std::vector<std::string_view>& read_new_request();
     private:
         int state = 0;
         int size = 0;
-        heap::vector<std::string> req{};
+        std::vector<std::string_view> req{};
         int item_nr = 0;
         int32_t bstr_size = 0;
-        std::string item{};
+        size_t buffer_start = 0l;
+        size_t buffer_size = 0l;
+        size_t parameters_processed = 0l;
+        size_t messages_processed = 0l;
         std::string buffer{};
+        std::string full_buffer{};
+        std::string_view arr_size_item{};
+        std::string_view bstr_item{};
+        std::string_view bstr_size_item{};
     };
 
     inline bool is_bulk(const std::string& item) {
@@ -104,7 +111,7 @@ namespace redis {
 
     template<typename TS>
     inline void rwrite(TS& io, const Variable& v) {
-        std::string buffer;
+        //std::string buffer;
         switch (v.index()) {
             case var_bool:
                 rwrite(io, *std::get_if<bool>(&v));

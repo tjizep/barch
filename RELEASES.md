@@ -1,4 +1,4 @@
-# Release v0.3.3.3b 2025-08-03
+# Release v0.3.3.4b 2025-08-03
 
 ## New Features
 
@@ -11,6 +11,7 @@
 
 1. Readme instructions for docker
 2. expose valkey and flask simultaneously
+3. fix potential crash in resp parser due to temporary
 
 # Release v0.3.3.1b 2025-08-01
 

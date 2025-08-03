@@ -41,29 +41,6 @@ namespace redis {
                 return true;
             }
         }
-#if 0
-        if (!broken) {
-            art::std_err("test error",test_item.size,test_item.to_string(),item.length(),item);
-        }
-        size_t olen = item.length();
-        size_t ilen ;
-        for (size_t i = 0; i < buffer.length(); i++) {
-            item += buffer[i];
-            ilen = olen + i + 1;
-            if(ilen + i >= 2 &&
-               item[ilen-2] == '\r' &&
-               item[ilen-1] == '\n') {
-                // Remove the part read
-                buffer = buffer.substr(i+1);
-                if (test_item.to_string() != item) {
-                    art::std_err("test error",test_item.size,test_item.to_string(),item.length(),item);
-                }
-
-                return true;
-            }
-        }
-        art::std_log("buffer not exhausted, it will scan again");
-#endif
         return false;
     }
 
@@ -111,11 +88,7 @@ namespace redis {
             return false;
         }
         // Rest should be a number
-        //for (int i = 1; i <= len-3; i++) {
-        //    if (size_item[i] < '0' || size_item[i] > '9') {
-        //        return false;
-        //    }
-        //}
+
         // valid
         return true;
     }
@@ -139,12 +112,7 @@ namespace redis {
         if (size_item[len-1] != '\n' || size_item[len-2] != '\r') {
             return false;
         }
-        // Rest should be a number
-        //for (size_t i = 1; i <= len-3; i++) {
-        //    if (size_item[i] < '0' || size_item[i] > '9') {
-        //        return false;
-        //    }
-        //}
+        // Rest should be a number - is checked by conversion
         // valid
         return true;
     }
@@ -220,7 +188,8 @@ namespace redis {
 
                     if (bstr_size == -1) {
                         // null bulk string
-                        req[item_nr] = "NULL";
+                        static const char null[] = "NULL";
+                        req[item_nr] = null;
                         ++item_nr;
                         continue;
                     }

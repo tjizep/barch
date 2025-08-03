@@ -5,6 +5,7 @@
 1. Added `UINCR`, `UINCRBY`, `APPEND` and `PREPEND`
 2. Unsigned 64-bit integer support (64-bit signed already there)
 3. Improve parser and call performance
+4. added io_context per server thread to try and reduce locking
 
 ## Fixes
 

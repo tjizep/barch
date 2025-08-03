@@ -173,7 +173,11 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
 art::node_ptr art_search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     try {
-        art::node_ptr al;
+        art::node_ptr al = art::find(t, key);
+        if (!al.null()) {
+            ++statistics::keys_found;
+            return al;
+        }
         tlb.clear();
         al = inner_lower_bound(tlb, t, key);
         if (!al.null() && al.const_leaf()->get_key() == key) {

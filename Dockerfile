@@ -1,5 +1,6 @@
 FROM ubuntu:22.04
 RUN apt-get update -y && apt-get install -y python3 python3-pip
+
 RUN pip install flask==3.0.*
 RUN pip install notebook
 RUN useradd -ms /bin/bash barch

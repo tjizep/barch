@@ -31,6 +31,7 @@
 #include "rpc_caller.h"
 #include "vk_caller.h"
 #include "redis_parser.h"
+#include "thread_pool.h"
 enum {
     cmd_ping = 1,
     cmd_stream = 2,
@@ -362,15 +363,22 @@ namespace barch {
         return r;
     }
     struct server_context {
-        struct single_thread_pool : asio::thread_pool { single_thread_pool() : thread_pool(1) {} };
-        //std::vector<single_thread_pool> pools{art::get_shard_count().size()};
-        std::vector<std::thread> pool{rpc_io_thread_count};
-        asio::io_context io{rpc_io_thread_count};
+        thread_pool pool{rpc_io_thread_count};
+        thread_pool resp_pool{rpc_io_thread_count};
+        asio::io_context io{};
+        asio::io_context io_resp[rpc_io_thread_count]{};
+        typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
+        std::shared_ptr<exec_guard> work_guards[rpc_io_thread_count]{};
+
         tcp::acceptor acc;
         std::string interface;
         uint_least16_t port;
         std::atomic<size_t> threads_started = 0;
-
+        std::atomic<size_t> resp_distributor{};
+        asio::io_context& get_proc_ctx() {
+            size_t r = resp_distributor++ % rpc_io_thread_count;
+            return io_resp[r];
+        }
         void stop() {
             try {
                 acc.close();
@@ -381,13 +389,15 @@ namespace barch {
             }catch (std::exception& e) {
                 art::std_err("failed to stop io service", e.what());
             }
-
-            for (auto& t : pool) {
-
-                if (t.joinable())
-                    t.join();
-                t = {};
+            for (size_t i = 0; i < rpc_io_thread_count; ++i) {
+                try{
+                    io_resp[i].stop();
+                }catch (std::exception& e) {
+                    art::std_err("failed to stop resp io service",  e.what());
+                }
             }
+            pool.stop();
+            resp_pool.stop();
             port = 0;
         }
         void start_accept() {
@@ -582,16 +592,23 @@ namespace barch {
                 return true;
             }
         private:
-            void run_params(vector_stream& stream, const heap::vector<std::string>& params) {
-                const std::string &cn = params[0];
-                if (prev_cn != cn) {
-                    ic = barch_functions.find(cn);
-                    prev_cn = cn;
+            void run_params(vector_stream& stream, const std::vector<std::string_view>& params) {
+                if (!params.empty()) {
+                    //redis::rwrite(stream, OK);
+                    //return;
+                }
+                if (prev_cn != params[0]) {
+                    prev_cn = params[0];
+                    ic = barch_functions.find(prev_cn);
                     if (ic != barch_functions.end() &&
                         !is_authorized(ic->second.cats,caller.get_acl())) {
                         redis::rwrite(stream, error{"not authorized"});
                         return;
                     }
+                }
+                if (prev_cn == "START" || prev_cn == "STOP") {
+                    redis::rwrite(stream, error{"not authorized"});
+                    return;
                 }
                 if (ic == barch_functions.end()) {
                     redis::rwrite(stream, error{"unknown command"});
@@ -614,6 +631,7 @@ namespace barch {
             void do_read()
             {
                     auto self(shared_from_this());
+
                     socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
                         [this, self](std::error_code ec, std::size_t length)
                     {
@@ -674,6 +692,7 @@ namespace barch {
             rpc_caller caller{};
             vector_stream stream{};
             std::string prev_cn{};
+            Variable OK = "OK";
             function_map::iterator ic{};
         };
 
@@ -745,7 +764,12 @@ namespace barch {
                 //readp(stream, cs);
                 endpoint.read_some(asio::buffer(cs));
                 if (cs[0]) {
-                    std::make_shared<resp_session>(std::move(endpoint),this,cs[0])->start();
+                    auto& ioc = this->get_proc_ctx();
+                    tcp::socket socket (ioc);
+                    socket.assign(tcp::v4(),endpoint.release());
+                    auto session = std::make_shared<resp_session>(std::move(socket),this,cs[0]);
+                    session->start();
+
                     return;
                 }
                 uint32_t cmd = 0;
@@ -831,16 +855,23 @@ namespace barch {
         ,   interface(interface)
         ,   port(port){
             start_accept();
-
-
-            size_t tid = 0;
-            for (auto &t: pool) {
-                t = std::thread( [this,tid]{
-                    art::std_log("server started on", this->interface,this->port,"using thread",tid);
-                    io.run();
-                });
-                ++tid;
+            for (size_t i = 0; i < rpc_io_thread_count; ++i) {
+                work_guards[i] = std::make_shared<exec_guard>(asio::make_work_guard(io_resp[i]));
             }
+            pool.start([this](size_t tid) -> void{
+                io.dispatch([this,tid]() {
+                    art::std_log("server started on", this->interface,this->port,"using thread",tid);
+                });
+                io.run();
+                art::std_log("server stopped on", this->interface,this->port,"using thread",tid);
+            });
+            resp_pool.start([this](size_t tid) -> void {
+                io_resp[tid].dispatch([this,tid]() {
+                    art::std_log("proc server started using thread",tid);
+                });
+                io_resp[tid].run();
+            });
+
 
         }
     };

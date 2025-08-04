@@ -364,11 +364,11 @@ namespace barch {
     }
     struct server_context {
         thread_pool pool{rpc_io_thread_count};
-        thread_pool resp_pool{rpc_io_thread_count};
+        thread_pool resp_pool{};
         asio::io_context io{};
-        asio::io_context io_resp[rpc_io_thread_count]{};
+        heap::vector<std::shared_ptr<asio::io_context>> io_resp{};
         typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
-        std::shared_ptr<exec_guard> work_guards[rpc_io_thread_count]{};
+        heap::vector<std::shared_ptr<exec_guard>> work_guards{};
 
         tcp::acceptor acc;
         std::string interface;
@@ -376,8 +376,8 @@ namespace barch {
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
         asio::io_context& get_proc_ctx() {
-            size_t r = resp_distributor++ % rpc_io_thread_count;
-            return io_resp[r];
+            size_t r = resp_distributor++ % io_resp.size();
+            return *io_resp[r];
         }
         void stop() {
             try {
@@ -389,9 +389,9 @@ namespace barch {
             }catch (std::exception& e) {
                 art::std_err("failed to stop io service", e.what());
             }
-            for (size_t i = 0; i < rpc_io_thread_count; ++i) {
+            for (size_t i = 0; i < io_resp.size(); ++i) {
                 try{
-                    io_resp[i].stop();
+                    io_resp[i]->stop();
                 }catch (std::exception& e) {
                     art::std_err("failed to stop resp io service",  e.what());
                 }
@@ -855,8 +855,11 @@ namespace barch {
         ,   interface(interface)
         ,   port(port){
             start_accept();
-            for (size_t i = 0; i < rpc_io_thread_count; ++i) {
-                work_guards[i] = std::make_shared<exec_guard>(asio::make_work_guard(io_resp[i]));
+            io_resp.resize(resp_pool.size());
+            work_guards.resize(io_resp.size());
+            for (size_t i = 0; i < io_resp.size(); ++i) {
+                io_resp[i] = std::make_shared<asio::io_context>();
+                work_guards[i] = std::make_shared<exec_guard>(asio::make_work_guard(*io_resp[i]));
             }
             pool.start([this](size_t tid) -> void{
                 io.dispatch([this,tid]() {
@@ -866,10 +869,10 @@ namespace barch {
                 art::std_log("server stopped on", this->interface,this->port,"using thread",tid);
             });
             resp_pool.start([this](size_t tid) -> void {
-                io_resp[tid].dispatch([this,tid]() {
+                io_resp[tid]->dispatch([this,tid]() {
                     art::std_log("proc server started using thread",tid);
                 });
-                io_resp[tid].run();
+                io_resp[tid]->run();
             });
 
 

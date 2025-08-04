@@ -6,6 +6,7 @@
 2. Unsigned 64-bit integer support (64-bit signed already there)
 3. Improve parser and call performance
 4. Added io_context per server thread to try and reduce locking
+5. improve concurrency
 
 ## Fixes
 

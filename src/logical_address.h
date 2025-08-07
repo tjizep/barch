@@ -100,12 +100,15 @@ struct logical_address {
         return index;
     }
     void check_ap() const {
+#if _CHECK_AP_
         if (alloc == nullptr) {
             abort_with("allocator pair not set");
         }
         if (*(int*)alloc != 1<<24) {
             abort_with("invalid allocator pair");
         }
+#endif
+
     }
     template<typename AT>
     AT& get_ap() {

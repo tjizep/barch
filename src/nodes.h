@@ -352,7 +352,7 @@ namespace art {
                 return (T *) dcache;
             }
             mutable node_data *dcache = nullptr;
-            mutable uint32_t last_ticker = 0;//page_modifications::get_ticker(0);
+            mutable uint32_t last_ticker = page_modifications::get_ticker(0);
             mutable logical_address address{nullptr};
 
             node_proxy(const node_proxy &) = default;

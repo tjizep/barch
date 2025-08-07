@@ -352,7 +352,7 @@ namespace art {
                 return (T *) dcache;
             }
             mutable node_data *dcache = nullptr;
-            mutable uint32_t last_ticker = page_modifications::get_ticker(0);
+            mutable uint32_t last_ticker = 0;//page_modifications::get_ticker(0);
             mutable logical_address address{nullptr};
 
             node_proxy(const node_proxy &) = default;
@@ -360,15 +360,17 @@ namespace art {
             node_proxy() = default;
 
             template<typename IntPtrType, uint8_t NodeType>
-            void set_lazy(logical_address address, node_data *data) {
-                if (address.null()) {
-                    abort();
+            void set_lazy(logical_address in_address, node_data *data) {
+                if (node_checks == 1) {
+                    if (in_address.null()) {
+                        abort_with("invalid lazy node address");
+                    }
+                    if (data->type != NodeType || data->pointer_size != sizeof(IntPtrType)) {
+                        abort_with("type and pointer size does not match");
+                    }
                 }
-                if (data->type != NodeType || data->pointer_size != sizeof(IntPtrType)) {
-                    abort_with("type and pointer size does not match");
-                }
-                this->address = address;
-                last_ticker = page_modifications::get_ticker(address.page());
+                this->address = in_address;
+                last_ticker = page_modifications::get_ticker(in_address.page());
                 dcache = data; // it will get loaded as required
             }
         };

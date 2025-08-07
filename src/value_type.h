@@ -73,6 +73,9 @@ namespace art {
         [[nodiscard]] const char *chars() const {
             return (const char *) bytes;
         }
+        [[nodiscard]] const char *data() const {
+            return (const char *) bytes;
+        }
         [[nodiscard]] const char *begin() const {
             return (const char *) bytes;
         }

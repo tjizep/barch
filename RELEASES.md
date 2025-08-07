@@ -7,6 +7,7 @@
 3. Improve parser and call performance
 4. Added io_context per server thread to try and reduce locking
 5. improve concurrency
+6. increase shards to improve write concurrency
 
 ## Fixes
 

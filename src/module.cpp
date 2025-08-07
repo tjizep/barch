@@ -45,14 +45,11 @@ size_t get_shard(const char* key, size_t key_len) {
     if (art::get_shard_count().size() == 1) {
         return 0;
     }
-    auto converted = conversion::convert(key, key_len);
-    auto shard_key = converted.get_value();
+    auto shard_key = art::value_type{key,key_len};
 
     uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(shard_key.chars(), shard_key.size);
 
-    //memcpy(&hash, shard_key.bytes, std::min<uint64_t>(8,shard_key.size));
     size_t hshard = hash % art::get_shard_count().size();
-    //art::std_log(hshard);
     return hshard;
 }
 

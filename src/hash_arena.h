@@ -419,7 +419,7 @@ namespace arena {
                     heap::allocated += new_size;
                     page_data_size = new_size;
                     page_modifications::inc_all_tickers();
-                    art::std_log("allocated", page_data_size, "virtual memory as page data");
+                    //art::std_log("allocated", page_data_size, "virtual memory as page data");
 
                 }
             } else {
@@ -475,7 +475,7 @@ namespace arena {
                 abort_with("invalid CoW page data");
             }
             if (std::max(page_data_size, cow_size) <= page_pos + offset + size) {
-                alloc_page_data((r.page() + 8) * physical_page_size + size);
+                alloc_page_data((r.page() + 1) * physical_page_size + size);
             }
             if (std::max(page_data_size, cow_size) < page_pos + offset + size) {
                 abort_with("position not allocated");

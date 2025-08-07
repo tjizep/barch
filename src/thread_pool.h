@@ -11,13 +11,13 @@ struct thread_pool {
     heap::vector<std::thread> pool{};
     bool started = false;
     std::atomic<size_t> stopped{};
-    thread_pool(size_t size) {
+    explicit thread_pool(size_t size) {
         pool.resize(size);
     }
     thread_pool() {
         pool.resize(std::max<size_t>(4, std::thread::hardware_concurrency()));
     }
-    size_t size() const {
+    [[nodiscard]] size_t size() const {
         return pool.size();
     }
     template<typename TF>

@@ -22,6 +22,7 @@ struct rpc_caller : caller {
     heap::vector<Variable> results{};
     heap::vector<std::string> errors{};
     heap::vector<bool> acl{get_all_acl()};
+    arg_t args{};
     std::string user = "default";
     rpc_caller() {
         routes.reserve(art::get_shard_count().size());
@@ -166,7 +167,7 @@ struct rpc_caller : caller {
     int call(const std::vector<std::string_view>& params, TC&& f) {
 
         ++statistics::local_calls;
-        arg_t args;
+        args.clear();
         errors.clear();
         results.clear();
         int r = 0;

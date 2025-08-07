@@ -24,7 +24,7 @@ namespace redis {
         return !(result.ec == std::errc::invalid_argument) ;
     }
     /**
-     * If there is a valid (CRLF terminated) item in cache,
+     * If there is a valid (CRLF terminated) item in buffer,
      * populate 'item' with it and return true.
      *
      * Returns false otherwise.

@@ -718,7 +718,6 @@ public:
     template<typename T>
     T *modify(logical_address at) {
         if (at.null()) return nullptr;
-        //std::lock_guard guard(mutex);
         static_assert(sizeof(T) < LPageSize);
         uint8_t *d = basic_resolve(at, true);
         return (T *) d;

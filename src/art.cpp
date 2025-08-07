@@ -173,17 +173,20 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
 art::node_ptr art_search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     try {
-        art::node_ptr al = art::find(t, key);
+        art::node_ptr al;
+        al = art::find(t, key);
         if (!al.null()) {
             ++statistics::keys_found;
             return al;
         }
-        tlb.clear();
-        al = inner_lower_bound(tlb, t, key);
-        if (!al.null() && al.const_leaf()->get_key() == key) {
-            ++statistics::keys_found;
-            return al;
-        }
+
+
+        //tlb.clear();
+        //al = inner_lower_bound(tlb, t, key);
+        //if (!al.null() && al.const_leaf()->get_key() == key) {
+            //++statistics::keys_found;
+            //return al;
+        //}
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
@@ -560,6 +563,12 @@ art::node_ptr art::find(const tree* t, value_type key) {
     //const tree *t = get_art(get_shard(key));
     ++statistics::get_ops;
     try {
+        if (!t->root.null() && !t->root.is_leaf) {
+            if (t->root->data().type > 4u) {
+                abort_with("invalid root");
+            }
+        }
+
         node_ptr n = t->root;
         unsigned depth = 0;
         while (!n.null()) {
@@ -2059,6 +2068,7 @@ bool art::tree::remove(value_type key) {
 }
 art::node_ptr art::tree::search(value_type unfiltered_key) {
     value_type key = filter_key(unfiltered_key);
+
     auto r = art_search(this, key);
     if (r.null()) {
         last_leaf_added = nullptr; // clear it before trying to retrieve

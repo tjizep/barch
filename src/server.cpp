@@ -689,7 +689,6 @@ namespace barch {
             explicit barch_session(tcp::socket socket)
               : socket_(std::move(socket))
             {
-                caller.set_context(ctx_rpc);
                 ++statistics::repl::redis_sessions;
             }
             ~barch_session() {

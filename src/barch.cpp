@@ -964,7 +964,7 @@ int SAVE(caller& call, const arg_t& argv) {
     std::atomic<size_t> errors = 0;
     for (auto& t: saviors) {
         t = std::thread([&errors,shard]() {
-            if (!get_art(shard)->save(false)) {
+            if (!get_art(shard)->save(true)) {
                 art::std_err("could not save",shard);
                 ++errors;
             }

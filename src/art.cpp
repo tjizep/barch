@@ -173,7 +173,14 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
 art::node_ptr art_search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     try {
+        if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
+            abort_with("invalid root node");
+        }
         art::node_ptr al;
+        al = find(t, key);
+        if (!al.null()) {
+            return al;
+        }
         tlb.clear();
         al = inner_lower_bound(tlb, t, key);
         if (!al.null() && al.const_leaf()->get_key() == key) {
@@ -469,7 +476,8 @@ art::trace_list& art::get_tlb() {
 art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
     try {
-        art::node_ptr al;
+        node_ptr al;
+
         tlb.clear();
         al = inner_lower_bound(tlb, t, key);
         if (!al.null()) {

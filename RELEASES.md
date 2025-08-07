@@ -1,3 +1,22 @@
+# Release v0.3.3.6b 2025-08-04
+
+## New Features
+
+1. Added `UINCR`, `UINCRBY`, `APPEND` and `PREPEND`
+2. Unsigned 64-bit integer support (64-bit signed already there)
+3. Improve parser and call performance
+4. Added io_context per server thread to try and reduce locking
+5. improve concurrency
+6. increase shards to improve write concurrency and performance
+
+## Fixes
+
+1. Readme instructions for docker
+2. expose valkey and flask simultaneously
+3. fix potential crash in resp parser due to temporary
+4. improve code
+5. fix stats not saving anymore
+
 # Release v0.3.3.5b 2025-08-04
 
 ## New Features

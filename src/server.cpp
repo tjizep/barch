@@ -420,7 +420,9 @@ namespace barch {
             barch_parser& operator=(const barch_parser&) = delete;
             barch_parser(const barch_parser&) = delete;
 
-            barch_parser() = default;
+            barch_parser() {
+                caller.set_context(ctx_rpc);
+            };
 
             ~barch_parser() = default;
             vector_stream in{};
@@ -562,6 +564,7 @@ namespace barch {
             resp_session(tcp::socket socket, char init_char)
               : socket_(std::move(socket))
             {
+                caller.set_context(ctx_resp);
                 parser.init(init_char);
                 ++statistics::repl::redis_sessions;
             }
@@ -574,9 +577,10 @@ namespace barch {
                 do_read();
             }
             static bool is_authorized(const heap::vector<bool>& func,const heap::vector<bool>& user) {
-                for (size_t i = 0; i < func.size(); ++i) {
-                    bool user_flag = user.size() > i && user[i];
-                    if (func[i] && !user_flag)
+                size_t s = std::min<size_t>(user.size(),func.size());
+                if (s < func.size()) return false;
+                for (size_t i = 0; i < s; ++i) {
+                    if (func[i] && !user[i])
                         return false;
                 }
                 return true;
@@ -597,10 +601,6 @@ namespace barch {
                     }
                 }
 
-                if (prev_cn == "START" || prev_cn == "STOP") {
-                    redis::rwrite(in_stream, error{"not authorized"});
-                    return;
-                }
                 if (ic == barch_functions.end()) {
                     redis::rwrite(in_stream, error{"unknown command"});
                 } else {
@@ -689,6 +689,7 @@ namespace barch {
             explicit barch_session(tcp::socket socket)
               : socket_(std::move(socket))
             {
+                caller.set_context(ctx_rpc);
                 ++statistics::repl::redis_sessions;
             }
             ~barch_session() {

@@ -7,8 +7,21 @@
 #include "value_type.h"
 #include "variable.h"
 #include <initializer_list>
+enum contexts {
+    ctx_resp = 1,
+    ctx_valkey,
+    ctx_rpc
+};
 struct caller {
     virtual ~caller() = default;
+    int ctx{ctx_valkey};
+
+    void set_context(int in_ctx) {
+        this->ctx = in_ctx;
+    }
+    int get_context() {
+        return this->ctx;
+    }
     [[nodiscard]] virtual int wrong_arity() = 0;
     [[nodiscard]] virtual int syntax_error() = 0;
     [[nodiscard]] virtual int error() const = 0;
@@ -32,8 +45,8 @@ struct caller {
     virtual int end_array(size_t length) = 0;
     virtual int reply_encoded_key(art::value_type key) = 0;
     virtual int reply_values(const std::initializer_list<Variable>& keys) = 0;
-    virtual const std::string& get_user() const = 0;
-    virtual const heap::vector<bool>& get_acl() const = 0;
+    [[nodiscard]] virtual const std::string& get_user() const = 0;
+    [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
 };
 typedef heap::small_vector<art::value_type> arg_t;

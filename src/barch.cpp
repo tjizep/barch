@@ -1008,6 +1008,7 @@ int LOAD(caller& call, const arg_t& argv) {
 int START(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
+
     auto interface = argv[1];
     auto port = argv[2];
     barch::server::start(interface.chars(), atoi(port.chars()));
@@ -1034,6 +1035,9 @@ int PULL(caller& call, const arg_t& argv) {
     return call.simple("OK");
 }
 int STOP(caller& call, const arg_t& ) {
+    if (call.get_context() == ctx_resp) {
+        return call.error("Cannot stop server");
+    }
     barch::server::stop();
     return call.simple("OK");
 }

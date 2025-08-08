@@ -309,6 +309,10 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         if (d.partial_len) {
             unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
             if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
+                art::node_ptr mx = inner_maximum(t->root);
+                if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+                    return nullptr;
+                }
                 break;
             }
             depth += d.partial_len;

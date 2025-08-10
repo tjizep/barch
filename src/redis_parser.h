@@ -28,7 +28,10 @@ namespace redis {
         std::vector<std::string_view> empty{};
     public:
         redis_parser() = default;
-        void init(char cs){ buffer += cs;full_buffer+=cs;buffer_size=1;};
+        void init(char cs){
+            full_buffer=cs;
+            buffer_size=1;
+        };
         void add_data(const char * data, size_t len);
         [[nodiscard]] size_t remaining() const ;
         const std::vector<std::string_view>& read_new_request();
@@ -42,7 +45,6 @@ namespace redis {
         size_t buffer_size = 0l;
         size_t parameters_processed = 0l;
         size_t messages_processed = 0l;
-        std::string buffer{};
         std::string full_buffer{};
         std::string_view arr_size_item{};
         std::string_view bstr_item{};

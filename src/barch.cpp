@@ -1183,6 +1183,7 @@ int STATS(caller& call, const arg_t& argv) {
     call.reply_values({ "maintenance_cycles", as.maintenance_cycles});
     call.reply_values({ "shards", as.shards});
     call.reply_values({ "local_calls", as.local_calls});
+    call.reply_values({ "max_spin", as.max_spin});
     call.reply_values({"logical_allocated", as.logical_allocated});
     call.reply_values({"oom_avoided_inserts", as.oom_avoided_inserts});
     call.reply_values({"keys_found", as.keys_found});

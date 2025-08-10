@@ -161,7 +161,7 @@ Variable encoded_key_as_variant(art::value_type key) {
     } else if (key_len >= 1 && *enck == art::tstring) {
         k = (const char *) &enck[1];
         // kl = key_len - 2;
-        std::string s;
+        std::string s = "$";
         s.insert(s.end(), k, k + encoded_str_len(k, key_len - 2));
         return s;
 

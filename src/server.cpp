@@ -619,56 +619,65 @@ namespace barch {
                     }
                 }
             }
-            void do_read()
-            {
-                    auto self(shared_from_this());
+            void do_parse() {
+                while (parser.remaining() > 0) {
+                    auto &params = parser.read_new_request();
+                    if (!params.empty()) {
+                        run_params(stream, params);
+                    }else {
+                        break;
+                    }
+                }
 
-                    socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                        [this, self](std::error_code ec, std::size_t length)
-                    {
-
-                        if (!ec){
-
-                            parser.add_data(data_, length);
-                            try {
-
-                                stream.clear();
-                                while (parser.remaining() > 0) {
-                                    auto &params = parser.read_new_request();
-                                    if (!params.empty()) {
-                                        //redis::rwrite(stream, OK);
-                                        run_params(stream, params);
-                                    }else {
-                                        break;
-                                    }
-                                }
-
-                                do_write(stream);
-                                do_read();
-                            }catch (std::exception& e) {
-                                art::std_err("error", e.what());
-                            }
-                        }
-                    });
-
+                do_write(stream);
+                if (rpc_resp_asynch_reads != 0) {
+                    do_read();
+                }
             }
-
+            void do_read() {
+                auto self(shared_from_this());
+                if (rpc_resp_asynch_reads == 0) {
+                    try {
+                        for (;;) {
+                            auto some = socket_.read_some(asio::buffer(data_, rpc_io_buffer_size));
+                            stream_read_ctr += some;
+                            parser.add_data(data_, some);
+                            stream.clear();
+                            do_parse();
+                        }
+                    }catch (std::exception&) {
+                        //art::std_err("error", e.what());
+                    }
+                    return;
+                }
+                socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
+                    [this, self](std::error_code ec, std::size_t length)
+                {
+                    if (!ec){
+                        stream_read_ctr += length;
+                        parser.add_data(data_, length);
+                        try {
+                            stream.clear();
+                            do_parse();
+                        }catch (std::exception& e) {
+                            art::std_err("error", e.what());
+                        }
+                    }
+                });
+            }
+            // write statistics are already updated (by vector_stream)
             void do_write(vector_stream& in_stream) {
                 auto self(shared_from_this());
                 if (in_stream.empty()) return;
                 size_t bcount = in_stream.tellg();
+                if (rpc_resp_asynch_writes == 0) {
+                    asio::write(socket_, asio::buffer(in_stream.buf.data(),bcount));
+                    return;
+                }
+
                 asio::async_write(socket_, asio::buffer(in_stream.buf.data(),bcount),
-                    [this, self](std::error_code ec, std::size_t length){
-                        if (!ec){
-                            try {
-                                net_stat stat;
+                    [](std::error_code , std::size_t){
 
-                                stream_write_ctr += length;
-                            }catch (std::exception& e) {
-                                art::std_err("error", e.what());
-                            }
-
-                        }
                     });
             }
             tcp::socket socket_;
@@ -709,6 +718,7 @@ namespace barch {
                 {
 
                     if (!ec){
+                        stream_read_ctr += length;
                         parser.add_data(data_, length);
                         try {
                             vector_stream out;
@@ -746,7 +756,8 @@ namespace barch {
             try {
                 char cs[1] ;
                 //readp(stream, cs);
-                endpoint.read_some(asio::buffer(cs));
+                endpoint.read_some(asio::buffer(cs,1));
+                stream_read_ctr += 1;
                 if (cs[0]) {
                     if (opt_use_alt_threads == 1){
                         auto& ioc = this->get_proc_ctx();
@@ -755,7 +766,9 @@ namespace barch {
                         auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
                         session->start();
                     }else {
-                        auto session = std::make_shared<resp_session>(std::move(endpoint),cs[0]);
+                        tcp::socket socket (this->io);
+                        socket.assign(tcp::v4(),endpoint.release());
+                        auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
                         session->start();
                     }
                     return;

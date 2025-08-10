@@ -12,14 +12,6 @@
 #include "key_options.h"
 #include "variable.h"
 
-enum {
-    rpc_server_version = 21,
-    rpc_server_version_min = 21,
-    rpc_server_version_max = 21,
-    rpc_client_max_wait_default_ms = 30000,
-    rpc_io_buffer_size = 1024 * 4,
-    rpc_max_param_buffer_size = 1024 * 1024 * 10,
-};
 namespace barch {
 
     typedef std::pair<std::string, size_t> host_id;
@@ -90,5 +82,16 @@ namespace barch {
         route get_route(size_t shard);
     }
 }
+
+enum {
+    rpc_server_version = 21,
+    rpc_server_version_min = 21,
+    rpc_server_version_max = 21,
+    rpc_client_max_wait_default_ms = 30000,
+    rpc_io_buffer_size = 1024 * 8,
+    rpc_max_param_buffer_size = 1024 * 1024 * 10,
+    rpc_resp_asynch_reads = 1,
+    rpc_resp_asynch_writes = 0
+};
 
 #endif //SERVER_H

@@ -348,7 +348,6 @@ namespace art {
                     dcache = address.get_ap<alloc_pair>().get_nodes().modify<T>(address);
                     last_ticker = page_modifications::get_ticker(address.page());
                 }
-
                 return (T *) dcache;
             }
             mutable node_data *dcache = nullptr;

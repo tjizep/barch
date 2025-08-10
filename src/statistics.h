@@ -36,6 +36,7 @@ namespace statistics {
     extern std::atomic<uint64_t> maintenance_cycles;
     extern std::atomic<uint64_t> shards;
     extern std::atomic<uint64_t> local_calls;
+    extern std::atomic<uint64_t> max_spin;
     /**
      * ops stats
      */

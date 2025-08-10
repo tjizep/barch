@@ -179,6 +179,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         art::node_ptr al;
         al = find(t, key);
         if (!al.null()) {
+            ++statistics::keys_found;
             return al;
         }
         tlb.clear();
@@ -291,8 +292,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
             auto l = n.const_leaf();
             if (trace.empty())
                 return (l->get_key() < key ||  l->expired()) ? nullptr : n;
-
-            while (true) {
+            for (uint64_t i=0;;++i) {
                 auto c = last_el(trace).child;
                 if (!c.is_leaf) return nullptr;
                 l = c.const_leaf();
@@ -300,6 +300,9 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
                     if (!increment_trace(t->root, trace)) return nullptr;
                 }else {
                     break;
+                }
+                if (i > statistics::max_spin) {
+                    statistics::max_spin = i;
                 }
             }
             n = last_el(trace).child;
@@ -344,7 +347,7 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
         depth++;
     }
     if (!extend_trace_min(t->root, trace)) return nullptr;
-    while (true) {
+    for (uint64_t i = 0;; ++i) {
         auto c = last_el(trace).child;
         if (!c.is_leaf) return nullptr;
         auto l = c.const_leaf();
@@ -352,6 +355,9 @@ static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *
             if (!increment_trace(t->root, trace)) return nullptr;
         }else {
             break;
+        }
+        if (i > statistics::max_spin) {
+            statistics::max_spin = i;
         }
     }
     n = last_el(trace).child;
@@ -1557,6 +1563,7 @@ art_statistics art::get_statistics() {
     as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
     as.shards = (int64_t) statistics::shards;
     as.local_calls = (int64_t) statistics::local_calls;
+    as.local_calls = (int64_t) statistics::max_spin;
     as.logical_allocated = (int64_t) statistics::logical_allocated;
     as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
     as.keys_found = (int64_t) statistics::keys_found;

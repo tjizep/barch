@@ -17,7 +17,7 @@ enum {
     allocation_padding = 0,
     initialize_memory = 1,
     storage_version = 8,
-    ticker_size = 64,
+    ticker_size = 256,
     numeric_key_size = 12,
     num32_key_size = 6,
     composite_key_size = 2,

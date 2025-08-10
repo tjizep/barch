@@ -87,6 +87,7 @@ struct statistics_values {
     long long maintenance_cycles {};
     long long shards {};
     long long local_calls {};
+    long long max_spin {};
     long long logical_allocated {};
     long long oom_avoided_inserts {};
     long long keys_found {};

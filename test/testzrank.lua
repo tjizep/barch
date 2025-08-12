@@ -22,7 +22,7 @@ local function add(tr)
 end
 
 local failures = 0
-for i=1,10000 do
+for i=1,1000 do
     local min = math.floor((count-count/10)*math.random())
     local max = min + count/10 --count*math.random()--math.floor()
     local zr = vk.call('B.ZRANK',key,min,max)

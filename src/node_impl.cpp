@@ -10,7 +10,11 @@
 
 #include <algorithm>
 #include "module.h"
+static std::random_device rd;
+static std::mt19937 gen(rd());
+
 namespace art {
+
     node_ptr tree::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
         return art::make_leaf(*this, key, v, ttl, is_volatile);
     }
@@ -294,8 +298,6 @@ void abstract_random_eviction(art::tree *t, const std::function<bool(const art::
     auto &lc = t->get_leaves();
     auto page_count = lc.get_page_count();
 
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
     if (page_count > 10) {
         std::uniform_int_distribution<size_t> dist(0, page_count - 1);
         size_t random_page = dist(gen);
@@ -391,7 +393,10 @@ void art::tree::start_maintain() {
                 }
             }
             ++statistics::maintenance_cycles;
+            //std::uniform_int_distribution<size_t> dist(1, art::get_maintenance_poll_delay());
+
             // TODO: we should wait on a join signal not just sleep else server wont stop quickly
+            //std::this_thread::sleep_for(std::chrono::milliseconds(dist(gen)+5));
             std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
         }
     });

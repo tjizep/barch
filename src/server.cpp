@@ -12,7 +12,8 @@
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Weffc++"
-
+//#define ASIO_HAS_IO_URING
+//#define ASIO_DISABLE_EPOLL
 #include <asio/io_context.hpp>
 #include <asio/detached.hpp>
 #include <asio/ip/tcp.hpp>
@@ -21,27 +22,28 @@
 #include "asio/io_service.hpp"
 #pragma GCC diagnostic pop
 #include <cstdio>
+#include <liburing.h>
 #include "barch_apis.h"
 #include "swig_api.h"
 #include "rpc_caller.h"
 #include "vk_caller.h"
 #include "redis_parser.h"
 #include "thread_pool.h"
+#include "uring_context.h"
 enum {
     cmd_ping = 1,
     cmd_stream = 2,
     cmd_art_fun = 3,
     cmd_barch_call = 4
 };
+
 enum {
     opt_max_workers = 8,
     opt_read_timout = 60000,
     opt_use_alt_threads = 1
 };
-
 using asio::ip::tcp;
 using asio::local::stream_protocol;
-
 namespace barch {
     static auto barch_functions = functions_by_name();
     template<typename T>
@@ -61,15 +63,6 @@ namespace barch {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    struct net_stat {
-        uint64_t saved_writes = stream_write_ctr;
-        uint64_t saved_reads = stream_read_ctr;
-        net_stat() = default;
-        ~net_stat() {
-            statistics::repl::bytes_recv += stream_read_ctr - saved_reads;
-            statistics::repl::bytes_sent += stream_write_ctr - saved_writes;
-        }
-    };
 
     inline double ntohl(double x) {
         return x;
@@ -349,22 +342,42 @@ namespace barch {
         }
         return r;
     }
+
+    typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
+    struct work_unit {
+        asio::io_service io = asio::io_service(1);
+        uring_context ur{&io};
+
+        exec_guard guard = asio::make_work_guard(io);
+        void run(size_t tid) {
+            io.dispatch([tid]() {
+                art::std_log("proc server started using thread",tid);
+            });
+            ur.start(tid);
+            io.run();
+        }
+        void stop() {
+            io.stop();
+        }
+    };
     struct server_context {
         thread_pool pool{};
-        thread_pool resp_pool{};
+        thread_pool resp_pool{1.25f};
         asio::io_context io{};
-        heap::vector<std::shared_ptr<asio::io_service>> io_resp{};
-        typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
-        heap::vector<std::shared_ptr<exec_guard>> work_guards{};
+        std::vector<std::shared_ptr<work_unit>> io_resp{};
 
         tcp::acceptor acc;
         std::string interface;
         uint_least16_t port;
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
+        std::shared_ptr<work_unit> get_unit() {
+            size_t r = resp_distributor++ % io_resp.size();
+            return io_resp[r];
+        }
         asio::io_context& get_proc_ctx() {
             size_t r = resp_distributor++ % io_resp.size();
-            return *io_resp[r];
+            return io_resp[r]->io;
         }
         void stop() {
             try {
@@ -561,15 +574,18 @@ namespace barch {
         public:
             resp_session(const resp_session&) = delete;
             resp_session& operator=(const resp_session&) = delete;
-            resp_session(tcp::socket socket, char init_char)
-              : socket_(std::move(socket))
+            resp_session(tcp::socket socket, std::shared_ptr<work_unit> work, char init_char)
+              : socket_(std::move(socket)), work(work)
             {
                 caller.set_context(ctx_resp);
                 parser.init(init_char);
                 ++statistics::repl::redis_sessions;
             }
+
             ~resp_session() {
                 --statistics::repl::redis_sessions;
+                if (opt_debug_uring == 1)
+                    art::std_log("redis session closed",(uint64_t)statistics::repl::redis_sessions);
             }
 
             void start()
@@ -630,57 +646,33 @@ namespace barch {
                 }
 
                 do_write(stream);
-                if (rpc_resp_asynch_reads != 0) {
-                    do_read();
-                }
+                do_read();
+
             }
             void do_read() {
-                auto self(shared_from_this());
-                if (rpc_resp_asynch_reads == 0) {
+                auto self = shared_from_this();
+                work->ur.read(socket_, rreq,{data_, rpc_io_buffer_size}, [this,self](art::value_type v) {
+                    if (v.size == 0) return;
+                    parser.add_data(v.chars(), v.size);
                     try {
-                        for (;;) {
-                            auto some = socket_.read_some(asio::buffer(data_, rpc_io_buffer_size));
-                            stream_read_ctr += some;
-                            parser.add_data(data_, some);
-                            stream.clear();
-                            do_parse();
-                        }
-                    }catch (std::exception&) {
-                        //art::std_err("error", e.what());
-                    }
-                    return;
-                }
-                socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                    [this, self](std::error_code ec, std::size_t length)
-                {
-                    if (!ec){
-                        stream_read_ctr += length;
-                        parser.add_data(data_, length);
-                        try {
-                            stream.clear();
-                            do_parse();
-                        }catch (std::exception& e) {
-                            art::std_err("error", e.what());
-                        }
+                        stream.clear();
+                        do_parse();
+                    }catch (std::exception& e) {
+                        art::std_err("error", e.what());
                     }
                 });
             }
             // write statistics are already updated (by vector_stream)
             void do_write(vector_stream& in_stream) {
-                auto self(shared_from_this());
                 if (in_stream.empty()) return;
                 size_t bcount = in_stream.tellg();
-                if (rpc_resp_asynch_writes == 0) {
-                    asio::write(socket_, asio::buffer(in_stream.buf.data(),bcount));
-                    return;
-                }
+                auto self = shared_from_this();
+                work->ur.write(socket_, wreq,{in_stream.buf.data(),bcount}, [this,self](art::value_type) {
 
-                asio::async_write(socket_, asio::buffer(in_stream.buf.data(),bcount),
-                    [](std::error_code , std::size_t){
-
-                    });
+                });
             }
             tcp::socket socket_;
+            std::shared_ptr<work_unit> work{};
             char data_[rpc_io_buffer_size]{};
             redis::redis_parser parser{};
             rpc_caller caller{};
@@ -688,6 +680,8 @@ namespace barch {
             std::string prev_cn{};
             Variable OK = "OK";
             function_map::iterator ic{};
+            request rreq{};
+            request wreq{};
         };
 
         class barch_session : public std::enable_shared_from_this<barch_session>
@@ -751,7 +745,8 @@ namespace barch {
             uint8_t data_[rpc_io_buffer_size]{};
             barch_parser parser{};
         };
-
+        heap::vector<std::shared_ptr<resp_session>> sessions{};
+        void start() {}
         void process_data(tcp::socket& endpoint) {
             try {
                 char cs[1] ;
@@ -761,15 +756,18 @@ namespace barch {
                 if (cs[0]) {
                     if (opt_use_alt_threads == 1){
                         auto& ioc = this->get_proc_ctx();
+                        auto unit = this->get_unit();
                         tcp::socket socket (ioc);
                         socket.assign(tcp::v4(),endpoint.release());
-                        auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
+                        auto session = std::make_shared<resp_session>(std::move(socket),unit,cs[0]);
+                        //sessions.push_back(session);
                         session->start();
+
                     }else {
                         tcp::socket socket (this->io);
-                        socket.assign(tcp::v4(),endpoint.release());
-                        auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
-                        session->start();
+                        //socket.assign(tcp::v4(),endpoint.release());
+                        //auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
+                        //session->start();
                     }
                     return;
                 }
@@ -857,10 +855,8 @@ namespace barch {
         ,   port(port){
             start_accept();
             io_resp.resize(resp_pool.size());
-            work_guards.resize(io_resp.size());
             for (size_t i = 0; i < io_resp.size(); ++i) {
-                io_resp[i] = std::make_shared<asio::io_service>(1);
-                work_guards[i] = std::make_shared<exec_guard>(asio::make_work_guard(*io_resp[i]));
+                io_resp[i] = std::make_shared<work_unit>();
             }
             pool.start([this](size_t tid) -> void{
                 io.dispatch([this,tid]() {
@@ -870,10 +866,7 @@ namespace barch {
                 art::std_log("server stopped on", this->interface,this->port,"using thread",tid);
             });
             resp_pool.start([this](size_t tid) -> void {
-                io_resp[tid]->dispatch([this,tid]() {
-                    art::std_log("proc server started using thread",tid);
-                });
-                io_resp[tid]->run();
+                io_resp[tid]->run(tid);
             });
 
 

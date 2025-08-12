@@ -357,7 +357,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key);
  * Returns the minimum valued leaf
  * @return The minimum leaf or NULL
  */
-art::node_ptr art_minimum(art::tree *t);
+art::node_ptr art_minimum(const art::tree *t);
 
 /**
  * Returns the maximum valued leaf

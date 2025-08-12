@@ -51,7 +51,7 @@ extern "C"{
     int COMMAND(caller& call,const arg_t& argv);
     int AUTH(caller& call,const arg_t& argv);
     int ACL(caller& call,const arg_t& argv);
-
+    int INFO(caller& call, const arg_t& argv);
     // Keys
     int SET(caller& call,const arg_t& argv);
     int APPEND(caller& call,const arg_t& argv);

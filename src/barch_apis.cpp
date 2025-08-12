@@ -88,6 +88,7 @@ function_map& functions_by_name() {
         r["FLUSHALL"] = {::CLEAR,{"write","dangerous"}};
         r["STATS"] = {::STATS,{"read","stats"}};
         r["OPS"] = {OPS,{"read","stats"}};
+        r["INFO"] = {INFO,{"read","stats"}};
 
         r["ADDROUTE"] = {::ADDROUTE,{"write","connection"}};
         r["ROUTE"] = {::ROUTE,{"read","connection"}};

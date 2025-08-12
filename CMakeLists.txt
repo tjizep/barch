@@ -48,6 +48,25 @@ if (USE_ASIO)
 else ()
     message("Boost.Asio not used use -USE_ASIO=ON")
 endif()
+
+if (USE_ASIO)
+    message("Using liburing")
+    FetchContent_Declare(
+            liburing
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            SOURCE_SUBDIR build/cmake
+            URL "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.11.tar.gz"
+    )
+    FetchContent_MakeAvailable(liburing)
+    execute_process(COMMAND ./configure --cc=gcc --cxx=g++
+            WORKING_DIRECTORY ${liburing_SOURCE_DIR})
+    execute_process(COMMAND make -j4
+            WORKING_DIRECTORY ${liburing_SOURCE_DIR})
+    include_directories(${liburing_SOURCE_DIR}/src/include)
+    set(LIBURING_LIB_PATH ${liburing_SOURCE_DIR}/src/liburing.a)
+else ()
+    message("Boost.Asio not used use -USE_ASIO=ON")
+endif()
 if (USE_ASIO)
     message("Using std alone ASIO")
     FetchContent_Declare(
@@ -165,6 +184,9 @@ if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
 endif ()
 
+if (USE_ASIO)
+    target_link_libraries(barch PRIVATE ${LIBURING_LIB_PATH})
+endif ()
 if (ADD_FMT)
     target_link_libraries(barch PRIVATE fmt::fmt)
 endif ()

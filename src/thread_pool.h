@@ -17,6 +17,13 @@ struct thread_pool {
     thread_pool() {
         pool.resize(std::max<size_t>(4, std::thread::hardware_concurrency()));
     }
+    explicit thread_pool(double factor) {
+        double cores = std::thread::hardware_concurrency();
+        pool.resize(std::max<size_t>(4, (size_t)(cores*factor)));
+    }
+    explicit thread_pool(int threads) {
+        pool.resize(threads);
+    }
     [[nodiscard]] size_t size() const {
         return pool.size();
     }

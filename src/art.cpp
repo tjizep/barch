@@ -176,6 +176,10 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
             abort_with("invalid root node");
         }
+        if (t->size > 1000 ) {
+            //++statistics::keys_found;
+            //return art_minimum(t);
+        }
         art::node_ptr al;
         al = find(t, key);
         if (!al.null()) {
@@ -188,6 +192,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
             ++statistics::keys_found;
             return al;
         }
+
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
@@ -602,7 +607,9 @@ art::node_ptr art::find(const tree* t, value_type key) {
                     return nullptr;
                 }
             }
-            unsigned at = n->index(key[depth]);
+            unsigned at;
+
+            at = n->index(key[depth]);
             n = n->get_child(at);
             depth++;
         }
@@ -893,7 +900,7 @@ void art::iterator::log_trace() const {
 /**
  * Returns the minimum valued leaf
  */
-art::node_ptr art_minimum(art::tree *t) {
+art::node_ptr art_minimum(const art::tree *t) {
     ++statistics::min_ops;
     try {
         auto l = minimum(t->root);

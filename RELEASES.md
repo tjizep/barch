@@ -1,4 +1,4 @@
-# Release v0.3.3.8b 2025-08-10
+# Release v0.3.3.9b 2025-08-14
 
 ## New Features
 
@@ -8,6 +8,9 @@
 4. Added io_context per server thread to try and reduce locking (0.3.3.3b 2025-08-02)
 5. improve concurrency (0.3.3.3b 2025-08-02)
 6. increase shards to improve write concurrency and performance (0.3.3.4b 2025-08-04)
+7. use io_uring for resp socket operations (0.3.3.9b 2025-08-14)
+8. general performance improvements (0.3.3.9b 2025-08-14)
+9. jump cache to improve read performance (0.3.3.9b 2025-08-14)
 
 ## Fixes
 

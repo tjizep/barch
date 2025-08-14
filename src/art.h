@@ -148,6 +148,8 @@ namespace art {
     private:
         trace_list trace{};
         std::set<kv_buf> buffers{};
+        mutable size_t cache_size = 0;
+        mutable heap::vector<uint32_t> jump{};
         mutable std::string temp_key{};
         bool with_stats{true};
     public:
@@ -201,10 +203,15 @@ namespace art {
             barch::repl::clear_route(shard);
             start_maintain();
 
+
         }
         tree& operator=(const tree&) = delete;
 
         ~tree();
+        void rehash_jump();
+        void uncache_leaf(value_type key);
+        void cache_leaf(value_type key, const node_ptr& leaf) const ;
+        node_ptr get_cached(value_type key) const;
 
         bool publish(std::string host, int port);
 

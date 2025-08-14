@@ -68,6 +68,10 @@ struct uring_context {
             run();
         });
     }
+    int fd_is_valid(int fd)
+    {
+        return fcntl(fd, F_GETFD) != -1 || errno != EBADF;
+    }
     void run() {
 
         for (;operations_pending > 0; --operations_pending) {
@@ -86,7 +90,7 @@ struct uring_context {
             if (opt_debug_uring == 1)
                 art::std_log("req",req->type,req->client_socket,cqe->res);
 
-            if (cqe->res == 0) {
+            if (cqe->res == 0 || !fd_is_valid(req->client_socket)) {
                 io_uring_cqe_seen(&ring, cqe);
                 if (opt_debug_uring == 1)
                     art::std_log("exit detected",req->type,req->client_socket,cqe->res);

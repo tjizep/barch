@@ -7,6 +7,7 @@
 #include "statistics.h"
 #include "nodes.h"
 #include "node_impl.h"
+#include "time_convertsion.h"
 
 #include <algorithm>
 #include "module.h"
@@ -357,20 +358,10 @@ static uint64_t get_modifications() {
     return statistics::insert_ops + statistics::delete_ops + statistics::set_ops;
 }
 
-template<typename T>
-static uint64_t millis(std::chrono::time_point<T> a, std::chrono::time_point<T> b) {
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(a - b);
-    uint64_t count = duration.count();
-    return count;
-}
-
-template<typename T>
-static uint64_t millis(std::chrono::time_point<T> a) {
-    return millis(std::chrono::high_resolution_clock::now(), a);
-}
-
 void art::tree::start_maintain() {
+
     tmaintain = std::thread([&]() -> void {
+        uint64_t jf = get_jump_factor();
         auto start_save_time = std::chrono::high_resolution_clock::now();
         auto mods = get_modifications();
         while (!this->mexit) {
@@ -380,6 +371,16 @@ void art::tree::start_maintain() {
             run_evict_volatile_keys_lfu(this);
             run_evict_volatile_expired_keys(this);
             run_sweep_expired_keys(this);
+            {
+                storage_release releaser(this->latch);
+                if (statistics::logical_allocated < art::get_max_module_memory()) {
+                    if (jump.size() < this->size || jf != get_jump_factor()) {
+                        rehash_jump();
+                        jf = get_jump_factor();
+                    }
+                }
+
+            }
             // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
             if (art::get_active_defrag())
                 run_defrag(); // periodic

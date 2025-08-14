@@ -7,10 +7,4 @@
 
 
 
-class list_api {
-
-};
-
-
-
 #endif //LIST_API_H

@@ -32,6 +32,7 @@ static std::string bind_interface{"127.0.0.1"};
 static std::string listen_port{};
 static std::string rpc_max_buffer{};
 static std::string rpc_client_max_wait_ms{};
+static std::string jump_factor{};
 
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
@@ -127,6 +128,40 @@ static int SetRPCClientMaxWait(const char *unused_arg, ValkeyModuleString *val, 
     return SetRPCClientMaxWait(test_rpc_client_max_wait_ms);
 }
 static int ApplyRPCClientMaxWait(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+static ValkeyModuleString *GetJumpFactor(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, jump_factor.c_str(), jump_factor.length());;
+}
+
+static int SetJumpFactor(const std::string& test_jump_factor) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_jump_factor, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(config_mutex);
+    jump_factor = test_jump_factor;
+    char *notn = nullptr;
+    const char *str = jump_factor.c_str();
+    const char *end = str + jump_factor.length();
+
+    uint64_t n_jump_factor = std::strtoll(str, &notn, 10);
+    if (notn != nullptr && notn != end) {
+        return VALKEYMODULE_ERR;
+    }
+    record.jump_factor = n_jump_factor;
+    return VALKEYMODULE_OK;
+}
+
+static int SetJumpFactor(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string test_jump_factor = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetRPCClientMaxWait(test_jump_factor);
+}
+static int ApplyJumpFactor(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 
@@ -621,6 +656,10 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetRPCClientMaxWait, SetRPCClientMaxWait,
                                                  ApplyRPCClientMaxWait, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "jump_factor", "3", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetJumpFactor, SetJumpFactor,
+                                                 ApplyJumpFactor, nullptr);
+
     return ret;
 }
 
@@ -680,6 +719,12 @@ int art::set_configuration_value(const std::string& name, const std::string &val
         auto r = SetRPCClientMaxWait(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyRPCClientMaxWait(nullptr, nullptr, nullptr);
+        }
+        return r;
+    }else if (name == "jump_factor") {
+        auto r = SetJumpFactor(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyJumpFactor(nullptr, nullptr, nullptr);
         }
         return r;
     } else {
@@ -778,6 +823,10 @@ uint64_t art::get_rpc_max_buffer() {
 int64_t art::get_rpc_max_client_wait_ms() {
     return record.rpc_client_max_wait_ms;
 }
+uint64_t art::get_jump_factor() {
+    return record.jump_factor;
+}
+
 
 
 bool art::get_log_page_access_trace() {

@@ -28,6 +28,8 @@ namespace art {
         uint64_t rpc_connect_to_s{30};
         uint64_t rpc_read_to_s{30};
         uint64_t rpc_write_to_s{30};
+        uint64_t jump_factor{3};
+        uint64_t internal_shards{37};
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
         bool use_vmm_memory{true};
@@ -89,6 +91,8 @@ namespace art {
     uint64_t get_rpc_max_buffer();
 
     int64_t get_rpc_max_client_wait_ms();
+
+    uint64_t get_jump_factor();
 
     std::chrono::seconds get_rpc_connect_to_s();
     std::chrono::seconds get_rpc_read_to_s() ;

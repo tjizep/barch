@@ -653,6 +653,7 @@ namespace barch {
                 auto self = shared_from_this();
                 work->ur.read(socket_, rreq,{data_, rpc_io_buffer_size}, [this,self](art::value_type v) {
                     if (v.size == 0) return;
+                    if (!socket_.is_open()) return;
                     parser.add_data(v.chars(), v.size);
                     try {
                         stream.clear();
@@ -665,6 +666,8 @@ namespace barch {
             // write statistics are already updated (by vector_stream)
             void do_write(vector_stream& in_stream) {
                 if (in_stream.empty()) return;
+                if (!socket_.is_open()) return;
+
                 size_t bcount = in_stream.tellg();
                 auto self = shared_from_this();
                 work->ur.write(socket_, wreq,{in_stream.buf.data(),bcount}, [this,self](art::value_type) {

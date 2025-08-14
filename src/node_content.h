@@ -421,12 +421,6 @@ namespace art {
                 if (KEYS > 0) {
                     auto at = (const uint8_t*)memchr(dat.keys, c, dat.occupants);
                     return at - dat.keys;
-#if 0
-                    for (i = 0; i < dat.occupants; ++i) {
-                        if (dat.keys[i] == c)
-                            return i;
-                    }
-#endif
                 }
 
             }

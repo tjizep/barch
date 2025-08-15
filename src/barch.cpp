@@ -925,7 +925,7 @@ int REM(caller& call, const arg_t& argv) {
 
     auto t = get_art(argv[1]);
     storage_release release(t->latch);
-    art_delete(t, converted.get_value(), fc);
+    t->remove(converted.get_value(), fc);
 
     return r;
 }

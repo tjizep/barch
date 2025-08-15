@@ -1716,23 +1716,7 @@ static void stream_to_stats(InStream &in) {
 static size_t hash_(art::value_type v) {
     return ankerl::unordered_dense::detail::wyhash::hash(v.chars(), v.size);
 }
-
-static bool hash_insert(heap::vector<uint32_t>& jump, art::value_type key, const art::node_ptr& leaf) {
-    size_t at = hash_(key) % jump.size();
-    for (int i = 0; i < max_jump_probe && jump[at]; ++i) {
-        at = (at + 1) % jump.size();
-    }
-    bool r = jump[at] == 0;
-    if (r)
-        jump[at] = leaf.logical.address();
-    return r;
-}
-unused(
-static bool hash_insert(heap::vector<uint32_t>& jump, const art::node_ptr& leaf) {
-    return hash_insert(jump, leaf.const_leaf()->get_key(), leaf);
-}
-)
-static art::node_ptr hash_find(const art::tree* t, heap::vector<uint32_t>& jump, art::value_type k) {
+static art::node_ptr hash_find(void* t, heap::vector<uint32_t>& jump, art::value_type k) {
     if (jump.empty()) return nullptr;
     size_t at = hash_(k) % jump.size();
     for (int i = 0; i < max_jump_probe; ++i) {
@@ -1746,16 +1730,46 @@ static art::node_ptr hash_find(const art::tree* t, heap::vector<uint32_t>& jump,
     }
     return nullptr;
 }
+
+static bool hash_insert(void* t, heap::vector<uint32_t>& jump, art::value_type key, const art::node_ptr& leaf) {
+    size_t at = hash_(key) % jump.size();
+    for (int i = 0; i < max_jump_probe && jump[at]; ++i) {
+        auto addr = jump[at];
+        if ( addr ) {
+            art::node_ptr l = logical_address(addr, t);
+            auto cl = l.const_leaf();
+            if (cl->compare(key)==0) {
+                if (addr != l.logical.address()) {
+                    jump[at] = l.logical.address();
+                }
+
+                return false;
+            }
+        }
+        ++at ;;
+        if (at >= jump.size()) {
+            at = 0;
+        };
+    }
+    bool r = jump[at] == 0;
+    if (r)
+        jump[at] = leaf.logical.address();
+    return r;
+}
+
+static bool hash_insert(void* t, heap::vector<uint32_t>& jump, const art::node_ptr& leaf) {
+    return hash_insert(t, jump, leaf.const_leaf()->get_key(), leaf);
+}
 static bool hash_remove(art::tree* t, heap::vector<uint32_t>& jump, art::value_type k) {
     if (jump.empty()) return false;
     size_t at = hash_(k) % jump.size();
     for (int i = 0; i < max_jump_probe; ++i) {
-        auto &addr = jump[at];
+        auto addr = jump[at];
         if ( addr ) {
             art::node_ptr l = logical_address(addr, t);
             auto cl = l.const_leaf();
             if (cl->compare(k)==0) {
-                addr = 0;
+                jump[at] = 0;
                 return true;
             }
         }
@@ -1773,7 +1787,7 @@ void art::tree::rehash_jump() {
             node_ptr l = logical_address(addr, (void*)this);
             auto cl = l.const_leaf();
             if (!cl->deleted() && !cl->expired()) {
-                if (hash_insert(new_jump, cl->get_key(), l)) {
+                if (hash_insert(this, new_jump, cl->get_key(), l)) {
                     if (cache_size > this->size) {
                         abort_with("art::tree::rehash_jump: cache size overflow");
                     }
@@ -1782,6 +1796,7 @@ void art::tree::rehash_jump() {
             }
         }
     }
+
     jump.swap(new_jump);
 }
 void art::tree::uncache_leaf(value_type key) {
@@ -1789,17 +1804,20 @@ void art::tree::uncache_leaf(value_type key) {
         --cache_size;
     }
 }
-void art::tree::cache_leaf(value_type key, const node_ptr& leaf) const {
+void art::tree::cache_leaf(value_type unused(key), const node_ptr& leaf) const {
     if (jump.empty()) {
         return;
     }
-    if (hash_insert(jump, key, leaf)) {
+    if (hash_insert((void*)this, jump, leaf)) {
         ++cache_size;
+        if (cache_size > this->size) {
+            //abort_with("art::tree::cache_leaf: cache size overflow");
+        }
     }
 }
 art::node_ptr art::tree::get_cached(value_type key) const {
     if (jump.empty()) return nullptr;
-    return hash_find(this, jump, key);
+    return hash_find((void*)this, jump, key);
 }
 
 bool art::tree::publish(std::string host, int port) {
@@ -1918,6 +1936,7 @@ bool art::tree::load(bool) {
     try {
         storage_release release(latch);
         jump.clear();
+        cache_size = 0;
         auto *t = this;
         logical_address root{nullptr};
         bool is_leaf = false;
@@ -2060,6 +2079,7 @@ void art::tree::clear() {
     get_leaves().clear();
     get_nodes().clear();
     jump.clear();
+    cache_size = 0;
     statistics::n4_nodes = 0;
     statistics::n16_nodes = 0;
     statistics::n48_nodes = 0;

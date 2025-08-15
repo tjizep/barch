@@ -164,11 +164,12 @@ namespace art {
  * the key and node.
  */
 
+
 unsigned art::node::check_prefix(const unsigned char *key, unsigned key_len, unsigned depth) const {
-    unsigned max_cmp = std::min<int>(std::min<int>(data().partial_len, max_prefix_llength),
+    auto &d = data();
+    unsigned max_cmp = std::min<int>(std::min<int>(d.partial_len, max_prefix_llength),
                                      (int) key_len - (int) depth);
     unsigned idx;
-    auto &d = data();
 
     for (idx = 0; idx < max_cmp; idx++) {
         if (d.partial[idx] != key[depth + idx])

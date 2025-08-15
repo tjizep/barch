@@ -15,7 +15,16 @@
 #include <vector>
 #include <ankerl/unordered_dense.h>
 
-#include "jg/dense_hash_map.hpp"
+#define unused_arg
+#define unused(x)
+
+#    if defined(__GNUC__) || defined(__INTEL_COMPILER) || defined(__clang__)
+#        define LIKELY(x) __builtin_expect(x, 1)   // NOLINT(cppcoreguidelines-macro-usage)
+#        define UNLIKELY(x) __builtin_expect(x, 0) // NOLINT(cppcoreguidelines-macro-usage)
+#    else
+#        define LIKELY(x) (x)   // NOLINT(cppcoreguidelines-macro-usage)
+#        define UNLIKELY(x) (x) // NOLINT(cppcoreguidelines-macro-usage)
+#    endif
 
 namespace heap {
     uint64_t get_physical_memory_bytes();

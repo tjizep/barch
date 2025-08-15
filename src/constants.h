@@ -29,6 +29,7 @@ enum {
     log_streams = 0,
     encoding_width = 128,
     encoding_delta = 0,
-    key_terminator = 0x01
+    key_terminator = 0x01,
+    max_jump_probe = 8
 };
 #endif //CONSTANTS_H

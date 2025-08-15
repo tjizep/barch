@@ -607,9 +607,7 @@ art::node_ptr art::find(const tree* t, value_type key) {
                     return nullptr;
                 }
             }
-            unsigned at;
-
-            at = n->index(key[depth]);
+            unsigned at = n->index(key[depth]);
             n = n->get_child(at);
             depth++;
         }
@@ -1714,11 +1712,59 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::oom_avoided_inserts);
     readp(in, statistics::logical_allocated);
 }
-void art::tree::uncache_leaf(value_type key) {
-    if (jump.empty()) return;
-    uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-    size_t at = hash % jump.size();
-    jump[at] = 0;
+
+static size_t hash_(art::value_type v) {
+    return ankerl::unordered_dense::detail::wyhash::hash(v.chars(), v.size);
+}
+
+static bool hash_insert(heap::vector<uint32_t>& jump, art::value_type key, const art::node_ptr& leaf) {
+    size_t at = hash_(key) % jump.size();
+    size_t at_start  = at;
+    for (int i = 0; i < max_jump_probe && jump[at]; ++i) {
+        at = (at + 1) % jump.size();
+    }
+    if (at_start < at) {
+
+    }
+    bool r = jump[at] == 0;
+    jump[at] = leaf.logical.address();
+    return r;
+}
+unused(
+static bool hash_insert(heap::vector<uint32_t>& jump, const art::node_ptr& leaf) {
+    return hash_insert(jump, leaf.const_leaf()->get_key(), leaf);
+}
+)
+static art::node_ptr hash_find(const art::tree* t, heap::vector<uint32_t>& jump, art::value_type k) {
+    if (jump.empty()) return nullptr;
+    size_t at = hash_(k) % jump.size();
+    for (int i = 0; i < max_jump_probe; ++i) {
+        auto addr = jump[at];
+        if ( addr ) {
+            art::node_ptr l = logical_address(addr, (void*)t);
+            auto cl = l.const_leaf();
+            if (!cl->deleted() && !cl->expired() && cl->compare(k)==0) return l;
+        }
+        at = (at + 1) % jump.size();
+    }
+    return nullptr;
+}
+static bool hash_remove(art::tree* t, heap::vector<uint32_t>& jump, art::value_type k) {
+    if (jump.empty()) return false;
+    size_t at = hash_(k) % jump.size();
+    for (int i = 0; i < max_jump_probe; ++i) {
+        auto &addr = jump[at];
+        if ( addr ) {
+            art::node_ptr l = logical_address(addr, t);
+            auto cl = l.const_leaf();
+            if (cl->compare(k)==0) {
+                addr = 0;
+                return true;
+            }
+        }
+        at = (at + 1) % jump.size();
+    }
+    return false;
 }
 void art::tree::rehash_jump() {
     auto jf = get_jump_factor();
@@ -1730,39 +1776,33 @@ void art::tree::rehash_jump() {
             node_ptr l = logical_address(addr, (void*)this);
             auto cl = l.const_leaf();
             if (!cl->deleted() && !cl->expired()) {
-                auto key = cl->get_key();
-                uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-                if (new_jump.empty()) continue;
-                size_t at = hash % new_jump.size();
-                if (!new_jump[at]) ++cache_size;
-                new_jump[at] = addr;
+                if (hash_insert(new_jump, cl->get_key(), l)) {
+                    if (cache_size > this->size) {
+                        abort_with("art::tree::rehash_jump: cache size overflow");
+                    }
+                    cache_size++;
+                }
             }
         }
     }
     jump.swap(new_jump);
 }
+void art::tree::uncache_leaf(value_type key) {
+    if (hash_remove(this, jump, key)) {
+        --cache_size;
+    }
+}
 void art::tree::cache_leaf(value_type key, const node_ptr& leaf) const {
     if (jump.empty()) {
         return;
     }
-    uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-    size_t at = hash % jump.size();
-    auto addr = jump[at];
-    if ( !addr ) {
-        jump[at] = leaf.logical.address();
+    if (hash_insert(jump, key, leaf)) {
         ++cache_size;
     }
 }
 art::node_ptr art::tree::get_cached(value_type key) const {
     if (jump.empty()) return nullptr;
-    uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-    size_t at = hash % jump.size();
-    auto addr = jump[at];
-    if ( !addr ) return nullptr;
-    node_ptr l = logical_address(addr, (void*)this);
-    auto cl = l.const_leaf();
-    if (!cl->deleted() && !cl->expired() && cl->compare(key)==0) return l;
-    return nullptr;
+    return hash_find(this, jump, key);
 }
 
 bool art::tree::publish(std::string host, int port) {

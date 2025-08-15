@@ -393,7 +393,16 @@ namespace art {
             }
             return true;
         }
-
+        // TODO: NB check where this function is used
+        [[nodiscard]] unsigned index_eq(unsigned char c) const  {
+            check_object();
+            auto &dat = nd();
+            if (UNLIKELY(KEYS < dat.occupants)) {
+                return dat.occupants;
+            }
+            auto at = (const uint8_t*)memchr(dat.keys, c, dat.occupants);
+            return at - dat.keys;
+        }
 
         // TODO: NB check where this function is used
         [[nodiscard]] unsigned index(unsigned char c, unsigned operbits) const override {
@@ -410,6 +419,12 @@ namespace art {
                 }
                 if (operbits == (eq & gt)) return data().occupants;
             }
+            if (operbits & eq) {
+                if (KEYS > 0) {
+                    auto at = (const uint8_t*)memchr(dat.keys, c, dat.occupants);
+                    return at - dat.keys;
+                }
+            }
             if (operbits & (eq & lt) && KEYS > 0) {
                 for (i = 0; i < dat.occupants; ++i) {
                     if (dat.keys[i] <= c)
@@ -417,13 +432,7 @@ namespace art {
                 }
                 if (operbits == (eq & lt)) return data().occupants;
             }
-            if (operbits & eq) {
-                if (KEYS > 0) {
-                    auto at = (const uint8_t*)memchr(dat.keys, c, dat.occupants);
-                    return at - dat.keys;
-                }
 
-            }
             if (operbits & gt && KEYS > 0) {
                 for (i = 0; i < dat.occupants; ++i) {
                     if (dat.keys[i] > c)
@@ -441,7 +450,7 @@ namespace art {
 
         [[nodiscard]] unsigned index(unsigned char c) const override {
             check_object();
-            return index(c, eq);
+            return index_eq(c);
         }
 
         [[nodiscard]] node_ptr find(unsigned char c) const override {

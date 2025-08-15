@@ -425,7 +425,7 @@ private:
         main.iterate_arena(iter);
     }
     uint8_t* get_page_data(logical_address at) {
-        if (at.offset() > LPageSize) {
+        if (UNLIKELY(at.offset() > LPageSize)) {
             abort_with("offset too large");
         }
         return main.get_page_data({at.page(),at.offset(),ap},true);
@@ -537,11 +537,11 @@ private:
     }
 
     uint8_t *basic_resolve(logical_address at, bool modify = false) {
-        if (opt_page_trace) {
+        if (UNLIKELY(opt_page_trace)) {
             art::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), modify);
         }
-        if (at.null()) return nullptr;
-        if (opt_enable_lru) {
+        if (UNLIKELY(at.null())) return nullptr;
+        if (UNLIKELY(opt_enable_lru)) {
             auto p = at.page();
             auto &t = retrieve_page(p, modify);
             update_lru(at.page(), t);

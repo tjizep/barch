@@ -11,8 +11,6 @@
 #include "value_type.h"
 #include "keyspec.h"
 
-#define unused_arg
-#define unused(x)
 #include "key_options.h"
 namespace art {
     template<typename I>

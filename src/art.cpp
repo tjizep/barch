@@ -1719,15 +1719,12 @@ static size_t hash_(art::value_type v) {
 
 static bool hash_insert(heap::vector<uint32_t>& jump, art::value_type key, const art::node_ptr& leaf) {
     size_t at = hash_(key) % jump.size();
-    size_t at_start  = at;
     for (int i = 0; i < max_jump_probe && jump[at]; ++i) {
         at = (at + 1) % jump.size();
     }
-    if (at_start < at) {
-
-    }
     bool r = jump[at] == 0;
-    jump[at] = leaf.logical.address();
+    if (r)
+        jump[at] = leaf.logical.address();
     return r;
 }
 unused(

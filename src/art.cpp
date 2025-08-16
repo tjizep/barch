@@ -928,7 +928,7 @@ art::node_ptr art::maximum(art::tree *t) {
 }
 
 static unsigned longest_common_prefix(const art::leaf *l1, const art::leaf *l2, int depth) {
-    unsigned max_cmp = std::min<unsigned>(l1->key_len, l2->key_len) - depth;
+    unsigned max_cmp = std::min<unsigned>(l1->key_len(), l2->key_len()) - depth;
     unsigned idx;
     for (idx = 0; idx < max_cmp; idx++) {
         if (l1->key()[depth + idx] != l2->key()[depth + idx])
@@ -957,7 +957,7 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
     if (dat.partial_len > art::max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
         const art::leaf *l = minimum(n).const_leaf();
-        max_cmp = std::min<unsigned>(l->key_len, key.length()) - depth; // may be negative
+        max_cmp = std::min<unsigned>(l->key_len(), key.length()) - depth; // may be negative
         for (; idx < max_cmp; idx++) {
             if (l->key()[idx + depth] != key[depth + idx])
                 return idx;
@@ -993,7 +993,7 @@ static art::node_ptr handle_leaf_replacement(
         // call back indicates actual replacement
         fc(n);
         art::leaf *dl = n.l();
-        if (dl->val_len == value.size && !dl->expired() &&
+        if (dl->val_len() == value.size && !dl->expired() &&
             ((options.get_expiry() > 0) == dl->is_expiry()))
         {
             dl->set_value(value);
@@ -1402,7 +1402,7 @@ int art_iter(art::tree *t, CallBack cb, void *data) {
  */
 static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
     // Fail if the key length is too short
-    if (n->key_len < (uint32_t) prefix.length()) return 1;
+    if (n->key_len() < (uint32_t) prefix.length()) return 1;
 
     // Compare the keys
     return memcmp(n->key(), prefix.bytes, prefix.length());
@@ -1512,7 +1512,7 @@ uint64_t art_evict_lru(art::tree *t) {
         };
         while (i != e) {
             const art::leaf *l = (art::leaf *) i;
-            if (l->key_len > page.second) {
+            if (l->key_len() > page.second) {
                 abort_with("invalid key or key size");
             }
             if (l->deleted()) {
@@ -1544,7 +1544,7 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern,
                 uint64_t misses = 0;
                 while (i != e) {
                     const leaf *l = (const leaf *) i;
-                    if (l->key_len > size) {
+                    if (l->key_len() > size) {
                         throw std::runtime_error("art::glob: key too long");
                     }
                     if (!(l->deleted() || l->expired())) {
@@ -1732,6 +1732,7 @@ static art::node_ptr hash_find(void* t, heap::vector<uint32_t>& jump, art::value
 }
 
 static bool hash_insert(void* t, heap::vector<uint32_t>& jump, art::value_type key, const art::node_ptr& leaf) {
+    if (jump.empty()) return false;
     size_t at = hash_(key) % jump.size();
     for (int i = 0; i < max_jump_probe && jump[at]; ++i) {
         auto addr = jump[at];

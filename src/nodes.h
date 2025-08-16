@@ -30,6 +30,7 @@ namespace art {
         tcomposite = 4u,
         tshort = 5u,
         tfloat = 6u,
+        tlast_valid = 6u,
         tend = 255u,
         tnone = 65536
     };
@@ -52,15 +53,17 @@ namespace art {
     };
 
     enum constants {
-        max_prefix_llength = 10u,
+        max_prefix_llength = 6u,
         max_alloc_children = 8u,
         initial_node = node_4
     };
 
     enum {
-        leaf_expiry_flag = 1,
-        leaf_volatile_flag = 2,
-        leaf_deleted_flag = 4
+        leaf_expiry_flag = 1u,
+        leaf_volatile_flag = 2u,
+        leaf_deleted_flag = 4u,
+        leaf_large_flag = 8u,
+        leaf_last_flag = (1<<(3u+1u))-1,
     };
 
     struct leaf;
@@ -490,14 +493,17 @@ namespace art {
      * of arbitrary size, as they include the key.
      */
     struct leaf {
-        typedef uint16_t LeafSize;
+        typedef uint8_t LeafSize;
         typedef long ExpiryType;
 
         leaf() = delete;
 
-        leaf(unsigned kl, unsigned vl, int64_t expiry, bool is_volatile) : key_len(std::min<unsigned>(
-                                                                             kl, std::numeric_limits<LeafSize>::max()))
-                                                                             , val_len(std::min<unsigned>(vl, std::numeric_limits<LeafSize>::max())) {
+        leaf(unsigned kl, unsigned vl, int64_t expiry, bool is_volatile) {
+            if (kl >= std::numeric_limits<LeafSize>::max() || vl >= std::numeric_limits<LeafSize>::max()) {
+                set_is_large();
+            }
+            set_key_len(kl);
+            set_val_len(vl);
             if (expiry && now() > expiry) {
                 //std_err("key already expired:");
             }
@@ -507,40 +513,98 @@ namespace art {
         }
 
         uint8_t flags{};
-        LeafSize key_len; // does not include null terminator (which is hidden: see make_leaf)
-        LeafSize val_len;
+        LeafSize _key_len{}; // does not include null terminator (which is hidden: see make_leaf)
+        LeafSize _val_len{};
+
+        [[nodiscard]] unsigned key_len() const {
+if (bad()) {
+                abort_with("invalid leaf flags");
+            }
+            if (large()) {
+                uint32_t l;
+                memcpy(&l, data, sizeof(uint32_t));
+                return l;
+            }
+            return _key_len;
+        }
+
+        [[nodiscard]] unsigned val_len() const {
+            if (bad()) {
+                abort_with("invalid leaf flags");
+            }
+            if (large()) {
+                uint32_t l;
+                memcpy(&l, data+sizeof(uint32_t), sizeof(uint32_t));
+                return l;
+            }
+            return _val_len;
+        }
+        void set_key_len(uint32_t l) {
+            if (large()) {
+                memcpy(data, &l, sizeof(uint32_t));
+                return;
+            }
+            if ( l >= std::numeric_limits<LeafSize>::max()) {
+                abort_with("key length too large");
+            }
+            _key_len = l;
+        }
+        void set_val_len(uint32_t l) {
+            if (large()) {
+                memcpy(data+sizeof(uint32_t), &l, sizeof(uint32_t));
+                return;
+            }
+            if (l >= std::numeric_limits<LeafSize>::max()) {
+                abort_with("value length too large");
+            }
+            _val_len = l;
+        }
+
         unsigned char data[];
 
         void set_volatile() {
-            flags |= (uint8_t) leaf_volatile_flag;
+            flags |= leaf_volatile_flag;
         }
 
         void set_deleted() {
-            flags |= (uint8_t) leaf_deleted_flag;
+            flags |= leaf_deleted_flag;
         }
 
         void unset_volatile() {
-            flags &= ~(uint8_t) leaf_volatile_flag;
+            flags &= ~leaf_volatile_flag;
         }
 
         [[nodiscard]] bool is_volatile() const {
-            return (flags & (uint8_t) leaf_volatile_flag) == (uint8_t) leaf_volatile_flag;
+            return (flags & leaf_volatile_flag) == leaf_volatile_flag;
         }
 
         [[nodiscard]] bool is_expiry() const {
-            return (flags & (uint8_t) leaf_expiry_flag) == (uint8_t) leaf_expiry_flag;
+            return (flags & leaf_expiry_flag) == leaf_expiry_flag;
         }
 
         void set_is_expiry() {
-            flags |= (uint8_t) leaf_expiry_flag;
+            flags |= leaf_expiry_flag;
+        }
+
+        void set_is_large() {
+            flags |= leaf_large_flag;
         }
 
         void unset_is_expiry() {
-            flags &= ~(uint8_t) leaf_expiry_flag;
+            flags &= ~leaf_expiry_flag;
         }
-
+        static size_t make_size(unsigned kl, unsigned vl,bool expires, bool unused(is_volatile)) {
+            // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
+            bool large = kl >= std::numeric_limits<LeafSize>::max() || vl >= std::numeric_limits<LeafSize>::max();
+            size_t esize = (expires ? sizeof(uint64_t) : 0);
+            size_t lsize = (large ? sizeof(uint32_t)*2:0);
+            return sizeof(leaf) + kl + 1 + vl + lsize + esize;
+        }
         [[nodiscard]] size_t byte_size() const {
-            return key_len + 1 + val_len + ((is_expiry()) ? sizeof(uint64_t) : 0) + sizeof(leaf);
+            // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
+            size_t esize = (is_expiry() ? sizeof(uint64_t) : 0);
+            size_t lsize = (large() ? sizeof(uint32_t)*2:0);
+            return key_len() + 1 + val_len() + lsize + esize + sizeof(leaf);
         }
 
         [[nodiscard]] bool expired() const {
@@ -549,13 +613,28 @@ namespace art {
             auto n = now();
             return n > expiry;
         }
-
+        [[nodiscard]] bool bad() const {
+            return  flags > leaf_last_flag; //|| (key()[0] > tlast_valid)
+        }
         [[nodiscard]] bool deleted() const {
-            return (flags & (uint8_t) leaf_deleted_flag) == (uint8_t) leaf_deleted_flag;
+            if (bad()) {
+                abort_with("invalid leaf flags");
+            }
+            return (flags & leaf_deleted_flag) == leaf_deleted_flag;
+        }
+
+        [[nodiscard]] bool large() const {
+            if (bad()) {
+                abort_with("invalid leaf flags");
+            }
+            if ((flags & leaf_large_flag) == leaf_large_flag) {
+                return true;
+            }
+            return false;
         }
 
         [[nodiscard]] unsigned val_start() const {
-            return key_len + 1;
+            return key_len() + 1 + (large() ? sizeof(uint32_t)*2:0);
         };
 
         unsigned char *val() {
@@ -567,72 +646,66 @@ namespace art {
         };
 
         unsigned char *key() {
-            return data;
+            return data + (large() ? sizeof(uint32_t)*2:0);
         };
 
         [[nodiscard]] const unsigned char *key() const {
-            return data;
+            return data + (large() ? sizeof(uint32_t)*2:0);
         };
 
         [[nodiscard]] value_type get_raw_key() const {
-            return {key(), (unsigned) key_len};
+            return {key(), key_len()};
         }
 
         [[nodiscard]] value_type get_key() const {
-            return {key(), (unsigned) key_len + 1};
+            return {key(),  key_len() + 1};
         }
 
         [[nodiscard]] value_type get_clean_key() const {
-            return {key() + 1, (unsigned) key_len};
+            return {key() + 1, (unsigned) key_len()};
         }
 
         void set_key(const unsigned char *k, unsigned len) {
-            auto l = std::min<unsigned>(len, key_len);
+            auto l = std::min<unsigned>(len, key_len());
             memcpy(data, k, l);
         }
 
         void set_key(value_type k) {
-            auto l = std::min<unsigned>(k.size, key_len);
+            auto l = std::min<unsigned>(k.size, key_len());
             memcpy(data, k.bytes, l);
         }
 
         void set_value(const void *v, unsigned len) {
-            auto l = std::min<unsigned>(len, val_len);
+            auto l = std::min<unsigned>(len, val_len());
             memcpy(val(), v, l);
         }
 
         void set_value(const unsigned char *v, unsigned len) {
-            auto l = std::min<unsigned>(len, val_len);
+            auto l = std::min<unsigned>(len, val_len());
             memcpy(val(), v, l);
         }
 
         void set_value(const char *v, unsigned len) {
-            auto l = std::min<unsigned>(len, val_len);
+            auto l = std::min<unsigned>(len, val_len());
             memcpy(val(), v, l);
         }
 
         [[nodiscard]] ExpiryType expiry_ms() const {
             if (!is_expiry()) return 0;
             ExpiryType r = 0;
-            memcpy(&r, val() + val_len, sizeof(ExpiryType));
+            memcpy(&r, val() + val_len(), sizeof(ExpiryType));
             return r;
         }
 
         bool set_expiry(ExpiryType v) {
             if (!is_expiry()) return false;
-            memcpy(val() + val_len, &v, sizeof(ExpiryType));
+            memcpy(val() + val_len(), &v, sizeof(ExpiryType));
             return true;
         }
 
         void set_value(value_type v) {
-            auto l = std::min<unsigned>(v.size, val_len);
+            auto l = std::min<unsigned>(v.size, val_len());
             memcpy(val(), v.bytes, l);
-        }
-
-        [[nodiscard]] void *value() const {
-            void *v;
-            memcpy(&v, val(), std::min<unsigned>(sizeof(void *), val_len));
-            return v;
         }
 
         [[nodiscard]] const char *s() const {
@@ -644,11 +717,11 @@ namespace art {
         }
 
         explicit operator value_type() {
-            return {s(), val_len};
+            return {s(), val_len()};
         }
 
         [[nodiscard]] value_type get_value() const {
-            return {s(), val_len};
+            return {s(), val_len()};
         }
 
         /**
@@ -664,9 +737,9 @@ namespace art {
         }
 
         int compare(const unsigned char *key, unsigned key_len, unsigned unused(depth)) const {
-            unsigned left_len = this->key_len;
+            unsigned left_len = this->key_len();
             unsigned right_len = key_len;
-            int r = memcmp(this->data, key, std::min<unsigned>(left_len, right_len));
+            int r = memcmp(this->key(), key, std::min<unsigned>(left_len, right_len));
             if (r == 0) {
                 if (left_len < right_len) return -1;
                 if (left_len > right_len) return 1;
@@ -676,13 +749,14 @@ namespace art {
         }
 
         int prefix(const unsigned char *key, unsigned key_len) const {
-            unsigned left_len = this->key_len;
+            unsigned left_len = this->key_len();
             unsigned right_len = key_len;
             if (left_len < right_len) return -1;
-            int r = memcmp(this->data, key, std::min<unsigned>(left_len, right_len));
+            int r = memcmp(this->key(), key, std::min<unsigned>(left_len, right_len));
             return r;
         }
-        operator art::key_options() const {
+
+         operator const art::key_options() const {
             key_options opts;
             opts.set_expiry(this->expiry_ms());
             opts.set_volatile(is_volatile());

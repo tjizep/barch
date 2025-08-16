@@ -64,9 +64,6 @@ namespace barch {
         }
     }
 
-    inline double ntohl(double x) {
-        return x;
-    }
     template<typename T>
     void push_size_t(heap::vector<uint8_t>& buffer,T s) {
         uint8_t tb[sizeof(T)];

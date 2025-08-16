@@ -24,13 +24,13 @@ namespace art {
 
         unsigned val_len = v.size;
         unsigned key_len = key.length();
-        unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
-        unsigned sol = sizeof(leaf);
+        //unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
+        //unsigned sol = sizeof(leaf);
         std::string sk = key.to_string();
         std::string sv = v.to_string();
         key = sk;
         v = sv;
-        size_t leaf_size = sol + key_len + ttl_size + 1 + val_len;
+        size_t leaf_size = leaf::make_size(key_len,val_len,ttl,is_volatile);
         // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
         logical_address logical{&alloc};
         auto ldata = alloc.get_leaves().new_address(logical, leaf_size);

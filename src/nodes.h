@@ -614,7 +614,7 @@ if (bad()) {
             return n > expiry;
         }
         [[nodiscard]] bool bad() const {
-            return  flags > leaf_last_flag; //|| (key()[0] > tlast_valid)
+            return  false; //flags > leaf_last_flag; //|| (key()[0] > tlast_valid)
         }
         [[nodiscard]] bool deleted() const {
             if (bad()) {

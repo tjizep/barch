@@ -1,4 +1,4 @@
-# Release v0.3.3.9b 2025-08-14
+# Release v0.3.3.9b 2025-08-16
 
 ## New Features
 
@@ -10,7 +10,8 @@
 6. increase shards to improve write concurrency and performance (0.3.3.4b 2025-08-04)
 7. use io_uring for resp socket operations (0.3.3.9b 2025-08-14)
 8. general performance improvements (0.3.3.9b 2025-08-14)
-9. jump cache to improve read performance (0.3.3.9b 2025-08-14)
+9. jump cache to improve read performance (0.3.3.9b 2025-08-16)
+10. reduce memory use by 10-15% (0.3.3.9b 2025-08-16)
 
 ## Fixes
 

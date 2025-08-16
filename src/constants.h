@@ -30,6 +30,6 @@ enum {
     encoding_width = 128,
     encoding_delta = 0,
     key_terminator = 0x01,
-    max_jump_probe = 8
+    max_jump_probe = 4
 };
 #endif //CONSTANTS_H

@@ -225,7 +225,7 @@ void art::tree::run_defrag() {
 
 
     try {
-        if (lc.fragmentation_ratio() > -1) //get_min_fragmentation_ratio())
+        if (lc.fragmentation_ratio() > 0.3) //get_min_fragmentation_ratio())
         {
             heap::vector<size_t> fl;
             {
@@ -237,8 +237,7 @@ void art::tree::run_defrag() {
                 storage_release releaser(this->latch);
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) continue;
-
-                //write_lock lock(get_lock());
+                jump.clear();
                 auto page = lc.get_page_buffer(p);
 
                 page_iterator(page.first, page.second, [&fc,this](const leaf *l) {

@@ -53,7 +53,7 @@ namespace art {
     };
 
     enum constants {
-        max_prefix_llength = 6u,
+        max_prefix_llength = 10u,
         max_alloc_children = 8u,
         initial_node = node_4
     };
@@ -517,9 +517,7 @@ namespace art {
         LeafSize _val_len{};
 
         [[nodiscard]] unsigned key_len() const {
-if (bad()) {
-                abort_with("invalid leaf flags");
-            }
+
             if (large()) {
                 uint32_t l;
                 memcpy(&l, data, sizeof(uint32_t));
@@ -614,7 +612,7 @@ if (bad()) {
             return n > expiry;
         }
         [[nodiscard]] bool bad() const {
-            return  false; //flags > leaf_last_flag; //|| (key()[0] > tlast_valid)
+            return  flags > leaf_last_flag ;
         }
         [[nodiscard]] bool deleted() const {
             if (bad()) {
@@ -624,16 +622,13 @@ if (bad()) {
         }
 
         [[nodiscard]] bool large() const {
-            if (bad()) {
-                abort_with("invalid leaf flags");
-            }
-            if ((flags & leaf_large_flag) == leaf_large_flag) {
-                return true;
-            }
-            return false;
+            return  (flags & leaf_large_flag) == leaf_large_flag;
         }
 
         [[nodiscard]] unsigned val_start() const {
+            if (bad()) {
+                abort_with("invalid leaf flags");
+            }
             return key_len() + 1 + (large() ? sizeof(uint32_t)*2:0);
         };
 
@@ -644,13 +639,38 @@ if (bad()) {
         [[nodiscard]] const unsigned char *val() const {
             return data + val_start();
         };
+        void check_key(const uint8_t* k)const {
+            if (k){
+                if ( k[0] > tlast_valid && k[key_len()] != 0x00) {
+                    abort_with("invalid key");
+                }
+                if ( k[0] == tinteger && key_len()+1 != numeric_key_size) {
+                    std_err("invalid key (int) len",key_len());
+                    abort_with("invalid key (int)");
+                }
+                if ( k[0] == tdouble && key_len()+1 != numeric_key_size) {
+                    std_err("invalid key (double) len",key_len());
+                    abort_with("invalid key (double)");
+                }
+            }
+        }
 
         unsigned char *key() {
-            return data + (large() ? sizeof(uint32_t)*2:0);
+            if (bad()) {
+                abort_with("invalid leaf flags");
+            }
+            auto k = data + (large() ? sizeof(uint32_t)*2:0);
+            check_key(k);
+            return k;
         };
 
         [[nodiscard]] const unsigned char *key() const {
-            return data + (large() ? sizeof(uint32_t)*2:0);
+            if (bad()) {
+                abort_with("invalid leaf flags");
+            }
+            auto k = data + (large() ? sizeof(uint32_t)*2:0);
+            check_key(k);
+            return k;
         };
 
         [[nodiscard]] value_type get_raw_key() const {

@@ -1712,6 +1712,7 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::oom_avoided_inserts);
     readp(in, statistics::logical_allocated);
 }
+unused(
 static uint64_t fnv_hash_1a_64 ( const uint8_t *key, int len ) {
     const uint8_t *p = key;
     uint64_t h = 0xcbf29ce484222325ULL;
@@ -1722,9 +1723,12 @@ static uint64_t fnv_hash_1a_64 ( const uint8_t *key, int len ) {
 
     return h;
 }
+)
 static size_t hash_(art::value_type v) {
+    unused(
     return fnv_hash_1a_64(v.bytes, v.length());
-    //return ankerl::unordered_dense::detail::wyhash::hash(v.bytes,v.length());
+    )
+    return ankerl::unordered_dense::detail::wyhash::hash(v.bytes,v.length());
 }
 static art::node_ptr hash_find(void* t, heap::vector<uint32_t>& jump, art::value_type k) {
     if (jump.empty()) return nullptr;

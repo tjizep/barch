@@ -134,6 +134,7 @@ extern "C"
         }
         auto a = get_auth();
         if (spec.get) {
+            read_lock read(a->latch);
             std::string key = user_cats(spec.user);
             call.start_array();
             art::iterator cat_data(a,key);

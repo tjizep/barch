@@ -1,4 +1,4 @@
-# Release v0.3.3.9b 2025-08-16
+# Release v0.3.3.10b 2025-08-17
 
 ## New Features
 
@@ -22,6 +22,7 @@
 5. fix stats not saving anymore (0.3.3.6b 2025-08-06)
 6. remove performance bug in lowerbound (0.3.3.7b 2025-08-08)
 7. fix resp reply string type for keys (not simple string anymore) (0.3.3.8b 2025-08-10)
+8. fix auth read race condition (0.3.3.10b 2025-08-17)
 
 # Release v0.3.3.7b 2025-08-08
 

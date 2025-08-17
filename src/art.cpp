@@ -1747,6 +1747,8 @@ static art::node_ptr hash_find(void* t, heap::vector<uint32_t>& jump, art::value
 
 static bool hash_insert(void* t, heap::vector<uint32_t>& jump, art::value_type key, const art::node_ptr& leaf) {
     if (jump.empty()) return false;
+    if (leaf.logical.address() > std::numeric_limits<uint32_t>::max()) return false;
+
     size_t at = hash_(key) % jump.size();
     for (int i = 0; i < max_jump_probe && jump[at]; ++i) {
         auto addr = jump[at];
@@ -1760,6 +1762,8 @@ static bool hash_insert(void* t, heap::vector<uint32_t>& jump, art::value_type k
 
                 return false;
             }
+        }else {
+            break;
         }
         ++at ;;
         if (at >= jump.size()) {
@@ -1792,6 +1796,10 @@ static bool hash_remove(art::tree* t, heap::vector<uint32_t>& jump, art::value_t
     }
     return false;
 }
+void art::tree::clear_hash() {
+    jump.clear();
+}
+
 void art::tree::rehash_jump() {
     auto jf = get_jump_factor();
     heap::vector<uint32_t> new_jump(this->size * jf);

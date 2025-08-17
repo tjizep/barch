@@ -208,6 +208,7 @@ namespace art {
         tree& operator=(const tree&) = delete;
 
         ~tree();
+        void clear_hash() ;
         void rehash_jump();
         void uncache_leaf(value_type key);
         void cache_leaf(value_type key, const node_ptr& leaf) const ;

@@ -641,6 +641,8 @@ namespace art {
         };
         void check_key(const uint8_t* k)const {
             if (k){
+                // a stronger check would be without the 0x00
+                // but then auth doesnt work because it doesnt use type bytes
                 if ( k[0] > tlast_valid && k[key_len()] != 0x00) {
                     abort_with("invalid key");
                 }

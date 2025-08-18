@@ -19,15 +19,18 @@ namespace art {
     node_ptr tree::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
         return art::make_leaf(*this, key, v, ttl, is_volatile);
     }
-
+    //
+    // TODO: this function's interface can lend itself to crashes when used with parameter pointers which
+    // are sourced from a tree leaf allocator. currently the solution is to allocate and copy these params
+    // which could be deleterious to performance, because they rely on the system allocator.
+    //
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile ){
 
         unsigned val_len = v.size;
         unsigned key_len = key.length();
-        //unsigned ttl_size = ttl > 0 ? sizeof(ttl) : 0;
-        //unsigned sol = sizeof(leaf);
+
         std::string sk = key.to_string();
-        std::string sv = v.to_string();
+        std::string sv = v.to_string(); // for short params this is ok
         key = sk;
         v = sv;
         size_t leaf_size = leaf::make_size(key_len,val_len,ttl,is_volatile);
@@ -196,12 +199,6 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
     size_t pos = 0;
     for (auto i = page_data.begin(); i < e;) {
         const art::leaf *l = (art::leaf *) i;
-#if 0
-        auto ks = l->byte_size();
-        if (ks > statistics::max_leaf_size) {
-            art::std_log("unusual leaf size",ks);
-        }
-#endif
         if (l->deleted()) {
             deleted++;
         } else {
@@ -229,15 +226,22 @@ void art::tree::run_defrag() {
         {
             heap::vector<size_t> fl;
             {
-                storage_release releaser(this->latch);
+                write_lock releaser(this->latch);
                 fl = lc.create_fragmentation_list(get_max_defrag_page_count());
             }
             key_options options;
             for (auto p: fl) {
-                storage_release releaser(this->latch);
+                write_lock releaser(this->latch);
                 // for some reason we have to not do this while a transaction is active
-                if (transacted) continue;
-                jump.clear();
+                if (transacted) return; // try later
+                for (auto& addr : jump) {
+                    if (addr) {
+                        logical_address lad(addr, this);
+                        if (lad.page() == p) {
+                            addr = 0;
+                        }
+                    }
+                }
                 auto page = lc.get_page_buffer(p);
 
                 page_iterator(page.first, page.second, [&fc,this](const leaf *l) {

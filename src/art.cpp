@@ -1765,10 +1765,7 @@ static bool hash_insert(void* t, heap::vector<uint32_t>& jump, art::value_type k
         }else {
             break;
         }
-        ++at ;;
-        if (at >= jump.size()) {
-            at = 0;
-        };
+        at = (at + 1) % jump.size();
     }
     bool r = jump[at] == 0;
     if (r)
@@ -1802,7 +1799,9 @@ void art::tree::clear_hash() {
 
 void art::tree::rehash_jump() {
     auto jf = get_jump_factor();
-    heap::vector<uint32_t> new_jump(this->size * jf);
+    uint64_t njs = this->size * jf;
+
+    heap::vector<uint32_t> new_jump(njs);
     cache_size = 0;
 
     for (auto addr : jump) {

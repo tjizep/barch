@@ -1,4 +1,4 @@
-# Release v0.3.3.10b 2025-08-17
+# Release v0.3.3.11b 2025-08-18
 
 ## New Features
 
@@ -23,7 +23,8 @@
 6. remove performance bug in lowerbound (0.3.3.7b 2025-08-08)
 7. fix resp reply string type for keys (not simple string anymore) (0.3.3.8b 2025-08-10)
 8. fix auth read race condition (0.3.3.10b 2025-08-17)
-
+9. improve jump cache retention (0.3.3.11b 2025-08-18)
+ 
 # Release v0.3.3.7b 2025-08-08
 
 ## New Features

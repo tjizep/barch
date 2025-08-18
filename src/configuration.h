@@ -88,6 +88,8 @@ namespace art {
 
     bool get_use_vmm_memory();
 
+    uint64_t get_internal_shards();
+
     uint64_t get_rpc_max_buffer();
 
     int64_t get_rpc_max_client_wait_ms();

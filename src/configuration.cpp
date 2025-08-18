@@ -847,9 +847,13 @@ bool art::get_use_vmm_memory() {
     std::lock_guard lock(config_mutex);
     return record.use_vmm_memory;
 }
+uint64_t art::get_internal_shards() {
+    return record.internal_shards;
+}
+
 static std::vector<size_t> init_shard_sizes() {
     std::vector<size_t> r;
-    for (size_t s = 0; s < 37;++s) {
+    for (size_t s = 0; s < art::get_internal_shards();++s) {
         r.push_back(s);
     }
     return r;

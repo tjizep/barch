@@ -234,16 +234,8 @@ void art::tree::run_defrag() {
                 write_lock releaser(this->latch);
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) return; // try later
-                for (auto& addr : jump) {
-                    if (addr) {
-                        logical_address lad(addr, this);
-                        if (lad.page() == p) {
-                            addr = 0;
-                        }
-                    }
-                }
                 auto page = lc.get_page_buffer(p);
-
+                j->erase_page(p);
                 page_iterator(page.first, page.second, [&fc,this](const leaf *l) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
@@ -366,7 +358,7 @@ static uint64_t get_modifications() {
 void art::tree::start_maintain() {
 
     tmaintain = std::thread([&]() -> void {
-        uint64_t jf = get_jump_factor();
+        //uint64_t jf = get_jump_factor();
         auto start_save_time = std::chrono::high_resolution_clock::now();
         auto mods = get_modifications();
         while (!this->mexit) {
@@ -379,10 +371,7 @@ void art::tree::start_maintain() {
             {
                 storage_release releaser(this->latch);
                 if (statistics::logical_allocated < art::get_max_module_memory()) {
-                    if (jump.size() < this->size || jf != get_jump_factor()) {
-                        rehash_jump();
-                        jf = get_jump_factor();
-                    }
+                    rehash_jump();
                 }
 
             }
@@ -406,4 +395,7 @@ void art::tree::start_maintain() {
             std::this_thread::sleep_for(std::chrono::milliseconds(art::get_maintenance_poll_delay()));
         }
     });
+    std::string name = "maintain-";
+    name+=this->nodes.get_name();
+    pthread_setname_np(tmaintain.native_handle(), name.c_str());
 }

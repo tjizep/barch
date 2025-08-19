@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 
 #include "composite.h"
+#include "jump.h"
 #include "nodes.h"
 #include "logical_allocator.h"
 #include "keyspec.h"
@@ -148,10 +149,10 @@ namespace art {
     private:
         trace_list trace{};
         std::set<kv_buf> buffers{};
-        mutable size_t cache_size = 0;
-        mutable heap::vector<uint32_t> jump{};
+        mutable std::shared_ptr<jump> j{std::make_shared<jump>(this)};
         mutable std::string temp_key{};
         bool with_stats{true};
+
     public:
         void log_trace() const ;
         value_type filter_key(value_type key) const;
@@ -211,7 +212,7 @@ namespace art {
         void clear_hash() ;
         void rehash_jump();
         void uncache_leaf(value_type key);
-        void cache_leaf(value_type key, const node_ptr& leaf) const ;
+        void cache_leaf(const node_ptr& leaf) const ;
         node_ptr get_cached(value_type key) const;
 
         bool publish(std::string host, int port);
@@ -280,12 +281,6 @@ namespace art {
 
     };
 }
-
-/**
- * Initializes an ART tree
- * @return 0 on success.
- */
-int art_tree_init(art::tree *t);
 
 /**
  * Destroys an ART tree

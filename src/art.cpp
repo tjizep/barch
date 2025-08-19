@@ -14,17 +14,10 @@
 #include "logger.h"
 #include "module.h"
 #include "jump.h"
-extern art::tree *get_art(size_t shard);
-/**
- * Initializes an ART tree
- * @return 0 on success.
- */
-int art_tree_init(art::tree *unused(t)) {
-    return 0;
-}
+
 
 // Recursively destroys the tree
-static void destroy_node(art::node_ptr n) {
+static void destroy_node(const art::node_ptr& n) {
     // Break if null
     if (n.null()) return;
 
@@ -70,8 +63,11 @@ int tree_destroy(art::tree *t) {
 /**
  * find first not less than
  */
-static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char *key, unsigned key_len, unsigned depth,
-                                            int *is_equal) {
+static art::trace_element lower_bound_child(const art::node_ptr &n,
+    const unsigned char *key,
+    unsigned key_len,
+    unsigned depth,
+    int *is_equal) {
     unsigned char c = 0x00;
     if (n.null()) return {};
     if (n.is_leaf) return {};
@@ -83,7 +79,7 @@ static art::trace_element lower_bound_child(art::node_ptr n, const unsigned char
     return r.first;
 }
 
-static art::node_ptr find_child(art::node_ptr n, unsigned char c) {
+static art::node_ptr find_child(const art::node_ptr& n, unsigned char c) {
     if (n.null()) return nullptr;
     if (n.is_leaf) return nullptr;
 
@@ -139,7 +135,7 @@ static bool extend_trace_min(const art::node_ptr &root, art::trace_list &trace) 
     return true;
 }
 
-static art::trace_element last_child_off(art::node_ptr n) {
+static art::trace_element last_child_off(const art::node_ptr& n) {
     if (n.null()) return {nullptr, nullptr, 0};
     if (n.is_leaf) return {nullptr, nullptr, 0};
     auto idx = n->last_index();
@@ -147,7 +143,10 @@ static art::trace_element last_child_off(art::node_ptr n) {
     return {n, n->get_child(idx.first), idx.first, idx.second};
 }
 
-static bool extend_trace_max(art::node_ptr root, art::trace_list &trace) {
+static bool extend_trace_max
+(   const art::node_ptr& root,
+    art::trace_list &trace
+    ) {
     if (trace.empty()) {
         trace.push_back(last_child_off(root));
     };
@@ -183,7 +182,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         }
         al = find(t, key);
         if (!al.null()) {
-            t->cache_leaf(key, al);
+            t->cache_leaf(al);
             ++statistics::keys_found;
             return al;
         }
@@ -201,7 +200,11 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
     return nullptr;
 
 }
-static bool zip_update(art::trace_list::reverse_iterator it, art::trace_list::reverse_iterator rend, art::node_ptr new_node) {
+static bool zip_update
+(   art::trace_list::reverse_iterator it,
+    const art::trace_list::reverse_iterator& rend,
+    const art::node_ptr& new_node
+) {
     if (it == rend) return true;
     art::trace_element &te = *it;
     art::node_ptr p = te.parent;
@@ -216,7 +219,8 @@ static bool zip_update(art::trace_list::reverse_iterator it, art::trace_list::re
     }
     return false;
 }
-bool art::update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+bool art::update(tree *t, value_type key,
+    const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     ++statistics::update_ops;
     try {
         art::node_ptr n = lower_bound(t, key);
@@ -1001,20 +1005,20 @@ static art::node_ptr handle_leaf_replacement(
             dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
             options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
             t->last_leaf_added = n; // tje
-            t->cache_leaf(key,n); // TODO: dont need to do this if its been cached already
+            t->cache_leaf(n); // TODO: dont need to do this if its been cached already
         }
         else
         {
             // create a new leaf to carry the new value
             ref = t->make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile());
             t->last_leaf_added = ref;
-            t->cache_leaf(key,ref);
+            t->cache_leaf(ref);
             ++statistics::leaf_nodes_replaced;
             return n; // the old val (n) will be removed by caller
         }
     }else {
         t->last_leaf_added = n;
-        t->cache_leaf(key,n);
+        t->cache_leaf(n);
     }
     return nullptr;
 }
@@ -1163,6 +1167,7 @@ void art_insert
             art::node_ptr ref = old;
             old = handle_leaf_replacement(t, options, old, ref, key, value, replace,fc);
         }else {
+
             old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
         }
         if (!old_val) {
@@ -1714,52 +1719,24 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::logical_allocated);
 }
 void art::tree::clear_hash() {
-    jump.clear();
+    j->clear();
 }
 
 void art::tree::rehash_jump() {
-    auto jf = get_jump_factor();
-    uint64_t njs = this->size * jf;
-
-    heap::vector<uint32_t> new_jump(njs);
-    cache_size = 0;
-
-    for (auto addr : jump) {
-        if (addr) {
-            node_ptr l = logical_address(addr, (void*)this);
-            auto cl = l.const_leaf();
-            if (!cl->deleted() && !cl->expired()) {
-                if (jump::hash_insert(this, new_jump, cl->get_key(), l)) {
-                    if (cache_size > this->size) {
-                        abort_with("art::tree::rehash_jump: cache size overflow");
-                    }
-                    cache_size++;
-                }
-            }
-        }
-    }
-
-    jump.swap(new_jump);
+    //auto jf = art::get_jump_factor();
+    j->rehash();
+   // j.rehash(this->size * jf);
 }
 void art::tree::uncache_leaf(value_type key) {
-    if (jump::hash_remove(this, jump, key)) {
-        --cache_size;
-    }
+    j->remove(key);
 }
-void art::tree::cache_leaf(value_type unused(key), const node_ptr& leaf) const {
-    if (jump.empty()) {
-        return;
-    }
-    if (jump::hash_insert((void*)this, jump, leaf)) {
-        ++cache_size;
-        if (cache_size > this->size) {
-            //abort_with("art::tree::cache_leaf: cache size overflow");
-        }
-    }
+void art::tree::cache_leaf(const node_ptr& leaf) const {
+
+    j->insert(leaf);
+
 }
 art::node_ptr art::tree::get_cached(value_type key) const {
-    if (jump.empty()) return nullptr;
-    return jump::hash_find((void*)this, jump, key);
+    return j->find(key);
 }
 
 bool art::tree::publish(std::string host, int port) {
@@ -1877,8 +1854,7 @@ bool art::tree::load(bool) {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
         storage_release release(latch);
-        jump.clear();
-        cache_size = 0;
+        j->clear();
         auto *t = this;
         logical_address root{nullptr};
         bool is_leaf = false;
@@ -2020,8 +1996,7 @@ void art::tree::clear() {
     transacted = false;
     get_leaves().clear();
     get_nodes().clear();
-    jump.clear();
-    cache_size = 0;
+    j->clear();
     statistics::n4_nodes = 0;
     statistics::n16_nodes = 0;
     statistics::n48_nodes = 0;
@@ -2133,6 +2108,7 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
 #endif
 
     size_t before = size;
+
     art_insert(this, options, key, value, update, fc);
     this->repl_client.insert(options, key, value);
     return size > before;

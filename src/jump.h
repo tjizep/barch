@@ -8,11 +8,20 @@
 #include "value_type.h"
 #include "nodes.h"
 #include "logical_allocator.h"
+#include <atomic>
 
+/**
+ * the jump cache is a lossy lock free wait-free hash table
+ * where insertion and removal is not guaranteed,
+ * it will respond on insert/remove ops with true or
+ * false if it succeeded
+ * the size should always be consistent though.
+ */
 struct jump {
-    typedef heap::vector<uint32_t> d_t;
+    typedef heap::vector<std::atomic<uint32_t>> d_t;
+    uint32_t zero = 0;
     alloc_pair* t;
-    uint64_t jump_size{};
+    std::atomic<uint64_t> jump_size{};
     mutable std::mutex latch{};
     jump() = default;
     jump(const jump&) = delete;
@@ -23,7 +32,9 @@ struct jump {
     jump(alloc_pair* t) : t(t) {}
     std::shared_ptr<d_t> data = std::make_shared<d_t>();
     art::node_ptr find(art::value_type k) const;
-    bool insert(art::value_type key, const art::node_ptr& leaf);
+    // the insert and remove functions are'nt guaranteed to succeed
+    // mostly because I can't write a lock free version
+    // but they dont have to
     bool insert(const art::node_ptr& leaf);
     bool remove(art::value_type k);
     void rehash(size_t new_size);

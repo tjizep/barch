@@ -600,7 +600,9 @@ public:
 
     void free(logical_address at, size_t sz) {
         size_t size = sz + test_memory + allocation_padding;
-
+        if (this->opt_page_trace) {
+            art::std_log("freeing size", size);
+        }
         uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size) {
             abort_with("invalid allocation data");

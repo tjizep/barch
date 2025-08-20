@@ -1,4 +1,4 @@
-# Release v0.3.3.13b 2025-08-19
+# Release v0.3.3.14b 2025-08-20
 
 ## New Features
 
@@ -12,6 +12,7 @@
 8. general performance improvements (0.3.3.9b 2025-08-14)
 9. jump cache to improve read performance (0.3.3.9b 2025-08-16)
 10. reduce memory use by 10-15% (0.3.3.9b 2025-08-16)
+11. improve update performance 8-15% (0.3.3.14b 2025-08-20)
 
 ## Fixes
 

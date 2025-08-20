@@ -152,6 +152,7 @@ namespace art {
         mutable std::shared_ptr<jump> j{std::make_shared<jump>(this)};
         mutable std::string temp_key{};
         bool with_stats{true};
+        mutable std::atomic<uint32_t> insert_fence{};
 
     public:
         void log_trace() const ;
@@ -250,6 +251,7 @@ namespace art {
         void update_trace(int direction);
 
         bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update = true);
 
@@ -319,7 +321,8 @@ void art_insert
  , art::value_type key
  , art::value_type value
  , bool replace
- , const NodeResult &fc);
+ , const NodeResult &fc
+ , bool use_cache = true);
 
 /**
  * inserts a new value into the art tree (not replacing)

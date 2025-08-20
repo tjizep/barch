@@ -239,7 +239,7 @@ int SET(caller& call,const arg_t& argv) {
     if (argv.size() < 3)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+
     auto k = argv[1];
     auto v = argv[2];
 
@@ -258,8 +258,11 @@ int SET(caller& call,const arg_t& argv) {
             reply = converted.get_value();
         }
     };
+    {
+        //storage_release release(t->latch);
+        t->opt_insert(spec, converted.get_value(), v, true, fc);
+    }
 
-    t->insert(spec, converted.get_value(), v, true, fc);
     if (spec.get) {
         if (reply.size) {
 

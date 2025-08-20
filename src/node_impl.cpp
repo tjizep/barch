@@ -235,7 +235,8 @@ void art::tree::run_defrag() {
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) return; // try later
                 auto page = lc.get_page_buffer(p);
-                j->erase_page(p);
+                //j->erase_page(p);
+                j->clear();
                 page_iterator(page.first, page.second, [&fc,this](const leaf *l) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
@@ -359,6 +360,7 @@ void art::tree::start_maintain() {
 
     tmaintain = std::thread([&]() -> void {
         //uint64_t jf = get_jump_factor();
+        uint32_t zero = 0;
         auto start_save_time = std::chrono::high_resolution_clock::now();
         auto mods = get_modifications();
         while (!this->mexit) {
@@ -371,13 +373,21 @@ void art::tree::start_maintain() {
             {
                 storage_release releaser(this->latch);
                 if (statistics::logical_allocated < art::get_max_module_memory()) {
-                    rehash_jump();
+                    if (insert_fence.compare_exchange_strong(zero, 1)) {
+                        rehash_jump();
+                        insert_fence.store(0);
+                    }
                 }
 
             }
             // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
-            if (art::get_active_defrag())
-                run_defrag(); // periodic
+            if (art::get_active_defrag()) {
+                if (insert_fence.compare_exchange_strong(zero, 1)) {
+                    run_defrag(); // periodic
+                    insert_fence.store(0);
+                }
+            }
+
             if (millis(start_save_time) > get_save_interval()
                 || get_modifications() - mods > get_max_modifications_before_save()
             ) {

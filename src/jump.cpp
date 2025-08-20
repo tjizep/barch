@@ -28,7 +28,7 @@ static size_t hash_(art::value_type v) {
     return ankerl::unordered_dense::detail::wyhash::hash(v.bytes,v.length());
 }
 art::node_ptr jump::find(art::value_type k) const {
-    auto d = data;
+    auto d = data; // data can be reallocated now it wont affect this function
     if (d->empty()) return nullptr;
     size_t at = hash_(k) % d->size();
     for (int i = 0; i < max_jump_probe; ++i) {
@@ -76,7 +76,7 @@ static bool insert(alloc_pair* t,std::atomic<uint64_t>& jump_size, std::shared_p
 }
 
 bool jump::insert(const art::node_ptr& leaf) {
-    auto d = data;
+    auto d = data; // data can be reallocated now it wont affect this function
     if (d->empty()) {
         lock l(latch);
         if (d->empty()) {
@@ -87,7 +87,7 @@ bool jump::insert(const art::node_ptr& leaf) {
 }
 bool jump::remove(art::value_type k) {
     //lock l(latch);
-    auto d = data;
+    auto d = data; // data can be reallocated now it wont affect this function
     if (d->empty()) return false;
     size_t at = hash_(k) % d->size();
     for (int i = 0; i < max_jump_probe; ++i) {

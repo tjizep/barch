@@ -992,7 +992,8 @@ static art::node_ptr handle_leaf_replacement(
     art::value_type key,
     art::value_type value,
     int replace,
-    const NodeResult &fc
+    const NodeResult &fc,
+    bool use_cache = true
     ) {
     if (replace) {
         // call back indicates actual replacement
@@ -1005,14 +1006,16 @@ static art::node_ptr handle_leaf_replacement(
             dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
             options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
             t->last_leaf_added = n; // tje
-            t->cache_leaf(n); // TODO: dont need to do this if its been cached already
+            if (use_cache)
+                t->cache_leaf(n); // TODO: dont need to do this if its been cached already
         }
         else
         {
             // create a new leaf to carry the new value
             ref = t->make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile());
             t->last_leaf_added = ref;
-            t->cache_leaf(ref);
+            if (use_cache)
+                t->cache_leaf(ref);
             ++statistics::leaf_nodes_replaced;
             return n; // the old val (n) will be removed by caller
         }
@@ -1153,7 +1156,8 @@ void art_insert
  , art::value_type key
  , art::value_type value
  , bool replace
- , const NodeResult &fc) {
+ , const NodeResult &fc
+ , bool use_cache) {
     try {
         int old_val = 0;
         if (key.size + value.size > maximum_allocation_size) {
@@ -1161,11 +1165,13 @@ void art_insert
         }
         t->clear_trace();
 
-        art::node_ptr old = t->get_cached(key);
+        art::node_ptr old;
+        if (use_cache)
+            old = t->get_cached(key);
         if (!old.null()) {
             old_val = 1;
             art::node_ptr ref = old;
-            old = handle_leaf_replacement(t, options, old, ref, key, value, replace,fc);
+            old = handle_leaf_replacement(t, options, old, ref, key, value, replace, fc, false);
         }else {
 
             old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
@@ -2065,8 +2071,7 @@ void art::tree::update_trace(int direction) {
 bool art::tree::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
     return this->insert({}, key, value, update, fc);
 }
-
-art::value_type art::tree::filter_key(value_type key) const {
+static art::value_type s_filter_key(std::string& temp_key, art::value_type key) {
     if (key.size > maximum_allocation_size) {
         throw_exception<std::runtime_error>("value too large");
     }
@@ -2084,34 +2089,53 @@ art::value_type art::tree::filter_key(value_type key) const {
     }
     return key;
 }
+
+art::value_type art::tree::filter_key(value_type key) const {
+    return s_filter_key(temp_key, key);
+}
+
 bool art::tree::insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    //storage_release release(latch);
+
     if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
         return false;
     }
     value_type key = filter_key(unfiltered_key);
-#if 0
-    if (buffers.size() < 100000){
-        kv_buf b{options,key,value};
-        if (b.key.size == key.size) {
-            buffers.insert(b);
-            return true;
-        }
-    }
-
-    for (auto &el: buffers) {
-        art_insert(this, el.opts, el.key, el.value, update, fc);
-    }
-    buffers.clear();
-#endif
 
     size_t before = size;
 
     art_insert(this, options, key, value, update, fc);
+
     this->repl_client.insert(options, key, value);
     return size > before;
+}
+bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
+
+    if (statistics::logical_allocated > get_max_module_memory()) {
+        // do not add data if memory limit is reached
+        ++statistics::oom_avoided_inserts;
+        return false;
+    }
+    std::string temp_key;
+
+    value_type key = s_filter_key(temp_key,unfiltered_key);
+
+    node_ptr old;
+    storage_release release(latch);
+    size_t before = size;
+    old = get_cached(key);
+    if (!old.null()) {
+        auto n = old;
+        node_ptr ref;
+        handle_leaf_replacement(this, options, n, ref, key, value, update, fc, false);
+        this->repl_client.insert(options, key, value);
+        return false;
+    }
+    before = size;
+    art_insert(this, options, key, value, update, fc,false);
+    this->repl_client.insert(options, key, value);
+    return size > before;// this can return a wrong value
 }
 
 bool art::tree::insert(value_type key, value_type value, bool update) {

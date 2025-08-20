@@ -2127,12 +2127,19 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     old = get_cached(key);
     if (!old.null()) {
         auto n = old;
-        node_ptr ref;
-        handle_leaf_replacement(this, options, n, ref, key, value, update, fc, false);
-        this->repl_client.insert(options, key, value);
-        return false;
+        art::leaf *dl = n.l();
+        if (dl->val_len() == value.size && !dl->expired() &&
+            ((options.get_expiry() > 0) == dl->is_expiry()))
+        {
+            fc(n);
+            dl->set_value(value);
+            dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
+            options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
+            last_leaf_added = n;
+            this->repl_client.insert(options, key, value);
+            return false;
+        }
     }
-    before = size;
     art_insert(this, options, key, value, update, fc,false);
     this->repl_client.insert(options, key, value);
     return size > before;// this can return a wrong value

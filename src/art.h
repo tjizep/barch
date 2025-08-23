@@ -5,7 +5,6 @@
 #include <netinet/in.h>
 
 #include "composite.h"
-#include "jump.h"
 #include "nodes.h"
 #include "logical_allocator.h"
 #include "keyspec.h"

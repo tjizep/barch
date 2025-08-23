@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <vector>
 #include <ankerl/unordered_dense.h>
+#include <jg/dense_hash_map.hpp>
 
 #define unused_arg
 #define unused(x)
@@ -671,6 +672,15 @@ namespace heap {
         , H
         , std::equal_to<K>
         , allocator<K>
+    >;
+
+    template<typename K, typename V, typename H = std::hash<K>>
+    using jmap = jg::dense_hash_map
+    <K
+    , V
+    , H
+    , std::equal_to<K>
+    , allocator<K>
     >;
 
     using string_set = ankerl::unordered_dense::set

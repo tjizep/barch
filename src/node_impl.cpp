@@ -224,12 +224,13 @@ void art::tree::load_hash() {
 
                 logical_address lad{p,pos,this};
                 h.insert(lad);
-                ++jump_size;
+
             }
         });
 
     }
-    std_log("loaded hash",lc.get_name(),h.size(),"actual:",size);
+    jump_size = h.size();
+    std_log("loaded hash",lc.get_name(),h.size(),"actual:",size, "sizeof(hashed_key)",sizeof(hashed_key));
 }
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those

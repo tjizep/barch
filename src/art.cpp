@@ -13,7 +13,6 @@
 #include "keys.h"
 #include "logger.h"
 #include "module.h"
-#include "jump.h"
 
 
 // Recursively destroys the tree
@@ -589,7 +588,7 @@ art::node_ptr art::find(const tree* t, value_type key) {
     try {
 
         node_ptr n = t->get_cached(key);
-        if (!n.null()) return n;
+
         n = t->root;
         unsigned depth = 0;
         while (!n.null()) {
@@ -1733,12 +1732,20 @@ static void stream_to_stats(InStream &in) {
 thread_local alloc_pair* thread_ap;
 thread_local art::value_type key_query;
 art::hashed_key::hashed_key(const node_ptr& la) {
+    if (la.logical.address() > std::numeric_limits<uint32_t>::max()) {
+        throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
+    }
+
     thread_ap = (alloc_pair*)&la.logical.get_ap<alloc_pair>();
     addr = la.logical.address();
 }
 art::hashed_key::hashed_key(const logical_address& la) {
+    if (la.address() > std::numeric_limits<uint32_t>::max()) {
+        throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
+    }
     thread_ap = (alloc_pair*)&la.get_ap<alloc_pair>();
     addr = la.address();
+
 }
 
 art::hashed_key::hashed_key(value_type k, alloc_pair* p) {
@@ -1942,7 +1949,7 @@ bool art::tree::load(bool) {
         auto now = std::chrono::high_resolution_clock::now();
         const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
         const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        std_log("Done loading BARCH, keys loaded:", t->size, "");
+        std_log("Done loading BARCH, keys loaded:", t->size, "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
 
         std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
         std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");

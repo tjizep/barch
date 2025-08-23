@@ -50,10 +50,14 @@ namespace art {
         statistics::max_leaf_size = std::max<uint64_t>(statistics::max_leaf_size, l->byte_size());
         return logical;
     }
+
 }
 
-void art::free_leaf_node(art::leaf *l, logical_address logical) {
+void art::free_leaf_node(leaf *l, logical_address logical) {
     if (l == nullptr) return;
+    if (l->bad()) {
+        abort_with("freeing bad leaf");
+    }
     l->set_deleted();
     logical.get_ap<alloc_pair>().get_leaves().free(logical, l->byte_size());
     --statistics::leaf_nodes;
@@ -191,7 +195,7 @@ art::tree::~tree() {
 #include "configuration.h"
 #include <functional>
 
-void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<void(const art::leaf *)> cb) {
+void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<void(const art::leaf *, uint32_t pos)> cb) {
     if (!size) return;
 
     auto e = page_data.begin() + size;
@@ -202,14 +206,31 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
         if (l->deleted()) {
             deleted++;
         } else {
-            cb(l);
+            cb(l,pos);
         }
-        pos += l->byte_size() + test_memory;
-        i += (l->byte_size() + test_memory);
+        pos += l->byte_size() + test_memory + allocation_padding;
+        i += (l->byte_size() + test_memory + allocation_padding);
 
     }
 }
 
+void art::tree::load_hash() {
+    auto &lc = get_leaves();
+    for (size_t p = 0; p < lc.get_page_count();++p) {
+        auto page = lc.get_page_buffer(p);
+        page_iterator(page.first, page.second, [p,this](const leaf *l, uint32_t pos) {
+            if (l->deleted()) return;
+            if (l->is_hashed()) {
+
+                logical_address lad{p,pos,this};
+                h.insert(lad);
+                ++jump_size;
+            }
+        });
+
+    }
+    std_log("loaded hash",lc.get_name(),h.size(),"actual:",size);
+}
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those
  * then adds them back again
@@ -235,23 +256,35 @@ void art::tree::run_defrag() {
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) return; // try later
                 auto page = lc.get_page_buffer(p);
-                //j->erase_page(p);
-                j->clear();
-                page_iterator(page.first, page.second, [&fc,this](const leaf *l) {
+
+                page_iterator(page.first, page.second, [&fc,this,p](const leaf *l, uint32_t pos) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
-                    this->remove(l->get_key(), fc);
-                    if (c1 - 1 != this->size) {
-                        abort_with("key does not exist anymore");
+                    if (l->is_hashed()) {
+                        logical_address lad{p,pos,this};
+                        h.erase(lad);
+                        free_node(lad);
+                    }else {
+                        this->remove(l->get_key(), fc);
+                        if (c1 - 1 != this->size) {
+                            abort_with("key does not exist anymore");
+                        }
                     }
+
                 });
 
-                page_iterator(page.first, page.second, [&fc,&options,this](const leaf *l) {
+                page_iterator(page.first, page.second, [&fc,&options,this](const leaf *l, uint32_t ) {
                     if (l->deleted()) return;
+                    if (l->is_hashed()) {
+                        options.set_expiry(l->expiry_ms());
+                        options.set_volatile(l->is_volatile());
+                        jumpsert(options, l->get_key(), l->get_value(),true,fc);
+                        return;
+                    }
                     size_t c1 = this->size;
                     options.set_expiry(l->expiry_ms());
                     options.set_volatile(l->is_volatile());
-                    art_insert(this, options, l->get_key(), l->get_value(), true, fc);
+                    art_insert(this, options, l->get_key(), l->get_value(), true, fc,false);
                     if (c1 + 1 != this->size) {
                         abort_with("key not added");
                     }
@@ -273,10 +306,9 @@ void abstract_eviction(art::tree *t,
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
     auto fc = [](const art::node_ptr & unused(n)) -> void {
     };
-    t->clear_hash();
     //write_lock lock(get_lock());
     auto page = src();
-    page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf *l) {
+    page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf *l, uint32_t) {
         if (!l->deleted() && predicate(l)) {
             ++statistics::keys_evicted;
             art_delete(t, l->get_key(), fc); // will get cleaned up by defrag
@@ -360,7 +392,7 @@ void art::tree::start_maintain() {
 
     tmaintain = std::thread([&]() -> void {
         //uint64_t jf = get_jump_factor();
-        uint32_t zero = 0;
+
         auto start_save_time = std::chrono::high_resolution_clock::now();
         auto mods = get_modifications();
         while (!this->mexit) {
@@ -370,22 +402,10 @@ void art::tree::start_maintain() {
             run_evict_volatile_keys_lfu(this);
             run_evict_volatile_expired_keys(this);
             run_sweep_expired_keys(this);
-            {
-                storage_release releaser(this->latch);
-                if (statistics::logical_allocated < art::get_max_module_memory()) {
-                    if (insert_fence.compare_exchange_strong(zero, 1)) {
-                        rehash_jump();
-                        insert_fence.store(0);
-                    }
-                }
 
-            }
             // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
             if (art::get_active_defrag()) {
-                if (insert_fence.compare_exchange_strong(zero, 1)) {
-                    run_defrag(); // periodic
-                    insert_fence.store(0);
-                }
+                run_defrag(); // periodic
             }
 
             if (millis(start_save_time) > get_save_interval()

@@ -540,6 +540,14 @@ private:
         if (opt_page_trace) {
             art::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), modify);
         }
+        if (test_memory == 1) {
+            if (!allocated) {
+                abort_with("use after free");
+            }
+            if (erased.contains(at.address())) {
+                abort_with("use after free");
+            }
+        }
         if (at.null()) return nullptr;
         if (opt_enable_lru) {
             auto p = at.page();
@@ -600,19 +608,20 @@ public:
 
     void free(logical_address at, size_t sz) {
         size_t size = sz + test_memory + allocation_padding;
-        if (this->opt_page_trace) {
-            art::std_log("freeing size", size);
-        }
         uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size) {
             abort_with("invalid allocation data");
         }
+        if (this->opt_page_trace) {
+            art::std_log("freeing from [",main.name,"] size", size,"at",at.address(),"allocated",allocated);
+        }
+
         allocated -= size;
         if (at.address() == 0 || size == 0) {
-            abort();
+            abort_with("invalid address");
         }
         if (test_memory == 1 && d1[sz] != at.address() % 255) {
-            abort();
+            abort_with("memory address check failure");
         }
         if (test_memory == 1)
             d1[sz] = 0;
@@ -626,7 +635,7 @@ public:
         }
         if (test_memory) {
             if (erased.count(at.address())) {
-                throw std::runtime_error("memory erased");
+                abort_with("memory erased (double free)");
             }
             erased.insert(at.address());
         }
@@ -769,7 +778,9 @@ public:
                 memset(pd, 0, sz);
             }
 
-
+            if (this->opt_page_trace) {
+                art::std_log("allocate size [",main.name,"]", size,"at",r.address(),"from freelist","allocated",allocated);
+            }
             return pd;
         }
         auto at = create_if_required(size);
@@ -797,14 +808,18 @@ public:
         if (test_memory == 1)
             rd[sz] = ca.address() % 255;
 
+        allocated += size;
         auto *data = (test_memory == 1) ? basic_resolve(ca) : nullptr;
         if (test_memory == 1 && data[sz] != ca.address() % 255) {
             abort();
         }
 
-        allocated += size;
+
         statistics::logical_allocated += size;
         r = ca;
+        if (this->opt_page_trace) {
+            art::std_log("allocate size [",main.name,"]", size,"at",r.address(),"as new","allocated",allocated);
+        }
 
         return rd;
     }

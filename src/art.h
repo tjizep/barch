@@ -106,7 +106,7 @@ namespace art {
     node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const children_t &c);
 
     struct kv_buf {
-        uint8_t buf[64];
+        uint8_t buf[32];
         kv_buf(key_options options, value_type k, value_type v) {
             if (k.size + v.size + 2 < sizeof(buf)) {
                 memcpy(buf, k.bytes, k.size+1);
@@ -145,16 +145,52 @@ namespace art {
             return hash;
         }
     };
+    struct hashed_key {
+        uint32_t addr{};
+        hashed_key(value_type , alloc_pair* ) ;
+        hashed_key(value_type , const alloc_pair* ) ;
+
+        const leaf* get_leaf() const;
+        value_type get_key() const;
+
+        hashed_key(const node_ptr& la) ;
+        hashed_key(const logical_address& la) ;
+
+        hashed_key& operator=(const node_ptr& nl) {
+            addr = nl.logical.address();
+            return *this;
+        }
+
+        bool operator==(const hashed_key& r) const {
+            return get_key() == r.get_key();
+        }
+
+        bool operator<(const hashed_key& r) const {
+            return get_key() < r.get_key();
+        }
+        size_t hash() const {
+            auto key = get_key();
+            size_t r = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
+            return r;
+        }
+    };
+    struct hk_hash{
+        size_t operator()(const hashed_key& k) const {
+           return k.hash();
+        }
+    };
     struct tree : public alloc_pair{
+
     private:
         trace_list trace{};
-        std::set<kv_buf> buffers{};
-        mutable std::shared_ptr<jump> j{std::make_shared<jump>(this)};
+
         mutable std::string temp_key{};
         bool with_stats{true};
-        mutable std::atomic<uint32_t> insert_fence{};
-
+        mutable heap::set<hashed_key,hk_hash> h{};
     public:
+        size_t get_hash_size() {
+            return jump_size;
+        }
         void log_trace() const ;
         value_type filter_key(value_type key) const;
         composite query{};
@@ -173,7 +209,9 @@ namespace art {
         bool opt_use_trace = true;
         node_ptr last_leaf_added{};
         barch::repl::client repl_client{};
+        uint64_t jump_size{};
 
+        bool opt_ordered_keys;
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();
@@ -194,26 +232,33 @@ namespace art {
 
         tree(const tree &) = delete;
 
-        tree(const node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard), root(root), size(size) {
+        tree(const node_ptr &root, uint64_t size, size_t shard) :
+        alloc_pair(shard),
+        root(root),
+        size(size),
+        opt_ordered_keys(get_ordered_keys()) {
             repl_client.shard = shard;
             barch::repl::clear_route(shard);
             start_maintain();
 
         }
-        tree(const std::string& name,const node_ptr &root, uint64_t size, size_t shard) : alloc_pair(shard,name), with_stats(false), root(root), size(size) {
+        tree(const std::string& name,const node_ptr &root, uint64_t size, size_t shard) :
+        alloc_pair(shard,name),
+        with_stats(false),
+        root(root),
+        size(size),
+        opt_ordered_keys(true) {
             repl_client.shard = shard;
             barch::repl::clear_route(shard);
             start_maintain();
-
-
         }
         tree& operator=(const tree&) = delete;
 
         ~tree();
+        void load_hash();
         void clear_hash() ;
-        void rehash_jump();
-        void uncache_leaf(value_type key);
-        void cache_leaf(const node_ptr& leaf) const ;
+        bool uncache_leaf(value_type key);
+        void cache_leaf(const node_ptr& leaf) const;
         node_ptr get_cached(value_type key) const;
 
         bool publish(std::string host, int port);
@@ -251,6 +296,9 @@ namespace art {
         void update_trace(int direction);
 
         bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
+
+        bool jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc);
+
         bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update = true);

@@ -63,7 +63,8 @@ namespace art {
         leaf_volatile_flag = 2u,
         leaf_deleted_flag = 4u,
         leaf_large_flag = 8u,
-        leaf_last_flag = (1<<(3u+1u))-1,
+        leaf_hashed_flag = 16u,
+        leaf_last_flag = (1<<(4u+1u))-1,
     };
 
     struct leaf;
@@ -217,7 +218,9 @@ namespace art {
 
         void free_from_storage() {
             if (is_leaf) {
-                free_leaf_node(l(), logical);
+                if (!logical.null()) {
+                    free_leaf_node(l(), logical);
+                }
             } else if (!logical.null() && !storage.null()) {
                 modify()->free_data();
             }
@@ -559,6 +562,9 @@ namespace art {
         }
 
         unsigned char data[];
+        void set_hashed() {
+            flags |= leaf_hashed_flag;
+        }
 
         void set_volatile() {
             flags |= leaf_volatile_flag;
@@ -578,6 +584,9 @@ namespace art {
 
         [[nodiscard]] bool is_expiry() const {
             return (flags & leaf_expiry_flag) == leaf_expiry_flag;
+        }
+        [[nodiscard]] bool is_hashed() const {
+            return (flags & leaf_hashed_flag) == leaf_hashed_flag;
         }
 
         void set_is_expiry() {
@@ -814,7 +823,7 @@ namespace art {
     void free_node(node_ptr n);
 
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
-    node_ptr make_stable_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
+    node_ptr make_leaf_at(uint8_t * key_store, logical_address addr, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile );
 
     node_ptr alloc_8_node_ptr(alloc_pair& alloc, unsigned nt);
 

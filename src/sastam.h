@@ -665,13 +665,14 @@ namespace heap {
         , allocator<std::pair<std::string, V> >
     >;
 
-    template<typename K>
+    template<typename K, typename H = std::hash<K>>
     using set = ankerl::unordered_dense::set
     <K
-        , std::hash<K>
+        , H
         , std::equal_to<K>
         , allocator<K>
     >;
+
     using string_set = ankerl::unordered_dense::set
     <   std::string
         , string_hash

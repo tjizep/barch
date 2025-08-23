@@ -261,11 +261,16 @@ namespace barch {
                             r.error = true;
                             return r;
                         } else {
-                            art_insert(t, options.first, key.first, value.first,true,
-                                [&r](const art::node_ptr &){
-                                    ++statistics::repl::key_add_recv_applied;
-                                    ++r.add_applied;
-                            });
+                            auto fc = [&r](const art::node_ptr &){
+                                        ++statistics::repl::key_add_recv_applied;
+                                        ++r.add_applied;};
+                            if (t->opt_ordered_keys) {
+                                art_insert(t, options.first, key.first, value.first,true,fc);
+                            }else
+                            {
+                                t->jumpsert(options.first, key.first, value.first,true,fc);
+                            }
+
 
                         }
                         ++statistics::repl::key_add_recv;
@@ -275,10 +280,19 @@ namespace barch {
                     break;
                     case 'r': {
                         auto key = get_value(i+1, buffer);
-                        art_delete(t, key.first,[&r](const art::node_ptr &) {
-                            ++statistics::repl::key_rem_recv_applied;
-                            ++r.remove_applied;
-                        });
+                        if (t->opt_ordered_keys) {
+                            art_delete(t, key.first,[&r](const art::node_ptr &) {
+                                ++statistics::repl::key_rem_recv_applied;
+                                ++r.remove_applied;
+                            });
+                        }else {
+                            if (t->uncache_leaf(key.first)) {
+                                ++statistics::repl::key_rem_recv_applied;
+                                ++r.remove_applied;
+                            }
+                        }
+
+
                         i = key.second;
                         ++statistics::repl::key_rem_recv;
                         ++r.remove_called;
@@ -860,7 +874,7 @@ namespace barch {
             }
             pool.start([this](size_t tid) -> void{
                 io.dispatch([this,tid]() {
-                    art::std_log("server started on", this->interface,this->port,"using thread",tid);
+                    art::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
                 });
                 io.run();
                 art::std_log("server stopped on", this->interface,this->port,"using thread",tid);

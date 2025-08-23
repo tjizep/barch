@@ -835,7 +835,7 @@ private:
                                                      BucketContainer>;
 
     static constexpr uint8_t initial_shifts = 64 - 2; // 2^(64-m_shift) number of buckets
-    static constexpr float default_max_load_factor = 0.8F;
+    static constexpr float default_max_load_factor = 0.95F;
 
 public:
     using key_type = Key;

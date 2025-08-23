@@ -1,4 +1,4 @@
-# Release v0.3.3.14b 2025-08-20
+# Release v0.3.3.15b 2025-08-23
 
 ## New Features
 
@@ -13,6 +13,7 @@
 9. jump cache to improve read performance (0.3.3.9b 2025-08-16)
 10. reduce memory use by 10-15% (0.3.3.9b 2025-08-16)
 11. improve update performance 8-15% (0.3.3.14b 2025-08-20)
+12. add unordered only mode (unordered_keys config) (0.3.3.15b 2025-08-23)
 
 ## Fixes
 

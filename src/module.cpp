@@ -39,7 +39,8 @@ art::tree *get_art(size_t s) {
     if (shards.empty()) {
         abort_with("shard configuration is empty");
     }
-    return shards[s % shards.size()];
+    auto r = shards[s % shards.size()];
+    return r;
 }
 size_t get_shard(const char* key, size_t key_len) {
     if (art::get_shard_count().size() == 1) {

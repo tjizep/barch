@@ -64,6 +64,7 @@ art::tree * get_auth() {
         init_auth(auth);
 
     }
+    //art::hashed_key::thread_ap = auth;
     return auth;
 }
 void save_auth() {

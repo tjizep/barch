@@ -33,13 +33,14 @@ static std::string listen_port{};
 static std::string rpc_max_buffer{};
 static std::string rpc_client_max_wait_ms{};
 static std::string jump_factor{};
-
+static std::string ordered_keys{};
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
 };
 static std::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
 static std::vector<std::string> valid_use_vmm_mem = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 static std::vector<std::string> valid_defrag = {"on", "true", "off", "yes", "no", "null", "nil"};
+static std::vector<std::string> valid_ordered_keys = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 
 template<typename VT>
 bool check_type(const std::string &et, const VT &valid) {
@@ -454,6 +455,38 @@ static int SetMinFragmentation(const char *unused_arg, ValkeyModuleString *val, 
 static int ApplyMinFragmentation(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
+// ===========================================================================================================
+static ValkeyModuleString *GetOrderedKeys(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, ordered_keys.c_str(), ordered_keys.length());
+}
+
+static int SetOrderedKeys(std::string test_ordered_keys) {
+    std::lock_guard lock(config_mutex);
+    std::transform(test_ordered_keys.begin(), test_ordered_keys.end(), test_ordered_keys.begin(), ::tolower);
+
+    if (!check_type(test_ordered_keys, valid_ordered_keys)) {
+        return VALKEYMODULE_ERR;
+    }
+
+    ordered_keys = test_ordered_keys;
+    record.ordered_keys =
+            ordered_keys == "on" || ordered_keys == "true" || ordered_keys == "yes";
+
+    return VALKEYMODULE_OK;
+}
+static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    std::string test_ordered_keys = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetOrderedKeys(test_ordered_keys);
+}
+static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    for (auto s : art::get_shard_count()) {
+        get_art(s)->opt_ordered_keys = record.ordered_keys;
+    }
+    return VALKEYMODULE_OK;
+}
+
 
 // ===========================================================================================================
 static ValkeyModuleString *GetActiveDefragType(const char *unused_arg, void *unused_arg) {
@@ -622,6 +655,9 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_client_max_wait_ms", "30000", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetRPCClientMaxWait, SetRPCClientMaxWait,
                                                  ApplyRPCClientMaxWait, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetOrderedKeys, SetOrderedKeys,
+                                                     ApplyOrderedKeys, nullptr);
 
     return ret;
 }
@@ -682,6 +718,12 @@ int art::set_configuration_value(const std::string& name, const std::string &val
         auto r = SetRPCClientMaxWait(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyRPCClientMaxWait(nullptr, nullptr, nullptr);
+        }
+        return r;
+    }else if (name == "ordered_keys") {
+        auto r = SetOrderedKeys(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyOrderedKeys(nullptr, nullptr, nullptr);
         }
         return r;
     } else {

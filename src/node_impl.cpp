@@ -7,7 +7,7 @@
 #include "statistics.h"
 #include "nodes.h"
 #include "node_impl.h"
-#include "time_convertsion.h"
+#include "time_conversion.h"
 
 #include <algorithm>
 #include "module.h"
@@ -224,7 +224,6 @@ void art::tree::load_hash() {
 
                 logical_address lad{p,pos,this};
                 h.insert(lad);
-
             }
         });
 

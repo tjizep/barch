@@ -1999,6 +1999,7 @@ bool art::tree::retrieve(std::istream& in) {
             t->root = resolve_read_node(root);
         }
         page_modifications::inc_all_tickers();
+        load_hash();
         auto now = std::chrono::high_resolution_clock::now();
         const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
         const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);

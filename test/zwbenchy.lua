@@ -38,7 +38,7 @@ for i = 1, count do
 end
 math.randomseed(count)
 
---numbers = shuffle(numbers)
+numbers = shuffle(numbers)
 
 local tocharsnum = function(num)
     return numbers[num]
@@ -75,7 +75,7 @@ local test = function()
 end
 
 
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "80m")
+--result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "80m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "10000000000")

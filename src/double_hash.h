@@ -8,6 +8,11 @@
 #include <functional>
 #include <vector>
 #include <sastam.h>
+
+/**
+ * the double hash gives good performance at much reduced memory use
+ * an ordered set can also be used as the second set
+ */
 namespace dh {
     template<typename K, typename H = std::hash<K>, typename EQ = std::equal_to<K>, int PROBES = 4>
     struct set {
@@ -19,14 +24,18 @@ namespace dh {
         typedef heap::set<K, H> H2;
 
         struct data {
-            const float max_ratio = 0.05f;
-            const float max_load_factor = 0.75f;
+            float max_ratio = 0.05f;
+            float max_load_factor = 0.75f;
+            float rehash_multiplier = 7.0f;
             EQ eq{};
             hash_type hash{};
             size_t size{};
             heap::vector<bool> has{};
             heap::vector<key_type> keys{};
             H2 h2{};
+            size_t modifier(size_t i) {
+                return i;
+            }
             bool insert(const key_type &k) {
                 if (keys.empty()) {
                     resize(4);
@@ -34,17 +43,18 @@ namespace dh {
 
                 size_t pos = hash(k);
                 size_t fopen = keys.size();
+                size_t s = keys.size();
                 for (size_t i = 0; i < PROBES; ++i) {
-                    size_t at = (pos + i) % keys.size();
+                    size_t at = (pos + modifier(i)) % s;
                     if (!has[at]) {
-                        if (fopen == keys.size()) {
+                        if (fopen == s) {
                             fopen = at;
                         }
                     }else if (eq(keys[at], k)) {
                         return false;
                     }
                 }
-                if (fopen < keys.size()) {
+                if (fopen < s) {
                     has[fopen] = true;
                     keys[fopen] = k;
                     ++size;
@@ -63,7 +73,7 @@ namespace dh {
                 if (keys.empty()) { return; }
                 size_t pos = hash(k);
                 for (size_t i = 0; i < PROBES; ++i) {
-                    size_t at = (pos + i) % keys.size();
+                    size_t at = (pos + modifier(i)) % keys.size();
                     if (has[at] && eq(keys[at], k)) {
                         keys[at] = K();
                         has[at] = false;
@@ -77,7 +87,7 @@ namespace dh {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
                 for (size_t i = 0; i < PROBES; ++i) {
-                    size_t at = (pos + i) % keys.size();
+                    size_t at = (pos + modifier(i)) % keys.size();
                     if (has[at] && eq(keys[at], k)) {
                         return &keys[at];
                     }
@@ -106,7 +116,7 @@ namespace dh {
                 return size + h2.size();
             }
             void rehash(data& to) {
-                to.resize(get_size()*7);
+                to.resize(get_size()*rehash_multiplier);
                 for (size_t i = 0; i < keys.size(); i++) {
                     if (has[i]) {
                         auto before = to.get_size();
@@ -133,7 +143,7 @@ namespace dh {
                 }
             }
             bool tolarge() const {
-                //
+                // use the max_load_factor or max_ratio to determine rehash
                 return size >= max_load_factor*keys.size() || size*max_ratio <= h2.size();
             }
             bool contains(const key_type &k) const {
@@ -184,6 +194,52 @@ namespace dh {
         }
         K* end() const {
             return nullptr;
+        }
+
+        /**
+         * ratios should be less that 0.2 to be effective
+         * @param f number between 0 and 1
+         */
+        void set_max_ration(float f) {
+            d_.max_ratio = f;
+        }
+
+        /**
+         * set the load factor at which rehashing takes place
+         * @param f value between 0 and 1
+         */
+        void set_max_load_factor(float f) {
+            d_.max_load_factor = f;
+        }
+
+        /**
+         * the rehash multiplier determines expansion rate
+         * @param f value > 1
+         */
+        void set_rehash_multiplier(float f) {
+            d_.rehash_multiplier = f;
+        }
+
+        /**
+         * return current value
+         * @return max load factor
+         */
+        float max_load_factor() const {
+            return d_.max_load_factor;
+        }
+        /**
+         * return current value
+         * @return max_ratio
+         */
+        float max_ratio() const {
+            return d_.max_ratio;
+        }
+        /**
+         * return current value
+         * @return rehash_multiplier
+         */
+        float rehash_multiplier() const {
+            return d_.rehash_multiplier;
         }
     };
 }

@@ -189,8 +189,8 @@ namespace art {
         mutable std::string temp_key{};
         bool with_stats{true};
         //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
-        mutable oh::unordered_set<hashed_key,hk_hash > h{};
-        //mutable heap::set<hashed_key,hk_hash > h{};
+        //mutable oh::unordered_set<hashed_key,hk_hash > h{};
+        mutable heap::set<hashed_key,hk_hash > h{};
     public:
         size_t get_hash_size() {
             return jump_size;

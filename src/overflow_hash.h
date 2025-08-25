@@ -84,7 +84,6 @@ namespace oh {
                 size_t s = keys.size();
                 size_t start = pos % s;
                 size_t end = std::min(s,start + PROBES);
-
                 for (size_t i = start; i < end; ++i) {
                     if (!has[i]) {
                         has[i] = true;

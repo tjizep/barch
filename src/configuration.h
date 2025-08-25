@@ -31,7 +31,7 @@ namespace art {
         uint64_t internal_shards{37};
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
-        bool ordered_keys{false};
+        bool ordered_keys{true};
         bool use_vmm_memory{true};
         bool active_defrag{true};
         bool evict_volatile_lru{false};

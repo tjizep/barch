@@ -34,7 +34,7 @@ art::tree *get_art(size_t s) {
         statistics::shards = shards.size();
         auto end_time = std::chrono::high_resolution_clock::now();
         double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-        art::std_log("Loaded ",shards.size(),"shards in ", millis/1000.0f, "s");
+        art::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
     }
     if (shards.empty()) {
         abort_with("shard configuration is empty");

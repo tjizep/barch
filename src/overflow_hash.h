@@ -12,10 +12,12 @@
 /**
  * the double hash gives good performance at much reduced memory use
  * an ordered set can also be used as the second set
+ * works because the data it indexes is much larger than
+ * the ht itself
  */
-namespace dh {
+namespace oh {
     template<typename K, typename H = std::hash<K>, typename EQ = std::equal_to<K>, int PROBES = 4>
-    struct set {
+    struct unordered_set {
     private:
 
         using key_type = K;
@@ -24,15 +26,18 @@ namespace dh {
         typedef heap::set<K, H> H2;
 
         struct data {
-            float max_ratio = 0.05f;
-            float max_load_factor = 0.75f;
-            float rehash_multiplier = 7.0f;
+            float max_leakage = 0.075f;
+            float max_load_factor = 0.8f;
+            float max_rehash_multiplier = 7; // a large multiplier is ok
+            // because the hash itself is small relative to the data it indexes
+            // it wont work well where the data is small
             EQ eq{};
             hash_type hash{};
             size_t size{};
             heap::vector<bool> has{};
             heap::vector<key_type> keys{};
             H2 h2{};
+            float rehashed = 0;
             size_t modifier(size_t i) {
                 return i;
             }
@@ -64,6 +69,35 @@ namespace dh {
                 h2.insert(k);
                 return h2.size() == sb + 1;
             }
+
+            /**
+             * if we know that all keys are unique beforehand
+             * we can use this function (like during rehash)
+             * @param k needs to be unique
+             * @return true (always)
+             */
+            bool insert_unique(const key_type &k) {
+                if (keys.empty()) {
+                    resize(4);
+                }
+                size_t pos = hash(k);
+                size_t s = keys.size();
+                size_t start = pos % s;
+                size_t end = std::min(s,start + PROBES);
+
+                for (size_t i = start; i < end; ++i) {
+                    if (!has[i]) {
+                        has[i] = true;
+                        keys[i] = k;
+                        ++size;
+                        return true;
+                    }
+                }
+
+                size_t sb = h2.size();
+                h2.insert(k);
+                return h2.size() == sb + 1;
+            }
             void remove(const key_type *k) {
                 if (k) {
                     remove(*k);
@@ -86,10 +120,11 @@ namespace dh {
             K* find(const key_type &k) {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
-                for (size_t i = 0; i < PROBES; ++i) {
-                    size_t at = (pos + modifier(i)) % keys.size();
-                    if (has[at] && eq(keys[at], k)) {
-                        return &keys[at];
+                size_t start = pos % keys.size();
+                size_t end = std::min(keys.size(),start + PROBES);
+                for (size_t i = start; i < end; ++i) {
+                    if (has[i] && eq(keys[i], k)) {
+                        return &keys[i];
                     }
                 }
                 auto i = h2.find(k);
@@ -107,6 +142,7 @@ namespace dh {
                 std::swap(keys, with.keys);
                 std::swap(h2, with.h2);
                 std::swap(size, with.size);
+                std::swap(rehashed, with.rehashed);
             }
             void resize(size_t new_size) {
                 keys.resize(new_size);
@@ -116,11 +152,13 @@ namespace dh {
                 return size + h2.size();
             }
             void rehash(data& to) {
-                to.resize(get_size()*rehash_multiplier);
+                //art::std_log("fullness",(float)size/ (float)keys.size(), keys.size(), h2.size(),"leakage",(float)h2.size()/(float)size,"rehashed", rehashed);
+                auto mul = std::max<float>(2.0, max_rehash_multiplier) ;
+                to.resize(get_size() * mul);
                 for (size_t i = 0; i < keys.size(); i++) {
                     if (has[i]) {
                         auto before = to.get_size();
-                        if (!to.insert(keys[i])) {
+                        if (!to.insert_unique(keys[i])) {
                             abort_with("insert failed");
                         }
                         if (to.get_size() != before + 1) {
@@ -141,10 +179,11 @@ namespace dh {
                     art::std_log("resize failed",get_size(), to.get_size());
                     abort_with("rehash failed");
                 }
+                to.rehashed = ++rehashed;
             }
             bool tolarge() const {
                 // use the max_load_factor or max_ratio to determine rehash
-                return size >= max_load_factor*keys.size() || size*max_ratio <= h2.size();
+                return size >= max_load_factor*keys.size() || size*max_leakage <= h2.size();
             }
             bool contains(const key_type &k) const {
                 return find(k) != nullptr;
@@ -155,16 +194,18 @@ namespace dh {
             }
         };
         data d_{};
+
         void rehash(data& from, data& to) {
             from.rehash(to);
         }
 
     public:
-        set() = default;
+        unordered_set() = default;
         bool insert(const key_type &k) {
             bool r = d_.insert(k);
 
             if (d_.tolarge()) {
+
                 data to;
                 d_.rehash(to);
                 d_.swap(to);
@@ -197,11 +238,11 @@ namespace dh {
         }
 
         /**
-         * ratios should be less that 0.2 to be effective
+         * ratios should be less than 0.2 to be effective
          * @param f number between 0 and 1
          */
-        void set_max_ration(float f) {
-            d_.max_ratio = f;
+        void set_max_leakage(float f) {
+            d_.max_leakage = f;
         }
 
         /**
@@ -213,10 +254,11 @@ namespace dh {
         }
 
         /**
-         * the rehash multiplier determines expansion rate
+         * the rehash multiplier determines initial expansion rate
+         * which tapers of to two
          * @param f value > 1
          */
-        void set_rehash_multiplier(float f) {
+        void set_rehash_multiplier(int f) {
             d_.rehash_multiplier = f;
         }
 
@@ -231,8 +273,8 @@ namespace dh {
          * return current value
          * @return max_ratio
          */
-        float max_ratio() const {
-            return d_.max_ratio;
+        float max_leakage() const {
+            return d_.max_leakage;
         }
         /**
          * return current value

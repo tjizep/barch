@@ -14,7 +14,7 @@
 10. reduce memory use by 10-15% (0.3.3.9b 2025-08-16)
 11. improve update performance 8-15% (0.3.3.14b 2025-08-20)
 12. add unordered only mode (unordered_keys config) (0.3.3.15b 2025-08-23)
-13. add double hash to reduce memory consumption (unordered_keys config) (0.3.3.16b 2025-08-24)
+13. add overflow hash to reduce memory consumption (unordered_keys config) (0.3.3.16b 2025-08-24)
 
 ## Fixes
 

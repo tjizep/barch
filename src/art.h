@@ -11,7 +11,7 @@
 #include "value_type.h"
 #include "vector_stream.h"
 #include "server.h"
-#include "double_hash.h"
+#include "overflow_hash.h"
 
 typedef std::unique_lock<std::shared_mutex> write_lock;
 typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
@@ -188,7 +188,9 @@ namespace art {
 
         mutable std::string temp_key{};
         bool with_stats{true};
-        mutable dh::set<hashed_key,hk_hash> h{};
+        //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
+        mutable oh::unordered_set<hashed_key,hk_hash > h{};
+        //mutable heap::set<hashed_key,hk_hash > h{};
     public:
         size_t get_hash_size() {
             return jump_size;

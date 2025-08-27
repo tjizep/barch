@@ -30,7 +30,7 @@
 10. fix jump cache race condition (0.3.3.12b & 0.3.3.13b 2025-08-19)
 11. fix use after free issue introduced by jump table during updates (0.3.3.16b 2025-08-26)
 12. fix release date doc (0.3.3.16b 2025-08-27)
-12. fix hash size reporting (0.3.3.16b 2025-08-27)
+13. fix hash size reporting (0.3.3.16b 2025-08-27)
 
 # Release v0.3.3.7b 2025-08-08
 

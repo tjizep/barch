@@ -51,10 +51,10 @@ struct request {
 
 struct uring_context {
     io_uring ring{};
-    asio::io_context* io;
     size_t id{};
     size_t operations_pending{};
-    uring_context(asio::io_context* io) : io(io) {
+    bool running = true;
+    uring_context() {
         io_uring_queue_init(opt_uring_queue_size, &ring, 0);
     }
     ~uring_context() {
@@ -64,22 +64,26 @@ struct uring_context {
     uring_context& operator=(const uring_context&) = delete;
     void start(size_t id) {
         this->id = id;
-        io->post([this]() {
+        running = true;
+        for (;running;) {
             run();
-        });
+        };
     }
     int fd_is_valid(int fd)
     {
         return fcntl(fd, F_GETFD) != -1 || errno != EBADF;
     }
-    void run() {
+    void stop() {
+        running = false;
+    }
+    bool run() {
 
         for (;operations_pending > 0; --operations_pending) {
             io_uring_cqe *cqe;
             int ret = io_uring_wait_cqe(&ring, &cqe);
             if (ret < 0) {
                 art::std_err("io_uring_wait_cqe failed with",ret,", this queue will expire, id:",id);
-                return;
+                return false;
             }
             request *req = (request *) cqe->user_data;
             if(req == nullptr) {
@@ -127,13 +131,9 @@ struct uring_context {
             }
             io_uring_cqe_seen(&ring, cqe);
         }
-        //if (operations_pending == 0) {
-            io->post([this]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(15));
-                run();
-            });
-        //}
-
+        if (!operations_pending)
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        return true;
     }
     void close(tcp::socket &s, request& req,uring_cb f) {
         if (opt_debug_uring==1)

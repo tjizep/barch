@@ -356,24 +356,19 @@ namespace barch {
 
     typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
     struct work_unit {
-        asio::io_service io = asio::io_service(1);
-        uring_context ur{&io};
+        uring_context ur{};
 
-        exec_guard guard = asio::make_work_guard(io);
         void run(size_t tid) {
-            io.dispatch([tid]() {
-                art::std_log("proc server started using thread",tid);
-            });
             ur.start(tid);
-            io.run();
         }
         void stop() {
-            io.stop();
+            ur.stop();
         }
     };
     struct server_context {
         thread_pool pool{};
         thread_pool resp_pool{1.25f};
+        //std::shared_ptr<work_g> get_unit() {}
         asio::io_context io{};
         std::vector<std::shared_ptr<work_unit>> io_resp{};
 
@@ -386,10 +381,7 @@ namespace barch {
             size_t r = resp_distributor++ % io_resp.size();
             return io_resp[r];
         }
-        asio::io_context& get_proc_ctx() {
-            size_t r = resp_distributor++ % io_resp.size();
-            return io_resp[r]->io;
-        }
+
         void stop() {
             try {
                 acc.close();
@@ -769,7 +761,7 @@ namespace barch {
                 stream_read_ctr += 1;
                 if (cs[0]) {
                     if (opt_use_alt_threads == 1){
-                        auto& ioc = this->get_proc_ctx();
+                        auto& ioc = this->io;
                         auto unit = this->get_unit();
                         tcp::socket socket (ioc);
                         socket.assign(tcp::v4(),endpoint.release());

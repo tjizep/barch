@@ -15,6 +15,7 @@
 11. improve update performance 8-15% (0.3.3.14b 2025-08-20)
 12. add unordered only mode (unordered_keys config) (0.3.3.15b 2025-08-23)
 13. add overflow hash to reduce memory consumption (unordered_keys config) (0.3.3.16b 2025-08-24)
+14. buffer some statistics to improve concurrency (0.3.3.16b 2025-08-27)
 
 ## Fixes
 

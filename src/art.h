@@ -191,7 +191,12 @@ namespace art {
         //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
         //mutable heap::unordered_set<hashed_key,hk_hash > h{};
         mutable oh::unordered_set<hashed_key,hk_hash > h{};
+        mutable uint64_t saf_keys_found{};
+
     public:
+        void inc_keys_found() const {
+            ++saf_keys_found;
+        }
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {
             return jump_size;

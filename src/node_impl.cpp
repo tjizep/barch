@@ -409,6 +409,11 @@ void art::tree::start_maintain() {
             if (art::get_active_defrag()) {
                 run_defrag(); // periodic
             }
+            if (saf_keys_found) {
+                write_lock l(this->latch);
+                statistics::keys_found+=saf_keys_found;
+                saf_keys_found = 0;
+            }
 
             if (millis(start_save_time) > get_save_interval()
                 || get_modifications() - mods > get_max_modifications_before_save()

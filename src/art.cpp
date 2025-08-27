@@ -177,12 +177,13 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         }
         art::node_ptr al = t->get_cached(key);
         if (!al.null()) {
+            t->inc_keys_found();
             return al;
         }
         al = find(t, key);
         if (!al.null()) {
             t->cache_leaf(al);
-            ++statistics::keys_found;
+            t->inc_keys_found();
             return al;
         }
         tlb.clear();

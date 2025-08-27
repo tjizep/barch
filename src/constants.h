@@ -13,7 +13,7 @@ enum {
     initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,
     iterate_workers = 4,
-    test_memory = 0,
+    test_memory = 1,
     allocation_padding = 0,
     initialize_memory = 1,
     storage_version = 8,
@@ -29,6 +29,8 @@ enum {
     log_streams = 0,
     encoding_width = 128,
     encoding_delta = 0,
-    key_terminator = 0x01
+    key_terminator = 0x01,
+    max_top = 100000000000,
+    page_extension_on_allocation = 16
 };
 #endif //CONSTANTS_H

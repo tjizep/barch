@@ -29,9 +29,10 @@
 #include "storage.h"
 #include "hash_arena.h"
 #include "page_modifications.h"
+#include "overflow_hash.h"
 
 typedef uint32_t PageSizeType;
-typedef heap::set<size_t> address_set;
+typedef heap::unordered_set<size_t> address_set;
 enum {
     LPageSize = page_size - sizeof(storage)
 
@@ -55,9 +56,9 @@ struct free_page {
     free_page() = delete;
     free_page& operator=(const free_page&) = default;
     free_page(const free_page&) = default;
-    explicit free_page(logical_address p) : ap(&p.get_ap<alloc_pair>()), page(p.page()) {
+    explicit free_page(logical_address p) : ap(&p.get_ap<abstract_alloc_pair>()), page(p.page()) {
     };
-    alloc_pair* ap{nullptr};
+    abstract_alloc_pair *ap{nullptr};
     heap::vector<PageSizeType> offsets{}; // within page
     uint64_t page{0};
 
@@ -93,12 +94,12 @@ struct free_bin {
 
     free_bin() = default;
 
-    free_bin(unsigned size, alloc_pair* alloc) : alloc(alloc), size(size) {
+    free_bin(unsigned size, abstract_leaf_pair* alloc) : alloc(alloc), size(size) {
     }
     free_bin(const free_bin& other) = default; //: alloc(other.alloc),size(other.size) {};
     free_bin& operator=(const free_bin& other) = default;
 
-    alloc_pair * alloc = nullptr;
+    abstract_leaf_pair * alloc = nullptr;
     unsigned size = 0;
     heap::vector<uint32_t> page_index{};
     heap::vector<free_page> pages{};
@@ -212,7 +213,7 @@ struct free_bin {
     }
 };
 struct free_list {
-    alloc_pair * alloc = nullptr;
+    abstract_leaf_pair * alloc = nullptr;
     size_t added = 0;
     size_t min_bin = LPageSize;
     size_t max_bin = 0;
@@ -230,7 +231,7 @@ struct free_list {
         free_bins = other.free_bins;
         return *this;
     }
-    free_list(alloc_pair* alloc): alloc(alloc) {
+    free_list(abstract_leaf_pair* alloc): alloc(alloc) {
 
     }
     void clear() {
@@ -312,7 +313,7 @@ struct free_list {
                 abort_with("trying to free too many bytes");
             }
             if (test_memory == 1) {
-                auto& tap = r.get_ap<alloc_pair>();
+                auto& tap = r.get_ap<abstract_leaf_pair>();
                 if (&tap != this->alloc) {
                     abort_with("allocation pair from different tree");
                 }
@@ -334,10 +335,10 @@ struct free_list {
 
 struct logical_allocator {
 
-    logical_allocator(alloc_pair* ap,std::string name): ap(ap), main(std::move(name)), emancipated(ap) {}
+    logical_allocator(abstract_leaf_pair* ap,std::string name): ap(ap), main(std::move(name)), emancipated(ap) {}
 
     explicit
-    logical_allocator(bool opt_enable_lru, alloc_pair* ap, std::string name): ap(ap), main(std::move(name)), opt_enable_lru(opt_enable_lru) {
+    logical_allocator(bool opt_enable_lru, abstract_leaf_pair* ap, std::string name): ap(ap), main(std::move(name)), opt_enable_lru(opt_enable_lru) {
         opt_page_trace = art::get_log_page_access_trace();
     };
 
@@ -348,9 +349,9 @@ struct logical_allocator {
 
 private:
 
-    mutable alloc_pair * ap = nullptr;
+    mutable abstract_leaf_pair * ap = nullptr;
     arena::hash_arena main;
-    bool opt_page_trace = false;
+    bool opt_page_trace = art::get_log_page_access_trace();
     bool opt_enable_lru = false;
     bool opt_enable_lfu = false;
     bool opt_validate_addresses = false;
@@ -538,13 +539,15 @@ private:
 
     uint8_t *basic_resolve(logical_address at, bool modify = false) {
         if (opt_page_trace) {
-            art::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), modify);
+            art::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read");
         }
         if (test_memory == 1) {
             if (!allocated) {
+                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("use after free");
             }
             if (erased.contains(at.address())) {
+                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("use after free");
             }
         }
@@ -610,6 +613,7 @@ public:
         size_t size = sz + test_memory + allocation_padding;
         uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size) {
+            art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
             abort_with("invalid allocation data");
         }
         if (this->opt_page_trace) {
@@ -618,9 +622,11 @@ public:
 
         allocated -= size;
         if (at.address() == 0 || size == 0) {
+            art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
             abort_with("invalid address");
         }
         if (test_memory == 1 && d1[sz] != at.address() % 255) {
+            art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
             abort_with("memory address check failure");
         }
         if (test_memory == 1)
@@ -635,6 +641,7 @@ public:
         }
         if (test_memory) {
             if (erased.count(at.address())) {
+                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("memory erased (double free)");
             }
             erased.insert(at.address());
@@ -644,6 +651,7 @@ public:
             auto tp = at.page();
 
             if (is_free(tp)) {
+                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("freeing a free page");
             }
             if (last_page_allocated == tp) {
@@ -652,6 +660,7 @@ public:
             t.size = 0;
             //t.modifications = 0;
             if (fragmentation < t.fragmentation) {
+                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("invalid fragmentation");
             }
             fragmentation -= t.fragmentation;
@@ -665,6 +674,7 @@ public:
             //free_pages.push_back(at.page());
 
             if (fragmentation < t.fragmentation) {
+                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("invalid fragmentation");
             }
         } else {
@@ -759,14 +769,15 @@ public:
             // last_page_allocated should not be set here
             at.second.size++;
             //at.second.modifications++;
-            if (at.second.fragmentation < size) {
+            if (at.second.fragmentation < size) {art::std_log("failure for",main.name,r.address(), r.page(), r.offset());
                 abort_with(" no fragmentation?");
             }
             at.second.fragmentation -= size;
             invalid(r);
             auto *data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0) {
-                abort();
+                art::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+                abort_with("address check failed");
             }
             if (test_memory == 1)
                 data[sz] = r.address() % 255;
@@ -811,7 +822,8 @@ public:
         allocated += size;
         auto *data = (test_memory == 1) ? basic_resolve(ca) : nullptr;
         if (test_memory == 1 && data[sz] != ca.address() % 255) {
-            abort();
+            art::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+            abort_with("memory address check failure");
         }
 
 
@@ -1041,12 +1053,13 @@ public:
     }
 };
 
-struct alloc_pair {
+struct alloc_pair : public abstract_leaf_pair{
 
-    int sentinel = 1<<24;
+
     size_t shard{};
     std::shared_mutex latch{};
     bool is_debug = false;
+
 
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
@@ -1064,6 +1077,7 @@ struct alloc_pair {
     const logical_allocator& get_leaves() const {
         return leaves;
     }
+    virtual ~alloc_pair() = default;
 
 };
 

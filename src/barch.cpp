@@ -242,7 +242,6 @@ int SET(caller& call,const arg_t& argv) {
 
     auto k = argv[1];
     auto v = argv[2];
-
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 

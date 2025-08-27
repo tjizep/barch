@@ -4,7 +4,6 @@
 
 #ifndef HASH_ARENA_H
 #define HASH_ARENA_H
-//#include "storage.h"
 #include "logical_address.h"
 #include <fstream>
 #include <utility>
@@ -32,7 +31,7 @@ namespace arena {
         hash_type hidden_arena{};
         heap::std_vector<size_t> free_address_list{};
         heap::std_vector<size_t> buffered_free{};
-        size_t top = 100000000;
+        size_t top = max_top;
         size_t free_pages = top;
         size_t last_allocated = 0;
         size_t max_address_accessed = 0;
@@ -162,7 +161,7 @@ namespace arena {
             hidden_arena = hash_type{};
             free_address_list = heap::std_vector<size_t>{};
             buffered_free = heap::std_vector<size_t>{};
-            top = 10000000;
+            top = max_top;
             free_pages = top;
             last_allocated = 0;
             max_address_accessed = 0;
@@ -475,7 +474,7 @@ namespace arena {
                 abort_with("invalid CoW page data");
             }
             if (std::max(page_data_size, cow_size) <= page_pos + offset + size) {
-                alloc_page_data((r.page() + 1) * physical_page_size + size);
+                alloc_page_data((r.page() + page_extension_on_allocation) * physical_page_size + size);
             }
             if (std::max(page_data_size, cow_size) < page_pos + offset + size) {
                 abort_with("position not allocated");

@@ -226,7 +226,6 @@ bool art::update(tree *t, value_type key,
         if (!n.is_leaf || n.const_leaf()->get_key() != key) return false;
         auto &trace = get_tlb();
 
-
         if (n.is_leaf) {
             const art::leaf *l = n.const_leaf();
             if (!l->expired()) {
@@ -246,7 +245,6 @@ bool art::update(tree *t, value_type key,
 
                     t->root = new_leaf;
                 }
-                t->uncache_leaf(n.cl()->get_key());
                 destroy_node(n);
                 return true;
             } //skip this one if it's expired
@@ -973,6 +971,19 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
 }
 
 /**
+ * determines if the currently allocated leaf can be overwritten directly or needs to
+ * be reallocated
+ * @param dl leaf to be replaced
+ * @param value new value to change
+ * @param options expiry info
+ * @return true if the value.size is the same as current leaf and no expiry is set
+ */
+static bool is_leaf_direct_replacement(const art::leaf* dl, art::value_type value, const art::key_options &options) {
+    return dl->val_len() == value.size && !dl->expired() &&
+            (options.get_expiry() > 0) == dl->is_expiry();
+}
+
+/**
  * handles replacement and sets last_leaf_added to the leaf that was changed
  * @param t the tree
  * @param options contains expiry and volatility info
@@ -985,6 +996,7 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
  * @param fc function called when replacement happens
  * @return null or the old value that has to be removed
  */
+
 static art::node_ptr handle_leaf_replacement(
     art::tree *t,
     const art::key_options &options,
@@ -1000,8 +1012,7 @@ static art::node_ptr handle_leaf_replacement(
         // call back indicates actual replacement
         fc(n);
         art::leaf *dl = n.l();
-        if (dl->val_len() == value.size && !dl->expired() &&
-            ((options.get_expiry() > 0) == dl->is_expiry()))
+        if (is_leaf_direct_replacement(dl,value,options))
         {
             dl->set_value(value);
             dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
@@ -1042,6 +1053,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
         // Check if we are updating an existing value
         if (l->compare(key) == 0) {
             *old = 1;
+
             return handle_leaf_replacement(t, options, n, ref, key, value, replace, fc);
         }
         art::node_ptr l1 = n;
@@ -1172,9 +1184,14 @@ void art_insert
         if (!old.null()) {
             old_val = 1;
             art::node_ptr ref = old;
-            old = handle_leaf_replacement(t, options, old, ref, key, value, replace, fc, false);
-        }else {
-
+            auto dl = ref.const_leaf();
+            if (is_leaf_direct_replacement(dl,value,options)) {
+                old = handle_leaf_replacement(t, options, old, ref, key, value, replace, fc, false);
+            }else {
+                old = nullptr;
+            }
+        }
+        if (old.null()) {
             old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
         }
         if (!old_val) {
@@ -1191,7 +1208,6 @@ void art_insert
             if (!old.is_leaf) {
                 abort_with("not a leaf");
             }
-            t->uncache_leaf(key);
             free_leaf_node(old);
         }
     } catch (std::exception &e) {
@@ -1327,7 +1343,6 @@ void art_delete(art::tree *t, art::value_type key, const NodeResult &fc) {
             t->update_trace(-1);
             if (!l.const_leaf()->expired())
                 fc(l);
-            t->uncache_leaf(key);
             free_node(l);
         }
     } catch (std::exception &e) {
@@ -1758,7 +1773,7 @@ art::hashed_key::hashed_key(value_type k, const alloc_pair* p) {
 }
 
 const art::leaf* art::hashed_key::get_leaf() const {
-    return thread_ap->get_leaves().read<leaf>(logical_address{addr,(void*)thread_ap});
+    return thread_ap->get_leaves().read<leaf>(logical_address{addr,thread_ap});
 }
 
 art::value_type art::hashed_key::get_key() const {
@@ -1771,7 +1786,10 @@ art::value_type art::hashed_key::get_key() const {
 void art::tree::clear_hash() {
     h.clear();
 }
-
+void art::tree::remove_leaf(const logical_address& at)  {
+    node_ptr l{at};
+    uncache_leaf(l.cl()->get_key());
+}
 bool art::tree::uncache_leaf(value_type key) {
     auto i = h.find({key,this});
     if (i != h.end()) {
@@ -1792,7 +1810,7 @@ void art::tree::cache_leaf(const node_ptr& leaf)  const{
 art::node_ptr art::tree::get_cached(value_type key) const {
     auto i = h.find({key,this});
     if (i != h.end()) {
-        return logical_address{i->addr,(void*)this};
+        return logical_address{i->addr,(abstract_alloc_pair*)this};
     }
     return nullptr;
     //return j->find(key);
@@ -2172,7 +2190,7 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
     auto i = h.find(ks);
     if (i != h.end()) {
         if (!update) return false;
-        node_ptr old{logical_address{i->addr,(void*)this}};
+        node_ptr old{logical_address{i->addr,this}};
         h.erase(i);
         if (old.cl()->is_hashed()) {
             old.free_from_storage();
@@ -2202,8 +2220,7 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
         if (!old.null()) {
             auto n = old;
             leaf *dl = n.l();
-            if (dl->val_len() == value.size && !dl->expired() &&
-                ((options.get_expiry() > 0) == dl->is_expiry()))
+            if (is_leaf_direct_replacement(dl, value, options))
             {
                 fc(n);
                 dl->set_value(value);

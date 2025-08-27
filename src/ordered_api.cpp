@@ -18,7 +18,7 @@ art::tree *get_art_s(const std::string& key) {
 
 struct query_pool {
     composite query[max_queries_per_call]{};
-    heap::set<size_t> available{};
+    heap::unordered_set<size_t> available{};
 
     query_pool() {
         for (size_t i = 0; i < max_queries_per_call; i++) {

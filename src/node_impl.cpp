@@ -58,6 +58,8 @@ void art::free_leaf_node(leaf *l, logical_address logical) {
     if (l->bad()) {
         abort_with("freeing bad leaf");
     }
+    auto &ap = logical.get_ap<alloc_pair>();
+    ap.remove_leaf(logical);
     l->set_deleted();
     logical.get_ap<alloc_pair>().get_leaves().free(logical, l->byte_size());
     --statistics::leaf_nodes;

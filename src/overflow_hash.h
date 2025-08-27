@@ -23,10 +23,10 @@ namespace oh {
         using key_type = K;
         using hash_type = H;
         using key_compare = EQ;
-        typedef heap::set<K, H> H2;
+        typedef heap::unordered_set<K, H> H2;
 
         struct data {
-            float max_leakage = 0.075f;
+            float max_leakage = 0.05f;
             float max_load_factor = 0.8f;
             float max_rehash_multiplier = 7; // a large multiplier is ok
             // because the hash itself is small relative to the data it indexes
@@ -50,7 +50,7 @@ namespace oh {
                 size_t fopen = keys.size();
                 size_t s = keys.size();
                 for (size_t i = 0; i < PROBES; ++i) {
-                    size_t at = (pos + modifier(i)) % s;
+                    size_t at = (pos + i) % s;
                     if (!has[at]) {
                         if (fopen == s) {
                             fopen = at;
@@ -82,17 +82,15 @@ namespace oh {
                 }
                 size_t pos = hash(k);
                 size_t s = keys.size();
-                size_t start = pos % s;
-                size_t end = std::min(s,start + PROBES);
-                for (size_t i = start; i < end; ++i) {
-                    if (!has[i]) {
+                for (size_t i = 0; i < PROBES; ++i) {
+                    size_t at = (pos + i) % s;
+                    if (has[at] ) {
                         has[i] = true;
                         keys[i] = k;
                         ++size;
                         return true;
                     }
                 }
-
                 size_t sb = h2.size();
                 h2.insert(k);
                 return h2.size() == sb + 1;
@@ -102,30 +100,42 @@ namespace oh {
                     remove(*k);
                 }
             }
-            void remove(const key_type &k) {
-                if (keys.empty()) { return; }
+            size_t remove(const key_type &k) {
+                if (keys.empty()) { return 0; }
                 size_t pos = hash(k);
                 for (size_t i = 0; i < PROBES; ++i) {
-                    size_t at = (pos + modifier(i)) % keys.size();
+                    size_t at = (pos + i) % keys.size();
                     if (has[at] && eq(keys[at], k)) {
                         keys[at] = K();
                         has[at] = false;
                         --size;
-                        return;
+                        return 1;
                     }
                 }
-                h2.erase(k);
+                return h2.erase(k);
+
+            }
+            bool scan(const key_type &q) {
+                size_t h = 0;
+                for (auto&k : keys) {
+                    if (has[h++] && k == q) {
+
+                        return true;
+                    }
+                }
+                return false;
             }
             K* find(const key_type &k) {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
-                size_t start = pos % keys.size();
-                size_t end = std::min(keys.size(),start + PROBES);
-                for (size_t i = start; i < end; ++i) {
-                    if (has[i] && eq(keys[i], k)) {
-                        return &keys[i];
+                size_t s = keys.size();
+                for (size_t i = 0; i < PROBES; ++i) {
+                    size_t at = (pos + i) % s;
+                    if (has[at] && eq(keys[at], k)) {
+                        return &keys[at];
                     }
                 }
+
                 auto i = h2.find(k);
                 if (i != h2.end()) {
                     return (key_type*)&(*i);
@@ -133,7 +143,21 @@ namespace oh {
                 return nullptr;
             }
             const K* find(const key_type &k) const {
-                return find(k);
+                if (keys.empty()) { return nullptr; }
+                size_t pos = hash(k);
+                size_t s = keys.size();
+                for (size_t i = 0; i < PROBES; ++i) {
+                    size_t at = (pos + i) % s;
+                    if (has[at] && eq(keys[at], k)) {
+                        return &keys[at];
+                    }
+                }
+
+                auto i = h2.find(k);
+                if (i != h2.end()) {
+                    return (key_type*)&(*i);
+                }
+                return nullptr;
             }
 
             void swap(data& with) {
@@ -157,7 +181,7 @@ namespace oh {
                 for (size_t i = 0; i < keys.size(); i++) {
                     if (has[i]) {
                         auto before = to.get_size();
-                        if (!to.insert_unique(keys[i])) {
+                        if (!to.insert(keys[i])) {
                             abort_with("insert failed");
                         }
                         if (to.get_size() != before + 1) {
@@ -193,41 +217,61 @@ namespace oh {
             }
         };
         data d_{};
-
+        EQ eq{};
         void rehash(data& from, data& to) {
             from.rehash(to);
         }
+        void check(const key_type& unused(k)) const {
 
+        }
     public:
         unordered_set() = default;
         bool insert(const key_type &k) {
+            check(k);
             bool r = d_.insert(k);
 
             if (d_.tolarge()) {
-
                 data to;
                 d_.rehash(to);
                 d_.swap(to);
             }
+            check(k);
             return r;
         }
 
         K* find(const key_type &k) {
-            return d_.find(k);
+            check(k);
+            auto r = d_.find(k);
+            return r;
         }
         const K* find(const key_type &k) const {
-            return d_.find(k);
+            check(k);
+            auto r = d_.find(k);
+            return r;
         }
 
-        size_t size() const {
+        [[nodiscard]] size_t size() const {
             return d_.get_size();
         }
         void erase(const key_type *k) {
+            size_t n = d_.get_size();
+            check(*k);
+            key_type k1 = *k;
             d_.remove(k);
+            if (n == d_.get_size()) {
+                abort_with("test failed");
+            }
+            check(k1);
         }
 
         void erase(const key_type &k) {
+            check(k);
+            auto n = d_.get_size();
             d_.remove(k);
+            if (n == d_.get_size()) {
+                abort_with("test failed");
+            }
+            check(k);
         }
         void clear() {
             d_.clear();

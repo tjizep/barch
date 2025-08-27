@@ -667,13 +667,12 @@ namespace heap {
     >;
 
     template<typename K, typename H = std::hash<K>>
-    using set = ankerl::unordered_dense::set
-    <K
-        , H
-        , std::equal_to<K>
-        , allocator<K>
+    using unordered_set = ankerl::unordered_dense::set
+    <       K
+        ,   H
+        ,   std::equal_to<K>
+        ,   allocator<K>
     >;
-
     template<typename K, typename V, typename H = std::hash<K>>
     using jmap = jg::dense_hash_map
     <K

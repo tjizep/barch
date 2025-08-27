@@ -40,6 +40,8 @@ static std::vector<std::string> valid_evictions = {
 static std::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
 static std::vector<std::string> valid_use_vmm_mem = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 static std::vector<std::string> valid_defrag = {"on", "true", "off", "yes", "no", "null", "nil"};
+// we want alloc tests but the db has to be created with alloc tests in the first place
+static std::vector<std::string> valid_alloc_tests = {"on", "true", "off", "yes", "no", "null", "nil"};
 static std::vector<std::string> valid_ordered_keys = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 
 template<typename VT>
@@ -609,30 +611,40 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     int ret = 0;
     ret |= ValkeyModule_RegisterStringConfig(ctx, "compression", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetCompressionType, SetCompressionType, ApplyCompressionType, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "eviction_policy", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEvictionType, SetEvictionType, ApplyEvictionType, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", "32g", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxMemoryRatio, SetMaxMemoryBytes, ApplyMaxMemoryRatio, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "active_defrag", "on", VALKEYMODULE_CONFIG_DEFAULT,
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "active_defrag", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetActiveDefragType, SetActiveDefragType, ApplyActiveDefragType, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "maintenance_poll_delay", "40", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaintenancePollDelay, SetMaintenancePollDelay,
                                              ApplyMaintenancePollDelay, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_defrag_page_count", "10", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxDefragPageCount, SetMaxDefragPageCount, ApplyMaxDefragPageCount,
                                              nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "360000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "43000000",
                                              VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxModificationsBeforeSave, SetMaxModificationsBeforeSave,
                                              ApplyMaxModificationsBeforeSave, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "log_page_access_trace", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEnablePageTrace, SetEnablePageTrace,
                                              ApplyEnablePageTrace, nullptr);
@@ -652,9 +664,11 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_max_buffer", "262144", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetRPCMaxBuffer, SetRPCMaxBuffer,
                                              ApplyRPCMaxBuffer, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "rpc_client_max_wait_ms", "30000", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetRPCClientMaxWait, SetRPCClientMaxWait,
                                                  ApplyRPCClientMaxWait, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetOrderedKeys, SetOrderedKeys,
                                                      ApplyOrderedKeys, nullptr);

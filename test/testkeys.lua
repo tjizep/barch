@@ -80,7 +80,7 @@ local test = function()
     end
 
     result[inc()] = {"succeses for test "..tests..": "..successes}
-    end
+end
 
 
 

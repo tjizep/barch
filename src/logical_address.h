@@ -9,23 +9,28 @@
 #include "sastam.h"
 #include "constants.h"
 #define _CHECK_AP_ 1
+struct abstract_alloc_pair {
+    virtual ~abstract_alloc_pair() = default;
+
+    int sentinel = 1<<24;
+};
 struct logical_address {
     typedef uint64_t AddressIntType;
 
     logical_address() = delete;
-    logical_address(void * alloc) : alloc(alloc){};
+    logical_address(abstract_alloc_pair * alloc) : alloc(alloc){};
     logical_address(const logical_address &) = default;
 
     logical_address &operator=(const logical_address &) = default;
 
-    explicit logical_address(size_t index, void* alloc) : index(index), alloc(alloc) {
-        if (alloc && *(int*)alloc != 1<<24) {
+    explicit logical_address(size_t index, abstract_alloc_pair* alloc) : index(index), alloc(alloc) {
+        if (alloc && alloc->sentinel != 1<<24) {
             abort_with("invalid allocator pair");
         }
     }
 
-    logical_address(size_t p, size_t o, void * alloc) :alloc(alloc){
-        if (alloc && *(int*)alloc != 1<<24) {
+    logical_address(size_t p, size_t o, abstract_alloc_pair * alloc) :alloc(alloc){
+        if (alloc && alloc->sentinel != 1<<24) {
             abort_with("invalid allocator pair");
         }
         from_page_offset(p, o);
@@ -104,7 +109,7 @@ struct logical_address {
         if (alloc == nullptr) {
             abort_with("allocator pair not set");
         }
-        if (*(int*)alloc != 1<<24) {
+        if (alloc->sentinel != 1<<24) {
             abort_with("invalid allocator pair");
         }
 #endif
@@ -126,7 +131,9 @@ private:
     // it does have a 3% perf impact in single threaded perf, but hopefully we can have
     // much better multithreaded perf because a seperate tree is allocated
     // for each key shard associated with it's own processing thread
-    void * alloc = nullptr;
+    abstract_alloc_pair * alloc = nullptr;
 };
-
+struct abstract_leaf_pair : public abstract_alloc_pair {
+    virtual void remove_leaf(const logical_address& at) = 0;
+};
 #endif //COMPRESSED_ADDRESS_H

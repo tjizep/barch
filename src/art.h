@@ -193,7 +193,7 @@ namespace art {
         mutable oh::unordered_set<hashed_key,hk_hash > h{};
     public:
         void remove_leaf(const logical_address& at) override;
-        size_t get_hash_size() const {
+        size_t get_jump_size() const {
             return jump_size;
         }
         void log_trace() const ;

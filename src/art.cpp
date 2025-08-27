@@ -1522,9 +1522,9 @@ uint64_t art_size(art::tree *t) {
         if (t == nullptr)
             return 0;
         uint64_t size = t->size;
-        if (!art::get_ordered_keys()) {
-            size += t->get_hash_size();
-        }
+        //if (!art::get_ordered_keys()) {
+            size += t->get_jump_size();
+        //}
         return size;
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
@@ -1785,6 +1785,7 @@ art::value_type art::hashed_key::get_key() const {
 
 void art::tree::clear_hash() {
     h.clear();
+    jump_size = 0;
 }
 void art::tree::remove_leaf(const logical_address& at)  {
     node_ptr l{at};
@@ -1804,7 +1805,7 @@ bool art::tree::uncache_leaf(value_type key) {
 }
 
 void art::tree::cache_leaf(const node_ptr& leaf)  const{
-    h.insert(leaf);
+    h.insert(leaf); // wont overwrite on purpose
 }
 
 art::node_ptr art::tree::get_cached(value_type key) const {
@@ -1932,6 +1933,7 @@ bool art::tree::load(bool) {
     try {
         storage_release release(latch);
         h.clear();
+        jump_size = 0;
         auto *t = this;
         logical_address root{nullptr};
         bool is_leaf = false;
@@ -2200,8 +2202,8 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
     node_ptr l = this->make_leaf(key, value, options.get_expiry(),options.is_volatile());
     l.l()->set_hashed();
     fc(l);
-    h.insert(l);
-    jump_size = h.size();
+    if (h.insert(l))
+        ++jump_size;
     return true;
 }
 
@@ -2289,9 +2291,12 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
             }
             if (!n.null()) {
                 n.l()->set_hashed();
-                h.erase(i);
-                h.insert(n);
-                jump_size = h.size();
+                size_t erased = h.erase(i);
+                if (hashed) {
+                    jump_size -= erased;
+                }
+                if (h.insert(n))
+                    ++jump_size;
             }
             old.free_from_storage();// ok if old is null - nothing will happen
             return !n.null();
@@ -2318,9 +2323,9 @@ bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
         leaf *dl = n.l();
         if (dl->is_hashed()) {
             fc(n);
-            h.erase({key,this});
+            jump_size -= h.erase({key,this});
             n.free_from_storage();
-            --jump_size;
+
             this->repl_client.remove(key);
             return true;
         }

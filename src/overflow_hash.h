@@ -253,25 +253,19 @@ namespace oh {
         [[nodiscard]] size_t size() const {
             return d_.get_size();
         }
-        void erase(const key_type *k) {
+        size_t erase(const key_type *k) {
             size_t n = d_.get_size();
             check(*k);
-            key_type k1 = *k;
             d_.remove(k);
-            if (n == d_.get_size()) {
-                abort_with("test failed");
-            }
-            check(k1);
+            return n - d_.get_size();
         }
 
-        void erase(const key_type &k) {
+        size_t erase(const key_type &k) {
             check(k);
             auto n = d_.get_size();
             d_.remove(k);
-            if (n == d_.get_size()) {
-                abort_with("test failed");
-            }
             check(k);
+            return n - d_.get_size();;
         }
         void clear() {
             d_.clear();

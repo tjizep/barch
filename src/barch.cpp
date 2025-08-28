@@ -238,13 +238,14 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int SET(caller& call,const arg_t& argv) {
     if (argv.size() < 3)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+
 
     auto k = argv[1];
     auto v = argv[2];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
+    auto t = get_art(argv[1]);
     auto converted = conversion::convert(k);
     art::key_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -258,8 +259,10 @@ int SET(caller& call,const arg_t& argv) {
         }
     };
     {
-        //storage_release release(t->latch);
-        t->opt_insert(spec, converted.get_value(), v, true, fc);
+        storage_release release(t->latch);
+        //art::make_leaf(*t, converted.get_value(), v, 0);
+        t->jumpsert(spec, converted.get_value(), v, true, fc);
+        //t->opt_insert(spec, converted.get_value(), v, true, fc);
     }
 
     if (spec.get) {

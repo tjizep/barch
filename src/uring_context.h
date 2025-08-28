@@ -132,7 +132,7 @@ struct uring_context {
             io_uring_cqe_seen(&ring, cqe);
         }
         if (!operations_pending)
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return true;
     }
     void close(tcp::socket &s, request& req,uring_cb f) {

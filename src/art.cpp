@@ -1745,40 +1745,35 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::oom_avoided_inserts);
     readp(in, statistics::logical_allocated);
 }
-thread_local alloc_pair* thread_ap;
+//thread_local alloc_pair* thread_ap;
 thread_local art::value_type key_query;
 art::hashed_key::hashed_key(const node_ptr& la) {
     if (la.logical.address() > std::numeric_limits<uint32_t>::max()) {
         throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
     }
 
-    thread_ap = (alloc_pair*)&la.logical.get_ap<alloc_pair>();
-    addr = la.logical.address();
+    addr = la.logical;//.address();
 }
 art::hashed_key::hashed_key(const logical_address& la) {
     if (la.address() > std::numeric_limits<uint32_t>::max()) {
         throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
     }
-    thread_ap = (alloc_pair*)&la.get_ap<alloc_pair>();
-    addr = la.address();
+    addr = la;//.address();
 
 }
 
-art::hashed_key::hashed_key(value_type k, alloc_pair* p) {
+art::hashed_key::hashed_key(value_type k) {
     key_query = k;
-    thread_ap = p;
-}
-art::hashed_key::hashed_key(value_type k, const alloc_pair* p) {
-    key_query = k;
-    thread_ap = (alloc_pair*)p;
 }
 
 const art::leaf* art::hashed_key::get_leaf() const {
-    return thread_ap->get_leaves().read<leaf>(logical_address{addr,thread_ap});
+    //thread_ap->get_leaves().read<leaf>(logical_address{addr});
+    node_ptr n{addr};
+    return n.is_leaf ? n.const_leaf() : nullptr;
 }
 
 art::value_type art::hashed_key::get_key() const {
-    if (!addr) {
+    if (!addr.address()) {
         return key_query;
     }
     return get_leaf()->get_key();
@@ -1789,13 +1784,17 @@ void art::tree::clear_hash() {
     jump_size = 0;
 }
 void art::tree::remove_leaf(const logical_address& at)  {
-    node_ptr l{at};
-    uncache_leaf(l.cl()->get_key());
+    if (do_remove) {
+        node_ptr l{at};
+        uncache_leaf(l.cl()->get_key());
+    }
+
 }
 bool art::tree::uncache_leaf(value_type key) {
-    auto i = h.find({key,this});
+
+    auto i = h.find(key);
     if (i != h.end()) {
-        node_ptr old{logical_address(i->addr, this)};
+        node_ptr old{logical_address(i->addr)};
         h.erase(i);
         if (old.cl()->is_hashed()) {
             old.free_from_storage();
@@ -1810,9 +1809,9 @@ void art::tree::cache_leaf(const node_ptr& leaf)  const{
 }
 
 art::node_ptr art::tree::get_cached(value_type key) const {
-    auto i = h.find({key,this});
+    auto i = h.find(key);
     if (i != h.end()) {
-        return logical_address{i->addr,(abstract_alloc_pair*)this};
+        return i->addr;
     }
     return nullptr;
     //return j->find(key);
@@ -2189,22 +2188,23 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
 }
 
 bool art::tree::jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
-    hashed_key ks({key,this});
-    auto i = h.find(ks);
-    if (i != h.end()) {
-        if (!update) return false;
-        node_ptr old{logical_address{i->addr,this}};
-        h.erase(i);
-        if (old.cl()->is_hashed()) {
-            old.free_from_storage();
-        }
 
-    }
-    node_ptr l = this->make_leaf(key, value, options.get_expiry(),options.is_volatile());
+    size_t sb = h.size();
+    node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
     l.l()->set_hashed();
     fc(l);
-    if (h.insert(l))
-        ++jump_size;
+    auto i = h.find_or_insert(l);
+    if (i != h.end()) {
+        if (update) {
+            node_ptr old{i->addr};
+            *i = l;
+            do_remove = false;
+            old.free_from_storage();
+            do_remove = true;
+        }
+        return false;
+    }
+    jump_size += h.size()- sb;
     return true;
 }
 
@@ -2217,7 +2217,7 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     }
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
-    {
+    if (opt_ordered_keys) {
         read_lock release(latch); // only read lock if there's a chance of update
         node_ptr old = get_cached(key);
         if (!old.null()) {
@@ -2241,10 +2241,10 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     size_t before = size;
     if (opt_ordered_keys) {
         if (jump_size > 0) {
-            auto i = h.find({key,this});
+            auto i = h.find(key);
             if (i != h.end()) {
                 if (!update) return false;
-                node_ptr old{logical_address(i->addr, this)};
+                node_ptr old{i->addr};
                 h.erase(i);
                 if (old.cl()->is_hashed()) {
                     old.free_from_storage();
@@ -2276,10 +2276,10 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
         this->repl_client.insert(options, key, l->get_value());
         return value;
     };
-    auto i = h.find({key,this});
+    auto i = h.find(key);
     if (i != h.end()) {
         node_ptr n;
-        node_ptr old{logical_address(i->addr, this)};
+        node_ptr old{i->addr};
         bool hashed = old.cl()->is_hashed();
         if (!opt_ordered_keys) {
             n = repl_updateresult(old);
@@ -2292,12 +2292,14 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
             }
             if (!n.null()) {
                 n.l()->set_hashed();
-                size_t erased = h.erase(i);
+                size_t sb = h.size();
+                h.erase(i);
                 if (hashed) {
-                    jump_size -= erased;
+                    jump_size -= sb - h.size();
                 }
-                if (h.insert(n))
-                    ++jump_size;
+                sb = h.size();
+                h.insert(n);
+                jump_size += h.size() - sb;
             }
             old.free_from_storage();// ok if old is null - nothing will happen
             return !n.null();
@@ -2324,7 +2326,7 @@ bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
         leaf *dl = n.l();
         if (dl->is_hashed()) {
             fc(n);
-            jump_size -= h.erase({key,this});
+            jump_size -= h.erase(key);
             n.free_from_storage();
 
             this->repl_client.remove(key);

@@ -147,10 +147,11 @@ namespace art {
         }
     };
     struct hashed_key {
-        uint32_t addr{};
+        logical_address addr{nullptr};
         hashed_key() = default;
-        hashed_key(value_type , alloc_pair* ) ;
-        hashed_key(value_type , const alloc_pair* ) ;
+        hashed_key(const hashed_key&) = default;
+        hashed_key& operator=(const hashed_key&) = default;
+        hashed_key(value_type) ;
 
         const leaf* get_leaf() const;
         value_type get_key() const;
@@ -159,16 +160,16 @@ namespace art {
         hashed_key(const logical_address& la) ;
 
         hashed_key& operator=(const node_ptr& nl) {
-            addr = nl.logical.address();
+            addr = nl.logical;
             return *this;
         }
 
         bool operator==(const hashed_key& r) const {
-            return get_key() == r.get_key();
+            return get_key().pref(1) == r.get_key().pref(1);
         }
 
         bool operator<(const hashed_key& r) const {
-            return get_key() < r.get_key();
+            return get_key().pref(1) < r.get_key().pref(1);
         }
         size_t hash() const {
             auto key = get_key();
@@ -192,7 +193,7 @@ namespace art {
         //mutable heap::unordered_set<hashed_key,hk_hash > h{};
         mutable oh::unordered_set<hashed_key,hk_hash > h{};
         mutable uint64_t saf_keys_found{};
-
+        bool do_remove = true;
     public:
         void inc_keys_found() const {
             ++saf_keys_found;

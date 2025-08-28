@@ -37,7 +37,7 @@ namespace oh {
             heap::vector<bool> has{};
             heap::vector<key_type> keys{};
             H2 h2{};
-            float rehashed = 0;
+            size_t rehashed = 0;
             size_t modifier(size_t i) {
                 return i;
             }
@@ -45,6 +45,7 @@ namespace oh {
                 if (keys.empty()) {
                     resize(4);
                 }
+                if (h2.contains(k)) return false;
 
                 size_t pos = hash(k);
                 size_t fopen = keys.size();
@@ -69,6 +70,37 @@ namespace oh {
                 h2.insert(k);
                 return h2.size() == sb + 1;
             }
+            key_type* find_or_insert(const key_type &k) {
+                if (keys.empty()) {
+                    resize(4);
+                }
+                auto i = h2.find(k);
+                if (i != h2.end()) {
+                    return (key_type*)&(*i);
+                }
+
+                size_t pos = hash(k);
+                size_t fopen = keys.size();
+                size_t s = keys.size();
+                for (size_t i = 0; i < PROBES; ++i) {
+                    size_t at = (pos + i) % s;
+                    if (!has[at]) {
+                        if (fopen == s) {
+                            fopen = at;
+                        }
+                    }else if (eq(keys[at], k)) {
+                        return &keys[at];
+                    }
+                }
+                if (fopen < s) {
+                    has[fopen] = true;
+                    keys[fopen] = k;
+                    ++size;
+                    return nullptr;
+                }
+                h2.insert(k);
+                return nullptr;
+            }
 
             /**
              * if we know that all keys are unique beforehand
@@ -84,9 +116,9 @@ namespace oh {
                 size_t s = keys.size();
                 for (size_t i = 0; i < PROBES; ++i) {
                     size_t at = (pos + i) % s;
-                    if (has[at] ) {
-                        has[i] = true;
-                        keys[i] = k;
+                    if (!has[at]) {
+                        has[at] = true;
+                        keys[at] = k;
                         ++size;
                         return true;
                     }
@@ -95,6 +127,7 @@ namespace oh {
                 h2.insert(k);
                 return h2.size() == sb + 1;
             }
+
             void remove(const key_type *k) {
                 if (k) {
                     remove(*k);
@@ -181,7 +214,7 @@ namespace oh {
                 for (size_t i = 0; i < keys.size(); i++) {
                     if (has[i]) {
                         auto before = to.get_size();
-                        if (!to.insert(keys[i])) {
+                        if (!to.insert_unique(keys[i])) {
                             abort_with("insert failed");
                         }
                         if (to.get_size() != before + 1) {
@@ -192,6 +225,7 @@ namespace oh {
                 for (auto &k : h2) {
                     auto before = to.get_size();
                     if (!to.insert(k)) {
+                        to.insert(k);
                         abort_with("insert failed");
                     }
                     if (to.get_size() != before + 1) {
@@ -206,7 +240,7 @@ namespace oh {
             }
             bool tolarge() const {
                 // use the max_load_factor or max_ratio to determine rehash
-                return size >= max_load_factor*keys.size() || size*max_leakage <= h2.size();
+                return size >= max_load_factor*keys.size();// || size*max_leakage <= h2.size();
             }
             bool contains(const key_type &k) const {
                 return find(k) != nullptr;
@@ -229,13 +263,26 @@ namespace oh {
         bool insert(const key_type &k) {
             check(k);
             bool r = d_.insert(k);
-
             if (d_.tolarge()) {
                 data to;
                 d_.rehash(to);
                 d_.swap(to);
             }
             check(k);
+            return r;
+        }
+        key_type* find_or_insert(const key_type &k) {
+            check(k);
+            auto r = d_.find_or_insert(k);
+            if (d_.tolarge()) {
+                data to;
+                d_.rehash(to);
+                d_.swap(to);
+                if (r) {
+                    r = find(k);
+                }
+            }
+
             return r;
         }
 

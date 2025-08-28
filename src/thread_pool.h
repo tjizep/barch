@@ -8,6 +8,7 @@
 #include <atomic>
 #include "sastam.h"
 struct thread_pool {
+    bool min_threads = false;
     heap::vector<std::thread> pool{};
     bool started = false;
     std::atomic<size_t> stopped{};
@@ -15,13 +16,25 @@ struct thread_pool {
         pool.resize(size);
     }
     thread_pool() {
+        if (min_threads) {
+            pool.resize(1);
+            return;
+        }
         pool.resize(std::max<size_t>(4, std::thread::hardware_concurrency()));
     }
     explicit thread_pool(double factor) {
+        if (min_threads) {
+            pool.resize(1);
+            return;
+        }
         double cores = std::thread::hardware_concurrency();
         pool.resize(std::max<size_t>(4, (size_t)(cores*factor)));
     }
     explicit thread_pool(int threads) {
+        if (min_threads) {
+            pool.resize(1);
+            return;
+        }
         pool.resize(threads);
     }
     [[nodiscard]] size_t size() const {

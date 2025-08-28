@@ -31,6 +31,6 @@ enum {
     encoding_delta = 0,
     key_terminator = 0x01,
     max_top = 100000000000,
-    page_extension_on_allocation = 16
+    page_extension_on_allocation = 128
 };
 #endif //CONSTANTS_H

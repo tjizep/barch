@@ -1746,7 +1746,7 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::logical_allocated);
 }
 //thread_local alloc_pair* thread_ap;
-thread_local art::value_type key_query;
+//thread_local art::value_type key_query;
 art::hashed_key::hashed_key(const node_ptr& la) {
     if (la.logical.address() > std::numeric_limits<uint32_t>::max()) {
         throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
@@ -1784,10 +1784,10 @@ void art::tree::clear_hash() {
     jump_size = 0;
 }
 void art::tree::remove_leaf(const logical_address& at)  {
-    if (do_remove) {
+    //if (do_remove) {
         node_ptr l{at};
         uncache_leaf(l.cl()->get_key());
-    }
+    //}
 
 }
 bool art::tree::uncache_leaf(value_type key) {
@@ -1814,7 +1814,6 @@ art::node_ptr art::tree::get_cached(value_type key) const {
         return i->addr;
     }
     return nullptr;
-    //return j->find(key);
 }
 
 bool art::tree::publish(std::string host, int port) {
@@ -2188,7 +2187,7 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
 }
 
 bool art::tree::jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
-
+unused(
     size_t sb = h.size();
     node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
     l.l()->set_hashed();
@@ -2204,7 +2203,8 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
         }
         return false;
     }
-    jump_size += h.size()- sb;
+    jump_size += h.size()- sb;)
+
     return true;
 }
 
@@ -2217,7 +2217,7 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     }
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
-    if (opt_ordered_keys) {
+    if (false && opt_ordered_keys) {
         read_lock release(latch); // only read lock if there's a chance of update
         node_ptr old = get_cached(key);
         if (!old.null()) {
@@ -2334,10 +2334,6 @@ bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
         }
     }
     art_delete(this, key, fc);
-    if (size < before) {
-
-        // replicate the delete
-    }
     this->repl_client.remove(key);
     return size < before;
 }

@@ -220,11 +220,8 @@ int KEYS(caller& call, const arg_t& argv) {
                 return true;
             });
         }
-
-
         call.end_array(replies);
 
-        /* Cleanup. */
     }
     return call.ok();
 }
@@ -259,10 +256,10 @@ int SET(caller& call,const arg_t& argv) {
         }
     };
     {
-        storage_release release(t->latch);
+        //storage_release release(t->latch);
         //art::make_leaf(*t, converted.get_value(), v, 0);
-        t->jumpsert(spec, converted.get_value(), v, true, fc);
-        //t->opt_insert(spec, converted.get_value(), v, true, fc);
+        //t->jumpsert(spec, converted.get_value(), v, true, fc);
+        t->opt_insert(spec, converted.get_value(), v, true, fc);
     }
 
     if (spec.get) {
@@ -542,7 +539,6 @@ int ADD(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
     auto k = argv[1];
     auto v = argv[2];
 
@@ -552,6 +548,7 @@ int ADD(caller& call, const arg_t& argv) {
     };
     auto converted = conversion::convert(k);
     art::key_spec spec(argv);
+    storage_release release(t->latch);
     t->insert(spec, converted.get_value(), v, false, fc);
 
     return call.simple("OK");

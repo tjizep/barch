@@ -148,6 +148,7 @@ namespace art {
     };
     struct hashed_key {
         logical_address addr{nullptr};
+        value_type key_query{};
         hashed_key() = default;
         hashed_key(const hashed_key&) = default;
         hashed_key& operator=(const hashed_key&) = default;
@@ -165,11 +166,11 @@ namespace art {
         }
 
         bool operator==(const hashed_key& r) const {
-            return get_key().pref(1) == r.get_key().pref(1);
+            return get_key() == r.get_key();
         }
 
         bool operator<(const hashed_key& r) const {
-            return get_key().pref(1) < r.get_key().pref(1);
+            return get_key() < r.get_key();
         }
         size_t hash() const {
             auto key = get_key();
@@ -190,8 +191,8 @@ namespace art {
         mutable std::string temp_key{};
         bool with_stats{true};
         //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
-        //mutable heap::unordered_set<hashed_key,hk_hash > h{};
-        mutable oh::unordered_set<hashed_key,hk_hash > h{};
+        mutable heap::unordered_set<hashed_key,hk_hash > h{};
+        //mutable oh::unordered_set<hashed_key,hk_hash > h{};
         mutable uint64_t saf_keys_found{};
         bool do_remove = true;
     public:

@@ -7,16 +7,12 @@
 #include <iostream>
 #include <fstream>
 #include "sastam.h"
-#include <mutex>
-#include <shared_mutex>
 #include <ostream>
 #include <statistics.h>
 #include <stdexcept>
 #include <thread>
 #include <valkeymodule.h>
 #include <vector>
-//#include <zstd.h>
-//#include <zdict.h>
 #include <functional>
 #include <list>
 #include <logger.h>
@@ -29,7 +25,6 @@
 #include "storage.h"
 #include "hash_arena.h"
 #include "page_modifications.h"
-#include "overflow_hash.h"
 
 typedef uint32_t PageSizeType;
 typedef heap::unordered_set<size_t> address_set;
@@ -527,16 +522,6 @@ private:
         return {last_page_allocated, last};
     }
 
-    size_t release_decompressed(size_t at) {
-        if (is_null_base(at)) return 0;
-        size_t r = 0;
-        heap::buffer<uint8_t> torelease;
-
-        page_modifications::inc_ticker(at);
-
-        return r;
-    }
-
     uint8_t *basic_resolve(logical_address at, bool modify = false) {
         if (opt_page_trace) {
             art::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read");
@@ -752,7 +737,6 @@ public:
 
     uint8_t *new_address(logical_address &r, size_t sz) {
         size_t size = sz + test_memory + allocation_padding;
-        //std::lock_guard guard(mutex);
         r = emancipated.get(size);
         if (!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty()) {
             if (test_memory) {
@@ -855,7 +839,7 @@ public:
 
     void iterate_pages(std::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
         opt_iterate_workers = art::get_iteration_worker_count();
-        std::thread workers[opt_iterate_workers];
+        std::vector<std::thread> workers{opt_iterate_workers};
         std::atomic<bool> stop = false;
         for (unsigned iwork = 0; iwork < opt_iterate_workers; iwork++) {
             workers[iwork] = std::thread([this,&latch,iwork,&found_page,&stop]() {
@@ -869,7 +853,7 @@ public:
                             std::lock_guard guard(latch);
                             if (!is_free(page)) {
                                 wp = retrieve_page(page).write_position;
-                                pdata = std::move(heap::buffer{get_page_data({page,0,this->ap}), wp});
+                                pdata = heap::buffer{get_page_data({page,0,this->ap}), wp};
                             }
                         }
                         if (wp) {
@@ -980,23 +964,23 @@ public:
     }
 
     bool receive_extra(std::istream& in, const std::function<void(std::istream &of)> &extra1) {
-        auto reader = [&](std::istream &in) -> void {
+        auto reader = [&](std::istream &in1) -> void {
             long ts = 0;
-            readp(in, ts);
+            readp(in1, ts);
 
-            readp(in, opt_enable_lru);
-            readp(in, opt_validate_addresses);
-            readp(in, opt_move_decompressed_pages);
-            readp(in, opt_iterate_workers);
+            readp(in1, opt_enable_lru);
+            readp(in1, opt_validate_addresses);
+            readp(in1, opt_move_decompressed_pages);
+            readp(in1, opt_iterate_workers);
 
-            readp(in, last_page_allocated);
-            readp(in, highest_reserve_address);
-            readp(in, last_heap_bytes);
-            readp(in, ticker);
-            readp(in, allocated);
-            readp(in, fragmentation);
+            readp(in1, last_page_allocated);
+            readp(in1, highest_reserve_address);
+            readp(in1, last_heap_bytes);
+            readp(in1, ticker);
+            readp(in1, allocated);
+            readp(in1, fragmentation);
             last_page_allocated = 0;
-            extra1(in);
+            extra1(in1);
         };
         try {
             emancipated.clear();
@@ -1021,7 +1005,7 @@ public:
         main.rollback();
         main = arena::hash_arena{main.name};
         last_page_allocated = {0};
-        highest_reserve_address = {nullptr};
+        highest_reserve_address = nullptr;
         last_heap_bytes = 0;
         ticker = 1;
         allocated = 0;

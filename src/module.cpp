@@ -40,6 +40,7 @@ art::tree *get_art(size_t s) {
         abort_with("shard configuration is empty");
     }
     auto r = shards[s % shards.size()];
+    r->set_thread_ap();
     return r;
 }
 size_t get_shard(const char* key, size_t key_len) {

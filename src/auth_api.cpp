@@ -64,6 +64,7 @@ art::tree * get_auth() {
         init_auth(auth);
 
     }
+    auth->set_thread_ap();
     //art::hashed_key::thread_ap = auth;
     return auth;
 }

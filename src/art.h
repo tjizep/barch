@@ -147,8 +147,7 @@ namespace art {
         }
     };
     struct hashed_key {
-        logical_address addr{nullptr};
-        value_type key_query{};
+        uint64_t addr{};
         hashed_key() = default;
         hashed_key(const hashed_key&) = default;
         hashed_key& operator=(const hashed_key&) = default;
@@ -160,10 +159,7 @@ namespace art {
         hashed_key(const node_ptr& la) ;
         hashed_key(const logical_address& la) ;
 
-        hashed_key& operator=(const node_ptr& nl) {
-            addr = nl.logical;
-            return *this;
-        }
+        hashed_key& operator=(const node_ptr& nl);
 
         bool operator==(const hashed_key& r) const {
             return get_key() == r.get_key();
@@ -191,14 +187,15 @@ namespace art {
         mutable std::string temp_key{};
         bool with_stats{true};
         //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
-        mutable heap::unordered_set<hashed_key,hk_hash > h{};
-        //mutable oh::unordered_set<hashed_key,hk_hash > h{};
+        //mutable heap::unordered_set<hashed_key,hk_hash > h{};
+        mutable oh::unordered_set<hashed_key,hk_hash > h{};
         mutable uint64_t saf_keys_found{};
         bool do_remove = true;
     public:
         void inc_keys_found() const {
             ++saf_keys_found;
         }
+        void set_thread_ap();
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {
             return jump_size;
@@ -223,7 +220,7 @@ namespace art {
         barch::repl::client repl_client{};
         uint64_t jump_size{};
 
-        bool opt_ordered_keys;
+        bool opt_ordered_keys{true};
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();

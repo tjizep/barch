@@ -1745,20 +1745,27 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::oom_avoided_inserts);
     readp(in, statistics::logical_allocated);
 }
-//thread_local alloc_pair* thread_ap;
-//thread_local art::value_type key_query;
+thread_local alloc_pair* thread_ap;
+thread_local art::value_type key_query;
 art::hashed_key::hashed_key(const node_ptr& la) {
     if (la.logical.address() > std::numeric_limits<uint32_t>::max()) {
         throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
     }
-
-    addr = la.logical;//.address();
+    thread_ap = (tree*)&la.logical.get_ap<alloc_pair>();
+    addr = la.logical.address();
 }
+art::hashed_key& art::hashed_key::operator=(const node_ptr& nl) {
+    thread_ap = (tree*)&nl.logical.get_ap<alloc_pair>();
+    addr = nl.logical.address();
+    return *this;
+}
+
 art::hashed_key::hashed_key(const logical_address& la) {
     if (la.address() > std::numeric_limits<uint32_t>::max()) {
         throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
     }
-    addr = la;//.address();
+    thread_ap = (tree*)&la.get_ap<alloc_pair>();
+    addr = la.address();
 
 }
 
@@ -1768,12 +1775,12 @@ art::hashed_key::hashed_key(value_type k) {
 
 const art::leaf* art::hashed_key::get_leaf() const {
     //thread_ap->get_leaves().read<leaf>(logical_address{addr});
-    node_ptr n{addr};
+    node_ptr n = logical_address{addr,thread_ap};
     return n.is_leaf ? n.const_leaf() : nullptr;
 }
 
 art::value_type art::hashed_key::get_key() const {
-    if (!addr.address()) {
+    if (!addr) {
         return key_query;
     }
     return get_leaf()->get_key();
@@ -1783,18 +1790,22 @@ void art::tree::clear_hash() {
     h.clear();
     jump_size = 0;
 }
+void art::tree::set_thread_ap() {
+    thread_ap = this;
+}
+
 void art::tree::remove_leaf(const logical_address& at)  {
-    //if (do_remove) {
+    if (do_remove) {
         node_ptr l{at};
         uncache_leaf(l.cl()->get_key());
-    //}
+    }
 
 }
 bool art::tree::uncache_leaf(value_type key) {
 
     auto i = h.find(key);
     if (i != h.end()) {
-        node_ptr old{logical_address(i->addr)};
+        node_ptr old{logical_address(i->addr,thread_ap)};
         h.erase(i);
         if (old.cl()->is_hashed()) {
             old.free_from_storage();
@@ -1805,13 +1816,14 @@ bool art::tree::uncache_leaf(value_type key) {
 }
 
 void art::tree::cache_leaf(const node_ptr& leaf)  const{
-    h.insert(leaf); // wont overwrite on purpose
+    if (!opt_ordered_keys)
+        h.insert(leaf); // wont overwrite on purpose
 }
 
 art::node_ptr art::tree::get_cached(value_type key) const {
     auto i = h.find(key);
     if (i != h.end()) {
-        return i->addr;
+        return logical_address{i->addr,thread_ap};
     }
     return nullptr;
 }
@@ -2187,7 +2199,7 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
 }
 
 bool art::tree::jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
-unused(
+
     size_t sb = h.size();
     node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
     l.l()->set_hashed();
@@ -2195,7 +2207,7 @@ unused(
     auto i = h.find_or_insert(l);
     if (i != h.end()) {
         if (update) {
-            node_ptr old{i->addr};
+            node_ptr old = logical_address{i->addr,this};
             *i = l;
             do_remove = false;
             old.free_from_storage();
@@ -2203,7 +2215,7 @@ unused(
         }
         return false;
     }
-    jump_size += h.size()- sb;)
+    jump_size += h.size()- sb;
 
     return true;
 }
@@ -2217,7 +2229,8 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     }
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
-    if (false && opt_ordered_keys) {
+    //if (false && opt_ordered_keys)
+    {
         read_lock release(latch); // only read lock if there's a chance of update
         node_ptr old = get_cached(key);
         if (!old.null()) {
@@ -2244,7 +2257,7 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
             auto i = h.find(key);
             if (i != h.end()) {
                 if (!update) return false;
-                node_ptr old{i->addr};
+                node_ptr old = logical_address{i->addr,this};
                 h.erase(i);
                 if (old.cl()->is_hashed()) {
                     old.free_from_storage();
@@ -2279,7 +2292,7 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
     auto i = h.find(key);
     if (i != h.end()) {
         node_ptr n;
-        node_ptr old{i->addr};
+        node_ptr old = logical_address{i->addr,this};
         bool hashed = old.cl()->is_hashed();
         if (!opt_ordered_keys) {
             n = repl_updateresult(old);

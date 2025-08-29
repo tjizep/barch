@@ -4,7 +4,7 @@ enable_testing()
 message("barch version: ${PROJECT_VERSION}")
 
 if (CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(TEST_BUILD_DIR "./build")
+    set(TEST_BUILD_DIR "build")
 else ()
     set(TEST_BUILD_DIR ${CMAKE_BUILD_TYPE})
 endif ()

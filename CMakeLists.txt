@@ -4,7 +4,7 @@ enable_testing()
 message("barch version: ${PROJECT_VERSION}")
 
 if (CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(TEST_BUILD_DIR build)
+    set(TEST_BUILD_DIR "./build")
 else ()
     set(TEST_BUILD_DIR ${CMAKE_BUILD_TYPE})
 endif ()
@@ -50,7 +50,7 @@ if (USE_ASIO)
     FetchContent_Declare(
             liburing
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-            SOURCE_SUBDIR ${TEST_BUILD_DIR}/cmake
+            #SOURCE_SUBDIR ${TEST_BUILD_DIR}/cmake
             URL "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.11.tar.gz"
     )
     FetchContent_MakeAvailable(liburing)
@@ -68,7 +68,7 @@ if (USE_ASIO)
     FetchContent_Declare(
             asio
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-            SOURCE_SUBDIR ${TEST_BUILD_DIR}/cmake
+            #SOURCE_SUBDIR ${TEST_BUILD_DIR}/cmake
             URL "https://sourceforge.net/projects/asio/files/asio/1.30.2%20%28Stable%29/asio-1.30.2.tar.gz/download"
     )
     FetchContent_MakeAvailable(asio)
@@ -84,7 +84,7 @@ if (ADD_ZSTD_COMPRESSION)
     FetchContent_Declare(
             zstd
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-            SOURCE_SUBDIR ${TEST_BUILD_DIR}/cmake
+            #SOURCE_SUBDIR ${TEST_BUILD_DIR}/cmake
             URL "https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz"
     )
 else ()

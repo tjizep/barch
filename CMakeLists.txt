@@ -44,19 +44,6 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 
 include(FetchContent)
-if (USE_ASIO)
-    message("Using msgpack")
-    FetchContent_Declare(
-            msgpack
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-            SOURCE_SUBDIR ${TEST_BUILD_DIR}/cmake
-            URL "https://github.com/msgpack/msgpack-c/archive/refs/tags/cpp-7.0.0.tar.gz"
-    )
-    FetchContent_MakeAvailable(msgpack)
-    include_directories(${msgpack_SOURCE_DIR}/include)
-else ()
-    message("Boost.Asio not used use -USE_ASIO=ON")
-endif()
 
 if (USE_ASIO)
     message("Using liburing")

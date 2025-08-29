@@ -621,7 +621,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "active_defrag", "off", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "active_defrag", "on", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetActiveDefragType, SetActiveDefragType, ApplyActiveDefragType, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "maintenance_poll_delay", "40", VALKEYMODULE_CONFIG_DEFAULT,

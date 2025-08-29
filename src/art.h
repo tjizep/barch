@@ -147,7 +147,10 @@ namespace art {
         }
     };
     struct hashed_key {
-        uint64_t addr{};
+        // we can reduce memory use by setting this to uint32_t
+        // but max database size is reduced to 128 gb
+        //uint64_t addr{};
+        uint32_t addr{};
         hashed_key() = default;
         hashed_key(const hashed_key&) = default;
         hashed_key& operator=(const hashed_key&) = default;

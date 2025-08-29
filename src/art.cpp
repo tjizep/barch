@@ -2213,7 +2213,7 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
             old.free_from_storage();
             do_remove = true;
         }
-        return false;
+        return false; // size not changed
     }
     jump_size += h.size()- sb;
 

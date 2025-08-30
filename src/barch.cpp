@@ -255,12 +255,7 @@ int SET(caller& call,const arg_t& argv) {
             reply = converted.get_value();
         }
     };
-    {
-        //storage_release release(t->latch);
-        //art::make_leaf(*t, converted.get_value(), v, 0);
-        //t->jumpsert(spec, converted.get_value(), v, true, fc);
-        t->opt_insert(spec, converted.get_value(), v, true, fc);
-    }
+    t->opt_insert(spec, converted.get_value(), v, true, fc);
 
     if (spec.get) {
         if (reply.size) {

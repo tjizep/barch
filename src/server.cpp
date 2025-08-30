@@ -286,7 +286,7 @@ namespace barch {
                                 ++r.remove_applied;
                             });
                         }else {
-                            if (t->uncache_leaf(key.first)) {
+                            if (t->remove_leaf_from_uset(key.first)) {
                                 ++statistics::repl::key_rem_recv_applied;
                                 ++r.remove_applied;
                             }

@@ -150,6 +150,7 @@ namespace art {
         // but max database size is reduced to 128 gb
         //uint64_t addr{};
         uint32_t addr{};
+        node_ptr node(const abstract_leaf_pair* p) const ;
         hashed_key() = default;
         hashed_key(const hashed_key&) = default;
         hashed_key& operator=(const hashed_key&) = default;
@@ -200,7 +201,7 @@ namespace art {
         void set_thread_ap();
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {
-            return jump_size;
+            return h.size();
         }
         void log_trace() const ;
         value_type filter_key(value_type key) const;
@@ -220,7 +221,6 @@ namespace art {
         bool opt_use_trace = true;
         node_ptr last_leaf_added{};
         barch::repl::client repl_client{};
-        uint64_t jump_size{};
 
         bool opt_ordered_keys{true};
         void clear_trace() {
@@ -268,9 +268,8 @@ namespace art {
         ~tree() override;
         void load_hash();
         void clear_hash() ;
-        bool uncache_leaf(value_type key);
-        void cache_leaf(const node_ptr& leaf) const;
-        node_ptr get_cached(value_type key) const;
+        bool remove_leaf_from_uset(value_type key);
+        node_ptr from_unordered_set(value_type key) const;
 
         bool publish(std::string host, int port);
 
@@ -380,8 +379,7 @@ void art_insert
  , art::value_type key
  , art::value_type value
  , bool replace
- , const NodeResult &fc
- , bool use_cache = true);
+ , const NodeResult &fc);
 
 /**
  * inserts a new value into the art tree (not replacing)

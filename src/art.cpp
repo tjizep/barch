@@ -175,14 +175,13 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
             abort_with("invalid root node");
         }
-        art::node_ptr al = t->get_cached(key);
+        art::node_ptr al = t->from_unordered_set(key);
         if (!al.null()) {
             t->inc_keys_found();
             return al;
         }
         al = find(t, key);
         if (!al.null()) {
-            t->cache_leaf(al);
             t->inc_keys_found();
             return al;
         }
@@ -586,7 +585,7 @@ art::node_ptr art::find(const tree* t, value_type key) {
     ++statistics::get_ops;
     try {
 
-        node_ptr n = t->get_cached(key);
+        node_ptr n = t->from_unordered_set(key);
 
         n = t->root;
         unsigned depth = 0;
@@ -1006,8 +1005,7 @@ static art::node_ptr handle_leaf_replacement(
     art::value_type key,
     art::value_type value,
     int replace,
-    const NodeResult &fc,
-    bool use_cache = true
+    const NodeResult &fc
     ) {
     if (replace) {
         // call back indicates actual replacement
@@ -1019,22 +1017,17 @@ static art::node_ptr handle_leaf_replacement(
             dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
             options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
             t->last_leaf_added = n; // tje
-            if (use_cache)
-                t->cache_leaf(n); // TODO: dont need to do this if its been cached already
         }
         else
         {
             // create a new leaf to carry the new value
             ref = t->make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile());
             t->last_leaf_added = ref;
-            if (use_cache)
-                t->cache_leaf(ref);
             ++statistics::leaf_nodes_replaced;
             return n; // the old val (n) will be removed by caller
         }
     }else {
         t->last_leaf_added = n;
-        t->cache_leaf(n);
     }
     return nullptr;
 }
@@ -1170,8 +1163,7 @@ void art_insert
  , art::value_type key
  , art::value_type value
  , bool replace
- , const NodeResult &fc
- , bool use_cache) {
+ , const NodeResult &fc) {
     try {
         int old_val = 0;
         if (key.size + value.size > maximum_allocation_size) {
@@ -1179,22 +1171,8 @@ void art_insert
         }
         t->clear_trace();
 
-        art::node_ptr old;
-        if (use_cache)
-            old = t->get_cached(key);
-        if (!old.null()) {
-            old_val = 1;
-            art::node_ptr ref = old;
-            auto dl = ref.const_leaf();
-            if (is_leaf_direct_replacement(dl,value,options)) {
-                old = handle_leaf_replacement(t, options, old, ref, key, value, replace, fc, false);
-            }else {
-                old = nullptr;
-            }
-        }
-        if (old.null()) {
-            old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
-        }
+        art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
+
         if (!old_val) {
             t->size++;
             t->update_trace(+1);
@@ -1754,6 +1732,10 @@ art::hashed_key::hashed_key(const node_ptr& la) {
     thread_ap = (tree*)&la.logical.get_ap<alloc_pair>();
     addr = la.logical.address();
 }
+art::node_ptr art::hashed_key::node(const abstract_leaf_pair* p) const {
+    thread_ap = (tree*)p;
+    return logical_address{addr, (abstract_leaf_pair*)p};
+}
 art::hashed_key& art::hashed_key::operator=(const node_ptr& nl) {
     thread_ap = (tree*)&nl.logical.get_ap<alloc_pair>();
     addr = nl.logical.address();
@@ -1788,7 +1770,6 @@ art::value_type art::hashed_key::get_key() const {
 
 void art::tree::clear_hash() {
     h.clear();
-    jump_size = 0;
 }
 void art::tree::set_thread_ap() {
     thread_ap = this;
@@ -1797,11 +1778,11 @@ void art::tree::set_thread_ap() {
 void art::tree::remove_leaf(const logical_address& at)  {
     if (do_remove) {
         node_ptr l{at};
-        uncache_leaf(l.cl()->get_key());
+        remove_leaf_from_uset(l.cl()->get_key());
     }
 
 }
-bool art::tree::uncache_leaf(value_type key) {
+bool art::tree::remove_leaf_from_uset(value_type key) {
 
     auto i = h.find(key);
     if (i != h.end()) {
@@ -1815,15 +1796,10 @@ bool art::tree::uncache_leaf(value_type key) {
     return false;
 }
 
-void art::tree::cache_leaf(const node_ptr& leaf)  const{
-    if (!opt_ordered_keys)
-        h.insert(leaf); // wont overwrite on purpose
-}
-
-art::node_ptr art::tree::get_cached(value_type key) const {
+art::node_ptr art::tree::from_unordered_set(value_type key) const {
     auto i = h.find(key);
     if (i != h.end()) {
-        return logical_address{i->addr,thread_ap};
+        return i->node(this);
     }
     return nullptr;
 }
@@ -1944,7 +1920,6 @@ bool art::tree::load(bool) {
     try {
         storage_release release(latch);
         h.clear();
-        jump_size = 0;
         auto *t = this;
         logical_address root{nullptr};
         bool is_leaf = false;
@@ -2089,7 +2064,6 @@ void art::tree::clear() {
     get_leaves().clear();
     get_nodes().clear();
     h.clear();
-    jump_size = 0;
     statistics::n4_nodes = 0;
     statistics::n16_nodes = 0;
     statistics::n48_nodes = 0;
@@ -2200,23 +2174,34 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
 
 bool art::tree::jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
 
-    size_t sb = h.size();
-    node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
-    l.l()->set_hashed();
-    fc(l);
-    auto i = h.find_or_insert(l);
+    auto i = h.find(key);
     if (i != h.end()) {
         if (update) {
+            auto n = i->node(this);
+            leaf *dl = n.l();
+            if (is_leaf_direct_replacement(dl, value, options))
+            {
+                fc(n);
+                dl->set_value(value);
+                dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
+                options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
+                last_leaf_added = n;
+                this->repl_client.insert(options, key, value);
+                return false;
+            }
             node_ptr old = logical_address{i->addr,this};
-            *i = l;
             do_remove = false;
             old.free_from_storage();
             do_remove = true;
+            h.erase(i);
+        }else {
+            return false;
         }
-        return false; // size not changed
     }
-    jump_size += h.size()- sb;
-
+    node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
+    l.l()->set_hashed();
+    fc(l);
+    h.insert_unique(l);
     return true;
 }
 
@@ -2229,42 +2214,10 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     }
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
-    //if (false && opt_ordered_keys)
-    {
-        read_lock release(latch); // only read lock if there's a chance of update
-        node_ptr old = get_cached(key);
-        if (!old.null()) {
-            auto n = old;
-            leaf *dl = n.l();
-            if (is_leaf_direct_replacement(dl, value, options))
-            {
-                fc(n);
-                dl->set_value(value);
-                dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
-                options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
-                last_leaf_added = n;
-                this->repl_client.insert(options, key, value);
-                return false;
-            }
-        }
-    }
-
-
     storage_release release(latch);
     size_t before = size;
     if (opt_ordered_keys) {
-        if (jump_size > 0) {
-            auto i = h.find(key);
-            if (i != h.end()) {
-                if (!update) return false;
-                node_ptr old = logical_address{i->addr,this};
-                h.erase(i);
-                if (old.cl()->is_hashed()) {
-                    old.free_from_storage();
-                }
-            }
-        }
-        art_insert(this, options, key, value, update, fc,true);
+        art_insert(this, options, key, value, update, fc);
     }else {
         jumpsert(options, key, value, update, fc);
     }
@@ -2291,37 +2244,22 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
     };
     auto i = h.find(key);
     if (i != h.end()) {
-        node_ptr n;
+
         node_ptr old = logical_address{i->addr,this};
         bool hashed = old.cl()->is_hashed();
-        if (!opt_ordered_keys) {
-            n = repl_updateresult(old);
-            if (n == old) {
-                return false; // nothing to do
-            }
-            if (!hashed && !n.null()) {
-                art_delete(this, key);// remove old key completely
-                old = nullptr;
-            }
-            if (!n.null()) {
-                n.l()->set_hashed();
-                size_t sb = h.size();
-                h.erase(i);
-                if (hashed) {
-                    jump_size -= sb - h.size();
-                }
-                sb = h.size();
-                h.insert(n);
-                jump_size += h.size() - sb;
-            }
+        if (!hashed)
+            abort_with("no art caching allowed");
+        node_ptr n = repl_updateresult(old);
+        if (n == old) {
+            return false; // nothing to do
+        }
+        if (!n.null()) {
+            n.l()->set_hashed();
+            h.erase(i);
+            h.insert(n);
             old.free_from_storage();// ok if old is null - nothing will happen
-            return !n.null();
         }
-        if (hashed) {
-            old.free_from_storage(); // well mpve the new one to the tree
-        }
-
-        h.erase(i);
+        return !n.null();
     }
     if (!opt_ordered_keys) {
         return false;
@@ -2332,14 +2270,15 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
 bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
     //storage_release release(latch);
     size_t before = size;
+
     auto key = filter_key(unfiltered_key);
-    node_ptr old = get_cached(key);
+    node_ptr old = from_unordered_set(key);
     if (!old.null()) {
         auto n = old;
         leaf *dl = n.l();
         if (dl->is_hashed()) {
             fc(n);
-            jump_size -= h.erase(key);
+            h.erase(key);
             n.free_from_storage();
 
             this->repl_client.remove(key);
@@ -2356,6 +2295,11 @@ bool art::tree::remove(value_type key) {
 }
 art::node_ptr art::tree::search(value_type unfiltered_key) {
     value_type key = filter_key(unfiltered_key);
+    auto n = from_unordered_set(key);
+    if (!n.null()) {
+        return n;
+    }
+
     auto r = art_search(this, key);
     if (r.null()) {
         last_leaf_added = nullptr; // clear it before trying to retrieve

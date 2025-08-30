@@ -16,17 +16,19 @@
  * the ht itself
  */
 namespace oh {
-    template<typename K, typename H = std::hash<K>, typename EQ = std::equal_to<K>, int PROBES = 4>
+    template<typename K, typename H = std::hash<K>, typename EQ = std::equal_to<K>>
     struct unordered_set {
     private:
-
+        enum {
+            PROBES = 4
+        };
         using key_type = K;
         using hash_type = H;
         using key_compare = EQ;
         typedef heap::unordered_set<K, H> H2;
 
         struct data {
-            float max_leakage = 0.05f;
+            float max_leakage = 0.3f;
             float max_load_factor = 0.8f;
             float max_rehash_multiplier = 7; // a large multiplier is ok
             // because the hash itself is small relative to the data it indexes
@@ -263,6 +265,17 @@ namespace oh {
         bool insert(const key_type &k) {
             check(k);
             bool r = d_.insert(k);
+            if (d_.tolarge()) {
+                data to;
+                d_.rehash(to);
+                d_.swap(to);
+            }
+            check(k);
+            return r;
+        }
+        bool insert_unique(const key_type &k) {
+            check(k);
+            bool r = d_.insert_unique(k);
             if (d_.tolarge()) {
                 data to;
                 d_.rehash(to);

@@ -219,23 +219,23 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
 void art::tree::load_hash() {
     auto &lc = get_leaves();
     size_t encountered = 0;
-    for (size_t p = 0; p < lc.get_page_count();++p) {
-        auto page = lc.get_page_buffer(p);
-        page_iterator(page.first, page.second, [p,this,&encountered](const leaf *l, uint32_t pos) {
+
+    lc.iterate_pages([this,&encountered](size_t s, size_t page, auto& data) {
+        page_iterator(data, s, [page,this,&encountered](const leaf *l, uint32_t pos) {
             if (l->deleted()) return;
             if (l->is_hashed()) {
 
-                logical_address lad{p,pos,this};
+                logical_address lad{page,pos,this};
                 h.insert_unique(lad); // only possible because we know all keys are unique or should be at least
                 ++encountered;
             }
         });
+    });
 
-    }
     if (encountered != h.size()) {
         abort_with("hashed keys where not unique");
     }
-    std_log("loaded hash",lc.get_name(),h.size(),"encountered",encountered,"actual:",size, "sizeof(hashed_key)",sizeof(hashed_key));
+    std_log("loaded hash [",lc.get_name(),"] keys:",h.size(),", bytes per key:",sizeof(hashed_key));
 }
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those

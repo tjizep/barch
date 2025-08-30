@@ -1955,7 +1955,7 @@ bool art::tree::load(bool) {
         auto now = std::chrono::high_resolution_clock::now();
         const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
         const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        std_log("Done loading BARCH, keys loaded:", t->size, "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
+        std_log("Done loading BARCH, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
 
         std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
         std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");

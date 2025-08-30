@@ -409,7 +409,7 @@ private:
         main.free_page(page);
     }
 
-    bool has_page(size_t page) {
+    bool has_page(size_t page) const {
         return main.has_page(page);
     }
 
@@ -573,7 +573,7 @@ private:
     }
 
 
-    std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer_inner(size_t at) {
+    std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer_inner(size_t at) const {
         if (is_null_base(at)) return {};
         if (!has_page(at)) return {};
         auto &t = retrieve_page(at);
@@ -699,7 +699,7 @@ public:
     size_t get_page_count() const {
         return main.page_count();
     }
-    std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer(size_t at) {
+    std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer(size_t at) const {
         return get_page_buffer_inner(at);
     }
 
@@ -836,7 +836,19 @@ public:
 
         return 0;
     }
-
+    void iterate_pages(const std::function<void(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) const {
+        heap::buffer<uint8_t> pdata;
+        iterate_arena([&](size_t page, const size_t &) -> void {
+            if (is_null_base(page)) return;
+            size_t wp = 0;
+            if (!is_free(page)) {
+                wp = retrieve_page(page).write_position;
+                pdata = heap::buffer{get_page_data({page,0,this->ap}), wp};
+            }
+            auto pb = get_page_buffer(page);
+            found_page(pb.second, page, pb.first);
+        });
+    }
     void iterate_pages(std::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
         opt_iterate_workers = art::get_iteration_worker_count();
         std::vector<std::thread> workers{opt_iterate_workers};

@@ -1,4 +1,4 @@
-# Release v0.3.3.18b 2025-08-30
+# Release v0.3.3.19b 2025-09-01
 
 ## New Features
 
@@ -16,6 +16,7 @@
 12. add unordered only mode (unordered_keys config) (0.3.3.15b 2025-08-23)
 13. add overflow hash to reduce memory consumption (unordered_keys config) (0.3.3.16b 2025-08-24)
 14. buffer some statistics to improve concurrency (0.3.3.16b 2025-08-27)
+15. improve write throughput by 80% using lockfree queue (moodycamel) (v0.3.3.19b 2025-09-01)
 
 ## Fixes
 
@@ -33,7 +34,7 @@
 12. fix release date doc (0.3.3.16b 2025-08-27)
 13. fix hash size reporting (0.3.3.16b 2025-08-27)
 14. remove mixed hash art - it crashes - art and hash operates separately (0.3.3.17b 2025-08-29)
-15. fix loading issue  (0.3.3.18b 2025-08-30)
+15. fix loading issue (0.3.3.18b 2025-08-30)
 
 # Release v0.3.3.7b 2025-08-08
 

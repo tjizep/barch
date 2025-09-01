@@ -72,7 +72,7 @@ extern "C"{
             return cc.null();
         }
         auto t = get_art(args[1]);
-        storage_release release(t->latch);
+        storage_release release(t);
         composite li;
         auto container = conversion::convert(args[1]);
         auto key = t->query.create({container});
@@ -116,7 +116,7 @@ extern "C"{
         }
         auto count = conversion::to_int64(conversion::as_variable(args[2]));
         auto t = get_art(args[1]);
-        storage_release release(t->latch);
+        storage_release release(t);
         composite li;
         auto container = conversion::convert(args[1]);
         auto key = t->query.create({container});
@@ -159,7 +159,7 @@ extern "C"{
             return cc.null();
         }
         auto t = get_art(args[1]);
-        storage_release release(t->latch);
+        storage_release release(t);
         auto container = conversion::convert(args[1]);
         auto key = t->query.create({container});
         auto value = t->search(key);
@@ -182,7 +182,7 @@ extern "C"{
             return cc.null();
         }
         auto t = get_art(args[1]);
-        storage_release release(t->latch);
+        storage_release release(t);
         auto container = conversion::convert(args[1]);
         auto key = t->query.create({container});
         auto value = t->search(key);
@@ -209,7 +209,7 @@ extern "C"{
             return cc.null();
         }
         auto t = get_art(args[1]);
-        storage_release release(t->latch);
+        storage_release release(t);
         auto container = conversion::convert(args[1]);
         auto key = t->query.create({container});
         auto value = t->search(key);

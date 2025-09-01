@@ -24,7 +24,7 @@ int HSET(caller& cc, const arg_t& args) {
         return cc.null();
     }
     auto t = get_art(args[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto container = conversion::convert(args[1]);
     t->query.create({container});
     for (size_t n = 2; n < args.size(); n += 2) {
@@ -71,7 +71,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
         return call.null();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
 
     t->query.create({conversion::convert(n)});
     if (replies)
@@ -389,7 +389,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
         return call.null();
     }
     auto t = get_art(n);
-    storage_release release(t->latch);
+    storage_release release(t);
 
     art::value_type any_key = t->query.create({conversion::convert(n)});
     art::node_ptr lb = lower_bound(t, any_key);
@@ -485,7 +485,7 @@ int HLEN(caller& call, const arg_t& argv) {
         return call.null();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     t->query.create({conversion::convert(n, nlen), art::ts_end});
     auto search_end = t->query.end();
     auto search_start = t->query.prefix(2);
@@ -533,7 +533,7 @@ int HGETALL(caller& call, const arg_t& argv) {
         return call.null();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::value_type search_start = t->query.create({conversion::convert(n)},false);
 
     art::value_type table_key = search_start;
@@ -576,7 +576,7 @@ int HKEYS(caller& call, const arg_t& argv) {
         return call.null();
     };
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::value_type search_end = t->query.create({conversion::convert(n), art::ts_end});
     art::value_type search_start = t->query.prefix(2);
     art::value_type table_key = search_start;

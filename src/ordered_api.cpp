@@ -93,7 +93,7 @@ static void insert_ordered(composite &score_key, composite &member_key, art::val
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    //storage_release release(t->latch); // the shard should be latched
+    //storage_release release(t); // the shard should be latched
     t->insert(sk, value, update);
     t->insert(mk, sk, update);
 }
@@ -110,7 +110,7 @@ static void remove_ordered(composite &score_key, composite &member_key) {
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    //storage_release release(t->latch); // the shard should be latched
+    //storage_release release(t); // the shard should be latched
     t->remove(sk);
     t->remove(mk);
 }
@@ -141,7 +141,7 @@ int ZADD(caller& call, const arg_t &argv) {
     }
 
     auto t = get_art(key);
-    storage_release release(t->latch);
+    storage_release release(t);
 
     zspec.LFI = true;
     int64_t updated = 0;
@@ -223,7 +223,7 @@ int ZREM(caller& call, const arg_t& argv) {
         return call.null();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto container = conversion::convert(key);
     query q1, qmember;
     q1->create({container});
@@ -272,7 +272,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
         return call.null();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto fcfk = [&](const art::node_ptr& ) -> void {
         ++updated;
     };
@@ -351,7 +351,7 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     if (argc < 4)
         return ValkeyModule_WrongArity(ctx);
     auto t = get_art(argv);
-    storage_release release(t->latch);
+    storage_release release(t);
     size_t nlen, minlen, maxlen;
     const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
     const char *smin = ValkeyModule_StringPtrLen(argv[2], &minlen);
@@ -513,7 +513,7 @@ int ZRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
@@ -531,7 +531,7 @@ int ZCARD(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto n = argv[1];
 
     if (key_ok(n) != 0) {
@@ -619,7 +619,7 @@ static int ZOPER(
     }
     if (fk != spec.keys.end()) {
         auto t = get_art_s(*fk);
-        storage_release release(t->latch);
+        storage_release release(t);
 
         query lq, uq;
         auto container = conversion::convert(*fk);
@@ -806,7 +806,7 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     long long count = 1;
     long long replies = 0;
     auto k = argv[1];
@@ -853,7 +853,7 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     long long count = 1;
     long long replies = 0;
     auto k = argv[1];
@@ -912,7 +912,7 @@ int ZREVRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
@@ -932,7 +932,7 @@ int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
@@ -952,7 +952,7 @@ int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
@@ -970,7 +970,7 @@ int ZREMRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
@@ -990,7 +990,7 @@ int ZRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
@@ -1009,7 +1009,7 @@ int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
@@ -1029,7 +1029,7 @@ int ZRANK(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto c = argv[1];
     if (c.empty()) {
         return call.wrong_arity();
@@ -1071,7 +1071,7 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     }
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto c = argv[1];
     if (c.empty()) {
         return call.wrong_arity();

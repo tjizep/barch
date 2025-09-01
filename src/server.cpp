@@ -383,6 +383,7 @@ namespace barch {
         }
 
         void stop() {
+            stop_hash_server();
             try {
                 acc.close();
             }catch (std::exception& ) {}
@@ -837,7 +838,7 @@ namespace barch {
                             buffer.resize(buffers_size);
                             readp(stream, buffer.data(), buffers_size);
                             auto t = get_art(shard);
-                            storage_release release(t->latch);
+                            storage_release release(t);
                             process_art_fun_cmd(t, stream, buffer);
                             //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                         }catch (std::exception& e) {
@@ -859,6 +860,7 @@ namespace barch {
         :   acc(io, tcp::endpoint(tcp::v4(), port))
         ,   interface(interface)
         ,   port(port){
+            start_hash_server() ;
             start_accept();
             io_resp.resize(resp_pool.size());
             for (size_t i = 0; i < io_resp.size(); ++i) {
@@ -1244,7 +1246,7 @@ namespace barch {
                         continue;
                     }
                     auto t = get_art(this->shard);
-                    //storage_release release(t->latch); // the latch should be called outside
+                    //storage_release release(t); // the latch should be called outside
                     t->last_leaf_added = nullptr;
                     auto r = process_art_fun_cmd(t, stream, rbuff);
                     if (r.add_applied > 0) {

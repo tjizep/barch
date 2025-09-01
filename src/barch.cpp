@@ -7,6 +7,7 @@
 #include "redis_parser.h"
 #include "vk_caller.h"
 #include "keys.h"
+#include "thread_pool.h"
 /* cdict --
  *
  * This module implements a volatile key-value store on top of the
@@ -35,7 +36,144 @@ extern "C" {
 #include "keys.h"
 #include "ordered_api.h"
 #include "caller.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Weffc++"
+#include <moodycamel/concurrentqueue.h>
+#pragma GCC diagnostic pop
+class hash_server {
+    struct instruction {
+        instruction() = default;
+        instruction(const instruction&) = default;
+        instruction(instruction&&) = default;
+        instruction& operator=(const instruction&) = default;
+        heap::small_vector<uint8_t, 32> key{};
+        heap::small_vector<uint8_t, 32> value{};
+        art::tree*  t{};
+        void set_key(art::value_type k) {
+            key.append(k.to_view());
+        }
+        void set_value(art::value_type v) {
+            value.append(v.to_view());
+        }
+        [[nodiscard]] art::value_type get_key() const {
+            return {key.data(), key.size()};
+        }
+        [[nodiscard]] art::value_type get_value() const {
+            return {value.data(), value.size()};
+        }
 
+    };
+    public:
+    hash_server() {
+
+    }
+    ~hash_server() {
+        stop();
+    }
+    thread_pool threads{art::get_shard_count().size()};
+    typedef moodycamel::ConcurrentQueue<instruction> queue_type;
+    heap::vector<std::shared_ptr<queue_type>> queues{threads.size()};
+    bool started = false;
+    void start() {
+        started = true;
+        for (auto& q : queues) {
+            q = std::make_shared<queue_type>(1000);
+        }
+        threads.start([this](size_t id) {
+            auto q = queues[id];
+            while (started) {
+                instruction ins;
+                if (q->try_dequeue(ins)) {
+
+                    write_lock release(ins.t->latch);
+                    --ins.t->queue_size;
+                    ins.t->opt_insert({}, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+                }else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+            }
+        });
+    }
+    void stop() {
+
+        started = false;
+        threads.stop();
+        consume();
+
+
+    }
+    void queue_insert(art::tree* t,art::value_type k, art::value_type v) {
+        size_t at = t->shard % threads.size();
+        instruction ins;
+        ins.set_key(k);
+        ins.set_value(v);
+        ins.t = t;
+        ++t->queue_size;
+        queues[at]->enqueue(ins);
+    }
+    void consume() {
+        for (auto& q : queues) {
+            instruction ins;
+            while (q->try_dequeue(ins)) {
+                write_lock release(ins.t->latch);
+                --ins.t->queue_size;
+                ins.t->opt_insert({}, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+            }
+        }
+    }
+    void consume(art::tree* t) {
+        auto q = t->shard % threads.size();
+        instruction ins;
+        while (queues[q]->try_dequeue(ins)) {
+
+            --ins.t->queue_size;
+            write_lock release(t->latch);
+            ins.t->opt_insert({}, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+        }
+
+    }
+};
+static size_t save() {
+    std::vector<std::thread> saviors{art::get_shard_count().size()};
+    size_t shard = 0;
+    std::atomic<size_t> errors = 0;
+    for (auto& t: saviors) {
+        t = std::thread([&errors,shard]() {
+            if (!get_art(shard)->save(true)) {
+                art::std_err("could not save",shard);
+                ++errors;
+            }
+        });
+        ++shard;
+    }
+    save_auth();
+    for (auto& t: saviors) {
+        if (t.joinable())
+            t.join();
+    }
+    return errors;
+}
+std::shared_ptr<hash_server> server;
+void hash_consume(art::tree* t) {
+    if (server)
+        server->consume(t);
+}
+void hash_consume_all() {
+    if (server)
+        server->consume();
+}
+void start_hash_server() {
+    if (!server) {
+        server = std::make_shared<hash_server>();
+        server->start();
+    }
+}
+void stop_hash_server() {
+    if (server) {
+        server->stop();
+    }
+    server = nullptr;
+}
 static auto startTime = std::chrono::high_resolution_clock::now();
 template<typename IntT>
 static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
@@ -43,7 +181,7 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     if (argv.size() < 2)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto k = argv[1];
     art::key_spec spec;
     if (key_ok(k) != 0)
@@ -244,6 +382,7 @@ int SET(caller& call,const arg_t& argv) {
 
     auto t = get_art(argv[1]);
     auto converted = conversion::convert(k);
+    auto key = converted.get_value();
     art::key_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
@@ -252,10 +391,18 @@ int SET(caller& call,const arg_t& argv) {
     art::value_type reply{"", 0};
     auto fc = [&](const art::node_ptr &) -> void {
         if (spec.get) {
-            reply = converted.get_value();
+            reply = key;
         }
     };
-    t->opt_insert(spec, converted.get_value(), v, true, fc);
+    //
+    if (call.get_context() == ctx_resp && server && t->queue_size < max_process_queue_size) {
+        server->queue_insert(t, key, v);
+    }else {
+        storage_release l(t);
+        t->opt_insert(spec, key, v, true, fc);
+    }
+
+
 
     if (spec.get) {
         if (reply.size) {
@@ -281,7 +428,7 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
     if (argv.size() < 2)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto k = argv[1];
     art::key_spec spec;
     if (key_ok(k) != 0)
@@ -349,7 +496,7 @@ int APPEND(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto k = argv[1];
     auto v = argv[2];
     art::key_spec spec;
@@ -392,7 +539,7 @@ int PREPEND(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     auto k = argv[1];
     auto v = argv[2];
     art::key_spec spec;
@@ -515,7 +662,7 @@ int MSET(caller& call, const arg_t& argv) {
         auto fc = [&](art::node_ptr) -> void {
         };
         auto t = get_art(k);
-        storage_release release(t->latch);
+        storage_release release(t);
         art_insert(t, spec, converted.get_value(), v, fc);
 
         ++responses;
@@ -543,7 +690,7 @@ int ADD(caller& call, const arg_t& argv) {
     };
     auto converted = conversion::convert(k);
     art::key_spec spec(argv);
-    storage_release release(t->latch);
+    storage_release release(t);
     t->insert(spec, converted.get_value(), v, false, fc);
 
     return call.simple("OK");
@@ -705,7 +852,7 @@ int MGET(caller& call, const arg_t& argv) {
         } else {
             auto converted = conversion::convert(k);
             auto t = get_art(k);
-            storage_release release(t->latch);
+            storage_release release(t);
             art::node_ptr r = art_search(t, converted.get_value());
             if (r.null()) {
                 call.null();
@@ -921,7 +1068,7 @@ int REM(caller& call, const arg_t& argv) {
     };
 
     auto t = get_art(argv[1]);
-    storage_release release(t->latch);
+    storage_release release(t);
     t->remove(converted.get_value(), fc);
 
     return r;
@@ -940,7 +1087,7 @@ int SIZE(caller& call, const arg_t& argv) {
     auto size = 0ll;
     for (auto shard: art::get_shard_count()) {
         auto t = get_art(shard);
-        storage_release release(t->latch);
+        storage_release release(t);
         size += (int64_t) art_size(t);
     }
     return call.long_long(size);
@@ -956,24 +1103,7 @@ int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int SAVE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    std::vector<std::thread> saviors{art::get_shard_count().size()};
-    size_t shard = 0;
-    std::atomic<size_t> errors = 0;
-    for (auto& t: saviors) {
-        t = std::thread([&errors,shard]() {
-            if (!get_art(shard)->save(true)) {
-                art::std_err("could not save",shard);
-                ++errors;
-            }
-        });
-        ++shard;
-    }
-    save_auth();
-    for (auto& t: saviors) {
-        if (t.joinable())
-            t.join();
-    }
-
+    size_t errors = save();
     return errors ? call.error("some shards not saved"): call.simple("OK");
 }
 
@@ -1152,7 +1282,7 @@ int STATS(caller& call, const arg_t& argv) {
     art_statistics as = art::get_statistics();
     auto vbytes = 0ll;
     for (auto shard : art::get_shard_count()) {
-        storage_release release(get_art(shard)->latch);
+        storage_release release(get_art(shard));
         vbytes += get_art(shard)->get_nodes().get_bytes_allocated() + get_art(shard)->get_leaves().get_bytes_allocated();
     }
     call.start_array();
@@ -1237,7 +1367,7 @@ int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
         return ValkeyModule_WrongArity(ctx);;
     auto vbytes = 0ll;
     for (auto shard : art::get_shard_count()) {
-        storage_release release(get_art(shard)->latch);
+        storage_release release(get_art(shard));
         vbytes += get_art(shard)->get_nodes().get_bytes_allocated() + get_art(shard)->get_leaves().get_bytes_allocated();
     }
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) heap::allocated + vbytes);
@@ -1250,7 +1380,7 @@ int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     int64_t ev = 0;
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
-        storage_release release(t->latch);
+        storage_release release(t);
         ev += art_evict_lru(t);
     }
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)ev );

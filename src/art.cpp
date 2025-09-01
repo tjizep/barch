@@ -1842,7 +1842,7 @@ bool art::tree::save(bool stats) {
     //arena::hash_arena leaves{get_leaves().get_name()};
     //arena::hash_arena nodes{get_nodes().get_name()};
     {
-        storage_release release(latch); // only lock during partial copy
+        storage_release release(this); // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
@@ -1888,7 +1888,7 @@ bool art::tree::send(std::ostream& out) {
     arena::hash_arena leaves{get_leaves().get_name()};
     arena::hash_arena nodes{get_nodes().get_name()};
     {
-        storage_release release(latch); // only lock during partial copy
+        storage_release release(this); // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
@@ -1918,7 +1918,7 @@ bool art::tree::load(bool) {
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
-        storage_release release(latch);
+        storage_release release(this);
         h.clear();
         auto *t = this;
         logical_address root{nullptr};
@@ -1970,7 +1970,7 @@ bool art::tree::retrieve(std::istream& in) {
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
-        storage_release release(latch);
+        storage_release release(this);
         auto *t = this;
         logical_address root{nullptr};
         bool is_leaf = false;
@@ -2027,7 +2027,7 @@ void art::tree::begin() {
     save_stats.clear();
     stats_to_stream(save_stats);
     {
-       storage_release release(latch);
+       storage_release release(this);
         get_leaves().begin();
         get_nodes().begin();
 
@@ -2037,7 +2037,7 @@ void art::tree::begin() {
 
 void art::tree::commit() {
     if (!transacted) return;
-    storage_release release(latch);
+    storage_release release(this);
     get_leaves().commit();
     get_nodes().commit();
     transacted = false;
@@ -2045,7 +2045,7 @@ void art::tree::commit() {
 
 void art::tree::rollback() {
     if (!transacted) return;
-    storage_release release(latch);
+    storage_release release(this);
     get_leaves().rollback();
     get_nodes().rollback();
     root = save_root;
@@ -2057,7 +2057,7 @@ void art::tree::rollback() {
 
 void art::tree::clear() {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    storage_release release(latch);
+    storage_release release(this);
     root = {nullptr};
     size = 0;
     transacted = false;
@@ -2214,7 +2214,6 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     }
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
-    storage_release release(latch);
     size_t before = size;
     if (opt_ordered_keys) {
         art_insert(this, options, key, value, update, fc);
@@ -2268,7 +2267,7 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
     return art::update(this, key, repl_updateresult);
 }
 bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
-    //storage_release release(latch);
+    //storage_release release(this);
     size_t before = size;
 
     auto key = filter_key(unfiltered_key);

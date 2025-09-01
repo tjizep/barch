@@ -19,7 +19,7 @@ extern std::shared_mutex &get_lock();
 /**
  * context management
  */
-typedef std::unique_lock<std::shared_mutex> storage_release;
+//typedef std::unique_lock<std::shared_mutex> storage_release;
 typedef std::shared_lock<std::shared_mutex> read_release;
 
 /**
@@ -221,7 +221,7 @@ namespace art {
         bool opt_use_trace = true;
         node_ptr last_leaf_added{};
         barch::repl::client repl_client{};
-
+        std::atomic<size_t> queue_size{};
         bool opt_ordered_keys{true};
         void clear_trace() {
             if (opt_use_trace)
@@ -566,8 +566,23 @@ namespace art {
 
     int64_t fast_distance(const trace_list &a, const trace_list &b);
 }
-
-
+extern void hash_consume(art::tree*) ;
+//extern void hash_consume_all() ;
+extern void start_hash_server() ;
+extern void stop_hash_server() ;
+struct storage_release {
+    art::tree * t{};
+    storage_release() = default;
+    storage_release(const storage_release&) = default;
+    storage_release& operator=(const storage_release&) = default;
+    storage_release(art::tree* t) : t(t) {
+        hash_consume(t);
+        t->latch.lock();
+    }
+    ~storage_release() {
+        t->latch.unlock();
+    }
+};
 /**
 * evict a lru page
 */

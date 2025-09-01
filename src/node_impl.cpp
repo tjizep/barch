@@ -325,13 +325,13 @@ void abstract_eviction(art::tree *t,
 
 void abstract_lru_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
-    storage_release release(t->latch);
+    storage_release release(t);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 void abstract_random_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
-    storage_release release(t->latch);
+    storage_release release(t);
     auto &lc = t->get_leaves();
     auto page_count = lc.get_page_count();
 
@@ -343,7 +343,7 @@ void abstract_random_eviction(art::tree *t, const std::function<bool(const art::
 }
 void abstract_iter_eviction(art::tree *t, size_t ctr, const std::function<bool(const art::leaf *l)> &predicate) {
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
-    storage_release release(t->latch);
+    storage_release release(t);
     auto &lc = t->get_leaves();
     auto page_count = lc.get_page_count();
 

@@ -88,6 +88,7 @@ class hash_server {
 
                     write_lock release(ins.t->latch);
                     --ins.t->queue_size;
+                    // TODO: the infernal thread_ap should be set before using any t functions
                     ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
                 }else {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -127,8 +128,9 @@ class hash_server {
         auto q = t->shard % threads.size();
         instruction ins;
         while (queues[q]->try_dequeue(ins)) {
-            --ins.t->queue_size;
+
             write_lock release(ins.t->latch);
+            --ins.t->queue_size;
             ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
         }
 

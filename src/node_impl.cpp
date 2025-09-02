@@ -275,6 +275,7 @@ void art::tree::run_defrag() {
                         if (c1 - 1 != this->size) {
                             abort_with("key does not exist anymore");
                         }
+                        --statistics::delete_ops; // were not counting these deletes
                     }
 
                 });
@@ -294,6 +295,9 @@ void art::tree::run_defrag() {
                     if (c1 + 1 != this->size) {
                         abort_with("key not added");
                     }
+                    --statistics::insert_ops;
+                    --statistics::new_keys_added;
+
                 });
                 ++statistics::pages_defragged;
             }
@@ -318,6 +322,7 @@ void abstract_eviction(art::tree *t,
         if (!l->deleted() && predicate(l)) {
             ++statistics::keys_evicted;
             art_delete(t, l->get_key(), fc); // will get cleaned up by defrag
+            --statistics::delete_ops; // not counting these deletes
         }
     });
 
@@ -335,11 +340,9 @@ void abstract_random_eviction(art::tree *t, const std::function<bool(const art::
     auto &lc = t->get_leaves();
     auto page_count = lc.max_page_num();
 
-    if (page_count > 10) {
-        std::uniform_int_distribution<size_t> dist(0, page_count - 1);
-        size_t random_page = dist(gen);
-        abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
-    }
+    std::uniform_int_distribution<size_t> dist(0, page_count - 1);
+    size_t random_page = dist(gen);
+    abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
 }
 void abstract_iter_eviction(art::tree *t, size_t ctr, const std::function<bool(const art::leaf *l)> &predicate) {
     if (statistics::logical_allocated < art::get_max_module_memory()) return;

@@ -422,11 +422,11 @@ void art::tree::start_maintain() {
             if (millis(start_save_time) > get_save_interval()
                 || get_modifications() - mods > get_max_modifications_before_save()
             ) {
-                if (get_modifications() - mods > 0) {
+                //if (get_modifications() - mods > 0) {
                     this->save(with_stats);
                     start_save_time = std::chrono::high_resolution_clock::now();
                     mods = get_modifications();
-                }
+                //}
             }
             ++statistics::maintenance_cycles;
             //std::uniform_int_distribution<size_t> dist(1, art::get_maintenance_poll_delay());

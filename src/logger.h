@@ -10,6 +10,7 @@
 #include <chrono>
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Weffc++"
+#include <bits/this_thread_sleep.h>
 #include <fmt/core.h>
 #include <fmt/chrono.h>
 #include <fmt/format.h>
@@ -64,6 +65,7 @@ namespace art {
         braces.back() = '\0';
 
         raw_write_to_log(true, std::string_view{braces.data()}, fmt::make_format_args(args...));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         abort();
     }
 

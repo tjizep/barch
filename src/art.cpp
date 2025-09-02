@@ -2110,7 +2110,7 @@ void art::tree::update_trace(int direction) {
     // although it has a performance penalty
     if (!trace.empty()) {
         if (trace[0].parent != root) {
-            std_log("trace root invalid");
+            std_log("trace root invalid for",nodes.get_name());
             abort_with("invalid trace root");
         }
         auto trd = trace[0].parent->data().descendants;

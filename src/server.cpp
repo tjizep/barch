@@ -1137,7 +1137,7 @@ namespace barch {
                 bool r = buffer.size() < art::get_rpc_max_buffer();
                 if (!r) {
                     latch.unlock();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     latch.lock();
                 }
                 r = buffer.size() < art::get_rpc_max_buffer();

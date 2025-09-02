@@ -127,9 +127,8 @@ class hash_server {
         auto q = t->shard % threads.size();
         instruction ins;
         while (queues[q]->try_dequeue(ins)) {
-
             --ins.t->queue_size;
-            write_lock release(t->latch);
+            write_lock release(ins.t->latch);
             ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
         }
 

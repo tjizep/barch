@@ -1777,8 +1777,8 @@ void art::tree::set_thread_ap() {
 
 void art::tree::remove_leaf(const logical_address& at)  {
     if (do_remove) {
-        node_ptr l{at};
-        remove_leaf_from_uset(l.cl()->get_key());
+        //node_ptr l{at};
+        //remove_leaf_from_uset(l.cl()->get_key());
     }
 
 }
@@ -2190,10 +2190,8 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
                 return false;
             }
             node_ptr old = logical_address{i->addr,this};
-            do_remove = false;
-            old.free_from_storage();
-            do_remove = true;
             h.erase(i);
+            old.free_from_storage();
         }else {
             return false;
         }
@@ -2206,7 +2204,7 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
 }
 
 bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-
+    thread_ap = this;
     if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;

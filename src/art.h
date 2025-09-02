@@ -587,8 +587,9 @@ struct read_lock {
     read_lock() = default;
     read_lock(const read_lock&) = default;
     read_lock& operator=(const read_lock&) = default;
-    read_lock(art::tree* t) : t(t) {
-        hash_consume(t);
+    read_lock(art::tree* t, bool consume = true) : t(t) {
+        if (consume)
+            hash_consume(t);
         t->latch.lock_shared();
     }
     ~read_lock() {

@@ -202,7 +202,13 @@ namespace arena {
         [[nodiscard]] size_t page_count_no_source() const {
             return hidden_arena.size();
         }
-
+        [[nodiscard]] size_t max_page_num() const {
+            size_t pmax = 0;
+            for (auto &[at,str]: hidden_arena) {
+                pmax = std::max(pmax, at);
+            }
+            return pmax;
+        }
         [[nodiscard]] size_t page_count() const {
             return page_count_no_source();
         }
@@ -557,6 +563,9 @@ namespace arena {
         // arena virtualization functions
         [[nodiscard]] size_t page_count() const {
             return main.page_count();
+        }
+        [[nodiscard]] size_t max_page_num() const {
+            return main.max_page_num();
         }
 
         [[nodiscard]] size_t max_logical_address() const {

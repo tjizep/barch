@@ -333,7 +333,7 @@ void abstract_random_eviction(art::tree *t, const std::function<bool(const art::
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
     storage_release release(t);
     auto &lc = t->get_leaves();
-    auto page_count = lc.get_page_count();
+    auto page_count = lc.max_page_num();
 
     if (page_count > 10) {
         std::uniform_int_distribution<size_t> dist(0, page_count - 1);

@@ -528,11 +528,11 @@ private:
         }
         if (test_memory == 1) {
             if (!allocated) {
-                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
-                abort_with("use after free");
+                art::std_err("failure for",main.name,at.address(), at.page(), at.offset());
+                abort_with("use after free - no data allocated ");
             }
             if (erased.contains(at.address())) {
-                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                art::std_err("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("use after free");
             }
         }
@@ -699,6 +699,11 @@ public:
     size_t get_page_count() const {
         return main.page_count();
     }
+
+    size_t max_page_num() const {
+        return main.max_page_num();
+    }
+
     std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer(size_t at) const {
         return get_page_buffer_inner(at);
     }

@@ -49,6 +49,7 @@ class hash_server {
         heap::small_vector<uint8_t, 32> key{};
         heap::small_vector<uint8_t, 32> value{};
         art::tree*  t{};
+        art::key_options options;
         void set_key(art::value_type k) {
             key.append(k.to_view());
         }
@@ -87,7 +88,7 @@ class hash_server {
 
                     write_lock release(ins.t->latch);
                     --ins.t->queue_size;
-                    ins.t->opt_insert({}, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+                    ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
                 }else {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
@@ -102,11 +103,12 @@ class hash_server {
 
 
     }
-    void queue_insert(art::tree* t,art::value_type k, art::value_type v) {
+    void queue_insert(art::tree* t,art::key_options options,art::value_type k, art::value_type v) {
         size_t at = t->shard % threads.size();
         instruction ins;
         ins.set_key(k);
         ins.set_value(v);
+        ins.options = options;
         ins.t = t;
         ++t->queue_size;
         queues[at]->enqueue(ins);
@@ -117,7 +119,7 @@ class hash_server {
             while (q->try_dequeue(ins)) {
                 write_lock release(ins.t->latch);
                 --ins.t->queue_size;
-                ins.t->opt_insert({}, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+                ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
             }
         }
     }
@@ -128,7 +130,7 @@ class hash_server {
 
             --ins.t->queue_size;
             write_lock release(t->latch);
-            ins.t->opt_insert({}, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+            ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
         }
 
     }
@@ -239,6 +241,7 @@ int RANGE(caller& call, const arg_t& argv) {
     heap::std_vector<art::value_type> sorted{};
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
+        hash_consume(t);
         t->latch.lock_shared();
     }
     try {
@@ -297,7 +300,7 @@ int COUNT(caller& call, const arg_t& argv) {
     auto c2 = conversion::convert(k2);
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
-        read_lock release(t->latch);
+        read_lock release(t);
 
         art::iterator i(t,c1.get_value());
         art::iterator j(t,c2.get_value());
@@ -395,8 +398,8 @@ int SET(caller& call,const arg_t& argv) {
         }
     };
     //
-    if (call.get_context() == ctx_resp && server && t->queue_size < max_process_queue_size) {
-        server->queue_insert(t, key, v);
+    if (!spec.get && server && t->queue_size < max_process_queue_size) {
+        server->queue_insert(t, spec, key, v);
     }else {
         storage_release l(t);
         t->opt_insert(spec, key, v, true, fc);
@@ -711,7 +714,7 @@ int GET(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto t = get_art(argv[1]);
-    read_lock release(t->latch);
+    read_lock release(t);
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
 
@@ -735,7 +738,7 @@ int TTL(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto t = get_art(argv[1]);
-    read_lock release(t->latch);
+    read_lock release(t);
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
     if (r.null()) {
@@ -763,7 +766,7 @@ int EXISTS(caller& call, const arg_t& argv) {
             return call.key_check_error(k);
 
         auto t = get_art(argv[i]);
-        read_lock release(t->latch);
+        read_lock release(t);
         auto converted = conversion::convert(k);
         art::node_ptr r = t->search(converted.get_value());
         if (r.null()) {
@@ -785,7 +788,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto t = get_art(argv[1]);
-    read_lock release(t->latch);
+    read_lock release(t);
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
     if (r.null()) {
@@ -880,6 +883,7 @@ int MIN(caller& call, const arg_t& argv) {
     art::value_type the_min;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
+        hash_consume(t);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {
@@ -922,6 +926,7 @@ int MAX(caller& call, const arg_t& ) {
     art::value_type the_max;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
+        hash_consume(t);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {
@@ -969,6 +974,7 @@ int LB(caller& call, const arg_t& argv) {
     art::value_type the_lb;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
+        hash_consume(t);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {
@@ -1010,6 +1016,7 @@ int UB(caller& call, const arg_t& argv) {
     art::value_type the_lb;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
+        hash_consume(t);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {

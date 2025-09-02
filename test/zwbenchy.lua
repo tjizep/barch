@@ -45,7 +45,7 @@ local tocharsnum = function(num)
 end
 
 local test = function()
-    --result[inc()] ={'CLEAR B', vk.call('B.CLEAR')}
+    result[inc()] ={'CLEAR B', vk.call('B.CLEAR')}
 
     tests = tests + 1
     local t

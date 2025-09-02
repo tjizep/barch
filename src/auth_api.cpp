@@ -100,7 +100,7 @@ extern "C"
             call.set_acl("default", get_all_acl());
             return call.simple("OK");
         }
-        read_lock read(a->latch);
+        read_lock read(a);
         catmap cats;
         std::string key = user_cats(user.to_string());
         art::iterator cat_data(a,key);
@@ -136,7 +136,7 @@ extern "C"
         }
         auto a = get_auth();
         if (spec.get) {
-            read_lock read(a->latch);
+            read_lock read(a);
             std::string key = user_cats(spec.user);
             call.start_array();
             art::iterator cat_data(a,key);

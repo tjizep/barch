@@ -13,7 +13,6 @@
 #include "overflow_hash.h"
 
 typedef std::unique_lock<std::shared_mutex> write_lock;
-typedef std::shared_lock<std::shared_mutex> read_lock; // C++ 14
 extern std::shared_mutex &get_lock();
 
 /**
@@ -581,6 +580,19 @@ struct storage_release {
     }
     ~storage_release() {
         t->latch.unlock();
+    }
+};
+struct read_lock {
+    art::tree * t{};
+    read_lock() = default;
+    read_lock(const read_lock&) = default;
+    read_lock& operator=(const read_lock&) = default;
+    read_lock(art::tree* t) : t(t) {
+        hash_consume(t);
+        t->latch.lock_shared();
+    }
+    ~read_lock() {
+        t->latch.unlock_shared();
     }
 };
 /**

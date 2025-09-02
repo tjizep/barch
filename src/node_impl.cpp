@@ -271,7 +271,7 @@ void art::tree::run_defrag() {
                         h.erase(lad);
                         free_node(lad);
                     }else {
-                        this->remove(l->get_key(), fc);
+                        art_delete(this, l->get_key(), fc);
                         if (c1 - 1 != this->size) {
                             abort_with("key does not exist anymore");
                         }

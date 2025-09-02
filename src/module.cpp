@@ -16,25 +16,28 @@ std::shared_mutex &get_lock() {
 
 art::tree *get_art(size_t s) {
     if (shards.empty()) {
-        shards.resize(art::get_shard_count().size());
-        std::vector<std::thread> loaders{shards.size()};
-        size_t shard_num = 0;
-        auto start_time = std::chrono::high_resolution_clock::now();
-        for (auto &shard : shards) {
-            loaders[shard_num] = std::thread([shard_num, &shard]() {
-                shard = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0, shard_num);
-                shard->load();
-            });
-            ++shard_num;
+        write_lock w(get_lock());
+        if (shards.empty()) {
+            shards.resize(art::get_shard_count().size());
+            std::vector<std::thread> loaders{shards.size()};
+            size_t shard_num = 0;
+            auto start_time = std::chrono::high_resolution_clock::now();
+            for (auto &shard : shards) {
+                loaders[shard_num] = std::thread([shard_num, &shard]() {
+                    shard = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0, shard_num);
+                    shard->load();
+                });
+                ++shard_num;
+            }
+            for (auto &loader : loaders) {
+                if (loader.joinable())
+                    loader.join();
+            }
+            statistics::shards = shards.size();
+            auto end_time = std::chrono::high_resolution_clock::now();
+            double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+            art::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
         }
-        for (auto &loader : loaders) {
-            if (loader.joinable())
-                loader.join();
-        }
-        statistics::shards = shards.size();
-        auto end_time = std::chrono::high_resolution_clock::now();
-        double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-        art::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
     }
     if (shards.empty()) {
         abort_with("shard configuration is empty");

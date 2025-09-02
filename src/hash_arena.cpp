@@ -2,6 +2,9 @@
 // Created by linuxlite on 3/27/25.
 //
 #include "hash_arena.h"
+
+#include <filesystem>
+
 #include "art.h"
 #include "server.h"
 #include "module.h"
@@ -91,7 +94,7 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
 
 bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::function<void(std::istream &)> &extra,
                                         const std::string &filename) {
-    art::log("reading from " + filename);
+    art::std_log("reading from",std::filesystem::current_path().c_str(),filename);
     std::ifstream in{filename, std::ios::in | std::ios::binary};
     if (!in.is_open()) {
         art::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
@@ -101,7 +104,7 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
     //uint64_t eof = in.tellg();
     in.seekg(0, std::ios::beg);
     arena_retrieve(arena, in, extra);
-    art::log("complete reading from " + filename);
+    art::std_log("complete reading from",std::filesystem::current_path().c_str(),filename);
     return true;
 }
 

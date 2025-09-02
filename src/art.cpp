@@ -1842,7 +1842,7 @@ bool art::tree::save(bool stats) {
     //arena::hash_arena leaves{get_leaves().get_name()};
     //arena::hash_arena nodes{get_nodes().get_name()};
     {
-        storage_release release(this); // only lock during partial copy
+        write_lock release(this->latch); // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
@@ -1918,7 +1918,7 @@ bool art::tree::load(bool) {
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
-        storage_release release(this);
+        write_lock release(this->latch);
         h.clear();
         auto *t = this;
         logical_address root{nullptr};
@@ -2168,7 +2168,7 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
 
     art_insert(this, options, key, value, update, fc);
 
-    this->repl_client.insert(options, key, value);
+    this->repl_client.insert(latch, options, key, value);
     return size > before;
 }
 
@@ -2186,7 +2186,7 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
                 dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
                 options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
                 last_leaf_added = n;
-                this->repl_client.insert(options, key, value);
+                this->repl_client.insert(latch, options, key, value);
                 return false;
             }
             node_ptr old = logical_address{i->addr,this};
@@ -2220,7 +2220,7 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     }else {
         jumpsert(options, key, value, update, fc);
     }
-    this->repl_client.insert(options, key, value);
+    this->repl_client.insert(latch, options, key, value);
     return size > before;
 }
 
@@ -2238,7 +2238,7 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
         }
         auto l = value.const_leaf();
         key_options options = *l;
-        this->repl_client.insert(options, key, l->get_value());
+        this->repl_client.insert(latch, options, key, l->get_value());
         return value;
     };
     auto i = h.find(key);
@@ -2280,12 +2280,12 @@ bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
             h.erase(key);
             n.free_from_storage();
 
-            this->repl_client.remove(key);
+            this->repl_client.remove(latch, key);
             return true;
         }
     }
     art_delete(this, key, fc);
-    this->repl_client.remove(key);
+    this->repl_client.remove(latch, key);
     return size < before;
 }
 bool art::tree::remove(value_type key) {

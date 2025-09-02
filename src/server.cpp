@@ -838,7 +838,7 @@ namespace barch {
                             buffer.resize(buffers_size);
                             readp(stream, buffer.data(), buffers_size);
                             auto t = get_art(shard);
-                            storage_release release(t);
+                            write_lock release(t->latch);
                             process_art_fun_cmd(t, stream, buffer);
                             //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                         }catch (std::exception& e) {
@@ -1127,14 +1127,21 @@ namespace barch {
             }
             return true;
         }
-        bool client::insert(const art::key_options& options, art::value_type key, art::value_type value) {
+        bool client::insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value) {
 
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
-                return buffer.size() < art::get_rpc_max_buffer();
+            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this,&latch]() {
+                bool r = buffer.size() < art::get_rpc_max_buffer();
+                if (!r) {
+                    latch.unlock();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    latch.lock();
+                }
+                r = buffer.size() < art::get_rpc_max_buffer();
+                return r;
             });
 
             if (!ok) {
@@ -1152,13 +1159,20 @@ namespace barch {
             return true;
         }
 
-        bool client::remove(art::value_type key) {
+        bool client::remove(std::shared_mutex& latch, art::value_type key) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this]() {
-                return buffer.size() < art::get_rpc_max_buffer();
+            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this, &latch]() {
+                bool r = buffer.size() < art::get_rpc_max_buffer();
+                if (!r) {
+                    latch.unlock();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    latch.lock();
+                }
+                r = buffer.size() < art::get_rpc_max_buffer();
+                return r;
             });
             if (!ok) {
                 ++statistics::repl::instructions_failed;

@@ -53,86 +53,96 @@ struct uring_context {
     io_uring ring{};
     size_t id{};
     size_t operations_pending{};
-    bool running = true;
+    bool running = false;
+    io_uring_cqe *cqe{};
     uring_context() {
-        io_uring_queue_init(opt_uring_queue_size, &ring, 0);
+
     }
     ~uring_context() {
-        io_uring_queue_exit(&ring);
+        stop();
     }
     uring_context(const uring_context&) = delete;
     uring_context& operator=(const uring_context&) = delete;
-    void start(size_t id) {
+    bool start(size_t id) {
+        if (running) return false;
+        io_uring_queue_init(opt_uring_queue_size, &ring, 0);
         this->id = id;
         running = true;
-        for (;running;) {
-            run();
+        for (;run();) {
         };
+        running = false;
+        return true;
     }
     int fd_is_valid(int fd)
     {
         return fcntl(fd, F_GETFD) != -1 || errno != EBADF;
     }
     void stop() {
-        running = false;
+        if (!running) return;
+        request r;
+        r.type = u_shutdown;
+        write(0,r,art::value_type(),nullptr);
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        io_uring_queue_exit(&ring);
+
+
     }
     bool run() {
 
-        for (;operations_pending > 0; --operations_pending) {
-            io_uring_cqe *cqe;
-            int ret = io_uring_wait_cqe(&ring, &cqe);
-            if (ret < 0) {
-                art::std_err("io_uring_wait_cqe failed with",ret,", this queue will expire, id:",id);
-                return false;
-            }
-            request *req = (request *) cqe->user_data;
-            if(req == nullptr) {
-                art::std_err("invalid user data",cqe->res);
-                io_uring_cqe_seen(&ring, cqe);
-                continue;
-            }
-            if (opt_debug_uring == 1)
-                art::std_log("req",req->type,req->client_socket,cqe->res);
-
-            if (cqe->res == 0 || !fd_is_valid(req->client_socket)) {
-                io_uring_cqe_seen(&ring, cqe);
-                if (opt_debug_uring == 1)
-                    art::std_log("exit detected",req->type,req->client_socket,cqe->res);
-                auto f = std::move(req->f);
-
-                continue;
-            }
-            if (req->type == u_read || req->type == u_write) {
-                try {
-                    auto f = std::move(req->f);
-                    req->f = nullptr;
-                    art::value_type v = req->data.sub(0,cqe->res);
-                    if (opt_debug_uring == 1) {
-                        std::string s = std::regex_replace(v.to_string(),std::regex("[\r\n]"),".");
-                        art::std_log(req->type == u_read ? "read" : "write",s);
-                    }
-                    if (f)
-                        f(v);
-                    else {
-                        art::std_err("no callback provided on",(void*)req);
-                    }
-
-                }catch (std::exception& e) {
-                    art::std_err("exception in callback",e.what());
-                }
-                net_stat stat;
-                if (req->type == u_read ) {
-                    stream_read_ctr += cqe->res;
-                }else {
-                    stream_write_ctr += cqe->res;
-                }
-            }else {
-                art::std_err("invalid type",req->type);
-            }
-            io_uring_cqe_seen(&ring, cqe);
+        int ret = io_uring_wait_cqe(&ring, &cqe);
+        if (ret < 0) {
+            art::std_err("io_uring_wait_cqe failed with",ret,", this queue will expire, id:",id);
+            return false;
         }
-        if (!operations_pending)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        request *req = (request *) cqe->user_data;
+        if(req == nullptr) {
+            art::std_err("invalid user data",cqe->res);
+            io_uring_cqe_seen(&ring, cqe);
+            return true;
+        }
+        if (opt_debug_uring == 1)
+            art::std_log("req",req->type,req->client_socket,cqe->res);
+        if (req->client_socket == 0) return false;
+        if (cqe->res == 0 || !fd_is_valid(req->client_socket)) {
+            io_uring_cqe_seen(&ring, cqe);
+            if (opt_debug_uring == 1)
+                art::std_log("exit detected",req->type,req->client_socket,cqe->res);
+            auto f = std::move(req->f);
+
+            return true;
+        }
+        if (req->type == u_read || req->type == u_write) {
+            try {
+                auto f = std::move(req->f);
+                req->f = nullptr;
+                art::value_type v = req->data.sub(0,cqe->res);
+                if (opt_debug_uring == 1) {
+                    std::string s = std::regex_replace(v.to_string(),std::regex("[\r\n]"),".");
+                    art::std_log(req->type == u_read ? "read" : "write",s);
+                }
+                if (f)
+                    f(v);
+                else {
+                    art::std_err("no callback provided on",(void*)req);
+                }
+
+            }catch (std::exception& e) {
+                art::std_err("exception in callback",e.what());
+            }
+            net_stat stat;
+            if (req->type == u_read ) {
+                stream_read_ctr += cqe->res;
+            }else {
+                stream_write_ctr += cqe->res;
+            }
+        }else {
+            art::std_err("invalid type",req->type);
+        }
+        io_uring_cqe_seen(&ring, cqe);
+        --operations_pending;
+
         return true;
     }
     void close(tcp::socket &s, request& req,uring_cb f) {
@@ -190,15 +200,15 @@ struct uring_context {
             ++operations_pending;
         }
     }
-    void write(tcp::socket &s, request& req, art::value_type value, uring_cb f) {
+    void write(tcp::socket::native_handle_type s, request& req, art::value_type value, uring_cb f) {
         if (opt_debug_uring==1)
-            art::std_log("write",s.native_handle(),value.size);
+            art::std_log("write",s,value.size);
         io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         req.type = u_write;
         req.f = std::move(f);
-        req.client_socket = s.native_handle();
+        req.client_socket = s;
         req.data = value;
-        io_uring_prep_write(sqe, s.native_handle(), (void *)value.bytes, value.size, 0);
+        io_uring_prep_write(sqe, s, (void *)value.bytes, value.size, 0);
         io_uring_sqe_set_data(sqe, &req);
         int r = io_uring_submit(&ring);
         if (r < 0) {
@@ -207,6 +217,10 @@ struct uring_context {
         }else {
             ++operations_pending;
         }
+    }
+
+    void write(tcp::socket &s, request& req, art::value_type value, uring_cb f) {
+        write(s.native_handle(),req,value,std::move(f));
     }
 };
 #endif //BARCH_URING_CONTEXT_H

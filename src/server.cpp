@@ -367,7 +367,7 @@ namespace barch {
     };
     struct server_context {
         thread_pool pool{};
-        thread_pool resp_pool{1.25f};
+        thread_pool resp_pool{};
         //std::shared_ptr<work_g> get_unit() {}
         asio::io_context io{};
         std::vector<std::shared_ptr<work_unit>> io_resp{};
@@ -752,7 +752,6 @@ namespace barch {
             uint8_t data_[rpc_io_buffer_size]{};
             barch_parser parser{};
         };
-        heap::vector<std::shared_ptr<resp_session>> sessions{};
         void start() {}
         void process_data(tcp::socket& endpoint) {
             try {
@@ -873,11 +872,14 @@ namespace barch {
                 io.run();
                 art::std_log("server stopped on", this->interface,this->port,"using thread",tid);
             });
-            resp_pool.start([this](size_t tid) -> void {
+            std::atomic<size_t> started = 0;
+            resp_pool.start([this, &started](size_t tid) -> void {
+                ++started;
                 io_resp[tid]->run(tid);
             });
-
-
+            while (started != resp_pool.size()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
     };
     std::shared_ptr<server_context>  srv = nullptr;

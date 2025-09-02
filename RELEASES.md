@@ -1,4 +1,4 @@
-# Release v0.3.3.21b 2025-09-02
+# Release v0.3.3.22b 2025-09-02
 
 ## New Features
 
@@ -37,6 +37,7 @@
 15. fix loading issue (0.3.3.18b 2025-08-30)
 16. fix insert thread ap bug (0.3.3.20b 2025-09-02)
 16. improve eviction tests (0.3.3.21b 2025-09-02)
+17. improve io uring throughput and latency (0.3.3.22b 2025-09-02)
 
 # Release v0.3.3.7b 2025-08-08
 

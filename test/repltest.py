@@ -8,13 +8,13 @@ k = barch.KeyValue()
 k.set("one","1")
 k.set("two","2")
 k.set("three","3")
-for i in range(1000000):
+for i in range(100000):
     k.set(str(i),str(i))
     if i % 10000 == 0 :
         print("adding",i)
-for i in range(1000000):
+for i in range(100000):
     k.erase(str(i))
-    if i % 10000 == 0 :
+    if i % 1000 == 0 :
         print("removing",i)
 
 

@@ -12,6 +12,7 @@ struct thread_pool {
     heap::vector<std::thread> pool{};
     bool started = false;
     std::atomic<size_t> stopped{};
+    std::atomic<size_t> running{};
     explicit thread_pool(size_t size) {
         pool.resize(size);
     }
@@ -45,8 +46,10 @@ struct thread_pool {
         stop();
         size_t tid = 0;
         stopped = 0;
+        running = 0;
         for (auto& t : pool) {
             t = std::thread([this,tid,tf]() -> void {
+                ++running;
                 tf(tid);
                 ++stopped;
             });
@@ -56,6 +59,9 @@ struct thread_pool {
     }
     ~thread_pool() {
         stop();
+    }
+    size_t active() const {
+        return running - stopped;
     }
     void stop() {
         if (!started) {

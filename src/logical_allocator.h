@@ -480,7 +480,6 @@ private:
             }
         }
     }
-
     std::pair<size_t, storage &> allocate_page_at(size_t at, size_t) //unused(ps = SS)
     {
         auto &page = retrieve_page(at);
@@ -511,14 +510,13 @@ private:
             return expand_over_null_base();
         }
 
-        auto &last = retrieve_page(last_page_allocated, false);
+        auto &last = retrieve_page(last_page_allocated, true);
         if (last.empty()) {
             abort();
         }
         if (last.write_position + size >= LPageSize) {
             return expand_over_null_base();
         }
-
         return {last_page_allocated, last};
     }
 

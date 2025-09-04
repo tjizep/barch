@@ -494,6 +494,32 @@ configuration_values config() {
     r.use_vmm_memory = i.use_vmm_memory;
     return r;
 }
+
+Caller::Caller(){}
+Caller::Caller(const std::string& host, int port) {
+    sc.host = barch::repl::create(host,port);
+}
+std::vector<Value> Caller::call(const std::string &method, const std::vector<Value> &args) {
+    std::string cn = std::string{params[0]};
+    auto ic = barch_functions.find(cn);
+    if (ic == barch_functions.end()) {
+        art::std_err("invalid call", cn);
+        return {};
+    }
+    auto f = ic->second.call;
+    ++ic->second.calls;
+    params = {method};
+    params.insert(params.end(), args.begin(), args.end());
+    result.clear();
+    int r = sc.call(params, f);
+    if (r != 0) {
+        result.insert(result.end(), sc.errors.begin(), sc.errors.end());
+    }else {
+        result.insert(result.end(), sc.results.begin(), sc.results.end());
+    }
+    return result;
+}
+
 HashSet::HashSet(){}
 
 HashSet::HashSet(const std::string &host, int port) {

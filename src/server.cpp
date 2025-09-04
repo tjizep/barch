@@ -30,6 +30,7 @@
 #include "redis_parser.h"
 #include "thread_pool.h"
 #include "uring_context.h"
+#include "queue_server.h"
 enum {
     cmd_ping = 1,
     cmd_stream = 2,
@@ -383,7 +384,7 @@ namespace barch {
         }
 
         void stop() {
-            stop_hash_server();
+            ::stop_queue_server();
             try {
                 acc.close();
             }catch (std::exception& ) {}
@@ -859,7 +860,7 @@ namespace barch {
         :   acc(io, tcp::endpoint(tcp::v4(), port))
         ,   interface(interface)
         ,   port(port){
-            start_hash_server() ;
+            start_queue_server() ;
             start_accept();
             io_resp.resize(resp_pool.size());
             for (size_t i = 0; i < io_resp.size(); ++i) {

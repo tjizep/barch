@@ -36,106 +36,7 @@ extern "C" {
 #include "keys.h"
 #include "ordered_api.h"
 #include "caller.h"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Weffc++"
-#include <moodycamel/concurrentqueue.h>
-#pragma GCC diagnostic pop
-class hash_server {
-    struct instruction {
-        instruction() = default;
-        instruction(const instruction&) = default;
-        instruction(instruction&&) = default;
-        instruction& operator=(const instruction&) = default;
-        heap::small_vector<uint8_t, 32> key{};
-        heap::small_vector<uint8_t, 32> value{};
-        art::tree*  t{};
-        art::key_options options;
-        void set_key(art::value_type k) {
-            key.append(k.to_view());
-        }
-        void set_value(art::value_type v) {
-            value.append(v.to_view());
-        }
-        [[nodiscard]] art::value_type get_key() const {
-            return {key.data(), key.size()};
-        }
-        [[nodiscard]] art::value_type get_value() const {
-            return {value.data(), value.size()};
-        }
-
-    };
-    public:
-    hash_server() {
-
-    }
-    ~hash_server() {
-        stop();
-    }
-    thread_pool threads{art::get_shard_count().size()};
-    typedef moodycamel::ConcurrentQueue<instruction> queue_type;
-    heap::vector<std::shared_ptr<queue_type>> queues{threads.size()};
-    bool started = false;
-    void start() {
-        started = true;
-        for (auto& q : queues) {
-            q = std::make_shared<queue_type>(1000);
-        }
-        threads.start([this](size_t id) {
-            auto q = queues[id];
-            while (started) {
-                instruction ins;
-                if (q->try_dequeue(ins)) {
-
-                    write_lock release(ins.t->latch);
-                    --ins.t->queue_size;
-                    // TODO: the infernal thread_ap should be set before using any t functions
-                    ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
-                }else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-            }
-        });
-    }
-    void stop() {
-
-        started = false;
-        threads.stop();
-        consume();
-
-
-    }
-    void queue_insert(art::tree* t,art::key_options options,art::value_type k, art::value_type v) {
-        size_t at = t->shard % threads.size();
-        instruction ins;
-        ins.set_key(k);
-        ins.set_value(v);
-        ins.options = options;
-        ins.t = t;
-        ++t->queue_size;
-        queues[at]->enqueue(ins);
-    }
-    void consume() {
-        for (auto& q : queues) {
-            instruction ins;
-            while (q->try_dequeue(ins)) {
-                write_lock release(ins.t->latch);
-                --ins.t->queue_size;
-                ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
-            }
-        }
-    }
-    void consume(art::tree* t) {
-        auto q = t->shard % threads.size();
-        instruction ins;
-        while (queues[q]->try_dequeue(ins)) {
-
-            write_lock release(ins.t->latch);
-            --ins.t->queue_size;
-            ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
-        }
-
-    }
-};
+#include "queue_server.h"
 static size_t save() {
     std::vector<std::thread> saviors{art::get_shard_count().size()};
     size_t shard = 0;
@@ -155,27 +56,6 @@ static size_t save() {
             t.join();
     }
     return errors;
-}
-std::shared_ptr<hash_server> server;
-void hash_consume(art::tree* t) {
-    if (server)
-        server->consume(t);
-}
-void hash_consume_all() {
-    if (server)
-        server->consume();
-}
-void start_hash_server() {
-    if (!server) {
-        server = std::make_shared<hash_server>();
-        server->start();
-    }
-}
-void stop_hash_server() {
-    if (server) {
-        server->stop();
-    }
-    server = nullptr;
 }
 static auto startTime = std::chrono::high_resolution_clock::now();
 template<typename IntT>
@@ -242,7 +122,7 @@ int RANGE(caller& call, const arg_t& argv) {
     heap::std_vector<art::value_type> sorted{};
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
-        hash_consume(t);
+        queue_consume(t->shard);
         t->latch.lock_shared();
     }
     try {
@@ -399,8 +279,8 @@ int SET(caller& call,const arg_t& argv) {
         }
     };
     //
-    if (!spec.get && server && t->queue_size < max_process_queue_size) {
-        server->queue_insert(t, spec, key, v);
+    if (!spec.get && is_queue_server_running() && t->queue_size < max_process_queue_size) {
+        ::queue_insert(t->shard, spec, key, v);
     }else {
         storage_release l(t);
         t->opt_insert(spec, key, v, true, fc);
@@ -884,7 +764,7 @@ int MIN(caller& call, const arg_t& argv) {
     art::value_type the_min;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
-        hash_consume(t);
+        queue_consume(t->shard);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {
@@ -927,7 +807,7 @@ int MAX(caller& call, const arg_t& ) {
     art::value_type the_max;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
-        hash_consume(t);
+        queue_consume(shard);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {
@@ -975,7 +855,7 @@ int LB(caller& call, const arg_t& argv) {
     art::value_type the_lb;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
-        hash_consume(t);
+        queue_consume(shard);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {
@@ -1017,7 +897,7 @@ int UB(caller& call, const arg_t& argv) {
     art::value_type the_lb;
     for (auto shard:art::get_shard_count()) {
         auto t = get_art(shard);
-        hash_consume(t);
+        queue_consume(shard);
         t->latch.lock();
     }
     for (auto shard:art::get_shard_count()) {

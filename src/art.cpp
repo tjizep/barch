@@ -1775,12 +1775,7 @@ void art::tree::set_thread_ap() {
     thread_ap = this;
 }
 
-void art::tree::remove_leaf(const logical_address& at)  {
-    if (do_remove) {
-        //node_ptr l{at};
-        //remove_leaf_from_uset(l.cl()->get_key());
-    }
-
+void art::tree::remove_leaf(const logical_address& )  {
 }
 bool art::tree::remove_leaf_from_uset(value_type key) {
 
@@ -2305,4 +2300,7 @@ art::node_ptr art::tree::search(value_type unfiltered_key) {
     }
     return r;
 }
-
+#include "queue_server.h"
+void art::tree::queue_consume() {
+    ::queue_consume(this->shard);
+}

@@ -14,7 +14,7 @@ st1 = barch.stats()
 print(barch.size(),barch.stats().logical_allocated)
 for i in range(MAXK):
     k.set(str(i),str(i))
-    k.expire(str(i),18)
+    k.expire(str(i),10)
     assert(k.ttl(str(i))>=2)
     if i%10000 == 0:
         st1 = barch.stats()

@@ -13,10 +13,10 @@ enum {
     initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,
     iterate_workers = 4,
-    test_memory = 1,
+    test_memory = 0,
     allocation_padding = 0,
     initialize_memory = 1,
-    storage_version = 9,
+    storage_version = 10*page_size,
     ticker_size = 256,
     numeric_key_size = 12,
     num32_key_size = 6,

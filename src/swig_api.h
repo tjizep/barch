@@ -263,6 +263,17 @@ struct Route {
 void setRoute(int shard, const std::string& host, int port);
 void removeRoute(int shard);
 Route getRoute(int shard);
+class Caller {
+public:
+    Caller();
+    Caller(const std::string& host, int port);
+    std::vector<Value> call(const std::string &method, const std::vector<Value> &args);
+private:
+    std::vector<std::string_view> params {};
+    std::vector<Value> result{};
+    rpc_caller sc{};
+    function_map& barch_functions = functions_by_name();
+};
 class List {
 public:
     List();

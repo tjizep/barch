@@ -11,7 +11,6 @@
 #include "vector_stream.h"
 #include "server.h"
 #include "overflow_hash.h"
-
 typedef std::unique_lock<std::shared_mutex> write_lock;
 extern std::shared_mutex &get_lock();
 
@@ -192,7 +191,6 @@ namespace art {
         //mutable heap::unordered_set<hashed_key,hk_hash > h{};
         mutable oh::unordered_set<hashed_key,hk_hash > h{};
         mutable uint64_t saf_keys_found{};
-        bool do_remove = true;
     public:
         void inc_keys_found() const {
             ++saf_keys_found;
@@ -336,7 +334,7 @@ namespace art {
         node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
         node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c);
         node_ptr alloc_8_node_ptr(unsigned nt);
-
+        void queue_consume();
 
     };
 }
@@ -553,6 +551,7 @@ namespace art {
         [[nodiscard]] int64_t fast_distance(const iterator &other) const;
 
         void log_trace() const;
+
     };
 
     node_ptr find(const tree* t, value_type key);
@@ -565,17 +564,14 @@ namespace art {
 
     int64_t fast_distance(const trace_list &a, const trace_list &b);
 }
-extern void hash_consume(art::tree*) ;
-//extern void hash_consume_all() ;
-extern void start_hash_server() ;
-extern void stop_hash_server() ;
+
 struct storage_release {
     art::tree * t{};
     storage_release() = default;
     storage_release(const storage_release&) = default;
     storage_release& operator=(const storage_release&) = default;
     storage_release(art::tree* t) : t(t) {
-        hash_consume(t);
+        t->queue_consume();
         t->latch.lock();
     }
     ~storage_release() {
@@ -589,7 +585,7 @@ struct read_lock {
     read_lock& operator=(const read_lock&) = default;
     read_lock(art::tree* t, bool consume = true) : t(t) {
         if (consume)
-            hash_consume(t);
+            t->queue_consume();
         t->latch.lock_shared();
     }
     ~read_lock() {

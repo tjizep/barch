@@ -11,7 +11,7 @@ A demo ubuntu 22.04 docker image is available at teejip/barch:apis
 Run below to expose an example flask application to see the API's in action
 ```
 sudo docker ps -a -q | sudo xargs docker stop 
-sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.3.3.21b
+sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.3.3.22b
 
 ```
 binaries are located under `/home/barch/setup` within the docker image

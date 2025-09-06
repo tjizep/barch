@@ -1723,21 +1723,18 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::oom_avoided_inserts);
     readp(in, statistics::logical_allocated);
 }
-thread_local alloc_pair* thread_ap;
-thread_local art::value_type key_query;
+
+
 art::hashed_key::hashed_key(const node_ptr& la) {
     if (la.logical.address() > std::numeric_limits<uint32_t>::max()) {
         throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
     }
-    thread_ap = (tree*)&la.logical.get_ap<alloc_pair>();
     addr = la.logical.address();
 }
 art::node_ptr art::hashed_key::node(const abstract_leaf_pair* p) const {
-    thread_ap = (tree*)p;
     return logical_address{addr, (abstract_leaf_pair*)p};
 }
 art::hashed_key& art::hashed_key::operator=(const node_ptr& nl) {
-    thread_ap = (tree*)&nl.logical.get_ap<alloc_pair>();
     addr = nl.logical.address();
     return *this;
 }
@@ -1746,42 +1743,44 @@ art::hashed_key::hashed_key(const logical_address& la) {
     if (la.address() > std::numeric_limits<uint32_t>::max()) {
         throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
     }
-    thread_ap = (tree*)&la.get_ap<alloc_pair>();
     addr = la.address();
 
 }
 
 art::hashed_key::hashed_key(value_type k) {
-    key_query = k;
 }
 
-const art::leaf* art::hashed_key::get_leaf() const {
-    //thread_ap->get_leaves().read<leaf>(logical_address{addr});
-    node_ptr n = logical_address{addr,thread_ap};
+const art::leaf* art::hashed_key::get_leaf(const query_pair& q) const {
+    node_ptr n = logical_address{addr, q.leaves};
     return n.is_leaf ? n.const_leaf() : nullptr;
 }
 
-art::value_type art::hashed_key::get_key() const {
+art::value_type art::hashed_key::get_key(const query_pair& q) const {
     if (!addr) {
-        return key_query;
+        return q.key;
     }
-    return get_leaf()->get_key();
+    return get_leaf(q)->get_key();
 }
 
 void art::tree::clear_hash() {
     h.clear();
 }
+void art::tree::set_hash_query_context(value_type k) {
+    qp.key = k;
+}
+void art::tree::set_hash_query_context(value_type k) const {
+    qp.key = k;
+}
 void art::tree::set_thread_ap() {
-    thread_ap = this;
 }
 
 void art::tree::remove_leaf(const logical_address& )  {
 }
 bool art::tree::remove_leaf_from_uset(value_type key) {
-
+    set_hash_query_context(key);
     auto i = h.find(key);
     if (i != h.end()) {
-        node_ptr old{logical_address(i->addr,thread_ap)};
+        node_ptr old{logical_address(i->addr,this)};
         h.erase(i);
         if (old.cl()->is_hashed()) {
             old.free_from_storage();
@@ -1792,11 +1791,17 @@ bool art::tree::remove_leaf_from_uset(value_type key) {
 }
 
 art::node_ptr art::tree::from_unordered_set(value_type key) const {
+    set_hash_query_context(key);
     auto i = h.find(key);
     if (i != h.end()) {
+
+        inc_keys_found();
         return i->node(this);
     }
     return nullptr;
+}
+
+int64_t art::distance(const tree *t, const trace_list &a, const trace_list &b) {
 }
 
 bool art::tree::publish(std::string host, int port) {
@@ -1952,8 +1957,8 @@ bool art::tree::load(bool) {
         const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
         std_log("Done loading BARCH, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
 
-        std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");
+        std_log("loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds");
+        std_log("db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb");
     }catch (std::exception &e) {
         std_log("could not load",e.what());
         return false;
@@ -2168,7 +2173,7 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
 }
 
 bool art::tree::jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
-
+    set_hash_query_context(key);
     auto i = h.find(key);
     if (i != h.end()) {
         if (update) {
@@ -2199,7 +2204,6 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
 }
 
 bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    thread_ap = this;
     if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;

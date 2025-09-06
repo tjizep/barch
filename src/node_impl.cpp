@@ -226,6 +226,7 @@ void art::tree::load_hash() {
             if (l->is_hashed()) {
 
                 logical_address lad{page,pos,this};
+
                 h.insert_unique(lad); // only possible because we know all keys are unique or should be at least
                 ++encountered;
             }
@@ -418,8 +419,10 @@ void art::tree::start_maintain() {
             }
             if (saf_keys_found) {
                 write_lock l(this->latch);
-                statistics::keys_found+=saf_keys_found;
+                statistics::keys_found += saf_keys_found;
                 saf_keys_found = 0;
+                statistics::get_ops += saf_get_ops;
+                saf_get_ops = 0;
             }
 
             if (millis(start_save_time) > get_save_interval()

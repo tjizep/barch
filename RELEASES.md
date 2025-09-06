@@ -1,4 +1,4 @@
-# Release v0.3.3.23b 2025-09-04
+# Release v0.3.3.24b 2025-09-06
 
 ## New Features
 
@@ -40,6 +40,8 @@
 18. improve io uring throughput and latency (0.3.3.22b 2025-09-02)
 19. potential fix modify flag in allocator (0.3.3.23b 2025-09-04)
 20. hash->queue server rename and modularize. (0.3.3.23b 2025-09-04)
+21.  remove thread_local's (0.3.3.23b 2025-09-06)
+22.  fix stats vars (0.3.3.23b 2025-09-06)
 
 # Release v0.3.3.7b 2025-08-08
 

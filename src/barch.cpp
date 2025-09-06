@@ -1174,7 +1174,7 @@ int STATS(caller& call, const arg_t& argv) {
         vbytes += get_art(shard)->get_nodes().get_bytes_allocated() + get_art(shard)->get_leaves().get_bytes_allocated();
     }
     call.start_array();
-    call.reply_values({"heap_bytes_allocated", as.heap_bytes_allocated + vbytes});
+    call.reply_values({"heap_bytes_allocated", get_total_memory()});
     call.reply_values({"page_bytes_compressed",as.page_bytes_compressed});
     call.reply_values({ "max_page_bytes_uncompressed", as.max_page_bytes_uncompressed});
     call.reply_values({ "last_vacuum_time", as.last_vacuum_time});

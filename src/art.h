@@ -102,46 +102,13 @@ typedef std::function<void(const art::node_ptr &)> NodeResult;
  */
 namespace art {
     node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const children_t &c);
-
-    struct kv_buf {
-        uint8_t buf[32];
-        kv_buf(key_options options, value_type k, value_type v) {
-            if (k.size + v.size + 2 < sizeof(buf)) {
-                memcpy(buf, k.bytes, k.size+1);
-                memcpy(&buf[k.size+1], v.bytes, v.size);
-                key = {&buf[0], k.size};
-                value = {&buf[k.size+1], v.size};
-            }
-            opts = options;
-        }
-        kv_buf(const kv_buf& r) {
-            memcpy(buf, r.buf, r.value.size + r.key.size + 1);
-            key = {&buf[0], r.key.size};
-            value = {&buf[r.key.size+1], r.value.size};
-            opts = r.opts;
-        }
-        kv_buf& operator=(const kv_buf& r) {
-            memcpy(buf, r.buf, sizeof(buf));
-            key = {&buf[0], r.key.size};
-            value = {&buf[r.key.size+1], r.value.size};
-            opts = r.opts;
-            return *this;
-        }
-        bool operator==(const kv_buf& r) const {
-            return  key == r.key;
-        }
-        bool operator<(const kv_buf& r) const {
-            return  key < r.key;
-        }
-        key_options opts{};
+    struct query_pair {
+        query_pair(abstract_leaf_pair * leaves, value_type key) : leaves(leaves), key(key) {}
+        query_pair() = default;
+        query_pair& operator=(const query_pair&) = default;
+        query_pair(const query_pair&) = default;
+        abstract_leaf_pair * leaves{};
         value_type key{};
-        value_type value{};
-    };
-    struct kv_hash{
-        size_t operator()(const kv_buf& k) const {
-            uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(k.key.chars(), k.key.size);
-            return hash;
-        }
     };
     struct hashed_key {
         // we can reduce memory use by setting this to uint32_t
@@ -154,30 +121,46 @@ namespace art {
         hashed_key& operator=(const hashed_key&) = default;
         hashed_key(value_type) ;
 
-        const leaf* get_leaf() const;
-        value_type get_key() const;
+        [[nodiscard]] const leaf* get_leaf(const query_pair& q) const;
+        [[nodiscard]] value_type get_key(const query_pair& q) const;
 
         hashed_key(const node_ptr& la) ;
         hashed_key(const logical_address& la) ;
 
         hashed_key& operator=(const node_ptr& nl);
 
-        bool operator==(const hashed_key& r) const {
-            return get_key() == r.get_key();
-        }
 
-        bool operator<(const hashed_key& r) const {
-            return get_key() < r.get_key();
-        }
-        size_t hash() const {
-            auto key = get_key();
+
+        [[nodiscard]] size_t hash(const query_pair& q) const {
+            auto key = get_key(q);
             size_t r = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
             return r;
         }
     };
     struct hk_hash{
+        hk_hash() = default;
+        hk_hash& operator=(const hk_hash&) = default;
+        hk_hash(const hk_hash&) = default;
+        hk_hash(query_pair& q):q(&q){}
+        query_pair* q{};
         size_t operator()(const hashed_key& k) const {
-           return k.hash();
+            if (q == nullptr) {
+                abort_with("no query pair");
+            }
+           return k.hash(*q);
+        }
+    };
+    struct hk_eq{
+        hk_eq() = default;
+        hk_eq& operator=(const hk_eq&) = default;
+        hk_eq(const hk_eq&) = default;
+        hk_eq(query_pair& q):q(&q){}
+        query_pair* q{};
+        size_t operator()(const hashed_key& l,const hashed_key& r) const {
+            if (q == nullptr) {
+                abort_with("no query pair");
+            }
+            return l.get_key(*q) == r.get_key(*q);
         }
     };
     struct tree : public alloc_pair{
@@ -189,12 +172,19 @@ namespace art {
         bool with_stats{true};
         //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
         //mutable heap::unordered_set<hashed_key,hk_hash > h{};
-        mutable oh::unordered_set<hashed_key,hk_hash > h{};
+        mutable query_pair qp{this, {}};
+        mutable hk_hash hk_h{qp};
+        mutable hk_eq hk_e{qp};
+        mutable oh::unordered_set<hashed_key,hk_hash, hk_eq> h{hk_e,hk_h};
         mutable uint64_t saf_keys_found{};
+        mutable uint64_t saf_get_ops{};
     public:
         void inc_keys_found() const {
+            ++saf_get_ops;
             ++saf_keys_found;
         }
+        void set_hash_query_context(value_type q);
+        void set_hash_query_context(value_type q) const ;
         void set_thread_ap();
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {

@@ -669,7 +669,7 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetRPCClientMaxWait, SetRPCClientMaxWait,
                                                  ApplyRPCClientMaxWait, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetOrderedKeys, SetOrderedKeys,
                                                      ApplyOrderedKeys, nullptr);
 

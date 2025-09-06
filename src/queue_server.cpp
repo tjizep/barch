@@ -20,7 +20,7 @@ class queue_server {
         heap::small_vector<uint8_t, 32> key{};
         heap::small_vector<uint8_t, 32> value{};
         art::tree*  t{};
-        art::key_options options;
+        art::key_options options{};
         void set_key(art::value_type k) {
             key.append(k.to_view());
         }

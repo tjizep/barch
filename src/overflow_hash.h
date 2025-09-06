@@ -25,7 +25,7 @@ namespace oh {
         using key_type = K;
         using hash_type = H;
         using key_compare = EQ;
-        typedef heap::unordered_set<K, H> H2;
+        typedef heap::unordered_set<K, H, key_compare> H2;
 
         struct data {
             float max_leakage = 0.3f;
@@ -33,8 +33,14 @@ namespace oh {
             float max_rehash_multiplier = 4; // a large multiplier is ok
             // because the hash itself is small relative to the data it indexes
             // it wont work well where the data is small
-            EQ eq{};
+            key_compare eq{};
             hash_type hash{};
+            data(key_compare eq, hash_type hash ) : eq(eq), hash(hash) {
+                H2 t;
+                h2 = H2(t.begin(), t.end(), size_t(0), hash, eq);
+            }
+            size_t rehash_multiplier = 4;
+            // (size_t) (max_leakage * keys.size()
             size_t size{};
             heap::vector<bool> has{};
             heap::vector<key_type> keys{};
@@ -210,7 +216,7 @@ namespace oh {
                 return size + h2.size();
             }
             void rehash(data& to) {
-                //art::std_log("fullness",(float)size/ (float)keys.size(), keys.size(), h2.size(),"leakage",(float)h2.size()/(float)size,"rehashed", rehashed);
+
                 auto mul = std::max<float>(2.0, max_rehash_multiplier) ;
                 to.resize(get_size() * mul);
                 for (size_t i = 0; i < keys.size(); i++) {
@@ -248,12 +254,13 @@ namespace oh {
                 return find(k) != nullptr;
             }
             void clear() {
-                data d0;
+                data d0{eq, hash};
                 this->swap(d0);
             }
         };
+        key_compare eq{};
+        hash_type hash{};
         data d_{};
-        EQ eq{};
         void rehash(data& from, data& to) {
             from.rehash(to);
         }
@@ -261,14 +268,21 @@ namespace oh {
 
         }
     public:
-        unordered_set() = default;
+        void swap(unordered_set& with) {
+            d_.swap(with.d_);
+            std::swap(eq, with.eq);
+            std::swap(hash, with.hash);
+        }
+        unordered_set(EQ eq, H h) : eq(eq), hash(h), d_(eq, h) {};
         bool insert(const key_type &k) {
             check(k);
             bool r = d_.insert(k);
             if (d_.tolarge()) {
-                data to;
+                data to{d_.eq, d_.hash};
                 d_.rehash(to);
                 d_.swap(to);
+                d_.eq = this->eq;
+                d_.hash = this->hash;
             }
             check(k);
             return r;
@@ -277,7 +291,7 @@ namespace oh {
             check(k);
             bool r = d_.insert_unique(k);
             if (d_.tolarge()) {
-                data to;
+                data to{d_.eq, d_.hash};
                 d_.rehash(to);
                 d_.swap(to);
             }

@@ -69,6 +69,8 @@ struct uring_context {
         this->id = id;
         running = true;
         for (;run();) {
+            if (--operations_pending == 0)
+                std::this_thread::yield();
         };
         running = false;
         return true;
@@ -83,6 +85,7 @@ struct uring_context {
         r.type = u_shutdown;
         write(0,r,art::value_type(),nullptr);
         while (running) {
+
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         io_uring_queue_exit(&ring);
@@ -96,7 +99,7 @@ struct uring_context {
             art::std_err("io_uring_wait_cqe failed with",ret,", this queue will expire, id:",id);
             return false;
         }
-        request *req = (request *) cqe->user_data;
+        auto *req = (request *) cqe->user_data;
         if(req == nullptr) {
             art::std_err("invalid user data",cqe->res);
             io_uring_cqe_seen(&ring, cqe);
@@ -104,8 +107,11 @@ struct uring_context {
         }
         if (opt_debug_uring == 1)
             art::std_log("req",req->type,req->client_socket,cqe->res);
-        if (req->client_socket == 0) return false;
-        if (cqe->res == 0 || !fd_is_valid(req->client_socket)) {
+        if (req->client_socket == 0) {
+            io_uring_cqe_seen(&ring, cqe);
+            return false;
+        }
+        if (cqe->res == 0 ) {
             io_uring_cqe_seen(&ring, cqe);
             if (opt_debug_uring == 1)
                 art::std_log("exit detected",req->type,req->client_socket,cqe->res);
@@ -141,7 +147,6 @@ struct uring_context {
             art::std_err("invalid type",req->type);
         }
         io_uring_cqe_seen(&ring, cqe);
-        --operations_pending;
 
         return true;
     }

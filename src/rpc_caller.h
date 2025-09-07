@@ -163,8 +163,8 @@ struct rpc_caller : caller {
         return false;
     }
 
-    template<typename TC>
-    int call(const std::vector<std::string_view>& params, TC&& f) {
+    template<typename TC, typename VT>
+    int call(const VT& params, TC&& f) {
 
         ++statistics::local_calls;
         args.clear();
@@ -201,6 +201,7 @@ struct rpc_caller : caller {
         }
         return r;
     }
+
     const std::string& get_user() const override  {
         return user;
     }

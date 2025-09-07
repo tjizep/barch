@@ -513,6 +513,18 @@ namespace heap {
             }
         }
 
+        void append(const T* data, size_t size) {
+            if (!size) return;
+            if (ssize + size > scontent.size()) {
+                content.resize(ssize + size);
+                std::copy(data, data + size, content.begin() + ssize);
+                ssize += size;
+            } else {
+                std::copy(data, data + size, scontent.begin() + ssize);
+                ssize += size;
+            }
+        }
+
         void emplace_back() {
             emplace_back(T());
         }

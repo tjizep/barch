@@ -23,7 +23,7 @@ enum {
     u_shutdown = 4
 };
 enum {
-    opt_uring_queue_size = 512,
+    opt_uring_queue_size = 8192,
     opt_debug_uring = 0
 };
 using asio::ip::tcp;
@@ -69,8 +69,7 @@ struct uring_context {
         this->id = id;
         running = true;
         for (;run();) {
-            if (--operations_pending == 0)
-                std::this_thread::yield();
+            --operations_pending;
         };
         running = false;
         return true;

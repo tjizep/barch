@@ -12,7 +12,7 @@
 
 namespace redis {
     enum {
-        redis_max_item_len = 32000,
+        redis_max_item_len = 6400000,
         redis_max_buffer_size = 4096
     };
     typedef std::function<size_t (char* buf,size_t bytes)> reader_t;

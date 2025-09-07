@@ -6,8 +6,9 @@
 #define BARCH_ASIO_INCLUDES_H
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Weffc++"
-#define ASIO_HAS_IO_URING
-#define ASIO_DISABLE_EPOLL
+// IO_URING doesnt seem to work
+//#define ASIO_HAS_IO_URING
+//#define ASIO_DISABLE_EPOLL
 #include <asio/io_context.hpp>
 #include <asio/detached.hpp>
 #include <asio/ip/tcp.hpp>

@@ -365,10 +365,10 @@ namespace barch {
     };
     struct server_context {
         thread_pool pool{};
-        thread_pool resp_pool{1};
+        thread_pool resp_pool{2};
         thread_pool asio_resp_pool{};
         asio::io_context io{};
-        std::vector<std::shared_ptr<asio_work_unit>> asio_ios{};
+        std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
         std::vector<std::shared_ptr<work_unit>> io_resp{resp_pool.size()};
 
         tcp::acceptor acc;
@@ -382,8 +382,8 @@ namespace barch {
             return io_resp[r];
         }
         std::shared_ptr<asio_work_unit> get_asio_unit() {
-            size_t r = asio_resp_distributor++ % asio_ios.size();
-            return asio_ios[r];
+            size_t r = asio_resp_distributor++ % asio_resp_ios.size();
+            return asio_resp_ios[r];
         }
 
         void stop() {
@@ -391,7 +391,7 @@ namespace barch {
             try {
                 acc.close();
             }catch (std::exception& ) {}
-            for (auto &proc: asio_ios) {
+            for (auto &proc: asio_resp_ios) {
                 try {
                     proc->stop();
                 }catch (std::exception& e) {
@@ -761,9 +761,7 @@ namespace barch {
             for (size_t i = 0; i < io_resp.size(); ++i) {
                 io_resp[i] = std::make_shared<work_unit>();
             }
-            for (size_t i = 0; i < asio_ios.size(); ++i) {
 
-            }
             pool.start([this](size_t tid) -> void{
                 io.dispatch([this,tid]() {
                     art::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
@@ -773,10 +771,10 @@ namespace barch {
             });
             std::atomic<size_t> started = 0;
             art::std_log("resp pool size",asio_resp_pool.size());
-            asio_ios.resize(asio_resp_pool.size());
+            asio_resp_ios.resize(asio_resp_pool.size());
             asio_resp_pool.start([this, &started](size_t tid) -> void {
-                asio_ios[tid] = std::make_shared<asio_work_unit>();
-                asio_ios[tid]->run();
+                asio_resp_ios[tid] = std::make_shared<asio_work_unit>();
+                asio_resp_ios[tid]->run();
             });
 
             resp_pool.start([this, &started](size_t tid) -> void {

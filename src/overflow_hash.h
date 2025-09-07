@@ -20,7 +20,7 @@ namespace oh {
     struct unordered_set {
     private:
         enum {
-            PROBES = 7
+            PROBES = 4
         };
         using key_type = K;
         using hash_type = H;
@@ -248,7 +248,7 @@ namespace oh {
             }
             bool tolarge() const {
                 // use the max_load_factor or max_ratio to determine rehash
-                return size >= max_load_factor*keys.size();// || size*max_leakage <= h2.size();
+                return size >= max_load_factor*keys.size() || size*max_leakage <= h2.size();
             }
             bool contains(const key_type &k) const {
                 return find(k) != nullptr;

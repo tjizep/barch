@@ -42,7 +42,8 @@
 20. hash->queue server rename and modularize. (0.3.3.23b 2025-09-04)
 21.  remove thread_local's (0.3.3.23b 2025-09-06)
 22.  fix stats vars (0.3.3.23b 2025-09-06)
-22.  use asio for resp again (0.3.3.23b 2025-09-07)
+23. use asio for resp again (0.3.3.24b 2025-09-07)
+24. improve hash perf a bit (0.3.3.24b 2025-09-07)
 
 # Release v0.3.3.7b 2025-08-08
 

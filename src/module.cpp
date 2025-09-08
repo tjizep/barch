@@ -4,6 +4,7 @@
 
 #include "module.h"
 #include "keys.h"
+#include "queue_server.h"
 thread_local uint64_t stream_write_ctr = 0;
 thread_local uint64_t stream_read_ctr = 0;
 
@@ -37,6 +38,7 @@ art::tree *get_art(size_t s) {
             auto end_time = std::chrono::high_resolution_clock::now();
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             art::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
+            start_queue_server() ;
         }
     }
     if (shards.empty()) {

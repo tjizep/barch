@@ -1,4 +1,4 @@
-# Release v0.3.3.24b 2025-09-07
+# Release v0.3.3.25b 2025-09-08
 
 ## New Features
 
@@ -17,6 +17,7 @@
 13. add overflow hash to reduce memory consumption (unordered_keys config) (0.3.3.16b 2025-08-24)
 14. buffer some statistics to improve concurrency (0.3.3.16b 2025-08-27)
 15. improve write throughput by 80% using lockfree queue (moodycamel) (v0.3.3.19b 2025-09-01)
+16. support up to 256kb key and value size (v0.3.3.25b 2025-09-8)
 
 ## Fixes
 
@@ -44,6 +45,7 @@
 22.  fix stats vars (0.3.3.23b 2025-09-06)
 23. use asio for resp again (0.3.3.24b 2025-09-07)
 24. improve hash perf a bit (0.3.3.24b 2025-09-07)
+25. fix issue with last page eviction (0.3.3.25b 2025-09-08)
 
 # Release v0.3.3.7b 2025-08-08
 

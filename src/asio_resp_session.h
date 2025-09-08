@@ -101,21 +101,16 @@ namespace barch {
             void do_write(vector_stream& stream) {
                 auto self(shared_from_this());
                 if (stream.empty()) return;
+#if 0
                 size_t length = asio::write(socket_, asio::buffer(stream.buf));
                 net_stat stat;
                 stream_write_ctr += length;
-#if 0
+#else
                 asio::async_write(socket_, asio::buffer(stream.buf),
                     [this, self](std::error_code ec, std::size_t length){
                         if (!ec){
-                            try {
                                 net_stat stat;
-
                                 stream_write_ctr += length;
-                            }catch (std::exception& e) {
-                                art::std_err("error", e.what());
-                            }
-
                         }else {
                             //art::std_err("error", ec.message(), ec.value());
                         }

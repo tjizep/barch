@@ -6,8 +6,8 @@ print("cleared",barch.size(),barch.stats().logical_allocated)
 barch.save()
 print("saved",barch.size(),barch.stats().logical_allocated)
 
-barch.setConfiguration("max_memory_bytes","400m")
-barch.setConfiguration("active_defrag","on")
+#barch.setConfiguration("max_memory_bytes","400m")
+barch.setConfiguration("active_defrag","off")
 barch.setConfiguration("maintenance_poll_delay","1000")
 k = barch.KeyValue()
 st1 = barch.stats()
@@ -21,8 +21,9 @@ for i in range(MAXK):
         print(barch.size(),st1.logical_allocated)
 st1 = barch.stats()
 target = st1.logical_allocated/2
+barch.setConfiguration("active_defrag","on")
 barch.setConfiguration("max_memory_bytes","1m")
-barch.setConfiguration("maintenance_poll_delay","1")
+barch.setConfiguration("maintenance_poll_delay","40")
 print("sleeping")
 st1 = barch.stats()
 while st1.logical_allocated > target:

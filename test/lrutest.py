@@ -15,7 +15,7 @@ for i in range(1):
     time.sleep(0.5)
     print(barch.size())
 
-for i in range(MAXK+1,MAXK + 10):
+for i in range(MAXK+1,MAXK + 10000):
     print("insert again",i)
     k.set(str(i),str(i))
 

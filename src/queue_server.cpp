@@ -96,13 +96,20 @@ class queue_server {
         }
     }
     void consume(size_t shard) {
+        auto t = get_art(shard);
         auto q = shard % threads.size();
         instruction ins;
-        while (queues[q]->try_dequeue(ins)) {
-            write_lock r1(ins.t->latch);
-            --ins.t->queue_size;
-            ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
-
+        // this is more complicated than it looks
+        // queue_size may sometimes be a subset
+        // of the actual queue size - but usually it's the same
+        while (t->queue_size > 0) {
+            if (queues[q]->try_dequeue(ins)) {
+                write_lock r1(ins.t->latch);
+                --ins.t->queue_size;
+                ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+            }else {
+                std::this_thread::yield();
+            }
         }
     }
 };

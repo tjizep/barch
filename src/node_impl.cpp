@@ -250,7 +250,7 @@ void art::tree::run_defrag() {
 
 
     try {
-        if (lc.fragmentation_ratio() > 0.3) //get_min_fragmentation_ratio())
+        if (lc.fragmentation_ratio() > 1) //get_min_fragmentation_ratio())
         {
             heap::vector<size_t> fl;
             {
@@ -317,7 +317,6 @@ void abstract_eviction(art::tree *t,
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
     auto fc = [](const art::node_ptr & unused(n)) -> void {
     };
-    //write_lock lock(get_lock());
     auto page = src();
     page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf *l, uint32_t) {
         if (!l->deleted() && predicate(l)) {
@@ -331,7 +330,7 @@ void abstract_eviction(art::tree *t,
 
 void abstract_lru_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
-    storage_release release(t);
+    write_lock release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
@@ -339,9 +338,9 @@ void abstract_random_eviction(art::tree *t, const std::function<bool(const art::
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
     storage_release release(t);
     auto &lc = t->get_leaves();
-    auto page_count = lc.max_page_num();
+    auto page_num = lc.max_page_num();
 
-    std::uniform_int_distribution<size_t> dist(0, page_count - 1);
+    std::uniform_int_distribution<size_t> dist(1, page_num);
     size_t random_page = dist(gen);
     abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
 }

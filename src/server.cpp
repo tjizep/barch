@@ -755,7 +755,7 @@ namespace barch {
         :   acc(io, tcp::endpoint(tcp::v4(), port))
         ,   interface(interface)
         ,   port(port){
-            start_queue_server() ;
+
             start_accept();
             io_resp.resize(resp_pool.size());
             for (size_t i = 0; i < io_resp.size(); ++i) {

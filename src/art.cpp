@@ -1813,7 +1813,7 @@ bool art::tree::pull(std::string host, int port) {
     return true;
 }
 bool art::tree::save(bool stats) {
-    //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
     if (nodes.get_main().get_bytes_allocated()==0) return true;
     bool saved = false;
@@ -2138,6 +2138,9 @@ static art::value_type s_filter_key(std::string& temp_key, art::value_type key) 
     }
     if (key.size <= 1) {
         throw_exception<std::runtime_error>("key too short");
+    }
+    if (!key.bytes) {
+        throw_exception<std::runtime_error>("key is NULL");
     }
     for (size_t i = 0; i < key.size-1; ++i) {
         if (key.bytes[i] == 0) {

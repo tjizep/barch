@@ -249,6 +249,11 @@ else()
     add_test(NAME TestZRank
             COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+
+    add_test(NAME TestBenchy
+            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} zbenchy.lua
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
         add_test(NAME TestBarchInstallPy

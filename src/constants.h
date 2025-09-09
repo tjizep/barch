@@ -7,13 +7,13 @@
 
 enum {
     node_checks = 0,
-    page_size = 32768*8, // must be a power of twp
+    page_size = 32768*8, // must be a power of two
     physical_page_size = page_size,
     maximum_allocation_size = page_size - (page_size % 1000),
     initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,
     iterate_workers = 4,
-    test_memory = 0,
+    test_memory = 1,
     allocation_padding = 0,
     initialize_memory = 1,
     storage_version = 10*page_size,

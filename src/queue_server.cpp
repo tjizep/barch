@@ -56,11 +56,14 @@ class queue_server {
             while (started) {
                 instruction ins;
                 if (q->try_dequeue(ins)) {
-
-                    write_lock release(ins.t->latch);
-                    --ins.t->queue_size;
+                    try {
+                        write_lock release(ins.t->latch);
+                        --ins.t->queue_size;
                     // TODO: the infernal thread_ap should be set before using any t functions
-                    ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+                        ins.t->opt_insert(ins.options, ins.get_key(),ins.get_value(),true,[](const art::node_ptr& ){});
+                    }catch (std::exception& e) {
+                        art::std_err("exception processing queue", e.what());
+                    }
                 }else {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }

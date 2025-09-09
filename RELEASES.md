@@ -1,4 +1,4 @@
-# Release v0.3.3.25b 2025-09-08
+# Release v0.3.3.26b 2025-09-09
 
 ## New Features
 
@@ -46,6 +46,7 @@
 23. use asio for resp again (0.3.3.24b 2025-09-07)
 24. improve hash perf a bit (0.3.3.24b 2025-09-07)
 25. fix issue with last page eviction (0.3.3.25b 2025-09-08)
+26. handle dequeue issue with empty keys (also add test) (0.3.3.26b 2025-09-09)
 
 # Release v0.3.3.7b 2025-08-08
 

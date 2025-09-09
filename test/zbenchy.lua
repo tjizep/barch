@@ -34,7 +34,7 @@ local shuffle = function(array)
 end
 
 for i = 1, count do
-    numbers[i] = i
+    numbers[i] = 'tpohiqwefqiwjjbefp038yho2j3h'..i
 end
 numbers = shuffle(numbers)
 
@@ -46,14 +46,14 @@ local test = function()
     result[inc()] ={'CLEAR B', vk.call('B.CLEAR')}
 
     tests = tests + 1
-    local t
+    local t, w
     t = vk.call('B.MILLIS')
 
     for i = 1, count do
         local k = convert(i)
         vk.call('B.SET',k,i)
     end
-
+    w = vk.call('B.MILLIS') - t
     local valids = 0
 
     for i = 1, count do
@@ -63,16 +63,17 @@ local test = function()
         end
 	end
 
+	result[inc()] = {'WRITE', w}
 	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'VALIDS', valids}
     result[inc()] = {'B MEM', vk.call('B.HEAPBYTES')}
     result[inc()] = {'SIZE', vk.call('B.SIZE')}
     result[inc()] = {'SAVE B', vk.call('B.SAVE')}
-
+    assert(vk.call('B.SIZE') == valids)
 end
 
 
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "80m")
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "280m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "10000000000")
@@ -80,5 +81,6 @@ result[inc()] = vk.call("B.CONFIG", "SET","max_modifications_before_save", "1000
 --[[ Testing ints,doubles and string key types]]
 convert = tocharsnum
 test()
+
 collectgarbage()
 return result

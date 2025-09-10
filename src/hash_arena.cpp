@@ -136,7 +136,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
     for (size_t i = 0; i < size; i++) {
         storage s{};
         size_t page = 0;
-        if (get_total_memory() > art::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99) {
+        if (arena.is_check_mem() && (get_total_memory() > art::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)) {
             art::log(std::runtime_error("module or server out of memory"),__FILE__,__LINE__);
             return false;
         }
@@ -193,6 +193,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
 
 bool arena::base_hash_arena::load(const std::string &filename, const std::function<void(std::istream &)> &extra) {
     base_hash_arena anew_one;
+    anew_one.set_check_mem(this->is_check_mem());
     if (arena_read(anew_one, extra, filename)) {
         *this = anew_one; // only update if successfull
         return true;

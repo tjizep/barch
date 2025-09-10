@@ -1,4 +1,4 @@
-# Release v0.3.3.26b 2025-09-09
+# Release v0.3.3.27b 2025-09-10
 
 ## New Features
 
@@ -45,8 +45,10 @@
 22.  fix stats vars (0.3.3.23b 2025-09-06)
 23. use asio for resp again (0.3.3.24b 2025-09-07)
 24. improve hash perf a bit (0.3.3.24b 2025-09-07)
-25. fix issue with last page eviction (0.3.3.25b 2025-09-08)
+25. fix the issue with last page eviction (0.3.3.25b 2025-09-08)
 26. handle dequeue issue with empty keys (also add test) (0.3.3.26b 2025-09-09)
+27. switch off memory overflow check in auth db which can lead to unexpected failures when memory is too low(0.3.3.27b 2025-09-10)
+28. fix low memory check and test (0.3.3.27b 2025-09-10)
 
 # Release v0.3.3.7b 2025-08-08
 

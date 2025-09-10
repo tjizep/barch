@@ -42,6 +42,7 @@ namespace arena {
         mutable heap::std_vector<bool> modified{};
         mutable size_t cow_alllocated{};
         bool borrowed{false};
+        bool opt_check_mem = true;
 
         void recover_free(size_t at) {
             if (!is_free(at)) {
@@ -540,6 +541,12 @@ namespace arena {
         bool empty() const {
             return page_data_size == 0;
         }
+        void set_check_mem(bool check) {
+            opt_check_mem = check;
+        }
+        bool is_check_mem() const {
+            return opt_check_mem;
+        }
         bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const;
 
         bool load(const std::string &filename, const std::function<void(std::istream &)> &extra);
@@ -666,7 +673,9 @@ namespace arena {
         void set_opt_use_vmm(bool use_vmm) {
             main.reallocate(use_vmm);
         }
-
+        void set_check_mem(bool check) {
+            main.set_check_mem(check);
+        }
         [[nodiscard]] size_t get_bytes_allocated() const {
             if (main.opt_use_vmmap) {
                 return (main.get_max_address_accessed() + 1) * physical_page_size;

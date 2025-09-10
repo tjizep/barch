@@ -12,11 +12,10 @@ assert(barch.size() == MAXK)
 barch.setConfiguration("max_memory_bytes","1m")
 print("sleeping")
 for i in range(1):
-    time.sleep(0.5)
+    time.sleep(3.5)
     print(barch.size())
-
-for i in range(MAXK+1,MAXK + 10000):
-    print("insert again",i)
+assert(barch.size() < MAXK)
+for i in range(MAXK+1,MAXK + 100000):
     k.set(str(i),str(i))
 
 stats = barch.stats()

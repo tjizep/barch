@@ -2,16 +2,16 @@
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml)
 [![Ubuntu 22.04 CI (GCC 11)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
 
-`BARCH` is a low memory, dynamically configurable, constant access time ordered cache similar to [valkey](https://valkey.io/) and redis
+`BARCH` is a low-memory, dynamically configurable, constant access time ordered cache similar to [valkey](https://valkey.io/) and redis
 
-Additionally it has an embedded server+client for python which can reduce read latency to micro-seconds.
+Additionally, it has an embedded server+client for python which can reduce read latency to micro-seconds.
 It implements the Z* (OrderedSet), H* (HashSet) and key value API's available in redis.
 A demo ubuntu 22.04 docker image is available at teejip/barch:apis
 
 Run below to expose an example flask application to see the API's in action
 ```
 sudo docker ps -a -q | sudo xargs docker stop 
-sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.3.3.26b
+sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.3.3.27b
 
 ```
 binaries are located under `/home/barch/setup` within the docker image

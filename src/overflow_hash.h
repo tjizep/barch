@@ -28,9 +28,9 @@ namespace oh {
         typedef heap::unordered_set<K, H, key_compare> H2;
 
         struct data {
-            float max_leakage = 0.3f;
+            float max_leakage = 0.1f;
             float max_load_factor = 0.8f;
-            float max_rehash_multiplier = 4; // a large multiplier is ok
+            float max_rehash_multiplier = 3; // a large multiplier is ok
             // because the hash itself is small relative to the data it indexes
             // it wont work well where the data is small
             key_compare eq{};

@@ -72,8 +72,8 @@ local test = function()
     assert(vk.call('B.SIZE') == valids)
 end
 
-
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "280m")
+-- check issue with auth db failing when mem is low
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "80m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "10000000000")

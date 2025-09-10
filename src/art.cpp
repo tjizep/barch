@@ -1747,7 +1747,7 @@ art::hashed_key::hashed_key(const logical_address& la) {
 
 }
 
-art::hashed_key::hashed_key(value_type k) {
+art::hashed_key::hashed_key(value_type) {
 }
 
 const art::leaf* art::hashed_key::get_leaf(const query_pair& q) const {
@@ -1799,9 +1799,6 @@ art::node_ptr art::tree::from_unordered_set(value_type key) const {
         return i->node(this);
     }
     return nullptr;
-}
-
-int64_t art::distance(const tree *t, const trace_list &a, const trace_list &b) {
 }
 
 bool art::tree::publish(std::string host, int port) {
@@ -2160,7 +2157,7 @@ art::value_type art::tree::filter_key(value_type key) const {
 
 bool art::tree::insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
 
-    if (statistics::logical_allocated > get_max_module_memory()) {
+    if (get_total_memory() > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
         return false;

@@ -229,7 +229,7 @@ namespace art {
         void start_maintain();
 
         tree(const tree &) = delete;
-
+        // standard constructor
         tree(const node_ptr &root, uint64_t size, size_t shard) :
         alloc_pair(shard),
         root(root),
@@ -240,12 +240,15 @@ namespace art {
             start_maintain();
 
         }
+        // special constructor for auth
         tree(const std::string& name,const node_ptr &root, uint64_t size, size_t shard) :
         alloc_pair(shard,name),
         with_stats(false),
         root(root),
         size(size),
         opt_ordered_keys(true) {
+            nodes.get_main().set_check_mem(false);
+            leaves.get_main().set_check_mem(false);
             repl_client.shard = shard;
             barch::repl::clear_route(shard);
             start_maintain();

@@ -59,7 +59,7 @@ namespace art {
     static constexpr void std_abort(Args &&... args) __THROW {
         // Generate formatting string "{} "...
         std::array<char, sizeof...(Args) * 3 + 1> braces{};
-        constexpr const char c[4] = "{} ";
+        constexpr char c[4] = "{} ";
         for (size_t i{0}; i != braces.size() - 1; ++i)
             braces[i] = c[i % 3];
         braces.back() = '\0';

@@ -332,11 +332,6 @@ struct logical_allocator {
 
     logical_allocator(abstract_leaf_pair* ap,std::string name): ap(ap), main(std::move(name)), emancipated(ap) {}
 
-    explicit
-    logical_allocator(bool opt_enable_lru, abstract_leaf_pair* ap, std::string name): ap(ap), main(std::move(name)), opt_enable_lru(opt_enable_lru) {
-        opt_page_trace = art::get_log_page_access_trace();
-    };
-
     logical_allocator(const logical_allocator &) = delete;
 
     ~logical_allocator() = default;
@@ -347,7 +342,6 @@ private:
     mutable abstract_leaf_pair * ap = nullptr;
     arena::hash_arena main;
     bool opt_page_trace = art::get_log_page_access_trace();
-    bool opt_enable_lru = false;
     bool opt_enable_lfu = false;
     bool opt_validate_addresses = false;
     bool opt_move_decompressed_pages = false;
@@ -362,7 +356,6 @@ private:
 
     std::chrono::time_point<std::chrono::system_clock> last_vacuum_millis = std::chrono::high_resolution_clock::now();;
     free_list emancipated{nullptr};
-    lru_list lru{};
 
     address_set fragmented{};
     address_set erased{}; // for runtime use after free tests
@@ -457,33 +450,10 @@ private:
         return main.max_logical_address();
     }
 
-    void add_to_lru(size_t at, storage &page) {
-        if (opt_enable_lru) {
-            lru.emplace_back(at);
-            page.lru = --lru.end();
-        }
-        if (opt_enable_lfu||opt_enable_lru) {
-            page.ticker = ++ticker;
-        }
-    }
 
-    void update_lru(size_t at, storage &page) {
-        if (opt_enable_lru) {
-            if (page.lru == lru_list::iterator()) {
-                lru.emplace_back(at);
-                page.lru = --lru.end();
-            } else {
-                if (*page.lru != at) {
-                    abort();
-                }
-                lru.splice(lru.begin(), lru, page.lru);
-            }
-        }
-    }
     std::pair<size_t, storage &> allocate_page_at(size_t at, size_t) //unused(ps = SS)
     {
         auto &page = retrieve_page(at);
-        add_to_lru(at, page);
         if (initialize_memory == 1) {
         }
 
@@ -535,12 +505,6 @@ private:
             }
         }
         if (at.null()) return nullptr;
-        if (opt_enable_lru) {
-            auto p = at.page();
-            auto &t = retrieve_page(p, modify);
-            update_lru(at.page(), t);
-        }
-
 
         return get_page_data(at);
     }
@@ -647,8 +611,6 @@ public:
                 abort_with("invalid fragmentation");
             }
             fragmentation -= t.fragmentation;
-            if (!lru.empty())
-                lru.erase(t.lru);
             t.clear();
             emancipated.erase(at.page());
             free_page(at.page());
@@ -691,9 +653,6 @@ public:
         return pages;
     }
 
-    lru_list create_lru_list() {
-        return lru;
-    }
     size_t get_page_count() const {
         return main.page_count();
     }
@@ -707,11 +666,6 @@ public:
     }
 
     std::pair<heap::buffer<uint8_t>, size_t> get_lru_page() {
-        if (opt_enable_lru) {
-            if (!lru.empty()) {
-                return get_page_buffer_inner(*(--lru.end()));
-            }
-        }
         return {{}, 0};
     }
 
@@ -891,7 +845,7 @@ public:
         auto writer = [&](std::ostream &of) -> void {
             long ts = 0;
             writep(of, ts);
-
+            bool opt_enable_lru = false;
             writep(of, opt_enable_lru);
             writep(of, opt_validate_addresses);
             writep(of, opt_move_decompressed_pages);
@@ -919,7 +873,7 @@ public:
         auto writer = [&](std::ostream &of) -> void {
             long ts = 0;
             writep(of, ts);
-
+            bool opt_enable_lru = false;
             writep(of, opt_enable_lru);
             writep(of, opt_validate_addresses);
             writep(of, opt_move_decompressed_pages);
@@ -948,7 +902,7 @@ public:
         auto reader = [&](std::istream &in) -> void {
             long ts = 0;
             readp(in, ts);
-
+            bool opt_enable_lru = false;
             readp(in, opt_enable_lru);
             readp(in, opt_validate_addresses);
             readp(in, opt_move_decompressed_pages);
@@ -982,7 +936,7 @@ public:
         auto reader = [&](std::istream &in1) -> void {
             long ts = 0;
             readp(in1, ts);
-
+            bool opt_enable_lru = false;
             readp(in1, opt_enable_lru);
             readp(in1, opt_validate_addresses);
             readp(in1, opt_move_decompressed_pages);
@@ -1028,15 +982,10 @@ public:
 
         last_vacuum_millis = std::chrono::high_resolution_clock::now();;
         emancipated = {ap};
-        lru = {};
         fragmented = {};
         erased = {}; // for runtime use after free tests
         last_created_page = {};
         last_page_ptr = {};
-    }
-
-    void set_opt_enable_lru(bool enable_lru) {
-        opt_enable_lru = enable_lru;
     }
 
     void set_opt_enable_lfu(bool enable_lfu) {

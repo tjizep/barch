@@ -130,8 +130,6 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
 
     size = 0;
     readp(in, size);
-    //uint64_t alloc_table_start = in.tellg();
-    //in.seekg(alloc_table_start + size * alloc_record_size);
 
     for (size_t i = 0; i < size; i++) {
         storage s{};
@@ -142,7 +140,6 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
         }
         uint32_t bsize = 0;
 
-        //uint64_t start = in.tellg();
         readp(in, page);
         if (page > arena.max_address_accessed) {
             art::std_err("invalid page");
@@ -195,7 +192,7 @@ bool arena::base_hash_arena::load(const std::string &filename, const std::functi
     base_hash_arena anew_one;
     anew_one.set_check_mem(this->is_check_mem());
     if (arena_read(anew_one, extra, filename)) {
-        *this = anew_one; // only update if successfull
+        *this = anew_one; // only update if successful
         return true;
     }
     return false;
@@ -203,7 +200,7 @@ bool arena::base_hash_arena::load(const std::string &filename, const std::functi
 bool arena::base_hash_arena::retrieve(std::istream &in, const std::function<void(std::istream &)> &extra) {
     base_hash_arena anew_one;
     if (arena_retrieve(anew_one, in, extra)) {
-        *this = anew_one; // only update if successfull
+        *this = anew_one; // only update if successful
         return true;
     }
     return false;

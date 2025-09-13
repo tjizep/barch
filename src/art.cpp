@@ -1801,6 +1801,12 @@ art::node_ptr art::tree::from_unordered_set(value_type key) const {
     return nullptr;
 }
 
+bool art::tree::remove_from_unordered_set(value_type key) {
+    set_hash_query_context(key);
+    return h.erase(key) > 0;
+}
+
+
 bool art::tree::publish(std::string host, int port) {
     repl_client.add_destination(std::move(host), port);
     return true;
@@ -2204,7 +2210,7 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
 }
 
 bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (statistics::logical_allocated > get_max_module_memory()) {
+    if (get_total_memory() > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
         return false;
@@ -2262,6 +2268,45 @@ bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(c
     }
 
     return art::update(this, key, repl_updateresult);
+}
+bool art::tree::evict(const leaf* l) {
+    if (l->deleted()) return false;
+    size_t before = size;
+    if (l->is_hashed()) {
+        auto i = h.find(l->get_key());
+        if (i != h.end()) {
+            auto n = i->node(this);
+            h.erase(i);
+            n.free_from_storage();
+            ++statistics::keys_evicted;
+            return true;
+        }
+    }
+    --statistics::delete_ops; // were not counting these deletes
+    art_delete(this, l->get_key(), [](const art::node_ptr &){});
+    if (size < before) {
+        ++statistics::keys_evicted;
+    }
+    return size < before;
+}
+bool art::tree::evict(value_type unfiltered_key) {
+    size_t before = size;
+
+    auto key = filter_key(unfiltered_key);
+    node_ptr old = from_unordered_set(key);
+    if (!old.null()) {
+        auto n = old;
+        leaf *dl = n.l();
+        if (dl->is_hashed()) {
+            h.erase(key);
+            n.free_from_storage();
+            return true;
+        }
+    }
+    --statistics::delete_ops; // were not counting these deletes
+    art_delete(this, key, [](const art::node_ptr &){});
+    return size < before;
+
 }
 bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
     //storage_release release(this);

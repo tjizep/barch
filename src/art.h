@@ -178,6 +178,7 @@ namespace art {
         mutable oh::unordered_set<hashed_key,hk_hash, hk_eq> h{hk_e,hk_h};
         mutable uint64_t saf_keys_found{};
         mutable uint64_t saf_get_ops{};
+        bool remove_from_unordered_set(value_type key);
     public:
         void inc_keys_found() const {
             ++saf_get_ops;
@@ -210,6 +211,7 @@ namespace art {
         barch::repl::client repl_client{};
         std::atomic<size_t> queue_size{};
         bool opt_ordered_keys{true};
+
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();
@@ -235,6 +237,8 @@ namespace art {
         root(root),
         size(size),
         opt_ordered_keys(get_ordered_keys()) {
+            opt_all_keys_lru = get_evict_allkeys_lru();
+            opt_volatile_keys_lru = get_evict_volatile_lru();
             repl_client.shard = shard;
             barch::repl::clear_route(shard);
             start_maintain();
@@ -256,6 +260,7 @@ namespace art {
         tree& operator=(const tree&) = delete;
 
         ~tree() override;
+
         void load_hash();
         void clear_hash() ;
         bool remove_leaf_from_uset(value_type key);
@@ -302,7 +307,8 @@ namespace art {
         bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update = true);
-
+        bool evict(value_type key);
+        bool evict(const leaf* l);
         bool remove(value_type key, const NodeResult &fc);
         bool remove(value_type key);
 

@@ -1,4 +1,4 @@
-# Release v0.3.3.27b 2025-09-10
+# Release v0.3.3.28b 2025-09-13
 
 ## New Features
 
@@ -18,6 +18,7 @@
 14. buffer some statistics to improve concurrency (0.3.3.16b 2025-08-27)
 15. improve write throughput by 80% using lockfree queue (moodycamel) (v0.3.3.19b 2025-09-01)
 16. support up to 256kb key and value size (v0.3.3.25b 2025-09-8)
+17. rework and improve lru algorithm (v0.3.3.28b 2025-09-13)
 
 ## Fixes
 
@@ -49,6 +50,7 @@
 26. handle dequeue issue with empty keys (also add test) (0.3.3.26b 2025-09-09)
 27. switch off memory overflow check in auth db which can lead to unexpected failures when memory is too low(0.3.3.27b 2025-09-10)
 28. fix low memory check and test (0.3.3.27b 2025-09-10)
+29. fix oom checks (v0.3.3.28b 2025-09-13)
 
 # Release v0.3.3.7b 2025-08-08
 

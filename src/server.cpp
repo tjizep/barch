@@ -247,7 +247,7 @@ namespace barch {
                         auto options = get_options(i+1, buffer);
                         auto key = get_value(options.second, buffer);
                         auto value = get_value(key.second, buffer);
-                        if (statistics::logical_allocated > art::get_max_module_memory()) {
+                        if (get_total_memory() > art::get_max_module_memory()) {
                             // do not add data if the memory limit is reached
                             ++statistics::oom_avoided_inserts;
                             r.error = true;

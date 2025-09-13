@@ -15,7 +15,9 @@ static std::random_device rd;
 static std::mt19937 gen(rd());
 
 namespace art {
-
+    void set_leaf_lru(art::leaf * l) {
+        l->set_lru();
+    }
     node_ptr tree::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
         return art::make_leaf(*this, key, v, ttl, is_volatile);
     }
@@ -44,6 +46,12 @@ namespace art {
         ++statistics::leaf_nodes;
         l->set_key(key);
         l->set_value(v);
+        if (alloc.opt_all_keys_lru) {
+            l->set_lru();
+        }
+        if (is_volatile && alloc.opt_volatile_keys_lru ) {
+            l->set_lru();
+        }
         if (l->byte_size() != leaf_size) {
             abort_with("invalid leaf size");
         }
@@ -264,7 +272,7 @@ void art::tree::run_defrag() {
                 if (transacted) return; // try later
                 auto page = lc.get_page_buffer(p);
 
-                page_iterator(page.first, page.second, [&fc,this,p](const leaf *l, uint32_t pos) {
+                page_iterator(page.first, page.second, [this,p](const leaf *l, uint32_t pos) {
                     if (l->deleted()) return;
                     size_t c1 = this->size;
                     if (l->is_hashed()) {
@@ -272,11 +280,11 @@ void art::tree::run_defrag() {
                         h.erase(lad);
                         free_node(lad);
                     }else {
-                        art_delete(this, l->get_key(), fc);
+                        this->evict(l);
                         if (c1 - 1 != this->size) {
                             abort_with("key does not exist anymore");
                         }
-                        --statistics::delete_ops; // were not counting these deletes
+
                     }
 
                 });
@@ -310,32 +318,40 @@ void art::tree::run_defrag() {
     std::this_thread::sleep_for(std::chrono::milliseconds(40)); // chill a little we've worked hard
 }
 
-void abstract_eviction(art::tree *t,
-                       const std::function<bool(const art::leaf *l)> &predicate,
+void abstract_eviction(const std::function<void(const art::leaf *l)> &fupdate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
 
-    if (statistics::logical_allocated < art::get_max_module_memory()) return;
-    auto fc = [](const art::node_ptr & unused(n)) -> void {
-    };
+    if (get_total_memory() < art::get_max_module_memory()) return;
+
     auto page = src();
-    page_iterator(page.first, page.second, [t,fc,predicate](const art::leaf *l, uint32_t) {
-        if (!l->deleted() && predicate(l)) {
-            ++statistics::keys_evicted;
-            art_delete(t, l->get_key(), fc); // will get cleaned up by defrag
-            --statistics::delete_ops; // not counting these deletes
+    page_iterator(page.first, page.second, [fupdate](const art::leaf *l, uint32_t) {
+        if (!l->deleted()) {
+            fupdate(l);
         }
     });
 
 }
+void abstract_eviction(art::tree *t,
+                       const std::function<bool(const art::leaf *l)> &predicate,
+                       const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
+    auto fc = [](const art::node_ptr & unused(n)) -> void {
+    };
+    auto updater = [predicate,fc,t](const art::leaf *l) {
+        if (!l->deleted() && predicate(l)) {
+           t->evict(l);
+        }
+    };
+    abstract_eviction(updater, src);
+}
 
 void abstract_lru_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
-    if (statistics::logical_allocated < art::get_max_module_memory()) return;
+    if (get_total_memory() < art::get_max_module_memory()) return;
     write_lock release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 void abstract_random_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
-    if (statistics::logical_allocated < art::get_max_module_memory()) return;
+    if (get_total_memory() < art::get_max_module_memory()) return;
     storage_release release(t);
     auto &lc = t->get_leaves();
     auto page_num = lc.max_page_num();
@@ -344,19 +360,18 @@ void abstract_random_eviction(art::tree *t, const std::function<bool(const art::
     size_t random_page = dist(gen);
     abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
 }
-void abstract_iter_eviction(art::tree *t, size_t ctr, const std::function<bool(const art::leaf *l)> &predicate) {
-    if (statistics::logical_allocated < art::get_max_module_memory()) return;
+
+void abstract_random_update(art::tree *t, const std::function<void(const art::leaf *l)> &updater) {
+    if (get_total_memory() < art::get_max_module_memory()) return;
     storage_release release(t);
     auto &lc = t->get_leaves();
-    auto page_count = lc.get_page_count();
+    auto page_num = lc.max_page_num();
 
-    if (page_count > 10) {
-        size_t random_page = page_count % ctr;
-        //art::std_log("choose page",random_page,"to evict from",ctr);
-        abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
-    }
+    std::uniform_int_distribution<size_t> dist(1, page_num);
+    size_t random_page = dist(gen);
+
+    abstract_eviction(updater, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
 }
-
 void abstract_lfu_eviction(art::tree *t, const std::function<bool(const art::leaf *l)> &predicate) {
     if (statistics::logical_allocated < art::get_max_module_memory()) return;
     auto &lc = t->get_leaves();
@@ -387,9 +402,22 @@ void run_evict_volatile_expired_keys(art::tree *t) {
     if (!art::get_evict_volatile_ttl()) return;
     abstract_lru_eviction(t, [](const art::leaf *l) -> bool { return l->expired(); });
 }
+
 void run_sweep_expired_keys(art::tree *t) {
     abstract_random_eviction(t, [](const art::leaf *l) -> bool {
         return l->expired();
+    });
+}
+
+void run_sweep_lru_keys(art::tree *t) {
+    if (!art::get_evict_allkeys_lru()) return;
+    abstract_random_update(t, [t](const art::leaf *l) {
+        if (l->is_lru()) {
+            auto n = art_search(t, l->get_key());
+            n.l()->unset_lru();
+        }else {
+            t->evict(l); // will get cleaned up by defrag
+        }
     });
 }
 
@@ -405,7 +433,7 @@ void art::tree::start_maintain() {
         auto start_save_time = std::chrono::high_resolution_clock::now();
         auto mods = get_modifications();
         while (!this->mexit) {
-            run_evict_all_keys_lru(this);
+            run_sweep_lru_keys(this);
             run_evict_all_keys_lfu(this);
             run_evict_volatile_keys_lru(this);
             run_evict_volatile_keys_lfu(this);

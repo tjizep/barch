@@ -13,6 +13,8 @@
 
 #include "key_options.h"
 namespace art {
+    struct leaf;
+
     template<typename I>
     int64_t i64max() {
         return std::numeric_limits<I>::max();
@@ -22,7 +24,7 @@ namespace art {
     int64_t i64min() {
         return std::numeric_limits<I>::min();
     }
-
+    extern void set_leaf_lru(art::leaf * l);
     enum key_types {
         tinteger = 1u,
         tdouble = 2u,
@@ -64,7 +66,8 @@ namespace art {
         leaf_deleted_flag = 4u,
         leaf_large_flag = 8u,
         leaf_hashed_flag = 16u,
-        leaf_last_flag = (1<<(4u+1u))-1,
+        leaf_lru_flag = 32u,
+        leaf_last_flag = (1<<(5u+1u))-1,
     };
 
     struct leaf;
@@ -230,9 +233,13 @@ namespace art {
             if (!is_leaf)
                 abort();
             check();
-            auto *l = logical.get_ap<alloc_pair>().get_leaves().modify<leaf>(logical);
+            auto& ap = logical.get_ap<alloc_pair>();
+            auto *l = ap.get_leaves().modify<leaf>(logical);
             if (l == nullptr) {
-                abort();
+                abort_with("invalid leaf address");
+            }
+            if (ap.opt_all_keys_lru) {
+                set_leaf_lru(l);
             }
             return l;
         }
@@ -245,9 +252,19 @@ namespace art {
             if (!is_leaf)
                 abort();
             check();
-            const auto *l = logical.get_ap<alloc_pair>().get_leaves().read<leaf>(logical);
+            auto& ap = logical.get_ap<alloc_pair>();
+            const leaf *l;
+            if (ap.opt_all_keys_lru) {
+                auto * lm = ((alloc_pair&)ap).get_leaves().modify<leaf>(logical);
+                if (lm) {
+                    set_leaf_lru(lm);
+                }
+                l = lm;
+            }else {
+                l = ap.get_leaves().read<leaf>(logical);
+            }
             if (l == nullptr) {
-                abort();
+                abort_with("invalid leaf address");
             }
             return l;
         }
@@ -570,6 +587,18 @@ namespace art {
             flags |= leaf_volatile_flag;
         }
 
+        void set_lru() {
+            flags |= leaf_lru_flag;
+        }
+
+        void unset_lru() {
+            flags &= ~leaf_lru_flag;
+        }
+
+        [[nodiscard]] bool is_lru() const {
+            return (flags & leaf_lru_flag) == leaf_lru_flag;
+        }
+
         void set_deleted() {
             flags |= leaf_deleted_flag;
         }
@@ -577,6 +606,7 @@ namespace art {
         void unset_volatile() {
             flags &= ~leaf_volatile_flag;
         }
+
 
         [[nodiscard]] bool is_volatile() const {
             return (flags & leaf_volatile_flag) == leaf_volatile_flag;

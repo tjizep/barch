@@ -592,7 +592,6 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
 }
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     std::lock_guard lock(config_mutex);
-    bool lru = (record.evict_volatile_lru || record.evict_allkeys_lru) ;
     bool lfu = (record.evict_volatile_lfu || record.evict_allkeys_lfu) ;
     for (auto shard : art::get_shard_count()) {
         auto t = get_art(shard);
@@ -600,9 +599,8 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
 
         t->nodes.set_opt_enable_lfu(lfu);
         t->leaves.set_opt_enable_lfu(lfu);
-
-        t->nodes.set_opt_enable_lru(lru);
-        t->leaves.set_opt_enable_lru(lru);
+        t->opt_all_keys_lru = record.evict_allkeys_lru;
+        t->opt_volatile_keys_lru = record.evict_volatile_lru;
     }
     return VALKEYMODULE_OK;
 }

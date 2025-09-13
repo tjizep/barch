@@ -8,7 +8,7 @@
 #include <cstdint>
 #include "sastam.h"
 #include "constants.h"
-#define _CHECK_AP_ 1
+#define _CHECK_AP_ 0
 struct abstract_alloc_pair {
     virtual ~abstract_alloc_pair() = default;
 
@@ -134,6 +134,8 @@ private:
     abstract_alloc_pair * alloc = nullptr;
 };
 struct abstract_leaf_pair : public abstract_alloc_pair {
+    bool opt_all_keys_lru{false};
+    bool opt_volatile_keys_lru{false};
     virtual void remove_leaf(const logical_address& at) = 0;
 };
 #endif //COMPRESSED_ADDRESS_H

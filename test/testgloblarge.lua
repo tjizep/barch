@@ -57,7 +57,7 @@ end
 result[inc()] = {"running test "..tests}
 vk.call('B.CLEAR')
 
-result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "60m")
+result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "160m")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "on")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "none")
 local cfg = vk.call("B.CONFIG", "SET","iteration_worker_count", 4)

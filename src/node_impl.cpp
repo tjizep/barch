@@ -413,8 +413,9 @@ void run_sweep_lru_keys(art::tree *t) {
     if (!art::get_evict_allkeys_lru()) return;
     abstract_random_update(t, [t](const art::leaf *l) {
         if (l->is_lru()) {
-            auto n = art_search(t, l->get_key());
-            n.l()->unset_lru();
+            auto n = t->search(l->get_key());
+            if (!n.null())
+                n.l()->unset_lru();
         }else {
             t->evict(l); // will get cleaned up by defrag
         }

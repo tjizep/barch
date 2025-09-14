@@ -2192,7 +2192,6 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
                 dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
                 options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
                 last_leaf_added = n;
-                this->repl_client.insert(latch, options, key, value);
                 return false;
             }
             node_ptr old = logical_address{i->addr,this};
@@ -2273,6 +2272,7 @@ bool art::tree::evict(const leaf* l) {
     if (l->deleted()) return false;
     size_t before = size;
     if (l->is_hashed()) {
+        set_hash_query_context(l->get_key());
         auto i = h.find(l->get_key());
         if (i != h.end()) {
             auto n = i->node(this);

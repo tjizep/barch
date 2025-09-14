@@ -1,4 +1,4 @@
-# Release v0.3.3.28b 2025-09-13
+# Release v0.3.3.28b 2025-09-14
 
 ## New Features
 
@@ -51,6 +51,8 @@
 27. switch off memory overflow check in auth db which can lead to unexpected failures when memory is too low(0.3.3.27b 2025-09-10)
 28. fix low memory check and test (0.3.3.27b 2025-09-10)
 29. fix oom checks (v0.3.3.28b 2025-09-13)
+30. fix lru bug with hash table (v0.3.3.28b 2025-09-14)
+31. fix rpc bug with hash table (v0.3.3.28b 2025-09-14)
 
 # Release v0.3.3.7b 2025-08-08
 

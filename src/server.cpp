@@ -260,7 +260,7 @@ namespace barch {
                                 art_insert(t, options.first, key.first, value.first,true,fc);
                             }else
                             {
-                                t->jumpsert(options.first, key.first, value.first,true,fc);
+                                t->hash_insert(options.first, key.first, value.first,true,fc);
                             }
 
 

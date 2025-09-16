@@ -302,7 +302,7 @@ namespace art {
 
         bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
 
-        bool jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc);
 
         bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc);

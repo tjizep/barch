@@ -294,7 +294,7 @@ void art::tree::run_defrag() {
                     if (l->is_hashed()) {
                         options.set_expiry(l->expiry_ms());
                         options.set_volatile(l->is_volatile());
-                        jumpsert(options, l->get_key(), l->get_value(),true,fc);
+                        hash_insert(options, l->get_key(), l->get_value(),true,fc);
                         return;
                     }
                     size_t c1 = this->size;

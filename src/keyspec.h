@@ -129,6 +129,7 @@ namespace art {
         bool nx = false;
         bool xx = false;
         bool keepttl = false;
+        bool hash = false;
         int64_t ttl = 0;
 
         key_spec() = default;
@@ -193,6 +194,10 @@ namespace art {
             }
             if (has("keepttl", spos)) {
                 keepttl = true;
+                ++spos;
+            }
+            if (has("h", spos)) {
+                hash = true;
                 ++spos;
             }
             if (argc == spos) // all known arguments should be consumed

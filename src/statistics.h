@@ -56,6 +56,13 @@ namespace statistics {
     extern std::atomic<uint64_t> decr_ops;
     extern std::atomic<uint64_t> update_ops;
     /**
+     * queue stats
+     */
+    extern std::atomic<uint64_t> queue_failures;
+    extern std::atomic<uint64_t> queue_added;
+    extern std::atomic<uint64_t> queue_processed;
+
+    /**
      * replication + network stats
      */
     namespace repl {

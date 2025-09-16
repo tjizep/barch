@@ -50,11 +50,9 @@ local test = function()
     tests = tests + 1
     local t
     t = vk.call('B.MILLIS')
-    if vk.call('B.SIZE') < count/2 then
-        for i = 1, count do
-            local k = convert(i)
-            vk.call('B.SET',k,i)
-        end
+    for i = 1, count do
+        local k = convert(i)
+        vk.call('B.SET', k, i, 'H')
     end
     local valids = 0
 
@@ -71,7 +69,7 @@ local test = function()
     result[inc()] = {'SIZE', vk.call('B.SIZE')}
     --result[inc()] = {'CLEAR B', vk.call('B.CLEAR')}
     result[inc()] = {'SAVE B', vk.call('B.SAVE')}
-
+    assert(valids == vk.call('B.SIZE'))
 end
 
 

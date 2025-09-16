@@ -271,6 +271,7 @@ int SET(caller& call,const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
     }
+    bool do_hash = spec.hash;
 
     art::value_type reply{"", 0};
     auto fc = [&](const art::node_ptr &) -> void {
@@ -278,12 +279,19 @@ int SET(caller& call,const arg_t& argv) {
             reply = key;
         }
     };
-    //
+
     if (!spec.get && is_queue_server_running() && t->queue_size < max_process_queue_size) {
-        ::queue_insert(t->shard, spec, key, v);
+        if (do_hash)
+            ::hash_queue_insert(t->shard, spec, key, v);
+        else
+            ::queue_insert(t->shard, spec, key, v);
+
     }else {
         storage_release l(t);
-        t->opt_insert(spec, key, v, true, fc);
+        if (do_hash)
+            t->hash_insert(spec, key, v, true, fc);
+        else
+            t->opt_insert(spec, key, v, true, fc);
     }
 
 

@@ -2178,7 +2178,8 @@ bool art::tree::insert(const key_options& options, value_type unfiltered_key, va
     return size > before;
 }
 
-bool art::tree::jumpsert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
+bool art::tree::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
+    ++statistics::insert_ops;
     set_hash_query_context(key);
     auto i = h.find(key);
     if (i != h.end()) {
@@ -2192,14 +2193,18 @@ bool art::tree::jumpsert(const key_options &options, value_type key, value_type 
                 dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
                 options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
                 last_leaf_added = n;
+                ++statistics::keys_replaced;
                 return false;
             }
             node_ptr old = logical_address{i->addr,this};
             h.erase(i);
             old.free_from_storage();
+            ++statistics::keys_replaced;
         }else {
             return false;
         }
+    }else {
+        ++statistics::new_keys_added;
     }
     node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
     l.l()->set_hashed();
@@ -2220,7 +2225,7 @@ bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key
     if (opt_ordered_keys) {
         art_insert(this, options, key, value, update, fc);
     }else {
-        jumpsert(options, key, value, update, fc);
+        hash_insert(options, key, value, update, fc);
     }
     this->repl_client.insert(latch, options, key, value);
     return size > before;

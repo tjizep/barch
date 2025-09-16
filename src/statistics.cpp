@@ -51,6 +51,14 @@ std::atomic<uint64_t> statistics::incr_ops = 0;
 std::atomic<uint64_t> statistics::decr_ops = 0;
 std::atomic<uint64_t> statistics::update_ops = 0;
 
+/**
+* queue stats
+*/
+
+std::atomic<uint64_t> statistics::queue_failures = 0;
+std::atomic<uint64_t> statistics::queue_added = 0;
+std::atomic<uint64_t> statistics::queue_processed = 0;
+
 namespace statistics::repl {
     std::atomic<uint64_t> push_connections_open = 0;
     std::atomic<uint64_t> key_add_recv = 0;

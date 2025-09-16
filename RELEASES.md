@@ -1,4 +1,4 @@
-# Release v0.3.3.28b 2025-09-14
+# Release v0.3.3.29b 2025-09-15
 
 ## New Features
 
@@ -17,8 +17,10 @@
 13. add overflow hash to reduce memory consumption (unordered_keys config) (0.3.3.16b 2025-08-24)
 14. buffer some statistics to improve concurrency (0.3.3.16b 2025-08-27)
 15. improve write throughput by 80% using lockfree queue (moodycamel) (v0.3.3.19b 2025-09-01)
-16. support up to 256kb key and value size (v0.3.3.25b 2025-09-8)
+16. support up to 256 kb key and value size (v0.3.3.25b 2025-09-8)
 17. rework and improve lru algorithm (v0.3.3.28b 2025-09-13)
+18. add queue statistics (v0.3.3.29b 2025-09-15)
+19. add `H` flag to insert into hash (`GET` works without a flag) (v0.3.3.29b 2025-09-15)
 
 ## Fixes
 

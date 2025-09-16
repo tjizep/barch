@@ -1,4 +1,4 @@
-# Release v0.3.3.29b 2025-09-15
+# Release v0.3.3.29b 2025-09-16
 
 ## New Features
 
@@ -20,7 +20,7 @@
 16. support up to 256 kb key and value size (v0.3.3.25b 2025-09-8)
 17. rework and improve lru algorithm (v0.3.3.28b 2025-09-13)
 18. add queue statistics (v0.3.3.29b 2025-09-15)
-19. add `H` flag to insert into hash (`GET` works without a flag) (v0.3.3.29b 2025-09-15)
+19. add `H` flag to insert into hash (`GET` works without a flag) (v0.3.3.29b 2025-09-16)
 
 ## Fixes
 

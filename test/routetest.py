@@ -18,7 +18,7 @@ print(f"serverdir{serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 
 serverCmd = [f"{serverdir}valkey-server", f"--loadmodule", f"{barchdir}/_barch.so"]
-serverProc = subprocess.Popen(serverCmd,cwd=barchdir)
+serverProc = subprocess.Popen(serverCmd,cwd=serverdir)
 time.sleep(1)
 # sourcestart.lua starts a barch on port 14000 and adds some data while publishing to port 13000
 cliCmd = [f"{clidir}valkey-cli", f"--eval", f"{srcdir}/sourcestart.lua"]
@@ -31,9 +31,9 @@ barch.setRoute(1,"127.0.0.1",14000)
 barch.setRoute(2,"127.0.0.1",14000)
 # clear the db we have no keys now
 # size is not pulled from the source (port 14000) - keys are on demand only
-
 k = barch.KeyValue()
 # get the key from the source (port 14000)
+print(f"k.get('1')=[{k.get('1')}]")
 assert(k.get("1") == "one:test")
 print(barch.size())
 assert(barch.size() > 900)

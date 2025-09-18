@@ -265,7 +265,6 @@ namespace barch {
             while (started != asio_resp_pool.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     };
     std::shared_ptr<server_context>  srv = nullptr;

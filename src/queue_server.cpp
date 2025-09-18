@@ -52,7 +52,7 @@ private:
                 }
                 write_lock release(t->latch);
                 --t->queue_size;
-                t->opt_insert(into == into_hash, options, get_key(),get_value(),true,[](const art::node_ptr& ){});
+                t->opt_insert(options, get_key(),get_value(),true,[](const art::node_ptr& ){});
                 return true;
 
 
@@ -179,9 +179,4 @@ void queue_insert(size_t shard, art::key_options options,art::value_type k, art:
     else
         t->opt_insert(options,k,v,true,[](const art::node_ptr& ){});
 }
-void queue_insert(bool do_hash, size_t shard,art::key_options options,art::value_type k, art::value_type v) {
-    if (do_hash)
-        hash_queue_insert(shard,options,k,v);
-    else
-        queue_insert(shard,options,k,v);
-}
+

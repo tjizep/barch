@@ -2215,15 +2215,7 @@ bool art::tree::hash_insert(const key_options &options, value_type key, value_ty
     return true;
 }
 
-bool art::tree::opt_insert(bool do_hash, const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (opt_rpc_insert(do_hash, options, unfiltered_key, value, update, fc)) {
-        this->repl_client.insert(latch, options, unfiltered_key, value);
-        return true;
-    }
-    return false;
-}
-
-bool art::tree::opt_rpc_insert(bool do_hash, const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
+bool art::tree::opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
     if (get_total_memory() > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
@@ -2232,7 +2224,7 @@ bool art::tree::opt_rpc_insert(bool do_hash, const key_options& options, value_t
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
     size_t before = size;
-    if (do_hash) {
+    if (options.is_hashed()) {
         hash_insert(options, key, value, update, fc);
     }else {
         art_insert(this, options, key, value, update, fc);
@@ -2240,9 +2232,6 @@ bool art::tree::opt_rpc_insert(bool do_hash, const key_options& options, value_t
     return size+h.size() > before;
 }
 
-bool art::tree::opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    return opt_rpc_insert(!opt_ordered_keys, options, unfiltered_key, value, update, fc);
-}
 
 bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
     std::string tk;

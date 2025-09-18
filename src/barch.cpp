@@ -271,7 +271,9 @@ int SET(caller& call,const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
     }
-    bool do_hash = spec.hash;
+    if (!art::get_ordered_keys()) {
+        spec.hash = true;
+    }
 
     art::value_type reply{"", 0};
     auto fc = [&](const art::node_ptr &) -> void {
@@ -281,10 +283,10 @@ int SET(caller& call,const arg_t& argv) {
     };
 
     if (!spec.get && is_queue_server_running() && t->queue_size < max_process_queue_size) {
-        queue_insert(do_hash, t->shard, spec, key, v);
+        queue_insert(t->shard, spec, key, v);
     }else {
         storage_release l(t);
-        t->opt_insert(do_hash, spec, key, v, true, fc);
+        t->opt_insert(spec, key, v, true, fc);
     }
 
 
@@ -711,7 +713,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
         }
         return art::make_leaf(*t, l->get_key(), l->get_value(),  art::now() + spec.ttl, l->is_volatile());
     };
-    art::key_options opts{spec.ttl,true,false};
+    art::key_options opts{spec.ttl,true,false,false};
     if (t->update(l->get_key(),updater))
         return call.long_long(1);
     return call.long_long(-2);

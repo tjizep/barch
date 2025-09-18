@@ -13,10 +13,11 @@ namespace art {
             flag_is_keep_ttl = 1,
             flag_is_volatile = 2,
             flag_has_expiry = 4,
+            flag_is_hashed = 8,
         };
 
         key_options() = default;
-        key_options(int64_t expiry, bool keep_ttl, bool is_volatile) : expiry(expiry), flags(0) {
+        key_options(int64_t expiry, bool keep_ttl, bool is_volatile, bool is_hashed) : expiry(expiry), flags(0) {
             if (keep_ttl) {
                 flags |= flag_is_keep_ttl;
             }
@@ -25,6 +26,9 @@ namespace art {
             }
             if (expiry) {
                 flags |= flag_has_expiry;
+            }
+            if (is_hashed) {
+                flags |= flag_is_hashed;
             }
         }
         void writep(std::ostream& out) const {
@@ -39,12 +43,17 @@ namespace art {
         key_options(const key_spec & s) {
             expiry = s.ttl;
             set_keep_ttl(s.keepttl);
+            set_hashed(s.hash);
+            //set_is_volatile(s.is_volatile);
         }
         bool is_keep_ttl() const {
             return flags & flag_is_keep_ttl;
         }
         bool is_volatile() const {
             return flags & flag_is_volatile;
+        }
+        bool is_hashed() const {
+            return flags & flag_is_hashed;
         }
         bool has_expiry() const {
             return flags & flag_has_expiry;
@@ -74,7 +83,14 @@ namespace art {
             if (truth) {
                 flags |= flag_is_volatile;
             }else {
-                flags &= ~flag_is_keep_ttl;
+                flags &= ~flag_is_volatile;
+            }
+        }
+        void set_hashed(bool truth) {
+            if (truth) {
+                flags |= flag_is_hashed;
+            }else {
+                flags &= ~flag_is_hashed;
             }
         }
 

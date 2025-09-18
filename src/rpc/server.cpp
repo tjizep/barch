@@ -559,7 +559,7 @@ namespace barch {
             return true;
         }
 
-        bool client::rpc_insert(std::shared_mutex& latch, bool do_hash, const art::key_options& options, art::value_type key, art::value_type value){
+        bool client::rpc_insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value){
             latch.unlock();
             thread_local heap::vector<Variable> result;
             thread_local heap::vector<art::value_type> params;
@@ -567,7 +567,6 @@ namespace barch {
                     std::to_string(shard),
                     std::to_string(options.flags),
                     std::to_string(options.get_expiry()),
-                    do_hash ? "false": "true",
                     key.to_string(),value.to_string()};
             size_t ss = 0;
             if (!host.empty()) {
@@ -591,7 +590,9 @@ namespace barch {
 
         }
         bool client::insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value) {
-
+#if 0
+            return rpc_insert(latch, options, key, value);
+#else
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
@@ -620,6 +621,8 @@ namespace barch {
             ++statistics::repl::insert_requests;
             ++messages;
             return true;
+#endif
+
         }
 
         bool client::remove(std::shared_mutex& latch, art::value_type key) {
@@ -816,7 +819,7 @@ extern "C"{
     }
     int RPC_INSERT(caller& call, const arg_t& argv) {
         ++statistics::repl::key_add_recv;
-        if (argv.size() != 7)
+        if (argv.size() != 6)
             return call.wrong_arity();
         size_t shard = conversion::as_variable(argv[1]).i();
         if (shard >= art::get_shard_count().size())
@@ -824,7 +827,6 @@ extern "C"{
         auto fc = [&](const art::node_ptr &) -> void {};
         uint8_t flags = conversion::as_variable(argv[2]).i();
         uint64_t expiry = conversion::as_variable(argv[3]).i();
-        bool do_hash = conversion::as_variable(argv[4]).b();
         auto key = argv[5];
         auto value = argv[6];
         auto t = get_art(shard);
@@ -832,7 +834,7 @@ extern "C"{
         options.flags = flags;
         options.set_expiry(expiry);
         write_lock l(t->latch);
-        t->opt_rpc_insert(do_hash, options, key, value, true, fc);
+        t->opt_rpc_insert(options, key, value, true, fc);
         ++statistics::repl::key_add_recv_applied;
 
         return 0;

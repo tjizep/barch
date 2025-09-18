@@ -303,10 +303,8 @@ namespace art {
         bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
 
         bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc);
-        bool opt_rpc_insert(bool do_hash, const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
         bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
         bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
-        bool opt_insert(bool do_hash, const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
 
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update = true);

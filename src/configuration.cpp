@@ -9,7 +9,7 @@
 #include <regex>
 #include "art.h"
 #include "module.h"
-#include "server.h"
+#include "rpc/server.h"
 
 #define unused_arg
 art::configuration_record record;

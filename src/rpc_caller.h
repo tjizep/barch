@@ -9,10 +9,11 @@
 #include <vector>
 #include "keys.h"
 #include "module.h"
-#include "server.h"
+#include "rpc/server.h"
 #include "barch_apis.h"
 #include "sastam.h"
 #include "auth_api.h"
+#include "rpc/barch_functions.h"
 struct rpc_caller : caller {
 
     std::shared_ptr<barch::repl::rpc> host {};
@@ -24,6 +25,9 @@ struct rpc_caller : caller {
     heap::vector<bool> acl{get_all_acl()};
     arg_t args{};
     std::string user = "default";
+    void create(const std::string& h, uint_least16_t port) {
+        this->host = barch::repl::create(h,port);
+    }
     rpc_caller() {
         routes.reserve(art::get_shard_count().size());
         for (size_t shard : art::get_shard_count()) {
@@ -71,7 +75,7 @@ struct rpc_caller : caller {
         return 0;
     }
     int boolean(bool value) override {
-        results.push_back(value);
+        results.emplace_back(value);
         return 0;
     }
     int long_long(int64_t l) override {
@@ -138,29 +142,30 @@ struct rpc_caller : caller {
         }
         return 0;
     };
-    bool call_route(int &r, const std::vector<std::string_view>& params) {
+    barch::repl::call_result call_route(const std::vector<std::string_view>& params) {
         if (valid_routes && params.size() > 1) {
             size_t shard = get_shard(params[1]);
             if (shard < routes.size()) {
                 if (routes[shard] != nullptr) { // dont do any lookups if there's no route for perf
-                    auto &fbn = functions_by_name();
+                    auto fbn = barch::barch_functions;
                     std::string n = {params[0].data(),params[0].size()};
-                    auto fi = fbn.find(n);
-                    if (fi != fbn.end() && fi->second.is_data()) { // only route data calls
+                    auto fi = fbn->find(n);
+                    if (fi != fbn->end() && fi->second.is_data()) { // only route data calls
                         ++statistics::repl::attempted_routes;
-                        if (routes[shard]->call(r, results, params) == 0) {
+                        auto cr = routes[shard]->call(results, params);
+                        if (cr.net_error == 0) {
                             ++statistics::repl::routes_succeeded;
-                            return true;
+                            return cr;
                         } else {
                             // TODO: should we => if the data route network fails we will continue with other functions
                             routes[shard] = nullptr;
-                            return false;
+                            return cr;
                         }
                     }
                 }
             }
         }
-        return false;
+        return {-1,-1};
     }
 
     template<typename TC, typename VT>
@@ -170,13 +175,13 @@ struct rpc_caller : caller {
         args.clear();
         errors.clear();
         results.clear();
-        int r = 0;
-        if (call_route(r, params)) {
-            return r;
+        auto cr = call_route(params);
+        if (cr.net_error == 0) {
+            return cr.call_error;
         }
         if (host != nullptr) {
-            if (host->call(r, results, params) == 0) {
-                return r;
+            if (host->call(results, params).ok()) {
+                return 0;
             }else {
                 return -1;
             }
@@ -185,27 +190,27 @@ struct rpc_caller : caller {
             args.push_back({s.data(),s.size()});
         }
         try {
-            r = f(*this, args);
+            cr.call_error = f(*this, args);
         }catch (const std::exception& e) {
             ++statistics::exceptions_raised;
             errors.emplace_back(e.what());
-            r = -1;
+            cr.call_error = -1;
         }
-        if (r != 0) {
+        if (cr.call_error != 0) {
             if (errors.empty())
                 errors.emplace_back("call failed");
-            return r;
+            return cr.call_error;
         }
         if (!errors.empty()) {
-            r = -1;
+            cr.call_error = -1;
         }
-        return r;
+        return cr.call_error;
     }
 
-    const std::string& get_user() const override  {
+    [[nodiscard]] const std::string& get_user() const override  {
         return user;
     }
-    const heap::vector<bool>& get_acl() const override {
+    [[nodiscard]] const heap::vector<bool>& get_acl() const override {
         return acl;
     }
     void set_acl(const std::string& user,const heap::vector<bool>& acl) override {

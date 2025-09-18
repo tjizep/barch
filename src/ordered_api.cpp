@@ -93,9 +93,17 @@ static void insert_ordered(composite &score_key, composite &member_key, art::val
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    //storage_release release(t); // the shard should be latched
-    t->insert(sk, value, update);
-    t->insert(mk, sk, update);
+    //write_lock release(t->latch); // the shard should be latched
+    bool locked = t->latch.try_lock();
+    try {
+        t->insert(sk, value, update);
+        t->insert(mk, sk, update);
+    }catch (const std::exception& e) {
+        art::std_err(e.what());
+    }
+    if (locked) {
+        t->latch.unlock();
+    }
 }
 
 static void remove_ordered(composite &score_key, composite &member_key) {
@@ -110,9 +118,17 @@ static void remove_ordered(composite &score_key, composite &member_key) {
     }
     shk = shk.sub(1,shk.size - 2);
     auto t = get_art(get_shard(shk));
-    //storage_release release(t); // the shard should be latched
-    t->remove(sk);
-    t->remove(mk);
+    bool locked = t->latch.try_lock();
+    //write_lock release(t->latch); // the shard should be latched
+    try {
+        t->remove(sk);
+        t->remove(mk);
+    }catch (const std::exception& e) {
+        art::std_err(e.what());
+    }
+    if (locked) {
+        t->latch.unlock();
+    }
 }
 
 void insert_ordered(ordered_keys &thing, bool update = false) {
@@ -412,6 +428,7 @@ static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
     heap::vector<ordered_keys> removals;
     if (!spec.REMOVE)
         call.start_array();
+
     art::iterator ai(t,lower);
     while (ai.ok()) {
         auto v = ai.key();

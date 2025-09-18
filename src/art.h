@@ -9,7 +9,7 @@
 #include "keyspec.h"
 #include "value_type.h"
 #include "vector_stream.h"
-#include "server.h"
+#include "rpc/server.h"
 #include "overflow_hash.h"
 typedef std::unique_lock<std::shared_mutex> write_lock;
 extern std::shared_mutex &get_lock();
@@ -303,8 +303,11 @@ namespace art {
         bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
 
         bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc);
-
+        bool opt_rpc_insert(bool do_hash, const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
+        bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
         bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool opt_insert(bool do_hash, const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
+
         bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
         bool insert(value_type key, value_type value, bool update = true);
         bool evict(value_type key);
@@ -566,8 +569,9 @@ namespace art {
 
 struct storage_release {
     art::tree * t{};
-    storage_release() = default;
-    storage_release(const storage_release&) = default;
+    bool locked{false};
+    storage_release() = delete;
+    storage_release(const storage_release&) = delete;
     storage_release& operator=(const storage_release&) = default;
     storage_release(art::tree* t) : t(t) {
         t->queue_consume();
@@ -579,16 +583,19 @@ struct storage_release {
 };
 struct read_lock {
     art::tree * t{};
+    bool locked{false};
     read_lock() = default;
-    read_lock(const read_lock&) = default;
-    read_lock& operator=(const read_lock&) = default;
+    read_lock(const read_lock&) = delete;
+    read_lock& operator=(const read_lock&) = delete;
     read_lock(art::tree* t, bool consume = true) : t(t) {
         if (consume)
             t->queue_consume();
-        t->latch.lock_shared();
+        //locked =
+            t->latch.lock_shared();
     }
     ~read_lock() {
-        t->latch.unlock_shared();
+        //if (locked)
+            t->latch.unlock_shared();
     }
 };
 /**

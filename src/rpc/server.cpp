@@ -23,329 +23,9 @@
 #include "queue_server.h"
 #include "uring_resp_session.h"
 #include "asio_resp_session.h"
-
-enum {
-    cmd_ping = 1,
-    cmd_stream = 2,
-    cmd_art_fun = 3,
-    cmd_barch_call = 4
-};
-
-enum {
-    opt_max_workers = 8,
-    opt_read_timout = 60000,
-    opt_use_alt_threads = 0
-};
+#include "rpc/barch_session.h"
 
 namespace barch {
-    template<typename T>
-    bool time_wait(int64_t millis, T&& fwait ) {
-        if (fwait()) {
-            return true;
-        }
-        auto start = std::chrono::steady_clock::now();
-        while (true) {
-            if (fwait()) {
-                return true;
-            }
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > millis) {
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
-
-    template<typename T>
-    void push_size_t(heap::vector<uint8_t>& buffer,T s) {
-        uint8_t tb[sizeof(T)];
-        T size = htonl(s);
-        memcpy(tb, &size, sizeof(T));
-        buffer.insert(buffer.end(), tb, tb + sizeof(T));
-    }
-    template<typename T>
-    T get_size_t(size_t at, const heap::vector<uint8_t>& buffer) {
-        if (sizeof(T) > buffer.size()-at) {
-            throw_exception<std::runtime_error>("invalid size");
-        }
-        T size = 0;
-        memcpy(&size, buffer.data()+at, sizeof(T));
-        return ntohl(size);
-    }
-    template<typename TBF>
-    void timeout(TBF&& check, int max_to = 1000) {
-        int to = max_to;
-        while (check() && to > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            --to;
-        }
-    }
-    void push_options(heap::vector<uint8_t>& buffer, const art::key_options& options) {
-        buffer.push_back(options.flags);
-        if (options.has_expiry())
-            push_size_t<uint64_t>(buffer, options.get_expiry());
-    }
-    std::pair<art::key_options,size_t> get_options(size_t at, const heap::vector<uint8_t>& buffer) {
-        if (buffer.size() <= at+sizeof(uint64_t) + 1) {
-            throw_exception<std::runtime_error>("invalid size");
-        }
-        art::key_options r;
-        r.flags = buffer[at];
-        if (r.has_expiry()) {
-            r.set_expiry(get_size_t<uint64_t>(at+1, buffer));
-            return {r, at+sizeof(uint64_t)+1};
-        }
-        return {r, at+1};
-    }
-    std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
-        auto size = get_size_t<uint32_t>(at, buffer);
-        if (buffer.size()+sizeof(size)+at + 1< size) {
-            throw_exception<std::runtime_error>("invalid size");
-        }
-        art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
-        return {r, at+sizeof(size)+size + 1};
-    }
-
-    void push_value(heap::vector<uint8_t>& buffer, art::value_type v) {
-        push_size_t<uint32_t>(buffer, v.size);
-        buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
-        buffer.push_back(0x00);
-    }
-    void push_value(heap::vector<uint8_t>& buffer, const std::string& v) {
-        push_value(buffer, art::value_type{v});
-    }
-    void push_value(heap::vector<uint8_t>& buffer, const Variable& v) {
-        uint8_t i = v.index();
-        if (i >= 255) {
-            throw_exception<std::runtime_error>("invalid index");
-        }
-        buffer.push_back(i);
-        switch (i) {
-            case var_bool:
-                buffer.push_back(*std::get_if<bool>(&v) ? 1 : 0);
-                break;
-            case var_int64:
-                push_size_t<int64_t>(buffer, *std::get_if<int64_t>(&v));
-                break;
-            case var_uint64:
-                push_size_t<uint64_t>(buffer, *std::get_if<uint64_t>(&v));
-                break;
-            case var_double:
-                push_size_t<double>(buffer, *std::get_if<double>(&v));
-                break;
-            case var_string:
-                push_value(buffer, *std::get_if<std::string>(&v));
-                break;
-            default:
-                break;
-        }
-
-    }
-
-    std::pair<Variable,size_t> get_variable(size_t at, const heap::vector<uint8_t>& buffer) {
-        std::pair<art::value_type,size_t> vt;
-        auto bsize = buffer.size();
-        if (at >= bsize) {
-            throw_exception<std::runtime_error>("invalid at");
-        }
-        uint8_t i = buffer[at];
-        if (i >= 255) {
-            throw_exception<std::runtime_error>("invalid index");
-        }
-        ++at;
-        switch (i) {
-            case var_bool:
-                if (at + 1 > bsize) {
-                    throw_exception<std::runtime_error>("invalid at");
-                }
-                return { buffer[at] == 1,at+1} ;
-            case var_int64:
-                if (at + sizeof(int64_t) > bsize) {
-                    throw_exception<std::runtime_error>("invalid at");
-                }
-                return  {get_size_t<int64_t>(at, buffer),at+sizeof(int64_t)};
-            case var_uint64:
-                if (at + sizeof(uint64_t) > bsize) {
-                    throw_exception<std::runtime_error>("invalid at");
-                }
-                return  {get_size_t<uint64_t>(at, buffer),at+sizeof(int64_t)};
-            case var_double:
-                if (at + sizeof(double) > bsize) {
-                    throw_exception<std::runtime_error>("invalid at");
-                }
-                return { get_size_t<double>(at, buffer), at+sizeof(double)};
-            case var_string:
-                vt = get_value(at, buffer);
-                return { std::string(vt.first.chars(), vt.first.size),vt.second};
-            case var_null:
-                return { nullptr,at};
-            default:
-                break;
-        }
-        throw_exception<std::runtime_error>("invalid index");
-        return {};
-    }
-
-    bool recv_buffer(std::iostream& stream, heap::vector<uint8_t>& buffer) {
-        uint32_t buffers_size = 0;
-        readp(stream,buffers_size);
-        if (buffers_size == 0) {
-            return false;
-        }
-        buffer.clear();
-        buffer.resize(buffers_size);
-        readp(stream, buffer.data(), buffer.size());
-        return true;
-    }
-    void send_art_fun(uint32_t shard, uint32_t messages, std::iostream& stream, heap::vector<uint8_t>& to_send) {
-        uint32_t cmd = cmd_art_fun;
-        uint32_t buffers_size = to_send.size();
-        uint32_t sh = shard;
-        writep(stream, cmd);
-        writep(stream, sh);
-        writep(stream, messages);
-        writep(stream, buffers_size);
-        writep(stream, to_send.data(), to_send.size());
-        stream.flush();
-
-    }
-
-    host_id get_host_id() {
-        return {"localhost", getpid() % 10000000000000000000ULL};
-    }
-    struct af_result {
-        size_t add_called {};
-        size_t add_applied {};
-        size_t remove_called {};
-        size_t remove_applied {};
-        size_t find_called {};
-        size_t find_applied {};
-        bool error{false};
-    };
-    /**
-     * process a cmd_art_fun buffer
-     * Note: no latching in this function all latches are set outside
-     * @param t
-     * @param buffer buffer containing commands and data
-     * @param stream for writing reply data
-     * @return true if no errors occurred
-     */
-
-    af_result process_art_fun_cmd(art::tree* t, tcp::iostream& stream, heap::vector<uint8_t>& buffer) {
-        af_result r;
-        heap::vector<uint8_t> tosend;
-        art::node_ptr found;
-        uint32_t buffers_size = buffer.size();
-        bool flush_buffers = false;
-        for (size_t i = 0; i < buffers_size;) {
-            char cmd = (char)buffer[i];
-            switch (cmd) {
-                case 'c': {
-
-                }
-                case 'i': {
-                        auto options = get_options(i+1, buffer);
-                        auto key = get_value(options.second, buffer);
-                        auto value = get_value(key.second, buffer);
-                        if (get_total_memory() > art::get_max_module_memory()) {
-                            // do not add data if the memory limit is reached
-                            ++statistics::oom_avoided_inserts;
-                            r.error = true;
-                            return r;
-                        } else {
-                            auto fc = [&r](const art::node_ptr &){
-                                        ++statistics::repl::key_add_recv_applied;
-                                        ++r.add_applied;};
-                            if (t->opt_ordered_keys) {
-                                art_insert(t, options.first, key.first, value.first,true,fc);
-                            }else
-                            {
-                                t->hash_insert(options.first, key.first, value.first,true,fc);
-                            }
-
-
-                        }
-                        ++statistics::repl::key_add_recv;
-                        ++r.add_called;
-                        i = value.second;
-                    }
-                    break;
-                    case 'r': {
-                        auto key = get_value(i+1, buffer);
-                        if (t->opt_ordered_keys) {
-                            art_delete(t, key.first,[&r](const art::node_ptr &) {
-                                ++statistics::repl::key_rem_recv_applied;
-                                ++r.remove_applied;
-                            });
-                        }else {
-                            if (t->remove_leaf_from_uset(key.first)) {
-                                ++statistics::repl::key_rem_recv_applied;
-                                ++r.remove_applied;
-                            }
-                        }
-
-
-                        i = key.second;
-                        ++statistics::repl::key_rem_recv;
-                        ++r.remove_called;
-                    }
-                    break;
-                case 'f': {
-                        auto key = get_value(i+1, buffer);
-                        found = art::find(t, key.first);
-                        if (found.is_leaf) {
-                            auto l = found.const_leaf();
-                            tosend.push_back('i');
-                            push_options(tosend, *l);
-                            push_value(tosend, l->get_key());
-                            push_value(tosend, l->get_value());
-                            ++r.find_applied;
-                        }
-                        i = key.second;
-                        ++statistics::repl::key_find_recv;
-                        ++r.find_called;
-                        flush_buffers = true;
-                    }
-                    break;
-                case 'a': {
-                    auto lkey = get_value(i+1, buffer);
-                    auto ukey = get_value(lkey.second, buffer);
-                    ++r.find_called;
-                    art::iterator ai(t, lkey.first);
-                    while (ai.ok()) {
-                        auto k = ai.key();
-                        if (k >= lkey.first && k <= ukey.first) {
-                            tosend.push_back('i');
-                            auto l = found.const_leaf();
-                            push_options(tosend, *l);
-                            push_value(tosend, l->get_key());
-                            push_value(tosend, l->get_value());
-                            ++r.find_applied;
-                        } else {
-                            break;
-                        }
-                        ai.next();
-                    }
-                    flush_buffers = true;
-                    i = ukey.second;
-                    ++statistics::repl::key_find_recv;
-                }
-                break;
-                default:
-                    art::std_err("unknown command", cmd);
-                    r.error = true;
-                    return r;
-            }
-        }
-        if (flush_buffers) {
-            auto s = (uint32_t)tosend.size();
-            writep(stream,s);
-            writep(stream,tosend.data(),tosend.size());
-            stream.flush();
-        }
-        return r;
-    }
-
     typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
     struct asio_work_unit {
         asio::io_context io{};
@@ -365,11 +45,11 @@ namespace barch {
     };
     struct server_context {
         thread_pool pool{};
-        thread_pool resp_pool{2};
+        //thread_pool resp_pool{2};
         thread_pool asio_resp_pool{};
         asio::io_context io{};
         std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
-        std::vector<std::shared_ptr<work_unit>> io_resp{resp_pool.size()};
+        //std::vector<std::shared_ptr<work_unit>> io_resp{resp_pool.size()};
 
         tcp::acceptor acc;
         std::string interface;
@@ -377,10 +57,12 @@ namespace barch {
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
         std::atomic<size_t> asio_resp_distributor{};
+#if 0
         std::shared_ptr<work_unit> get_unit() {
             size_t r = resp_distributor++ % io_resp.size();
             return io_resp[r];
         }
+#endif
         std::shared_ptr<asio_work_unit> get_asio_unit() {
             size_t r = asio_resp_distributor++ % asio_resp_ios.size();
             return asio_resp_ios[r];
@@ -405,6 +87,7 @@ namespace barch {
             }catch (std::exception& e) {
                 art::std_err("failed to stop io service", e.what());
             }
+#if 0
             for (auto &proc: io_resp) {
                 try{
                     proc->stop();
@@ -412,8 +95,10 @@ namespace barch {
                     art::std_err("failed to stop resp io service",  e.what());
                 }
             }
-            pool.stop();
             resp_pool.stop();
+#endif
+            pool.stop();
+
             asio_resp_pool.stop();
             port = 0;
         }
@@ -436,218 +121,8 @@ namespace barch {
                 art::std_err("failed to start/run replication server", interface, port, e.what());
             }
         }
-        class barch_parser {
-        public:
-            enum {
-                header_size = 4
-            };
-            enum {
-                barch_wait_for_header = 1,
-                barch_wait_for_buffer_size,
-                barch_wait_for_buffer,
-                barch_parse_params
-            };
-            barch_parser& operator=(const barch_parser&) = delete;
-            barch_parser(const barch_parser&) = delete;
-
-            barch_parser() {
-                caller.set_context(ctx_rpc);
-            };
-
-            ~barch_parser() = default;
-            vector_stream in{};
-            int state = barch_wait_for_header;
-            uint32_t calls = 0;
-            uint32_t c = 0;
-            uint32_t buffers_size = 0;
-            uint32_t replies_size = 0;
-
-            rpc_caller caller{};
-            heap::vector<uint8_t> replies{};
-            heap::vector<uint8_t> buffer{};
-            void clear() {
-                state = barch_wait_for_header;
-                calls = 0;
-                buffers_size = 0;
-                replies_size = 0;
-                c = 0;
-                replies.clear();
-                buffer.clear();
-                in.clear();
-            }
-            [[nodiscard]] size_t remaining() const {
-                if (in.pos > in.buf.size()) {
-                    art::std_err("invalid buffer size", in.buf.size());
-                    return 0;
-                }
-                return in.buf.size() - in.pos;
-            }
-            /**
-             *
-             * @return true if someing needs to be written
-             */
-            bool process(vector_stream& out) {
-                while (remaining() > 0) {
-                    switch (state) {
-                        case barch_wait_for_header:
-                            if (remaining() >= header_size) {
-                                readp(in,calls);
-                                if (1 != calls) {
-                                    return false; // nothing to do - wait for more data
-                                }
-                                c = 0;
-                                buffers_size = 0;
-                                state = barch_wait_for_buffer_size;
-                            }
-                            break;
-                        case barch_wait_for_buffer_size:
-                            if (c < calls) {
-                                if (remaining() < sizeof(buffers_size)) {
-                                    return false; // nothing to do - wait for more data
-                                }
-                                readp(in,buffers_size);
-                                if (buffers_size == 0) {
-                                    art::std_err("invalid buffer size", buffers_size);
-                                    clear();
-                                    return false;
-                                }
-                                buffer.resize(buffers_size);
-                                state = barch_wait_for_buffer;
-                            }else {
-                                state = barch_wait_for_header;
-                                if (remaining()  >= in.buf.size())
-                                    return false;
-                            }
-                            break;
-                        case barch_wait_for_buffer:{
-                            // wait for input buffer to reach a target
-                            if (remaining() < buffers_size) {
-                                return false; // nothing to do - wait for more data
-                            }
-                            readp(in, buffer.data(), buffers_size);
-                            int32_t r = 0;
-                            if (buffers_size > rpc_max_param_buffer_size) {
-                                r = -1;
-                                replies.clear();
-                                push_value(replies, error{"parameter buffer too large"});
-                            }else {
-                                // TODO: max buffer size check
-                                std::vector<std::string_view> params;
-                                for (size_t i = 0; i < buffers_size;) {
-                                    auto vp = get_value(i, buffer);
-                                    params.emplace_back(vp.first.chars(), vp.first.size);
-                                    i = vp.second;
-                                }
-                                std::string cn = std::string{params[0]};
-                                auto ic = barch_functions.find(cn);
-                                if (ic == barch_functions.end()) {
-                                    art::std_err("invalid call", cn);
-                                    writep(out, replies_size);
-                                    clear();
-                                    return true;
-                                }
-                                auto f = ic->second.call;
-                                ++ic->second.calls;
-                                r = caller.call(params,f);
-                                replies.clear();
-                                for (auto &v: caller.results) {
-                                    push_value(replies,v);
-                                }
-                            }
-
-                            replies_size = replies.size();
-                            writep(out, r);
-                            writep(out, replies_size);
-                            writep(out, replies.data(), replies_size);
-                            ++c;
-                            if (c < calls) {
-                                state = barch_wait_for_buffer;
-                            }else {
-                                state = barch_wait_for_header;
-                                buffers_size = 0;
-                            }
-
-                            if (remaining() <= 0) {
-                                in.clear();
-                                return true;
-                            }
-
-                        }
-                            break;
-                        default:
-                            art::std_err("invalid state", state);
-                            break;
-                    }
-                }
-                return false; // consumed all data but no action could be taken
-            }
-            void add_data(const uint8_t *data, size_t length) {
-                in.buf.insert(in.buf.end(),data,data+length);
-            }
-        };
 
 
-        class barch_session : public std::enable_shared_from_this<barch_session>
-        {
-        public:
-            barch_session(const barch_session&) = delete;
-            barch_session& operator=(const barch_session&) = delete;
-            explicit barch_session(tcp::socket socket)
-              : socket_(std::move(socket))
-            {
-                ++statistics::repl::redis_sessions;
-            }
-            ~barch_session() {
-                --statistics::repl::redis_sessions;
-            }
-
-            void start()
-            {
-                do_read();
-            }
-
-        private:
-            void do_read()
-            {
-                auto self(shared_from_this());
-                socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                    [this, self](std::error_code ec, std::size_t length)
-                {
-
-                    if (!ec){
-                        stream_read_ctr += length;
-                        parser.add_data(data_, length);
-                        try {
-                            vector_stream out;
-                            parser.process(out);
-                            if (out.tellg() > 0) {
-                                do_write(out);
-                            }else {
-                                do_read();
-                            }
-                        }catch (std::exception& e) {
-                            art::std_err("error", e.what());
-                        }
-                    }else {
-                        //art::std_err("error", ec.message(), ec.value());
-                    }
-                });
-            }
-
-            void do_write(const vector_stream& stream) {
-                auto self(shared_from_this());
-
-                asio::async_write(socket_, asio::buffer(stream.buf),
-                    [this, self](std::error_code ec, std::size_t /*length*/){
-                        if (!ec){
-                            do_read();
-                        }
-                    });
-            }
-            tcp::socket socket_;
-            uint8_t data_[rpc_io_buffer_size]{};
-            barch_parser parser{};
-        };
         void start() {}
         void process_data(tcp::socket& endpoint) {
             try {
@@ -657,13 +132,14 @@ namespace barch {
                 stream_read_ctr += 1;
                 if (cs[0]) {
                     if (opt_use_alt_threads == 1){
+#if 0
                         auto& ioc = this->io;
                         auto unit = this->get_unit();
                         tcp::socket socket (ioc);
                         socket.assign(tcp::v4(),endpoint.release());
                         auto session = std::make_shared<uring_resp_session>(std::move(socket),unit,cs[0]);
                         session->start();
-
+#endif
                     }else {
                         auto unit = this->get_asio_unit();
                         tcp::socket socket (unit->io);
@@ -757,11 +233,12 @@ namespace barch {
         ,   port(port){
 
             start_accept();
+#if 0
             io_resp.resize(resp_pool.size());
             for (size_t i = 0; i < io_resp.size(); ++i) {
                 io_resp[i] = std::make_shared<work_unit>();
             }
-
+#endif
             pool.start([this](size_t tid) -> void{
                 io.dispatch([this,tid]() {
                     art::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
@@ -773,17 +250,22 @@ namespace barch {
             art::std_log("resp pool size",asio_resp_pool.size());
             asio_resp_ios.resize(asio_resp_pool.size());
             asio_resp_pool.start([this, &started](size_t tid) -> void {
+                ++started;
                 asio_resp_ios[tid] = std::make_shared<asio_work_unit>();
                 asio_resp_ios[tid]->run();
             });
-
+#if 0
             resp_pool.start([this, &started](size_t tid) -> void {
                 ++started;
                 io_resp[tid]->run(tid);
             });
-            while (started != resp_pool.size()) {
+
+
+#endif
+            while (started != asio_resp_pool.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     };
     std::shared_ptr<server_context>  srv = nullptr;
@@ -808,17 +290,19 @@ namespace barch {
     };
     static module_stopper stopper;
     namespace repl {
-        class rpc_impl : public rpc{
+        class rpc_impl : public rpc {
         private:
-            heap::vector<uint8_t> to_send{};
+            std::mutex latch{};
             std::string host;
             int port;
             asio::io_context ioc{};
+            tcp::resolver resolver{ioc};
             tcp::socket s;
-
+            size_t requests_in_stream = 0;
+            std::error_code error{};
             heap::vector<uint8_t> replies{};
             vector_stream stream{};
-            std::error_code error{};
+            heap::vector<uint8_t> to_send{};
         public:
             rpc_impl(const std::string& host, int port)
             : host(host), port(port), s(ioc) {
@@ -872,17 +356,20 @@ namespace barch {
                 };
                 return r;
             }
+            template<typename ResultT,typename ParamT>
+            call_result tcall(ResultT& result, const ParamT& params, bool asynch = false) {
 
-            int call(int& callr, heap::vector<Variable>& result, const std::vector<std::string_view>& params) {
+                std::lock_guard lock(latch);
                 to_send.clear();
+                call_result r;
                 if (params.empty()) {
-                    return -1;
+                    return call_result{-1,0};
                 }
                 try {
-                    stream.clear();
 
                     if (!s.is_open()) {
-                        tcp::resolver resolver(ioc);
+                        stream.clear();
+
                         auto resolution = resolver.resolve(host,std::to_string(port));
                         asio::async_connect(s, resolution,[this](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
                             if (!ec) {
@@ -908,25 +395,64 @@ namespace barch {
                     writep(stream, buffers_size);
                     writep(stream, to_send.data(), to_send.size());
                     net_stat stat;
-                    write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
+                    if (asynch) {
+                        if (stream.tellg() > 1000) {
+                            write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
+                            for (;requests_in_stream > 0; requests_in_stream--) {
+                                read(s,asio::buffer(&r.call_error,sizeof(r.call_error)));
+                                read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
+                                replies.resize(buffers_size);
+                                size_t reply_length = read(s,asio::buffer(replies));
+                                if (reply_length != buffers_size) {
+                                    art::std_err(reply_length,"!=",buffers_size);
+                                }
+                                for (size_t i = 0; i < buffers_size; i++) {
+                                    auto v = get_variable(i, replies);
+                                    result.emplace_back(v.first);
+                                    i = v.second;
+                                }
+                            }
+                            result.clear();
+                            stream.clear();
+                        }else {
+                            ++requests_in_stream;
+                        }
+                    }else{
+                        write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
+                        read(s,asio::buffer(&r.call_error,sizeof(r.call_error)));
+                        read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
+                        replies.resize(buffers_size);
+                        size_t reply_length = read(s,asio::buffer(replies));
+                        if (reply_length != buffers_size) {
+                            art::std_err(reply_length,"!=",buffers_size);
+                        }
+                        for (size_t i = 0; i < buffers_size; i++) {
+                            auto v = get_variable(i, replies);
+                            result.emplace_back(v.first);
+                            i = v.second;
+                        }
+                        stream.clear();
+                    }
 
-                    read(s,asio::buffer(&callr,sizeof(callr)));
-                    read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
-                    replies.resize(buffers_size);
-                    size_t reply_length = read(s,asio::buffer(replies));
-                    if (reply_length != buffers_size) {
-                        art::std_err(reply_length,"!=",buffers_size);
-                    }
-                    for (size_t i = 0; i < buffers_size; i++) {
-                        auto v = get_variable(i, replies);
-                        result.emplace_back(v.first);
-                        i = v.second;
-                    }
+
                 }catch (std::exception& e) {
                     art::std_err("call failed [", e.what(),"] to",host,port,"because [",error.message(),error.value(),"]");
-                    return -1;
+                    stream.clear();
+                    return {-1,-1};
                 }
-                return 0;
+
+                return r;
+            }
+
+            call_result call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) override {
+                return tcall(result, params);
+            }
+            call_result asynch_call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) override {
+                return tcall(result, params, false);
+            }
+
+            call_result call(heap::vector<Variable>& result, const std::vector<std::string_view>& params) override {
+                return tcall(result, params);
             }
         };
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
@@ -1032,6 +558,38 @@ namespace barch {
                 sources.emplace_back(src);
             }
             return true;
+        }
+
+        bool client::rpc_insert(std::shared_mutex& latch, bool do_hash, const art::key_options& options, art::value_type key, art::value_type value){
+            latch.unlock();
+            thread_local heap::vector<Variable> result;
+            thread_local heap::vector<art::value_type> params;
+            params = {"RPC_INSERT",
+                    std::to_string(shard),
+                    std::to_string(options.flags),
+                    std::to_string(options.get_expiry()),
+                    do_hash ? "false": "true",
+                    key.to_string(),value.to_string()};
+            size_t ss = 0;
+            if (!host.empty()) {
+                result.clear();
+                auto cr = caller()->asynch_call(result, params);
+                if (cr.ok()) ++ss;
+                else ++statistics::repl::instructions_failed;
+            }
+
+            for (auto &d: destinations) {
+                result.clear();
+                auto cr = d.caller()->asynch_call(result, params);
+                if (cr.ok()) ++ss;
+                else ++statistics::repl::instructions_failed;
+            }
+            if (ss != 0)
+                ++statistics::repl::insert_requests;
+
+            latch.lock();
+            return  ss > 0;
+
         }
         bool client::insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value) {
 
@@ -1155,6 +713,7 @@ namespace barch {
 
                     net_stat stat;
                     tcp::iostream stream;
+
                     stream.connect(source.host, std::to_string(source.port));
                     if (stream.fail()) {
                         art::std_err("failed to connect to remote server", host, this->port);
@@ -1245,6 +804,69 @@ namespace barch {
 }
 
 extern "C"{
+    int RPC_GET(caller& call, const arg_t& argv) {
+        if (argv.size() != 2)
+            return call.wrong_arity();
+        auto key = argv[1];
+        auto t = get_art(key);
+        read_lock rl(t);
+        auto node = t->search(key);
+        if (node.null()) return call.null();
+        return call.vt(node.cl()->get_value());
+
+    }
+    int RPC_INSERT(caller& call, const arg_t& argv) {
+        ++statistics::repl::key_add_recv;
+        if (argv.size() != 7)
+            return call.wrong_arity();
+        size_t shard = conversion::as_variable(argv[1]).i();
+        if (shard >= art::get_shard_count().size())
+            return call.error("invalid shard");
+        auto fc = [&](const art::node_ptr &) -> void {};
+        uint8_t flags = conversion::as_variable(argv[2]).i();
+        uint64_t expiry = conversion::as_variable(argv[3]).i();
+        bool do_hash = conversion::as_variable(argv[4]).b();
+        auto key = argv[5];
+        auto value = argv[6];
+        auto t = get_art(shard);
+        art::key_options options;
+        options.flags = flags;
+        options.set_expiry(expiry);
+        write_lock l(t->latch);
+        t->opt_rpc_insert(do_hash, options, key, value, true, fc);
+        ++statistics::repl::key_add_recv_applied;
+
+        return 0;
+    }
+    int RPC_FUN(caller& call, const arg_t& argv) {
+        if (argv.size() != 2)
+            return call.wrong_arity();
+        try {
+            vector_stream stream{argv[1]};
+            uint32_t buffers_size = 0;
+            uint32_t shard = 0;
+            uint32_t count = 0;
+            readp(stream,shard);
+            readp(stream,count);
+            readp(stream,buffers_size);
+            if (buffers_size == 0) {
+                art::std_err("invalid buffer size", buffers_size);
+                return call.error("invalid buffer size");
+            }
+
+            heap::vector<uint8_t> buffer;
+            buffer.resize(buffers_size);
+            readp(stream, buffer.data(), buffers_size);
+            auto t = get_art(shard);
+            write_lock release(t->latch);
+            barch::process_art_fun_cmd(t, stream, buffer);
+            //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
+        }catch (std::exception& e) {
+            art::std_err("failed to apply changes", e.what());
+            return call.error("failed to apply changes");
+        }
+        return 0;
+    }
     int ADDROUTE(caller& call, const arg_t& argv) {
         if (argv.size() != 4)
             return call.wrong_arity();
@@ -1271,6 +893,7 @@ extern "C"{
         call.simple(route.ip.c_str());
         call.long_long(route.port);
         call.end_array(0);
+//
         return 0;
     }
     int REMROUTE(caller& call, const arg_t& argv) {

@@ -8,7 +8,7 @@
 #include "redis_parser.h"
 #include "rpc_caller.h"
 #include "uring_context.h"
-#include "barch_functions.h"
+#include "rpc/barch_functions.h"
 namespace barch {
     struct work_unit {
         uring_context ur{};
@@ -59,17 +59,19 @@ namespace barch {
                 //redis::rwrite(stream, OK);
                 //return;
             }
+            auto bf = barch_functions; // take a snapshot
             if (prev_cn != params[0]) {
                 prev_cn = params[0];
-                ic = barch_functions.find(prev_cn);
-                if (ic != barch_functions.end() &&
+
+                ic = bf->find(prev_cn);
+                if (ic != bf->end() &&
                     !is_authorized(ic->second.cats,caller.get_acl())) {
                     redis::rwrite(in_stream, error{"not authorized"});
                     return;
                     }
             }
 
-            if (ic == barch_functions.end()) {
+            if (ic == bf->end()) {
                 redis::rwrite(in_stream, error{"unknown command"});
             } else {
 

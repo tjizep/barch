@@ -6,7 +6,7 @@
 #include <filesystem>
 
 #include "art.h"
-#include "server.h"
+#include "rpc/server.h"
 #include "module.h"
 
 void append(std::ostream &out, size_t page, const storage &s, const uint8_t *data) {

@@ -9,7 +9,7 @@
 #include "keyspec.h"
 #include "module.h"
 #include "value_type.h"
-#include "server.h"
+#include "rpc/server.h"
 
 #include "statistics.h"
 
@@ -52,16 +52,10 @@ private:
                 }
                 write_lock release(t->latch);
                 --t->queue_size;
-                // TODO: the infernal thread_ap should be set before using any t functions
-                if (into == into_hash) {
-                    t->hash_insert(options, get_key(),get_value(),true,[](const art::node_ptr& ){});
-                    return true;
-                }
-                if (into == into_any) {
-                    t->opt_insert(options, get_key(),get_value(),true,[](const art::node_ptr& ){});
-                    return true;
+                t->opt_insert(into == into_hash, options, get_key(),get_value(),true,[](const art::node_ptr& ){});
+                return true;
 
-                }
+
             }catch (std::exception& e) {
                 art::std_err("exception processing queue", e.what());
             }
@@ -184,4 +178,10 @@ void queue_insert(size_t shard, art::key_options options,art::value_type k, art:
         server->queue_insert(t,options,k,v,queue_server::into_any);
     else
         t->opt_insert(options,k,v,true,[](const art::node_ptr& ){});
+}
+void queue_insert(bool do_hash, size_t shard,art::key_options options,art::value_type k, art::value_type v) {
+    if (do_hash)
+        hash_queue_insert(shard,options,k,v);
+    else
+        queue_insert(shard,options,k,v);
 }

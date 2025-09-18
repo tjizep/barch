@@ -13,11 +13,18 @@ struct vector_stream  {
     vector_stream() = default;
     vector_stream(const vector_stream&) = default;
     vector_stream& operator=(const vector_stream&) = default;
-
+    vector_stream(art::value_type vt) {
+        buf.insert(buf.end(), vt.begin(), vt.end());
+    }
     vector_stream(vector_stream&& other) {
         pos = other.pos;
         buf = std::move(other.buf);
         other.pos = 0;
+    }
+    vector_stream& operator=(art::value_type& other) {
+        clear();
+        buf.insert(buf.end(), other.begin(), other.end());
+        return *this;
     }
 
     vector_stream& operator=(vector_stream&& other) {
@@ -26,10 +33,11 @@ struct vector_stream  {
         other.pos = 0;
         return *this;
     }
-    bool empty() const {
+    [[nodiscard]] bool empty() const {
         return buf.empty();
     }
     void write(const char *data, size_t size) {
+        if (!size) return;
         if (nullptr == data) {
             throw_exception<std::invalid_argument>("parameter null");
         }
@@ -79,5 +87,6 @@ struct vector_stream  {
     bool fail() const {
         return !good();
     }
+    void flush(){};
 };
 #endif //VECTOR_STREAM_H

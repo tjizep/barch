@@ -1,4 +1,4 @@
-# Release v0.3.3.29b 2025-09-16
+# Release v0.3.3.30b 2025-09-18
 
 ## New Features
 
@@ -55,6 +55,8 @@
 29. fix oom checks (v0.3.3.28b 2025-09-13)
 30. fix lru bug with hash table (v0.3.3.28b 2025-09-14)
 31. fix rpc bug with hash table (v0.3.3.28b 2025-09-14)
+32. fix rpc error handling (v0.3.3.30b 2025-09-17)
+33. improve rpc code (v0.3.3.30b 2025-09-18)
 
 # Release v0.3.3.7b 2025-08-08
 

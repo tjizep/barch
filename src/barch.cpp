@@ -4,7 +4,7 @@
 
 #include "auth_api.h"
 #include "barch_apis.h"
-#include "redis_parser.h"
+#include "rpc/redis_parser.h"
 #include "vk_caller.h"
 #include "keys.h"
 #include "thread_pool.h"
@@ -281,17 +281,10 @@ int SET(caller& call,const arg_t& argv) {
     };
 
     if (!spec.get && is_queue_server_running() && t->queue_size < max_process_queue_size) {
-        if (do_hash)
-            ::hash_queue_insert(t->shard, spec, key, v);
-        else
-            ::queue_insert(t->shard, spec, key, v);
-
+        queue_insert(do_hash, t->shard, spec, key, v);
     }else {
         storage_release l(t);
-        if (do_hash)
-            t->hash_insert(spec, key, v, true, fc);
-        else
-            t->opt_insert(spec, key, v, true, fc);
+        t->opt_insert(do_hash, spec, key, v, true, fc);
     }
 
 

@@ -39,16 +39,17 @@ namespace barch {
             template<typename PT>
             void run_params(vector_stream& stream, const PT& params) {
                 std::string cn{ params[0]};
+                auto bf = barch_functions; // take a snapshot
                 if (prev_cn != cn) {
-                    ic = barch_functions.find(cn);
+                    ic = bf->find(cn);
                     prev_cn = cn;
-                    if (ic != barch_functions.end() &&
+                    if (ic != bf->end() &&
                         !is_authorized(ic->second.cats,caller.get_acl())) {
                         redis::rwrite(stream, error{"not authorized"});
                         return;
                     }
                 }
-                if (ic == barch_functions.end()) {
+                if (ic == bf->end()) {
                     redis::rwrite(stream, error{"unknown command"});
                 } else {
 

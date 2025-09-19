@@ -1205,6 +1205,7 @@ int STATS(caller& call, const arg_t& argv) {
     call.reply_values({"logical_allocated", as.logical_allocated});
     call.reply_values({"oom_avoided_inserts", as.oom_avoided_inserts});
     call.reply_values({"keys_found", as.keys_found});
+    call.reply_values({"queue_reorders", as.queue_reorders});
     call.end_array(0);
     return 0;
 }

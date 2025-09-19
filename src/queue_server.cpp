@@ -56,7 +56,7 @@ private:
                 }
                 write_lock release(t->latch);
                 if (t->last_queue_id+1 != qpos) {
-                    art::std_err("invalid queue order, expected",t->last_queue_id+1, "found", qpos, "T",tid);
+                    //art::std_err("invalid queue order, expected",t->last_queue_id+1, "found", qpos, "T",tid);
                 }
                 --t->queue_size;
                 t->last_queue_id = qpos;
@@ -97,13 +97,14 @@ private:
                     if (ins.qpos == ins.t->last_queue_id+1) {
                         ins.exec(id+1);
                     }else {
+                        ++statistics::queue_reorders;
                         instructions.push_back(ins);
                     }
 
                 }else {
                     // this is a "best effort" reordering it does not guarantee
                     // correct execution order
-                    if (sleeps > 8) {
+                    if (sleeps > 32) {
                         std::sort(instructions.begin(), instructions.end());
                         for (auto& i : instructions) {
                             i.exec(id+1);
@@ -111,7 +112,7 @@ private:
                         instructions.clear();
                         sleeps = 0;
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     ++sleeps;
                 }
             }

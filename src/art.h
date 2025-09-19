@@ -57,6 +57,7 @@ struct art_statistics {
     int64_t keys_found {};
     int64_t new_keys_added {};
     int64_t keys_replaced {};
+    int64_t queue_reorders {};
 };
 
 struct art_ops_statistics {

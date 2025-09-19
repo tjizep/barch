@@ -56,6 +56,7 @@ std::atomic<uint64_t> statistics::update_ops = 0;
 */
 
 std::atomic<uint64_t> statistics::queue_failures = 0;
+std::atomic<uint64_t> statistics::queue_reorders = 0;
 std::atomic<uint64_t> statistics::queue_added = 0;
 std::atomic<uint64_t> statistics::queue_processed = 0;
 

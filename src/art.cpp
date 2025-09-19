@@ -1623,6 +1623,8 @@ art_statistics art::get_statistics() {
     as.keys_found = (int64_t) statistics::keys_found;
     as.new_keys_added = (int64_t) statistics::new_keys_added;
     as.keys_replaced = (int64_t) statistics::keys_replaced;
+    as.queue_reorders = (int64_t) statistics::queue_reorders;
+
     return as;
 }
 

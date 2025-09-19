@@ -574,8 +574,9 @@ struct storage_release {
     storage_release() = delete;
     storage_release(const storage_release&) = delete;
     storage_release& operator=(const storage_release&) = default;
-    storage_release(art::tree* t) : t(t) {
-        t->queue_consume();
+    storage_release(art::tree* t, bool cons = true) : t(t) {
+        if (cons)
+            t->queue_consume();
         t->latch.lock();
     }
     ~storage_release() {

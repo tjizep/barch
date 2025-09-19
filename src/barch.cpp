@@ -285,7 +285,7 @@ int SET(caller& call,const arg_t& argv) {
     if (!spec.get && is_queue_server_running() && t->queue_size < max_process_queue_size) {
         queue_insert(t->shard, spec, key, v);
     }else {
-        storage_release l(t);
+        storage_release l(t,false);
         t->opt_insert(spec, key, v, true, fc);
     }
 

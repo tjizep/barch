@@ -1,6 +1,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Weffc++"
 #include <moodycamel/concurrentqueue.h>
+#include <moodycamel/blockingconcurrentqueue.h>
 #pragma GCC diagnostic pop
 #include "sastam.h"
 #include "art.h"
@@ -79,23 +80,22 @@ private:
         stop();
     }
     thread_pool threads{art::get_shard_count().size()};
-    typedef moodycamel::ConcurrentQueue<instruction> queue_type;
+    typedef moodycamel::BlockingConcurrentQueue<instruction> queue_type;
     heap::vector<std::shared_ptr<queue_type>> queues{threads.size()};
-    heap::vector<std::mutex> locks{threads.size()};
     bool started = false;
     void start() {
         started = true;
         for (auto& q : queues) {
             q = std::make_shared<queue_type>(1000);
+
         }
         threads.start([this](size_t id) {
             auto q = queues[id];
-            auto &mut = locks[id];
             heap::vector<instruction> instructions;
             size_t sleeps = 0;
+            size_t steps = 0;
             while (started) {
                 instruction ins;
-                std::unique_lock l(mut);
                 if (q->try_dequeue(ins)) {
                     if (ins.qpos == ins.t->last_queue_id+1) {
                         ins.exec(id+1);
@@ -107,7 +107,7 @@ private:
                 }else {
                     // this is a "best effort" reordering it does not guarantee
                     // correct execution order
-                    if (sleeps > 2) {
+                    if (sleeps > 128) {
                         std::sort(instructions.begin(), instructions.end());
                         for (auto& i : instructions) {
                             i.exec(id+1);
@@ -115,7 +115,16 @@ private:
                         instructions.clear();
                         sleeps = 0;
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    auto t = get_art(id);
+                    if (t->queue_size == 0) {
+                        if (++steps < 10000)
+                            std::this_thread::sleep_for(std::chrono::microseconds(1));
+                        else
+                            std::this_thread::sleep_for(std::chrono::microseconds(1000));
+                    }else {
+                        steps = 0;
+                    }
+
                     ++sleeps;
                 }
             }
@@ -125,7 +134,7 @@ private:
 
         started = false;
         threads.stop();
-        consume();
+        consume_all();
 
 
     }
@@ -143,7 +152,7 @@ private:
         queues[at]->enqueue(ins);
         ++statistics::queue_added;
     }
-    void consume() {
+    void consume_all() {
         for (auto& q : queues) {
             instruction ins;
             while (q->try_dequeue(ins)) {
@@ -159,12 +168,11 @@ private:
         // queue_size may sometimes be a subset
         // of the actual queue size - but usually it's the same
         while (t->queue_size > 0) {
-            auto &mut = locks[q]; // only lock when consuming here to try and guarantee order
-            if (queues[q]->try_dequeue(ins)) {
-                ins.exec(shard+1);
-            }else {
-                std::this_thread::yield();
-            }
+            //if (queues[q]->try_dequeue(ins)) {
+            //    ins.exec(shard+1);
+            //}else {
+                std::this_thread::sleep_for(std::chrono::microseconds(1));
+            //}
         }
     }
 };
@@ -177,12 +185,21 @@ void queue_consume(size_t shard) {
 }
 void queue_consume_all() {
     if (server)
-        server->consume();
+        server->consume_all();
 }
 void start_queue_server() {
     if (!server) {
         server = std::make_shared<queue_server>();
         server->start();
+    }
+}
+void clear_queue_server() {
+    if (server) {
+        auto s = server;
+        server = nullptr;
+        s->consume_all();
+        s->stop();
+        server = std::make_shared<queue_server>();
     }
 }
 void stop_queue_server() {

@@ -81,6 +81,7 @@ private:
     thread_pool threads{art::get_shard_count().size()};
     typedef moodycamel::ConcurrentQueue<instruction> queue_type;
     heap::vector<std::shared_ptr<queue_type>> queues{threads.size()};
+    heap::vector<std::mutex> locks{threads.size()};
     bool started = false;
     void start() {
         started = true;
@@ -89,10 +90,12 @@ private:
         }
         threads.start([this](size_t id) {
             auto q = queues[id];
+            auto &mut = locks[id];
             heap::vector<instruction> instructions;
             size_t sleeps = 0;
             while (started) {
                 instruction ins;
+                std::unique_lock l(mut);
                 if (q->try_dequeue(ins)) {
                     if (ins.qpos == ins.t->last_queue_id+1) {
                         ins.exec(id+1);
@@ -104,7 +107,7 @@ private:
                 }else {
                     // this is a "best effort" reordering it does not guarantee
                     // correct execution order
-                    if (sleeps > 32) {
+                    if (sleeps > 2) {
                         std::sort(instructions.begin(), instructions.end());
                         for (auto& i : instructions) {
                             i.exec(id+1);
@@ -112,7 +115,7 @@ private:
                         instructions.clear();
                         sleeps = 0;
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     ++sleeps;
                 }
             }
@@ -156,6 +159,7 @@ private:
         // queue_size may sometimes be a subset
         // of the actual queue size - but usually it's the same
         while (t->queue_size > 0) {
+            auto &mut = locks[q]; // only lock when consuming here to try and guarantee order
             if (queues[q]->try_dequeue(ins)) {
                 ins.exec(shard+1);
             }else {

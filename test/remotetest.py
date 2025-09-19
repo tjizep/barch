@@ -8,8 +8,8 @@ k.set("key1","value1")
 for i in range(100000):
     k.set(str(i),str(i+1))
     k.set(str(i),str(i))
-    if i < 1000:
-        assert(k.get(str(i))==str(i))
+    #if i < 100000:
+    assert(k.get(str(i))==str(i))
     if i%1000==0:
         print(i)
 assert(k.get("key1")=="value1")

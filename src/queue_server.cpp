@@ -48,12 +48,12 @@ private:
         [[nodiscard]] art::value_type get_value() const {
             return {value.data(), value.size()};
         }
-        [[nodiscard]] bool exec(size_t tid) const {
+        void exec(size_t tid) const {
             try {
                 ++statistics::queue_processed;
                 if (!t) {
                     ++statistics::queue_failures;
-                    return false;
+                    return;
                 }
                 write_lock release(t->latch);
                 if (t->last_queue_id+1 != qpos) {
@@ -61,15 +61,14 @@ private:
                 }
                 --t->queue_size;
                 t->last_queue_id = qpos;
-                t->opt_insert(options, get_key(),get_value(),true,[](const art::node_ptr& ){});
-                return true;
+                t->opt_insert(options, get_key() ,get_value(),true,[](const art::node_ptr& ){});
+                return;
 
 
             }catch (std::exception& e) {
                 art::std_err("exception processing queue", e.what());
             }
             ++statistics::queue_failures;
-            return false;
         }
     };
     public:

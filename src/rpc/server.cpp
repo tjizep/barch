@@ -356,7 +356,7 @@ namespace barch {
                 return r;
             }
             template<typename ResultT,typename ParamT>
-            call_result tcall(ResultT& result, const ParamT& params, bool asynch = false) {
+            call_result tcall(ResultT& result, const ParamT& params) {
 
                 std::lock_guard lock(latch);
                 to_send.clear();
@@ -394,46 +394,20 @@ namespace barch {
                     writep(stream, buffers_size);
                     writep(stream, to_send.data(), to_send.size());
                     net_stat stat;
-                    if (asynch) {
-                        if (stream.tellg() > 1000) {
-                            write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
-                            for (;requests_in_stream > 0; requests_in_stream--) {
-                                read(s,asio::buffer(&r.call_error,sizeof(r.call_error)));
-                                read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
-                                replies.resize(buffers_size);
-                                size_t reply_length = read(s,asio::buffer(replies));
-                                if (reply_length != buffers_size) {
-                                    art::std_err(reply_length,"!=",buffers_size);
-                                }
-                                for (size_t i = 0; i < buffers_size; i++) {
-                                    auto v = get_variable(i, replies);
-                                    result.emplace_back(v.first);
-                                    i = v.second;
-                                }
-                            }
-                            result.clear();
-                            stream.clear();
-                        }else {
-                            ++requests_in_stream;
-                        }
-                    }else{
-                        write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
-                        read(s,asio::buffer(&r.call_error,sizeof(r.call_error)));
-                        read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
-                        replies.resize(buffers_size);
-                        size_t reply_length = read(s,asio::buffer(replies));
-                        if (reply_length != buffers_size) {
-                            art::std_err(reply_length,"!=",buffers_size);
-                        }
-                        for (size_t i = 0; i < buffers_size; i++) {
-                            auto v = get_variable(i, replies);
-                            result.emplace_back(v.first);
-                            i = v.second;
-                        }
-                        stream.clear();
+                    write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
+                    read(s,asio::buffer(&r.call_error,sizeof(r.call_error)));
+                    read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
+                    replies.resize(buffers_size);
+                    size_t reply_length = read(s,asio::buffer(replies));
+                    if (reply_length != buffers_size) {
+                        art::std_err(reply_length,"!=",buffers_size);
                     }
-
-
+                    for (size_t i = 0; i < buffers_size; i++) {
+                        auto v = get_variable(i, replies);
+                        result.emplace_back(v.first);
+                        i = v.second;
+                    }
+                    stream.clear();
                 }catch (std::exception& e) {
                     art::std_err("call failed [", e.what(),"] to",host,port,"because [",error.message(),error.value(),"]");
                     stream.clear();
@@ -447,7 +421,7 @@ namespace barch {
                 return tcall(result, params);
             }
             call_result asynch_call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) override {
-                return tcall(result, params, false);
+                return tcall(result, params);
             }
 
             call_result call(heap::vector<Variable>& result, const std::vector<std::string_view>& params) override {

@@ -210,6 +210,8 @@ namespace art {
         node_ptr last_leaf_added{};
         barch::repl::client repl_client{};
         std::atomic<size_t> queue_size{};
+        std::atomic<size_t> queue_id{};
+        size_t last_queue_id{};
         bool opt_ordered_keys{true};
 
         void clear_trace() {

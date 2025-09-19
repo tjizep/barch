@@ -1,4 +1,4 @@
-# Release v0.3.3.30b 2025-09-18
+# Release v0.3.3.30b 2025-09-19
 
 ## New Features
 
@@ -57,7 +57,8 @@
 31. fix rpc bug with hash table (v0.3.3.28b 2025-09-14)
 32. fix rpc error handling (v0.3.3.30b 2025-09-17)
 33. improve rpc code (v0.3.3.30b 2025-09-18)
-34. fix route/cluster test
+34. fix route/cluster test (v0.3.3.30b 2025-09-18)
+35. fix lock-free queue order and test (2x yay) (v0.3.3.30b 2025-09-19)
 
 # Release v0.3.3.7b 2025-08-08
 

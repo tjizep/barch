@@ -31,6 +31,10 @@ private:
         art::tree*  t{};
         art::key_options options{};
         int into = into_any;
+        size_t qpos{};
+        bool operator<(const instruction& rhs) const {
+            return qpos < rhs.qpos;
+        }
         void set_key(art::value_type k) {
             key.append(k.to_view());
         }
@@ -43,7 +47,7 @@ private:
         [[nodiscard]] art::value_type get_value() const {
             return {value.data(), value.size()};
         }
-        [[nodiscard]] bool exec() const {
+        [[nodiscard]] bool exec(size_t tid) const {
             try {
                 ++statistics::queue_processed;
                 if (!t) {
@@ -51,7 +55,11 @@ private:
                     return false;
                 }
                 write_lock release(t->latch);
+                if (t->last_queue_id+1 != qpos) {
+                    art::std_err("invalid queue order, expected",t->last_queue_id+1, "found", qpos, "T",tid);
+                }
                 --t->queue_size;
+                t->last_queue_id = qpos;
                 t->opt_insert(options, get_key(),get_value(),true,[](const art::node_ptr& ){});
                 return true;
 
@@ -81,12 +89,30 @@ private:
         }
         threads.start([this](size_t id) {
             auto q = queues[id];
+            heap::vector<instruction> instructions;
+            size_t sleeps = 0;
             while (started) {
                 instruction ins;
                 if (q->try_dequeue(ins)) {
-                    ins.exec();
+                    if (ins.qpos == ins.t->last_queue_id+1) {
+                        ins.exec(id+1);
+                    }else {
+                        instructions.push_back(ins);
+                    }
+
                 }else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    // this is a "best effort" reordering it does not guarantee
+                    // correct execution order
+                    if (sleeps > 8) {
+                        std::sort(instructions.begin(), instructions.end());
+                        for (auto& i : instructions) {
+                            i.exec(id+1);
+                        }
+                        instructions.clear();
+                        sleeps = 0;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    ++sleeps;
                 }
             }
         });
@@ -108,6 +134,7 @@ private:
         ins.set_value(v);
         ins.options = options;
         ins.t = t;
+        ins.qpos = ++t->queue_id;
         ++t->queue_size;
         queues[at]->enqueue(ins);
         ++statistics::queue_added;
@@ -116,7 +143,7 @@ private:
         for (auto& q : queues) {
             instruction ins;
             while (q->try_dequeue(ins)) {
-                ins.exec();
+                ins.exec(1);
             }
         }
     }
@@ -129,7 +156,7 @@ private:
         // of the actual queue size - but usually it's the same
         while (t->queue_size > 0) {
             if (queues[q]->try_dequeue(ins)) {
-                ins.exec();
+                ins.exec(shard+1);
             }else {
                 std::this_thread::yield();
             }

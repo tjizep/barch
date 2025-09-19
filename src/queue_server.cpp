@@ -80,7 +80,7 @@ private:
         stop();
     }
     thread_pool threads{art::get_shard_count().size()};
-    typedef moodycamel::BlockingConcurrentQueue<instruction> queue_type;
+    typedef moodycamel::ConcurrentQueue<instruction> queue_type;
     heap::vector<std::shared_ptr<queue_type>> queues{threads.size()};
     bool started = false;
     void start() {
@@ -107,7 +107,7 @@ private:
                 }else {
                     // this is a "best effort" reordering it does not guarantee
                     // correct execution order
-                    if (sleeps > 128) {
+                    if (sleeps > 2) {
                         std::sort(instructions.begin(), instructions.end());
                         for (auto& i : instructions) {
                             i.exec(id+1);
@@ -117,7 +117,7 @@ private:
                     }
                     auto t = get_art(id);
                     if (t->queue_size == 0) {
-                        if (++steps < 10000)
+                        if (++steps < 100000)
                             std::this_thread::sleep_for(std::chrono::microseconds(1));
                         else
                             std::this_thread::sleep_for(std::chrono::microseconds(1000));
@@ -167,12 +167,13 @@ private:
         // this is more complicated than it looks
         // queue_size may sometimes be a subset
         // of the actual queue size - but usually it's the same
+        size_t steps = 0;
         while (t->queue_size > 0) {
-            //if (queues[q]->try_dequeue(ins)) {
-            //    ins.exec(shard+1);
-            //}else {
+            if (steps < 100)
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
-            //}
+            else
+                std::this_thread::sleep_for(std::chrono::microseconds(1000));
+            ++steps;
         }
     }
 };

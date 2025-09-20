@@ -189,8 +189,8 @@ void queue_consume_all() {
 }
 void start_queue_server() {
     if (!server) {
-        server = std::make_shared<queue_server>();
-        server->start();
+        //server = std::make_shared<queue_server>();
+        //server->start();
     }
 }
 void clear_queue_server() {

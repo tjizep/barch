@@ -51,7 +51,7 @@ endif ()
 
 include(FetchContent)
 
-if (USE_ASIO)
+if (USE_LIBURING)
     message("Using liburing")
     FetchContent_Declare(
             liburing
@@ -67,7 +67,7 @@ if (USE_ASIO)
     include_directories(${liburing_SOURCE_DIR}/src/include)
     set(LIBURING_LIB_PATH ${liburing_SOURCE_DIR}/src/liburing.a)
 else ()
-    message("Boost.Asio not used use -USE_ASIO=ON")
+    message("Liburing not used")
 endif()
 if (USE_ASIO)
     message("Using std alone ASIO")
@@ -187,7 +187,7 @@ if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
 endif ()
 
-if (USE_ASIO)
+if (USE_LIBURING)
     target_link_libraries(barch PRIVATE ${LIBURING_LIB_PATH})
 endif ()
 if (ADD_FMT)

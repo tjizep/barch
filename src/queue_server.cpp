@@ -13,7 +13,13 @@
 #include "rpc/server.h"
 
 #include "statistics.h"
+// TODO: reduce queue memory use when idle
+// TODO: switch automatically between insert ordered modes
+// TODO: switch queueing off from config
 
+enum {
+    retain_insert_order = 0,
+};
 class queue_server {
 public:
     enum {
@@ -61,6 +67,7 @@ private:
                 }
                 --t->queue_size;
                 t->last_queue_id = qpos;
+
                 t->opt_insert(options, get_key() ,get_value(),true,[](const art::node_ptr& ){});
                 return;
 
@@ -91,12 +98,12 @@ private:
         threads.start([this](size_t id) {
             auto q = queues[id];
             heap::vector<instruction> instructions;
+            instruction ins;
             size_t sleeps = 0;
             size_t steps = 0;
             while (started) {
-                instruction ins;
                 if (q->try_dequeue(ins)) {
-                    if (ins.qpos == ins.t->last_queue_id+1) {
+                    if (retain_insert_order == 0 || ins.qpos == ins.t->last_queue_id+1) {
                         ins.exec(id+1);
                     }else {
                         ++statistics::queue_reorders;
@@ -111,20 +118,25 @@ private:
                         for (auto& i : instructions) {
                             i.exec(id+1);
                         }
-                        instructions.clear();
+                        heap::vector<instruction> s;
+                        instructions.swap(s);
                         sleeps = 0;
                     }
-                    auto t = get_art(id);
-                    if (t->queue_size == 0) {
-                        if (++steps < 100000)
-                            std::this_thread::sleep_for(std::chrono::microseconds(1));
-                        else
-                            std::this_thread::sleep_for(std::chrono::microseconds(1000));
-                    }else {
-                        steps = 0;
+                    if (retain_insert_order != 0) {
+                        auto t = get_art(id);
+                        if (t->queue_size == 0) {
+                            if (++steps < 10000) {
+                                std::this_thread::sleep_for(std::chrono::microseconds(1));
+                            } else {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                            }
+                        }else {
+                            steps = 0;
+                        }
+                        ++sleeps;
+                    } else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
-
-                    ++sleeps;
                 }
             }
         });
@@ -167,12 +179,22 @@ private:
         // queue_size may sometimes be a subset
         // of the actual queue size - but usually it's the same
         size_t steps = 0;
-        while (t->queue_size > 0) {
-            if (steps < 100)
-                std::this_thread::sleep_for(std::chrono::microseconds(1));
-            else
-                std::this_thread::sleep_for(std::chrono::microseconds(1000));
-            ++steps;
+        if (retain_insert_order == 0) {
+            while (t->queue_size > 0) {
+                instruction ins;
+                if (queues[q]->try_dequeue(ins)) {
+                    ins.exec(0);
+                }
+            }
+        }else {
+            while (t->queue_size > 0) {
+                if (steps < 1000)
+                    std::this_thread::sleep_for(std::chrono::microseconds(1));
+                else
+                    std::this_thread::sleep_for(std::chrono::microseconds(1000));
+                ++steps;
+            }
+
         }
     }
 };
@@ -213,13 +235,6 @@ bool is_queue_server_running() {
     return server != nullptr;
 }
 
-void hash_queue_insert(size_t shard, art::key_options options,art::value_type k, art::value_type v) {
-    auto t = get_art(shard);
-    if (server)
-        server->queue_insert(t,options,k,v,queue_server::into_hash);
-    else
-        t->hash_insert(options,k,v,true,[](const art::node_ptr& ){});
-}
 
 void queue_insert(size_t shard, art::key_options options,art::value_type k, art::value_type v) {
     auto t = get_art(shard);

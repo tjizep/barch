@@ -1,4 +1,4 @@
-# Release v0.3.3.30b 2025-09-19
+# Release v0.3.3.30b 2025-09-21
 
 ## New Features
 
@@ -59,6 +59,7 @@
 33. improve rpc code (v0.3.3.30b 2025-09-18)
 34. fix route/cluster test (v0.3.3.30b 2025-09-18)
 35. fix lock-free queue order and test (2x yay) (v0.3.3.30b 2025-09-19)
+36. disable update queue for now (v0.3.3.30b 2025-09-21)
 
 # Release v0.3.3.7b 2025-08-08
 

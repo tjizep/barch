@@ -13,6 +13,7 @@
 #include "rpc/server.h"
 
 #include "statistics.h"
+#include "circular_queue.h"
 // TODO: reduce queue memory use when idle
 // TODO: switch automatically between insert ordered modes
 // TODO: switch queueing off from config
@@ -39,6 +40,7 @@ private:
         art::key_options options{};
         int into = into_any;
         size_t qpos{};
+        bool executed = false;
         bool operator<(const instruction& rhs) const {
             return qpos < rhs.qpos;
         }
@@ -54,28 +56,30 @@ private:
         [[nodiscard]] art::value_type get_value() const {
             return {value.data(), value.size()};
         }
-        void exec(size_t tid) const {
+        [[nodiscard]] bool ordered() const {
+            return  (t->last_queue_id+1 == qpos);
+        }
+        bool exec(size_t unused(tid)) {
             try {
                 ++statistics::queue_processed;
                 if (!t) {
                     ++statistics::queue_failures;
-                    return;
+                    return true;
                 }
-                write_lock release(t->latch);
-                if (t->last_queue_id+1 != qpos) {
-                    //art::std_err("invalid queue order, expected",t->last_queue_id+1, "found", qpos, "T",tid);
-                }
+
                 --t->queue_size;
                 t->last_queue_id = qpos;
 
                 t->opt_insert(options, get_key() ,get_value(),true,[](const art::node_ptr& ){});
-                return;
+                executed = true;
+                return true;
 
 
             }catch (std::exception& e) {
                 art::std_err("exception processing queue", e.what());
             }
             ++statistics::queue_failures;
+            return false;
         }
     };
     public:
@@ -86,7 +90,8 @@ private:
         stop();
     }
     thread_pool threads{art::get_shard_count().size()};
-    typedef moodycamel::ConcurrentQueue<instruction> queue_type;
+    //typedef moodycamel::ConcurrentQueue<instruction> queue_type;
+    typedef circular_queue<instruction> queue_type;
     heap::vector<std::shared_ptr<queue_type>> queues{threads.size()};
     bool started = false;
     void start() {
@@ -97,47 +102,9 @@ private:
         }
         threads.start([this](size_t id) {
             auto q = queues[id];
-            heap::vector<instruction> instructions;
-            instruction ins;
-            size_t sleeps = 0;
-            size_t steps = 0;
             while (started) {
-                if (q->try_dequeue(ins)) {
-                    if (retain_insert_order == 0 || ins.qpos == ins.t->last_queue_id+1) {
-                        ins.exec(id+1);
-                    }else {
-                        ++statistics::queue_reorders;
-                        instructions.push_back(ins);
-                    }
-
-                }else {
-                    // this is a "best effort" reordering it does not guarantee
-                    // correct execution order
-                    if (sleeps > 2) {
-                        std::sort(instructions.begin(), instructions.end());
-                        for (auto& i : instructions) {
-                            i.exec(id+1);
-                        }
-                        heap::vector<instruction> s;
-                        instructions.swap(s);
-                        sleeps = 0;
-                    }
-                    if (retain_insert_order != 0) {
-                        auto t = get_art(id);
-                        if (t->queue_size == 0) {
-                            if (++steps < 10000) {
-                                std::this_thread::sleep_for(std::chrono::microseconds(1));
-                            } else {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                            }
-                        }else {
-                            steps = 0;
-                        }
-                        ++sleeps;
-                    } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    }
-                }
+                dequeue_instructions(id);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         });
     }
@@ -171,31 +138,36 @@ private:
             }
         }
     }
-    void consume(size_t shard) {
-        auto t = get_art(shard);
-        auto q = shard % threads.size();
-        instruction ins;
-        // this is more complicated than it looks
-        // queue_size may sometimes be a subset
-        // of the actual queue size - but usually it's the same
-        size_t steps = 0;
-        if (retain_insert_order == 0) {
-            while (t->queue_size > 0) {
-                instruction ins;
-                if (queues[q]->try_dequeue(ins)) {
-                    ins.exec(0);
-                }
-            }
-        }else {
-            while (t->queue_size > 0) {
-                if (steps < 1000)
-                    std::this_thread::sleep_for(std::chrono::microseconds(1));
-                else
-                    std::this_thread::sleep_for(std::chrono::microseconds(1000));
-                ++steps;
-            }
-
+    bool dequeue_instructions(size_t qix) {
+        auto q = queues[qix];
+        size_t count = 0;
+        thread_local heap::vector<instruction> instructions;
+        bool ordered = true;
+        if (ordered) {
+            q->try_dequeue_all([qix,&count](instruction &ins)  {
+                write_lock release(ins.t->latch);
+                ins.exec(qix + 1);
+                ++count;
+            });
+            return count > 0;
         }
+        q->try_dequeue_all([](instruction &ins)  {
+            instructions.emplace_back(ins);
+        });
+
+        for (auto& ins : instructions) {
+            write_lock release(ins.t->latch);
+            ins.exec(qix + 1);
+            ++count;
+        }
+        instructions.erase(instructions.begin(),instructions.begin() + count);
+        instructions.clear();
+        return count > 0;
+
+    }
+    void consume(size_t shard) {
+        auto qix = shard % threads.size();
+        dequeue_instructions(qix);
     }
 };
 

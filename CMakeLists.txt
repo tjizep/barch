@@ -24,7 +24,7 @@ if (NOT TEST_OD)
     set(TEST_OD ON)
 endif ()
 if (NOT USE_LIBURING)
-    set(USE_LIBURING ON)
+    set(USE_LIBURING OFF)
 endif ()
 
 set(CMAKE_CPP_STANDARD 17)

@@ -19,7 +19,7 @@
 #include "vk_caller.h"
 #include "redis_parser.h"
 #include "thread_pool.h"
-#include "uring_context.h"
+//#include "uring_context.h"
 #include "queue_server.h"
 #include "uring_resp_session.h"
 #include "asio_resp_session.h"

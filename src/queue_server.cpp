@@ -27,12 +27,6 @@ bool is_queue_server_initialized() {
     return true;
 }
 class queue_server {
-public:
-    enum {
-        into_any = 1,
-        into_hash = 2
-    };
-private:
     struct instruction {
 
         instruction() = default;
@@ -43,7 +37,6 @@ private:
         heap::small_vector<uint8_t,48> value{};
         art::tree*  t{};
         art::key_options options{};
-        int into = into_any;
         size_t qpos{};
         bool executed = false;
         bool operator<(const instruction& rhs) const {
@@ -140,11 +133,10 @@ private:
         threads.stop();
         consume_all();
     }
-    void queue_insert(art::tree* t,art::key_options options,art::value_type k, art::value_type v, int where) {
+    void queue_insert(art::tree* t,art::key_options options,art::value_type k, art::value_type v) {
 
         size_t at = t->shard % threads.size();
         instruction ins;
-        ins.into = where;
         ins.set_key(k);
         ins.set_value(v);
         ins.options = options;
@@ -233,7 +225,7 @@ bool is_queue_server_running() {
 void queue_insert(size_t shard, art::key_options options,art::value_type k, art::value_type v) {
     auto t = get_art(shard);
     if (server)
-        server->queue_insert(t,options,k,v,queue_server::into_any);
+        server->queue_insert(t,options,k,v);
     else
         t->opt_insert(options,k,v,true,[](const art::node_ptr& ){});
 }

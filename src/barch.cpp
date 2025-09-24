@@ -976,8 +976,8 @@ int SIZE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     auto size = 0ll;
-    for (auto shard: art::get_shard_count()) {
-        auto t = get_art(shard);
+    auto arts = get_arts();
+    for (auto t:arts) {
         storage_release release(t);
         size += (int64_t) art_size(t);
     }

@@ -1,4 +1,4 @@
-# Release v0.3.3.31b 2025-09-22
+# Release v0.3.3.32b 2025-09-24
 
 ## New Features
 
@@ -61,6 +61,7 @@
 35. fix lock-free queue order and test (2x yay) (v0.3.3.30b 2025-09-19)
 36. disable update queue for now (v0.3.3.30b 2025-09-21)
 37. Use simpler circular queue  (v0.3.3.31b 2025-09-22)
+38. finalize circular queue  (v0.3.3.32b 2025-09-24)
 
 # Release v0.3.3.7b 2025-08-08
 

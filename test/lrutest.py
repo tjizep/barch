@@ -3,11 +3,12 @@ import time
 MAXK = 1000000
 barch.clear()
 barch.save()
-barch.setConfiguration("max_memory_bytes","100m")
+barch.setConfiguration("max_memory_bytes","300m")
 barch.setConfiguration("eviction_policy","allkeys-lru")
 k = barch.KeyValue()
 for i in range(MAXK):
     k.set(str(i),str(i))
+print(barch.size())
 assert(barch.size() == MAXK)
 barch.setConfiguration("max_memory_bytes","1m")
 print("sleeping")

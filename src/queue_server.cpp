@@ -3,6 +3,8 @@
 #include <moodycamel/concurrentqueue.h>
 #include <moodycamel/blockingconcurrentqueue.h>
 #pragma GCC diagnostic pop
+#include "queue_server.h"
+
 #include "sastam.h"
 #include "art.h"
 #include "thread_pool.h"
@@ -21,6 +23,10 @@
 enum {
     retain_insert_order = 0,
 };
+static bool queue_server_initialized = false;
+bool is_queue_server_initialized() {
+    return queue_server_initialized;
+}
 class queue_server {
 public:
     enum {
@@ -34,8 +40,8 @@ private:
         instruction(const instruction&) = default;
         instruction(instruction&&) = default;
         instruction& operator=(const instruction&) = default;
-        heap::small_vector<uint8_t, 32> key{};
-        heap::small_vector<uint8_t, 32> value{};
+        heap::small_vector<uint8_t,32> key{};
+        heap::small_vector<uint8_t,48> value{};
         art::tree*  t{};
         art::key_options options{};
         int into = into_any;
@@ -66,10 +72,11 @@ private:
                     ++statistics::queue_failures;
                     return true;
                 }
-
+                if (!ordered()) {
+                    //art::std_err("queue not ordered");
+                }
                 --t->queue_size;
                 t->last_queue_id = qpos;
-
                 t->opt_insert(options, get_key() ,get_value(),true,[](const art::node_ptr& ){});
                 executed = true;
                 return true;
@@ -84,37 +91,54 @@ private:
     };
     public:
     queue_server() {
-
+        queue_server_initialized = true;
     }
     ~queue_server() {
+        queue_server_initialized = false;
         stop();
     }
     thread_pool threads{art::get_shard_count().size()};
     //typedef moodycamel::ConcurrentQueue<instruction> queue_type;
     typedef circular_queue<instruction> queue_type;
-    heap::vector<std::shared_ptr<queue_type>> queues{threads.size()};
+    struct queue_data {
+        explicit queue_data(size_t size) : queue(size) {}
+        queue_data() = default;
+        queue_data(const queue_data&) = delete;
+        queue_data(queue_data&&) = delete;
+        queue_data& operator=(const queue_data&) = delete;
+        queue_data& operator=(queue_data&&) = delete;
+        queue_type queue{};
+        moodycamel::LightweightSemaphore semaphore{0};
+        moodycamel::LightweightSemaphore consumer{0};
+        std::atomic<int64_t> consumers{0};
+        uint64_t execs{};
+        void signalConsumers() {
+            // the consumers really is just a hint of how many (consumers) there are
+            // it's not precise it just aims to reduce semaphore waits and dequeue loops
+            consumer.signal(consumers.load());
+        }
+    };
+    heap::vector<std::shared_ptr<queue_data>> queues{threads.size()};
     bool started = false;
     void start() {
         started = true;
         for (auto& q : queues) {
-            q = std::make_shared<queue_type>(1000);
+            q = std::make_shared<queue_data>(1000);
 
         }
         threads.start([this](size_t id) {
             auto q = queues[id];
+            heap::vector<instruction> instructions;
             while (started) {
-                dequeue_instructions(id);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (!dequeue_instructions(instructions, id))
+                    q->semaphore.wait(10000);
             }
         });
     }
     void stop() {
-
         started = false;
         threads.stop();
         consume_all();
-
-
     }
     void queue_insert(art::tree* t,art::key_options options,art::value_type k, art::value_type v, int where) {
 
@@ -127,67 +151,75 @@ private:
         ins.t = t;
         ins.qpos = ++t->queue_id;
         ++t->queue_size;
-        queues[at]->enqueue(ins);
+        queues[at]->queue.enqueue(ins);
+
         ++statistics::queue_added;
     }
     void consume_all() {
         for (auto& q : queues) {
             instruction ins;
-            while (q->try_dequeue(ins)) {
+            while (q->queue.try_dequeue(ins)) {
                 ins.exec(1);
             }
         }
     }
-    bool dequeue_instructions(size_t qix) {
+    bool dequeue_instructions(heap::vector<instruction>& instructions, size_t qix) {
         auto q = queues[qix];
         size_t count = 0;
-        thread_local heap::vector<instruction> instructions;
-        bool ordered = true;
-        if (ordered) {
-            q->try_dequeue_all([qix,&count](instruction &ins)  {
-                write_lock release(ins.t->latch);
-                ins.exec(qix + 1);
-                ++count;
-            });
-            return count > 0;
-        }
-        q->try_dequeue_all([](instruction &ins)  {
+
+        instructions.clear();
+        q->queue.try_dequeue_all([&](instruction &ins)  {
             instructions.emplace_back(ins);
-        });
+        },32);
 
         for (auto& ins : instructions) {
             write_lock release(ins.t->latch);
+            ++q->execs;
             ins.exec(qix + 1);
             ++count;
         }
-        instructions.erase(instructions.begin(),instructions.begin() + count);
-        instructions.clear();
+
+        q->signalConsumers();
         return count > 0;
 
     }
     void consume(size_t shard) {
         auto qix = shard % threads.size();
-        dequeue_instructions(qix);
+        auto q = queues[qix];
+        auto t = get_art(shard);
+        if (t->queue_size > 0) {
+            ++q->consumers;
+            q->semaphore.signal();
+            q->consumer.wait(1000);
+            --q->consumers;
+        }
+        while (t->queue_size > 0) {
+            ++q->consumers;
+            q->consumer.wait(1000);
+            --q->consumers;
+        }
+
     }
 };
 
 std::shared_ptr<queue_server> server;
 
 void queue_consume(size_t shard) {
-    if (server)
+    if (is_queue_server_running())
         server->consume(shard);
 }
 void queue_consume_all() {
-    if (server)
+    if (is_queue_server_running())
         server->consume_all();
 }
 void start_queue_server() {
-    if (!server) {
-        //server = std::make_shared<queue_server>();
-        //server->start();
+    if (!is_queue_server_running()) {
+        server = std::make_shared<queue_server>();
+        server->start();
     }
 }
 void clear_queue_server() {
+    if (!is_queue_server_running()) return;
     if (server) {
         auto s = server;
         server = nullptr;
@@ -197,6 +229,7 @@ void clear_queue_server() {
     }
 }
 void stop_queue_server() {
+    if (!queue_server_initialized) return;
     if (server) {
         server->stop();
     }
@@ -204,6 +237,7 @@ void stop_queue_server() {
 }
 
 bool is_queue_server_running() {
+    if (!queue_server_initialized) return false;
     return server != nullptr;
 }
 

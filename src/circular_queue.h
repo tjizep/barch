@@ -14,6 +14,8 @@ public:
     mutable std::mutex mutex_{};
     size_t front{};
     size_t rear{};
+    size_t enqueues = 0;
+    size_t dequeues = 0;
     heap::vector<T> arr{InitialCapacity};
     explicit circular_queue(size_t init_cap) : arr(init_cap == 0 ? InitialCapacity :init_cap) {}
     circular_queue() = default;
@@ -27,15 +29,32 @@ public:
     bool full() const {
         return ((rear + 1) % arr.size() == front);
     }
-
+    void simple_enqueue(const T &item) {
+        ++enqueues;
+        arr[rear] = item;
+        rear = (rear + 1) % arr.size();
+    }
     void enqueue(const T& val) {
         std::unique_lock lock(mutex_);
         if (full()) {
-            arr.resize(arr.size() * 2);
+            heap::vector<T> old;
+            old.swap(arr);
+            arr.resize(old.size() * 2);
+            size_t old_front = front;
+            size_t old_rear = rear;
+            enqueues = 0;
+            dequeues = 0;
+            front = 0;
+            rear = 0;
+            while (old_front != old_rear) {
+                simple_enqueue(old[old_front]);
+                old_front = (old_front + 1) % old.size();
+            }
+            if (full() || rear - front != enqueues) {
+                art::std_err("resize failed");
+            }
         }
-        arr[rear] = val;
-        rear = (rear + 1) % arr.size();
-
+       simple_enqueue(val);
     }
     std::mutex& mutex() {
         return mutex_;
@@ -50,6 +69,7 @@ public:
         if (empty()) {
             return false;
         }
+        ++dequeues;
         item = arr[front];
         front = (front + 1) % arr.size();
         return true;

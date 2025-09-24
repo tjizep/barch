@@ -14,7 +14,9 @@ static std::vector<art::tree *> shards{};
 std::shared_mutex &get_lock() {
     return shared;
 }
-
+std::vector<art::tree *>& get_arts() {
+    return shards;
+}
 art::tree *get_art(size_t s) {
     if (shards.empty()) {
         write_lock w(get_lock());

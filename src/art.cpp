@@ -13,7 +13,7 @@
 #include "keys.h"
 #include "logger.h"
 #include "module.h"
-
+#include "queue_server.h"
 
 // Recursively destroys the tree
 static void destroy_node(const art::node_ptr& n) {
@@ -1501,6 +1501,7 @@ uint64_t art_size(art::tree *t) {
         if (t == nullptr)
             return 0;
         uint64_t size = t->size;
+
         //if (!art::get_ordered_keys()) {
             size += t->get_jump_size();
         //}

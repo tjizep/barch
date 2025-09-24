@@ -12,7 +12,6 @@
 
 #include "asio_includes.h"
 #include <cstdio>
-#include <liburing.h>
 #include "barch_apis.h"
 #include "swig_api.h"
 #include "rpc_caller.h"

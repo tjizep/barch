@@ -109,6 +109,21 @@ public:
 
         return count;
     }
+    size_t try_dequeue_bulk(T* items, size_t max) {
+        if (empty() || max == 0) {
+            return 0;
+        }
+        size_t count = 0;
+        std::unique_lock lock(mutex_);
+        while (try_dequeue_unlocked(items[count])) {
+            ++count;
+            if (count == max) {
+                break;
+            }
+        }
+
+        return count;
+    }
 
     bool peek(T& item) {
         std::unique_lock lock(mutex_);

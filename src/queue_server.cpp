@@ -103,10 +103,30 @@ class queue_server {
         moodycamel::LightweightSemaphore consumer{0};
         std::atomic<int64_t> consumers{0};
         uint64_t execs{};
+        heap::vector<instruction> instructions{};
         void signalConsumers() {
             // the consumers really is just a hint of how many (consumers) there are
             // it's not precise it just aims to reduce semaphore waits and dequeue loops
             consumer.signal(consumers.load());
+        }
+        bool dequeue_instructions(size_t qix) {
+            size_t count = 0;
+
+            instructions.clear();
+            queue.try_dequeue_all([&](instruction &ins)  {
+                instructions.emplace_back(ins);
+            },32);
+
+            for (auto& ins : instructions) {
+                write_lock release(ins.t->latch);
+                ++execs;
+                ins.exec(qix + 1);
+                ++count;
+            }
+
+            signalConsumers();
+            return count > 0;
+
         }
     };
     heap::vector<std::shared_ptr<queue_data>> queues{threads.size()};
@@ -120,9 +140,9 @@ class queue_server {
         }
         threads.start([this](size_t id) {
             auto q = queues[id];
-            heap::vector<instruction> instructions;
+
             while (started) {
-                if (!dequeue_instructions(instructions, id))
+                if (!q->dequeue_instructions(id))
                     q->semaphore.wait(10000);
             }
         });
@@ -156,26 +176,7 @@ class queue_server {
             }
         }
     }
-    bool dequeue_instructions(heap::vector<instruction>& instructions, size_t qix) {
-        auto q = queues[qix];
-        size_t count = 0;
 
-        instructions.clear();
-        q->queue.try_dequeue_all([&](instruction &ins)  {
-            instructions.emplace_back(ins);
-        },32);
-
-        for (auto& ins : instructions) {
-            write_lock release(ins.t->latch);
-            ++q->execs;
-            ins.exec(qix + 1);
-            ++count;
-        }
-
-        q->signalConsumers();
-        return count > 0;
-
-    }
     void consume(size_t shard) {
         auto qix = shard % threads.size();
         auto q = queues[qix];

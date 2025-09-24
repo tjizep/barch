@@ -32,6 +32,6 @@ enum {
     key_terminator = 0x01,
     max_top = 100000000000,
     page_extension_on_allocation = 1,
-    max_process_queue_size = 45000
+    max_process_queue_size = 20000
 };
 #endif //CONSTANTS_H

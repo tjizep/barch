@@ -11,5 +11,6 @@ extern void queue_consume(size_t shard) ;
 extern void queue_consume_all();
 extern void start_queue_server();
 extern void stop_queue_server();
+extern void clear_queue_server();
 extern bool is_queue_server_running();
 #endif //BARCH_QUEUE_SERVER_H

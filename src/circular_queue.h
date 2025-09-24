@@ -7,7 +7,7 @@
 #include <mutex>
 
 #include "sastam.h"
-template<typename T, int InitialCapacity = 16000>
+template<typename T, int InitialCapacity = 1000>
 class circular_queue {
 public:
     // index pointers and data array
@@ -36,6 +36,9 @@ public:
     }
     void enqueue(const T& val) {
         std::unique_lock lock(mutex_);
+        if (arr.empty()) {
+            arr.resize(InitialCapacity);
+        }
         if (full()) {
             heap::vector<T> old;
             old.swap(arr);
@@ -74,6 +77,18 @@ public:
         front = (front + 1) % arr.size();
         return true;
     }
+    bool clear_if_empty() {
+        std::unique_lock lock(mutex_);
+        if (!empty()) {
+            return false;
+        }
+        front = 0;
+        rear = 0;
+        enqueues = 0;
+        dequeues = 0;
+        arr = std::move(heap::vector<T>());
+        return true;
+    }
     // function has to be called only when the user
     // has manually engaged the mutex
     template<typename FT>
@@ -91,6 +106,7 @@ public:
                 break;
             }
         }
+
         return count;
     }
 

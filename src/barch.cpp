@@ -8,6 +8,7 @@
 #include "vk_caller.h"
 #include "keys.h"
 #include "thread_pool.h"
+#include "queue_server.h"
 /* cdict --
  *
  * This module implements a volatile key-value store on top of the
@@ -1159,6 +1160,7 @@ int CLEAR(caller& call, const arg_t& argv) {
     for (auto shard : art::get_shard_count()) {
         get_art(shard)->clear();
     }
+
     return call.simple("OK");
 }
 

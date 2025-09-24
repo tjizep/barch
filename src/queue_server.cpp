@@ -23,9 +23,8 @@
 enum {
     retain_insert_order = 0,
 };
-static bool queue_server_initialized = false;
 bool is_queue_server_initialized() {
-    return queue_server_initialized;
+    return true;
 }
 class queue_server {
 public:
@@ -91,10 +90,9 @@ private:
     };
     public:
     queue_server() {
-        queue_server_initialized = true;
+        start();
     }
     ~queue_server() {
-        queue_server_initialized = false;
         stop();
     }
     thread_pool threads{art::get_shard_count().size()};
@@ -121,6 +119,7 @@ private:
     heap::vector<std::shared_ptr<queue_data>> queues{threads.size()};
     bool started = false;
     void start() {
+        if (started) return;
         started = true;
         for (auto& q : queues) {
             q = std::make_shared<queue_data>(1000);
@@ -136,6 +135,7 @@ private:
         });
     }
     void stop() {
+        if (!started) return;
         started = false;
         threads.stop();
         consume_all();
@@ -156,6 +156,7 @@ private:
         ++statistics::queue_added;
     }
     void consume_all() {
+        if (!started) return;
         for (auto& q : queues) {
             instruction ins;
             while (q->queue.try_dequeue(ins)) {
@@ -209,36 +210,23 @@ void queue_consume(size_t shard) {
         server->consume(shard);
 }
 void queue_consume_all() {
-    if (is_queue_server_running())
-        server->consume_all();
+    server->consume_all();
 }
 void start_queue_server() {
-    if (!is_queue_server_running()) {
-        server = std::make_shared<queue_server>();
-        server->start();
-    }
+    server = std::make_shared<queue_server>();
 }
 void clear_queue_server() {
-    if (!is_queue_server_running()) return;
     if (server) {
-        auto s = server;
         server = nullptr;
-        s->consume_all();
-        s->stop();
-        server = std::make_shared<queue_server>();
+        start_queue_server();
     }
 }
 void stop_queue_server() {
-    if (!queue_server_initialized) return;
-    if (server) {
-        server->stop();
-    }
     server = nullptr;
 }
 
 bool is_queue_server_running() {
-    if (!queue_server_initialized) return false;
-    return server != nullptr;
+    return server != nullptr && server->started;
 }
 
 

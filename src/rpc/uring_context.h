@@ -29,15 +29,6 @@ enum {
 using asio::ip::tcp;
 using asio::local::stream_protocol;
 
-struct net_stat {
-    uint64_t saved_writes = stream_write_ctr;
-    uint64_t saved_reads = stream_read_ctr;
-    net_stat() = default;
-    ~net_stat() {
-        statistics::repl::bytes_recv += stream_read_ctr - saved_reads;
-        statistics::repl::bytes_sent += stream_write_ctr - saved_writes;
-    }
-};
 typedef std::function<void(art::value_type data)> uring_cb;
 struct request {
     request(){}

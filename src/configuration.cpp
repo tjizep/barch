@@ -34,6 +34,8 @@ static std::string rpc_max_buffer{};
 static std::string rpc_client_max_wait_ms{};
 static std::string jump_factor{};
 static std::string ordered_keys{};
+static std::string server_port{};
+static std::string server_binding{};
 static std::vector<std::string> valid_evictions = {
     "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
 };
@@ -131,6 +133,44 @@ static int SetRPCClientMaxWait(const char *unused_arg, ValkeyModuleString *val, 
     return SetRPCClientMaxWait(test_rpc_client_max_wait_ms);
 }
 static int ApplyRPCClientMaxWait(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString *GetServerPort(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(config_mutex);
+    return ValkeyModule_CreateString(nullptr, max_memory_bytes.c_str(), max_memory_bytes.length());;
+}
+
+static int SetServerPort(const std::string& test_server_port) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_server_port, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(config_mutex);
+    server_port = test_server_port;
+    char *notn = nullptr;
+    const char *str = server_port.c_str();
+    const char *end = str + server_port.length();
+
+    uint64_t n_server_port = std::strtoll(str, &notn, 10);
+    if (notn != nullptr && notn != end) {
+        return VALKEYMODULE_ERR;
+    }
+    if (n_server_port > 65535) {
+        return VALKEYMODULE_ERR;
+    }
+    record.server_port = n_server_port;
+    return VALKEYMODULE_OK;
+}
+
+static int SetServerPort(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string test_server_port = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetServerPort(test_server_port);
+}
+static int ApplyServerPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    barch::server::stop();
+    barch::server::start(record.server_binding,record.server_port);
     return VALKEYMODULE_OK;
 }
 
@@ -671,6 +711,10 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                      GetOrderedKeys, SetOrderedKeys,
                                                      ApplyOrderedKeys, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "server_port", "14000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetServerPort, SetServerPort,
+                                                     ApplyServerPort, nullptr);
+
     return ret;
 }
 
@@ -736,6 +780,12 @@ int art::set_configuration_value(const std::string& name, const std::string &val
         auto r = SetOrderedKeys(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyOrderedKeys(nullptr, nullptr, nullptr);
+        }
+        return r;
+    }else if (name == "server_port") {
+        auto r = SetServerPort(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyServerPort(nullptr, nullptr, nullptr);
         }
         return r;
     } else {
@@ -859,6 +909,11 @@ bool art::get_ordered_keys() {
 
 uint64_t art::get_internal_shards() {
     return record.internal_shards;
+}
+
+uint64_t art::get_server_port() {
+    std::lock_guard lock(config_mutex);
+    return record.server_port;
 }
 
 static std::vector<size_t> init_shard_sizes() {

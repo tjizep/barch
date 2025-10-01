@@ -270,6 +270,7 @@ namespace barch {
     void server::start(const std::string& interface, uint_least16_t port) {
         if (srv) srv->stop();
         try {
+            if (port == 0) return;
             srv = std::make_shared<server_context>(interface, port);
         }catch (std::exception& e) {
             art::std_err("failed to start server", e.what());

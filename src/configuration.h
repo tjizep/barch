@@ -29,6 +29,9 @@ namespace art {
         uint64_t rpc_read_to_s{30};
         uint64_t rpc_write_to_s{30};
         uint64_t internal_shards{37};
+        uint64_t server_port{14000};
+        std::string server_binding{"0.0.0.0"};
+
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
         bool ordered_keys{true};
@@ -95,7 +98,7 @@ namespace art {
     uint64_t get_rpc_max_buffer();
 
     int64_t get_rpc_max_client_wait_ms();
-
+    uint64_t get_server_port();
     std::chrono::seconds get_rpc_connect_to_s();
     std::chrono::seconds get_rpc_read_to_s() ;
     std::chrono::seconds get_rpc_write_to_s() ;

@@ -14,9 +14,7 @@ enum {
 };
 
 enum {
-    opt_max_workers = 8,
-    opt_read_timout = 60000,
-    opt_use_alt_threads = 0
+    opt_read_timout = 60000
 };
 
 

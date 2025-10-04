@@ -130,22 +130,11 @@ namespace barch {
                 endpoint.read_some(asio::buffer(cs,1));
                 stream_read_ctr += 1;
                 if (cs[0]) {
-                    if (opt_use_alt_threads == 1){
-#if 0
-                        auto& ioc = this->io;
-                        auto unit = this->get_unit();
-                        tcp::socket socket (ioc);
-                        socket.assign(tcp::v4(),endpoint.release());
-                        auto session = std::make_shared<uring_resp_session>(std::move(socket),unit,cs[0]);
-                        session->start();
-#endif
-                    }else {
-                        auto unit = this->get_asio_unit();
-                        tcp::socket socket (unit->io);
-                        socket.assign(tcp::v4(),endpoint.release());
-                        auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
-                        session->start();
-                    }
+                    auto unit = this->get_asio_unit();
+                    tcp::socket socket (unit->io);
+                    socket.assign(tcp::v4(),endpoint.release());
+                    auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
+                    session->start();
                     return;
                 }
                 uint32_t cmd = 0;
@@ -232,12 +221,6 @@ namespace barch {
         ,   port(port){
 
             start_accept();
-#if 0
-            io_resp.resize(resp_pool.size());
-            for (size_t i = 0; i < io_resp.size(); ++i) {
-                io_resp[i] = std::make_shared<work_unit>();
-            }
-#endif
             pool.start([this](size_t tid) -> void{
                 io.dispatch([this,tid]() {
                     art::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
@@ -253,14 +236,6 @@ namespace barch {
                 asio_resp_ios[tid] = std::make_shared<asio_work_unit>();
                 asio_resp_ios[tid]->run();
             });
-#if 0
-            resp_pool.start([this, &started](size_t tid) -> void {
-                ++started;
-                io_resp[tid]->run(tid);
-            });
-
-
-#endif
             while (started != asio_resp_pool.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
@@ -564,9 +539,6 @@ namespace barch {
 
         }
         bool client::insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value) {
-#if 0
-            return rpc_insert(latch, options, key, value);
-#else
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
@@ -595,7 +567,6 @@ namespace barch {
             ++statistics::repl::insert_requests;
             ++messages;
             return true;
-#endif
 
         }
 

@@ -327,5 +327,31 @@ namespace barch {
         }
         return r;
     }
+    template<typename SockT>
+    bool run_to(asio::io_context& ioc, SockT& s, std::chrono::steady_clock::duration timeout) {
+        ioc.restart();
+        ioc.run_for(timeout);
+        if (!ioc.stopped()) {
+            s.close();
+            ioc.run();
+            return false;
+        }
+        return true;
+    }
+    template<typename SockT,typename BufT>
+    void async_write_to(SockT& sock, const BufT& buf, std::error_code& error) {
+        asio::async_write(sock, buf,[&](const std::error_code& result_error,
+        std::size_t result_n)
+        {
+            error = result_error;
+            if (error) {
+                ++statistics::repl::request_errors;
+                //throw_exception<std::runtime_error>("failed to write");
+            }else {
+                net_stat stat;
+                stream_write_ctr += result_n;
+            }
+        });
+    }
 }
 #endif //BARCH_BARCH_RPC_H

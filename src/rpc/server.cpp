@@ -287,12 +287,7 @@ namespace barch {
             }
             virtual ~rpc_impl() = default;
             void run(std::chrono::steady_clock::duration timeout) {
-                ioc.restart();
-                ioc.run_for(timeout);
-                if (!ioc.stopped()) {
-                    s.close();
-                    ioc.run();
-                }
+                run_to(ioc, s, timeout);
             }
 
             template<typename SockT,typename BufT>
@@ -376,6 +371,7 @@ namespace barch {
                     size_t reply_length = read(s,asio::buffer(replies));
                     if (reply_length != buffers_size) {
                         art::std_err(reply_length,"!=",buffers_size);
+                        throw_exception<std::length_error>("invalid reply length");
                     }
                     for (size_t i = 0; i < buffers_size; i++) {
                         auto v = get_variable(i, replies);
@@ -438,15 +434,17 @@ namespace barch {
                 heap::vector<uint8_t> to_send;
                 to_send.reserve(art::get_rpc_max_buffer());
                 try {
-                    asio::io_service io;
+                    asio::io_context io;
+                    tcp::resolver resolver{io};
                     heap::vector<repl_dest> dests;
-                    uint32_t messages = 0;
+                    vector_stream stream;
+                    uint32_t message_count = 0;
                     while (connected) {
 
                         {
                             std::lock_guard lock(this->latch);
                             to_send.swap(this->buffer);
-                            messages = this->messages;
+                            message_count = this->messages;
                             this->buffer.clear();
                             this->messages = 0;
                             dests = destinations;
@@ -454,27 +452,47 @@ namespace barch {
                         if (!to_send.empty()) {
                             for (auto& dest : dests) {
                                 try {
-                                    net_stat stat;
+                                    stream.clear();
+                                    std::error_code error{};
+                                    tcp::socket s = tcp::socket(io);
+                                    auto resolution = resolver.resolve(dest.host,std::to_string(dest.port));
+                                    asio::async_connect(s, resolution,[&](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
+                                        if (!ec) {
+
+                                            uint32_t cmd = cmd_art_fun;
+                                            uint32_t buffers_size = to_send.size();
+                                            uint32_t sh = this->shard;
+                                            writep(stream,uint8_t{0x00});
+                                            writep(stream, cmd);
+                                            writep(stream, sh);
+                                            writep(stream, message_count);
+                                            if (buffers_size == 0) {
+                                                art::std_err("invalid buffer size", buffers_size);
+                                                return;
+                                            }
+                                            writep(stream, buffers_size);
+                                            writep(stream, to_send.data(), to_send.size());
+                                            async_write_to( s, asio::buffer(stream.buf.data(), stream.buf.size()), error);
+                                        }else {
+                                            error = ec;
+                                        }
+
+                                    });
+                                    if (!run_to(io, s, art::get_rpc_connect_to_s())) {
+                                        throw_exception<std::runtime_error>("failed to connect to server");
+                                    }
+                                    if (error) {
+                                        continue;
+                                    }
+
+#if 0
                                     tcp::iostream stream(dest.host, std::to_string(dest.port));
                                     if (stream.fail()) {
                                         continue;
                                     }
-                                    uint32_t cmd = cmd_art_fun;
-                                    uint32_t buffers_size = to_send.size();
-                                    uint32_t sh = this->shard;
-                                    writep(stream,uint8_t{0x00});
-                                    writep(stream, cmd);
-                                    writep(stream, sh);
-                                    writep(stream, messages);
-                                    if (buffers_size == 0) {
-                                        art::std_err("invalid buffer size", buffers_size);
-                                        return;
-                                    }
-                                    writep(stream, buffers_size);
-                                    writep(stream, to_send.data(), to_send.size());
-                                    stream.flush();
-                                    stream.close();
+#endif
                                     //art::std_log("sent", buffers_size, "bytes to", dest.host, dest.port, "total sent",total_messages,"still queued",(uint32_t)this->messages,"iq",(long long)statistics::repl::insert_requests);
+
                                 }catch (std::exception& e) {
                                     art::std_err("failed to write to stream", e.what(),"to",dest.host,dest.port);
                                 }

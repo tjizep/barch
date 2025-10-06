@@ -346,7 +346,6 @@ namespace barch {
             error = result_error;
             if (error) {
                 ++statistics::repl::request_errors;
-                //throw_exception<std::runtime_error>("failed to write");
             }else {
                 net_stat stat;
                 stream_write_ctr += result_n;

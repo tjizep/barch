@@ -439,6 +439,7 @@ namespace barch {
                     heap::vector<repl_dest> dests;
                     vector_stream stream;
                     uint32_t message_count = 0;
+                    std::error_code error{};
                     while (connected) {
 
                         {
@@ -453,12 +454,12 @@ namespace barch {
                             for (auto& dest : dests) {
                                 try {
                                     stream.clear();
-                                    std::error_code error{};
+                                    error.clear();
                                     tcp::socket s = tcp::socket(io);
                                     auto resolution = resolver.resolve(dest.host,std::to_string(dest.port));
                                     asio::async_connect(s, resolution,[&](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
+                                        error = ec;
                                         if (!ec) {
-
                                             uint32_t cmd = cmd_art_fun;
                                             uint32_t buffers_size = to_send.size();
                                             uint32_t sh = this->shard;
@@ -473,10 +474,7 @@ namespace barch {
                                             writep(stream, buffers_size);
                                             writep(stream, to_send.data(), to_send.size());
                                             async_write_to( s, asio::buffer(stream.buf.data(), stream.buf.size()), error);
-                                        }else {
-                                            error = ec;
                                         }
-
                                     });
                                     if (!run_to(io, s, art::get_rpc_connect_to_s())) {
                                         throw_exception<std::runtime_error>("failed to connect to server");

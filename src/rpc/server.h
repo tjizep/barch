@@ -95,7 +95,7 @@ namespace barch {
              */
             bool find_insert(art::value_type key);
         private:
-            void send_art_fun(std::iostream& stream,  const heap::vector<uint8_t>& to_send);
+            //void send_art_fun(std::iostream& stream,  const heap::vector<uint8_t>& to_send);
         };
         struct route {
             std::string ip{};

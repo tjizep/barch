@@ -18,9 +18,7 @@
 #include "vk_caller.h"
 #include "redis_parser.h"
 #include "thread_pool.h"
-//#include "uring_context.h"
 #include "queue_server.h"
-//#include "uring_resp_session.h"
 #include "asio_resp_session.h"
 #include "rpc/barch_session.h"
 
@@ -570,11 +568,18 @@ namespace barch {
             ++messages;
             return true;
         }
-        void client::send_art_fun(std::iostream& stream, const heap::vector<uint8_t>& to_send) {
-            uint32_t cmd = cmd_art_fun;
+
+        template<typename Stream>
+        auto get_value() {
+            return cmd_art_fun;
+        }
+
+        template<typename Stream>
+        void send_art_fun(Stream& stream, const heap::vector<uint8_t>& to_send, uint32_t messages, size_t shard) {
+            uint32_t cmd = get_value<Stream>();
             uint32_t buffers_size = to_send.size();
-            uint32_t sh = this->shard;
-            writep(stream,uint8_t{0x00});
+            uint32_t sh = shard;
+            writep(stream, uint8_t{0x00});
             writep(stream, cmd);
             writep(stream, sh);
             writep(stream, messages);
@@ -631,15 +636,15 @@ namespace barch {
                 try {
 
                     net_stat stat;
-                    tcp::iostream stream;
-
+                    //tcp::iostream stream;
+                    sock_fun stream;
                     stream.connect(source.host, std::to_string(source.port));
                     if (stream.fail()) {
                         art::std_err("failed to connect to remote server", host, this->port);
                         continue;
                     }
 
-                    send_art_fun(stream, to_send);
+                    send_art_fun(stream, to_send, messages, shard);
                     if (!recv_buffer(stream, rbuff)) {
                         continue;
                     }
@@ -648,7 +653,7 @@ namespace barch {
                     auto r = process_art_fun_cmd(t, stream, rbuff);
                     if (r.add_applied > 0) {
                         added = true;
-                        break; // don't call the other servers
+                        break; // don't call the other servers - paxos would have us get a quorum
                     }
                 }catch (std::exception& e) {
                     art::std_err("failed to write to stream", e.what(),"to",source.host,source.port);

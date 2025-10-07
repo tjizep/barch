@@ -166,8 +166,8 @@ namespace barch {
         throw_exception<std::runtime_error>("invalid index");
         return {};
     }
-
-    inline bool recv_buffer(std::iostream& stream, heap::vector<uint8_t>& buffer) {
+    template<typename Stream>
+    bool recv_buffer(Stream& stream, heap::vector<uint8_t>& buffer) {
         uint32_t buffers_size = 0;
         readp(stream,buffers_size);
         if (buffers_size == 0) {
@@ -346,6 +346,7 @@ namespace barch {
         {
             error = result_error;
             if (error) {
+                art::std_err("error (",result_error.value(),") writing ",result_n,"bytes to socket:",result_error.message());
                 ++statistics::repl::request_errors;
             }else {
                 net_stat stat;
@@ -359,9 +360,9 @@ namespace barch {
         tcp::resolver resolver{io};
         tcp::socket s{io};
         std::error_code error{};
-        bool connect(const std::string& host,  uint16_t port) {
+        bool connect(const std::string& host,  const std::string& port) {
             error.clear();
-            auto resolution = resolver.resolve(host,std::to_string(port));
+            auto resolution = resolver.resolve(host,port);
             asio::async_connect(s, resolution,[&](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
                 error = ec;
             });
@@ -379,7 +380,7 @@ namespace barch {
         }
         bool write(const char* data, size_t size) {
             async_write_to( s, asio::buffer(data, size), error);
-            return run_to(io, s, art::get_rpc_connect_to_s()) && !error;
+            return run_to(io, s, art::get_rpc_write_to_s()) && !error;
         }
         bool write(const heap::vector<uint8_t> &to_send) {
             return write(to_send.data(), to_send.size());
@@ -391,6 +392,10 @@ namespace barch {
                 net_stat stat;
                 stream_read_ctr += result_n;
                 error = result_error;
+                if (error) {
+                    art::std_err("error (",error.value(),") reading socket:[",error.message(),"]");
+                    ++statistics::repl::request_errors;
+                }
             });
             if (!run_to(io, s, art::get_rpc_read_to_s())) {
                 return false;
@@ -422,7 +427,6 @@ namespace barch {
             return read(buffer);
         }
         void flush() {
-
         }
     };
     struct art_fun : sock_fun {
@@ -433,7 +437,7 @@ namespace barch {
         bool send(size_t shard, const std::string& host, uint16_t port, const heap::vector<uint8_t> &to_send) {
             stream.clear();
             error.clear();
-            if (connect(host,port)) {
+            if (connect(host,std::to_string(port))) {
                 uint32_t cmd = cmd_art_fun;
                 uint32_t buffers_size = to_send.size();
                 uint32_t sh = shard;

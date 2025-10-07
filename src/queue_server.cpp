@@ -37,11 +37,7 @@ class queue_server {
         heap::small_vector<uint8_t,48> value{};
         art::tree*  t{};
         art::key_options options{};
-        size_t qpos{};
         bool executed = false;
-        bool operator<(const instruction& rhs) const {
-            return qpos < rhs.qpos;
-        }
         void set_key(art::value_type k) {
             key.append(k.to_view());
         }
@@ -55,7 +51,7 @@ class queue_server {
             return {value.data(), value.size()};
         }
         [[nodiscard]] bool ordered() const {
-            return  (t->last_queue_id+1 == qpos);
+            return true; // (t->last_queue_id+1 == qpos);
         }
         bool exec(size_t unused(tid)) {
             try {
@@ -68,7 +64,7 @@ class queue_server {
                     //art::std_err("queue not ordered");
                 }
                 --t->queue_size;
-                t->last_queue_id = qpos;
+                //t->last_queue_id = qpos;
                 t->opt_insert(options, get_key() ,get_value(),true,[](const art::node_ptr& ){});
                 executed = true;
                 return true;
@@ -161,7 +157,6 @@ class queue_server {
         ins.set_value(v);
         ins.options = options;
         ins.t = t;
-        ins.qpos = ++t->queue_id;
         ++t->queue_size;
         queues[at]->queue.enqueue(ins);
 

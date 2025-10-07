@@ -5,13 +5,11 @@
 #ifndef COMPRESS_H
 #define COMPRESS_H
 #include <iostream>
-#include <fstream>
 #include "sastam.h"
 #include <ostream>
 #include <statistics.h>
 #include <stdexcept>
 #include <thread>
-#include <valkeymodule.h>
 #include <vector>
 #include <functional>
 #include <list>
@@ -672,7 +670,6 @@ public:
     template<typename T>
     T *read(logical_address at) const {
         if (at.null()) return nullptr;
-        //std::lock_guard guard(mutex);
         static_assert(sizeof(T) < LPageSize);
         const uint8_t *d = const_cast<logical_allocator*>(this)->basic_resolve(at);
         return (T *) d;

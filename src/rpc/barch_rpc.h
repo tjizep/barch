@@ -178,6 +178,7 @@ namespace barch {
         readp(stream, buffer.data(), buffer.size());
         return true;
     }
+
     inline void send_art_fun(uint32_t shard, uint32_t messages, std::iostream& stream, heap::vector<uint8_t>& to_send) {
         uint32_t cmd = cmd_art_fun;
         uint32_t buffers_size = to_send.size();
@@ -352,5 +353,106 @@ namespace barch {
             }
         });
     }
+    struct sock_fun {
+        sock_fun() = default;
+        asio::io_context io{};
+        tcp::resolver resolver{io};
+        tcp::socket s{io};
+        std::error_code error{};
+        bool connect(const std::string& host,  uint16_t port) {
+            error.clear();
+            auto resolution = resolver.resolve(host,std::to_string(port));
+            asio::async_connect(s, resolution,[&](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
+                error = ec;
+            });
+            if (!run_to(io, s, art::get_rpc_connect_to_s())) {
+                return false;
+            }
+            return !error ;
+        }
+        bool write(const vector_stream &to_send) {
+            return write(to_send.buf);
+        }
+        bool write(const uint8_t* data, size_t size) {
+            async_write_to( s, asio::buffer(data, size), error);
+            return run_to(io, s, art::get_rpc_connect_to_s()) && !error;
+        }
+        bool write(const char* data, size_t size) {
+            async_write_to( s, asio::buffer(data, size), error);
+            return run_to(io, s, art::get_rpc_connect_to_s()) && !error;
+        }
+        bool write(const heap::vector<uint8_t> &to_send) {
+            return write(to_send.data(), to_send.size());
+        }
+        bool read(uint8_t* data, size_t size) {
+            asio::async_read(s, asio::buffer(data, size),[&](const std::error_code& result_error,
+            std::size_t result_n)
+            {
+                net_stat stat;
+                stream_read_ctr += result_n;
+                error = result_error;
+            });
+            if (!run_to(io, s, art::get_rpc_read_to_s())) {
+                return false;
+            }
+            return !error;
+
+        }
+        [[nodiscard]] bool ok() const {
+            return !error;
+        }
+        [[nodiscard]] bool fail() const{
+            return !ok();
+        }
+        bool read(char* data, size_t size) {
+            return read((uint8_t*)data, size);
+        }
+        template<typename BufferT>
+        bool read(BufferT& data) {
+            return read(data.data(), data.size());
+        }
+        bool recv_buffer(heap::vector<uint8_t>& buffer) {
+            uint32_t buffers_size = 0;
+            readp(*this, buffers_size);
+            if (buffers_size == 0) {
+                return false;
+            }
+            buffer.clear();
+            buffer.resize(buffers_size);
+            return read(buffer);
+        }
+        void flush() {
+
+        }
+    };
+    struct art_fun : sock_fun {
+        art_fun() = default;
+        vector_stream stream{};
+        uint32_t message_count = 0;
+
+        bool send(size_t shard, const std::string& host, uint16_t port, const heap::vector<uint8_t> &to_send) {
+            stream.clear();
+            error.clear();
+            if (connect(host,port)) {
+                uint32_t cmd = cmd_art_fun;
+                uint32_t buffers_size = to_send.size();
+                uint32_t sh = shard;
+                writep(stream,uint8_t{0x00});
+                writep(stream, cmd);
+                writep(stream, sh);
+                writep(stream, message_count);
+                if (buffers_size == 0) {
+                    art::std_err("invalid buffer size", buffers_size);
+                    return false;
+                }
+                writep(stream, buffers_size);
+                writep(stream, to_send.data(), to_send.size());
+                write(stream);
+                return run_to(io, s, art::get_rpc_connect_to_s());
+            }
+            return false;
+        }
+    };
+
 }
 #endif //BARCH_BARCH_RPC_H

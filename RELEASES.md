@@ -1,9 +1,9 @@
-# Release v0.3.4.1b 2025-10-06
+# Release v0.3.4.1b 2025-10-07
 
 ## New Features
 
 1. Added server_port configuration, 0 disables server if required (v0.3.4.1b 2025-10-01)
-2. Improve client replication io (v0.3.4.1b 2025-10-06)
+2. Improve client replication io (v0.3.4.1b 2025-10-07)
 
 # Release v0.3.3.32b 2025-09-24
 

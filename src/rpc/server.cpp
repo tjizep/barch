@@ -432,68 +432,24 @@ namespace barch {
                 connected = true;
                 tpoll = std::thread([this]() {
                 heap::vector<uint8_t> to_send;
+                art_fun sender;
                 to_send.reserve(art::get_rpc_max_buffer());
                 try {
-                    asio::io_context io;
-                    tcp::resolver resolver{io};
                     heap::vector<repl_dest> dests;
-                    vector_stream stream;
-                    uint32_t message_count = 0;
-                    std::error_code error{};
+                    //uint32_t message_count = 0;
                     while (connected) {
 
                         {
                             std::lock_guard lock(this->latch);
                             to_send.swap(this->buffer);
-                            message_count = this->messages;
+                            sender.message_count = this->messages; // detect missing
                             this->buffer.clear();
                             this->messages = 0;
                             dests = destinations;
                         }
                         if (!to_send.empty()) {
                             for (auto& dest : dests) {
-                                try {
-                                    stream.clear();
-                                    error.clear();
-                                    tcp::socket s = tcp::socket(io);
-                                    auto resolution = resolver.resolve(dest.host,std::to_string(dest.port));
-                                    asio::async_connect(s, resolution,[&](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
-                                        error = ec;
-                                        if (!ec) {
-                                            uint32_t cmd = cmd_art_fun;
-                                            uint32_t buffers_size = to_send.size();
-                                            uint32_t sh = this->shard;
-                                            writep(stream,uint8_t{0x00});
-                                            writep(stream, cmd);
-                                            writep(stream, sh);
-                                            writep(stream, message_count);
-                                            if (buffers_size == 0) {
-                                                art::std_err("invalid buffer size", buffers_size);
-                                                return;
-                                            }
-                                            writep(stream, buffers_size);
-                                            writep(stream, to_send.data(), to_send.size());
-                                            async_write_to( s, asio::buffer(stream.buf.data(), stream.buf.size()), error);
-                                        }
-                                    });
-                                    if (!run_to(io, s, art::get_rpc_connect_to_s())) {
-                                        throw_exception<std::runtime_error>("failed to connect to server");
-                                    }
-                                    if (error) {
-                                        continue;
-                                    }
-
-#if 0
-                                    tcp::iostream stream(dest.host, std::to_string(dest.port));
-                                    if (stream.fail()) {
-                                        continue;
-                                    }
-#endif
-                                    //art::std_log("sent", buffers_size, "bytes to", dest.host, dest.port, "total sent",total_messages,"still queued",(uint32_t)this->messages,"iq",(long long)statistics::repl::insert_requests);
-
-                                }catch (std::exception& e) {
-                                    art::std_err("failed to write to stream", e.what(),"to",dest.host,dest.port);
-                                }
+                                sender.send(this->shard, dest.host, dest.port, to_send);
                             }
                             to_send.clear();
                         }
@@ -688,7 +644,6 @@ namespace barch {
                         continue;
                     }
                     auto t = get_art(this->shard);
-                    //storage_release release(t); // the latch should be called outside
                     t->last_leaf_added = nullptr;
                     auto r = process_art_fun_cmd(t, stream, rbuff);
                     if (r.add_applied > 0) {

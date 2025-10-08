@@ -1154,11 +1154,12 @@ RECURSE_SEARCH:;
  * @arg key the key
  * @arg value opaque value.
  * @arg fc os the callback when node is replaced
- * @return null if the item was newly inserted, otherwise
+ * @return true if the item was inserted or replaced, false if no memory
  * the old value pointer is returned.
+ * exceptions may happen
  */
-void art_insert
-(art::tree *t
+bool art_insert
+( art::tree *t
  , const art::key_options &options
  , art::value_type key
  , art::value_type value
@@ -1189,15 +1190,17 @@ void art_insert
             }
             free_leaf_node(old);
         }
+        return true;
     } catch (std::exception &e) {
         art::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
+    return false;
 }
 
-void art_insert(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
+bool art_insert(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                 const NodeResult &fc) {
-    art_insert(t, options, key, value, true, fc);
+    return art_insert(t, options, key, value, true, fc);
 }
 
 /**
@@ -2191,9 +2194,10 @@ bool art::tree::hash_insert(const key_options &options, value_type key, value_ty
         if (update) {
             auto n = i->node(this);
             leaf *dl = n.l();
+            fc(n);
             if (is_leaf_direct_replacement(dl, value, options))
             {
-                fc(n);
+
                 dl->set_value(value);
                 dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
                 options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
@@ -2213,7 +2217,6 @@ bool art::tree::hash_insert(const key_options &options, value_type key, value_ty
     }
     node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
     l.l()->set_hashed();
-    fc(l);
     h.insert_unique(l);
     return true;
 }

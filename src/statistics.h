@@ -82,6 +82,7 @@ namespace statistics {
         extern std::atomic<uint64_t> find_requests;
         extern std::atomic<uint64_t> request_errors;
         extern std::atomic<uint64_t> redis_sessions;
+        extern std::atomic<uint64_t> art_sessions;
         extern std::atomic<uint64_t> attempted_routes;
         extern std::atomic<uint64_t> routes_succeeded;
     }

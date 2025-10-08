@@ -214,7 +214,7 @@ namespace barch {
      */
 
     template<typename StreamT>
-     af_result process_art_fun_cmd(art::tree* t, StreamT& stream, heap::vector<uint8_t>& buffer) {
+     af_result process_art_fun_cmd(art::tree* t, StreamT& stream, const heap::vector<uint8_t>& buffer) {
         af_result r;
         heap::vector<uint8_t> tosend;
         art::node_ptr found;
@@ -237,15 +237,19 @@ namespace barch {
                         return r;
                     } else {
                         auto fc = [&r](const art::node_ptr &){
-                            ++statistics::repl::key_add_recv_applied;
-                            ++r.add_applied;};
+
+                        };
+                        bool added_or = false;
                         if (t->opt_ordered_keys) {
-                            art_insert(t, options.first, key.first, value.first,true,fc);
+                            added_or = art_insert(t, options.first, key.first, value.first,true, fc);
                         }else
                         {
-                            t->hash_insert(options.first, key.first, value.first,true,fc);
+                            added_or = t->hash_insert(options.first, key.first, value.first,true, fc);
                         }
-
+                        if (added_or) {
+                            ++statistics::repl::key_add_recv_applied;
+                            ++r.add_applied;
+                        }
 
                     }
                     ++statistics::repl::key_add_recv;
@@ -386,8 +390,8 @@ namespace barch {
             return write(to_send.data(), to_send.size());
         }
         bool read(uint8_t* data, size_t size) {
-            asio::async_read(s, asio::buffer(data, size),[&](const std::error_code& result_error,
-            std::size_t result_n)
+            asio::async_read(s, asio::buffer(data, size),
+        [&](const std::error_code& result_error,std::size_t result_n)
             {
                 net_stat stat;
                 stream_read_ctr += result_n;

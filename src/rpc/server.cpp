@@ -21,6 +21,7 @@
 #include "queue_server.h"
 #include "asio_resp_session.h"
 #include "rpc/barch_session.h"
+#include "repl_session.h"
 
 namespace barch {
     typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
@@ -141,6 +142,10 @@ namespace barch {
                     std::make_shared<barch_session>(std::move(endpoint))->start();
                     return;
                 }
+                if (cmd == cmd_art_fun) {
+                    std::make_shared<repl_session>(std::move(endpoint),1+sizeof(cmd))->start();
+                    return;
+                }
                 heap::vector<uint8_t> buffer{};
                 art::key_spec spec;
 
@@ -180,6 +185,7 @@ namespace barch {
                         }
                         break;
                     case cmd_art_fun:
+#if 0
                         try {
                             uint32_t buffers_size = 0;
                             uint32_t shard = 0;
@@ -202,6 +208,9 @@ namespace barch {
                             art::std_err("failed to apply changes", e.what());
                             return;
                         }
+#else
+
+#endif
                         break;
                     default:
                         art::std_err("unknown command", cmd);
@@ -648,6 +657,7 @@ namespace barch {
                     if (!recv_buffer(stream, rbuff)) {
                         continue;
                     }
+                    // we are in a lock here (from the caller)
                     auto t = get_art(this->shard);
                     t->last_leaf_added = nullptr;
                     auto r = process_art_fun_cmd(t, stream, rbuff);

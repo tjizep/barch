@@ -4,6 +4,12 @@
 
 1. Added server_port configuration, 0 disables server if required (v0.3.4.1b 2025-10-01)
 2. Improve client replication io (v0.3.4.1b 2025-10-07)
+3. Make server replication asynch and faster (v0.3.4.1b 2025-10-08)
+4. server replication can be called multiple times per connection (v0.3.4.1b 2025-10-08)
+
+## Fixes
+
+1. Fix bugs in sharding and replication logic (v0.3.4.1b 2025-10-08)
 
 # Release v0.3.3.32b 2025-09-24
 

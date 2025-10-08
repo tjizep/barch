@@ -360,10 +360,11 @@ uint64_t art_size(art::tree *t);
  * @arg key the key the key cannot have embedded 0 chars a terminating 0 char will be added if it does not exist
  * @arg key_len the length of the key
  * @arg value opaque value.
- * @return null if the item was newly inserted, otherwise
- * the old value pointer is returned.
+ * @return true was inserted or replaced, otherwise
+ * The old value is captured in the callback
+ * exceptions may happen
  */
-void art_insert
+bool art_insert
 (art::tree *t
  , const art::key_options &options
  , art::value_type key
@@ -371,7 +372,7 @@ void art_insert
  , const NodeResult &fc
 );
 
-void art_insert
+bool art_insert
 (art::tree *t
  , const art::key_options &options
  , art::value_type key

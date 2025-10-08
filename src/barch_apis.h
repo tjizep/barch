@@ -77,9 +77,6 @@ extern "C"{
     int COUNT(caller& call, const arg_t& argv);
     int REM(caller& call, const arg_t& argv);
     int TTL(caller& call, const arg_t& argv);
-    // RPC
-    int RPC_GET(caller& call, const arg_t& argv) ;
-    int RPC_INSERT(caller& call, const arg_t& argv);
     // database
     int SIZE(caller& call, const arg_t& argv);
     int SAVE(caller& call, const arg_t& argv);

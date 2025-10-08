@@ -11,10 +11,12 @@
 
 #include "key_options.h"
 #include "variable.h"
+#include "source.h"
 
 namespace barch {
 
     typedef std::pair<std::string, size_t> host_id;
+
     host_id get_host_id();
     namespace server {
         void start(const std::string& interface, uint_least16_t port);
@@ -62,12 +64,14 @@ namespace barch {
                 create_caller();
                 return caller_;
             }
+
         };
+        std::shared_ptr<source> create_source(const std::string& host, const std::string& port, size_t shard);
         struct client : repl_dest {
             std::atomic<uint32_t> messages = 0;
             heap::vector<uint8_t> buffer{};
             heap::vector<repl_dest> destinations{};
-            heap::vector<repl_dest> sources{};
+            heap::vector<std::shared_ptr<source>> sources{};
             std::thread tpoll{};
             std::mutex latch{};
             std::shared_ptr<rpc> dest{};

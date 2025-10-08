@@ -143,9 +143,6 @@ function_map& functions_by_name() {
         r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX,{"read","ordered","data"}};
         r["ZRANK"] = {::ZRANK,{"read","ordered","data"}};
         r["ZFASTRANK"] = {::ZFASTRANK,{"read","ordered","data"}};
-        // rpc functions
-        r["RPC_GET"] = { ::RPC_GET,{"read","keys","data"}} ;
-        r["RPC_INSERT"] = {::RPC_INSERT,{"write","keys","data"}};
     }
 
     return r;

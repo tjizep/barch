@@ -85,16 +85,6 @@ namespace barch {
             }catch (std::exception& e) {
                 art::std_err("failed to stop io service", e.what());
             }
-#if 0
-            for (auto &proc: io_resp) {
-                try{
-                    proc->stop();
-                }catch (std::exception& e) {
-                    art::std_err("failed to stop resp io service",  e.what());
-                }
-            }
-            resp_pool.stop();
-#endif
             pool.stop();
 
             asio_resp_pool.stop();
@@ -176,41 +166,6 @@ namespace barch {
                             art::std_err("failed to stream shard", e.what());
                             return;
                         }
-                        break;
-                    case cmd_barch_call:
-                        try{
-                        }catch (std::exception& e) {
-                            art::std_err("failed to make barch call", e.what());
-                            return;
-                        }
-                        break;
-                    case cmd_art_fun:
-#if 0
-                        try {
-                            uint32_t buffers_size = 0;
-                            uint32_t shard = 0;
-                            uint32_t count = 0;
-                            readp(stream,shard);
-                            readp(stream,count);
-                            readp(stream,buffers_size);
-                            if (buffers_size == 0) {
-                                art::std_err("invalid buffer size", buffers_size);
-                                return;
-                            }
-
-                            buffer.resize(buffers_size);
-                            readp(stream, buffer.data(), buffers_size);
-                            auto t = get_art(shard);
-                            write_lock release(t->latch);
-                            process_art_fun_cmd(t, stream, buffer);
-                            //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
-                        }catch (std::exception& e) {
-                            art::std_err("failed to apply changes", e.what());
-                            return;
-                        }
-#else
-
-#endif
                         break;
                     default:
                         art::std_err("unknown command", cmd);
@@ -473,12 +428,12 @@ namespace barch {
         }
 
         bool client::add_source(std::string host, int port) {
-            auto src = repl_dest{std::move(host), port, shard};
+            auto src = create_source(std::move(host), std::to_string(port), shard);
             {
                 std::lock_guard lock(this->latch);
                 for (auto& d : sources) {
-                    if (d.host == src.host && d.port == src.port) {
-                        art::std_err("source already added", d.host, d.port);
+                    if (d->host == src->host && d->port == src->port) {
+                        art::std_err("source already added", d->host, d->port);
                         return false;
                     }
                 }
@@ -487,36 +442,6 @@ namespace barch {
             return true;
         }
 
-        bool client::rpc_insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value){
-            latch.unlock();
-            thread_local heap::vector<Variable> result;
-            thread_local heap::vector<art::value_type> params;
-            params = {"RPC_INSERT",
-                    std::to_string(shard),
-                    std::to_string(options.flags),
-                    std::to_string(options.get_expiry()),
-                    key.to_string(),value.to_string()};
-            size_t ss = 0;
-            if (!host.empty()) {
-                result.clear();
-                auto cr = caller()->asynch_call(result, params);
-                if (cr.ok()) ++ss;
-                else ++statistics::repl::instructions_failed;
-            }
-
-            for (auto &d: destinations) {
-                result.clear();
-                auto cr = d.caller()->asynch_call(result, params);
-                if (cr.ok()) ++ss;
-                else ++statistics::repl::instructions_failed;
-            }
-            if (ss != 0)
-                ++statistics::repl::insert_requests;
-
-            latch.lock();
-            return  ss > 0;
-
-        }
         bool client::insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
@@ -597,6 +522,13 @@ namespace barch {
             stream.flush();
 
         }
+        std::shared_ptr<source> create_source(const std::string& host, const std::string& port, size_t shard) {
+            std::shared_ptr src = std::make_shared<sock_fun>();
+            src->host = host;
+            src->port = port;
+            src->shard = shard;
+            return src;
+        }
         [[nodiscard]] bool client::begin_transaction() const {
             try {
             }catch (std::exception& e) {
@@ -645,28 +577,30 @@ namespace barch {
                 try {
 
                     net_stat stat;
-                    //tcp::iostream stream;
-                    sock_fun stream;
-                    stream.connect(source.host, std::to_string(source.port));
-                    if (stream.fail()) {
+
+                    if (!source->is_open())
+                        source->connect(source->host, source->port);
+
+                    if (source->fail()) {
                         art::std_err("failed to connect to remote server", host, this->port);
                         continue;
                     }
 
-                    send_art_fun(stream, to_send, messages, shard);
-                    if (!recv_buffer(stream, rbuff)) {
+                    send_art_fun(*source, to_send, messages, shard);
+                    if (!recv_buffer(*source, rbuff)) {
                         continue;
                     }
                     // we are in a lock here (from the caller)
                     auto t = get_art(this->shard);
                     t->last_leaf_added = nullptr;
-                    auto r = process_art_fun_cmd(t, stream, rbuff);
+                    auto r = process_art_fun_cmd(t, *source, rbuff);
                     if (r.add_applied > 0) {
                         added = true;
                         break; // don't call the other servers - paxos would have us get a quorum
                     }
                 }catch (std::exception& e) {
-                    art::std_err("failed to write to stream", e.what(),"to",source.host,source.port);
+                    source->close();
+                    art::std_err("failed to write to stream", e.what(),"to",source->host,source->port);
                     ++statistics::repl::request_errors;
                 }
                 ++statistics::repl::find_requests;
@@ -737,68 +671,6 @@ namespace barch {
 }
 
 extern "C"{
-    int RPC_GET(caller& call, const arg_t& argv) {
-        if (argv.size() != 2)
-            return call.wrong_arity();
-        auto key = argv[1];
-        auto t = get_art(key);
-        read_lock rl(t);
-        auto node = t->search(key);
-        if (node.null()) return call.null();
-        return call.vt(node.cl()->get_value());
-
-    }
-    int RPC_INSERT(caller& call, const arg_t& argv) {
-        ++statistics::repl::key_add_recv;
-        if (argv.size() != 6)
-            return call.wrong_arity();
-        size_t shard = conversion::as_variable(argv[1]).i();
-        if (shard >= art::get_shard_count().size())
-            return call.error("invalid shard");
-        auto fc = [&](const art::node_ptr &) -> void {};
-        uint8_t flags = conversion::as_variable(argv[2]).i();
-        uint64_t expiry = conversion::as_variable(argv[3]).i();
-        auto key = argv[5];
-        auto value = argv[6];
-        auto t = get_art(shard);
-        art::key_options options;
-        options.flags = flags;
-        options.set_expiry(expiry);
-        write_lock l(t->latch);
-        t->opt_rpc_insert(options, key, value, true, fc);
-        ++statistics::repl::key_add_recv_applied;
-
-        return 0;
-    }
-    int RPC_FUN(caller& call, const arg_t& argv) {
-        if (argv.size() != 2)
-            return call.wrong_arity();
-        try {
-            vector_stream stream{argv[1]};
-            uint32_t buffers_size = 0;
-            uint32_t shard = 0;
-            uint32_t count = 0;
-            readp(stream,shard);
-            readp(stream,count);
-            readp(stream,buffers_size);
-            if (buffers_size == 0) {
-                art::std_err("invalid buffer size", buffers_size);
-                return call.error("invalid buffer size");
-            }
-
-            heap::vector<uint8_t> buffer;
-            buffer.resize(buffers_size);
-            readp(stream, buffer.data(), buffers_size);
-            auto t = get_art(shard);
-            write_lock release(t->latch);
-            barch::process_art_fun_cmd(t, stream, buffer);
-            //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
-        }catch (std::exception& e) {
-            art::std_err("failed to apply changes", e.what());
-            return call.error("failed to apply changes");
-        }
-        return 0;
-    }
     int ADDROUTE(caller& call, const arg_t& argv) {
         if (argv.size() != 4)
             return call.wrong_arity();

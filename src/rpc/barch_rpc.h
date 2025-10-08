@@ -4,6 +4,9 @@
 
 #ifndef BARCH_BARCH_RPC_H
 #define BARCH_BARCH_RPC_H
+#include "source.h"
+#include <unistd.h>
+
 #include "art.h"
 
 enum {
@@ -19,6 +22,7 @@ enum {
 
 
 namespace barch {
+
     template<typename T>
     bool time_wait(int64_t millis, T&& fwait ) {
         if (fwait()) {
@@ -177,19 +181,6 @@ namespace barch {
         buffer.resize(buffers_size);
         readp(stream, buffer.data(), buffer.size());
         return true;
-    }
-
-    inline void send_art_fun(uint32_t shard, uint32_t messages, std::iostream& stream, heap::vector<uint8_t>& to_send) {
-        uint32_t cmd = cmd_art_fun;
-        uint32_t buffers_size = to_send.size();
-        uint32_t sh = shard;
-        writep(stream, cmd);
-        writep(stream, sh);
-        writep(stream, messages);
-        writep(stream, buffers_size);
-        writep(stream, to_send.data(), to_send.size());
-        stream.flush();
-
     }
 
     inline host_id get_host_id() {
@@ -358,13 +349,29 @@ namespace barch {
             }
         });
     }
-    struct sock_fun {
+    struct sock_fun : public source {
         sock_fun() = default;
         asio::io_context io{};
         tcp::resolver resolver{io};
         tcp::socket s{io};
         std::error_code error{};
-        bool connect(const std::string& host,  const std::string& port) {
+
+        bool close() override {
+            try {
+                error = {};
+                s.close();
+            }catch (std::system_error const& e) {
+
+                art::std_err("error closing socket:",error.message(),error.value());
+                return false;
+            }
+            return true;
+        }
+
+        bool is_open() const override {
+            return s.is_open();
+        }
+        bool connect(const std::string& host,  const std::string& port) override {
             error.clear();
             auto resolution = resolver.resolve(host,port);
             asio::async_connect(s, resolution,[&](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
@@ -382,14 +389,14 @@ namespace barch {
             async_write_to( s, asio::buffer(data, size), error);
             return run_to(io, s, art::get_rpc_connect_to_s()) && !error;
         }
-        bool write(const char* data, size_t size) {
+        bool write(const char* data, size_t size) override {
             async_write_to( s, asio::buffer(data, size), error);
             return run_to(io, s, art::get_rpc_write_to_s()) && !error;
         }
         bool write(const heap::vector<uint8_t> &to_send) {
             return write(to_send.data(), to_send.size());
         }
-        bool read(uint8_t* data, size_t size) {
+        bool readu(uint8_t* data, size_t size) {
             asio::async_read(s, asio::buffer(data, size),
         [&](const std::error_code& result_error,std::size_t result_n)
             {
@@ -407,18 +414,19 @@ namespace barch {
             return !error;
 
         }
+        bool read(char* data, size_t size) override {
+            return readu((uint8_t*)data, size);
+        }
         [[nodiscard]] bool ok() const {
             return !error;
         }
-        [[nodiscard]] bool fail() const{
+        [[nodiscard]] bool fail() const override{
             return !ok();
         }
-        bool read(char* data, size_t size) {
-            return read((uint8_t*)data, size);
-        }
+
         template<typename BufferT>
         bool read(BufferT& data) {
-            return read(data.data(), data.size());
+            return readu(data.data(), data.size());
         }
         bool recv_buffer(heap::vector<uint8_t>& buffer) {
             uint32_t buffers_size = 0;
@@ -430,8 +438,9 @@ namespace barch {
             buffer.resize(buffers_size);
             return read(buffer);
         }
-        void flush() {
+        void flush() override{
         }
+        virtual ~sock_fun() = default;
     };
     struct art_fun : sock_fun {
         art_fun() = default;

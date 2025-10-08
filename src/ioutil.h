@@ -18,6 +18,13 @@ using expires_from_now_t = decltype( std::declval<T&>().expires_from_now(std::ch
 template<typename T>
 constexpr bool has_expires_from_now = std::experimental::is_detected_v<expires_from_now_t, T>;
 
+template<typename T>
+using nostats_t = decltype( std::declval<T&>().nostats() );
+
+template<typename T>
+constexpr bool has_nostats = std::experimental::is_detected_v<nostats_t, T>;
+
+
 template <typename T>
 static void read_expires(T& stream)
 {
@@ -35,9 +42,29 @@ static void write_expires(T& stream)
 
 }
 
-
 extern thread_local uint64_t stream_write_ctr;
 extern thread_local uint64_t stream_read_ctr;
+
+template <typename TStream>
+static void incr_write_stat(const TStream&, size_t bytes) {
+    if constexpr (has_nostats<TStream>) {
+    }else {
+        stream_write_ctr += bytes;
+    }
+}
+
+
+template <typename TStream>
+static void incr_read_stat(const TStream& , size_t bytes) {
+    if constexpr (has_nostats<TStream>) {
+
+    }else {
+        stream_read_ctr += bytes;
+    }
+
+}
+
+
 template<typename OStream, typename T>
 static void writep(OStream &of, const T* data, size_t size) {
     write_expires(of);
@@ -46,7 +73,7 @@ static void writep(OStream &of, const T* data, size_t size) {
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
     }
-    stream_write_ctr += size;
+    incr_write_stat(of,size);
 }
 
 template<typename OStream, typename T>
@@ -56,7 +83,7 @@ static void writep(OStream &of, const T &data) {
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
     }
-    stream_write_ctr += sizeof(data);
+    incr_write_stat(of,sizeof(data));
 }
 template<typename OStream>
 static void writep(OStream &of, const char* data) {
@@ -66,7 +93,7 @@ static void writep(OStream &of, const char* data) {
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
     }
-    stream_write_ctr += size;
+    incr_write_stat(of,size);
 }
 
 template<typename IStream, typename T>
@@ -78,7 +105,7 @@ static void readp(IStream &in, T &data) {
     if (in.fail()) {
         throw_exception<std::runtime_error>("read failed");
     }
-    stream_read_ctr+=sizeof(data);
+    incr_read_stat(in,sizeof(data));
 }
 
 template<typename IStream, typename T>
@@ -89,6 +116,6 @@ static void readp(IStream &in, T *data, size_t size) {
     if (in.fail()) {
         throw_exception<std::runtime_error>("read failed");
     }
-    stream_read_ctr+=size;
+    incr_read_stat(in,size);
 }
 #endif //IOUTIL_H

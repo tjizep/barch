@@ -7,7 +7,13 @@
 #include "sastam.h"
 #include <vector>
 #include <algorithm>
+
+#include "ioutil.h"
+
 struct vector_stream  {
+    bool nostats() const {
+        return true;
+    }
     size_t pos{};
     heap::std_vector<uint8_t> buf{};
     vector_stream() = default;

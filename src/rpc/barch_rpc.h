@@ -227,8 +227,7 @@ namespace barch {
                         r.error = true;
                         return r;
                     } else {
-                        auto fc = [&r](const art::node_ptr &){
-
+                        auto fc = [](const art::node_ptr &){
                         };
                         bool added_or = false;
                         if (t->opt_ordered_keys) {
@@ -360,15 +359,14 @@ namespace barch {
             try {
                 error = {};
                 s.close();
-            }catch (std::system_error const& e) {
-
-                art::std_err("error closing socket:",error.message(),error.value());
+            }catch (const std::system_error& e) {
+                art::std_err("error closing socket:",e.code().message(),e.code().value());
                 return false;
             }
             return true;
         }
 
-        bool is_open() const override {
+        [[nodiscard]] bool is_open() const override {
             return s.is_open();
         }
         bool connect(const std::string& host,  const std::string& port) override {
@@ -398,10 +396,8 @@ namespace barch {
         }
         bool readu(uint8_t* data, size_t size) {
             asio::async_read(s, asio::buffer(data, size),
-        [&](const std::error_code& result_error,std::size_t result_n)
+        [&](const std::error_code& result_error,std::size_t unused(result_n))
             {
-                net_stat stat;
-                stream_read_ctr += result_n;
                 error = result_error;
                 if (error) {
                     art::std_err("error (",error.value(),") reading socket:[",error.message(),"]");
@@ -428,20 +424,11 @@ namespace barch {
         bool read(BufferT& data) {
             return readu(data.data(), data.size());
         }
-        bool recv_buffer(heap::vector<uint8_t>& buffer) {
-            uint32_t buffers_size = 0;
-            readp(*this, buffers_size);
-            if (buffers_size == 0) {
-                return false;
-            }
-            buffer.clear();
-            buffer.resize(buffers_size);
-            return read(buffer);
-        }
         void flush() override{
         }
         virtual ~sock_fun() = default;
     };
+
     struct art_fun : sock_fun {
         art_fun() = default;
         vector_stream stream{};
@@ -464,8 +451,7 @@ namespace barch {
                 }
                 writep(stream, buffers_size);
                 writep(stream, to_send.data(), to_send.size());
-                write(stream);
-                return run_to(io, s, art::get_rpc_connect_to_s());
+                return write(stream);
             }
             return false;
         }

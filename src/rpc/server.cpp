@@ -297,7 +297,7 @@ namespace barch {
                     return call_result{-1,0};
                 }
                 try {
-
+                    net_stat stat;
                     if (!s.is_open()) {
                         stream.clear();
 
@@ -325,7 +325,7 @@ namespace barch {
                     writep(stream, calls);
                     writep(stream, buffers_size);
                     writep(stream, to_send.data(), to_send.size());
-                    net_stat stat;
+
                     write(s,asio::buffer(stream.buf.data(), stream.buf.size()));
                     read(s,asio::buffer(&r.call_error,sizeof(r.call_error)));
                     read(s,asio::buffer(&buffers_size,sizeof(buffers_size)));
@@ -398,9 +398,7 @@ namespace barch {
                 to_send.reserve(art::get_rpc_max_buffer());
                 try {
                     heap::vector<repl_dest> dests;
-                    //uint32_t message_count = 0;
                     while (connected) {
-
                         {
                             std::lock_guard lock(this->latch);
                             to_send.swap(this->buffer);
@@ -411,6 +409,7 @@ namespace barch {
                         }
                         if (!to_send.empty()) {
                             for (auto& dest : dests) {
+                                // statistics are updated
                                 sender.send(this->shard, dest.host, dest.port, to_send);
                             }
                             to_send.clear();
@@ -550,7 +549,7 @@ namespace barch {
                 }
                 uint32_t cmd = cmd_stream;
                 uint32_t s = shard;
-                net_stat stats;
+                net_stat stat;
                 writep(stream,uint8_t{0x00});
                 writep(stream,cmd);
                 writep(stream, s);

@@ -50,21 +50,6 @@ namespace barch {
             repl_dest(const repl_dest&) = default;
             repl_dest(repl_dest&&) = default;
             repl_dest& operator=(const repl_dest&) = default;
-            heap::vector<art::value_type> params {};
-            heap::vector<Variable> result{};
-            std::shared_ptr<rpc> caller_{};
-            void create_caller() {
-                if (caller_) {
-                    return;
-                }
-                if (!host.empty())
-                    caller_ = repl::create(host, port);
-            }
-            std::shared_ptr<rpc> caller() {
-                create_caller();
-                return caller_;
-            }
-
         };
         std::shared_ptr<source> create_source(const std::string& host, const std::string& port, size_t shard);
         struct client : repl_dest {
@@ -89,7 +74,6 @@ namespace barch {
             void add_destination(std::string host, int port);
             bool add_source(std::string host, int port);
             bool insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value);
-            bool rpc_insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value);
             bool remove(std::shared_mutex& latch, art::value_type key);
             /**
              * finds a key in the tree

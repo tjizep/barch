@@ -441,7 +441,7 @@ namespace barch {
                 uint32_t cmd = cmd_art_fun;
                 uint32_t buffers_size = to_send.size();
                 uint32_t sh = shard;
-                writep(stream,uint8_t{0x00});
+                writep(stream, uint8_t{0x00});
                 writep(stream, cmd);
                 writep(stream, sh);
                 writep(stream, message_count);

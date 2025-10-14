@@ -10,9 +10,9 @@
 #include "module.h"
 #include "vk_caller.h"
 // TODO: one day this counters gonna wrap
-static std::atomic<int64_t> counter = art::now() * 1000000;
+static std::atomic<int64_t> counter = barch::now() * 1000000;
 #define IX_MEMBER ""
-art::tree *get_art_s(const std::string& key) {
+barch::shard *get_art_s(const std::string& key) {
     return get_art(get_shard(key));
 }
 
@@ -73,21 +73,21 @@ struct ordered_keys {
     ordered_keys(
         const composite &score_key,
         const composite &member_key,
-        art::value_type value) : score_key(score_key), member_key(member_key), value(value) {
+        barch::value_type value) : score_key(score_key), member_key(member_key), value(value) {
     }
 
     composite score_key;
     composite member_key;
-    art::value_type value;
+    barch::value_type value;
 };
 
-static void insert_ordered(composite &score_key, composite &member_key, art::value_type value, bool update = false) {
+static void insert_ordered(composite &score_key, composite &member_key, barch::value_type value, bool update = false) {
     auto sk = score_key.create();
     auto mk = member_key.create();
     if (score_key.comp.size() < 2) {
         abort_with("invalid key buffer size");
     }
-    art::value_type shk = score_key.comp[1].get_value();
+    barch::value_type shk = score_key.comp[1].get_value();
     if (shk.size < 3) {
         abort_with("invalid key size");
     }
@@ -99,7 +99,7 @@ static void insert_ordered(composite &score_key, composite &member_key, art::val
         t->insert(sk, value, update);
         t->insert(mk, sk, update);
     }catch (const std::exception& e) {
-        art::std_err(e.what());
+        barch::std_err(e.what());
     }
     if (locked) {
         t->latch.unlock();
@@ -112,7 +112,7 @@ static void remove_ordered(composite &score_key, composite &member_key) {
     if (score_key.comp.size() < 2) {
         abort_with("invalid key buffer size");
     }
-    art::value_type shk = score_key.comp[1].get_value();
+    barch::value_type shk = score_key.comp[1].get_value();
     if (shk.size < 3) {
         abort_with("invalid key size");
     }
@@ -124,7 +124,7 @@ static void remove_ordered(composite &score_key, composite &member_key) {
         t->remove(sk);
         t->remove(mk);
     }catch (const std::exception& e) {
-        art::std_err(e.what());
+        barch::std_err(e.what());
     }
     if (locked) {
         t->latch.unlock();
@@ -147,7 +147,7 @@ int ZADD(caller& call, const arg_t &argv) {
         return call.wrong_arity();
     int responses = 0;
     int r = call.ok();
-    art::zadd_spec zspec(argv);
+    barch::zadd_spec zspec(argv);
     if (zspec.parse_options() != call.ok()) {
         return call.syntax_error();
     }
@@ -162,10 +162,10 @@ int ZADD(caller& call, const arg_t &argv) {
     zspec.LFI = true;
     int64_t updated = 0;
     int64_t fkadded = 0;
-    auto fc = [&](const art::node_ptr &) -> void {
+    auto fc = [&](const barch::node_ptr &) -> void {
         ++updated;
     };
-    auto fcfk = [&](const art::node_ptr &val) -> void {
+    auto fcfk = [&](const barch::node_ptr &val) -> void {
         if (val.is_leaf) {
             t->remove(val.const_leaf()->get_value());
         }
@@ -189,18 +189,18 @@ int ZADD(caller& call, const arg_t &argv) {
 
         auto score = conversion::convert(k, true);
         auto member = conversion::convert(v);
-        if (score.ctype() != art::tfloat && score.ctype() != art::tdouble) {
+        if (score.ctype() != barch::tfloat && score.ctype() != barch::tdouble) {
             r |= call.null();
             ++responses;
             continue;
         }
-        art::value_type qkey = t->cmd_ZADD_q1.create({container, score, member});
+        barch::value_type qkey = t->cmd_ZADD_q1.create({container, score, member});
         if (zspec.XX) {
-            t->update(qkey, [&](const art::node_ptr &old) -> art::node_ptr {
+            t->update(qkey, [&](const barch::node_ptr &old) -> barch::node_ptr {
                 if (old.null()) return nullptr;
 
                 auto l = old.const_leaf();
-                return art::make_leaf(*t, qkey, {}, l->expiry_ms(), l->is_volatile());
+                return barch::make_leaf(*t, qkey, {}, l->expiry_ms(), l->is_volatile());
             });
         } else {
             if (zspec.LFI) {
@@ -256,7 +256,7 @@ int ZREM(caller& call, const arg_t& argv) {
         auto member = conversion::convert(mem);
         conversion::comparable_key id{++counter};
         qmember->push(member);
-        art::iterator byscore(t, qmember->create());
+        barch::iterator byscore(t, qmember->create());
         if (byscore.ok()) {
             auto kscore = byscore.key();
             if (!kscore.starts_with(member_prefix.pref(1))) break;
@@ -289,7 +289,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     }
     auto t = get_art(argv[1]);
     storage_release release(t);
-    auto fcfk = [&](const art::node_ptr& ) -> void {
+    auto fcfk = [&](const barch::node_ptr& ) -> void {
         ++updated;
     };
 
@@ -306,14 +306,14 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     auto target_member = target.get_value();
     auto container = conversion::convert(key);
     query q1, q2, qfield;
-    art::value_type field_key = qfield->create({IX_MEMBER, container, target});
+    barch::value_type field_key = qfield->create({IX_MEMBER, container, target});
     auto prefix = q1->create({container},false);
 
-    art::iterator fields(t, field_key);
+    barch::iterator fields(t, field_key);
     if (fields.ok()) {
         auto kf = fields.key();
         if (kf.starts_with(field_key)) {
-            art::iterator scores(t, fields.value());
+            barch::iterator scores(t, fields.value());
             if (scores.ok()) {
                 auto k = scores.key();
                 auto val = scores.value();
@@ -325,7 +325,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
                         number += incr;
                         q1->push(conversion::comparable_key(number));
                         q1->push(member);
-                        art::value_type qkey = q1->create();
+                        barch::value_type qkey = q1->create();
                         t->insert({}, qkey, val, true, fcfk);
                         t->insert( kf, qkey, true);
 
@@ -349,8 +349,8 @@ int ZINCRBY(caller& call, const arg_t& argv) {
         auto member = conversion::convert(v);
         q1->push(score);
         q1->push(member);
-        art::value_type qkey = q1->create();
-        art::value_type qv = v ;
+        barch::value_type qkey = q1->create();
+        barch::value_type qv = v ;
         t->insert( {}, qkey, qv, true, fcfk);
         q1->pop(2);
         return call.double_(incr);
@@ -385,7 +385,7 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     auto prefix = pq->create({container});
     auto upper = uq->create({container, mx});
     long long count = 0;
-    art::iterator ai(t, lower);
+    barch::iterator ai(t, lower);
     while (ai.ok()) {
         auto ik = ai.key();
         if (!ik.starts_with(prefix.pref(1))) break;
@@ -399,16 +399,16 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return ValkeyModule_ReplyWithLongLong(ctx, count);
 }
 
-static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
+static int zrange(caller& call, barch::shard* t, const barch::zrange_spec &spec) {
 
     auto container = conversion::convert(spec.key);
     auto mn = conversion::convert(spec.start, true);
     auto mx = conversion::convert(spec.stop, true);
     query lq, uq, pq, tq;
-    art::value_type lower;
-    art::value_type prefix;
-    art::value_type nprefix;
-    art::value_type upper;
+    barch::value_type lower;
+    barch::value_type prefix;
+    barch::value_type nprefix;
+    barch::value_type upper;
     if (spec.BYLEX) {
         // it is implied that mn and mx are non-numeric strings
         lower = lq->create({IX_MEMBER, container, mn});
@@ -423,19 +423,19 @@ static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
     }
     long long count = 0;
     long long replies = 0;
-    heap::std_vector<std::pair<art::value_type, art::value_type> > bylex;
-    heap::std_vector<art::value_type> rev;
+    heap::std_vector<std::pair<barch::value_type, barch::value_type> > bylex;
+    heap::std_vector<barch::value_type> rev;
     heap::vector<ordered_keys> removals;
     if (!spec.REMOVE)
         call.start_array();
 
-    art::iterator ai(t,lower);
+    barch::iterator ai(t,lower);
     while (ai.ok()) {
         auto v = ai.key();
         if (!v.starts_with(prefix)) {
             break;
         }
-        art::value_type current_comp;
+        barch::value_type current_comp;
         if (spec.BYLEX) {
             current_comp = v.sub(0, prefix.size + mx.get_size() - 1);
             v = ai.value(); // in case of bylex the value is a fk to by-score
@@ -468,7 +468,7 @@ static int zrange(caller& call, art::tree* t, const art::zrange_spec &spec) {
                     score_key.create({container, encoded_number, member});
                     // fyi: member key means lex key
                     member_key.create({IX_MEMBER, container, member});
-                    removals.push_back({score_key, member_key, art::value_type()});
+                    removals.push_back({score_key, member_key, barch::value_type()});
                 }
                 if (!pushed && !spec.REMOVE) // bylex should be in correct order
                 {
@@ -531,7 +531,7 @@ int ZRANGE(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::zrange_spec spec(argv);
+    barch::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
@@ -558,9 +558,9 @@ int ZCARD(caller& call, const arg_t& argv) {
     auto container = conversion::convert(n);
     query lq, uq;
     auto lower = lq->create({container});
-    auto upper = uq->create({container, art::ts_end});
+    auto upper = uq->create({container, barch::ts_end});
     long long count = 0;
-    art::iterator ai(t, lower);
+    barch::iterator ai(t, lower);
     while (ai.ok()) {
         if (!ai.key().starts_with(lower.pref(1))) break;
         if (ai.key() <= upper) {
@@ -596,18 +596,18 @@ static int ZOPER(
     caller& call,
     const arg_t& argv,
     ops operate,
-    art::value_type store = {},
+    barch::value_type store = {},
     bool card = false,
     bool removal = false) {
 
     if (argv.size() < 4)
         return call.wrong_arity();
-    art::zops_spec spec(argv);
+    barch::zops_spec spec(argv);
 
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
-    if (spec.aggr == art::zops_spec::agg_none && store.empty())
+    if (spec.aggr == barch::zops_spec::agg_none && store.empty())
         call.start_array();
     long long replies = 0;
     double aggr = 0.0f;
@@ -619,19 +619,19 @@ static int ZOPER(
     size_t ks = spec.keys.size();
     auto fk = spec.keys.begin();
     switch (spec.aggr) {
-        case art::zops_spec::agg_none:
-        case art::zops_spec::avg:
-        case art::zops_spec::sum:
+        case barch::zops_spec::agg_none:
+        case barch::zops_spec::avg:
+        case barch::zops_spec::sum:
             break;
-        case art::zops_spec::min:
+        case barch::zops_spec::min:
             aggr = std::numeric_limits<double>::max();
             break;
-        case art::zops_spec::max:
+        case barch::zops_spec::max:
             aggr = std::numeric_limits<double>::min();
             break;
     }
 
-    if (spec.aggr == art::zops_spec::min) {
+    if (spec.aggr == barch::zops_spec::min) {
         aggr = std::numeric_limits<double>::max();
     }
     if (fk != spec.keys.end()) {
@@ -642,7 +642,7 @@ static int ZOPER(
         auto container = conversion::convert(*fk);
         auto lower = lq->create({container});
 
-        art::iterator i(t, lower);
+        barch::iterator i(t, lower);
 
         for (; i.ok();) {
             auto v = i.key();
@@ -660,7 +660,7 @@ static int ZOPER(
                 auto check_set = conversion::convert(*ok);
                 auto check_tainer = tainerq->create({check_set});
                 auto check = checkq->create({check_set, conversion::comparable_key(number)});
-                art::iterator j(get_art_s(*ok), check);
+                barch::iterator j(get_art_s(*ok), check);
                 bool found = false;
                 if (j.ok()) {
                     auto kf = j.key();
@@ -691,7 +691,7 @@ static int ZOPER(
             if (add_result) {
                 ++results_added;
                 switch (spec.aggr) {
-                    case art::zops_spec::agg_none:
+                    case barch::zops_spec::agg_none:
                         if (store.empty()) {
                             call.reply_encoded_key(member);
                             ++replies;
@@ -718,14 +718,14 @@ static int ZOPER(
                         }
 
                         break;
-                    case art::zops_spec::avg:
-                    case art::zops_spec::sum:
+                    case barch::zops_spec::avg:
+                    case barch::zops_spec::sum:
                         aggr += rnd(number);
                         break;
-                    case art::zops_spec::min:
+                    case barch::zops_spec::min:
                         aggr = std::min(rnd(number), aggr);
                         break;
-                    case art::zops_spec::max:
+                    case barch::zops_spec::max:
                         aggr = std::max(rnd(number), aggr);
                         break;
                 }
@@ -741,7 +741,7 @@ static int ZOPER(
     for (auto &ordered_keys: removed_keys) {
         remove_ordered(ordered_keys);
     }
-    if (replies == 0 && spec.aggr != art::zops_spec::agg_none) {
+    if (replies == 0 && spec.aggr != barch::zops_spec::agg_none) {
         return call.double_(results_added > 0 ? aggr : 0.0f);
     }
     if (store.empty()) {
@@ -757,7 +757,7 @@ int ZDIFF(caller& call, const arg_t& argv) {
     try {
         return ZOPER(call, argv, difference);
     } catch (std::exception &e) {
-        art::log(e,__FILE__,__LINE__);
+        barch::log(e,__FILE__,__LINE__);
     }
     return call.error("internal error");
 }
@@ -808,7 +808,7 @@ int ZINTER(caller& call, const arg_t& argv) {
     try {
         return ZOPER(call, argv, intersect);
     } catch (std::exception &e) {
-        art::log(e,__FILE__,__LINE__);
+        barch::log(e,__FILE__,__LINE__);
     }
     return call.error("internal error");
 }
@@ -842,7 +842,7 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
     call.start_array();
 
     for (long long c = 0; c < count; ++c) {
-        art::iterator i(t, lower);
+        barch::iterator i(t, lower);
         if (!i.ok()) {
             break;
         }
@@ -887,10 +887,10 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
     auto container = conversion::convert(k);
     query l, u;
     auto lower = l->create({container},false);
-    auto upper = u->create({container, art::ts_end});
+    auto upper = u->create({container, barch::ts_end});
     call.start_array();
     for (long long c = 0; c < count; ++c) {
-        art::iterator i(t, upper);
+        barch::iterator i(t, upper);
         if (!i.ok()) {
             // this may be because upper > last item in tree and therefore there's none not less than
             i.last();
@@ -913,7 +913,7 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
         replies += 2;
 
         if (!i.remove()) {
-            art::std_log("Could not remove key");
+            barch::std_log("Could not remove key");
         };
     }
     call.end_array(replies);
@@ -930,7 +930,7 @@ int ZREVRANGE(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::zrange_spec spec(argv);
+    barch::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
@@ -950,7 +950,7 @@ int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::zrange_spec spec(argv);
+    barch::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
@@ -970,7 +970,7 @@ int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::zrange_spec spec(argv);
+    barch::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
@@ -988,7 +988,7 @@ int ZREMRANGEBYLEX(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::zrange_spec spec(argv);
+    barch::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
@@ -1008,7 +1008,7 @@ int ZRANGEBYLEX(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::zrange_spec spec(argv);
+    barch::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
@@ -1027,7 +1027,7 @@ int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::zrange_spec spec(argv);
+    barch::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.error("syntax error");
     }
@@ -1069,7 +1069,7 @@ int ZRANK(caller& call, const arg_t& argv) {
     if (max_key < min_key) {
         return call.long_long(0);
     }
-    art::iterator first(t, min_key);
+    barch::iterator first(t, min_key);
 
     int64_t rank = 0;
     if (first.ok()) {
@@ -1112,8 +1112,8 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
         return call.long_long(0);
     }
 
-    art::iterator first(t, min_key);
-    art::iterator last(t, max_key);
+    barch::iterator first(t, min_key);
+    barch::iterator last(t, max_key);
 
     int64_t rank = 0;
     if (first.ok() && last.ok()) {

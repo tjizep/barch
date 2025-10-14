@@ -29,8 +29,8 @@ struct rpc_caller : caller {
         this->host = barch::repl::create(h,port);
     }
     rpc_caller() {
-        routes.reserve(art::get_shard_count().size());
-        for (size_t shard : art::get_shard_count()) {
+        routes.reserve(barch::get_shard_count().size());
+        for (size_t shard : barch::get_shard_count()) {
             auto route = barch::repl::get_route(shard);
             if (route.ip.empty()) {
                 routes[shard] = nullptr;
@@ -41,7 +41,7 @@ struct rpc_caller : caller {
         }
         std::vector<std::string_view> auth = {"AUTH","default","empty"};
         if (this->call( auth,::AUTH) != 0) {
-            art::std_err("could not authenticate `default`");
+            barch::std_err("could not authenticate `default`");
         }
     }
     [[nodiscard]] int wrong_arity()  override {

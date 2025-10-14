@@ -35,19 +35,19 @@ class queue_server {
         instruction& operator=(const instruction&) = default;
         heap::small_vector<uint8_t,32> key{};
         heap::small_vector<uint8_t,48> value{};
-        art::tree*  t{};
-        art::key_options options{};
+        barch::shard*  t{};
+        barch::key_options options{};
         bool executed = false;
-        void set_key(art::value_type k) {
+        void set_key(barch::value_type k) {
             key.append(k.to_view());
         }
-        void set_value(art::value_type v) {
+        void set_value(barch::value_type v) {
             value.append(v.to_view());
         }
-        [[nodiscard]] art::value_type get_key() const {
+        [[nodiscard]] barch::value_type get_key() const {
             return {key.data(), key.size()};
         }
-        [[nodiscard]] art::value_type get_value() const {
+        [[nodiscard]] barch::value_type get_value() const {
             return {value.data(), value.size()};
         }
         [[nodiscard]] bool ordered() const {
@@ -65,13 +65,13 @@ class queue_server {
                 }
                 --t->queue_size;
                 //t->last_queue_id = qpos;
-                t->opt_insert(options, get_key() ,get_value(),true,[](const art::node_ptr& ){});
+                t->opt_insert(options, get_key() ,get_value(),true,[](const barch::node_ptr& ){});
                 executed = true;
                 return true;
 
 
             }catch (std::exception& e) {
-                art::std_err("exception processing queue", e.what());
+                barch::std_err("exception processing queue", e.what());
             }
             ++statistics::queue_failures;
             return false;
@@ -84,7 +84,7 @@ class queue_server {
     ~queue_server() {
         stop();
     }
-    thread_pool threads{art::get_shard_count().size()};
+    thread_pool threads{barch::get_shard_count().size()};
     //typedef moodycamel::ConcurrentQueue<instruction> queue_type;
     typedef circular_queue<instruction> queue_type;
     struct queue_data {
@@ -149,9 +149,9 @@ class queue_server {
         threads.stop();
         consume_all();
     }
-    void queue_insert(art::tree* t,art::key_options options,art::value_type k, art::value_type v) {
+    void queue_insert(barch::shard* t,barch::key_options options,barch::value_type k, barch::value_type v) {
 
-        size_t at = t->shard % threads.size();
+        size_t at = t->shard_number % threads.size();
         instruction ins;
         ins.set_key(k);
         ins.set_value(v);
@@ -218,11 +218,11 @@ bool is_queue_server_running() {
 }
 
 
-void queue_insert(size_t shard, art::key_options options,art::value_type k, art::value_type v) {
+void queue_insert(size_t shard, barch::key_options options,barch::value_type k, barch::value_type v) {
     auto t = get_art(shard);
     if (server)
         server->queue_insert(t,options,k,v);
     else
-        t->opt_insert(options,k,v,true,[](const art::node_ptr& ){});
+        t->opt_insert(options,k,v,true,[](const barch::node_ptr& ){});
 }
 

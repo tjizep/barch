@@ -10,7 +10,7 @@
 /**
 * functions provide access to configuration
 */
-namespace art {
+namespace barch {
     enum compression_type {
         compression_none = 0,
         compression_zstd = 1

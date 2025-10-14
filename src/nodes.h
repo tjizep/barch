@@ -686,11 +686,11 @@ namespace art {
                     abort_with("invalid key");
                 }
                 if ( k[0] == tinteger && key_len()+1 != numeric_key_size) {
-                    std_err("invalid key (int) len",key_len());
+                    barch::std_err("invalid key (int) len",key_len());
                     abort_with("invalid key (int)");
                 }
                 if ( k[0] == tdouble && key_len()+1 != numeric_key_size) {
-                    std_err("invalid key (double) len",key_len());
+                    barch::std_err("invalid key (double) len",key_len());
                     abort_with("invalid key (double)");
                 }
             }

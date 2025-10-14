@@ -51,7 +51,7 @@ namespace barch {
                             do_read();
                         }
                     }catch (std::exception& e) {
-                        art::std_err("error", e.what());
+                        barch::std_err("error", e.what());
                     }
                 }else {
                     //art::std_err("error", ec.message(), ec.value());

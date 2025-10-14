@@ -91,7 +91,7 @@ namespace barch {
                                 do_write(stream);
                                 do_read();
                             }catch (std::exception& e) {
-                                art::std_err("error", e.what());
+                                barch::std_err("error", e.what());
                             }
                         }
                     });

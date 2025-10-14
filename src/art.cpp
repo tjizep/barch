@@ -8,8 +8,6 @@
 #include "valkeymodule.h"
 #include "statistics.h"
 #include "logical_allocator.h"
-#include "configuration.h"
-#include "glob.h"
 #include "keys.h"
 #include "logger.h"
 #include "module.h"
@@ -175,16 +173,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
             abort_with("invalid root node");
         }
-        art::node_ptr al = t->from_unordered_set(key);
-        if (!al.null()) {
-            t->inc_keys_found();
-            return al;
-        }
-        al = find(t, key);
-        if (!al.null()) {
-            t->inc_keys_found();
-            return al;
-        }
+        art::node_ptr al ;
         tlb.clear();
         al = inner_lower_bound(tlb, t, key);
         if (!al.null() && al.const_leaf()->get_key() == key) {
@@ -193,7 +182,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         }
 
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -252,7 +241,7 @@ bool art::update(tree *t, value_type key,
 
 
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return false;
@@ -501,7 +490,7 @@ art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
             return al;
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -536,7 +525,7 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
             } while (increment_trace(t->root, tl));
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -573,7 +562,7 @@ int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack c
             } while (increment_trace(t->root, tl));
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -581,13 +570,11 @@ int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack c
 
 
 art::node_ptr art::find(const tree* t, value_type key) {
-    //const tree *t = get_art(get_shard(key));
     ++statistics::get_ops;
     try {
 
-        node_ptr n = t->from_unordered_set(key);
 
-        n = t->root;
+        node_ptr n = t->root;
         unsigned depth = 0;
         while (!n.null()) {
             // Might be a leaf
@@ -616,7 +603,7 @@ art::node_ptr art::find(const tree* t, value_type key) {
             depth++;
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -646,7 +633,7 @@ art::iterator::iterator(tree* t, value_type unfiltered_key) : t(t) {
             c = t->size == 1 ? lb : last_node(tl);
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }
@@ -720,7 +707,8 @@ art::value_type art::iterator::value() const {
 bool art::iterator::remove() const {
     if (end()) return false;
     auto bef = t->size;
-    t->remove(key());
+    // TODO: it wont be replicated
+    art_delete(t, key());
     return bef > t->size;
 }
 
@@ -887,16 +875,16 @@ int64_t art::iterator::fast_distance(const iterator &other) const {
 
 void art::iterator::log_trace() const {
     size_t ctr = 0;
-    std_log("=======-iterator trace-========");
-    std_log("  tree size: ", this->t->size);
+    barch::std_log("=======-iterator trace-========");
+    barch::std_log("  tree size: ", this->t->size);
     log_encoded_key(key());
     for (auto &el: tl) {
         auto tp = el.parent->type();
         auto checked = el.parent->check_data();
-        std_log(++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
+        barch::std_log(++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
                 el.child_ix, el.k, tp, checked);
     }
-    std_log("=====-end iterator trace-======");
+    barch::std_log("=====-end iterator trace-======");
 }
 
 /**
@@ -909,7 +897,7 @@ art::node_ptr art_minimum(const art::tree *t) {
         if (l.null()) return nullptr;
         return l;
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -925,7 +913,7 @@ art::node_ptr art::maximum(art::tree *t) {
         if (l.null()) return nullptr;
         return l;
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -978,7 +966,7 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
  * @param options expiry info
  * @return true if the value.size is the same as current leaf and no expiry is set
  */
-static bool is_leaf_direct_replacement(const art::leaf* dl, art::value_type value, const art::key_options &options) {
+bool art::is_leaf_direct_replacement(const art::leaf* dl, art::value_type value, const art::key_options &options) {
     return dl->val_len() == value.size && !dl->expired() &&
             (options.get_expiry() > 0) == dl->is_expiry();
 }
@@ -1011,7 +999,7 @@ static art::node_ptr handle_leaf_replacement(
         // call back indicates actual replacement
         fc(n);
         art::leaf *dl = n.l();
-        if (is_leaf_direct_replacement(dl,value,options))
+        if (art::is_leaf_direct_replacement(dl,value,options))
         {
             dl->set_value(value);
             dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
@@ -1192,7 +1180,7 @@ bool art_insert
         }
         return true;
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return false;
@@ -1225,7 +1213,7 @@ void art_insert_no_replace(art::tree *t, const art::key_options &options, art::v
             t->size++;
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }
@@ -1328,7 +1316,7 @@ void art_delete(art::tree *t, art::value_type key, const NodeResult &fc) {
             free_node(l);
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }
@@ -1401,7 +1389,7 @@ int art_iter(art::tree *t, CallBack cb, void *data) {
         }
         return recursive_iter(t->root, cb, data);
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
         return -1;
     }
@@ -1489,61 +1477,62 @@ int art_iter_prefix(art::tree *t, art::value_type key, CallBack cb, void *data) 
             depth++;
         }
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
     return 0;
 }
 
-/**
- * just return the size
- */
-uint64_t art_size(art::tree *t) {
-    ++statistics::size_ops;
-    try {
-        if (t == nullptr)
-            return 0;
-        uint64_t size = t->size;
-
-        //if (!art::get_ordered_keys()) {
-            size += t->get_jump_size();
-        //}
-        return size;
-    } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
-        ++statistics::exceptions_raised;
+art::value_type art::s_filter_key(std::string& temp_key, barch::value_type key) {
+    if (key.size > maximum_allocation_size) {
+        throw_exception<std::runtime_error>("value too large");
     }
-    return 0;
-}
-
-uint64_t art_evict_lru(art::tree *t) {
-    try {
-        auto page = t->get_leaves().get_lru_page();
-        if (!page.second) return 0;
-        auto i = page.first.begin();
-        auto e = i + page.second;
-        auto fc = [](art::node_ptr) -> void {
-            ++statistics::keys_evicted;
-        };
-        while (i != e) {
-            const art::leaf *l = (art::leaf *) i;
-            if (l->key_len() > page.second) {
-                abort_with("invalid key or key size");
-            }
-            if (l->deleted()) {
-                i += (l->byte_size() + test_memory);
-                continue;
-            }
-            art_delete(t, l->get_key(), fc);
-            i += (l->byte_size() + test_memory);
+    if (key.size <= 1) {
+        throw_exception<std::runtime_error>("key too short");
+    }
+    if (!key.bytes) {
+        throw_exception<std::runtime_error>("key is NULL");
+    }
+    for (size_t i = 0; i < key.size-1; ++i) {
+        if (key.bytes[i] == 0) {
+            throw_exception<std::runtime_error>("key contains null byte");
         }
-        ++statistics::pages_evicted;
-        return page.second;
-    } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
-        ++statistics::exceptions_raised;
     }
-    return 0;
+    if (key.bytes[key.size - 1] != 0) {
+        temp_key = {key.chars(), key.size};// copy the data so that we don't cause potential buffer overflow
+        return  {temp_key.data(),temp_key.size()+1}; // include the null term
+    }
+    return key;
+}
+
+art::value_type art::tree::filter_key(value_type key) const {
+    return s_filter_key(temp_key, key);
+}
+
+void art::tree::update_trace(int direction) {
+#if 1
+    // this loop is extremely effective at detecting any kind of corruption in the tree
+    // although it has a performance penalty
+    if (!trace.empty()) {
+        if (trace[0].parent != root) {
+            barch::std_log("trace root invalid for",nodes.get_name());
+            abort_with("invalid trace root");
+        }
+        auto trd = trace[0].parent->data().descendants;
+        if (trd + direction != size) {
+            barch::std_err("descendant count invalid", trd, "!=", size);
+            abort_with("invalid descendant count");
+        }
+        for (auto &ut: trace) {
+            ut.parent.modify()->data().descendants += direction;
+        }
+        trd = trace[0].parent->data().descendants;
+        if (trd != size) {
+            barch::std_err("descendant count invalid", trd, "!=", size);
+            abort_with("invalid descendant count");
+        }
+    }
+#endif
 }
 
 void art::glob(tree * t, const keys_spec &spec, value_type pattern,
@@ -1584,520 +1573,19 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern,
                 return true;
             });
     } catch (std::exception &e) {
-        art::log(e, __FILE__, __LINE__);
+        barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
     }
 }
 
-art_statistics art::get_statistics() {
-    art_statistics as{};
-    as.heap_bytes_allocated = (int64_t) heap::allocated;
-    as.leaf_nodes = (int64_t) statistics::leaf_nodes;
-    as.node4_nodes = (int64_t) statistics::n4_nodes;
-    as.node16_nodes = (int64_t) statistics::n16_nodes;
-    as.node256_nodes = (int64_t) statistics::n256_nodes;
-    as.node256_occupants = as.node256_nodes ? ((int64_t) statistics::node256_occupants / as.node256_nodes) : 0ll;
-    as.node48_nodes = (int64_t) statistics::n48_nodes;
-    for (size_t shard : art::get_shard_count()) {
-        as.bytes_allocated += (int64_t) get_art(shard)->get_leaves().get_allocated() + get_art(shard)->get_nodes().get_allocated();
-    }
-
-    //statistics::addressable_bytes_alloc;
-    for (auto shard : art::get_shard_count()) {
-        as.bytes_interior += (int64_t) get_art(shard)->get_nodes().get_allocated();
-    }
-    as.page_bytes_compressed = (int64_t) statistics::page_bytes_compressed;
-    as.page_bytes_uncompressed = (int64_t) statistics::page_bytes_uncompressed;
-    as.pages_uncompressed = (int64_t) statistics::pages_uncompressed;
-    as.pages_compressed = (int64_t) statistics::pages_compressed;
-    as.max_page_bytes_uncompressed = (int64_t) statistics::max_page_bytes_uncompressed;
-    as.vacuums_performed = (int64_t) statistics::vacuums_performed;
-    as.last_vacuum_time = (int64_t) statistics::last_vacuum_time;
-    as.leaf_nodes_replaced = (int64_t) statistics::leaf_nodes_replaced;
-    as.pages_evicted = (int64_t) statistics::pages_evicted;
-    as.keys_evicted = (int64_t) statistics::keys_evicted;
-    as.pages_defragged = (int64_t) statistics::pages_defragged;
-    as.exceptions_raised = (int64_t) statistics::exceptions_raised;
-    as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
-    as.shards = (int64_t) statistics::shards;
-    as.local_calls = (int64_t) statistics::local_calls;
-    as.local_calls = (int64_t) statistics::max_spin;
-    as.logical_allocated = (int64_t) statistics::logical_allocated;
-    as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
-    as.keys_found = (int64_t) statistics::keys_found;
-    as.new_keys_added = (int64_t) statistics::new_keys_added;
-    as.keys_replaced = (int64_t) statistics::keys_replaced;
-    as.queue_reorders = (int64_t) statistics::queue_reorders;
-
-    return as;
-}
-
-
-struct transaction {
-    bool was_transacted = false;
-    art::tree *t = nullptr;
-    transaction(const transaction&) = default;
-    transaction& operator=(const transaction&) = default;
-    explicit transaction(art::tree *t) : t(t) {
-        was_transacted = t->transacted;
-        if (!was_transacted)
-            t->begin();
-    }
-
-    ~transaction() {
-        if (!was_transacted)
-            t->commit();
-
-    }
-};
-
-art_ops_statistics art::get_ops_statistics() {
-    art_ops_statistics os{};
-    os.delete_ops = (int64_t) statistics::delete_ops;
-    os.get_ops = (int64_t) statistics::get_ops;
-    os.insert_ops = (int64_t) statistics::insert_ops;
-    os.iter_ops = (int64_t) statistics::iter_ops;
-    os.iter_range_ops = (int64_t) statistics::iter_range_ops;
-    os.lb_ops = (int64_t) statistics::lb_ops;
-    os.max_ops = (int64_t) statistics::max_ops;
-    os.min_ops = (int64_t) statistics::min_ops;
-    os.range_ops = (int64_t) statistics::range_ops;
-    os.set_ops = (int64_t) statistics::set_ops;
-    os.size_ops = (int64_t) statistics::size_ops;
-    return os;
-}
-art_repl_statistics art::get_repl_statistics(){
-    art_repl_statistics rs;
-    rs.bytes_recv = (int64_t) statistics::repl::bytes_recv;
-    rs.bytes_sent = (int64_t) statistics::repl::bytes_sent;
-    rs.insert_requests = (int64_t) statistics::repl::insert_requests;
-    rs.remove_requests = (int64_t) statistics::repl::remove_requests;
-    rs.find_requests = (int64_t) statistics::repl::find_requests;
-    rs.request_errors = (int64_t) statistics::repl::request_errors;
-    rs.redis_sessions = (int64_t) statistics::repl::redis_sessions;
-    rs.attempted_routes = (int64_t) statistics::repl::attempted_routes;
-    rs.routes_succeeded = (int64_t) statistics::repl::routes_succeeded;
-    rs.instructions_failed = (int64_t) statistics::repl::instructions_failed;
-    rs.key_add_recv = (int64_t) statistics::repl::key_add_recv;
-    rs.key_add_recv_applied = (int64_t) statistics::repl::key_add_recv_applied;
-    rs.key_rem_recv = (int64_t) statistics::repl::key_rem_recv;
-    rs.out_queue_size = (int64_t) statistics::repl::out_queue_size;
-    rs.key_rem_recv_applied = (int64_t) statistics::repl::key_rem_recv_applied;
-    rs.routes_succeeded = (int64_t) statistics::repl::routes_succeeded;
-    rs.attempted_routes = (int64_t) statistics::repl::attempted_routes;
-    return rs;
-}
-#include "ioutil.h"
-
-template<typename OutStream>
-static void stats_to_stream(OutStream &of) {
-    writep(of, statistics::n4_nodes);
-    writep(of, statistics::n16_nodes);
-    writep(of, statistics::n48_nodes);
-    writep(of, statistics::n256_nodes);
-    writep(of, statistics::node256_occupants);
-    writep(of, statistics::leaf_nodes);
-    writep(of, statistics::page_bytes_compressed);
-    writep(of, statistics::page_bytes_uncompressed);
-    writep(of, statistics::pages_uncompressed);
-    writep(of, statistics::pages_compressed);
-    writep(of, statistics::max_page_bytes_uncompressed);
-    writep(of, statistics::oom_avoided_inserts);
-    writep(of, statistics::logical_allocated);
-
-    if (!of.good()) {
-        throw std::runtime_error("art::stats_to_stream: bad output stream");
-    }
-}
-
-template<typename InStream>
-static void stream_to_stats(InStream &in) {
-    if (!in.good()) {
-        throw std::runtime_error("art::stream_to_stats: bad output stream");
-    }
-    readp(in, statistics::n4_nodes);
-    readp(in, statistics::n16_nodes);
-    readp(in, statistics::n48_nodes);
-    readp(in, statistics::n256_nodes);
-    readp(in, statistics::node256_occupants);
-    readp(in, statistics::leaf_nodes);
-    readp(in, statistics::page_bytes_compressed);
-    readp(in, statistics::page_bytes_uncompressed);
-    readp(in, statistics::pages_uncompressed);
-    readp(in, statistics::pages_compressed);
-    readp(in, statistics::max_page_bytes_uncompressed);
-    readp(in, statistics::oom_avoided_inserts);
-    readp(in, statistics::logical_allocated);
-}
-
-
-art::hashed_key::hashed_key(const node_ptr& la) {
-    if (la.logical.address() > std::numeric_limits<uint32_t>::max()) {
-        throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
-    }
-    addr = la.logical.address();
-}
-art::node_ptr art::hashed_key::node(const abstract_leaf_pair* p) const {
-    return logical_address{addr, (abstract_leaf_pair*)p};
-}
-art::hashed_key& art::hashed_key::operator=(const node_ptr& nl) {
-    addr = nl.logical.address();
-    return *this;
-}
-
-art::hashed_key::hashed_key(const logical_address& la) {
-    if (la.address() > std::numeric_limits<uint32_t>::max()) {
-        throw_exception<std::runtime_error>("hashed_key: address too large/out of memory");
-    }
-    addr = la.address();
-
-}
-
-art::hashed_key::hashed_key(value_type) {
-}
-
-const art::leaf* art::hashed_key::get_leaf(const query_pair& q) const {
-    node_ptr n = logical_address{addr, q.leaves};
-    return n.is_leaf ? n.const_leaf() : nullptr;
-}
-
-art::value_type art::hashed_key::get_key(const query_pair& q) const {
-    if (!addr) {
-        return q.key;
-    }
-    return get_leaf(q)->get_key();
-}
-
-void art::tree::clear_hash() {
-    h.clear();
-}
-void art::tree::set_hash_query_context(value_type k) {
-    qp.key = k;
-}
-void art::tree::set_hash_query_context(value_type k) const {
-    qp.key = k;
-}
-void art::tree::set_thread_ap() {
-}
-
-void art::tree::remove_leaf(const logical_address& )  {
-}
-bool art::tree::remove_leaf_from_uset(value_type key) {
-    set_hash_query_context(key);
-    auto i = h.find(key);
-    if (i != h.end()) {
-        node_ptr old{logical_address(i->addr,this)};
-        h.erase(i);
-        if (old.cl()->is_hashed()) {
-            old.free_from_storage();
-        }
-        return true;
-    }
-    return false;
-}
-
-art::node_ptr art::tree::from_unordered_set(value_type key) const {
-    set_hash_query_context(key);
-    auto i = h.find(key);
-    if (i != h.end()) {
-
-        inc_keys_found();
-        return i->node(this);
-    }
-    return nullptr;
-}
-
-bool art::tree::remove_from_unordered_set(value_type key) {
-    set_hash_query_context(key);
-    return h.erase(key) > 0;
-}
-
-
-bool art::tree::publish(std::string host, int port) {
-    repl_client.add_destination(std::move(host), port);
-    return true;
-}
-bool art::tree::pull(std::string host, int port) {
-    repl_client.add_source(std::move(host), port);
-    return true;
-}
-bool art::tree::save(bool stats) {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    auto *t = this;
-    if (nodes.get_main().get_bytes_allocated()==0) return true;
-    bool saved = false;
-    node_ptr troot;
-    size_t tsize;
-    auto save_stats_and_root = [&](std::ostream &of) {
-        if (!saved) {
-            abort_with("synch error");
-        }
-        uint32_t w_stats = 0;
-        if (stats) {
-            w_stats = 1;
-        }
-        writep(of, w_stats);
-        if (w_stats == 1) {
-            stats_to_stream(of);
-        }
-        auto root = logical_address(troot.logical);
-        writep(of, root);
-        writep(of, troot.is_leaf);
-        writep(of, tsize);
-    };
-
-    auto st = std::chrono::high_resolution_clock::now();
-    //transaction tx(this); // stabilize main while saving
-    //arena::hash_arena leaves{get_leaves().get_name()};
-    //arena::hash_arena nodes{get_nodes().get_name()};
-    {
-        write_lock release(this->latch); // only lock during partial copy
-        tsize = t->size;
-        troot = t->root;
-        saved = true;
-        //leaves.borrow(get_leaves().get_main());
-        //nodes.borrow(get_nodes().get_main());
-        if (!get_leaves().self_save_extra(".dat", save_stats_and_root)) {
-            return false;
-        }
-
-        if (!get_nodes().self_save_extra( ".dat", [&](std::ostream &) {
-        })) {
-            return false;
-        }
-    }
-
-    auto current = std::chrono::high_resolution_clock::now();
-    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
-    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
-    std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
-            "seconds");
-    return true;
-}
-bool art::tree::send(std::ostream& out) {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    auto *t = this;
-    if (nodes.get_main().get_bytes_allocated()==0) return true;
-    bool saved = false;
-    node_ptr troot;
-    size_t tsize;
-    auto save_stats_and_root = [&](std::ostream &of) {
-        if (!saved) {
-            abort_with("synch error");
-        }
-        stats_to_stream(of);
-        auto root = logical_address(troot.logical);
-        writep(of, root);
-        writep(of, troot.is_leaf);
-        writep(of, tsize);
-    };
-
-    auto st = std::chrono::high_resolution_clock::now();
-    transaction tx(this); // stabilize main while saving
-    arena::hash_arena leaves{get_leaves().get_name()};
-    arena::hash_arena nodes{get_nodes().get_name()};
-    {
-        storage_release release(this); // only lock during partial copy
-        tsize = t->size;
-        troot = t->root;
-        saved = true;
-        leaves.borrow(get_leaves().get_main());
-        nodes.borrow(get_nodes().get_main());
-    }
-    if (!get_leaves().send_extra(leaves,out, save_stats_and_root)) {
-        return false;
-    }
-
-
-    if (!get_nodes().send_extra(nodes, out, [&](std::ostream &) {
-    })) {
-        return false;
-    }
-
-    auto current = std::chrono::high_resolution_clock::now();
-    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
-    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
-
-    std_log("sent barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
-            "seconds");
-    return true;
-}
-bool art::tree::load(bool) {
-
-    //
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    try {
-        write_lock release(this->latch);
-        h.clear();
-        auto *t = this;
-        logical_address root{nullptr};
-        bool is_leaf = false;
-        // save stats in the leaf storage
-        auto load_stats_and_root = [&](std::istream &in) {
-            uint32_t w_stats = 0;
-            readp(in, w_stats);
-            if (w_stats != 0) {
-                stream_to_stats(in);
-            }
-            readp(in, root);
-            readp(in, is_leaf);
-            readp(in, t->size);
-        };
-        auto st = std::chrono::high_resolution_clock::now();
-
-        if (!get_nodes().load_extra(".dat", [&](std::istream &) {
-        })) {
-            return false;
-        }
-        if (!get_leaves().load_extra(".dat", load_stats_and_root)) {
-            return false;
-        }
-        root = logical_address{root.address(), this};// translate root to the now
-        if (is_leaf) {
-
-            t->root = node_ptr{root};
-        } else {
-            t->root = resolve_read_node(root);
-        }
-        page_modifications::inc_all_tickers();
-        load_hash();
-        auto now = std::chrono::high_resolution_clock::now();
-        const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
-        const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        std_log("Done loading BARCH, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
-
-        std_log("loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb");
-    }catch (std::exception &e) {
-        std_log("could not load",e.what());
-        return false;
-    }
-    return true;
-}
-bool art::tree::retrieve(std::istream& in) {
-
-    //
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    try {
-        storage_release release(this);
-        auto *t = this;
-        logical_address root{nullptr};
-        bool is_leaf = false;
-        // save stats in the leaf storage
-        auto load_stats_and_root = [&](std::istream &in) {
-            uint32_t w_stats = 0;
-            readp(in, w_stats);
-            if (w_stats != 0) {
-                stream_to_stats(in);
-            }
-
-            readp(in, root);
-            readp(in, is_leaf);
-            readp(in, t->size);
-        };
-        auto st = std::chrono::high_resolution_clock::now();
-
-        if (!get_leaves().receive_extra(in, load_stats_and_root)) {
-            return false;
-        }
-
-        if (!get_nodes().receive_extra(in, [&](std::istream &) {
-        })) {
-            return false;
-        }
-
-        root = logical_address{root.address(), this};// translate root to the now
-        if (is_leaf) {
-
-            t->root = node_ptr{root};
-        } else {
-            t->root = resolve_read_node(root);
-        }
-        page_modifications::inc_all_tickers();
-        load_hash();
-        auto now = std::chrono::high_resolution_clock::now();
-        const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
-        const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        std_log("Done loading BARCH, keys loaded:", t->size, "");
-
-        std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");
-    }catch (std::exception &e) {
-        std_log("could not load",e.what());
-        return false;
-    }
-    return true;
-}
-
-void art::tree::begin() {
-    if (transacted) return;
-    save_root = root;
-    save_size = size;
-    save_stats.clear();
-    stats_to_stream(save_stats);
-    {
-       storage_release release(this);
-        get_leaves().begin();
-        get_nodes().begin();
-
-    }
-    transacted = true;
-}
-
-void art::tree::commit() {
-    if (!transacted) return;
-    storage_release release(this);
-    get_leaves().commit();
-    get_nodes().commit();
-    transacted = false;
-}
-
-void art::tree::rollback() {
-    if (!transacted) return;
-    storage_release release(this);
-    get_leaves().rollback();
-    get_nodes().rollback();
-    root = save_root;
-    size = save_size;
-    save_stats.seek(0);
-    stream_to_stats(save_stats);
-    transacted = false;
-}
-
-void art::tree::clear() {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    storage_release release(this);
-    root = {nullptr};
-    size = 0;
-    transacted = false;
-    get_leaves().clear();
-    get_nodes().clear();
-    h.clear();
-    statistics::n4_nodes = 0;
-    statistics::n16_nodes = 0;
-    statistics::n48_nodes = 0;
-    statistics::n256_nodes = 0;
-    statistics::node256_occupants = 0;
-    statistics::leaf_nodes = 0;
-    statistics::page_bytes_compressed = 0;
-    statistics::page_bytes_uncompressed = 0;
-    statistics::pages_uncompressed = 0;
-    statistics::pages_compressed = 0;
-    statistics::max_page_bytes_uncompressed = 0;
-    statistics::oom_avoided_inserts = 0;
-    statistics::keys_found = 0;
-    statistics::new_keys_added = 0;
-    statistics::keys_replaced = 0;
-    statistics::logical_allocated = 0;
-}
-static void log_trace(const art::tree* t , const std::string& name, const art::trace_list& tl)  {
+static void log_trace(const art::tree* t , const std::string& name, const barch::trace_list& tl)  {
     size_t ctr = 0;
-    art::std_log("====-tree trace-",name,"====");
-    art::std_log("  tree size: ", t->size);
+    barch::std_log("====-tree trace-",name,"====");
+    barch::std_log("  tree size: ", t->size);
     for (auto &el: tl) {
         auto tp = el.parent->type();
         auto checked = el.parent->check_data();
-        art::std_log(++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
+        barch::std_log(++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
                 el.child_ix, "k",el.k,"tp", tp, "checked", checked);
         if (el.child.is_leaf) {
             auto l = el.child.const_leaf();
@@ -2106,271 +1594,9 @@ static void log_trace(const art::tree* t , const std::string& name, const art::t
 
         }
     }
-    art::std_log("=====-end tree trace-======");
+    barch::std_log("=====-end tree trace-======");
 }
 void art::tree::log_trace() const {
     ::log_trace(this, "tlb", tlb);
     ::log_trace(this, "trace", trace);
-}
-
-void art::tree::update_trace(int direction) {
-#if 1
-    // this loop is extremely effective at detecting any kind of corruption in the tree
-    // although it has a performance penalty
-    if (!trace.empty()) {
-        if (trace[0].parent != root) {
-            std_log("trace root invalid for",nodes.get_name());
-            abort_with("invalid trace root");
-        }
-        auto trd = trace[0].parent->data().descendants;
-        if (trd + direction != size) {
-            std_err("descendant count invalid", trd, "!=", size);
-            abort_with("invalid descendant count");
-        }
-        for (auto &ut: trace) {
-            ut.parent.modify()->data().descendants += direction;
-        }
-        trd = trace[0].parent->data().descendants;
-        if (trd != size) {
-            std_err("descendant count invalid", trd, "!=", size);
-            abort_with("invalid descendant count");
-        }
-    }
-#endif
-}
-bool art::tree::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
-    return this->insert({}, key, value, update, fc);
-}
-static art::value_type s_filter_key(std::string& temp_key, art::value_type key) {
-    if (key.size > maximum_allocation_size) {
-        throw_exception<std::runtime_error>("value too large");
-    }
-    if (key.size <= 1) {
-        throw_exception<std::runtime_error>("key too short");
-    }
-    if (!key.bytes) {
-        throw_exception<std::runtime_error>("key is NULL");
-    }
-    for (size_t i = 0; i < key.size-1; ++i) {
-        if (key.bytes[i] == 0) {
-            throw_exception<std::runtime_error>("key contains null byte");
-        }
-    }
-    if (key.bytes[key.size - 1] != 0) {
-        temp_key = {key.chars(), key.size};// copy the data so that we don't cause potential buffer overflow
-        return  {temp_key.data(),temp_key.size()+1}; // include the null term
-    }
-    return key;
-}
-
-art::value_type art::tree::filter_key(value_type key) const {
-    return s_filter_key(temp_key, key);
-}
-
-bool art::tree::insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (get_total_memory() > get_max_module_memory()) {
-        // do not add data if memory limit is reached
-        ++statistics::oom_avoided_inserts;
-        return false;
-    }
-    value_type key = filter_key(unfiltered_key);
-    size_t before = size;
-    art_insert(this, options, key, value, update, fc);
-    this->repl_client.insert(latch, options, key, value);
-    return size > before;
-}
-
-bool art::tree::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
-    if (get_total_memory() > get_max_module_memory()) {
-        // do not add data if memory limit is reached
-        ++statistics::oom_avoided_inserts;
-        return false;
-    }
-
-    ++statistics::insert_ops;
-    set_hash_query_context(key);
-    auto i = h.find(key);
-    if (i != h.end()) {
-        if (update) {
-            auto n = i->node(this);
-            leaf *dl = n.l();
-            fc(n);
-            if (is_leaf_direct_replacement(dl, value, options))
-            {
-
-                dl->set_value(value);
-                dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
-                options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
-                last_leaf_added = n;
-                ++statistics::keys_replaced;
-                return false;
-            }
-            node_ptr old = logical_address{i->addr,this};
-            h.erase(i);
-            old.free_from_storage();
-            ++statistics::keys_replaced;
-        }else {
-            return false;
-        }
-    }else {
-        ++statistics::new_keys_added;
-    }
-    node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
-    l.l()->set_hashed();
-    h.insert_unique(l);
-    return true;
-}
-
-bool art::tree::opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (get_total_memory() > get_max_module_memory()) {
-        // do not add data if memory limit is reached
-        ++statistics::oom_avoided_inserts;
-        return false;
-    }
-    std::string tk;
-    value_type key = s_filter_key(tk,unfiltered_key);
-    size_t before = size;
-    if (options.is_hashed()) {
-        hash_insert(options, key, value, update, fc);
-    }else {
-        art_insert(this, options, key, value, update, fc);
-    }
-    return size+h.size() > before;
-}
-
-
-bool art::tree::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    std::string tk;
-    value_type key = s_filter_key(tk,unfiltered_key);
-    if (opt_rpc_insert(options, key, value, update, fc)) {
-        this->repl_client.insert(latch, options, key, value);
-        return true;
-    }
-    return false;
-}
-
-bool art::tree::insert(value_type key, value_type value, bool update) {
-    return this->insert(key, value, update, [](const node_ptr &) {}) ;
-}
-bool art::tree::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
-    auto key = filter_key(unfiltered_key);
-    auto repl_updateresult = [&](const node_ptr &leaf) {
-        auto value = updater(leaf);
-        if (value.null()) {
-            return value;
-        }
-        auto l = value.const_leaf();
-        key_options options = *l;
-        this->repl_client.insert(latch, options, key, l->get_value());
-        return value;
-    };
-    auto i = h.find(key);
-    if (i != h.end()) {
-
-        node_ptr old = logical_address{i->addr,this};
-        bool hashed = old.cl()->is_hashed();
-        if (!hashed)
-            abort_with("no art caching allowed");
-        node_ptr n = repl_updateresult(old);
-        if (n == old) {
-            return false; // nothing to do
-        }
-        if (!n.null()) {
-            n.l()->set_hashed();
-            h.erase(i);
-            h.insert(n);
-            old.free_from_storage();// ok if old is null - nothing will happen
-        }
-        return !n.null();
-    }
-    if (!opt_ordered_keys) {
-        return false;
-    }
-
-    return art::update(this, key, repl_updateresult);
-}
-bool art::tree::evict(const leaf* l) {
-    if (l->deleted()) return false;
-    size_t before = size;
-    if (l->is_hashed()) {
-        set_hash_query_context(l->get_key());
-        auto i = h.find(l->get_key());
-        if (i != h.end()) {
-            auto n = i->node(this);
-            h.erase(i);
-            n.free_from_storage();
-            ++statistics::keys_evicted;
-            return true;
-        }
-    }
-    --statistics::delete_ops; // were not counting these deletes
-    art_delete(this, l->get_key(), [](const art::node_ptr &){});
-    if (size < before) {
-        ++statistics::keys_evicted;
-    }
-    return size < before;
-}
-bool art::tree::evict(value_type unfiltered_key) {
-    size_t before = size;
-
-    auto key = filter_key(unfiltered_key);
-    node_ptr old = from_unordered_set(key);
-    if (!old.null()) {
-        auto n = old;
-        leaf *dl = n.l();
-        if (dl->is_hashed()) {
-            h.erase(key);
-            n.free_from_storage();
-            return true;
-        }
-    }
-    --statistics::delete_ops; // were not counting these deletes
-    art_delete(this, key, [](const art::node_ptr &){});
-    return size < before;
-
-}
-bool art::tree::remove(value_type unfiltered_key, const NodeResult &fc) {
-    //storage_release release(this);
-    size_t before = size;
-
-    auto key = filter_key(unfiltered_key);
-    node_ptr old = from_unordered_set(key);
-    if (!old.null()) {
-        auto n = old;
-        leaf *dl = n.l();
-        if (dl->is_hashed()) {
-            fc(n);
-            h.erase(key);
-            n.free_from_storage();
-
-            this->repl_client.remove(latch, key);
-            return true;
-        }
-    }
-    art_delete(this, key, fc);
-    this->repl_client.remove(latch, key);
-    return size < before;
-}
-bool art::tree::remove(value_type key) {
-
-    return this->remove(key, [](const node_ptr &) {});
-}
-art::node_ptr art::tree::search(value_type unfiltered_key) {
-    value_type key = filter_key(unfiltered_key);
-    auto n = from_unordered_set(key);
-    if (!n.null()) {
-        return n;
-    }
-
-    auto r = art_search(this, key);
-    if (r.null()) {
-        last_leaf_added = nullptr; // clear it before trying to retrieve
-        this->repl_client.find_insert(key);
-        return this->last_leaf_added;
-    }
-    return r;
-}
-#include "queue_server.h"
-void art::tree::queue_consume() {
-    ::queue_consume(this->shard);
 }

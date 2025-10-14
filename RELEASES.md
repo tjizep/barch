@@ -1,4 +1,4 @@
-# Release v0.3.4.1b 2025-10-10
+# Release v0.3.4.2b 2025-10-14
 
 ## New Features
 
@@ -12,6 +12,7 @@
 1. Fix bugs in sharding and replication logic (v0.3.4.1b 2025-10-08)
 2. Fix potential network stats bugs (v0.3.4.1b 2025-10-08)
 3. RPC Cleanup (v0.3.4.1b 2025-10-09)
+3. Shard and Tree Cleanup (v0.3.4.2b 2025-10-14)
 
 # Release v0.3.3.32b 2025-09-24
 

@@ -6,8 +6,8 @@
 #define MODULE_H
 
 #include "art.h"
+#include "shard.h"
 #define NAME(x) "B." #x , cmd_##x
-extern art::tree *ad;
 
 struct constants {
     ValkeyModuleString *OK = nullptr;
@@ -22,13 +22,13 @@ struct constants {
 extern constants Constants;
 
 std::shared_mutex &get_lock();
-art::tree *get_art(size_t shard);
-size_t get_shard(art::value_type key);
+barch::shard *get_art(size_t shard);
+size_t get_shard(barch::value_type key);
 size_t get_shard(const char * k, size_t l);
 size_t get_shard(const std::string& key);
 size_t get_shard(ValkeyModuleString **argv);
-art::tree * get_art(ValkeyModuleString **argv);
-art::tree * get_art(art::value_type key);
+barch::shard * get_art(ValkeyModuleString **argv);
+barch::shard * get_art(barch::value_type key);
 uint64_t get_total_memory();
-std::vector<art::tree *>& get_arts();
+std::vector<barch::shard *>& get_arts();
 #endif //MODULE_H

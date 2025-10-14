@@ -65,16 +65,16 @@ namespace barch {
             --to;
         }
     }
-    inline void push_options(heap::vector<uint8_t>& buffer, const art::key_options& options) {
+    inline void push_options(heap::vector<uint8_t>& buffer, const barch::key_options& options) {
         buffer.push_back(options.flags);
         if (options.has_expiry())
             push_size_t<uint64_t>(buffer, options.get_expiry());
     }
-    inline std::pair<art::key_options,size_t> get_options(size_t at, const heap::vector<uint8_t>& buffer) {
+    inline std::pair<barch::key_options,size_t> get_options(size_t at, const heap::vector<uint8_t>& buffer) {
         if (buffer.size() <= at+sizeof(uint64_t) + 1) {
             throw_exception<std::runtime_error>("invalid size");
         }
-        art::key_options r;
+        barch::key_options r;
         r.flags = buffer[at];
         if (r.has_expiry()) {
             r.set_expiry(get_size_t<uint64_t>(at+1, buffer));
@@ -82,22 +82,22 @@ namespace barch {
         }
         return {r, at+1};
     }
-    inline std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
+    inline std::pair<barch::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
         if (buffer.size()+sizeof(size)+at + 1< size) {
             throw_exception<std::runtime_error>("invalid size");
         }
-        art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
+        barch::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
         return {r, at+sizeof(size)+size + 1};
     }
 
-    inline void push_value(heap::vector<uint8_t>& buffer, art::value_type v) {
+    inline void push_value(heap::vector<uint8_t>& buffer, barch::value_type v) {
         push_size_t<uint32_t>(buffer, v.size);
         buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
         buffer.push_back(0x00);
     }
     inline void push_value(heap::vector<uint8_t>& buffer, const std::string& v) {
-        push_value(buffer, art::value_type{v});
+        push_value(buffer, barch::value_type{v});
     }
     inline void push_value(heap::vector<uint8_t>& buffer, const Variable& v) {
         uint8_t i = v.index();
@@ -128,7 +128,7 @@ namespace barch {
     }
 
     inline std::pair<Variable,size_t> get_variable(size_t at, const heap::vector<uint8_t>& buffer) {
-        std::pair<art::value_type,size_t> vt;
+        std::pair<barch::value_type,size_t> vt;
         auto bsize = buffer.size();
         if (at >= bsize) {
             throw_exception<std::runtime_error>("invalid at");
@@ -205,10 +205,10 @@ namespace barch {
      */
 
     template<typename StreamT>
-     af_result process_art_fun_cmd(art::tree* t, StreamT& stream, const heap::vector<uint8_t>& buffer) {
+     af_result process_art_fun_cmd(barch::shard* t, StreamT& stream, const heap::vector<uint8_t>& buffer) {
         af_result r;
         heap::vector<uint8_t> tosend;
-        art::node_ptr found;
+        barch::node_ptr found;
         uint32_t buffers_size = buffer.size();
         bool flush_buffers = false;
         for (size_t i = 0; i < buffers_size;) {
@@ -221,13 +221,13 @@ namespace barch {
                     auto options = get_options(i+1, buffer);
                     auto key = get_value(options.second, buffer);
                     auto value = get_value(key.second, buffer);
-                    if (get_total_memory() > art::get_max_module_memory()) {
+                    if (get_total_memory() > barch::get_max_module_memory()) {
                         // do not add data if the memory limit is reached
                         ++statistics::oom_avoided_inserts;
                         r.error = true;
                         return r;
                     } else {
-                        auto fc = [](const art::node_ptr &){
+                        auto fc = [](const barch::node_ptr &){
                         };
                         bool added_or = false;
                         if (t->opt_ordered_keys) {
@@ -250,7 +250,7 @@ namespace barch {
                 case 'r': {
                     auto key = get_value(i+1, buffer);
                     if (t->opt_ordered_keys) {
-                        art_delete(t, key.first,[&r](const art::node_ptr &) {
+                        art_delete(t, key.first,[&r](const barch::node_ptr &) {
                             ++statistics::repl::key_rem_recv_applied;
                             ++r.remove_applied;
                         });
@@ -269,7 +269,7 @@ namespace barch {
                     break;
                 case 'f': {
                     auto key = get_value(i+1, buffer);
-                    found = art::find(t, key.first);
+                    found = barch::find(t, key.first);
                     if (found.is_leaf) {
                         auto l = found.const_leaf();
                         tosend.push_back('i');
@@ -288,7 +288,7 @@ namespace barch {
                     auto lkey = get_value(i+1, buffer);
                     auto ukey = get_value(lkey.second, buffer);
                     ++r.find_called;
-                    art::iterator ai(t, lkey.first);
+                    barch::iterator ai(t, lkey.first);
                     while (ai.ok()) {
                         auto k = ai.key();
                         if (k >= lkey.first && k <= ukey.first) {
@@ -309,7 +309,7 @@ namespace barch {
                 }
                     break;
                 default:
-                    art::std_err("unknown command", cmd);
+                    barch::std_err("unknown command", cmd);
                     r.error = true;
                     return r;
             }
@@ -340,7 +340,7 @@ namespace barch {
         {
             error = result_error;
             if (error) {
-                art::std_err("error (",result_error.value(),") writing ",result_n,"bytes to socket:",result_error.message());
+                barch::std_err("error (",result_error.value(),") writing ",result_n,"bytes to socket:",result_error.message());
                 ++statistics::repl::request_errors;
             }else {
                 net_stat stat;
@@ -360,7 +360,7 @@ namespace barch {
                 error = {};
                 s.close();
             }catch (const std::system_error& e) {
-                art::std_err("error closing socket:",e.code().message(),e.code().value());
+                barch::std_err("error closing socket:",e.code().message(),e.code().value());
                 return false;
             }
             return true;
@@ -375,7 +375,7 @@ namespace barch {
             asio::async_connect(s, resolution,[&](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
                 error = ec;
             });
-            if (!run_to(io, s, art::get_rpc_connect_to_s())) {
+            if (!run_to(io, s, barch::get_rpc_connect_to_s())) {
                 return false;
             }
             return !error ;
@@ -385,11 +385,11 @@ namespace barch {
         }
         bool write(const uint8_t* data, size_t size) {
             async_write_to( s, asio::buffer(data, size), error);
-            return run_to(io, s, art::get_rpc_connect_to_s()) && !error;
+            return run_to(io, s, barch::get_rpc_connect_to_s()) && !error;
         }
         bool write(const char* data, size_t size) override {
             async_write_to( s, asio::buffer(data, size), error);
-            return run_to(io, s, art::get_rpc_write_to_s()) && !error;
+            return run_to(io, s, barch::get_rpc_write_to_s()) && !error;
         }
         bool write(const heap::vector<uint8_t> &to_send) {
             return write(to_send.data(), to_send.size());
@@ -400,11 +400,11 @@ namespace barch {
             {
                 error = result_error;
                 if (error) {
-                    art::std_err("error (",error.value(),") reading socket:[",error.message(),"]");
+                    barch::std_err("error (",error.value(),") reading socket:[",error.message(),"]");
                     ++statistics::repl::request_errors;
                 }
             });
-            if (!run_to(io, s, art::get_rpc_read_to_s())) {
+            if (!run_to(io, s, barch::get_rpc_read_to_s())) {
                 return false;
             }
             return !error;
@@ -446,7 +446,7 @@ namespace barch {
                 writep(stream, sh);
                 writep(stream, message_count);
                 if (buffers_size == 0) {
-                    art::std_err("invalid buffer size", buffers_size);
+                    barch::std_err("invalid buffer size", buffers_size);
                     return false;
                 }
                 writep(stream, buffers_size);

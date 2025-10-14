@@ -97,122 +97,20 @@ typedef std::function<int(void *data, art::value_type key, art::value_type value
 typedef std::function<int(const art::node_ptr &)> LeafCallBack;
 typedef std::function<void(const art::node_ptr &)> NodeResult;
 
-
-/**
- * art tree and company
- */
 namespace art {
     node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const children_t &c);
-    struct query_pair {
-        query_pair(abstract_leaf_pair * leaves, value_type key) : leaves(leaves), key(key) {}
-        query_pair() = default;
-        query_pair& operator=(const query_pair&) = default;
-        query_pair(const query_pair&) = default;
-        abstract_leaf_pair * leaves{};
-        value_type key{};
-    };
-    struct hashed_key {
-        // we can reduce memory use by setting this to uint32_t
-        // but max database size is reduced to 128 gb
-        //uint64_t addr{};
-        uint32_t addr{};
-        node_ptr node(const abstract_leaf_pair* p) const ;
-        hashed_key() = default;
-        hashed_key(const hashed_key&) = default;
-        hashed_key& operator=(const hashed_key&) = default;
-        hashed_key(value_type) ;
 
-        [[nodiscard]] const leaf* get_leaf(const query_pair& q) const;
-        [[nodiscard]] value_type get_key(const query_pair& q) const;
-
-        hashed_key(const node_ptr& la) ;
-        hashed_key(const logical_address& la) ;
-
-        hashed_key& operator=(const node_ptr& nl);
-
-
-
-        [[nodiscard]] size_t hash(const query_pair& q) const {
-            auto key = get_key(q);
-            size_t r = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-            return r;
-        }
-    };
-    struct hk_hash{
-        hk_hash() = default;
-        hk_hash& operator=(const hk_hash&) = default;
-        hk_hash(const hk_hash&) = default;
-        hk_hash(query_pair& q):q(&q){}
-        query_pair* q{};
-        size_t operator()(const hashed_key& k) const {
-            if (q == nullptr) {
-                abort_with("no query pair");
-            }
-           return k.hash(*q);
-        }
-    };
-    struct hk_eq{
-        hk_eq() = default;
-        hk_eq& operator=(const hk_eq&) = default;
-        hk_eq(const hk_eq&) = default;
-        hk_eq(query_pair& q):q(&q){}
-        query_pair* q{};
-        size_t operator()(const hashed_key& l,const hashed_key& r) const {
-            if (q == nullptr) {
-                abort_with("no query pair");
-            }
-            return l.get_key(*q) == r.get_key(*q);
-        }
-    };
-    struct tree : public alloc_pair{
-
-    private:
-        trace_list trace{};
-
-        mutable std::string temp_key{};
-        bool with_stats{true};
-        //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
-        //mutable heap::unordered_set<hashed_key,hk_hash > h{};
-        mutable query_pair qp{this, {}};
-        mutable hk_hash hk_h{qp};
-        mutable hk_eq hk_e{qp};
-        mutable oh::unordered_set<hashed_key,hk_hash, hk_eq> h{hk_e,hk_h};
-        mutable uint64_t saf_keys_found{};
-        mutable uint64_t saf_get_ops{};
-        bool remove_from_unordered_set(value_type key);
-    public:
-        void inc_keys_found() const {
-            ++saf_get_ops;
-            ++saf_keys_found;
-        }
-        void set_hash_query_context(value_type q);
-        void set_hash_query_context(value_type q) const ;
-        void set_thread_ap();
-        void remove_leaf(const logical_address& at) override;
-        size_t get_jump_size() const {
-            return h.size();
-        }
-        void log_trace() const ;
-        value_type filter_key(value_type key) const;
-        composite query{};
-        composite cmd_ZADD_q1{};
-        composite cmd_ZADD_qindex{};
-        bool mexit = false;
-        bool transacted = false;
-        std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
-        node_ptr root = nullptr;
-        uint64_t size = 0;
-        // to support a transaction
-        node_ptr save_root = nullptr;
-        uint64_t save_size = 0;
-        vector_stream save_stats{};
-        std::shared_mutex save_load_mutex{};
+    struct tree :  public alloc_pair {
+        tree(const std::string& name, size_t shard_number, node_ptr rrrr, uint64_t ssss)
+        : alloc_pair(shard_number,name), root(rrrr), size(ssss) {}
+        node_ptr root{};
+        uint64_t size{};
         bool opt_use_trace = true;
+        trace_list trace{};
+        mutable std::string temp_key{};
         node_ptr last_leaf_added{};
-        barch::repl::client repl_client{};
-        std::atomic<size_t> queue_size{};
-        bool opt_ordered_keys{true};
-
+        void update_trace(int direction);
+        value_type filter_key(value_type key) const;
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();
@@ -228,101 +126,7 @@ namespace art {
             if (opt_use_trace)
                 trace.push_back(te);
         }
-
-        void start_maintain();
-
-        tree(const tree &) = delete;
-        // standard constructor
-        tree(const node_ptr &root, uint64_t size, size_t shard) :
-        alloc_pair(shard),
-        root(root),
-        size(size),
-        opt_ordered_keys(get_ordered_keys()) {
-            opt_all_keys_lru = get_evict_allkeys_lru();
-            opt_volatile_keys_lru = get_evict_volatile_lru();
-            repl_client.shard = shard;
-            barch::repl::clear_route(shard);
-            start_maintain();
-
-        }
-        // special constructor for auth
-        tree(const std::string& name,const node_ptr &root, uint64_t size, size_t shard) :
-        alloc_pair(shard,name),
-        with_stats(false),
-        root(root),
-        size(size),
-        opt_ordered_keys(true) {
-            nodes.get_main().set_check_mem(false);
-            leaves.get_main().set_check_mem(false);
-            repl_client.shard = shard;
-            barch::repl::clear_route(shard);
-            start_maintain();
-        }
-        tree& operator=(const tree&) = delete;
-
-        ~tree() override;
-
-        void load_hash();
-        void clear_hash() ;
-        bool remove_leaf_from_uset(value_type key);
-        node_ptr from_unordered_set(value_type key) const;
-
-        bool publish(std::string host, int port);
-
-        /**
-         * register a pull source on this shard/tree
-         * currently non-existing hosts will also be added (they can come online later)
-         * but at a perf cost if keys are not found
-         * keys can also be retrieved asynchronously becoming available later but at greater
-         * throughput
-         * @param host
-         * @param port
-         * @return true if host and port combo does not exist
-         */
-        bool pull(std::string host, int port);
-
-        void run_defrag();
-
-        bool save(bool stats = true);
-
-        bool send(std::ostream& out);
-
-        bool load(bool stats = true);
-
-        bool retrieve(std::istream& in);
-
-        void begin();
-
-        void commit();
-
-        void rollback();
-
-        void clear();
-
-        void update_trace(int direction);
-
-        bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
-
-        bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc);
-        bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
-        bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
-
-        bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
-        bool insert(value_type key, value_type value, bool update = true);
-        bool evict(value_type key);
-        bool evict(const leaf* l);
-        bool remove(value_type key, const NodeResult &fc);
-        bool remove(value_type key);
-
-        /**
-         * find a key. if the key does not exist pull sources will be queried for the key
-         * if the key is no-were a null is returned
-         * @param key any valid value
-         * @return not null key if it exists (incl. pull sources)
-         */
-        node_ptr search(value_type key);
-
-        bool update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
+        void log_trace() const ;
 
         /**
          * leaf allocation
@@ -333,10 +137,9 @@ namespace art {
          * @return address of leaf created
          */
         node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
-        node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const art::children_t &c);
+        node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const children_t &c);
         node_ptr alloc_8_node_ptr(unsigned nt);
-        void queue_consume();
-
+        virtual ~tree() = default;
     };
 }
 
@@ -345,11 +148,6 @@ namespace art {
  * @return 0 on success.
  */
 int tree_destroy(art::tree *t);
-
-/**
- * Returns the size of the ART tree.
- */
-uint64_t art_size(art::tree *t);
 
 /**
  * inserts a new value into the art tree
@@ -433,7 +231,7 @@ namespace art {
      * @param key key to find
      * @param updater function to call for supplying modified key
      */
-    bool update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
+    bool update(art::tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
 
     art::node_ptr maximum(art::tree *t);
 
@@ -446,7 +244,7 @@ namespace art {
      * @return the lower bound or NULL if there is no value not less than key
      */
 
-    node_ptr lower_bound(const tree *t, value_type key);
+    node_ptr lower_bound(const art::tree *t, value_type key);
 
     /**
      *  gets the thread local trace list for the last lb operation
@@ -490,8 +288,8 @@ int art_iter_prefix(art::tree *t, art::value_type prefix, CallBack cb, void *dat
 namespace art {
     struct iterator {
         tree *t;
-        trace_list tl{};
-        node_ptr c{};
+        art::trace_list tl{};
+        art::node_ptr c{};
 
         /**
          * performs a lower-bound search and returns an iterator that may not always be valid
@@ -501,7 +299,7 @@ namespace art {
          * @return an iterator
          */
 
-        iterator(tree* t, value_type key);
+        iterator(tree* t, art::value_type key);
 
         /**
          * starts the iterator at the first key (left most) in the tree
@@ -556,7 +354,7 @@ namespace art {
 
     };
 
-    node_ptr find(const tree* t, value_type key);
+    node_ptr find(const art::tree* t, value_type key);
 
     int range(const tree *t, value_type key, value_type key_end, CallBack cb, void *data);
 
@@ -565,64 +363,32 @@ namespace art {
     int64_t distance(const tree *t, const trace_list &a, const trace_list &b);
 
     int64_t fast_distance(const trace_list &a, const trace_list &b);
-}
-
-struct storage_release {
-    art::tree * t{};
-    bool locked{false};
-    storage_release() = delete;
-    storage_release(const storage_release&) = delete;
-    storage_release& operator=(const storage_release&) = default;
-    storage_release(art::tree* t, bool cons = true) : t(t) {
-        if (cons)
-            t->queue_consume();
-        t->latch.lock();
-    }
-    ~storage_release() {
-        t->latch.unlock();
-    }
-};
-struct read_lock {
-    art::tree * t{};
-    bool locked{false};
-    read_lock() = default;
-    read_lock(const read_lock&) = delete;
-    read_lock& operator=(const read_lock&) = delete;
-    read_lock(art::tree* t, bool consume = true) : t(t) {
-        if (consume)
-            t->queue_consume();
-        //locked =
-            t->latch.lock_shared();
-    }
-    ~read_lock() {
-        //if (locked)
-            t->latch.unlock_shared();
-    }
-};
-/**
-* evict a lru page
-*/
-uint64_t art_evict_lru(art::tree *t);
-
-namespace art {
-    /**
-     * gets per module per node type statistics for all art_node* types
-     * @return art_statistics
-     */
-    art_statistics get_statistics();
-
-    /**
-     * get statistics for each operation performed
-     */
-    art_ops_statistics get_ops_statistics();
-
-    /**
-     * get replication and network statistics
-     */
-    art_repl_statistics get_repl_statistics();
     /**
      * glob match all the key value pairs except the deleted ones
      * This is a multi threaded iterator and care should be taken
      */
     void glob(tree *t, const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb);
+
+    /**
+     * sometimes the shard needs to know this fact
+     * @param dl
+     * @param value
+     * @param options
+     * @return if it can be overwritten directly
+     */
+    bool is_leaf_direct_replacement(const art::leaf* dl, art::value_type value, const art::key_options &options);
+
+    /**
+     * filter a key - may throw if key is malformed
+     * @param temp_key
+     * @param key
+     * @return the reconditioned key that will be compatible with an art
+     */
+    value_type s_filter_key(std::string& temp_key, value_type key);
 }
+
+/**
+* evict a lru page
+*/
+uint64_t art_evict_lru(art::tree *t);
+

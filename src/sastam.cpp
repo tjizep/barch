@@ -131,6 +131,6 @@ double heap::get_physical_memory_ratio() {
 }
 
 void abort_with(const char *message) __THROW {
-    art::std_abort("There's a bug and we cannot continue - last reason [", message, "]");
+    barch::std_abort("There's a bug and we cannot continue - last reason [", message, "]");
     abort();
 }

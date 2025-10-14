@@ -16,7 +16,7 @@
 
 namespace arena {
     struct base_hash_arena {
-        bool opt_use_vmmap = art::get_use_vmm_memory();
+        bool opt_use_vmmap = barch::get_use_vmm_memory();
 
     protected:
         typedef heap::allocator<std::pair<size_t, size_t> > allocator_type;
@@ -135,7 +135,7 @@ namespace arena {
                     memcpy(page_data, old_data, old_page_data_size);
                     free(old_data);
                     heap::allocated -= old_page_data_size;
-                    art::std_log("reallocating [", old_page_data_size, "] physical page data, to [", page_data_size,
+                    barch::std_log("reallocating [", old_page_data_size, "] physical page data, to [", page_data_size,
                                  "] virtual memory");
                 }
             } else {
@@ -151,7 +151,7 @@ namespace arena {
                     page_data_size = new_page_data_size;
                     page_data = npd;
                     page_modifications::inc_all_tickers();
-                    art::std_log("reallocating [", old_page_data_size, "] vmm page data, to [", new_page_data_size,
+                    barch::std_log("reallocating [", old_page_data_size, "] vmm page data, to [", new_page_data_size,
                                  "] physical memory");
                 }
             }
@@ -290,7 +290,7 @@ namespace arena {
             }
             auto pi = hidden_arena.find(at);
             if (pi == hidden_arena.end()) {
-                art::std_err("page [",at,"] is missing");
+                barch::std_err("page [",at,"] is missing");
                 abort_with("missing page");
             }
 
@@ -304,7 +304,7 @@ namespace arena {
 
             auto pi = hidden_arena.find(at);
             if (pi == hidden_arena.end()) {
-                art::std_err("page [",at,"] is missing");
+                barch::std_err("page [",at,"] is missing");
                 abort_with("page not found");
 
             }
@@ -317,7 +317,7 @@ namespace arena {
             }
             auto pi = hidden_arena.find(at);
             if (pi == hidden_arena.end()) {
-                art::std_err("page [",at,"] is missing");
+                barch::std_err("page [",at,"] is missing");
                 abort_with("page not found");
             }
             return pi->second;
@@ -329,7 +329,7 @@ namespace arena {
             }
             auto pi = hidden_arena.find(at);
             if (pi == hidden_arena.end()) {
-                art::std_err("page [",at,"] is missing");
+                barch::std_err("page [",at,"] is missing");
                 abort_with("page not found");
             }
             return pi->second;
@@ -392,7 +392,7 @@ namespace arena {
                 //memset(cow, 0, new_size);
                 heap::allocated += new_size;
                 cow_size = new_size;
-                art::std_log("allocated ", cow_size, "virtual memory as CoW");
+                barch::std_log("allocated ", cow_size, "virtual memory as CoW");
             }
             size_t cow_pages = cow_size / physical_page_size + 1;
             modified.resize(cow_pages);

@@ -17,7 +17,7 @@
 #include <fmt/color.h>
 #pragma GCC diagnostic pop
 
-namespace art {
+namespace barch {
 #if __cplusplus >= 202002L
     extern void raw_write_to_log(std::string_view users_fmt, std::format_args&& args);
     template<typename... Args>

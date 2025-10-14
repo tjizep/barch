@@ -223,7 +223,7 @@ int test() {
     end = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     int64_t simd_time = duration.count();
-    art::std_log("normal vs simd time",normal_time, simd_time,"ms");
+    barch::std_log("normal vs simd time",normal_time, simd_time,"ms");
     if (test_total1 != test_total)
     {
         abort();

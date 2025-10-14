@@ -10,24 +10,24 @@ thread_local uint64_t stream_read_ctr = 0;
 
 static std::shared_mutex shared{};
 constants Constants{};
-static std::vector<art::tree *> shards{};
+static std::vector<barch::shard *> shards{};
 std::shared_mutex &get_lock() {
     return shared;
 }
-std::vector<art::tree *>& get_arts() {
+std::vector<barch::shard *>& get_arts() {
     return shards;
 }
 static int init_shards() {
     write_lock w(get_lock());
     if (shards.empty()) {
-        std::vector<art::tree *> shards_out;
-        shards_out.resize(art::get_shard_count().size());
+        std::vector<barch::shard *> shards_out;
+        shards_out.resize(barch::get_shard_count().size());
         std::vector<std::thread> loaders{shards_out.size()};
         size_t shard_num = 0;
         auto start_time = std::chrono::high_resolution_clock::now();
         for (auto &shard : shards_out) {
             loaders[shard_num] = std::thread([shard_num, &shard]() {
-                shard = new(heap::allocate<art::tree>(1)) art::tree(nullptr, 0, shard_num);
+                shard = new(heap::allocate<barch::shard>(1)) barch::shard(nullptr, 0, shard_num);
                 shard->load();
             });
             ++shard_num;
@@ -39,13 +39,13 @@ static int init_shards() {
         statistics::shards = shards_out.size();
         auto end_time = std::chrono::high_resolution_clock::now();
         double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-        art::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
+        barch::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
         start_queue_server() ;
         shards.swap(shards_out);
     }
     return 0;
 }
-art::tree *get_art(size_t s) {
+barch::shard *get_art(size_t s) {
     if (shards.empty()) {
         init_shards() ;
     }
@@ -60,14 +60,14 @@ art::tree *get_art(size_t s) {
     return r;
 }
 size_t get_shard(const char* key, size_t key_len) {
-    if (art::get_shard_count().size() == 1) {
+    if (barch::get_shard_count().size() == 1) {
         return 0;
     }
-    auto shard_key = art::value_type{key,key_len};
+    auto shard_key = barch::value_type{key,key_len};
 
     uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(shard_key.chars(), shard_key.size);
 
-    size_t hshard = hash % art::get_shard_count().size();
+    size_t hshard = hash % barch::get_shard_count().size();
     return hshard;
 }
 
@@ -78,7 +78,7 @@ size_t get_shard(const std::string& key) {
 size_t get_shard(art::value_type key) {
    return get_shard(key.chars(), key.size);
 }
-art::tree* get_art(art::value_type key) {
+barch::shard* get_art(art::value_type key) {
     return get_art(get_shard(key.chars(), key.size));
 }
 size_t get_shard(ValkeyModuleString **argv) {
@@ -90,7 +90,7 @@ size_t get_shard(ValkeyModuleString **argv) {
    return get_shard(n,nlen);
 }
 
-art::tree * get_art(ValkeyModuleString **argv) {
+barch::shard * get_art(ValkeyModuleString **argv) {
     return get_art(get_shard(argv));
 }
 

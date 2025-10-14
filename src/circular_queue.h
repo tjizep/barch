@@ -54,7 +54,7 @@ public:
                 old_front = (old_front + 1) % old.size();
             }
             if (full() || rear - front != enqueues) {
-                art::std_err("resize failed");
+                barch::std_err("resize failed");
             }
         }
        simple_enqueue(val);

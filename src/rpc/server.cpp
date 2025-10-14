@@ -75,7 +75,7 @@ namespace barch {
                 try {
                     proc->stop();
                 }catch (std::exception& e) {
-                    art::std_err("failed to stop resp io service", e.what());
+                    barch::std_err("failed to stop resp io service", e.what());
                 }
 
             }
@@ -83,7 +83,7 @@ namespace barch {
                 io.stop();
 
             }catch (std::exception& e) {
-                art::std_err("failed to stop io service", e.what());
+                barch::std_err("failed to stop io service", e.what());
             }
             pool.stop();
 
@@ -95,7 +95,7 @@ namespace barch {
 
                 acc.async_accept([this](asio::error_code error, tcp::socket endpoint) {
                     if (error) {
-                        art::std_err("accept error",error.message(),error.value());
+                        barch::std_err("accept error",error.message(),error.value());
                         return; // this happens if there are not threads
                     }
                     {
@@ -106,7 +106,7 @@ namespace barch {
                 });
 
             }catch (std::exception& e) {
-                art::std_err("failed to start/run replication server", interface, port, e.what());
+                barch::std_err("failed to start/run replication server", interface, port, e.what());
             }
         }
 
@@ -137,7 +137,7 @@ namespace barch {
                     return;
                 }
                 heap::vector<uint8_t> buffer{};
-                art::key_spec spec;
+                barch::key_spec spec;
 
                 tcp::iostream stream(std::move(endpoint));
                 if (stream.fail())
@@ -147,7 +147,7 @@ namespace barch {
                         try {
                             writep(stream,rpc_server_version);
                         }catch (std::exception& e) {
-                            art::std_err("error",e.what());
+                            barch::std_err("error",e.what());
                         }
 
                         break;
@@ -155,24 +155,24 @@ namespace barch {
                         try {
                             uint32_t shard = 0;
                             readp(stream,shard);
-                            if (shard < art::get_shard_count().size()) {
+                            if (shard < barch::get_shard_count().size()) {
                                 get_art(shard)->send(stream);
                                 stream.flush();
                             }else {
-                                art::std_err("invalid shard", shard);
+                                barch::std_err("invalid shard", shard);
                             }
 
                         }catch (std::exception& e) {
-                            art::std_err("failed to stream shard", e.what());
+                            barch::std_err("failed to stream shard", e.what());
                             return;
                         }
                         break;
                     default:
-                        art::std_err("unknown command", cmd);
+                        barch::std_err("unknown command", cmd);
                         return;
                 }
             }catch (std::exception& e) {
-                art::std_err("failed to read command", e.what());
+                barch::std_err("failed to read command", e.what());
                 return;
             }
 
@@ -185,13 +185,13 @@ namespace barch {
             start_accept();
             pool.start([this](size_t tid) -> void{
                 io.dispatch([this,tid]() {
-                    art::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
+                    barch::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
                 });
                 io.run();
-                art::std_log("server stopped on", this->interface,this->port,"using thread",tid);
+                barch::std_log("server stopped on", this->interface,this->port,"using thread",tid);
             });
             std::atomic<size_t> started = 0;
-            art::std_log("resp pool size",asio_resp_pool.size());
+            barch::std_log("resp pool size",asio_resp_pool.size());
             asio_resp_ios.resize(asio_resp_pool.size());
             asio_resp_pool.start([this, &started](size_t tid) -> void {
                 ++started;
@@ -210,7 +210,7 @@ namespace barch {
             if (port == 0) return;
             srv = std::make_shared<server_context>(interface, port);
         }catch (std::exception& e) {
-            art::std_err("failed to start server", e.what());
+            barch::std_err("failed to start server", e.what());
         }
 
     }
@@ -262,7 +262,7 @@ namespace barch {
                     stream_write_ctr += result_n;
                     error = result_error;
                 });
-                run(art::get_rpc_write_to_s());
+                run(barch::get_rpc_write_to_s());
                 if (error) {
                     ++statistics::repl::request_errors;
                     throw_exception<std::runtime_error>("failed to write");
@@ -280,7 +280,7 @@ namespace barch {
                     stream_read_ctr += result_n;
                     error = result_error;
                 });
-                run(art::get_rpc_read_to_s());
+                run(barch::get_rpc_read_to_s());
                 if (error) {
                     ++statistics::repl::request_errors;
                     throw_exception<std::runtime_error>("failed to read");
@@ -310,14 +310,14 @@ namespace barch {
                             }
                             error = ec;
                         });
-                        run(art::get_rpc_connect_to_s());
+                        run(barch::get_rpc_connect_to_s());
                         if (error) {
                             throw_exception<std::runtime_error>("failed to connect");
                         };
                     }
 
                     for (auto p: params) {
-                        push_value(to_send, art::value_type{p});
+                        push_value(to_send, barch::value_type{p});
                     }
 
                     uint32_t calls = 1;
@@ -332,7 +332,7 @@ namespace barch {
                     replies.resize(buffers_size);
                     size_t reply_length = read(s,asio::buffer(replies));
                     if (reply_length != buffers_size) {
-                        art::std_err(reply_length,"!=",buffers_size);
+                        barch::std_err(reply_length,"!=",buffers_size);
                         throw_exception<std::length_error>("invalid reply length");
                     }
                     for (size_t i = 0; i < buffers_size; i++) {
@@ -342,7 +342,7 @@ namespace barch {
                     }
                     stream.clear();
                 }catch (std::exception& e) {
-                    art::std_err("call failed [", e.what(),"] to",host,port,"because [",error.message(),error.value(),"]");
+                    barch::std_err("call failed [", e.what(),"] to",host,port,"because [",error.message(),error.value(),"]");
                     stream.clear();
                     return {-1,-1};
                 }
@@ -350,10 +350,10 @@ namespace barch {
                 return r;
             }
 
-            call_result call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) override {
+            call_result call(heap::vector<Variable>& result, const heap::vector<barch::value_type>& params) override {
                 return tcall(result, params);
             }
-            call_result asynch_call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) override {
+            call_result asynch_call(heap::vector<Variable>& result, const heap::vector<barch::value_type>& params) override {
                 return tcall(result, params);
             }
 
@@ -383,7 +383,7 @@ namespace barch {
                 std::lock_guard lock(this->latch);
                 for (auto& d : destinations) {
                     if (d.host == dest.host && d.port == dest.port) {
-                        art::std_err("destination already added", d.host, d.port);
+                        barch::std_err("destination already added", d.host, d.port);
                         return;
                     }
                 }
@@ -395,7 +395,7 @@ namespace barch {
                 tpoll = std::thread([this]() {
                 heap::vector<uint8_t> to_send;
                 art_fun sender;
-                to_send.reserve(art::get_rpc_max_buffer());
+                to_send.reserve(barch::get_rpc_max_buffer());
                 try {
                     heap::vector<repl_dest> dests;
                     while (connected) {
@@ -419,7 +419,7 @@ namespace barch {
                     }
                 }catch (std::exception& e) {
                     this->connected = false;
-                    art::std_err("failed to connect to remote server", this->host, this->port,e.what());
+                    barch::std_err("failed to connect to remote server", this->host, this->port,e.what());
                 }
             });
             }
@@ -432,7 +432,7 @@ namespace barch {
                 std::lock_guard lock(this->latch);
                 for (auto& d : sources) {
                     if (d->host == src->host && d->port == src->port) {
-                        art::std_err("source already added", d->host, d->port);
+                        barch::std_err("source already added", d->host, d->port);
                         return false;
                     }
                 }
@@ -441,25 +441,25 @@ namespace barch {
             return true;
         }
 
-        bool client::insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value) {
+        bool client::insert(std::shared_mutex& latch, const barch::key_options& options, barch::value_type key, barch::value_type value) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this,&latch]() {
-                bool r = buffer.size() < art::get_rpc_max_buffer();
+            bool ok = time_wait(barch::get_rpc_max_client_wait_ms(), [this,&latch]() {
+                bool r = buffer.size() < barch::get_rpc_max_buffer();
                 if (!r) {
                     latch.unlock();
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     latch.lock();
                 }
-                r = buffer.size() < art::get_rpc_max_buffer();
+                r = buffer.size() < barch::get_rpc_max_buffer();
                 return r;
             });
 
             if (!ok) {
                 ++statistics::repl::instructions_failed;
-                art::std_err("replication buffer size exceeded", buffer.size());
+                barch::std_err("replication buffer size exceeded", buffer.size());
                 return false;
             }
             std::lock_guard lock(this->latch);
@@ -473,24 +473,24 @@ namespace barch {
 
         }
 
-        bool client::remove(std::shared_mutex& latch, art::value_type key) {
+        bool client::remove(std::shared_mutex& latch, barch::value_type key) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
             }
-            bool ok = time_wait(art::get_rpc_max_client_wait_ms(), [this, &latch]() {
-                bool r = buffer.size() < art::get_rpc_max_buffer();
+            bool ok = time_wait(barch::get_rpc_max_client_wait_ms(), [this, &latch]() {
+                bool r = buffer.size() < barch::get_rpc_max_buffer();
                 if (!r) {
                     latch.unlock();
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     latch.lock();
                 }
-                r = buffer.size() < art::get_rpc_max_buffer();
+                r = buffer.size() < barch::get_rpc_max_buffer();
                 return r;
             });
             if (!ok) {
                 ++statistics::repl::instructions_failed;
-                art::std_err("replication buffer size exceeded", buffer.size());
+                barch::std_err("replication buffer size exceeded", buffer.size());
                 return false;
             }
 
@@ -531,7 +531,7 @@ namespace barch {
         [[nodiscard]] bool client::begin_transaction() const {
             try {
             }catch (std::exception& e) {
-                art::std_err("failed to begin transaction", e.what());
+                barch::std_err("failed to begin transaction", e.what());
                 return false;
             }
             return true;
@@ -541,10 +541,10 @@ namespace barch {
                 if (!ping()) {
                     return false;
                 }
-                art::std_log("load shard",shard);
+                barch::std_log("load shard",shard);
                 tcp::iostream stream(host, std::to_string(this->port));
                 if (!stream) {
-                    art::std_err("failed to connect to remote server", host, this->port);
+                    barch::std_err("failed to connect to remote server", host, this->port);
                     return false;
                 }
                 uint32_t cmd = cmd_stream;
@@ -554,18 +554,18 @@ namespace barch {
                 writep(stream,cmd);
                 writep(stream, s);
                 if (!get_art(shard)->retrieve(stream)) {
-                    art::std_err("failed to retrieve shard", shard);
+                    barch::std_err("failed to retrieve shard", shard);
                     return false;
                 }
                 stream.close();
 
                 return true;
             }catch (std::exception& e) {
-                art::std_err("failed to load shard", shard, e.what());
+                barch::std_err("failed to load shard", shard, e.what());
                 return false;
             }
         }
-        bool client::find_insert(art::value_type key) {
+        bool client::find_insert(barch::value_type key) {
             if (sources.empty()) return false;
             bool added = false;
             heap::vector<uint8_t> to_send, rbuff;
@@ -581,7 +581,7 @@ namespace barch {
                         source->connect(source->host, source->port);
 
                     if (source->fail()) {
-                        art::std_err("failed to connect to remote server", host, this->port);
+                        barch::std_err("failed to connect to remote server", host, this->port);
                         continue;
                     }
 
@@ -599,7 +599,7 @@ namespace barch {
                     }
                 }catch (std::exception& e) {
                     source->close();
-                    art::std_err("failed to write to stream", e.what(),"to",source->host,source->port);
+                    barch::std_err("failed to write to stream", e.what(),"to",source->host,source->port);
                     ++statistics::repl::request_errors;
                 }
                 ++statistics::repl::find_requests;
@@ -612,7 +612,7 @@ namespace barch {
             try {
             } catch (std::exception& e) {
 
-                art::std_err("failed to commit transaction", e.what());
+                barch::std_err("failed to commit transaction", e.what());
                 return false;
             }
             return true;
@@ -621,7 +621,7 @@ namespace barch {
             try {
                 tcp::iostream stream(host, std::to_string(this->port ));
                 if (!stream) {
-                    art::std_err("failed to connect to remote server", host, this->port);
+                    barch::std_err("failed to connect to remote server", host, this->port);
                     return false;
                 }
                 net_stat stats;
@@ -631,37 +631,37 @@ namespace barch {
                 int ping_result = 0;
                 readp(stream, ping_result);
                 if (ping_result != rpc_server_version) {
-                    art::std_err("failed to ping remote server", host, port, "ping returned",ping_result);
+                    barch::std_err("failed to ping remote server", host, port, "ping returned",ping_result);
                     return false;
                 }
                 stream.close();
             }catch (std::exception &e) {
-                art::std_err("failed to ping remote server", host, port, e.what());
+                barch::std_err("failed to ping remote server", host, port, e.what());
                 return false;
             }
             return true;
         }
         static heap::vector<route> routes;
         void set_route(size_t shard, const route& destination) {
-            if (routes.empty()) routes.resize(art::get_shard_count().size());
+            if (routes.empty()) routes.resize(barch::get_shard_count().size());
             if (shard >= routes.size()) {
-                art::std_err("invalid shard",shard, routes.size());
+                barch::std_err("invalid shard",shard, routes.size());
                 return;
             }
             routes[shard] = destination;
         }
         void clear_route(size_t shard) {
-            if (routes.empty()) routes.resize(art::get_shard_count().size());
+            if (routes.empty()) routes.resize(barch::get_shard_count().size());
             if (shard >= routes.size()) {
-                art::std_err("invalid shard",shard, routes.size());
+                barch::std_err("invalid shard",shard, routes.size());
                 return;
             }
             routes[shard] = {};
         }
         route get_route(size_t shard) {
-            if (routes.empty()) routes.resize(art::get_shard_count().size());
+            if (routes.empty()) routes.resize(barch::get_shard_count().size());
             if (shard >= routes.size()) {
-                art::std_err("invalid shard",shard, routes.size());
+                barch::std_err("invalid shard",shard, routes.size());
                 return {};
             }
             return routes[shard];
@@ -674,7 +674,7 @@ extern "C"{
         if (argv.size() != 4)
             return call.wrong_arity();
         size_t shard = conversion::as_variable(argv[1]).i();
-        if (shard >= art::get_shard_count().size())
+        if (shard >= barch::get_shard_count().size())
             return call.error("invalid shard");
         auto host = conversion::as_variable(argv[2]).s();
         auto port = conversion::as_variable(argv[3]).i();
@@ -689,7 +689,7 @@ extern "C"{
         if (argv.size() != 2)
             return call.wrong_arity();
         size_t shard = atoi(argv[1].chars());
-        if (shard >= art::get_shard_count().size())
+        if (shard >= barch::get_shard_count().size())
             return call.error("invalid shard");
         auto route = barch::repl::get_route(shard);
         call.start_array();
@@ -703,7 +703,7 @@ extern "C"{
         if (argv.size() != 2)
             return call.wrong_arity();
         size_t shard = atoi(argv[1].chars());
-        if (shard >= art::get_shard_count().size())
+        if (shard >= barch::get_shard_count().size())
             return call.error("invalid shard");
         auto route = barch::repl::get_route(shard);
         barch::repl::clear_route(shard);

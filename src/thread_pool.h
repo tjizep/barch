@@ -73,9 +73,9 @@ struct thread_pool {
             t = {};
         }
         if (stopped < pool.size()) {
-            art::std_err("not all threads have stopped ",(size_t)stopped,"of",pool.size());
+            barch::std_err("not all threads have stopped ",(size_t)stopped,"of",pool.size());
         }else {
-            art::std_err("all threads have stopped ",(size_t)stopped,"of",pool.size());
+            barch::std_err("all threads have stopped ",(size_t)stopped,"of",pool.size());
         }
         stopped = 0;
         started = false;

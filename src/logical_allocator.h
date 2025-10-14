@@ -339,7 +339,7 @@ private:
 
     mutable abstract_leaf_pair * ap = nullptr;
     arena::hash_arena main;
-    bool opt_page_trace = art::get_log_page_access_trace();
+    bool opt_page_trace = barch::get_log_page_access_trace();
     bool opt_enable_lfu = false;
     bool opt_validate_addresses = false;
     bool opt_move_decompressed_pages = false;
@@ -490,15 +490,15 @@ private:
 
     uint8_t *basic_resolve(logical_address at, bool modify = false) {
         if (opt_page_trace) {
-            art::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read");
+            barch::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read");
         }
         if (test_memory == 1) {
             if (!allocated) {
-                art::std_err("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::std_err("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("use after free - no data allocated ");
             }
             if (erased.contains(at.address())) {
-                art::std_err("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::std_err("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("use after free");
             }
         }
@@ -558,20 +558,20 @@ public:
         size_t size = sz + test_memory + allocation_padding;
         uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size) {
-            art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+            barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
             abort_with("invalid allocation data");
         }
         if (this->opt_page_trace) {
-            art::std_log("freeing from [",main.name,"] size", size,"at",at.address(),"allocated",allocated);
+            barch::std_log("freeing from [",main.name,"] size", size,"at",at.address(),"allocated",allocated);
         }
 
         allocated -= size;
         if (at.address() == 0 || size == 0) {
-            art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+            barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
             abort_with("invalid address");
         }
         if (test_memory == 1 && d1[sz] != at.address() % 255) {
-            art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+            barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
             abort_with("memory address check failure");
         }
         if (test_memory == 1)
@@ -586,7 +586,7 @@ public:
         }
         if (test_memory) {
             if (erased.count(at.address())) {
-                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("memory erased (double free)");
             }
             erased.insert(at.address());
@@ -596,7 +596,7 @@ public:
             auto tp = at.page();
 
             if (is_free(tp)) {
-                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("freeing a free page");
             }
             if (last_page_allocated == tp) {
@@ -605,7 +605,7 @@ public:
             t.size = 0;
             //t.modifications = 0;
             if (fragmentation < t.fragmentation) {
-                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("invalid fragmentation");
             }
             fragmentation -= t.fragmentation;
@@ -617,7 +617,7 @@ public:
             //free_pages.push_back(at.page());
 
             if (fragmentation < t.fragmentation) {
-                art::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
                 abort_with("invalid fragmentation");
             }
         } else {
@@ -707,14 +707,14 @@ public:
             // last_page_allocated should not be set here
             at.second.size++;
             //at.second.modifications++;
-            if (at.second.fragmentation < size) {art::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+            if (at.second.fragmentation < size) {barch::std_log("failure for",main.name,r.address(), r.page(), r.offset());
                 abort_with(" no fragmentation?");
             }
             at.second.fragmentation -= size;
             invalid(r);
             auto *data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0) {
-                art::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+                barch::std_log("failure for",main.name,r.address(), r.page(), r.offset());
                 abort_with("address check failed");
             }
             if (test_memory == 1)
@@ -728,7 +728,7 @@ public:
             }
 
             if (this->opt_page_trace) {
-                art::std_log("allocate size [",main.name,"]", size,"at",r.address(),"from freelist","allocated",allocated);
+                barch::std_log("allocate size [",main.name,"]", size,"at",r.address(),"from freelist","allocated",allocated);
             }
             return pd;
         }
@@ -760,7 +760,7 @@ public:
         allocated += size;
         auto *data = (test_memory == 1) ? basic_resolve(ca) : nullptr;
         if (test_memory == 1 && data[sz] != ca.address() % 255) {
-            art::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+            barch::std_log("failure for",main.name,r.address(), r.page(), r.offset());
             abort_with("memory address check failure");
         }
 
@@ -768,7 +768,7 @@ public:
         statistics::logical_allocated += size;
         r = ca;
         if (this->opt_page_trace) {
-            art::std_log("allocate size [",main.name,"]", size,"at",r.address(),"as new","allocated",allocated);
+            barch::std_log("allocate size [",main.name,"]", size,"at",r.address(),"as new","allocated",allocated);
         }
 
         return rd;
@@ -804,7 +804,7 @@ public:
         });
     }
     void iterate_pages(std::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
-        opt_iterate_workers = art::get_iteration_worker_count();
+        opt_iterate_workers = barch::get_iteration_worker_count();
         std::vector<std::thread> workers{opt_iterate_workers};
         std::atomic<bool> stop = false;
         for (unsigned iwork = 0; iwork < opt_iterate_workers; iwork++) {
@@ -918,7 +918,7 @@ public:
             emancipated.clear();
             return main.load(main.name+filenname, reader);
         } catch (std::exception &e) {
-            art::log(e,__FILE__,__LINE__);
+            barch::log(e,__FILE__,__LINE__);
             ++statistics::exceptions_raised;
         }
 
@@ -952,7 +952,7 @@ public:
             emancipated.clear();
             return main.receive(in, reader);
         } catch (std::exception &e) {
-            art::log(e,__FILE__,__LINE__);
+            barch::log(e,__FILE__,__LINE__);
             ++statistics::exceptions_raised;
         }
 
@@ -1001,15 +1001,15 @@ public:
 struct alloc_pair : public abstract_leaf_pair{
 
 
-    size_t shard{};
+    size_t shard_number{};
     std::shared_mutex latch{};
     bool is_debug = false;
 
 
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
-    explicit alloc_pair(size_t shard) : shard(shard), nodes(this,"nodes_"+std::to_string(shard)),leaves(this,"leaves_"+std::to_string(shard)) {}
-    alloc_pair(size_t shard,const std::string& name) : shard(shard), nodes(this,"nodes_"+name+std::to_string(shard)),leaves(this,"leaves_"+name+std::to_string(shard)) {}
+    explicit alloc_pair(size_t shard_number) : shard_number(shard_number), nodes(this,"nodes_"+std::to_string(shard_number)),leaves(this,"leaves_"+std::to_string(shard_number)) {}
+    alloc_pair(size_t shard_number,const std::string& name) : shard_number(shard_number), nodes(this,"nodes_"+name+std::to_string(shard_number)),leaves(this,"leaves_"+name+std::to_string(shard_number)) {}
     logical_allocator& get_nodes() {
         return nodes;
     };

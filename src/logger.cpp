@@ -12,7 +12,7 @@
 #if __cplusplus >= 202002L
 #include <format>
 
-void art::raw_write_to_log(std::string_view users_fmt, std::format_args&& args)
+void barch::raw_write_to_log(std::string_view users_fmt, std::format_args&& args)
 {
     size_t tid = gettid();
     auto now = std::chrono::system_clock::now();
@@ -23,18 +23,18 @@ void art::raw_write_to_log(std::string_view users_fmt, std::format_args&& args)
     std::clog <<  logged << '\n';
 }
 
-void art::log(const std::string& message, const std::exception& e)
+void barch::log(const std::string& message, const std::exception& e)
 {
 
     std_log(message, e.what());
 }
 
-void art::log(const std::exception& e, const std::string& file, int line)
+void barch::log(const std::exception& e, const std::string& file, int line)
 {
 
     std_log(e.what(), file, line);
 }
-void art::log(const std::string& message)
+void barch::log(const std::string& message)
 {
     std_log(message);
 }
@@ -51,7 +51,7 @@ static std::mutex& get_lock() {
     static std::mutex m;
     return m;
 };
-void art::raw_start_log(bool err) {
+void barch::raw_start_log(bool err) {
     std::unique_lock lock(get_lock());
     size_t tid = gettid();
     auto now = std::chrono::system_clock::now();
@@ -73,7 +73,7 @@ void art::raw_start_log(bool err) {
     std::clog << logged;
 }
 
-void art::raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
+void barch::raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
     std::unique_lock lock(get_lock());
 
     fmt::text_style text_color;
@@ -85,12 +85,12 @@ void art::raw_continue_log(bool err, fmt::string_view users_fmt, fmt::format_arg
     std::clog << fmt::vformat(text_color, users_fmt, args);
 }
 
-void art::raw_end_log() {
+void barch::raw_end_log() {
     std::unique_lock lock(get_lock());
     std::clog << "\n";
 }
 
-void art::raw_write_to_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
+void barch::raw_write_to_log(bool err, fmt::string_view users_fmt, fmt::format_args &&args) {
     std::unique_lock lock(get_lock());
     size_t tid = gettid();
     auto now = std::chrono::system_clock::now();
@@ -113,15 +113,15 @@ void art::raw_write_to_log(bool err, fmt::string_view users_fmt, fmt::format_arg
     std::clog << logged << '\n';
 }
 
-void art::log(const std::string &message, const std::exception &e) {
+void barch::log(const std::string &message, const std::exception &e) {
     std_err(message, e.what());
 }
 
-void art::log(const std::exception &e, const std::string &file, int line) {
+void barch::log(const std::exception &e, const std::string &file, int line) {
     std_err(e.what(), file, line);
 }
 
-void art::log(const std::string &message) {
+void barch::log(const std::string &message) {
     std_log(message);
 }
 #endif

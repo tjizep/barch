@@ -91,6 +91,6 @@ namespace statistics {
 template<typename Ext>
 [[ noreturn ]] static void throw_exception(const char *name) {
     ++statistics::exceptions_raised;
-    art::std_err("exception", name);
+    barch::std_err("exception", name);
     throw Ext(name);
 }

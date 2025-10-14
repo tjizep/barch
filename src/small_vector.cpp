@@ -20,7 +20,7 @@ static int test(){
 	}
 	if (total != ttotal)
 	{
-		art::std_err("tesfail");
+		barch::std_err("tesfail");
 	}
 	for (auto r = testv.rbegin(); r != testv.rend(); ++r)
 	{
@@ -29,7 +29,7 @@ static int test(){
 	}
 	if (total != 0)
 	{
-		art::std_err("tesfail");
+		barch::std_err("tesfail");
 	}
 	for (int i = 0; i <100; ++i)
 	{
@@ -38,11 +38,11 @@ static int test(){
 	}
 	if (total != ttotal)
 	{
-		art::std_err("tesfail");
+		barch::std_err("tesfail");
 	}
 	if (!testv.empty())
 	{
-		art::std_err("should be empty",testv.size());
+		barch::std_err("should be empty",testv.size());
 	}
 	for (int i = 0; i <100; ++i)
 	{
@@ -56,7 +56,7 @@ static int test(){
 	}
 	if (total != 2*ttotal)
 	{
-		art::std_err("tesfail");
+		barch::std_err("tesfail");
 	}
 	tbefore = total;
 	t = testv.begin();
@@ -67,7 +67,7 @@ static int test(){
 	}
 	if (total != 3*ttotal)
 	{
-		art::std_err("tesfail");
+		barch::std_err("tesfail");
 	}
 	auto tr = testv.rbegin();
 	for (int i = 0; i <100; ++i)
@@ -77,7 +77,7 @@ static int test(){
 
 	if (total != tbefore)
 	{
-		art::std_err("tesfail");
+		barch::std_err("tesfail");
 	}
 	total = ttotal;
 	auto ttv= testv;
@@ -89,7 +89,7 @@ static int test(){
 
 	if (total != 0)
 	{
-		art::std_err("tesfail");
+		barch::std_err("tesfail");
 	}
     return ttotal;
 }

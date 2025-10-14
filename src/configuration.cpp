@@ -12,7 +12,7 @@
 #include "rpc/server.h"
 
 #define unused_arg
-art::configuration_record record;
+barch::configuration_record record;
 // these values are kept for reflection
 static std::recursive_mutex config_mutex{};
 static std::string compression_type{};
@@ -323,7 +323,7 @@ static int SetCompressionType(const std::string& val) {
         return VALKEYMODULE_ERR;
     }
     compression_type = test_compression_type;
-    record.compression = (compression_type == "zstd") ? art::compression_zstd : art::compression_none;
+    record.compression = (compression_type == "zstd") ? barch::compression_zstd : barch::compression_none;
     return VALKEYMODULE_OK;
 }
 static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -523,7 +523,7 @@ static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void 
     return SetOrderedKeys(test_ordered_keys);
 }
 static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    for (auto s : art::get_shard_count()) {
+    for (auto s : barch::get_shard_count()) {
         get_art(s)->opt_ordered_keys = record.ordered_keys;
     }
     return VALKEYMODULE_OK;
@@ -633,7 +633,7 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     std::lock_guard lock(config_mutex);
     bool lfu = (record.evict_volatile_lfu || record.evict_allkeys_lfu) ;
-    for (auto shard : art::get_shard_count()) {
+    for (auto shard : barch::get_shard_count()) {
         auto t = get_art(shard);
         storage_release r(t);
 
@@ -645,7 +645,7 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
     return VALKEYMODULE_OK;
 }
 
-int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
+int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     int ret = 0;
     ret |= ValkeyModule_RegisterStringConfig(ctx, "compression", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetCompressionType, SetCompressionType, ApplyCompressionType, nullptr);
@@ -718,13 +718,13 @@ int art::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     return ret;
 }
 
-int art::set_configuration_value(ValkeyModuleString *Name, ValkeyModuleString *Value) {
+int barch::set_configuration_value(ValkeyModuleString *Name, ValkeyModuleString *Value) {
     std::string name = ValkeyModule_StringPtrLen(Name, nullptr);
     std::string val = ValkeyModule_StringPtrLen(Value, nullptr);
     return set_configuration_value(name, val);
 }
-int art::set_configuration_value(const std::string& name, const std::string &val) {
-    art::std_log("setting", name, "to", val);
+int barch::set_configuration_value(const std::string& name, const std::string &val) {
+    barch::std_log("setting", name, "to", val);
 
     if (name == "compression") {
         int r = SetCompressionType(val);
@@ -793,137 +793,137 @@ int art::set_configuration_value(const std::string& name, const std::string &val
     }
 }
 
-bool art::get_compression_enabled() {
+bool barch::get_compression_enabled() {
     std::lock_guard lock(config_mutex);
     return record.compression == compression_zstd;
 }
 
-uint64_t art::get_max_module_memory() {
+uint64_t barch::get_max_module_memory() {
     return record.n_max_memory_bytes;
 }
 
-float art::get_min_fragmentation_ratio() {
+float barch::get_min_fragmentation_ratio() {
     std::lock_guard lock(config_mutex);
     return record.min_fragmentation_ratio;
 }
 
-bool art::get_active_defrag() {
+bool barch::get_active_defrag() {
     std::lock_guard lock(config_mutex);
     return record.active_defrag;
 }
 
 
-bool art::get_evict_volatile_lru() {
+bool barch::get_evict_volatile_lru() {
     std::lock_guard lock(config_mutex);
     return record.evict_volatile_lru;
 }
 
-bool art::get_evict_allkeys_lru() {
+bool barch::get_evict_allkeys_lru() {
     std::lock_guard lock(config_mutex);
     return record.evict_allkeys_lru;
 }
 
-bool art::get_evict_volatile_lfu() {
+bool barch::get_evict_volatile_lfu() {
     std::lock_guard lock(config_mutex);
     return record.evict_volatile_lfu;
 }
 
-bool art::get_evict_allkeys_lfu() {
+bool barch::get_evict_allkeys_lfu() {
     std::lock_guard lock(config_mutex);
     return record.evict_allkeys_lfu;
 }
 
-bool art::get_evict_volatile_random() {
+bool barch::get_evict_volatile_random() {
     std::lock_guard lock(config_mutex);
     return record.evict_volatile_random;
 };
 
-bool art::get_evict_allkeys_random() {
+bool barch::get_evict_allkeys_random() {
     std::lock_guard lock(config_mutex);
     return record.evict_allkeys_random;
 }
 
-bool art::get_evict_volatile_ttl() {
+bool barch::get_evict_volatile_ttl() {
     std::lock_guard lock(config_mutex);
     return record.evict_volatile_ttl;
 }
 
-const art::configuration_record& art::get_configuration() {
+const barch::configuration_record& barch::get_configuration() {
     std::lock_guard lock(config_mutex);
     return record;
 }
 
-uint64_t art::get_maintenance_poll_delay() {
+uint64_t barch::get_maintenance_poll_delay() {
     std::lock_guard lock(config_mutex);
     return record.max_defrag_page_count;
 }
 
-uint64_t art::get_max_defrag_page_count() {
+uint64_t barch::get_max_defrag_page_count() {
     std::lock_guard lock(config_mutex);
     return record.max_defrag_page_count;
 }
 
-unsigned art::get_iteration_worker_count() {
+unsigned barch::get_iteration_worker_count() {
     std::lock_guard lock(config_mutex);
     return record.iteration_worker_count;
 }
 
-uint64_t art::get_save_interval() {
+uint64_t barch::get_save_interval() {
     std::lock_guard lock(config_mutex);
     return record.save_interval;
 }
 
-uint64_t art::get_max_modifications_before_save() {
+uint64_t barch::get_max_modifications_before_save() {
     std::lock_guard lock(config_mutex);
     return record.max_modifications_before_save;
 }
-uint64_t art::get_rpc_max_buffer() {
+uint64_t barch::get_rpc_max_buffer() {
     return record.rpc_max_buffer;
 }
 
-int64_t art::get_rpc_max_client_wait_ms() {
+int64_t barch::get_rpc_max_client_wait_ms() {
     return record.rpc_client_max_wait_ms;
 }
 
-bool art::get_log_page_access_trace() {
+bool barch::get_log_page_access_trace() {
     std::lock_guard lock(config_mutex);
     return record.log_page_access_trace;
 }
 
-std::chrono::seconds art::get_rpc_connect_to_s() {
+std::chrono::seconds barch::get_rpc_connect_to_s() {
     return std::chrono::seconds(record.rpc_connect_to_s);
 }
-std::chrono::seconds art::get_rpc_read_to_s() {
+std::chrono::seconds barch::get_rpc_read_to_s() {
     return std::chrono::seconds(record.rpc_read_to_s);
 }
-std::chrono::seconds art::get_rpc_write_to_s() {
+std::chrono::seconds barch::get_rpc_write_to_s() {
     return std::chrono::seconds(record.rpc_write_to_s);
 }
-bool art::get_use_vmm_memory() {
+bool barch::get_use_vmm_memory() {
     std::lock_guard lock(config_mutex);
     return record.use_vmm_memory;
 }
-bool art::get_ordered_keys() {
+bool barch::get_ordered_keys() {
     return record.ordered_keys;
 }
 
-uint64_t art::get_internal_shards() {
+uint64_t barch::get_internal_shards() {
     return record.internal_shards;
 }
 
-uint64_t art::get_server_port() {
+uint64_t barch::get_server_port() {
     std::lock_guard lock(config_mutex);
     return record.server_port;
 }
 
 static std::vector<size_t> init_shard_sizes() {
     std::vector<size_t> r;
-    for (size_t s = 0; s < art::get_internal_shards();++s) {
+    for (size_t s = 0; s < barch::get_internal_shards();++s) {
         r.push_back(s);
     }
     return r;
 }
 static std::vector<size_t> shards = init_shard_sizes();
-const std::vector<size_t>& art::get_shard_count() {
+const std::vector<size_t>& barch::get_shard_count() {
     return shards;
 }

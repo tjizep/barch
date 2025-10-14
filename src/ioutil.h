@@ -29,7 +29,7 @@ template <typename T>
 static void read_expires(T& stream)
 {
     if constexpr (has_expires_from_now<T>) {
-        stream.expires_from_now(art::get_rpc_read_to_s());
+        stream.expires_from_now(barch::get_rpc_read_to_s());
     }
 }
 
@@ -37,7 +37,7 @@ template <typename T>
 static void write_expires(T& stream)
 {
     if constexpr (has_expires_from_now<T>) {
-        stream.expires_from_now(art::get_rpc_write_to_s());
+        stream.expires_from_now(barch::get_rpc_write_to_s());
     }
 
 }
@@ -68,7 +68,7 @@ static void incr_read_stat(const TStream& , size_t bytes) {
 template<typename OStream, typename T>
 static void writep(OStream &of, const T* data, size_t size) {
     write_expires(of);
-    if (log_streams==1) art::std_log("writing",size,"bytes","at",(uint64_t)stream_write_ctr);
+    if (log_streams==1) barch::std_log("writing",size,"bytes","at",(uint64_t)stream_write_ctr);
     of.write(reinterpret_cast<const char *>(data), size);
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
@@ -101,7 +101,7 @@ static void readp(IStream &in, T &data) {
     read_expires(in);
 
     in.read(reinterpret_cast<char *>(&data), sizeof(data));
-    if (log_streams==1) art::std_log("reading",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_read_ctr);
+    if (log_streams==1) barch::std_log("reading",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_read_ctr);
     if (in.fail()) {
         throw_exception<std::runtime_error>("read failed");
     }
@@ -112,7 +112,7 @@ template<typename IStream, typename T>
 static void readp(IStream &in, T *data, size_t size) {
     read_expires(in);
     in.read(reinterpret_cast<char *>(data), size);
-    if (log_streams==1) art::std_log("reading",size,"bytes","at",(uint64_t)stream_read_ctr);
+    if (log_streams==1) barch::std_log("reading",size,"bytes","at",(uint64_t)stream_read_ctr);
     if (in.fail()) {
         throw_exception<std::runtime_error>("read failed");
     }

@@ -65,7 +65,7 @@ namespace barch {
         {
 
             if (bytes_already_read > 1 + sizeof(uint32_t)) {
-                art::std_err("invalid header offset",bytes_already_read);
+                barch::std_err("invalid header offset",bytes_already_read);
                 return;
             }
             stream.buf.resize(header_size - bytes_already_read);
@@ -87,12 +87,12 @@ namespace barch {
                             if (old_bytes_already_read == 0) {
                                 readp(stream,start);
                                 if (start != 0) {
-                                    art::std_err("repl: invalid repl start byte",start);
+                                    barch::std_err("repl: invalid repl start byte",start);
                                     return;
                                 }
                                 readp(stream,cmd);
                                 if (cmd != cmd_art_fun) {
-                                    art::std_err("repl: invalid repl command",cmd);
+                                    barch::std_err("repl: invalid repl command",cmd);
                                     return;
                                 }
                             }
@@ -100,18 +100,18 @@ namespace barch {
                             readp(stream,count);
                             readp(stream,buffers_size);
                             if (buffers_size == 0) {
-                                art::std_err("repl: invalid buffer size", buffers_size);
+                                barch::std_err("repl: invalid buffer size", buffers_size);
                                 return;
                             }
                             stream.buf.resize(buffers_size);
                             do_read_data();
                             //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                         }catch (std::exception& e) {
-                            art::std_err("repl: failed to apply changes due to unexpected error", e.what());
+                            barch::std_err("repl: failed to apply changes due to unexpected error", e.what());
                             return;
                         }
                     }else if (ec.value() != 2){
-                        art::std_err("repl: socket error receiving data",ec.message(),ec.value());
+                        barch::std_err("repl: socket error receiving data",ec.message(),ec.value());
                     }
                 });
         }

@@ -17,7 +17,7 @@ int HSET(caller& cc, const arg_t& args) {
     int r = 0;
     int64_t updated = 0;
 
-    auto fc = [&](art::node_ptr) -> void {
+    auto fc = [&](barch::node_ptr) -> void {
         ++updated;
     };
     if (key_ok(args[1]) != 0) {
@@ -37,8 +37,8 @@ int HSET(caller& cc, const arg_t& args) {
 
         auto field = conversion::convert(args[n]);
         t->query.push(field);
-        art::value_type key = t->query.create();
-        art::value_type val = args[n+1];
+        barch::value_type key = t->query.create();
+        barch::value_type val = args[n+1];
 
         t->insert(key, val, true, fc);
 
@@ -59,12 +59,12 @@ int cmd_HMSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
               bool replies,
-              const std::function<art::node_ptr(const art::node_ptr &old)> &modify) {
+              const std::function<barch::node_ptr(const barch::node_ptr &old)> &modify) {
     if (argv.size() < 3)
         return call.wrong_arity();
     int responses = 0;
     int r = 0;
-    art::key_spec spec(argv);
+    barch::key_spec spec(argv);
 
     auto n = argv[1];
     if (key_ok(n) != 0) {
@@ -88,7 +88,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
         }
 
 
-        auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
+        auto updater = [&](const barch::node_ptr &leaf) -> barch::node_ptr {
             if (leaf.null()) {
                 if (replies)
                     r |= call.long_long(-2);
@@ -99,7 +99,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
         };
         auto converted = conversion::convert(k);
         t->query.push(converted);
-        art::value_type key = t->query.create();
+        barch::value_type key = t->query.create();
         t->update(key, updater);
         t->query.pop_back();
         ++responses;
@@ -111,20 +111,20 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
 
 
 int HUPDATE(caller& call,const arg_t& argv, int fields_start,
-            const std::function<art::node_ptr(const art::node_ptr &old)> &modify) {
+            const std::function<barch::node_ptr(const barch::node_ptr &old)> &modify) {
     return HUPDATEEX(call, argv, fields_start, true, modify);
 }
 
 int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t)> &calc) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    art::hexpire_spec ex_spec(argv);
+    barch::hexpire_spec ex_spec(argv);
     if (ex_spec.parse_options() != VALKEYMODULE_OK) {
         return call.syntax_error();
     }
     auto t = get_art(argv[1]);
     int r = 0;
-    auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
+    auto updater = [&](const barch::node_ptr &leaf) -> barch::node_ptr {
         auto l = leaf.const_leaf();
         auto ttl = calc(ex_spec.seconds);
         bool do_set = false;
@@ -142,7 +142,7 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
         }
         if (do_set) {
             r |= call.long_long(1);
-            return art::make_leaf(*t, l->get_key(), l->get_value(), ttl, l->is_volatile());
+            return barch::make_leaf(*t, l->get_key(), l->get_value(), ttl, l->is_volatile());
         } else {
             r |= call.long_long( 0);
         }
@@ -154,7 +154,7 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
 extern "C"
 int HEXPIRE(caller& call, const arg_t& args) {
     return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
-            return art::now() + 1000 * nr;
+            return barch::now() + 1000 * nr;
         });
 }
 
@@ -163,7 +163,7 @@ int cmd_HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
     return call.vk_call(ctx, argv,argc, [](caller& call, const arg_t& args) {
         return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
-            return art::now() + 1000 * nr;
+            return barch::now() + 1000 * nr;
         });
     });
 
@@ -182,7 +182,7 @@ int cmd_HEXPIREAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HGETEX(caller& call, const arg_t &argv) {
-    art::hgetex_spec spec(argv);
+    barch::hgetex_spec spec(argv);
     int r = 0;
     if (spec.parse_options() != VALKEYMODULE_OK) {
         return call.syntax_error();
@@ -190,18 +190,18 @@ int HGETEX(caller& call, const arg_t &argv) {
     long responses = 0;
     call.start_array();
     r = r | HUPDATEEX(call, argv, spec.fields_start, false,
-                      [&](const art::node_ptr &leaf) -> art::node_ptr {
+                      [&](const barch::node_ptr &leaf) -> barch::node_ptr {
                           auto l = leaf.const_leaf();
                           int64_t ttl = 0;
                           bool do_set = false;
 
                           if (spec.EX) {
                               do_set = true;
-                              ttl = art::now() + spec.time_val * 1000;
+                              ttl = barch::now() + spec.time_val * 1000;
                           }
                           if (spec.PX) {
                               do_set = true;
-                              ttl = art::now() + spec.time_val;
+                              ttl = barch::now() + spec.time_val;
                           }
                           if (spec.EXAT) {
                               do_set = true;
@@ -218,7 +218,7 @@ int HGETEX(caller& call, const arg_t &argv) {
                           r |= call.vt(l->get_value());
                           ++responses;
                           if (do_set) {
-                              return art::make_leaf(*get_art(argv[1]), l->get_key(), l->get_value(), ttl, l->is_volatile());
+                              return barch::make_leaf(*get_art(argv[1]), l->get_key(), l->get_value(), ttl, l->is_volatile());
                           }
                           return nullptr;
                       });
@@ -243,7 +243,7 @@ int HINCRBY(caller& call, const arg_t &argv) {
     auto vmin = argv;
     vmin.pop_back();
     int r = HUPDATEEX(call, vmin, 2, false,
-                      [&](const art::node_ptr &old) -> art::node_ptr {
+                      [&](const barch::node_ptr &old) -> barch::node_ptr {
                           return leaf_numeric_update(l, old, by);
                       });
     if (r == VALKEYMODULE_OK) {
@@ -269,7 +269,7 @@ int HINCRBYFLOAT(caller& call, const arg_t &argv) {
     auto arg2 = argv;
     arg2.pop_back();
     r = HUPDATEEX(call, arg2, 2, false,
-                  [&l,by](const art::node_ptr &old) -> art::node_ptr {
+                  [&l,by](const barch::node_ptr &old) -> barch::node_ptr {
                       return leaf_numeric_update(l, old, by);
                   });
     if (r == VALKEYMODULE_OK) {
@@ -289,14 +289,14 @@ int HDEL(caller& call, const arg_t &argv) {
         return call.wrong_arity();
 
     int responses = 0;
-    art::key_spec spec;
+    barch::key_spec spec;
     auto n = argv[1];
     if (key_ok(n) != 0) {
         return call.null();
     }
     auto t = get_art(argv[1]);
     t->query.create({conversion::convert(n)});
-    auto del_report = [&](art::node_ptr) -> void {
+    auto del_report = [&](barch::node_ptr) -> void {
         ++responses;
     };
     for (size_t n = 2; n < argv.size(); ++n) {
@@ -310,7 +310,7 @@ int HDEL(caller& call, const arg_t &argv) {
         auto converted = conversion::convert(k, klen);
         t->query.push(converted);
 
-        art::value_type key = t->query.create();
+        barch::value_type key = t->query.create();
         get_art(argv[1])->remove(key, del_report);
         t->query.pop_back();
     }
@@ -327,7 +327,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
     int responses = 0;
-    art::key_spec spec;
+    barch::key_spec spec;
     auto n = argv[1];
     if (key_ok(n) != 0) {
         return call.null();
@@ -338,7 +338,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
         return call.wrong_arity();
     }
     t->query.create({conversion::convert(n)});
-    auto del_report = [&](art::node_ptr) -> void {
+    auto del_report = [&](barch::node_ptr) -> void {
         ++responses;
     };
     for (size_t n = 3; n < argv.size(); ++n) {
@@ -351,7 +351,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
         auto converted = conversion::convert(k);
         t->query.push(converted);
 
-        art::value_type key = t->query.create();
+        barch::value_type key = t->query.create();
         get_art(argv[1])->remove(key, del_report);
         t->query.pop_back();
     }
@@ -365,13 +365,13 @@ int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 
 int HQUERY(caller& call,const arg_t& argv, bool fancy,
-           const std::function<void(art::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter) {
+           const std::function<void(barch::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter) {
 
     if (argv.size() < 3)
         return call.wrong_arity();
     int fields_start = 2;
     if (fancy) {
-        art::hgetex_spec spec(argv);
+        barch::hgetex_spec spec(argv);
 
         if (spec.parse_options() != VALKEYMODULE_OK) {
             return call.syntax_error();
@@ -391,8 +391,8 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     auto t = get_art(n);
     storage_release release(t);
 
-    art::value_type any_key = t->query.create({conversion::convert(n)});
-    art::node_ptr lb = lower_bound(t, any_key);
+    barch::value_type any_key = t->query.create({conversion::convert(n)});
+    barch::node_ptr lb = lower_bound(t, any_key);
     if (lb.null()) {
         return call.null();
     }
@@ -410,8 +410,8 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
         } else {
             auto converted = conversion::convert(k);
             t->query.push(converted);
-            art::value_type search_key = t->query.create();
-            art::node_ptr r = art_search(t, search_key);
+            barch::value_type search_key = t->query.create();
+            barch::node_ptr r = art_search(t, search_key);
             if (r.null()) {
                 nullreporter();
             } else {
@@ -426,20 +426,20 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
 }
 
 int HGET_(caller& call, const arg_t& argv,
-         const std::function<void(art::node_ptr leaf)> &reporter) {
+         const std::function<void(barch::node_ptr leaf)> &reporter) {
     return HQUERY(call, argv, false, reporter, [&]()-> void {
         call.null();
     });
 }
 extern "C"
 int HTTL(caller& call,const arg_t& argv) {
-    auto reporter = [&](art::node_ptr r) -> void {
+    auto reporter = [&](barch::node_ptr r) -> void {
         auto l = r.const_leaf();
         long long ttl = l->expiry_ms();
         if (ttl == 0) {
             call.long_long(-1);
         } else {
-            call.long_long((ttl - art::now()) / 1000);
+            call.long_long((ttl - barch::now()) / 1000);
         }
     };
     auto nullreport = [&]() -> void {
@@ -454,7 +454,7 @@ int cmd_HTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HGET(caller& call, const arg_t& argv) {
-    auto reporter = [&](art::node_ptr r) -> void {
+    auto reporter = [&](barch::node_ptr r) -> void {
         auto vt = r.const_leaf()->get_value();
         call.vt(vt);
     };
@@ -463,7 +463,7 @@ int HGET(caller& call, const arg_t& argv) {
 
 extern "C"
 int HMGET(caller& call, const arg_t& argv) {
-    auto reporter = [&](art::node_ptr r) -> void {
+    auto reporter = [&](barch::node_ptr r) -> void {
         auto vt = r.const_leaf()->get_value();
         call.vt(vt);
     };
@@ -486,11 +486,11 @@ int HLEN(caller& call, const arg_t& argv) {
     }
     auto t = get_art(argv[1]);
     storage_release release(t);
-    t->query.create({conversion::convert(n, nlen), art::ts_end});
+    t->query.create({conversion::convert(n, nlen), barch::ts_end});
     auto search_end = t->query.end();
     auto search_start = t->query.prefix(2);
     auto table_key = t->query.prefix(2);
-    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
+    auto table_iter = [&](void *, barch::value_type key, barch::value_type unused(value))-> int {
         if (!key.starts_with(table_key.pref(1))) {
             return -1;
         }
@@ -498,7 +498,7 @@ int HLEN(caller& call, const arg_t& argv) {
 
         return 0;
     };
-    art::range(t, search_start, search_end, table_iter, nullptr);
+    barch::range(t, search_start, search_end, table_iter, nullptr);
 
     return call.long_long(responses);
 }
@@ -512,7 +512,7 @@ int cmd_HMGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HEXPIRETIME(caller& call, const arg_t& argv) {
-    auto reporter = [&](art::node_ptr r) -> void {
+    auto reporter = [&](barch::node_ptr r) -> void {
         auto l = r.const_leaf();
         call.long_long(l->expiry_ms() / 1000);
     };
@@ -534,11 +534,11 @@ int HGETALL(caller& call, const arg_t& argv) {
     }
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::value_type search_start = t->query.create({conversion::convert(n)},false);
+    barch::value_type search_start = t->query.create({conversion::convert(n)},false);
 
-    art::value_type table_key = search_start;
+    barch::value_type table_key = search_start;
     //bool exists = false;
-    art::iterator ai(t, search_start);
+    barch::iterator ai(t, search_start);
     if (!ai.ok()) {
         return call.null();
     }
@@ -552,7 +552,7 @@ int HGETALL(caller& call, const arg_t& argv) {
         if (!key.starts_with(table_key)) {
             return -1;
         }
-        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.reply_encoded_key(barch::value_type{key.bytes + table_key.size, key.size - table_key.size});
         call.vt(value);
         responses += 2;
         ai.next();
@@ -577,20 +577,20 @@ int HKEYS(caller& call, const arg_t& argv) {
     };
     auto t = get_art(argv[1]);
     storage_release release(t);
-    art::value_type search_end = t->query.create({conversion::convert(n), art::ts_end});
-    art::value_type search_start = t->query.prefix(2);
-    art::value_type table_key = search_start;
+    barch::value_type search_end = t->query.create({conversion::convert(n), barch::ts_end});
+    barch::value_type search_start = t->query.prefix(2);
+    barch::value_type table_key = search_start;
     call.start_array();
-    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
+    auto table_iter = [&](void *, barch::value_type key, barch::value_type unused(value))-> int {
         if (!key.starts_with(search_start.pref(1))) {
             return -1;
         }
-        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.reply_encoded_key(barch::value_type{key.bytes + table_key.size, key.size - table_key.size});
         responses += 1;
 
         return 0;
     };
-    art::range(t, search_start, search_end, table_iter, nullptr);
+    barch::range(t, search_start, search_end, table_iter, nullptr);
 
     call.end_array(responses);
     return call.ok();
@@ -602,7 +602,7 @@ int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 extern "C"
 int HEXISTS(caller& call, const arg_t& argv) {
     int cnt = 0;
-    auto reporter = [&](art::node_ptr unused(r)) -> void {
+    auto reporter = [&](barch::node_ptr unused(r)) -> void {
         ++cnt;
     };
     int r = HQUERY(call, argv, false, reporter, [&]()-> void {

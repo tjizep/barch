@@ -5,7 +5,7 @@
 #include "auth_api.h"
 #include "keyspec.h"
 #include "caller.h"
-#include "art.h"
+#include "shard.h"
 #include "barch_apis.h"
 static const std::string CAT_PREFIX = "user:cat:";
 static const std::string SECRET_PREFIX = "user:secret:";
@@ -19,12 +19,12 @@ std::mutex& latch() {
     static std::mutex latch;
     return latch;
 }
-static void add_cats(art::tree * a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats);
+static void add_cats(barch::shard * a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats);
 heap::vector<std::string> category_groups() {
     heap::vector<std::string> r = {"all","readonly","admin", "user"};
     return r;
 }
-static void init_auth(art::tree* auth) {
+static void init_auth(barch::shard* auth) {
     if (auth->size == 0) {
         heap::string_map<bool> cats;
         cats.emplace("data",true);
@@ -34,7 +34,7 @@ static void init_auth(art::tree* auth) {
             add_cats(auth,"default","empty",cats);
         }
         auth->save(false);
-        art::std_log("Saved initial acl");
+        barch::std_log("Saved initial acl");
     }
 }
 
@@ -54,12 +54,12 @@ const heap::vector<bool>& get_all_acl() {
     return all_acl;
 }
 
-art::tree * get_auth() {
-    static art::tree * auth = nullptr;
+barch::shard * get_auth() {
+    static barch::shard * auth = nullptr;
     if (!auth) {
         std::lock_guard lock(latch());
         if (auth) return auth;
-        auth = new(heap::allocate<art::tree>(1)) art::tree("auth", nullptr, 0, 0);
+        auth = new(heap::allocate<barch::shard>(1)) barch::shard("auth", nullptr, 0, 0);
         auth->load();
         init_auth(auth);
 
@@ -72,7 +72,7 @@ void save_auth() {
     auto a = get_auth();
     a->save(false); //no stats
  }
-static void add_cats(art::tree * a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats) {
+static void add_cats(barch::shard * a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats) {
     std::string key;
     if (user.empty()) return;
     for (auto& cat : cats) {
@@ -103,7 +103,7 @@ extern "C"
         read_lock read(a,false);
         catmap cats;
         std::string key = user_cats(user.to_string());
-        art::iterator cat_data(a,key);
+        barch::iterator cat_data(a,key);
         while (cat_data.ok()) {
 
             auto k = cat_data.key();
@@ -130,7 +130,7 @@ extern "C"
         if (argv.size() < 3) {
             return call.error("ACL requires at least 3 arguments");
         }
-        art::acl_spec spec(argv);
+        barch::acl_spec spec(argv);
         if (spec.parse_options() != 0) {
             return call.error("ACL syntax error");
         }
@@ -139,8 +139,8 @@ extern "C"
             read_lock read(a,false);
             std::string key = user_cats(spec.user);
             call.start_array();
-            art::iterator cat_data(a,key);
-            heap::vector<art::value_type> to_del;
+            barch::iterator cat_data(a,key);
+            heap::vector<barch::value_type> to_del;
             while (cat_data.ok()) {
 
                 auto k = cat_data.key();
@@ -157,8 +157,8 @@ extern "C"
         if (spec.del) {
             write_lock write(a->latch);
             std::string key = user_cats(spec.user);
-            art::iterator cat_data(a,key);
-            heap::vector<art::value_type> to_del;
+            barch::iterator cat_data(a,key);
+            heap::vector<barch::value_type> to_del;
             while (cat_data.ok()) {
 
                 auto k = cat_data.key();

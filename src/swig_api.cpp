@@ -11,7 +11,7 @@
 #include "rpc_caller.h"
 
 void setConfiguration(const std::string& name, const std::string& value) {
-    art::set_configuration_value(name,value);
+    barch::set_configuration_value(name,value);
 }
 
 void setRoute(int shard, const std::string& host, int port) {
@@ -19,7 +19,7 @@ void setRoute(int shard, const std::string& host, int port) {
     rpc_caller sc;
     int r = sc.call(params, ADDROUTE);
     if (r == 0) {
-        art::std_log("add route", host, port);
+        barch::std_log("add route", host, port);
     }
 }
 void removeRoute(int shard) {
@@ -27,7 +27,7 @@ void removeRoute(int shard) {
     rpc_caller sc;
     int r = sc.call(params, REMROUTE);
     if (r == 0) {
-        art::std_log("removed route", shard);
+        barch::std_log("removed route", shard);
     }
 }
 
@@ -48,7 +48,7 @@ void load(const std::string &host, const std::string& port) {
     rpc_caller sc;
     int r = sc.call(params, RETRIEVE);
     if (r == 0) {
-        art::std_log("loaded all shards from", host, port);
+        barch::std_log("loaded all shards from", host, port);
     }
 }
 void load(const std::string &host, int port) {
@@ -59,7 +59,7 @@ void start(const std::string &host, const std::string& port) {
     rpc_caller sc;
     int r = sc.call(params, START);
     if (r == 0) {
-        art::std_log("started server on", host, port);
+        barch::std_log("started server on", host, port);
     }
 }
 void start(const std::string &host, int port) {
@@ -73,7 +73,7 @@ void stop() {
     rpc_caller sc;
     int r = sc.call(params, STOP);
     if (r == 0) {
-        art::std_log("stopped server");
+        barch::std_log("stopped server");
     }
 }
 void ping(const std::string &host, const std::string& port) {
@@ -81,7 +81,7 @@ void ping(const std::string &host, const std::string& port) {
     rpc_caller sc;
     int r = sc.call(params, PING);
     if (r != 0) {
-        art::std_log("ping failed", host, port);
+        barch::std_log("ping failed", host, port);
     }
 }
 void ping(const std::string &host, int port) {
@@ -92,7 +92,7 @@ void publish(const std::string &ip, const std::string &port) {
     rpc_caller sc;
     int r = sc.call(params, PUBLISH);
     if (r != 0) {
-        art::std_err("publish failed", ip, port);
+        barch::std_err("publish failed", ip, port);
     }
 }
 void publish(const std::string &host, int port) {
@@ -104,7 +104,7 @@ void pull(const std::string &ip, const std::string &port) {
     rpc_caller sc;
     int r = sc.call(params, PULL);
     if (r != 0) {
-        art::std_err("publish failed", ip, port);
+        barch::std_err("publish failed", ip, port);
     }
 }
 void pull(const std::string &host, int port) {
@@ -127,7 +127,7 @@ void save() {
     if (r == 0) {}
 }
 void clear() {
-    for (auto shard : art::get_shard_count()) {
+    for (auto shard : barch::get_shard_count()) {
         get_art(shard)->clear();
     }
 }
@@ -145,7 +145,7 @@ long long List::push(const std::string &key, const std::vector<std::string> &ite
 
     int r = sc.call(params, LPUSH);
     if (r != 0) {
-        art::std_err("set failed", key);
+        barch::std_err("set failed", key);
     }
     return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
 
@@ -155,7 +155,7 @@ long long List::len(const std::string &key) {
 
     int r = sc.call(params, LLEN);
     if (r != 0) {
-        art::std_err("len failed", key);
+        barch::std_err("len failed", key);
     }
     return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
 
@@ -166,7 +166,7 @@ long List::pop(const std::string &key, long long count) {
 
     int r = sc.call(params, LPOP);
     if (r != 0) {
-        art::std_err("pop failed", key);
+        barch::std_err("pop failed", key);
     }
     return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
 }
@@ -174,7 +174,7 @@ std::string List::back(const std::string &key) {
     params = {"LBACK", key};
     int r = sc.call(params, LBACK);
     if (r != 0) {
-        art::std_err("back failed", key);
+        barch::std_err("back failed", key);
     }
     return sc.results.empty() ? "" : conversion::to_string(sc.results[0]);
 }
@@ -183,7 +183,7 @@ std::string List::front(const std::string &key) {
     params = {"LFRONT", key};
     int r = sc.call(params, LFRONT);
     if (r != 0) {
-        art::std_err("front failed", key);
+        barch::std_err("front failed", key);
     }
     return sc.results.empty() ? "" : conversion::to_string(sc.results[0]);
 }
@@ -199,7 +199,7 @@ void KeyValue::set(const std::string &key, const std::string &value) {
 
     int r = sc.call(params, SET);
     if (r != 0) {
-        art::std_err("set failed", key, value);
+        barch::std_err("set failed", key, value);
     }
 
 }
@@ -392,11 +392,11 @@ void load() {
     rpc_caller sc;
     int r = sc.call(params, ::LOAD);
     if (r != 0) {
-        art::std_err("load failed");
+        barch::std_err("load failed");
     }
 }
 repl_statistics repl_stats() {
-    auto ar = art::get_repl_statistics();
+    auto ar = barch::get_repl_statistics();
     repl_statistics r;
     r.key_add_recv = ar.key_add_recv;
     r.key_add_recv_applied = ar.key_add_recv_applied;
@@ -415,7 +415,7 @@ repl_statistics repl_stats() {
 }
 
 ops_statistics ops_stats() {
-    auto t =  art::get_ops_statistics();
+    auto t =  barch::get_ops_statistics();
     ops_statistics r;
     r.delete_ops = t.delete_ops;
     r.get_ops = t.get_ops;
@@ -432,7 +432,7 @@ ops_statistics ops_stats() {
 }
 
 statistics_values stats() {
-    auto t = art::get_statistics();
+    auto t = barch::get_statistics();
     statistics_values r;
     r.bytes_allocated = t.bytes_allocated;
     r.bytes_interior = t.bytes_interior;
@@ -468,7 +468,7 @@ statistics_values stats() {
 }
 configuration_values config() {
     configuration_values r;
-    auto i = art::get_configuration();
+    auto i = barch::get_configuration();
     r.active_defrag = i.active_defrag;
     r.bind_interface = i.bind_interface;
     r.compression = i.compression;
@@ -503,7 +503,7 @@ std::vector<Value> Caller::call(const std::string &method, const std::vector<Val
     std::string cn = std::string{params[0]};
     auto ic = barch_functions.find(cn);
     if (ic == barch_functions.end()) {
-        art::std_err("invalid call", cn);
+        barch::std_err("invalid call", cn);
         return {};
     }
     auto f = ic->second.call;
@@ -530,7 +530,7 @@ void HashSet::set(const std::string &k, const std::vector<std::string>& members)
     params.insert(params.end(), members.begin(), members.end());
     int r = sc.call(params, ::HSET);
     if (r != 0) {
-        art::std_err("set failed");
+        barch::std_err("set failed");
     }
 }
 Value HashSet::get(const std::string &k, const std::string &member) {

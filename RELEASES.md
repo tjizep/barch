@@ -1,4 +1,4 @@
-# Release v0.3.4.2b 2025-10-14
+# Release v0.3.4.2b 2025-10-17
 
 ## New Features
 
@@ -6,6 +6,10 @@
 2. Improve client replication io (v0.3.4.1b 2025-10-07)
 3. Make server replication asynch and faster (v0.3.4.1b 2025-10-08)
 4. server replication can be called multiple times per connection (v0.3.4.1b 2025-10-08)
+5. add shard info `INFO SHARD [key]|[#(shard number)]` (v0.3.4.2b 2025-10-17)
+   - `INFO SHARD 1` returns shard info for key `1`
+   - `INFO SHARD #1` returns shard info for shard number 1
+   - `INFO SHARD ##1` or `#ABC` returns shard info for key `##1` or `#ABC`
 
 ## Fixes
 

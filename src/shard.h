@@ -211,9 +211,9 @@ namespace barch {
 
     };
     /**
- * gets per module per node type statistics for all art_node* types
- * @return art_statistics
- */
+     * gets per module per node type statistics for all art_node* types
+     * @return art_statistics
+     */
     art_statistics get_statistics();
 
     /**

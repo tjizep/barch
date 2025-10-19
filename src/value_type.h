@@ -64,10 +64,15 @@ namespace art {
             if (!size) return 0;
             return size - 1; // implied in the data is a null terminator
         }
-        std::string to_string() const {
-            return std::string(chars(), size);
+        [[nodiscard]] std::string to_string() const {
+            return {chars(), size};
         }
-        std::string_view to_view() const {
+        template<class TV>
+        void to_vector(TV& out) const {
+            out.clear();
+            out.insert(out.end(), bytes, bytes + size);
+        }
+        [[nodiscard]] std::string_view to_view() const {
             return std::string_view(chars(), size);
         }
         [[nodiscard]] const char *chars() const {

@@ -24,15 +24,29 @@ namespace art {
     // are sourced from a tree leaf allocator. currently the solution is to allocate and copy these params
     // which could be deleterious to performance, because they rely on the system allocator.
     //
+
+    struct tleaf2 {
+        heap::vector<uint8_t> sk {};
+        heap::vector<uint8_t> sv {}; // for short params this is ok
+
+        value_type copy_key(const value_type& key) {
+            sk.clear();
+            sk.insert(sk.begin(), key.bytes, key.bytes + key.size);
+            return {sk.data(), sk.size()};
+        }
+        value_type copy_value(const value_type& val) {
+            sv.clear();
+            sv.insert(sv.begin(), val.bytes, val.bytes + val.size);
+            return {sv.data(), sv.size()};
+        }
+    };
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile ){
 
         unsigned val_len = v.size;
         unsigned key_len = key.length();
-
-        std::string sk = key.to_string();
-        std::string sv = v.to_string(); // for short params this is ok
-        key = sk;
-        v = sv;
+        thread_local tleaf2 temp;
+        key = temp.copy_key(key);
+        v = temp.copy_value(v);
         size_t leaf_size = leaf::make_size(key_len,val_len,ttl,is_volatile);
         // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
         logical_address logical{&alloc};
@@ -180,7 +194,7 @@ namespace art {
  */
 
 
-unsigned barch::node::check_prefix(const unsigned char *key, unsigned key_len, unsigned depth) const {
+unsigned art::node::check_prefix(const unsigned char *key, unsigned key_len, unsigned depth) const {
     auto &d = data();
     unsigned max_cmp = std::min<int>(std::min<int>(d.partial_len, max_prefix_llength),
                                      (int) key_len - (int) depth);

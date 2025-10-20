@@ -73,21 +73,21 @@ struct ordered_keys {
     ordered_keys(
         const composite &score_key,
         const composite &member_key,
-        barch::value_type value) : score_key(score_key), member_key(member_key), value(value) {
+        art::value_type value) : score_key(score_key), member_key(member_key), value(value) {
     }
 
     composite score_key;
     composite member_key;
-    barch::value_type value;
+    art::value_type value;
 };
 
-static void insert_ordered(composite &score_key, composite &member_key, barch::value_type value, bool update = false) {
+static void insert_ordered(composite &score_key, composite &member_key, art::value_type value, bool update = false) {
     auto sk = score_key.create();
     auto mk = member_key.create();
     if (score_key.comp.size() < 2) {
         abort_with("invalid key buffer size");
     }
-    barch::value_type shk = score_key.comp[1].get_value();
+    art::value_type shk = score_key.comp[1].get_value();
     if (shk.size < 3) {
         abort_with("invalid key size");
     }
@@ -112,7 +112,7 @@ static void remove_ordered(composite &score_key, composite &member_key) {
     if (score_key.comp.size() < 2) {
         abort_with("invalid key buffer size");
     }
-    barch::value_type shk = score_key.comp[1].get_value();
+    art::value_type shk = score_key.comp[1].get_value();
     if (shk.size < 3) {
         abort_with("invalid key size");
     }
@@ -194,7 +194,7 @@ int ZADD(caller& call, const arg_t &argv) {
             ++responses;
             continue;
         }
-        barch::value_type qkey = t->cmd_ZADD_q1.create({container, score, member});
+        art::value_type qkey = t->cmd_ZADD_q1.create({container, score, member});
         if (zspec.XX) {
             t->update(qkey, [&](const barch::node_ptr &old) -> barch::node_ptr {
                 if (old.null()) return nullptr;
@@ -306,7 +306,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     auto target_member = target.get_value();
     auto container = conversion::convert(key);
     query q1, q2, qfield;
-    barch::value_type field_key = qfield->create({IX_MEMBER, container, target});
+    art::value_type field_key = qfield->create({IX_MEMBER, container, target});
     auto prefix = q1->create({container},false);
 
     barch::iterator fields(t, field_key);
@@ -325,7 +325,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
                         number += incr;
                         q1->push(conversion::comparable_key(number));
                         q1->push(member);
-                        barch::value_type qkey = q1->create();
+                        art::value_type qkey = q1->create();
                         t->insert({}, qkey, val, true, fcfk);
                         t->insert( kf, qkey, true);
 
@@ -349,8 +349,8 @@ int ZINCRBY(caller& call, const arg_t& argv) {
         auto member = conversion::convert(v);
         q1->push(score);
         q1->push(member);
-        barch::value_type qkey = q1->create();
-        barch::value_type qv = v ;
+        art::value_type qkey = q1->create();
+        art::value_type qv = v ;
         t->insert( {}, qkey, qv, true, fcfk);
         q1->pop(2);
         return call.double_(incr);
@@ -405,10 +405,10 @@ static int zrange(caller& call, barch::shard* t, const barch::zrange_spec &spec)
     auto mn = conversion::convert(spec.start, true);
     auto mx = conversion::convert(spec.stop, true);
     query lq, uq, pq, tq;
-    barch::value_type lower;
-    barch::value_type prefix;
-    barch::value_type nprefix;
-    barch::value_type upper;
+    art::value_type lower;
+    art::value_type prefix;
+    art::value_type nprefix;
+    art::value_type upper;
     if (spec.BYLEX) {
         // it is implied that mn and mx are non-numeric strings
         lower = lq->create({IX_MEMBER, container, mn});
@@ -423,8 +423,8 @@ static int zrange(caller& call, barch::shard* t, const barch::zrange_spec &spec)
     }
     long long count = 0;
     long long replies = 0;
-    heap::std_vector<std::pair<barch::value_type, barch::value_type> > bylex;
-    heap::std_vector<barch::value_type> rev;
+    heap::std_vector<std::pair<art::value_type, art::value_type> > bylex;
+    heap::std_vector<art::value_type> rev;
     heap::vector<ordered_keys> removals;
     if (!spec.REMOVE)
         call.start_array();
@@ -435,7 +435,7 @@ static int zrange(caller& call, barch::shard* t, const barch::zrange_spec &spec)
         if (!v.starts_with(prefix)) {
             break;
         }
-        barch::value_type current_comp;
+        art::value_type current_comp;
         if (spec.BYLEX) {
             current_comp = v.sub(0, prefix.size + mx.get_size() - 1);
             v = ai.value(); // in case of bylex the value is a fk to by-score
@@ -468,7 +468,7 @@ static int zrange(caller& call, barch::shard* t, const barch::zrange_spec &spec)
                     score_key.create({container, encoded_number, member});
                     // fyi: member key means lex key
                     member_key.create({IX_MEMBER, container, member});
-                    removals.push_back({score_key, member_key, barch::value_type()});
+                    removals.push_back({score_key, member_key, art::value_type()});
                 }
                 if (!pushed && !spec.REMOVE) // bylex should be in correct order
                 {
@@ -596,7 +596,7 @@ static int ZOPER(
     caller& call,
     const arg_t& argv,
     ops operate,
-    barch::value_type store = {},
+    art::value_type store = {},
     bool card = false,
     bool removal = false) {
 

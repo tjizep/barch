@@ -37,8 +37,8 @@ int HSET(caller& cc, const arg_t& args) {
 
         auto field = conversion::convert(args[n]);
         t->query.push(field);
-        barch::value_type key = t->query.create();
-        barch::value_type val = args[n+1];
+        art::value_type key = t->query.create();
+        art::value_type val = args[n+1];
 
         t->insert(key, val, true, fc);
 
@@ -99,7 +99,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
         };
         auto converted = conversion::convert(k);
         t->query.push(converted);
-        barch::value_type key = t->query.create();
+        art::value_type key = t->query.create();
         t->update(key, updater);
         t->query.pop_back();
         ++responses;
@@ -310,7 +310,7 @@ int HDEL(caller& call, const arg_t &argv) {
         auto converted = conversion::convert(k, klen);
         t->query.push(converted);
 
-        barch::value_type key = t->query.create();
+        art::value_type key = t->query.create();
         get_art(argv[1])->remove(key, del_report);
         t->query.pop_back();
     }
@@ -351,7 +351,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
         auto converted = conversion::convert(k);
         t->query.push(converted);
 
-        barch::value_type key = t->query.create();
+        art::value_type key = t->query.create();
         get_art(argv[1])->remove(key, del_report);
         t->query.pop_back();
     }
@@ -391,7 +391,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     auto t = get_art(n);
     storage_release release(t);
 
-    barch::value_type any_key = t->query.create({conversion::convert(n)});
+    art::value_type any_key = t->query.create({conversion::convert(n)});
     barch::node_ptr lb = lower_bound(t, any_key);
     if (lb.null()) {
         return call.null();
@@ -410,7 +410,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
         } else {
             auto converted = conversion::convert(k);
             t->query.push(converted);
-            barch::value_type search_key = t->query.create();
+            art::value_type search_key = t->query.create();
             barch::node_ptr r = art_search(t, search_key);
             if (r.null()) {
                 nullreporter();
@@ -490,7 +490,7 @@ int HLEN(caller& call, const arg_t& argv) {
     auto search_end = t->query.end();
     auto search_start = t->query.prefix(2);
     auto table_key = t->query.prefix(2);
-    auto table_iter = [&](void *, barch::value_type key, barch::value_type unused(value))-> int {
+    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
         if (!key.starts_with(table_key.pref(1))) {
             return -1;
         }
@@ -534,9 +534,9 @@ int HGETALL(caller& call, const arg_t& argv) {
     }
     auto t = get_art(argv[1]);
     storage_release release(t);
-    barch::value_type search_start = t->query.create({conversion::convert(n)},false);
+    art::value_type search_start = t->query.create({conversion::convert(n)},false);
 
-    barch::value_type table_key = search_start;
+    art::value_type table_key = search_start;
     //bool exists = false;
     barch::iterator ai(t, search_start);
     if (!ai.ok()) {
@@ -552,7 +552,7 @@ int HGETALL(caller& call, const arg_t& argv) {
         if (!key.starts_with(table_key)) {
             return -1;
         }
-        call.reply_encoded_key(barch::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
         call.vt(value);
         responses += 2;
         ai.next();
@@ -577,15 +577,15 @@ int HKEYS(caller& call, const arg_t& argv) {
     };
     auto t = get_art(argv[1]);
     storage_release release(t);
-    barch::value_type search_end = t->query.create({conversion::convert(n), barch::ts_end});
-    barch::value_type search_start = t->query.prefix(2);
-    barch::value_type table_key = search_start;
+    art::value_type search_end = t->query.create({conversion::convert(n), barch::ts_end});
+    art::value_type search_start = t->query.prefix(2);
+    art::value_type table_key = search_start;
     call.start_array();
-    auto table_iter = [&](void *, barch::value_type key, barch::value_type unused(value))-> int {
+    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
         if (!key.starts_with(search_start.pref(1))) {
             return -1;
         }
-        call.reply_encoded_key(barch::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
         responses += 1;
 
         return 0;

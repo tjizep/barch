@@ -38,16 +38,16 @@ class queue_server {
         barch::shard*  t{};
         barch::key_options options{};
         bool executed = false;
-        void set_key(barch::value_type k) {
+        void set_key(art::value_type k) {
             key.append(k.to_view());
         }
-        void set_value(barch::value_type v) {
+        void set_value(art::value_type v) {
             value.append(v.to_view());
         }
-        [[nodiscard]] barch::value_type get_key() const {
+        [[nodiscard]] art::value_type get_key() const {
             return {key.data(), key.size()};
         }
-        [[nodiscard]] barch::value_type get_value() const {
+        [[nodiscard]] art::value_type get_value() const {
             return {value.data(), value.size()};
         }
         [[nodiscard]] bool ordered() const {
@@ -149,7 +149,7 @@ class queue_server {
         threads.stop();
         consume_all();
     }
-    void queue_insert(barch::shard* t,barch::key_options options,barch::value_type k, barch::value_type v) {
+    void queue_insert(barch::shard* t,barch::key_options options,art::value_type k, art::value_type v) {
 
         size_t at = t->shard_number % threads.size();
         instruction ins;
@@ -218,7 +218,7 @@ bool is_queue_server_running() {
 }
 
 
-void queue_insert(size_t shard, barch::key_options options,barch::value_type k, barch::value_type v) {
+void queue_insert(size_t shard, barch::key_options options,art::value_type k, art::value_type v) {
     auto t = get_art(shard);
     if (server)
         server->queue_insert(t,options,k,v);

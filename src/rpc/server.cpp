@@ -317,7 +317,7 @@ namespace barch {
                     }
 
                     for (auto p: params) {
-                        push_value(to_send, barch::value_type{p});
+                        push_value(to_send, value_type{p});
                     }
 
                     uint32_t calls = 1;
@@ -350,10 +350,10 @@ namespace barch {
                 return r;
             }
 
-            call_result call(heap::vector<Variable>& result, const heap::vector<barch::value_type>& params) override {
+            call_result call(heap::vector<Variable>& result, const heap::vector<value_type>& params) override {
                 return tcall(result, params);
             }
-            call_result asynch_call(heap::vector<Variable>& result, const heap::vector<barch::value_type>& params) override {
+            call_result asynch_call(heap::vector<Variable>& result, const heap::vector<value_type>& params) override {
                 return tcall(result, params);
             }
 
@@ -441,7 +441,7 @@ namespace barch {
             return true;
         }
 
-        bool client::insert(std::shared_mutex& latch, const barch::key_options& options, barch::value_type key, barch::value_type value) {
+        bool client::insert(std::shared_mutex& latch, const barch::key_options& options, value_type key, value_type value) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
@@ -473,7 +473,7 @@ namespace barch {
 
         }
 
-        bool client::remove(std::shared_mutex& latch, barch::value_type key) {
+        bool client::remove(std::shared_mutex& latch, value_type key) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
@@ -565,7 +565,7 @@ namespace barch {
                 return false;
             }
         }
-        bool client::find_insert(barch::value_type key) {
+        bool client::find_insert(value_type key) {
             if (sources.empty()) return false;
             bool added = false;
             heap::vector<uint8_t> to_send, rbuff;

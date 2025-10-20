@@ -63,7 +63,7 @@ size_t get_shard(const char* key, size_t key_len) {
     if (barch::get_shard_count().size() == 1) {
         return 0;
     }
-    auto shard_key = barch::value_type{key,key_len};
+    auto shard_key = art::value_type{key,key_len};
 
     uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(shard_key.chars(), shard_key.size);
 

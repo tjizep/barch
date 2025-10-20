@@ -215,7 +215,7 @@ const barch::leaf* barch::hashed_key::get_leaf(const query_pair& q) const {
     return n.is_leaf ? n.const_leaf() : nullptr;
 }
 
-barch::value_type barch::hashed_key::get_key(const query_pair& q) const {
+value_type barch::hashed_key::get_key(const query_pair& q) const {
     if (!addr) {
         return q.key;
     }

@@ -120,7 +120,7 @@ int RANGE(caller& call, const arg_t& argv) {
     auto c1 = conversion::convert(k1);
     auto c2 = conversion::convert(k2);
     /* Reply with the matching items. */
-    heap::std_vector<barch::value_type> sorted{};
+    heap::std_vector<art::value_type> sorted{};
     for (auto shard : barch::get_shard_count()) {
         auto t = get_art(shard);
         queue_consume(t->shard_number);
@@ -220,7 +220,7 @@ int KEYS(caller& call, const arg_t& argv) {
     std::mutex vklock{};
     std::atomic<int64_t> replies = 0;
     auto cpat = argv[1];
-    barch::value_type pattern = cpat;
+    art::value_type pattern = cpat;
     if (spec.count) {
         for (auto shard : barch::get_shard_count()) {
             art::glob(get_art(shard), spec, pattern, [&](const barch::leaf & unused(l)) -> bool {
@@ -276,7 +276,7 @@ int SET(caller& call,const arg_t& argv) {
         spec.hash = true;
     }
 
-    barch::value_type reply{"", 0};
+    art::value_type reply{"", 0};
     auto fc = [&](const barch::node_ptr &) -> void {
         if (spec.get) {
             reply = key;
@@ -546,7 +546,7 @@ int MSET(caller& call, const arg_t& argv) {
 
         auto converted = conversion::convert(k);
         barch::key_spec spec; //(argv, argc);
-        barch::value_type reply{"", 0};
+        art::value_type reply{"", 0};
         auto fc = [&](barch::node_ptr) -> void {
         };
         auto t = get_art(k);
@@ -765,7 +765,7 @@ int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int MIN(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    barch::value_type the_min;
+    art::value_type the_min;
     for (auto shard:barch::get_shard_count()) {
         auto t = get_art(shard);
         queue_consume(t->shard_number);
@@ -808,7 +808,7 @@ int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
 int MAX(caller& call, const arg_t& ) {
-    barch::value_type the_max;
+    art::value_type the_max;
     for (auto shard:barch::get_shard_count()) {
         auto t = get_art(shard);
         queue_consume(shard);
@@ -856,7 +856,7 @@ int LB(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
 
     auto converted = conversion::convert(k);
-    barch::value_type the_lb;
+    art::value_type the_lb;
     for (auto shard:barch::get_shard_count()) {
         auto t = get_art(shard);
         queue_consume(shard);
@@ -898,7 +898,7 @@ int UB(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
 
     auto converted = conversion::convert(k);
-    barch::value_type the_lb;
+    art::value_type the_lb;
     for (auto shard:barch::get_shard_count()) {
         auto t = get_art(shard);
         queue_consume(shard);

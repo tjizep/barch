@@ -23,12 +23,12 @@ extern constants Constants;
 
 std::shared_mutex &get_lock();
 barch::shard *get_art(size_t shard);
-size_t get_shard(barch::value_type key);
+size_t get_shard(art::value_type key);
 size_t get_shard(const char * k, size_t l);
 size_t get_shard(const std::string& key);
 size_t get_shard(ValkeyModuleString **argv);
 barch::shard * get_art(ValkeyModuleString **argv);
-barch::shard * get_art(barch::value_type key);
+barch::shard * get_art(art::value_type key);
 uint64_t get_total_memory();
 std::vector<barch::shard *>& get_arts();
 #endif //MODULE_H

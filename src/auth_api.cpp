@@ -140,7 +140,7 @@ extern "C"
             std::string key = user_cats(spec.user);
             call.start_array();
             barch::iterator cat_data(a,key);
-            heap::vector<barch::value_type> to_del;
+            heap::vector<art::value_type> to_del;
             while (cat_data.ok()) {
 
                 auto k = cat_data.key();
@@ -158,7 +158,7 @@ extern "C"
             write_lock write(a->latch);
             std::string key = user_cats(spec.user);
             barch::iterator cat_data(a,key);
-            heap::vector<barch::value_type> to_del;
+            heap::vector<art::value_type> to_del;
             while (cat_data.ok()) {
 
                 auto k = cat_data.key();

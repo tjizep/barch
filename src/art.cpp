@@ -1483,7 +1483,7 @@ int art_iter_prefix(art::tree *t, art::value_type key, CallBack cb, void *data) 
     return 0;
 }
 
-art::value_type art::s_filter_key(std::string& temp_key, barch::value_type key) {
+art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
     if (key.size > maximum_allocation_size) {
         throw_exception<std::runtime_error>("value too large");
     }

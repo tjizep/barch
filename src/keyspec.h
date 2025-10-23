@@ -5,9 +5,8 @@
 #ifndef SET_H
 #define SET_H
 #include "value_type.h"
-#include "caller.h"
 extern "C" {
-#include "valkeymodule.h"
+    #include "valkeymodule.h"
 }
 
 #include <string>

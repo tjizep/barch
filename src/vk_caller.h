@@ -179,7 +179,9 @@ struct vk_caller : caller {
         ctx = nullptr;
         return r;
     }
-
+    barch::key_space_ptr kspace() override {
+        return nullptr;
+    }
 };
 
 #endif //VK_CALLER_H

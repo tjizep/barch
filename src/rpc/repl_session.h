@@ -52,7 +52,7 @@ namespace barch {
                         auto t = get_art(shard);
                         ostream.clear();
                         // self calls will deadlock here
-                        write_lock release(t->latch);
+                        write_lock release(t->get_latch());
                         process_art_fun_cmd(t, ostream, stream.buf);
                         do_write(ostream);
                     }else {

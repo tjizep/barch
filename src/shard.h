@@ -8,6 +8,9 @@
  * a barch shard
  */
 #include "art.h"
+#include "abstract_shard.h"
+#include "overflow_hash.h"
+#include "vector_stream.h"
 
 namespace barch {
     using namespace art;
@@ -72,7 +75,7 @@ namespace barch {
             return l.get_key(*q) == r.get_key(*q);
         }
     };
-    struct shard : public art::tree{
+    struct shard : public abstract_shard, public art::tree{
     public:
     private:
 
@@ -100,9 +103,6 @@ namespace barch {
         }
 
 
-        composite query{};
-        composite cmd_ZADD_q1{};
-        composite cmd_ZADD_qindex{};
         bool mexit = false;
         bool transacted = false;
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
@@ -115,18 +115,36 @@ namespace barch {
 
         barch::repl::client repl_client{};
         std::atomic<size_t> queue_size{};
-        bool opt_ordered_keys{true};
-
+        node_ptr get_root() const override {
+            return root;
+        }
+        size_t get_queue_size() const override {
+            return queue_size;
+        }
+        size_t inc_queue_size() override {
+            return ++queue_size;
+        };
+        size_t dec_queue_size() override {
+            return --queue_size;
+        };
 
         void start_maintain();
 
         shard(const shard &) = delete;
         // standard constructor
         shard(const node_ptr &root, uint64_t size, size_t shard_number) :
-        tree{"node", shard_number, root,size},
-        opt_ordered_keys(get_ordered_keys()) {
-            opt_all_keys_lru = get_evict_allkeys_lru();
-            opt_volatile_keys_lru = get_evict_volatile_lru();
+        tree{"node", shard_number, root,size}{
+            abstract_shard::opt_all_keys_lru = get_evict_allkeys_lru();
+            abstract_shard::opt_volatile_keys_lru = get_evict_volatile_lru();
+            repl_client.shard = shard_number;
+            barch::repl::clear_route(shard_number);
+            start_maintain();
+
+        }
+        shard(const std::string& name, uint64_t size, size_t shard_number) :
+        tree{name, shard_number, root,size}{
+            abstract_shard::opt_all_keys_lru = get_evict_allkeys_lru();
+            abstract_shard::opt_volatile_keys_lru = get_evict_volatile_lru();
             repl_client.shard = shard_number;
             barch::repl::clear_route(shard_number);
             start_maintain();
@@ -149,10 +167,15 @@ namespace barch {
 
         void load_hash();
         void clear_hash() ;
-        bool remove_leaf_from_uset(value_type key);
+        bool remove_leaf_from_uset(value_type key) override;
         node_ptr from_unordered_set(value_type key) const;
 
-        bool publish(std::string host, int port);
+        bool publish(std::string host, int port) override;
+        std::shared_mutex& get_latch() override {
+            return latch;
+        }
+        art::value_type filter_key(value_type key) const override;
+        art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile ) ;
 
         /**
          * register a pull source on this shard/tree
@@ -164,38 +187,42 @@ namespace barch {
          * @param port
          * @return true if host and port combo does not exist
          */
-        bool pull(std::string host, int port);
 
-        void run_defrag();
+        bool pull(std::string host, int port) override;
 
-        bool save(bool stats = true);
+        void run_defrag() override;
 
-        bool send(std::ostream& out);
+        bool save(bool stats) override;
 
-        bool load(bool stats = true);
+        bool send(std::ostream& out) override;
 
-        bool retrieve(std::istream& in);
+        bool load(bool stats) override;
 
-        void begin();
+        bool retrieve(std::istream& in) override;
 
-        void commit();
+        void begin() override;
 
-        void rollback();
+        void commit() override;
 
-        void clear();
+        void rollback() override;
 
-        bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        void clear() override;
 
-        bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc);
-        bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc);
-        bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc);
+        bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) override;
 
-        bool insert(value_type key, value_type value, bool update, const NodeResult &fc);
-        bool insert(value_type key, value_type value, bool update = true);
-        bool evict(value_type key);
-        bool evict(const leaf* l);
-        bool remove(value_type key, const NodeResult &fc);
-        bool remove(value_type key);
+        bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) override;
+        bool tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) override;
+
+        bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) override;
+        bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) override;
+
+        bool insert(value_type key, value_type value, bool update, const NodeResult &fc) override;
+        bool insert(value_type key, value_type value, bool update) override;
+        bool evict(value_type key) override;
+        bool evict(const leaf* l) override;
+        bool remove(value_type key, const NodeResult &fc) override;
+        bool tree_remove(value_type key, const NodeResult &fc) override;
+        bool remove(value_type key) override;
 
         /**
          * find a key. if the key does not exist pull sources will be queried for the key
@@ -203,63 +230,47 @@ namespace barch {
          * @param key any valid value
          * @return not null key if it exists (incl. pull sources)
          */
-        node_ptr search(value_type key);
+        node_ptr search(value_type key) override;
+        art::node_ptr lower_bound(art::value_type key) override;
+        art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) override;
+        void glob(const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb)  override ;
+        alloc_pair& get_ap() override {
+            return *this;
+        };
+        const alloc_pair& get_ap() const override {
+            return *this;
+        };
+        size_t get_shard_number() const {
+            return this->shard_number;
+        }
+        uint64_t get_tree_size() const override{
+            return this->size;
+        }
+        virtual uint64_t get_size() const override{
+            return h.size() + this->size;
+        };
+        virtual uint64_t get_hash_size() const override{
+            return h.size();
+        };
+        art::node_ptr tree_minimum() const override;
+        art::node_ptr tree_maximum() const override;
+        art::node_ptr get_last_leaf_added() const override {
+            return last_leaf_added;
+        };
 
-        bool update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
+        int range(art::value_type key, art::value_type key_end, CallBack cb, void *data) override;
 
-        void queue_consume();
+        int range(art::value_type key, art::value_type key_end, LeafCallBack cb) override;
+
+        bool update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) override;
+
+        void queue_consume() override;
 
     };
-    /**
-     * gets per module per node type statistics for all art_node* types
-     * @return art_statistics
-     */
-    art_statistics get_statistics();
-
-    /**
-     * get statistics for each operation performed
-     */
-    art_ops_statistics get_ops_statistics();
-
-    /**
-     * get replication and network statistics
-     */
-    art_repl_statistics get_repl_statistics();
 
 
 }
 
-struct storage_release {
-    barch::shard * t{};
-    bool locked{false};
-    storage_release() = delete;
-    storage_release(const storage_release&) = delete;
-    storage_release& operator=(const storage_release&) = default;
-    storage_release(barch::shard* t, bool cons = true) : t(t) {
-        if (cons)
-            t->queue_consume();
-        t->latch.lock();
-    }
-    ~storage_release() {
-        t->latch.unlock();
-    }
-};
-struct read_lock {
-    barch::shard * t{};
-    bool locked{false};
-    read_lock() = default;
-    read_lock(const read_lock&) = delete;
-    read_lock& operator=(const read_lock&) = delete;
-    read_lock(barch::shard* t, bool consume = true) : t(t) {
-        if (consume)
-            t->queue_consume();
-        t->latch.lock_shared();
-    }
-    ~read_lock() {
-        t->latch.unlock_shared();
-    }
-
-};
 
 /**
  * Returns the size of a shard.

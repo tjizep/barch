@@ -12,9 +12,9 @@ static std::random_device rd;
 static std::mt19937 gen(rd());
 
 using namespace art;
-uint64_t art_evict_lru(art::tree *t) {
+uint64_t art_evict_lru(barch::shard_ptr t) {
     try {
-        auto page = t->get_leaves().get_lru_page();
+        auto page = t->get_ap().get_leaves().get_lru_page();
         if (!page.second) return 0;
         auto i = page.first.begin();
         auto e = i + page.second;
@@ -30,7 +30,8 @@ uint64_t art_evict_lru(art::tree *t) {
                 i += (l->byte_size() + test_memory);
                 continue;
             }
-            art_delete(t, l->get_key(), fc);
+            t->remove(l->get_key(),fc);
+            //art_delete(t, l->get_key(), fc);
             i += (l->byte_size() + test_memory);
         }
         ++statistics::pages_evicted;
@@ -53,12 +54,12 @@ art_statistics barch::get_statistics() {
     as.node256_occupants = as.node256_nodes ? ((int64_t) statistics::node256_occupants / as.node256_nodes) : 0ll;
     as.node48_nodes = (int64_t) statistics::n48_nodes;
     for (size_t shard : barch::get_shard_count()) {
-        as.bytes_allocated += (int64_t) get_art(shard)->get_leaves().get_allocated() + get_art(shard)->get_nodes().get_allocated();
+        as.bytes_allocated += (int64_t) get_art(shard)->get_ap().get_leaves().get_allocated() + get_art(shard)->get_ap().get_nodes().get_allocated();
     }
 
     //statistics::addressable_bytes_alloc;
     for (auto shard : barch::get_shard_count()) {
-        as.bytes_interior += (int64_t) get_art(shard)->get_nodes().get_allocated();
+        as.bytes_interior += (int64_t) get_art(shard)->get_ap().get_nodes().get_allocated();
     }
     as.page_bytes_compressed = (int64_t) statistics::page_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t) statistics::page_bytes_uncompressed;
@@ -191,7 +192,7 @@ barch::hashed_key::hashed_key(const node_ptr& la) {
     }
     addr = la.logical.address();
 }
-barch::node_ptr barch::hashed_key::node(const abstract_leaf_pair* p) const {
+art::node_ptr barch::hashed_key::node(const abstract_leaf_pair* p) const {
     return logical_address{addr, (abstract_leaf_pair*)p};
 }
 barch::hashed_key& barch::hashed_key::operator=(const node_ptr& nl) {
@@ -250,7 +251,7 @@ bool barch::shard::remove_leaf_from_uset(value_type key) {
     return false;
 }
 
-barch::node_ptr barch::shard::from_unordered_set(value_type key) const {
+art::node_ptr barch::shard::from_unordered_set(value_type key) const {
     set_hash_query_context(key);
     auto i = h.find(key);
     if (i != h.end()) {
@@ -351,7 +352,7 @@ bool barch::shard::send(std::ostream& out) {
     arena::hash_arena leaves{get_leaves().get_name()};
     arena::hash_arena nodes{get_nodes().get_name()};
     {
-        storage_release release(this); // only lock during partial copy
+        storage_release release(this->shared_from_this()); // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
@@ -433,7 +434,7 @@ bool barch::shard::retrieve(std::istream& in) {
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
-        storage_release release(this);
+        storage_release release(this->shared_from_this());
         auto *t = this;
         logical_address root{nullptr};
         bool is_leaf = false;
@@ -490,7 +491,7 @@ void barch::shard::begin() {
     save_stats.clear();
     stats_to_stream(save_stats);
     {
-       storage_release release(this);
+       storage_release release(this->shared_from_this());
         get_leaves().begin();
         get_nodes().begin();
 
@@ -500,7 +501,7 @@ void barch::shard::begin() {
 
 void barch::shard::commit() {
     if (!transacted) return;
-    storage_release release(this);
+    storage_release release(this->shared_from_this());
     get_leaves().commit();
     get_nodes().commit();
     transacted = false;
@@ -508,7 +509,7 @@ void barch::shard::commit() {
 
 void barch::shard::rollback() {
     if (!transacted) return;
-    storage_release release(this);
+    storage_release release(this->shared_from_this());
     get_leaves().rollback();
     get_nodes().rollback();
     root = save_root;
@@ -520,7 +521,7 @@ void barch::shard::rollback() {
 
 void barch::shard::clear() {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    storage_release release(this);
+    storage_release release(this->shared_from_this());
     root = {nullptr};
     size = 0;
     transacted = false;
@@ -560,7 +561,9 @@ bool barch::shard::insert(const key_options& options, value_type unfiltered_key,
     this->repl_client.insert(latch, options, key, value);
     return size > before;
 }
-
+bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
+    return art_insert(this, options, key, value, update, fc);
+}
 bool barch::shard::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
     if (get_total_memory() > get_max_module_memory()) {
         // do not add data if memory limit is reached
@@ -685,7 +688,7 @@ bool barch::shard::evict(const leaf* l) {
         }
     }
     --statistics::delete_ops; // were not counting these deletes
-    art_delete(this, l->get_key(), [](const barch::node_ptr &){});
+    art_delete(this, l->get_key(), [](const art::node_ptr &){});
     if (size < before) {
         ++statistics::keys_evicted;
     }
@@ -706,10 +709,17 @@ bool barch::shard::evict(value_type unfiltered_key) {
         }
     }
     --statistics::delete_ops; // were not counting these deletes
-    art_delete(this, key, [](const barch::node_ptr &){});
+    art_delete(this, key, [](const art::node_ptr &){});
     return size < before;
 
 }
+bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
+    auto sbef = size;
+    art_delete(this, key, fc);
+    return sbef < size;
+}
+
+
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     //storage_release release(this);
     size_t before = size;
@@ -732,12 +742,35 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     this->repl_client.remove(latch, key);
     return size < before;
 }
+int barch::shard::range(art::value_type key, art::value_type key_end, CallBack cb, void *data) {
+    return art::range(this, key, key_end, cb, data);
+}
+
+int barch::shard::range(art::value_type key, art::value_type key_end, LeafCallBack cb) {
+    return art::range(this, key, key_end, cb);
+}
+art::value_type barch::shard::filter_key(value_type key) const {
+    return tree_filter_key(key);
+}
+node_ptr barch::shard::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile ) {
+    return tree_make_leaf(key, v, ttl, is_volatile);
+}
+
 bool barch::shard::remove(value_type key) {
 
     return this->remove(key, [](const node_ptr &) {});
 }
-barch::node_ptr barch::shard::search(value_type unfiltered_key) {
-    value_type key = filter_key(unfiltered_key);
+art::node_ptr barch::shard::lower_bound(art::value_type key) {
+    return art::lower_bound(this, key);
+}
+art::node_ptr barch::shard::lower_bound(art::trace_list &trace, art::value_type key) {
+    return art::lower_bound(trace, this, key);
+}
+void barch::shard::glob(const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb)  {
+    art::glob(this, spec, pattern, cb);
+}
+art::node_ptr barch::shard::search(value_type unfiltered_key) {
+    value_type key = this->filter_key(unfiltered_key);
     auto n = from_unordered_set(key);
     if (!n.null()) {
         return n;
@@ -750,6 +783,12 @@ barch::node_ptr barch::shard::search(value_type unfiltered_key) {
         return this->last_leaf_added;
     }
     return r;
+}
+art::node_ptr barch::shard::tree_minimum() const {
+    return art_minimum(this);
+}
+art::node_ptr barch::shard::tree_maximum() const {
+    return art::maximum(this);
 }
 #include "queue_server.h"
 void barch::shard::queue_consume() {
@@ -916,7 +955,7 @@ void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
 void abstract_eviction(barch::shard *t,
                        const std::function<bool(const barch::leaf *l)> &predicate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
-    auto fc = [](const barch::node_ptr & unused(n)) -> void {
+    auto fc = [](const art::node_ptr & unused(n)) -> void {
     };
     auto updater = [predicate,fc,t](const barch::leaf *l) {
         if (!l->deleted() && predicate(l)) {
@@ -934,7 +973,7 @@ void abstract_lru_eviction(barch::shard *t, const std::function<bool(const barch
 }
 void abstract_random_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
     if (get_total_memory() < barch::get_max_module_memory()) return;
-    storage_release release(t);
+    storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_page_num();
 
@@ -945,7 +984,7 @@ void abstract_random_eviction(barch::shard *t, const std::function<bool(const ba
 
 void abstract_random_update(barch::shard *t, const std::function<void(const barch::leaf *l)> &updater) {
     if (get_total_memory() < barch::get_max_module_memory()) return;
-    storage_release release(t);
+    storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_page_num();
 

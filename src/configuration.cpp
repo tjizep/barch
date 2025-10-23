@@ -637,8 +637,8 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
         auto t = get_art(shard);
         storage_release r(t);
 
-        t->nodes.set_opt_enable_lfu(lfu);
-        t->leaves.set_opt_enable_lfu(lfu);
+        t->get_ap().get_nodes().set_opt_enable_lfu(lfu);
+        t->get_ap().get_leaves().set_opt_enable_lfu(lfu);
         t->opt_all_keys_lru = record.evict_allkeys_lru;
         t->opt_volatile_keys_lru = record.evict_volatile_lru;
     }

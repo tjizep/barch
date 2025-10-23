@@ -591,7 +591,7 @@ namespace barch {
                     }
                     // we are in a lock here (from the caller)
                     auto t = get_art(this->shard);
-                    t->last_leaf_added = nullptr;
+                    //t->last_leaf_added = nullptr;
                     auto r = process_art_fun_cmd(t, *source, rbuff);
                     if (r.add_applied > 0) {
                         added = true;

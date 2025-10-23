@@ -1,11 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
-#include <bitset>
 #include <limits>
-
-#include "valkeymodule.h"
-
 #include <array>
 #include "logical_allocator.h"
 #include "value_type.h"
@@ -77,7 +73,7 @@ namespace art {
     typedef logical_address logical_leaf;
 
     struct node_ptr_storage {
-        uint8_t storage[node_pointer_storage_size];
+        uint8_t storage[node_pointer_storage_size]{};
         size_t size{};
 
         node_ptr_storage() {

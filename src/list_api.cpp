@@ -11,6 +11,7 @@
 #include "module.h"
 #include "keys.h"
 #include "vk_caller.h"
+thread_local composite query;
 template<typename T>
 art::value_type vt(const T& t) {
     return {(const uint8_t*)&t,sizeof(t)};
@@ -75,12 +76,12 @@ extern "C"{
         storage_release release(t);
         composite li;
         auto container = conversion::convert(args[1]);
-        auto key = t->query.create({container});
+        auto key = query.create({container});
         li.create({container});
         auto added = t->insert(key, header.as_value(), false, fc);
         if (added) {
         } else {
-            const art::leaf *dl = t->last_leaf_added.const_leaf();
+            const art::leaf *dl = t->get_last_leaf_added().const_leaf();
             header = dl->get_value();
         }
         int64_t start = conversion::dec_bytes_to_int(header.start);
@@ -99,7 +100,7 @@ extern "C"{
         // todo: we can set the header directly but that change would not be replicated - currently
         t->insert(key, header.as_value(), true);
         list_header h;
-        const art::leaf *dl = t->last_leaf_added.const_leaf();
+        const art::leaf *dl = t->get_last_leaf_added().const_leaf();
         h = dl->get_value();
         if (conversion::dec_bytes_to_int(h.end) != end) {
             abort_with("header not updated");
@@ -119,7 +120,7 @@ extern "C"{
         storage_release release(t);
         composite li;
         auto container = conversion::convert(args[1]);
-        auto key = t->query.create({container});
+        auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.null();
@@ -161,7 +162,7 @@ extern "C"{
         auto t = get_art(args[1]);
         storage_release release(t);
         auto container = conversion::convert(args[1]);
-        auto key = t->query.create({container});
+        auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.long_long(0);
@@ -184,7 +185,7 @@ extern "C"{
         auto t = get_art(args[1]);
         storage_release release(t);
         auto container = conversion::convert(args[1]);
-        auto key = t->query.create({container});
+        auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.null();
@@ -211,7 +212,7 @@ extern "C"{
         auto t = get_art(args[1]);
         storage_release release(t);
         auto container = conversion::convert(args[1]);
-        auto key = t->query.create({container});
+        auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.null();

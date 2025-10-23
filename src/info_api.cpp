@@ -6,6 +6,7 @@
 #include "caller.h"
 #include "conversion.h"
 #include "module.h"
+#include "shard.h"
 #include "time_conversion.h"
 #include "asio/detail/chrono.hpp"
 
@@ -40,9 +41,9 @@ int INFO(caller& call, const arg_t& argv) {
         "number:"+tos(shard)+"\n"
         "index_physical:"+index+"\n"
         "index_logical:"+order+"\n"
-        "size:"+tos(shard_size(s))+"\n"
-        "bytes_allocated:"+tos(s->get_leaves().get_bytes_allocated() + s->get_nodes().get_bytes_allocated()) + "\n"
-        "virtual_allocated:"+tos(s->get_leaves().get_allocated() + s->get_nodes().get_allocated()) + "\n";
+        "size:"+tos(s->get_size())+"\n"
+        "bytes_allocated:"+tos(s->get_ap().get_leaves().get_bytes_allocated() + s->get_ap().get_nodes().get_bytes_allocated()) + "\n"
+        "virtual_allocated:"+tos(s->get_ap().get_leaves().get_allocated() + s->get_ap().get_nodes().get_allocated()) + "\n";
 
         call.vt(response);
         return 0;

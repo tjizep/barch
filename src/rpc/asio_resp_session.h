@@ -6,6 +6,8 @@
 #define BARCH_ASIO_RESP_SESISON_H
 #include "asio_includes.h"
 #include "netstat.h"
+#include "vector_stream.h"
+
 namespace barch {
     class resp_session : public std::enable_shared_from_this<resp_session>
         {

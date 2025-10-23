@@ -16,7 +16,7 @@ namespace art {
     void set_leaf_lru(art::leaf * l) {
         l->set_lru();
     }
-    node_ptr tree::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
+    node_ptr tree::tree_make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
         return art::make_leaf(*this, key, v, ttl, is_volatile);
     }
     //
@@ -85,11 +85,11 @@ void art::free_leaf_node(leaf *l, logical_address logical) {
     --statistics::leaf_nodes;
 }
 
-void art::free_leaf_node(barch::node_ptr n) {
+void art::free_leaf_node(art::node_ptr n) {
     free_leaf_node(n.l(), n.logical);
 }
 
-void art::free_node(barch::node_ptr n) {
+void art::free_node(art::node_ptr n) {
     n.free_from_storage();
 }
 
@@ -144,7 +144,7 @@ namespace art {
         }
     }
 
-    node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const barch::children_t &c) {
+    node_ptr alloc_node_ptr(alloc_pair& alloc, unsigned ptrsize, unsigned nt, const art::children_t &c) {
         if (ptrsize == 8) return alloc_8_node_ptr(alloc, nt);
 
         node_ptr_storage ptr;
@@ -182,7 +182,7 @@ namespace art {
     }
 
     node_ptr art::tree::alloc_8_node_ptr(unsigned nt) {
-        return barch::alloc_8_node_ptr(*this, nt);
+        return art::alloc_8_node_ptr(*this, nt);
     }
 }
 

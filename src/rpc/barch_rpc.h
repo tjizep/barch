@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include "art.h"
+#include "iterator.h"
+#include "shard.h"
 
 enum {
     cmd_ping = 1,
@@ -65,16 +67,16 @@ namespace barch {
             --to;
         }
     }
-    inline void push_options(heap::vector<uint8_t>& buffer, const key_options& options) {
+    inline void push_options(heap::vector<uint8_t>& buffer, const art::key_options& options) {
         buffer.push_back(options.flags);
         if (options.has_expiry())
             push_size_t<uint64_t>(buffer, options.get_expiry());
     }
-    inline std::pair<key_options,size_t> get_options(size_t at, const heap::vector<uint8_t>& buffer) {
+    inline std::pair<art::key_options,size_t> get_options(size_t at, const heap::vector<uint8_t>& buffer) {
         if (buffer.size() <= at+sizeof(uint64_t) + 1) {
             throw_exception<std::runtime_error>("invalid size");
         }
-        key_options r;
+        art::key_options r;
         r.flags = buffer[at];
         if (r.has_expiry()) {
             r.set_expiry(get_size_t<uint64_t>(at+1, buffer));
@@ -82,22 +84,22 @@ namespace barch {
         }
         return {r, at+1};
     }
-    inline std::pair<value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
+    inline std::pair<art::value_type,size_t> get_value(size_t at, const heap::vector<uint8_t>& buffer) {
         auto size = get_size_t<uint32_t>(at, buffer);
         if (buffer.size()+sizeof(size)+at + 1< size) {
             throw_exception<std::runtime_error>("invalid size");
         }
-        value_type r = {buffer.data() + at + sizeof(uint32_t),size};
+        art::value_type r = {buffer.data() + at + sizeof(uint32_t),size};
         return {r, at+sizeof(size)+size + 1};
     }
 
-    inline void push_value(heap::vector<uint8_t>& buffer, value_type v) {
+    inline void push_value(heap::vector<uint8_t>& buffer, art::value_type v) {
         push_size_t<uint32_t>(buffer, v.size);
         buffer.insert(buffer.end(), v.bytes, v.bytes + v.size);
         buffer.push_back(0x00);
     }
     inline void push_value(heap::vector<uint8_t>& buffer, const std::string& v) {
-        push_value(buffer, value_type{v});
+        push_value(buffer, art::value_type{v});
     }
     inline void push_value(heap::vector<uint8_t>& buffer, const Variable& v) {
         uint8_t i = v.index();
@@ -128,7 +130,7 @@ namespace barch {
     }
 
     inline std::pair<Variable,size_t> get_variable(size_t at, const heap::vector<uint8_t>& buffer) {
-        std::pair<value_type,size_t> vt;
+        std::pair<art::value_type,size_t> vt;
         auto bsize = buffer.size();
         if (at >= bsize) {
             throw_exception<std::runtime_error>("invalid at");
@@ -205,7 +207,7 @@ namespace barch {
      */
 
     template<typename StreamT>
-     af_result process_art_fun_cmd(shard* t, StreamT& stream, const heap::vector<uint8_t>& buffer) {
+     af_result process_art_fun_cmd(barch::shard_ptr t, StreamT& stream, const heap::vector<uint8_t>& buffer) {
         af_result r;
         heap::vector<uint8_t> tosend;
         node_ptr found;
@@ -231,7 +233,7 @@ namespace barch {
                         };
                         bool added_or = false;
                         if (t->opt_ordered_keys) {
-                            added_or = art_insert(t, options.first, key.first, value.first,true, fc);
+                            added_or = t->tree_insert(options.first, key.first, value.first,true, fc);
                         }else
                         {
                             added_or = t->hash_insert(options.first, key.first, value.first,true, fc);
@@ -250,7 +252,7 @@ namespace barch {
                 case 'r': {
                     auto key = get_value(i+1, buffer);
                     if (t->opt_ordered_keys) {
-                        art_delete(t, key.first,[&r](const node_ptr &) {
+                        t->tree_remove(key.first,[&r](const node_ptr &) {
                             ++statistics::repl::key_rem_recv_applied;
                             ++r.remove_applied;
                         });
@@ -269,7 +271,8 @@ namespace barch {
                     break;
                 case 'f': {
                     auto key = get_value(i+1, buffer);
-                    found = find(t, key.first);
+                    // TODO: this may pull replicate
+                    found = t->search(key.first);
                     if (found.is_leaf) {
                         auto l = found.const_leaf();
                         tosend.push_back('i');
@@ -288,7 +291,7 @@ namespace barch {
                     auto lkey = get_value(i+1, buffer);
                     auto ukey = get_value(lkey.second, buffer);
                     ++r.find_called;
-                    iterator ai(t, lkey.first);
+                    art::iterator ai(t, lkey.first);
                     while (ai.ok()) {
                         auto k = ai.key();
                         if (k >= lkey.first && k <= ukey.first) {

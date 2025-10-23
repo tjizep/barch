@@ -7,6 +7,7 @@
 #include "value_type.h"
 #include "variable.h"
 #include <initializer_list>
+#include "key_space.h"
 enum contexts {
     ctx_resp = 1,
     ctx_valkey,
@@ -48,6 +49,7 @@ struct caller {
     [[nodiscard]] virtual const std::string& get_user() const = 0;
     [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
+    virtual barch::key_space_ptr kspace() = 0;
 };
-typedef heap::small_vector<art::value_type> arg_t;
+
 #endif //CALLER_H

@@ -162,4 +162,5 @@ namespace art {
         }
     };
 }
+typedef heap::small_vector<art::value_type> arg_t;
 #endif //VALUE_TYPE_H

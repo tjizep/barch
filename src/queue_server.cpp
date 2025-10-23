@@ -35,8 +35,8 @@ class queue_server {
         instruction& operator=(const instruction&) = default;
         heap::small_vector<uint8_t,32> key{};
         heap::small_vector<uint8_t,48> value{};
-        barch::shard*  t{};
-        barch::key_options options{};
+        barch::shard_ptr  t{};
+        art::key_options options{};
         bool executed = false;
         void set_key(art::value_type k) {
             key.append(k.to_view());
@@ -63,9 +63,9 @@ class queue_server {
                 if (!ordered()) {
                     //art::std_err("queue not ordered");
                 }
-                --t->queue_size;
+                t->dec_queue_size();
                 //t->last_queue_id = qpos;
-                t->opt_insert(options, get_key() ,get_value(),true,[](const barch::node_ptr& ){});
+                t->opt_insert(options, get_key() ,get_value(),true,[](const art::node_ptr& ){});
                 executed = true;
                 return true;
 
@@ -114,7 +114,7 @@ class queue_server {
             },32);
 
             for (auto& ins : instructions) {
-                write_lock release(ins.t->latch);
+                write_lock release(ins.t->get_latch());
                 ++execs;
                 ins.exec(qix + 1);
                 ++count;
@@ -149,15 +149,15 @@ class queue_server {
         threads.stop();
         consume_all();
     }
-    void queue_insert(barch::shard* t,barch::key_options options,art::value_type k, art::value_type v) {
+    void queue_insert(barch::shard_ptr t, art::key_options options,art::value_type k, art::value_type v) {
 
-        size_t at = t->shard_number % threads.size();
+        size_t at = t->get_shard_number() % threads.size();
         instruction ins;
         ins.set_key(k);
         ins.set_value(v);
         ins.options = options;
         ins.t = t;
-        ++t->queue_size;
+        t->inc_queue_size();
         queues[at]->queue.enqueue(ins);
 
         ++statistics::queue_added;
@@ -176,13 +176,13 @@ class queue_server {
         auto qix = shard % threads.size();
         auto q = queues[qix];
         auto t = get_art(shard);
-        if (t->queue_size > 0) {
+        if (t->get_queue_size() > 0) {
             ++q->consumers;
             q->semaphore.signal();
             q->consumer.wait(1000);
             --q->consumers;
         }
-        while (t->queue_size > 0) {
+        while (t->get_queue_size() > 0) {
             ++q->consumers;
             q->consumer.wait(1000);
             --q->consumers;
@@ -218,11 +218,11 @@ bool is_queue_server_running() {
 }
 
 
-void queue_insert(size_t shard, barch::key_options options,art::value_type k, art::value_type v) {
+void queue_insert(size_t shard, art::key_options options,art::value_type k, art::value_type v) {
     auto t = get_art(shard);
     if (server)
         server->queue_insert(t,options,k,v);
     else
-        t->opt_insert(options,k,v,true,[](const barch::node_ptr& ){});
+        t->opt_insert(options,k,v,true,[](const art::node_ptr& ){});
 }
 

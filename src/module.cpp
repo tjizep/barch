@@ -4,97 +4,46 @@
 
 #include "module.h"
 #include "keys.h"
-#include "queue_server.h"
+#include "key_space.h"
 thread_local uint64_t stream_write_ctr = 0;
 thread_local uint64_t stream_read_ctr = 0;
 
 static std::shared_mutex shared{};
 constants Constants{};
-static std::vector<barch::shard *> shards{};
+static auto ks_node = barch::get_keyspace("node");
 std::shared_mutex &get_lock() {
     return shared;
 }
-std::vector<barch::shard *>& get_arts() {
-    return shards;
+heap::vector<barch::shard_ptr> get_arts() {
+    return ks_node->get_shards();
 }
-static int init_shards() {
-    write_lock w(get_lock());
-    if (shards.empty()) {
-        std::vector<barch::shard *> shards_out;
-        shards_out.resize(barch::get_shard_count().size());
-        std::vector<std::thread> loaders{shards_out.size()};
-        size_t shard_num = 0;
-        auto start_time = std::chrono::high_resolution_clock::now();
-        for (auto &shard : shards_out) {
-            loaders[shard_num] = std::thread([shard_num, &shard]() {
-                shard = new(heap::allocate<barch::shard>(1)) barch::shard(nullptr, 0, shard_num);
-                shard->load();
-            });
-            ++shard_num;
-        }
-        for (auto &loader : loaders) {
-            if (loader.joinable())
-                loader.join();
-        }
-        statistics::shards = shards_out.size();
-        auto end_time = std::chrono::high_resolution_clock::now();
-        double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-        barch::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
-        start_queue_server() ;
-        shards.swap(shards_out);
-    }
-    return 0;
-}
-barch::shard *get_art(size_t s) {
-    if (shards.empty()) {
-        init_shards() ;
-    }
-    if (shards.empty()) {
-        abort_with("shard configuration is empty");
-    }
-    auto r = shards[s % shards.size()];
-    if (r == nullptr) {
-        abort_with("shard not found");
-    }
-    r->set_thread_ap();
-    return r;
+std::shared_ptr<barch::abstract_shard> get_art(size_t s) {
+    return ks_node->get(s);
 }
 size_t get_shard(const char* key, size_t key_len) {
-    if (barch::get_shard_count().size() == 1) {
-        return 0;
-    }
-    auto shard_key = art::value_type{key,key_len};
-
-    uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(shard_key.chars(), shard_key.size);
-
-    size_t hshard = hash % barch::get_shard_count().size();
-    return hshard;
+    return ks_node->get_shard_index(key, key_len);
 }
 
 size_t get_shard(const std::string& key) {
-   return get_shard(key.c_str(), key.size());
+    return ks_node->get_shard_index(key);
 }
 
 size_t get_shard(art::value_type key) {
-   return get_shard(key.chars(), key.size);
-}
-barch::shard* get_art(art::value_type key) {
-    return get_art(get_shard(key.chars(), key.size));
-}
-size_t get_shard(ValkeyModuleString **argv) {
-    size_t nlen = 0;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    if (key_ok(n, nlen) != 0) {
-        abort_with("invalid shard key");
-    }
-   return get_shard(n,nlen);
+   return ks_node->get_shard_index(key.chars(),key.size);
 }
 
-barch::shard * get_art(ValkeyModuleString **argv) {
-    return get_art(get_shard(argv));
+std::shared_ptr<barch::abstract_shard> get_art(art::value_type key) {
+    return ks_node->get(key);
+}
+
+size_t get_shard(ValkeyModuleString **argv) {
+    return ks_node->get_shard_index(argv);
+}
+
+barch::shard_ptr get_art(ValkeyModuleString **argv) {
+    return ks_node->get(argv);
 }
 
 uint64_t get_total_memory() {
-
     return heap::allocated;
 }

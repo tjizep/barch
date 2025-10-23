@@ -217,6 +217,9 @@ struct rpc_caller : caller {
         this->user = user;
         this->acl = acl;
     };
+    barch::key_space_ptr kspace() override {
+        return nullptr;
+    }
 };
 
 #endif //SWIG_CALLER_H

@@ -479,6 +479,9 @@ static bool decrement_trace(const art::node_ptr &root, art::trace_list &trace) {
 art::trace_list& art::get_tlb() {
     return tlb;
 }
+art::node_ptr art::lower_bound(trace_list& trace, const art::tree *t, art::value_type key) {
+    return inner_lower_bound(trace, t, key);
+}
 art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     ++statistics::lb_ops;
     try {
@@ -608,9 +611,10 @@ art::node_ptr art::find(const tree* t, value_type key) {
     }
     return nullptr;
 }
+#include "iterator.h"
 
-art::iterator::iterator(tree* t) : t(t) {
-    auto lb = art_minimum(t); //inner_min_bound(tl, t, key);
+art::iterator::iterator(barch::shard_ptr t) : t(t) {
+    auto lb = t->tree_minimum(); //inner_min_bound(tl, t, key);
     if (lb.null()) return;
     const art::leaf *al = lb.const_leaf();
     if (!al) {
@@ -620,17 +624,17 @@ art::iterator::iterator(tree* t) : t(t) {
     }
 }
 
-art::iterator::iterator(tree* t, value_type unfiltered_key) : t(t) {
+art::iterator::iterator(barch::shard_ptr t, value_type unfiltered_key) : t(t) {
     ++statistics::lb_ops;
     try {
         value_type key = t->filter_key(unfiltered_key);
-        auto lb = inner_lower_bound(tl, t, key); //inner_min_bound(tl, t, key);
+        auto lb = t->lower_bound(tl, key); //inner_min_bound(tl, t, key);
         if (lb.null()) return;
         const art::leaf *al = lb.const_leaf();
         if (!al) {
             tl.clear();
         } else {
-            c = t->size == 1 ? lb : last_node(tl);
+            c = t->get_tree_size() == 1 ? lb : last_node(tl);
         }
     } catch (std::exception &e) {
         barch::log(e, __FILE__, __LINE__);
@@ -640,7 +644,7 @@ art::iterator::iterator(tree* t, value_type unfiltered_key) : t(t) {
 
 bool art::iterator::previous() {
     c = nullptr;
-    bool r = decrement_trace(t->root, tl);
+    bool r = decrement_trace(t->get_root(), tl);
     if (!r) {
         tl.clear();
     } else {
@@ -654,7 +658,7 @@ bool art::iterator::previous() {
 
 bool art::iterator::next() {
     c = nullptr;
-    bool r = increment_trace(t->root, tl);
+    bool r = increment_trace(t->get_root(), tl);
     if (!r) {
         tl.clear();
     } else {
@@ -667,7 +671,7 @@ bool art::iterator::next() {
 }
 
 bool art::iterator::end() const {
-    return !c.is_leaf || (t->size > 1 && tl.empty()) || !t || t->size == 0;
+    return !c.is_leaf || (t->get_tree_size() > 1 && tl.empty()) || !t || t->get_tree_size() == 0;
 }
 
 bool art::iterator::ok() const {
@@ -686,9 +690,9 @@ art::value_type art::iterator::key() const {
     return l()->get_key();
 }
 bool art::iterator::last() {
-    if (!t->size) return false;
+    if (!t->get_tree_size()) return false;
     tl.clear();
-    if (!extend_trace_max(t->root, tl)) {
+    if (!extend_trace_max(t->get_root(), tl)) {
         tl.clear();
         return false;
     }
@@ -706,10 +710,10 @@ art::value_type art::iterator::value() const {
 
 bool art::iterator::remove() const {
     if (end()) return false;
-    auto bef = t->size;
+    auto bef = t->get_tree_size();
     // TODO: it wont be replicated
-    art_delete(t, key());
-    return bef > t->size;
+    t->tree_remove(key(),[](const node_ptr &) {});
+    return bef > t->get_tree_size();
 }
 
 bool art::iterator::update(std::function<node_ptr(const leaf *l)> updater) {
@@ -876,7 +880,7 @@ int64_t art::iterator::fast_distance(const iterator &other) const {
 void art::iterator::log_trace() const {
     size_t ctr = 0;
     barch::std_log("=======-iterator trace-========");
-    barch::std_log("  tree size: ", this->t->size);
+    barch::std_log("  tree size: ", this->t->get_tree_size());
     log_encoded_key(key());
     for (auto &el: tl) {
         auto tp = el.parent->type();
@@ -906,7 +910,7 @@ art::node_ptr art_minimum(const art::tree *t) {
 /**
  * Returns the maximum valued leaf
  */
-art::node_ptr art::maximum(art::tree *t) {
+art::node_ptr art::maximum(const art::tree *t) {
     ++statistics::max_ops;
     try {
         auto l = inner_maximum(t->root);
@@ -993,7 +997,7 @@ static art::node_ptr handle_leaf_replacement(
     art::value_type key,
     art::value_type value,
     int replace,
-    const NodeResult &fc
+    const art::NodeResult &fc
     ) {
     if (replace) {
         // call back indicates actual replacement
@@ -1009,7 +1013,7 @@ static art::node_ptr handle_leaf_replacement(
         else
         {
             // create a new leaf to carry the new value
-            ref = t->make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile());
+            ref = t->tree_make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile());
             t->last_leaf_added = ref;
             ++statistics::leaf_nodes_replaced;
             return n; // the old val (n) will be removed by caller
@@ -1021,10 +1025,10 @@ static art::node_ptr handle_leaf_replacement(
 }
 
 static art::node_ptr recursive_insert(art::tree *t, const art::key_options &options, art::node_ptr n, art::node_ptr &ref,
-                                      art::value_type key, art::value_type value, int depth, int *old, int replace,const NodeResult &fc) {
+                                      art::value_type key, art::value_type value, int depth, int *old, int replace,const art::NodeResult &fc) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
-        ref = t->make_leaf(key, value, options.get_expiry());
+        ref = t->tree_make_leaf(key, value, options.get_expiry());
         // The last leaf added must match the `key` parameter
         t->last_leaf_added = ref;
         return nullptr;
@@ -1040,7 +1044,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
         }
         art::node_ptr l1 = n;
         // Create a new leaf
-        art::node_ptr l2 = t->make_leaf(key, value, options.get_expiry(), options.is_volatile());
+        art::node_ptr l2 = t->tree_make_leaf(key, value, options.get_expiry(), options.is_volatile());
         t->last_leaf_added = l2;
         // New value, we must split the leaf into a initial_node, pasts the new children to get optimal pointer size
         auto new_stored = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
@@ -1127,7 +1131,7 @@ RECURSE_SEARCH:;
     }
 
     // No child, node goes within the current node (n)
-    art::node_ptr l = t->make_leaf(key, value, options.get_expiry(), options.is_volatile());
+    art::node_ptr l = t->tree_make_leaf(key, value, options.get_expiry(), options.is_volatile());
     t->last_leaf_added = l;
     // check to see if pointers need to expand to 8 bytes (usually starts at 4 bytes for compression)
     n = n.modify()->expand_pointers(ref, {l});
@@ -1152,7 +1156,7 @@ bool art_insert
  , art::value_type key
  , art::value_type value
  , bool replace
- , const NodeResult &fc) {
+ , const art::NodeResult &fc) {
     try {
         int old_val = 0;
         if (key.size + value.size > maximum_allocation_size) {
@@ -1187,7 +1191,7 @@ bool art_insert
 }
 
 bool art_insert(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
-                const NodeResult &fc) {
+                const art::NodeResult &fc) {
     return art_insert(t, options, key, value, true, fc);
 }
 
@@ -1201,7 +1205,7 @@ bool art_insert(art::tree *t, const art::key_options &options, art::value_type k
  * the old value pointer is returned.
  */
 void art_insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
-                           const NodeResult &fc) {
+                           const art::NodeResult &fc) {
     ++statistics::insert_ops;
     try {
         if (key.size + value.size > maximum_allocation_size) {
@@ -1300,7 +1304,7 @@ void art_delete(art::tree *t, art::value_type key) {
     });
 }
 
-void art_delete(art::tree *t, art::value_type key, const NodeResult &fc) {
+void art_delete(art::tree *t, art::value_type key, const art::NodeResult &fc) {
     ++statistics::delete_ops;
     try {
         if (key.size > maximum_allocation_size) {
@@ -1322,7 +1326,7 @@ void art_delete(art::tree *t, art::value_type key, const NodeResult &fc) {
 }
 
 // Recursively iterates over the tree
-static int recursive_iter(art::node_ptr n, CallBack cb, void *data) {
+static int recursive_iter(art::node_ptr n, art::CallBack cb, void *data) {
     // Handle base cases
     if (n.null()) return 0;
     if (n.is_leaf) {
@@ -1381,7 +1385,7 @@ static int recursive_iter(art::node_ptr n, CallBack cb, void *data) {
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter(art::tree *t, CallBack cb, void *data) {
+int art_iter(art::tree *t, art::CallBack cb, void *data) {
     ++statistics::iter_start_ops;
     try {
         if (!t) {
@@ -1419,7 +1423,7 @@ static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
-int art_iter_prefix(art::tree *t, art::value_type key, CallBack cb, void *data) {
+int art_iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *data) {
     ++statistics::iter_start_ops;
     try {
         if (!t) {
@@ -1505,7 +1509,7 @@ art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
     return key;
 }
 
-art::value_type art::tree::filter_key(value_type key) const {
+art::value_type art::tree::tree_filter_key(value_type key) const {
     return s_filter_key(temp_key, key);
 }
 
@@ -1578,7 +1582,7 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern,
     }
 }
 
-static void log_trace(const art::tree* t , const std::string& name, const barch::trace_list& tl)  {
+static void log_trace(const art::tree* t , const std::string& name, const art::trace_list& tl)  {
     size_t ctr = 0;
     barch::std_log("====-tree trace-",name,"====");
     barch::std_log("  tree size: ", t->size);

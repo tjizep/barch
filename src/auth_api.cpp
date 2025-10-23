@@ -7,6 +7,8 @@
 #include "caller.h"
 #include "shard.h"
 #include "barch_apis.h"
+#include "iterator.h"
+
 static const std::string CAT_PREFIX = "user:cat:";
 static const std::string SECRET_PREFIX = "user:secret:";
 static std::string user_cats(std::string user) {
@@ -19,18 +21,18 @@ std::mutex& latch() {
     static std::mutex latch;
     return latch;
 }
-static void add_cats(barch::shard * a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats);
+static void add_cats(barch::shard_ptr a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats);
 heap::vector<std::string> category_groups() {
     heap::vector<std::string> r = {"all","readonly","admin", "user"};
     return r;
 }
-static void init_auth(barch::shard* auth) {
-    if (auth->size == 0) {
+static void init_auth(barch::shard_ptr auth) {
+    if (auth->get_tree_size() == 0) {
         heap::string_map<bool> cats;
         cats.emplace("data",true);
         cats.emplace("all",true);
         {
-            write_lock write(auth->latch);
+            write_lock write(auth->get_latch());
             add_cats(auth,"default","empty",cats);
         }
         auth->save(false);
@@ -54,13 +56,14 @@ const heap::vector<bool>& get_all_acl() {
     return all_acl;
 }
 
-barch::shard * get_auth() {
-    static barch::shard * auth = nullptr;
+barch::shard_ptr get_auth() {
+    static barch::shard_ptr auth;
     if (!auth) {
         std::lock_guard lock(latch());
+        heap::allocator<barch::shard> alloc;
         if (auth) return auth;
-        auth = new(heap::allocate<barch::shard>(1)) barch::shard("auth", nullptr, 0, 0);
-        auth->load();
+        auth = std::allocate_shared<barch::shard>(alloc,"auth", nullptr, 0, 0);
+        auth->load(false);
         init_auth(auth);
 
     }
@@ -72,18 +75,18 @@ void save_auth() {
     auto a = get_auth();
     a->save(false); //no stats
  }
-static void add_cats(barch::shard * a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats) {
+static void add_cats(barch::shard_ptr a, const std::string& user,const std::string& secret, const heap::string_map<bool> & cats) {
     std::string key;
     if (user.empty()) return;
     for (auto& cat : cats) {
         key = user_cats(user);
         key += cat.first;
         std::string value = cat.second ? "true":"false";
-        a->insert(key, value);
+        a->insert(key, value, true);
     }
     if (!secret.empty()) {
         key = user_secret(user);
-        a->insert(key, secret);
+        a->insert(key, secret, true);
     }
 }
 extern "C"
@@ -96,7 +99,7 @@ extern "C"
         auto secret = argv[2];
         if (user.empty()) user = "default";
         auto a = get_auth();
-        if (a->size == 0) {
+        if (a->get_size() == 0) {
             call.set_acl("default", get_all_acl());
             return call.simple("OK");
         }
@@ -155,7 +158,7 @@ extern "C"
             return 0;
         }
         if (spec.del) {
-            write_lock write(a->latch);
+            write_lock write(a->get_latch());
             std::string key = user_cats(spec.user);
             barch::iterator cat_data(a,key);
             heap::vector<art::value_type> to_del;
@@ -187,7 +190,7 @@ extern "C"
 
         spec.cat.emplace("data",true); // always add the data right
         spec.cat.emplace("auth",true); // always add the data right
-        write_lock write(a->latch);
+        write_lock write(a->get_latch());
         add_cats(a,spec.user,spec.secret,spec.cat);
         return call.simple("OK");
     }

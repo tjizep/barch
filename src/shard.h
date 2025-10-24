@@ -11,6 +11,7 @@
 #include "abstract_shard.h"
 #include "overflow_hash.h"
 #include "vector_stream.h"
+#include "moodycamel/blockingconcurrentqueue.h"
 
 namespace barch {
     using namespace art;
@@ -102,8 +103,8 @@ namespace barch {
             return h.size();
         }
 
-
-        bool mexit = false;
+        moodycamel::LightweightSemaphore thread_control{};
+        moodycamel::LightweightSemaphore thread_exit{};
         bool transacted = false;
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
         // to support a transaction
@@ -137,20 +138,23 @@ namespace barch {
             abstract_shard::opt_all_keys_lru = get_evict_allkeys_lru();
             abstract_shard::opt_volatile_keys_lru = get_evict_volatile_lru();
             repl_client.shard = shard_number;
+            repl_client.name = name;
             barch::repl::clear_route(shard_number);
             start_maintain();
 
         }
+        // name configurable
         shard(const std::string& name, uint64_t size, size_t shard_number) :
         tree{name, shard_number, root,size}{
             abstract_shard::opt_all_keys_lru = get_evict_allkeys_lru();
             abstract_shard::opt_volatile_keys_lru = get_evict_volatile_lru();
             repl_client.shard = shard_number;
+            repl_client.name = name;
             barch::repl::clear_route(shard_number);
             start_maintain();
 
         }
-        // special constructor for auth
+        // special constructor for auth - does not replicate
         shard(const std::string& name,const node_ptr &root, uint64_t size, size_t shard_number) :
 
         tree{name, shard_number, root,size},

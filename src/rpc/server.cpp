@@ -410,7 +410,7 @@ namespace barch {
                         if (!to_send.empty()) {
                             for (auto& dest : dests) {
                                 // statistics are updated
-                                sender.send(this->shard, dest.host, dest.port, to_send);
+                                sender.send(this->shard, this->name, dest.host, dest.port, to_send);
                             }
                             to_send.clear();
                         }
@@ -508,7 +508,7 @@ namespace barch {
         }
 
         template<typename Stream>
-        void send_art_fun(Stream& stream, const heap::vector<uint8_t>& to_send, uint32_t messages, size_t shard) {
+        void send_art_fun(Stream& stream, const std::string& name, const heap::vector<uint8_t>& to_send, uint32_t messages, size_t shard) {
             uint32_t cmd = get_value<Stream>();
             uint32_t buffers_size = to_send.size();
             uint32_t sh = shard;
@@ -516,7 +516,10 @@ namespace barch {
             writep(stream, cmd);
             writep(stream, sh);
             writep(stream, messages);
+            writep(stream, (uint32_t)name.size());
             writep(stream, buffers_size);
+            // the header must always be the same size
+            writep(stream, name.data(), name.size());
             writep(stream, to_send.data(), to_send.size());
             stream.flush();
 
@@ -584,15 +587,15 @@ namespace barch {
                         barch::std_err("failed to connect to remote server", host, this->port);
                         continue;
                     }
-
-                    send_art_fun(*source, to_send, messages, shard);
+                    //
+                    send_art_fun(*source, this->name, to_send, messages, shard);
                     if (!recv_buffer(*source, rbuff)) {
                         continue;
                     }
                     // we are in a lock here (from the caller)
-                    auto t = get_art(this->shard);
+                    auto t = get_art(this->shard); // TODO: use name
                     //t->last_leaf_added = nullptr;
-                    auto r = process_art_fun_cmd(t, *source, rbuff);
+                    auto r = process_art_fun_cmd(t, 0, *source, rbuff);
                     if (r.add_applied > 0) {
                         added = true;
                         break; // don't call the other servers - paxos would have us get a quorum

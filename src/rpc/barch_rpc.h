@@ -207,13 +207,16 @@ namespace barch {
      */
 
     template<typename StreamT>
-     af_result process_art_fun_cmd(barch::shard_ptr t, StreamT& stream, const heap::vector<uint8_t>& buffer) {
+     af_result process_art_fun_cmd(barch::shard_ptr t, uint32_t name_size, StreamT& stream, const heap::vector<uint8_t>& buffer) {
         af_result r;
         heap::vector<uint8_t> tosend;
+        std::string name;
         node_ptr found;
         uint32_t buffers_size = buffer.size();
         bool flush_buffers = false;
-        for (size_t i = 0; i < buffers_size;) {
+        const char* chard = (const char *)buffer.data();
+        name.insert(name.begin(), chard, chard + name_size);
+        for (size_t i = name_size; i < buffers_size;) {
             char cmd = (char)buffer[i];
             switch (cmd) {
                 case 'c': {
@@ -437,22 +440,25 @@ namespace barch {
         vector_stream stream{};
         uint32_t message_count = 0;
 
-        bool send(size_t shard, const std::string& host, uint16_t port, const heap::vector<uint8_t> &to_send) {
+        bool send(size_t shard, const std::string& name, const std::string& host, uint16_t port, const heap::vector<uint8_t> &to_send) {
             stream.clear();
             error.clear();
             if (connect(host,std::to_string(port))) {
                 uint32_t cmd = cmd_art_fun;
                 uint32_t buffers_size = to_send.size();
                 uint32_t sh = shard;
+                uint32_t name_size = name.size();
                 writep(stream, uint8_t{0x00});
                 writep(stream, cmd);
                 writep(stream, sh);
                 writep(stream, message_count);
+                writep(stream, name_size);
                 if (buffers_size == 0) {
                     std_err("invalid buffer size", buffers_size);
                     return false;
                 }
                 writep(stream, buffers_size);
+                writep(stream, name.data(), name.size());
                 writep(stream, to_send.data(), to_send.size());
                 return write(stream);
             }

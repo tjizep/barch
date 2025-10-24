@@ -271,9 +271,9 @@ public:
 	typedef std::make_signed<std::size_t>::type ssize_t;
 
 private:
-	std::atomic<ssize_t> m_count;
-	details::Semaphore m_sema;
-	int m_maxSpins;
+	std::atomic<ssize_t> m_count{};
+	details::Semaphore m_sema{};
+	int m_maxSpins{};
 
 	bool waitWithPartialSpinning(std::int64_t timeout_usecs = -1)
 	{

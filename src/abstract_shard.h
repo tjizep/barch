@@ -128,7 +128,7 @@ struct storage_release {
     storage_release() = delete;
     storage_release(const storage_release&) = delete;
     storage_release& operator=(const storage_release&) = default;
-    storage_release(barch::shard_ptr t, bool cons = true) : t(t) {
+    explicit storage_release(const barch::shard_ptr& t, bool cons = true) : t(t) {
         if (cons)
             t->queue_consume();
         t->get_latch().lock();
@@ -143,7 +143,7 @@ struct read_lock {
     read_lock() = default;
     read_lock(const read_lock&) = delete;
     read_lock& operator=(const read_lock&) = delete;
-    read_lock(barch::shard_ptr t, bool consume = true) : t(t) {
+    explicit read_lock(const barch::shard_ptr& t, bool consume = true) : t(t) {
         if (consume)
             t->queue_consume();
         t->get_latch().lock_shared();

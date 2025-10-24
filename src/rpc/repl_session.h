@@ -19,7 +19,7 @@ namespace barch {
     {
     public:
         enum {
-            header_size = 1 + sizeof(uint32_t)*4
+            header_size = 1 + sizeof(uint32_t)*5
         };
         repl_session(const repl_session&) = delete;
         repl_session& operator=(const repl_session&) = delete;
@@ -53,7 +53,7 @@ namespace barch {
                         ostream.clear();
                         // self calls will deadlock here
                         write_lock release(t->get_latch());
-                        process_art_fun_cmd(t, ostream, stream.buf);
+                        process_art_fun_cmd(t, name_size, ostream, stream.buf);
                         do_write(ostream);
                     }else {
                         // clients can disconnect for all sorts of reasons
@@ -96,14 +96,18 @@ namespace barch {
                                     return;
                                 }
                             }
+                            std::string name;
+
                             readp(stream,shard);
                             readp(stream,count);
+                            readp(stream, name_size);
                             readp(stream,buffers_size);
                             if (buffers_size == 0) {
                                 barch::std_err("repl: invalid buffer size", buffers_size);
                                 return;
                             }
-                            stream.buf.resize(buffers_size);
+                            name.resize(name_size);
+                            stream.buf.resize(name_size + buffers_size);
                             do_read_data();
                             //art::std_log("cmd apply changes ",shard, "[",buffers_size,"] bytes","keys",count,"actual",actual,"total",(long long)statistics::repl::key_add_recv);
                         }catch (std::exception& e) {
@@ -131,6 +135,7 @@ namespace barch {
         }
         tcp::socket socket_;
         uint32_t shard{};
+        uint32_t name_size{};
         vector_stream stream{};
         vector_stream ostream{};
         uint32_t bytes_already_read{};

@@ -818,7 +818,8 @@ uint64_t shard_size(barch::shard *s) {
 
 barch::shard::~shard() {
     repl_client.stop();
-    mexit = true;
+    thread_control.signal(1);
+    thread_exit.wait();
     if (tmaintain.joinable())
         tmaintain.join();
 }
@@ -1051,48 +1052,51 @@ void barch::shard::start_maintain() {
 
     tmaintain = std::thread([&]() -> void {
         //uint64_t jf = get_jump_factor();
-
-        auto start_save_time = std::chrono::high_resolution_clock::now();
-        auto mods = get_modifications();
-        while (!this->mexit) {
-            run_sweep_lru_keys(this);
-            run_evict_all_keys_lfu(this);
-            run_evict_volatile_keys_lru(this);
-            run_evict_volatile_keys_lfu(this);
-            run_evict_volatile_expired_keys(this);
-            run_sweep_expired_keys(this);
-
-            // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
-            if (barch::get_active_defrag()) {
-                run_defrag(); // periodic
-            }
-            if (saf_keys_found) {
-                write_lock l(this->latch);
-                statistics::keys_found += saf_keys_found;
-                saf_keys_found = 0;
-                statistics::get_ops += saf_get_ops;
-                saf_get_ops = 0;
-            }
-
-            if (millis(start_save_time) > get_save_interval()
-                || get_modifications() - mods > get_max_modifications_before_save()
-            ) {
-                //if (get_modifications() - mods > 0) {
-                    this->save(with_stats);
-                    start_save_time = std::chrono::high_resolution_clock::now();
-                    mods = get_modifications();
-                //}
-            }
-            ++statistics::maintenance_cycles;
-            //std::uniform_int_distribution<size_t> dist(1, art::get_maintenance_poll_delay());
-
-            // TODO: we should wait on a join signal not just sleep else server wont stop quickly
-            //std::this_thread::sleep_for(std::chrono::milliseconds(dist(gen)+5));
-            std::this_thread::sleep_for(std::chrono::milliseconds(barch::get_maintenance_poll_delay()));
+        {
+            std::string name = "maintain-";
+            name+=this->nodes.get_name();
+            pthread_setname_np(tmaintain.native_handle(), name.c_str());
         }
+        try {
+            auto start_save_time = std::chrono::high_resolution_clock::now();
+            auto mods = get_modifications();
+            while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
+                run_sweep_lru_keys(this);
+                run_evict_all_keys_lfu(this);
+                run_evict_volatile_keys_lru(this);
+                run_evict_volatile_keys_lfu(this);
+                run_evict_volatile_expired_keys(this);
+                run_sweep_expired_keys(this);
+
+                // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
+                if (barch::get_active_defrag()) {
+                    run_defrag(); // periodic
+                }
+                if (saf_keys_found) {
+                    write_lock l(this->latch);
+                    statistics::keys_found += saf_keys_found;
+                    saf_keys_found = 0;
+                    statistics::get_ops += saf_get_ops;
+                    saf_get_ops = 0;
+                }
+
+                if (millis(start_save_time) > get_save_interval()
+                    || get_modifications() - mods > get_max_modifications_before_save()
+                ) {
+                    //if (get_modifications() - mods > 0) {
+                        this->save(with_stats);
+                        start_save_time = std::chrono::high_resolution_clock::now();
+                        mods = get_modifications();
+                    //}
+                }
+                ++statistics::maintenance_cycles;
+
+            }
+        }catch (std::exception& e){
+            barch::std_err("shard maintenance thread exception:",e.what());
+        }
+        thread_exit.signal(1);
     });
-    std::string name = "maintain-";
-    name+=this->nodes.get_name();
-    pthread_setname_np(tmaintain.native_handle(), name.c_str());
+
 }
 

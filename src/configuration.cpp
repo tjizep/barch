@@ -28,7 +28,7 @@ static std::string save_interval{};
 static std::string max_modifications_before_save{};
 static std::string use_vmm_mem{};
 static std::string external_host{};
-static std::string bind_interface{"127.0.0.1"};
+static std::string bind_interface{"0.0.0.0"};
 static std::string listen_port{};
 static std::string rpc_max_buffer{};
 static std::string rpc_client_max_wait_ms{};

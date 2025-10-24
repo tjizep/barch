@@ -43,6 +43,7 @@ namespace barch {
 
         struct repl_dest {
             std::string host {};
+            std::string name {};
             int port {};
             size_t shard {};
             repl_dest(std::string host, int port, size_t shard) : host(std::move(host)), port(port), shard(shard) {}

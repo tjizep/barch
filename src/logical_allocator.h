@@ -1004,12 +1004,12 @@ struct alloc_pair : public abstract_leaf_pair{
     size_t shard_number{};
     std::shared_mutex latch{};
     bool is_debug = false;
-
+    std::string name{};
 
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
     explicit alloc_pair(size_t shard_number) : shard_number(shard_number), nodes(this,"nodes_"+std::to_string(shard_number)),leaves(this,"leaves_"+std::to_string(shard_number)) {}
-    alloc_pair(size_t shard_number,const std::string& name) : shard_number(shard_number), nodes(this,"nodes_"+name+std::to_string(shard_number)),leaves(this,"leaves_"+name+std::to_string(shard_number)) {}
+    alloc_pair(size_t shard_number,const std::string& name) : shard_number(shard_number), name(name), nodes(this,"nodes_"+name+std::to_string(shard_number)),leaves(this,"leaves_"+name+std::to_string(shard_number)) {}
     logical_allocator& get_nodes() {
         return nodes;
     };

@@ -12,13 +12,12 @@
 #include "keys.h"
 #include "vk_caller.h"
 #include "iterator.h"
+static thread_local composite query;
 extern "C"{
 int HSET(caller& cc, const arg_t& args) {
-    int responses = 0;
-    int r = 0;
     int64_t updated = 0;
 
-    auto fc = [&](art::node_ptr) -> void {
+    auto fc = [&](const art::node_ptr&) -> void {
         ++updated;
     };
     if (key_ok(args[1]) != 0) {
@@ -27,18 +26,15 @@ int HSET(caller& cc, const arg_t& args) {
     auto t = get_art(args[1]);
     storage_release release(t);
     auto container = conversion::convert(args[1]);
-    thread_local composite query;
+
     query.create({container});
     for (size_t n = 2; n < args.size(); n += 2) {
 
         if (key_ok(args[n]) != 0) {
-            r |= cc.null();
-            ++responses;
             continue;
         }
 
         auto field = conversion::convert(args[n]);
-        thread_local composite query;
         query.push(field);
         art::value_type key = query.create();
         art::value_type val = args[n+1];
@@ -46,7 +42,6 @@ int HSET(caller& cc, const arg_t& args) {
         t->insert(key, val, true, fc);
 
         query.pop_back();
-        ++responses;
     }
     return cc.boolean(updated);
 }
@@ -75,7 +70,6 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
     }
     auto t = get_art(argv[1]);
     storage_release release(t);
-    thread_local composite query;
     query.create({conversion::convert(n)});
     if (replies)
         call.start_array();
@@ -293,14 +287,13 @@ int HDEL(caller& call, const arg_t &argv) {
 
     int responses = 0;
     art::key_spec spec;
-    auto n = argv[1];
-    if (key_ok(n) != 0) {
+    auto k = argv[1];
+    if (key_ok(k) != 0) {
         return call.null();
     }
-    thread_local composite query;
 
     auto t = get_art(argv[1]);
-    query.create({conversion::convert(n)});
+    query.create({conversion::convert(k)});
     auto del_report = [&](art::node_ptr) -> void {
         ++responses;
     };
@@ -342,7 +335,6 @@ int HGETDEL(caller& call, const arg_t &argv) {
     if (argv[2] != "FIELDS") {
         return call.wrong_arity();
     }
-    thread_local composite query;
     query.create({conversion::convert(n)});
     auto del_report = [&](art::node_ptr) -> void {
         ++responses;
@@ -396,7 +388,6 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     }
     auto t = get_art(n);
     storage_release release(t);
-    thread_local composite query;
     art::value_type any_key = query.create({conversion::convert(n)});
     art::node_ptr lb = t->lower_bound(any_key);
     if (lb.null()) {
@@ -480,7 +471,6 @@ int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HGET);
 }
-static thread_local composite query;
 extern "C"
 int HLEN(caller& call, const arg_t& argv) {
     if (argv.size() != 2)

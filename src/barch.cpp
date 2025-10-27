@@ -253,6 +253,54 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, KEYS);
 }
+/* B.VALUES
+*
+* match against all values using a glob pattern
+* */
+int VALUES(caller& call, const arg_t& argv) {
+
+    if (argv.size() < 2 || argv.size() > 4)
+        return call.wrong_arity();
+
+    art::keys_spec spec(argv);
+    if (spec.parse_keys_options() != call.ok()) {
+        return call.wrong_arity();
+    }
+    std::mutex vklock{};
+    std::atomic<int64_t> replies = 0;
+    auto cpat = argv[1];
+    art::value_type pattern = cpat;
+    if (spec.count) {
+        for (auto shard : barch::get_shard_count()) {
+            call.kspace()->get(shard)->glob(spec, pattern, [&](const art::leaf & unused(l)) -> bool {
+                ++replies;
+                return true;
+            });
+        }
+        return call.long_long(replies);
+    } else {
+        /* Reply with the matching items. */
+        call.start_array();
+
+        for (auto shard : barch::get_shard_count()) {
+            call.kspace()->get(shard)->glob(spec, pattern, [&](const art::leaf &l) -> bool {
+                std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
+                if (0 != call.reply_encoded_key(l.get_key())) {
+                    return false;
+                };
+                ++replies;
+                return true;
+            });
+        }
+        call.end_array(replies);
+
+    }
+    return call.ok();
+}
+int cmd_VALUES(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, VALUES);
+}
 /* B.SET <key> <value>
  *
  * Set the specified key to the specified value. */

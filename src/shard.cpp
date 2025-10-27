@@ -277,7 +277,6 @@ bool barch::shard::pull(std::string host, int port) {
     return true;
 }
 void barch::shard::read_extra(std::istream &in) {
-#if 0
     uint32_t extra = 0;
     readp(in, extra);
     if (extra > 0) {
@@ -291,17 +290,13 @@ void barch::shard::read_extra(std::istream &in) {
         uint8_t x;
         readp(in, x); // bytes from some future version
     }
-#endif
 }
 void barch::shard::write_extra(std::ostream &of) {
-    return;
-#if 0
     uint32_t extra = 1;
     writep(of, extra);
     uint8_t ordered = opt_ordered_keys ? 1 : 0;
     writep(of, ordered);
     // in future we can extend with more options here
-#endif
 }
 
 

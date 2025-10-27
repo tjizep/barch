@@ -21,6 +21,9 @@
       `SAVEALL`
     - `KSOPTION SET [UNORDERED|ORDERED]` sets the current key space to ordered or unordered, option is saved in key space shards
 7. add optional extra part to storage for future backwards compatibility
+8. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group
+   So keys is still fast but can not bring down a server
+9. `VALUES` match all values in the db against a glob pattern while
 
 ## Fixes
 

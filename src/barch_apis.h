@@ -57,6 +57,7 @@ extern "C"{
     int APPEND(caller& call,const arg_t& argv);
     int PREPEND(caller& call,const arg_t& argv);
     int KEYS(caller& call, const arg_t& argv);
+    int VALUES(caller& call, const arg_t& argv);
     int INCR(caller& call, const arg_t& argv);
     int INCRBY(caller& call, const arg_t& argv);
     int UINCRBY(caller& call, const arg_t& argv);

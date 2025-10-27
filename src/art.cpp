@@ -1538,10 +1538,15 @@ void art::tree::update_trace(int direction) {
     }
 #endif
 }
+// because we reserve a number of threads for glob matching
+// we don't want to concurrently start too many globs
+static std::mutex glob_queue{};
 
 void art::glob(tree * t, const keys_spec &spec, value_type pattern,
                const std::function<bool(const leaf &l)> &cb) {
     try {
+        // make sure only one call can use the intensive KEYS without blocking other requests
+        std::unique_lock guard(glob_queue);
         int64_t counter = 0;
         // this is a multi-threaded iterator and care should be taken
         t->get_leaves().iterate_pages(t->latch,
@@ -1564,6 +1569,47 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern,
                             return true;
                         }
                         if (1 == glob::stringmatchlen(pattern, l->get_clean_key(), 0)) {
+                            if (!cb(*l)) {
+                                return false;
+                            }
+                        } else {
+                            ++misses;
+                        }
+                    }
+                    i += (l->byte_size() + test_memory);
+                }
+
+                return true;
+            });
+    } catch (std::exception &e) {
+        barch::log(e, __FILE__, __LINE__);
+        ++statistics::exceptions_raised;
+    }
+}
+void art::values(tree * t, const keys_spec &spec, value_type pattern,
+               const std::function<bool(const leaf &l)> &cb) {
+    try {
+        // make sure only one call can use the intensive KEYS without blocking other requests
+        std::unique_lock guard(glob_queue);
+        int64_t counter = 0;
+        // this is a multi-threaded iterator and care should be taken
+        t->get_leaves().iterate_pages(t->latch,
+            [&](size_t size, size_t unused(padd), const heap::buffer<uint8_t> &page)-> bool {
+                if (!size) return true;
+                auto i = page.begin();
+                auto e = i + size;
+                uint64_t misses = 0;
+                while (i != e) {
+                    const leaf *l = (const leaf *) i;
+                    if (l->key_len() > size) {
+                        throw std::runtime_error("art::glob: key too long");
+                    }
+                    if (!(l->deleted() || l->expired())) {
+                        if (!spec.count && ++counter > spec.max_count) {
+                            return false;
+                        }
+
+                        if (1 == glob::stringmatchlen(pattern, l->get_value(), 0)) {
                             if (!cb(*l)) {
                                 return false;
                             }

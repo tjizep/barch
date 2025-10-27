@@ -56,6 +56,7 @@ function_map& functions_by_name() {
         r["APPEND"] = {::APPEND,{"write","keys","data"}};
         r["PREPEND"] = {::PREPEND,{"write","keys","data"}};
         r["KEYS"] = {::KEYS,{"read","keys","data"}};
+        r["VALUES"] = {::VALUES,{"read","keys","data"}};
         r["INCR"] = {::INCR,{"write","keys","data"}};
         r["INCRBY"] = {::INCRBY,{"write","keys","data"}};
         r["UINCRBY"] = {::UINCRBY,{"write","keys","data"}};

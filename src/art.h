@@ -298,10 +298,19 @@ namespace art {
 
     int64_t fast_distance(const trace_list &a, const trace_list &b);
     /**
-     * glob match all the key value pairs except the deleted ones
+     * glob match all the key's except the deleted ones
      * This is a multi threaded iterator and care should be taken
      */
     void glob(tree *t, const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb);
+
+    /**
+     * match all values agains the
+     * @param t
+     * @param spec
+     * @param pattern
+     * @param cb
+     */
+    void values(tree *t, const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb);
 
     /**
      * sometimes the shard needs to know this fact

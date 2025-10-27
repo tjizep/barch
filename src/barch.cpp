@@ -39,13 +39,13 @@ extern "C" {
 #include "ordered_api.h"
 #include "caller.h"
 #include "queue_server.h"
-static size_t save() {
+static size_t save(caller& call) {
     std::vector<std::thread> saviors{barch::get_shard_count().size()};
     size_t shard = 0;
     std::atomic<size_t> errors = 0;
     for (auto& t: saviors) {
-        t = std::thread([&errors,shard]() {
-            if (!get_art(shard)->save(true)) {
+        t = std::thread([&errors,&call, shard]() {
+            if (!call.kspace()->get(shard)->save(true)) {
                 barch::std_err("could not save",shard);
                 ++errors;
             }
@@ -65,7 +65,7 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto k = argv[1];
     art::key_spec spec;
@@ -123,13 +123,13 @@ int RANGE(caller& call, const arg_t& argv) {
     /* Reply with the matching items. */
     heap::std_vector<art::value_type> sorted{};
     for (auto shard : barch::get_shard_count()) {
-        auto t = get_art(shard);
-        queue_consume(t->get_shard_number());
+        auto t = call.kspace()->get(shard);
+        queue_consume(t);
         t->get_latch().lock_shared();
     }
     try {
         for (auto shard : barch::get_shard_count()) {
-            auto t = get_art(shard);
+            auto t = call.kspace()->get(shard);
             art::iterator i(t,c1.get_value());
             while (i.ok()) {
                 auto k = i.key();
@@ -152,7 +152,7 @@ int RANGE(caller& call, const arg_t& argv) {
         r = call.error(e.what());
     }
     for (auto shard : barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         t->get_latch().unlock();
     }
 
@@ -182,7 +182,7 @@ int COUNT(caller& call, const arg_t& argv) {
     auto c1 = conversion::convert(k1);
     auto c2 = conversion::convert(k2);
     for (auto shard : barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         read_lock release(t);
 
         art::iterator i(t,c1.get_value());
@@ -224,7 +224,7 @@ int KEYS(caller& call, const arg_t& argv) {
     art::value_type pattern = cpat;
     if (spec.count) {
         for (auto shard : barch::get_shard_count()) {
-            get_art(shard)->glob(spec, pattern, [&](const art::leaf & unused(l)) -> bool {
+            call.kspace()->get(shard)->glob(spec, pattern, [&](const art::leaf & unused(l)) -> bool {
                 ++replies;
                 return true;
             });
@@ -235,7 +235,7 @@ int KEYS(caller& call, const arg_t& argv) {
         call.start_array();
 
         for (auto shard : barch::get_shard_count()) {
-            get_art(shard)->glob(spec, pattern, [&](const art::leaf &l) -> bool {
+            call.kspace()->get(shard)->glob(spec, pattern, [&](const art::leaf &l) -> bool {
                 std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
                 if (0 != call.reply_encoded_key(l.get_key())) {
                     return false;
@@ -266,7 +266,7 @@ int SET(caller& call,const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     auto converted = conversion::convert(k);
     auto key = converted.get_value();
     art::key_spec spec(argv);
@@ -285,7 +285,7 @@ int SET(caller& call,const arg_t& argv) {
     };
 
     if (!spec.get && is_queue_server_running() && t->get_queue_size() < max_process_queue_size) {
-        queue_insert(t->get_shard_number(), spec, key, v);
+        queue_insert(t, spec, key, v);
     }else {
         storage_release l(t);
         t->opt_insert(spec, key, v, true, fc);
@@ -384,7 +384,7 @@ int APPEND(caller& call, const arg_t& argv) {
     ++statistics::set_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto k = argv[1];
     auto v = argv[2];
@@ -427,7 +427,7 @@ int PREPEND(caller& call, const arg_t& argv) {
     ++statistics::set_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto k = argv[1];
     auto v = argv[2];
@@ -550,7 +550,7 @@ int MSET(caller& call, const arg_t& argv) {
         art::value_type reply{"", 0};
         auto fc = [&](art::node_ptr) -> void {
         };
-        auto t = get_art(k);
+        auto t = call.kspace()->get(k);
         storage_release release(t);
         t->insert( spec, converted.get_value(), v, true, fc);
 
@@ -569,7 +569,7 @@ int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int ADD(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     auto k = argv[1];
     auto v = argv[2];
 
@@ -599,7 +599,7 @@ int GET(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     read_lock release(t);
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
@@ -623,7 +623,7 @@ int TTL(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     read_lock release(t);
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
@@ -651,7 +651,7 @@ int EXISTS(caller& call, const arg_t& argv) {
         if (key_ok(k) != 0)
             return call.key_check_error(k);
 
-        auto t = get_art(argv[i]);
+        auto t = call.kspace()->get(argv[i]);
         read_lock release(t);
         auto converted = conversion::convert(k);
         art::node_ptr r = t->search(converted.get_value());
@@ -673,7 +673,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     read_lock release(t);
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
@@ -740,7 +740,7 @@ int MGET(caller& call, const arg_t& argv) {
             call.null();
         } else {
             auto converted = conversion::convert(k);
-            auto t = get_art(k);
+            auto t = call.kspace()->get(k);
             storage_release release(t);
             art::node_ptr r = t->search(converted.get_value());
             if (r.null()) {
@@ -768,12 +768,12 @@ int MIN(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     art::value_type the_min;
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
-        queue_consume(t->get_shard_number());
+        auto t = call.kspace()->get(shard);
+        queue_consume(t);
         t->get_latch().lock();
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         art::node_ptr r = t->tree_minimum();
         if (!t->get_tree_size()) continue;
         if (r.is_leaf && the_min.empty()) {
@@ -789,7 +789,7 @@ int MIN(caller& call, const arg_t& argv) {
         ok = call.reply_encoded_key(the_min);
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         t->get_latch().unlock();
     }
     return ok;
@@ -811,12 +811,12 @@ int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
 int MAX(caller& call, const arg_t& ) {
     art::value_type the_max;
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
-        queue_consume(shard);
+        auto t = call.kspace()->get(shard);
+        queue_consume(t);
         t->get_latch().lock();
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_maximum();
         if (!r.is_leaf) {
@@ -836,7 +836,7 @@ int MAX(caller& call, const arg_t& ) {
         ok = call.reply_encoded_key(the_max);
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         t->get_latch().unlock();
     }
     return ok;
@@ -859,12 +859,12 @@ int LB(caller& call, const arg_t& argv) {
     auto converted = conversion::convert(k);
     art::value_type the_lb;
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
-        queue_consume(shard);
+        auto t = call.kspace()->get(shard);
+        queue_consume(t);
         t->get_latch().lock();
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->lower_bound(converted.get_value());
         if (r.is_leaf && the_lb.empty()) {
@@ -881,7 +881,7 @@ int LB(caller& call, const arg_t& argv) {
         ok = call.reply_encoded_key(the_lb);
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         t->get_latch().unlock();
     }
     return ok;
@@ -901,12 +901,12 @@ int UB(caller& call, const arg_t& argv) {
     auto converted = conversion::convert(k);
     art::value_type the_lb;
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
-        queue_consume(shard);
+        auto t = call.kspace()->get(shard);
+        queue_consume(t);
         t->get_latch().lock();
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         if (!t->get_tree_size()) continue;
         auto key = converted.get_value();
         art::iterator ilb(t, key);
@@ -926,7 +926,7 @@ int UB(caller& call, const arg_t& argv) {
         ok = call.reply_encoded_key(the_lb);
     }
     for (auto shard:barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         t->get_latch().unlock();
     }
     return ok;
@@ -960,7 +960,7 @@ int REM(caller& call, const arg_t& argv) {
         }
     };
 
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     t->remove(converted.get_value(), fc);
 
@@ -970,6 +970,57 @@ int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, REM);
 }
+/* B.USE
+ * @return OK.
+ */
+int USE(caller& call, const arg_t& argv) {
+    if (argv.size() == 1) {
+        call.use("");
+        return call.simple("OK");
+    }
+    if (argv.size() != 2) {
+        return call.wrong_arity();
+    }
+
+    call.use(argv[1].to_string());
+    return call.simple("OK");
+}
+int UNLOAD(caller& call, const arg_t& argv) {
+    if (argv.size() == 1) {
+        barch::unload_keyspace("");
+        return call.simple("OK");
+    }
+    if (argv.size() != 2) {
+        return call.wrong_arity();
+    }
+    barch::unload_keyspace(argv[1].to_string());
+    return call.simple("OK");
+}
+int cmd_UNLOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, UNLOAD);
+}
+
+int SPACES(caller& call, const arg_t& argv) {
+
+    if (argv.size() != 1) {
+        return call.wrong_arity();
+    }
+    call.start_array();
+    barch::all_spaces([&call](const std::string& name, const barch::key_space_ptr& space) {
+        int64_t size = 0;
+        for (auto s: space->get_shards() ) {
+            size += s->get_size();
+        }
+        call.reply_values({name,size});
+    });
+    call.end_array(0);
+    return 0;
+}
+int cmd_SPACES(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, SPACES);
+}
 /* B.SIZE
  * @return the size or o.k.a. key count.
  */
@@ -978,7 +1029,7 @@ int SIZE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     auto size = 0ll;
-    auto arts = get_arts();
+    auto arts = call.kspace()->get_shards();
     for (auto t:arts) {
         storage_release release(t);
         size += (int64_t) t->get_size();
@@ -996,7 +1047,7 @@ int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int SAVE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    size_t errors = save();
+    size_t errors = save(call);
     return errors ? call.error("some shards not saved"): call.simple("OK");
 }
 
@@ -1015,8 +1066,8 @@ int LOAD(caller& call, const arg_t& argv) {
     std::vector<std::thread> loaders{barch::get_shard_count().size()};
     size_t errors = 0;
     for (auto shard : barch::get_shard_count()) {
-        loaders[shard] = std::thread([&errors,shard]() {
-            if (!get_art(shard)->load(true)) ++errors;
+        loaders[shard] = std::thread([&errors,shard,&call]() {
+            if (!call.kspace()->get(shard)->load(true)) ++errors;
         });
     }
     for (auto &loader : loaders) {
@@ -1040,7 +1091,7 @@ int PUBLISH(caller& call, const arg_t& argv) {
     auto interface = argv[1];
     auto port = argv[2];
     for (auto shard: barch::get_shard_count()) {
-        if (!get_art(shard)->publish(interface.chars(), atoi(port.chars()))) {}
+        if (!call.kspace()->get(shard)->publish(interface.chars(), atoi(port.chars()))) {}
     }
     return call.simple("OK");
 }
@@ -1050,7 +1101,7 @@ int PULL(caller& call, const arg_t& argv) {
     auto interface = argv[1];
     auto port = argv[2];
     for (auto shard: barch::get_shard_count()) {
-        if (!get_art(shard)->pull(interface.chars(), atoi(port.chars()))) {}
+        if (!call.kspace()->get(shard)->pull(interface.chars(), atoi(port.chars()))) {}
     }
     return call.simple("OK");
 }
@@ -1085,7 +1136,7 @@ int RETRIEVE(caller& call, const arg_t& argv) {
         if (!cli.load(shard)) {
             if (shard > 0) {
                 for (auto s : barch::get_shard_count()) {
-                    get_art(s)->clear();
+                    call.kspace()->get(s)->clear();
                 }
             }
 
@@ -1126,40 +1177,50 @@ int cmd_STOP(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, STOP);
 }
 
-int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
+int BEGIN(caller& call, const arg_t& argv) {
 
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
-    for (auto shard : barch::get_shard_count()) {
-        get_art(shard)->begin();
-    }
-    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-}
-
-int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
-    for (auto shard : barch::get_shard_count()) {
-        get_art(shard)->commit();
-    }
-    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-}
-
-int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
-    for (auto shard : barch::get_shard_count()) {
-        get_art(shard)->rollback();
-    }
-    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-}
-
-int CLEAR(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     for (auto shard : barch::get_shard_count()) {
-        get_art(shard)->clear();
+        call.kspace()->get(shard)->begin();
+    }
+    return call.ok();
+}
+int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, BEGIN);
+}
+
+int COMMIT(caller& call, const arg_t& argv) {
+
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    for (auto shard : barch::get_shard_count()) {
+        call.kspace()->get(shard)->commit();
+    }
+    return call.simple("OK");
+}
+int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, COMMIT);
+}
+int ROLLBACK(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    for (auto shard : barch::get_shard_count()) {
+        call.kspace()->get(shard)->rollback();
+    }
+    return call.simple("OK");
+}
+int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ROLLBACK);
+}
+int CLEAR(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    for (auto shard : call.kspace()->get_shards()) {
+        shard->clear();
     }
 
     return call.simple("OK");
@@ -1170,14 +1231,88 @@ int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     return call.vk_call(ctx, argv, argc, CLEAR);
 }
 
+int CLEARALL(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    barch::all_shards([](auto& shard) {
+        shard->clear();
+    });
+
+
+    return call.simple("OK");
+}
+
+int cmd_CLEARALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, CLEAR);
+}
+int KSOPTIONS(caller& call, const arg_t& argv) {
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    if (argv[1] == "SET") {
+        if (argv[2] == "unordered") {
+            for (auto &shard : call.kspace()->get_shards()) {
+                shard->opt_ordered_keys = false;
+            }
+            return call.simple("OK");
+        }
+        if (argv[2] == "ordered") {
+            for (auto &shard : call.kspace()->get_shards()) {
+                shard->opt_ordered_keys = true;
+            }
+            return call.simple("OK");
+        }
+    }
+
+
+    return call.error("Unknown option");
+}
+
+int cmd_KSOPTIONS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, KSOPTIONS);
+}
+
+int SAVEALL(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    barch::all_shards([](auto& shard) {
+        shard->save(true);
+    });
+
+    return call.simple("OK");
+}
+
+int cmd_SIZEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, CLEAR);
+}
+int SIZEALL(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
+
+    uint64_t size = 0;
+
+    barch::all_shards([&](auto& shard) {
+        size += shard->get_size();
+    });
+
+    return call.any_int(size);
+}
+
+int cmd_SAVEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, CLEAR);
+}
+
 int STATS(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     art_statistics as = barch::get_statistics();
     auto vbytes = 0ll;
     for (auto shard : barch::get_shard_count()) {
-        storage_release release(get_art(shard));
-        vbytes += get_art(shard)->get_ap().get_nodes().get_bytes_allocated() + get_art(shard)->get_ap().get_leaves().get_bytes_allocated();
+        storage_release release(call.kspace()->get(shard));
+        vbytes += call.kspace()->get(shard)->get_ap().get_nodes().get_bytes_allocated() + call.kspace()->get(shard)->get_ap().get_leaves().get_bytes_allocated();
     }
     call.start_array();
     call.reply_values({"heap_bytes_allocated", get_total_memory()});
@@ -1256,29 +1391,39 @@ int cmd_VACUUM(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
     return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) result);
 }
 
-int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
+int HEAPBYTES(caller& call, const arg_t& argv) {
     //compressed_release release;
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);;
+    if (argv.size() != 1)
+        return call.wrong_arity();;
     auto vbytes = 0ll;
+    auto ks = call.kspace();
+
     for (auto shard : barch::get_shard_count()) {
-        storage_release release(get_art(shard));
-        vbytes += get_art(shard)->get_ap().get_nodes().get_bytes_allocated() + get_art(shard)->get_ap().get_leaves().get_bytes_allocated();
+        auto s = ks->get(shard);
+        storage_release release(s);
+        vbytes += s->get_ap().get_nodes().get_bytes_allocated() + s->get_ap().get_leaves().get_bytes_allocated();
     }
-    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) heap::allocated + vbytes);
+    return call.long_long( (int64_t) heap::allocated + vbytes);
 }
+int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HEAPBYTES);
+}
+int EVICT(caller& call, const arg_t& argv) {
 
-int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
-
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
+    if (argv.size() != 1)
+        return call.wrong_arity();
     int64_t ev = 0;
     for (auto shard : barch::get_shard_count()) {
-        auto t = get_art(shard);
+        auto t = call.kspace()->get(shard);
         storage_release release(t);
         ev += art_evict_lru(t);
     }
-    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t)ev );
+    return call.long_long((int64_t)ev );
+}
+int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, EVICT);
 }
 int CONFIG(caller& call, const arg_t& argv) {
     if (argv.size() != 4)
@@ -1391,6 +1536,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_CreateCommand(ctx, NAME(SIZE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(SIZEALL), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(STATS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -1454,6 +1602,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_CreateCommand(ctx, NAME(CLEAR), "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(CLEARALL), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (add_hash_api(ctx) != VALKEYMODULE_OK) {
         return VALKEYMODULE_ERR;
     }
@@ -1468,8 +1619,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
+    auto ks = get_default_ks();
     for (auto shard : barch::get_shard_count()) {
-        if (get_art(shard) == nullptr) {
+        if (ks->get(shard) == nullptr) {
             return VALKEYMODULE_ERR;
         }
     }

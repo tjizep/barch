@@ -15,7 +15,7 @@
 #include "auth_api.h"
 #include "rpc/barch_functions.h"
 struct rpc_caller : caller {
-
+    barch::key_space_ptr ks = get_default_ks();
     std::shared_ptr<barch::repl::rpc> host {};
     heap::vector<std::shared_ptr<barch::repl::rpc>> routes {};
     size_t valid_routes{};
@@ -29,14 +29,14 @@ struct rpc_caller : caller {
         this->host = barch::repl::create(h,port);
     }
     rpc_caller() {
-        routes.reserve(barch::get_shard_count().size());
+        routes.resize(barch::get_shard_count().size());
         for (size_t shard : barch::get_shard_count()) {
             auto route = barch::repl::get_route(shard);
             if (route.ip.empty()) {
                 routes[shard] = nullptr;
             }else {
                 ++valid_routes;
-                routes.emplace_back(barch::repl::create(route.ip,route.port));
+                routes[shard] =barch::repl::create(route.ip,route.port);
             }
         }
         std::vector<std::string_view> auth = {"AUTH","default","empty"};
@@ -135,7 +135,10 @@ struct rpc_caller : caller {
         results.emplace_back(encoded_key_as_variant(key));
         return 0;
     }
-
+    int reply(const std::string& value) override {
+        results.emplace_back(value);
+        return 0;
+    }
     int reply_values(const std::initializer_list<Variable>& keys) override {
         for (auto &k : keys) {
             results.emplace_back(k);
@@ -144,7 +147,7 @@ struct rpc_caller : caller {
     };
     barch::repl::call_result call_route(const std::vector<std::string_view>& params) {
         if (valid_routes && params.size() > 1) {
-            size_t shard = get_shard(params[1]);
+            size_t shard = ks->get_shard_index(params[1]);
             if (shard < routes.size()) {
                 if (routes[shard] != nullptr) { // dont do any lookups if there's no route for perf
                     auto fbn = barch::barch_functions;
@@ -217,8 +220,14 @@ struct rpc_caller : caller {
         this->user = user;
         this->acl = acl;
     };
-    barch::key_space_ptr kspace() override {
-        return nullptr;
+    barch::key_space_ptr& kspace() override {
+        return ks;
+    }
+    void set_kspace(const barch::key_space_ptr& kspace) override{
+        this->ks = kspace;
+    }
+    void use(const std::string& name) override {
+        this->ks = barch::get_keyspace(name);
     }
 };
 

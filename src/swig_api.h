@@ -19,9 +19,12 @@ void stop();
 
 
 unsigned long long size();
+unsigned long long sizeAll();
 void save();
+void saveAll();
 void load();
-void clear();
+bool clear();
+bool clearAll();
 void publish(const std::string &ip, const std::string &port);
 void publish(const std::string &ip, int port);
 void pull(const std::string &ip, const std::string &port);
@@ -263,18 +266,21 @@ struct Route {
 void setRoute(int shard, const std::string& host, int port);
 void removeRoute(int shard);
 Route getRoute(int shard);
+
 class Caller {
 public:
     Caller();
     Caller(const std::string& host, int port);
+    bool use(const std::string& keyspace);
     std::vector<Value> call(const std::string &method, const std::vector<Value> &args);
-private:
-    std::vector<std::string_view> params {};
-    std::vector<Value> result{};
-    rpc_caller sc{};
+protected:
+    mutable std::vector<std::string_view> params {};
+    mutable std::vector<Value> result{};
+    mutable rpc_caller sc{};
     function_map& barch_functions = functions_by_name();
 };
-class List {
+
+class List : public Caller {
 public:
     List();
     List(const std::string& host, int port);
@@ -283,13 +289,9 @@ public:
     std::string back(const std::string &key);
     std::string front(const std::string &key);
     long pop(const std::string &key,long long count);
-private:
-    mutable std::vector<std::string_view> params {};
-    mutable std::vector<Value> result{};
-    mutable rpc_caller sc{};
 };
 
-class KeyValue {
+class KeyValue : public Caller {
 public:
     KeyValue();
     KeyValue(const std::string& host, int port);
@@ -313,16 +315,12 @@ public:
     Value max() const ;
     Value upperBound(const std::string& key) const ;
     long long size() const ;
-private:
-    mutable std::vector<std::string_view> params {};
-    mutable std::vector<Value> result{};
-    mutable rpc_caller sc{};
 };
 
 /**
  * The has set like interface
  */
-class HashSet {
+class HashSet : public Caller {
 public:
 
     HashSet();
@@ -340,17 +338,13 @@ public:
     std::vector<Value> expireat(const std::string &k, long long exp, const std::string &flags, const std::vector<std::string> &fields);
     Value incrby(const std::string &k, const std::string& field, long long by);
 
-private:
-    mutable std::vector<std::string_view> params{};
-    mutable std::vector<Value> result{};
-    mutable rpc_caller sc{};
 };
 
 /**
  * the ordered set like interface similar to Z* commands in redis or valkey
  *
  */
-class OrderedSet {
+class OrderedSet : public Caller {
 public:
 
     OrderedSet();
@@ -392,9 +386,5 @@ public:
     Value interstore(const std::string &destkey, const std::vector<std::string>& keys);
     Value intercard(const std::vector<std::string>& keys);
     Value remrangebylex(const std::string &key, const std::string& lower, const std::string& upper);
-private:
-    mutable std::vector<std::string_view> params{};
-    mutable std::vector<Value> result{};
-    mutable rpc_caller sc{};
 };
 #endif //SWIG_API_H

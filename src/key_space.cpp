@@ -10,15 +10,65 @@
 
 namespace barch {
     static std::mutex lock{};
+    static std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
+    static std::string ks_pattern_error = "name does not match the "+ks_pattern+" pattern";
+    static std::regex name_check(ks_pattern);
     static heap::map<std::string, key_space_ptr> spaces{};
+    static std::string decorate(const std::string& name_) {
+        if (name_.empty())
+            return "node";
+        return name_ + "_"; // so that system stores dont get clobbered
+    }
 
-    key_space_ptr get_keyspace(const std::string &name) {
+    static std::string undecorate(const std::string& name_) {
+        if (name_ == "node")
+            return "";
+        std::string r = name_;
+        if (!r.empty())
+            r.resize(r.size()-1);
+        return r;
+    }
 
+    std::string ks_undecorate(const std::string& name) {
+        return undecorate(name);
+    }
+
+    const std::string& get_ks_pattern_error() {
+        return ks_pattern_error;
+    }
+
+    void all_shards(const std::function<void(const barch::shard_ptr&)>& cb ) {
         std::unique_lock l(lock);
+        for (auto &ks : spaces) {
+            for (auto &shard_ : ks.second->get_shards()) {
+                cb(shard_);
+            }
+        }
+    }
+
+    void all_spaces(const std::function<void(const std::string& name, const barch::key_space_ptr&)>& cb ) {
+        std::unique_lock l(lock);
+        for (auto &ks : spaces) {
+            cb(undecorate(ks.first), ks.second);
+        }
+    }
+
+    bool check_ks_name(const std::string& name_) {
+        auto name = decorate(name_);
+        return std::regex_match(name, name_check);
+    }
+
+    key_space_ptr get_keyspace(const std::string &name_) {
+        if (!check_ks_name(name_)) {
+            throw_exception<std::invalid_argument>(get_ks_pattern_error().c_str());
+        }
+        std::unique_lock l(lock);
+        std::string name = decorate(name_);
         auto s = spaces.find(name);
         if (s != spaces.end()) {
             return s->second;
         }
+
         heap::allocator<key_space> alloc;
         // cannot create keyspace without memory
         auto ks = std::allocate_shared<key_space>(alloc, name);
@@ -26,18 +76,29 @@ namespace barch {
         return ks;
     }
 
-    bool flush_keyspace(const std::string& name) {
-        key_space_ptr removed;
+    bool unload_keyspace(const std::string& name) {
+        return flush_keyspace(name);
+    }
+
+    bool flush_keyspace(const std::string& name_) {
+        bool r = false;
+        if (!check_ks_name(name_)) {
+            throw_exception<std::invalid_argument>(get_ks_pattern_error().c_str());
+        }
+        std::string name = decorate(name_);
         {
             std::unique_lock l(lock);
             auto s = spaces.find(name);
             if (s != spaces.end()) {
-                removed = s->second;
-                spaces.erase(s);
+                if (s->second.use_count() == 1) {
+                    spaces.erase(s);
+                    r = true;
+                }
             }
         }
-        return removed != nullptr; // destruction happens in callers thread - so hopefully no dl because shared ptr
+        return r; // destruction happens in callers thread - so hopefully no dl because shared ptr
     }
+
     key_space::key_space(const std::string &name) :name(name) {
         if (shards.empty()) {
             decltype(shards) shards_out;
@@ -65,8 +126,8 @@ namespace barch {
             shards.swap(shards_out);
         }
     }
-    std::shared_ptr<abstract_shard> key_space::get(size_t shard) {
 
+    std::shared_ptr<abstract_shard> key_space::get(size_t shard) {
         if (shards.empty()) {
             abort_with("shard configuration is empty");
         }
@@ -77,6 +138,11 @@ namespace barch {
         r->set_thread_ap();
         return r;
     }
+
+    size_t key_space::get_shard_index(art::value_type key) {
+        return get_shard_index(key.chars(), key.size);
+    }
+
     size_t key_space::get_shard_index(const char* key, size_t key_len) {
         if (barch::get_shard_count().size() == 1) {
             return 0;
@@ -88,9 +154,11 @@ namespace barch {
         size_t hshard = hash % barch::get_shard_count().size();
         return hshard;
     }
+
     size_t key_space::get_shard_index(const std::string& key) {
         return get_shard_index(key.c_str(), key.size());
     }
+
     size_t key_space::get_shard_index(ValkeyModuleString **argv) {
         size_t nlen = 0;
         const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
@@ -99,15 +167,19 @@ namespace barch {
         }
         return get_shard_index(n,nlen);
     }
+
     shard_ptr key_space::get(ValkeyModuleString **argv) {
         return get(get_shard_index(argv));
     }
+
     shard_ptr key_space::get(art::value_type key) {
         return get(get_shard_index(key.chars(), key.size));
     }
+
     [[nodiscard]] std::string key_space::get_name() const {
         return name;
     };
+
     heap::vector<shard_ptr> key_space::get_shards() {
         return shards;
     };

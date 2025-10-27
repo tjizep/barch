@@ -10,7 +10,10 @@ thread_local uint64_t stream_read_ctr = 0;
 
 static std::shared_mutex shared{};
 constants Constants{};
-static auto ks_node = barch::get_keyspace("node");
+static auto ks_node = barch::get_keyspace("");
+barch::key_space_ptr& get_default_ks() {
+    return ks_node;
+}
 std::shared_mutex &get_lock() {
     return shared;
 }

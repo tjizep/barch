@@ -23,7 +23,7 @@ int HSET(caller& cc, const arg_t& args) {
     if (key_ok(args[1]) != 0) {
         return cc.null();
     }
-    auto t = get_art(args[1]);
+    auto t = cc.kspace()->get(args[1]);
     storage_release release(t);
     auto container = conversion::convert(args[1]);
 
@@ -68,7 +68,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
     if (key_ok(n) != 0) {
         return call.null();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     query.create({conversion::convert(n)});
     if (replies)
@@ -119,7 +119,7 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
     if (ex_spec.parse_options() != VALKEYMODULE_OK) {
         return call.syntax_error();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     int r = 0;
     auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
         auto l = leaf.const_leaf();
@@ -215,7 +215,7 @@ int HGETEX(caller& call, const arg_t &argv) {
                           r |= call.vt(l->get_value());
                           ++responses;
                           if (do_set) {
-                              return art::make_leaf(get_art(argv[1])->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile());
+                              return art::make_leaf(call.kspace()->get(argv[1])->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile());
                           }
                           return nullptr;
                       });
@@ -292,7 +292,7 @@ int HDEL(caller& call, const arg_t &argv) {
         return call.null();
     }
 
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     query.create({conversion::convert(k)});
     auto del_report = [&](art::node_ptr) -> void {
         ++responses;
@@ -309,7 +309,7 @@ int HDEL(caller& call, const arg_t &argv) {
         query.push(converted);
 
         art::value_type key = query.create();
-        get_art(argv[1])->remove(key, del_report);
+        call.kspace()->get(argv[1])->remove(key, del_report);
         query.pop_back();
     }
     call.long_long(responses);
@@ -330,7 +330,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
     if (key_ok(n) != 0) {
         return call.null();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
 
     if (argv[2] != "FIELDS") {
         return call.wrong_arity();
@@ -350,7 +350,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
         query.push(converted);
 
         art::value_type key = query.create();
-        get_art(argv[1])->remove(key, del_report);
+        call.kspace()->get(argv[1])->remove(key, del_report);
         query.pop_back();
     }
     call.long_long(responses);
@@ -386,7 +386,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     if (key_ok(n) != 0) {
         return call.null();
     }
-    auto t = get_art(n);
+    auto t = call.kspace()->get(n);
     storage_release release(t);
     art::value_type any_key = query.create({conversion::convert(n)});
     art::node_ptr lb = t->lower_bound(any_key);
@@ -482,7 +482,7 @@ int HLEN(caller& call, const arg_t& argv) {
         return call.null();
     }
 
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     query.create({conversion::convert(n, nlen), art::ts_end});
     auto search_end = query.end();
@@ -530,7 +530,7 @@ int HGETALL(caller& call, const arg_t& argv) {
     if (key_ok(n) != 0) {
         return call.null();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::value_type search_start = query.create({conversion::convert(n)},false);
 
@@ -573,7 +573,7 @@ int HKEYS(caller& call, const arg_t& argv) {
     if (key_ok(n) != 0) {
         return call.null();
     };
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::value_type search_end = query.create({conversion::convert(n), art::ts_end});
     art::value_type search_start = query.prefix(2);

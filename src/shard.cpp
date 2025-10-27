@@ -53,14 +53,14 @@ art_statistics barch::get_statistics() {
     as.node256_nodes = (int64_t) statistics::n256_nodes;
     as.node256_occupants = as.node256_nodes ? ((int64_t) statistics::node256_occupants / as.node256_nodes) : 0ll;
     as.node48_nodes = (int64_t) statistics::n48_nodes;
-    for (size_t shard : barch::get_shard_count()) {
-        as.bytes_allocated += (int64_t) get_art(shard)->get_ap().get_leaves().get_allocated() + get_art(shard)->get_ap().get_nodes().get_allocated();
-    }
+    barch::all_shards( [&as](const shard_ptr &shard) {
+        as.bytes_allocated += (int64_t) shard->get_ap().get_leaves().get_allocated() + shard->get_ap().get_nodes().get_allocated();
+    });
 
     //statistics::addressable_bytes_alloc;
-    for (auto shard : barch::get_shard_count()) {
-        as.bytes_interior += (int64_t) get_art(shard)->get_ap().get_nodes().get_allocated();
-    }
+    barch::all_shards( [&as](const shard_ptr &shard) {
+        as.bytes_interior += (int64_t)shard->get_ap().get_nodes().get_allocated();
+    });
     as.page_bytes_compressed = (int64_t) statistics::page_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t) statistics::page_bytes_uncompressed;
     as.pages_uncompressed = (int64_t) statistics::pages_uncompressed;
@@ -276,6 +276,35 @@ bool barch::shard::pull(std::string host, int port) {
     repl_client.add_source(std::move(host), port);
     return true;
 }
+void barch::shard::read_extra(std::istream &in) {
+#if 0
+    uint32_t extra = 0;
+    readp(in, extra);
+    if (extra > 0) {
+        uint8_t ordered = 0;
+        readp(in, ordered );
+        opt_ordered_keys = ordered != 0;
+        --extra;
+    }
+    // to keep backwards compatibility between shards
+    while (extra > 0) {
+        uint8_t x;
+        readp(in, x); // bytes from some future version
+    }
+#endif
+}
+void barch::shard::write_extra(std::ostream &of) {
+    return;
+#if 0
+    uint32_t extra = 1;
+    writep(of, extra);
+    uint8_t ordered = opt_ordered_keys ? 1 : 0;
+    writep(of, ordered);
+    // in future we can extend with more options here
+#endif
+}
+
+
 bool barch::shard::save(bool stats) {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
@@ -299,6 +328,8 @@ bool barch::shard::save(bool stats) {
         writep(of, root);
         writep(of, troot.is_leaf);
         writep(of, tsize);
+        write_extra(of);
+
     };
 
     auto st = std::chrono::high_resolution_clock::now();
@@ -345,6 +376,7 @@ bool barch::shard::send(std::ostream& out) {
         writep(of, root);
         writep(of, troot.is_leaf);
         writep(of, tsize);
+        write_extra(of);
     };
 
     auto st = std::chrono::high_resolution_clock::now();
@@ -397,6 +429,8 @@ bool barch::shard::load(bool) {
             readp(in, root);
             readp(in, is_leaf);
             readp(in, t->size);
+            read_extra(in);
+
         };
         auto st = std::chrono::high_resolution_clock::now();
 
@@ -449,6 +483,7 @@ bool barch::shard::retrieve(std::istream& in) {
             readp(in, root);
             readp(in, is_leaf);
             readp(in, t->size);
+            read_extra(in);
         };
         auto st = std::chrono::high_resolution_clock::now();
 
@@ -792,7 +827,7 @@ art::node_ptr barch::shard::tree_maximum() const {
 }
 #include "queue_server.h"
 void barch::shard::queue_consume() {
-    ::queue_consume(this->shard_number);
+    ::queue_consume(this->shared_from_this());
 }
 
 /**

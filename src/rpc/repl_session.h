@@ -49,7 +49,11 @@ namespace barch {
             asio::async_read(socket_, asio::buffer(stream.buf.data(), stream.buf.size()),
                 [this, self](std::error_code ec, std::size_t unused(length)) {
                     if (!ec) {
-                        auto t = get_art(shard);
+                        std::string name;
+                        name.resize(name_size);
+                        readp(stream, name.data(), name_size);
+                        auto ks = get_keyspace(name);
+                        auto t = ks->get(shard);
                         ostream.clear();
                         // self calls will deadlock here
                         write_lock release(t->get_latch());

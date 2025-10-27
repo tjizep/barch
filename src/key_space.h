@@ -21,14 +21,19 @@ namespace barch {
         [[nodiscard]] std::string get_name() const;
         heap::vector<shard_ptr> get_shards();
         size_t get_shard_index(const char* key, size_t key_len);
+        size_t get_shard_index(art::value_type key);
         size_t get_shard_index(const std::string& key);
         size_t get_shard_index(ValkeyModuleString **argv) ;
-
     };
     typedef std::shared_ptr<key_space> key_space_ptr;
-
+    const std::string& get_ks_pattern_error();
+    bool check_ks_name(const std::string& name_);
+    std::string ks_undecorate(const std::string& name);
     key_space_ptr get_keyspace(const std::string &name);
+    void all_shards(const std::function<void(const shard_ptr&)>& cb );
     bool flush_keyspace(const std::string& name);
+    bool unload_keyspace(const std::string& name);
+    void all_spaces(const std::function<void(const std::string& name, const barch::key_space_ptr&)>& cb );
 } // barch
 
 #endif //BARCH_KEY_SPACE_H

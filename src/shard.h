@@ -90,6 +90,8 @@ namespace barch {
         mutable uint64_t saf_keys_found{};
         mutable uint64_t saf_get_ops{};
         bool remove_from_unordered_set(value_type key);
+        void write_extra(std::ostream& of);
+        void read_extra(std::istream& of);
     public:
         void inc_keys_found() const {
             ++saf_get_ops;

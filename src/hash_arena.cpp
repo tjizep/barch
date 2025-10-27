@@ -64,7 +64,7 @@ bool arena::base_hash_arena::save(const std::string &filename,
 
 
 bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(std::ostream &)> &extra, bool write_version) const {
-    uint64_t completed = write_version ? storage_version : 0;
+    uint64_t completed = write_version ? (int)storage_version : 0;
     size_t size = hidden_arena.size();
     writep(out, completed);
     writep(out, max_address_accessed);

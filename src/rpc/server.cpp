@@ -155,8 +155,10 @@ namespace barch {
                         try {
                             uint32_t shard = 0;
                             readp(stream,shard);
+                            // TODO: add named keyspace support
+                            auto ks = get_default_ks();
                             if (shard < barch::get_shard_count().size()) {
-                                get_art(shard)->send(stream);
+                                ks->get(shard)->send(stream);
                                 stream.flush();
                             }else {
                                 barch::std_err("invalid shard", shard);
@@ -508,7 +510,8 @@ namespace barch {
         }
 
         template<typename Stream>
-        void send_art_fun(Stream& stream, const std::string& name, const heap::vector<uint8_t>& to_send, uint32_t messages, size_t shard) {
+        void send_art_fun(Stream& stream, const std::string& uname, const heap::vector<uint8_t>& to_send, uint32_t messages, size_t shard) {
+            std::string name = barch::ks_undecorate(uname);
             uint32_t cmd = get_value<Stream>();
             uint32_t buffers_size = to_send.size();
             uint32_t sh = shard;
@@ -519,6 +522,7 @@ namespace barch {
             writep(stream, (uint32_t)name.size());
             writep(stream, buffers_size);
             // the header must always be the same size
+
             writep(stream, name.data(), name.size());
             writep(stream, to_send.data(), to_send.size());
             stream.flush();
@@ -556,7 +560,8 @@ namespace barch {
                 writep(stream,uint8_t{0x00});
                 writep(stream,cmd);
                 writep(stream, s);
-                if (!get_art(shard)->retrieve(stream)) {
+                auto ks = get_keyspace(ks_undecorate(this->name));
+                if (!ks->get(shard)->retrieve(stream)) {
                     barch::std_err("failed to retrieve shard", shard);
                     return false;
                 }
@@ -592,8 +597,10 @@ namespace barch {
                     if (!recv_buffer(*source, rbuff)) {
                         continue;
                     }
+                    // TODO: check if this name exists
+                    auto ks = get_keyspace(ks_undecorate(name));
                     // we are in a lock here (from the caller)
-                    auto t = get_art(this->shard); // TODO: use name
+                    auto t = ks->get(this->shard); // TODO: use name
                     //t->last_leaf_added = nullptr;
                     auto r = process_art_fun_cmd(t, 0, *source, rbuff);
                     if (r.add_applied > 0) {

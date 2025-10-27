@@ -1,4 +1,4 @@
-# Release v0.3.4.2b 2025-10-24
+# Release v0.3.4.2b 2025-10-27
 
 ## New Features
 
@@ -10,6 +10,17 @@
    - `INFO SHARD 1` returns shard info for key `1`
    - `INFO SHARD #1` returns shard info for shard number 1
    - `INFO SHARD ##1` or `#ABC` returns shard info for key `##1` or `#ABC`
+6. add key space support with these new api's key space name's should match `[0-9,A-Z,a-z,_]+` 
+    - `USE ksname` the named keyspace is made the current store for all other API's
+    - `UNLOAD ksname` all memory used by named key space is cleared except if it's in use
+    - `SPACES` returns a list of loaded key spaces and their sizes
+    - total count in the entire db of all shards in all key spaces
+      `SIZEALL`
+    - save and clear all key spaces
+      `CLEARALL`
+      `SAVEALL`
+    - `KSOPTION SET [UNORDERED|ORDERED]` sets the current key space to ordered or unordered, option is saved in key space shards
+7. add optional extra part to storage for future backwards compatibility
 
 ## Fixes
 
@@ -19,6 +30,7 @@
 4. Shard and Tree Cleanup (v0.3.4.2b 2025-10-14)
 5. Thread and memory cleanup (v0.3.4.2b 2025-10-24)
 6. Add key space name to rpc and repl (v0.3.4.2b 2025-10-24)
+7. fix route test (v0.3.4.2b 2025-10-27)
 
 # Release v0.3.3.32b 2025-09-24
 

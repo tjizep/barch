@@ -80,11 +80,19 @@ function_map& functions_by_name() {
         r["TTL"] = {::TTL,{"read","keys","data"}};
         r["SIZE"] = {::SIZE,{"read"}};
         r["DBSIZE"] = {::SIZE,{"read"}};
+        r["SIZEALL"] = {::SIZEALL,{"read"}};
+        r["USE"] = {::USE,{"write"}};
+        r["KSOPTIONS"] = {::KSOPTIONS,{"write"}};
+        r["UNLOAD"] = {::UNLOAD,{"write"}};
+        r["SPACES"] = {::SPACES,{"read"}};
+
         r["SAVE"] = {::SAVE,{"read"}};
+        r["SAVEALL"] = {::SAVEALL,{"read"}};
         r["AUTH"] = {::AUTH,{"auth"}};
         r["ACL"] = {::ACL,{"write","acl"}};
 
         r["FLUSHDB"] = {::CLEAR,{"write","dangerous"}};
+        r["CLEARALL"] = {::CLEARALL,{"write","dangerous"}};
         r["FLUSHALL"] = {::CLEAR,{"write","dangerous"}};
         r["STATS"] = {::STATS,{"read","stats"}};
         r["OPS"] = {OPS,{"read","stats"}};

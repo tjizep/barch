@@ -78,10 +78,19 @@ extern "C"{
     int REM(caller& call, const arg_t& argv);
     int TTL(caller& call, const arg_t& argv);
     // database
+    int USE(caller& call, const arg_t& argv);
+    int UNLOAD(caller& call, const arg_t& argv);
+    int SPACES(caller& call, const arg_t& argv);
+    // size in current keyspace
     int SIZE(caller& call, const arg_t& argv);
+    // total count in the entire db
+    int SIZEALL(caller& call, const arg_t& argv);
     int SAVE(caller& call, const arg_t& argv);
     int CLEAR(caller& call, const arg_t& argv);
-
+    // save and clear all key spaces
+    int CLEARALL(caller& call, const arg_t& argv);
+    int SAVEALL(caller& call, const arg_t& argv);
+    int KSOPTIONS(caller& call, const arg_t& argv);
     // replication+cluster
     int ADDROUTE(caller& call, const arg_t& argv);
     int ROUTE(caller& call, const arg_t& argv);

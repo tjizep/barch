@@ -13,9 +13,7 @@
 // TODO: one day this counters gonna wrap
 static std::atomic<int64_t> counter = art::now() * 1000000;
 #define IX_MEMBER ""
-barch::shard_ptr get_art_s(const std::string& key) {
-    return get_art(get_shard(key));
-}
+
 static thread_local composite cmd_ZADD_q1;
 static thread_local composite cmd_ZADD_qindex;
 struct query_pool {
@@ -83,7 +81,7 @@ struct ordered_keys {
     art::value_type value;
 };
 
-static void insert_ordered(composite &score_key, composite &member_key, art::value_type value, bool update = false) {
+static void insert_ordered(caller& call, composite &score_key, composite &member_key, art::value_type value, bool update = false) {
     auto sk = score_key.create();
     auto mk = member_key.create();
     if (score_key.comp.size() < 2) {
@@ -94,7 +92,7 @@ static void insert_ordered(composite &score_key, composite &member_key, art::val
         abort_with("invalid key size");
     }
     shk = shk.sub(1,shk.size - 2);
-    auto t = get_art(get_shard(shk));
+    auto t = call.kspace()->get(shk);
     //write_lock release(t->latch); // the shard should be latched
     bool locked = t->get_latch().try_lock();
     try {
@@ -108,7 +106,7 @@ static void insert_ordered(composite &score_key, composite &member_key, art::val
     }
 }
 
-static void remove_ordered(composite &score_key, composite &member_key) {
+static void remove_ordered(caller& call, composite &score_key, composite &member_key) {
     auto sk = score_key.create();
     auto mk = member_key.create();
     if (score_key.comp.size() < 2) {
@@ -119,7 +117,7 @@ static void remove_ordered(composite &score_key, composite &member_key) {
         abort_with("invalid key size");
     }
     shk = shk.sub(1,shk.size - 2);
-    auto t = get_art(get_shard(shk));
+    auto t = call.kspace()->get(shk);
     bool locked = t->get_latch().try_lock();
     //write_lock release(t->get_latch()); // the shard should be latched
     try {
@@ -133,12 +131,12 @@ static void remove_ordered(composite &score_key, composite &member_key) {
     }
 }
 
-void insert_ordered(ordered_keys &thing, bool update = false) {
-    insert_ordered(thing.score_key, thing.member_key, thing.value, update);
+void insert_ordered(caller& call, ordered_keys &thing, bool update = false) {
+    insert_ordered(call, thing.score_key, thing.member_key, thing.value, update);
 }
 
-void remove_ordered(ordered_keys &thing) {
-    remove_ordered(thing.score_key, thing.member_key);
+void remove_ordered(caller& call, ordered_keys &thing) {
+    remove_ordered(call, thing.score_key, thing.member_key);
 }
 
 
@@ -158,7 +156,7 @@ int ZADD(caller& call, const arg_t &argv) {
         return call.null();
     }
 
-    auto t = get_art(key);
+    auto t = call.kspace()->get(key);
     storage_release release(t);
 
     zspec.LFI = true;
@@ -241,7 +239,7 @@ int ZREM(caller& call, const arg_t& argv) {
     if (key_ok(key) != 0) {
         return call.null();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto container = conversion::convert(key);
     query q1, qmember;
@@ -290,7 +288,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     if (key_ok(key) != 0) {
         return call.null();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto fcfk = [&](const art::node_ptr& ) -> void {
         ++updated;
@@ -365,19 +363,20 @@ int cmd_ZINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZINCRBY);
 }
-int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    ValkeyModule_AutoMemory(ctx);
-    if (argc < 4)
-        return ValkeyModule_WrongArity(ctx);
-    auto t = get_art(argv);
+
+
+int ZCOUNT(caller& call, const arg_t& argv) {
+    if (argv.size() < 4)
+        return call.wrong_arity();
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     size_t nlen, minlen, maxlen;
-    const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
-    const char *smin = ValkeyModule_StringPtrLen(argv[2], &minlen);
-    const char *smax = ValkeyModule_StringPtrLen(argv[3], &maxlen);
+    const char *n = argv[1].chars(); nlen = argv[1].size;
+    const char *smin = argv[2].chars(); minlen = argv[2].size;
+    const char *smax = argv[3].chars();maxlen = argv[3].size;
 
     if (key_ok(smin, minlen) != 0 || key_ok(smax, maxlen) != 0 || key_ok(n, nlen) != 0) {
-        return ValkeyModule_ReplyWithNull(ctx);
+        return call.null();
     }
 
     auto container = conversion::convert(n, nlen);
@@ -399,9 +398,13 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         }
         ai.next();
     }
-    return ValkeyModule_ReplyWithLongLong(ctx, count);
+    return call.long_long(count);
 }
+int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZCOUNT);
 
+}
 static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec) {
 
     auto container = conversion::convert(spec.key);
@@ -521,7 +524,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         call.end_array(replies);
     } else {
         for (auto &r: removals) {
-            remove_ordered(r.score_key, r.member_key);
+            remove_ordered(call, r.score_key, r.member_key);
         }
         return call.long_long(removals.size());
     }
@@ -532,7 +535,7 @@ extern "C"
 int ZRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -550,7 +553,7 @@ extern "C"
 int ZCARD(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto n = argv[1];
 
@@ -638,7 +641,7 @@ static int ZOPER(
         aggr = std::numeric_limits<double>::max();
     }
     if (fk != spec.keys.end()) {
-        auto t = get_art_s(*fk);
+        auto t = call.kspace()->get(*fk);
         storage_release release(t);
 
         query lq, uq;
@@ -663,7 +666,7 @@ static int ZOPER(
                 auto check_set = conversion::convert(*ok);
                 auto check_tainer = tainerq->create({check_set});
                 auto check = checkq->create({check_set, conversion::comparable_key(number)});
-                art::iterator j(get_art_s(*ok), check);
+                art::iterator j(call.kspace()->get(*ok), check);
                 bool found = false;
                 if (j.ok()) {
                     auto kf = j.key();
@@ -739,10 +742,10 @@ static int ZOPER(
     }
 
     for (auto &ordered_keys: new_keys) {
-        insert_ordered(ordered_keys);
+        insert_ordered(call, ordered_keys);
     }
     for (auto &ordered_keys: removed_keys) {
-        remove_ordered(ordered_keys);
+        remove_ordered(call, ordered_keys);
     }
     if (replies == 0 && spec.aggr != art::zops_spec::agg_none) {
         return call.double_(results_added > 0 ? aggr : 0.0f);
@@ -825,7 +828,7 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     long long count = 1;
     long long replies = 0;
@@ -872,7 +875,7 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     long long count = 1;
     long long replies = 0;
@@ -931,7 +934,7 @@ extern "C"
 int ZREVRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -951,7 +954,7 @@ extern "C"
 int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -971,7 +974,7 @@ extern "C"
 int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -989,7 +992,7 @@ extern "C"
 int ZREMRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -1009,7 +1012,7 @@ extern "C"
 int ZRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -1028,7 +1031,7 @@ extern "C"
 int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -1048,7 +1051,7 @@ int ZRANK(caller& call, const arg_t& argv) {
     if (argv.size() != 4) {
         return call.wrong_arity();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto c = argv[1];
     if (c.empty()) {
@@ -1090,7 +1093,7 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
     if (argv.size() != 4) {
         return call.wrong_arity();
     }
-    auto t = get_art(argv[1]);
+    auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
     auto c = argv[1];
     if (c.empty()) {

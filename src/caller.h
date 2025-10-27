@@ -45,11 +45,14 @@ struct caller {
     virtual int start_array() = 0;
     virtual int end_array(size_t length) = 0;
     virtual int reply_encoded_key(art::value_type key) = 0;
+    virtual int reply(const std::string& value) = 0;
     virtual int reply_values(const std::initializer_list<Variable>& keys) = 0;
     [[nodiscard]] virtual const std::string& get_user() const = 0;
     [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
-    virtual barch::key_space_ptr kspace() = 0;
+    virtual barch::key_space_ptr& kspace() = 0;
+    virtual void set_kspace(const barch::key_space_ptr& ks) = 0;
+    virtual void use(const std::string& name) = 0;
 };
 
 #endif //CALLER_H

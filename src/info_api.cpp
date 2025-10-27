@@ -25,15 +25,15 @@ int INFO(caller& call, const arg_t& argv) {
 
         if (argv[2].starts_with("#") && argv[2].size > 1) {
             if (!conversion::to_ui64(argv[2].sub(1), shard)) {
-                shard = get_shard(argv[2]);
+                shard = call.kspace()->get_shard_index(argv[2]);
             }
             if (shard >= barch::get_shard_count().size()) {
                 return call.error("shard number out of range");
             }
         }else {
-            shard = get_shard(argv[2]);
+            shard = call.kspace()->get_shard_index(argv[2]);
         }
-        auto s = get_art(shard);
+        auto s = call.kspace()->get(shard);
         std::string order = s->opt_ordered_keys ? "ordered" : "unordered";
         std::string index = s->opt_ordered_keys ? "ART" : "HASH";
         std::string response =

@@ -523,8 +523,8 @@ static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void 
     return SetOrderedKeys(test_ordered_keys);
 }
 static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    for (auto s : barch::get_shard_count()) {
-        get_art(s)->opt_ordered_keys = record.ordered_keys;
+    for (auto s : get_default_ks()->get_shards()) {
+        s->opt_ordered_keys = record.ordered_keys;
     }
     return VALKEYMODULE_OK;
 }
@@ -633,8 +633,7 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     std::lock_guard lock(config_mutex);
     bool lfu = (record.evict_volatile_lfu || record.evict_allkeys_lfu) ;
-    for (auto shard : barch::get_shard_count()) {
-        auto t = get_art(shard);
+    for (auto t : get_default_ks()->get_shards()) {
         storage_release r(t);
 
         t->get_ap().get_nodes().set_opt_enable_lfu(lfu);

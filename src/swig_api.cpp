@@ -10,6 +10,7 @@
 #include "configuration.h"
 #include "rpc_caller.h"
 
+
 void setConfiguration(const std::string& name, const std::string& value) {
     barch::set_configuration_value(name,value);
 }
@@ -120,17 +121,42 @@ unsigned long long size()  {
     }
     return 0;
 }
+unsigned long long sizeAll()  {
+    std::vector<std::string_view> params = {"SIZEALL"};
+    rpc_caller sc;
+    int r = sc.call(params, ::SIZEALL);
+    if (r == 0) {
+        return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+    }
+    return 0;
+}
 void save() {
     std::vector<std::string_view> params = {"SAVE"};
     rpc_caller sc;
     int r = sc.call(params, ::SAVE);
     if (r == 0) {}
 }
-void clear() {
-    for (auto shard : barch::get_shard_count()) {
-        get_art(shard)->clear();
-    }
+void saveAll() {
+    std::vector<std::string_view> params = {"SAVEALL"};
+    rpc_caller sc;
+    int r = sc.call(params, ::SAVEALL);
+    if (r == 0) {}
 }
+
+bool clearAll() {
+    std::vector<std::string_view> params = {"CLEARALL"};
+    rpc_caller sc;
+    int r = sc.call(params, ::CLEARALL);
+    return r == 0;
+}
+
+bool clear() {
+    std::vector<std::string_view> params = {"CLEAR"};
+    rpc_caller sc;
+    int r = sc.call(params, ::CLEAR);
+    return r == 0;
+}
+
 List::List() {
 
 }
@@ -483,14 +509,14 @@ configuration_values config() {
     r.iteration_worker_count = i.iteration_worker_count;
     r.listen_port = i.listen_port;
     r.log_page_access_trace = i.log_page_access_trace;
-    r.maintenance_poll_delay = i.maintenance_poll_delay;
-    r.max_defrag_page_count = i.max_defrag_page_count;
-    r.max_modifications_before_save = i.max_modifications_before_save;
+    r.maintenance_poll_delay = (long long)i.maintenance_poll_delay;
+    r.max_defrag_page_count = (long long)i.max_defrag_page_count;
+    r.max_modifications_before_save = (long long)i.max_modifications_before_save;
     r.min_fragmentation_ratio = i.min_fragmentation_ratio;
-    r.n_max_memory_bytes = i.n_max_memory_bytes;
-    r.rpc_max_buffer = i.rpc_max_buffer;
-    r.rpc_client_max_wait_ms = i.rpc_client_max_wait_ms;
-    r.save_interval = i.save_interval;
+    r.n_max_memory_bytes = (long long)i.n_max_memory_bytes;
+    r.rpc_max_buffer = (long long)i.rpc_max_buffer;
+    r.rpc_client_max_wait_ms = (long long)i.rpc_client_max_wait_ms;
+    r.save_interval = (long long)i.save_interval;
     r.use_vmm_memory = i.use_vmm_memory;
     return r;
 }
@@ -498,6 +524,15 @@ configuration_values config() {
 Caller::Caller(){}
 Caller::Caller(const std::string& host, int port) {
     sc.host = barch::repl::create(host,port);
+}
+bool Caller::use(const std::string& key_space) {
+    params = {"USE",key_space};
+    sc.call(params, ::USE);
+
+    if (!sc.results.empty()) {
+        return sc.results[0] == "OK";
+    }
+    return false;
 }
 std::vector<Value> Caller::call(const std::string &method, const std::vector<Value> &args) {
     std::string cn = std::string{params[0]};
@@ -525,6 +560,7 @@ HashSet::HashSet(){}
 HashSet::HashSet(const std::string &host, int port) {
     sc.host = barch::repl::create(host,port);
 }
+
 void HashSet::set(const std::string &k, const std::vector<std::string>& members) {
     params = {"HSET", k};
     params.insert(params.end(), members.begin(), members.end());

@@ -149,7 +149,7 @@ class queue_server {
         threads.stop();
         consume_all();
     }
-    void queue_insert(barch::shard_ptr t, art::key_options options,art::value_type k, art::value_type v) {
+    void queue_insert(const barch::shard_ptr& t, art::key_options options,art::value_type k, art::value_type v) {
 
         size_t at = t->get_shard_number() % threads.size();
         instruction ins;
@@ -172,10 +172,10 @@ class queue_server {
         }
     }
 
-    void consume(size_t shard) {
-        auto qix = shard % threads.size();
+    void consume(barch::shard_ptr shard) {
+        auto qix = shard->get_shard_number() % threads.size();
         auto q = queues[qix];
-        auto t = get_art(shard);
+        auto t = shard;
         if (t->get_queue_size() > 0) {
             ++q->consumers;
             q->semaphore.signal();
@@ -193,7 +193,7 @@ class queue_server {
 
 std::shared_ptr<queue_server> server;
 
-void queue_consume(size_t shard) {
+void queue_consume(barch::shard_ptr shard) {
     if (is_queue_server_running())
         server->consume(shard);
 }
@@ -218,8 +218,8 @@ bool is_queue_server_running() {
 }
 
 
-void queue_insert(size_t shard, art::key_options options,art::value_type k, art::value_type v) {
-    auto t = get_art(shard);
+void queue_insert(const barch::shard_ptr& shard, art::key_options options,art::value_type k, art::value_type v) {
+    auto t = shard;
     if (server)
         server->queue_insert(t,options,k,v);
     else

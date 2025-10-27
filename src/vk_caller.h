@@ -7,21 +7,23 @@
 #include "caller.h"
 #include "valkeymodule.h"
 #include "keys.h"
+#include "module.h"
 struct vk_caller : caller {
-    virtual ~vk_caller() = default;
+    ~vk_caller() override = default;
     ValkeyModuleCtx *ctx = nullptr;
+    barch::key_space_ptr ks = get_default_ks();
     size_t call_counter{};
     std::string user{"default"};
     heap::vector<bool> acl{};
-    const std::string& get_user() const override  {
+    [[nodiscard]] const std::string& get_user() const override  {
         return user;
     }
-    const heap::vector<bool>& get_acl() const override {
+    [[nodiscard]] const heap::vector<bool>& get_acl() const override {
         return acl;
     }
-    void set_acl(const std::string& user,const heap::vector<bool>& acl) override {
-        this->user = user;
-        this->acl = acl;
+    void set_acl(const std::string& user_,const heap::vector<bool>& acl_) override {
+        this->user = user_;
+        this->acl = acl_;
     };
 
 
@@ -52,7 +54,7 @@ struct vk_caller : caller {
 
     int end_array(size_t) override {
         check_ctx();
-        ValkeyModule_ReplySetArrayLength(ctx, call_counter);
+        ValkeyModule_ReplySetArrayLength(ctx, (long long)call_counter);
         return 0;
     }
 
@@ -67,7 +69,7 @@ struct vk_caller : caller {
     };int any_int(uint64_t l) override {
         check_ctx();
         ++call_counter;
-        return ValkeyModule_ReplyWithLongLong(ctx,l);
+        return ValkeyModule_ReplyWithLongLong(ctx,(long long)l);
     };
     int any_int(long long l) override {
         check_ctx();
@@ -77,7 +79,7 @@ struct vk_caller : caller {
     int any_int(unsigned long long l) override {
         check_ctx();
         ++call_counter;
-        return ValkeyModule_ReplyWithLongLong(ctx,l);
+        return ValkeyModule_ReplyWithLongLong(ctx,(long long)l);
     };
 
     int any_int(uint32_t l) override {
@@ -104,7 +106,11 @@ struct vk_caller : caller {
         for (auto &k : keys) {
             reply_variable(ctx, k);
         }
-        ValkeyModule_ReplySetArrayLength(ctx, keys.size());
+        ValkeyModule_ReplySetArrayLength(ctx, (long long)keys.size());
+        return 0;
+    }
+    int reply(const std::string& value) override {
+        reply_variable(ctx, {value});
         return 0;
     }
 
@@ -159,8 +165,8 @@ struct vk_caller : caller {
     }
 
     template<typename TF>
-    int vk_call(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc, TF &&call) {
-        this->ctx = ctx;
+    int vk_call(ValkeyModuleCtx *ctx_, ValkeyModuleString **argv, int argc, TF &&call) {
+        this->ctx = ctx_;
         arg_t args {};
         args.resize(argc);
         ValkeyModule_AutoMemory(ctx);
@@ -179,8 +185,15 @@ struct vk_caller : caller {
         ctx = nullptr;
         return r;
     }
-    barch::key_space_ptr kspace() override {
-        return nullptr;
+    barch::key_space_ptr &kspace() override {
+        return ks;
+    }
+    void set_kspace(const barch::key_space_ptr& kspace) override{
+        this->ks = kspace;
+    }
+
+    void use(const std::string& name) override {
+        this->ks = barch::get_keyspace(name);
     }
 };
 

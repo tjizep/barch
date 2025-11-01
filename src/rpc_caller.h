@@ -45,11 +45,11 @@ struct rpc_caller : caller {
         }
     }
     [[nodiscard]] int wrong_arity()  override {
-        errors.emplace_back("wrong_arity");
+        errors.emplace_back("Wrong Arity");
         return 0;
     }
     [[nodiscard]] int syntax_error() override {
-        errors.emplace_back("syntax_error");
+        errors.emplace_back("Syntax Error");
         return 0;
     }
     [[nodiscard]] int error() const override {
@@ -221,6 +221,8 @@ struct rpc_caller : caller {
         this->acl = acl;
     };
     barch::key_space_ptr& kspace() override {
+        if (!ks ) {throw_exception<std::runtime_error>("key space not set");
+        }
         return ks;
     }
     void set_kspace(const barch::key_space_ptr& kspace) override{

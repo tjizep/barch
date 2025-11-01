@@ -82,6 +82,7 @@ extern "C"{
     int USE(caller& call, const arg_t& argv);
     int UNLOAD(caller& call, const arg_t& argv);
     int SPACES(caller& call, const arg_t& argv);
+    int KSPACE(caller& call, const arg_t& argv);
     // size in current keyspace
     int SIZE(caller& call, const arg_t& argv);
     // total count in the entire db

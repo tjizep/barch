@@ -86,6 +86,7 @@ function_map& functions_by_name() {
         r["KSOPTIONS"] = {::KSOPTIONS,{"write"}};
         r["UNLOAD"] = {::UNLOAD,{"write"}};
         r["SPACES"] = {::SPACES,{"read"}};
+        r["KSPACE"] = {::KSPACE,{"read","write"}};
 
         r["SAVE"] = {::SAVE,{"read"}};
         r["SAVEALL"] = {::SAVEALL,{"read"}};

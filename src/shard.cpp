@@ -682,11 +682,20 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
     if (i != h.end()) {
 
         node_ptr old = logical_address{i->addr,this};
+        if (old.l()->is_tomb()) {
+            old.l()->unset_tomb();
+            if (tomb_stones == 0) {
+                throw_exception<std::runtime_error>("invalid tombstone count");
+            }
+            --tomb_stones;
+        }
         bool hashed = old.cl()->is_hashed();
         if (!hashed)
             abort_with("no art caching allowed");
         node_ptr n = repl_updateresult(old);
+
         if (n == old) {
+
             return false; // nothing to do
         }
         if (!n.null()) {
@@ -711,6 +720,7 @@ bool barch::shard::evict(const leaf* l) {
         auto i = h.find(l->get_key());
         if (i != h.end()) {
             auto n = i->node(this);
+            erase_tomb(n.l());
             h.erase(i);
             n.free_from_storage();
             ++statistics::keys_evicted;
@@ -733,6 +743,7 @@ bool barch::shard::evict(value_type unfiltered_key) {
         auto n = old;
         leaf *dl = n.l();
         if (dl->is_hashed()) {
+            erase_tomb(dl);
             h.erase(key);
             n.free_from_storage();
             return true;
@@ -757,10 +768,25 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     auto key = filter_key(unfiltered_key);
     node_ptr old = from_unordered_set(key);
     if (!old.null()) {
+        if (dependencies) {
+            // check if exists and insert tombstone else continue with normal erase
+            auto dep = dependencies->search(key);
+            if (!dep.null()) {
+                fc(old);
+                bool r = this->hash_insert({},key,{},true,[](node_ptr){});
+                if (r) {
+                    last_leaf_added.l()->set_tomb();
+                    ++tomb_stones;
+                    return true;
+                }
+                return false;
+            }
+        }
         auto n = old;
         leaf *dl = n.l();
         if (dl->is_hashed()) {
             fc(n);
+            erase_tomb(dl);
             h.erase(key);
             n.free_from_storage();
 
@@ -768,6 +794,19 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             return true;
         }
     }
+    if (dependencies) {
+        // check if exists and insert tombstone else continue with normal erase
+        auto dep = dependencies->search(key);
+        if (!dep.null()) {
+            fc(dep);
+            ++tomb_stones;
+            tree_insert({},key,{},true,[](node_ptr){});
+            if (!last_leaf_added.null())
+                last_leaf_added.l()->set_tomb();
+
+            return true;
+        }
+    } // else continue
     art_delete(this, key, fc);
     this->repl_client.remove(latch, key);
     return size < before;
@@ -790,6 +829,27 @@ bool barch::shard::remove(value_type key) {
 
     return this->remove(key, [](const node_ptr &) {});
 }
+barch::shard_ptr barch::shard::sources() {
+    return dependencies;
+}
+void barch::shard::depends(const std::shared_ptr<abstract_shard> & source) {
+
+    dependencies = source;
+    auto current = this->shared_from_this();
+    auto test = dependencies;
+    while (test && test != current) {
+        test = test->sources();
+    }
+    if (test == current) {
+        dependencies = nullptr;
+        throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
+    }
+}
+void barch::shard::release(const std::shared_ptr<abstract_shard> & unused(source)) {
+
+    dependencies = nullptr;
+}
+
 art::node_ptr barch::shard::lower_bound(art::value_type key) {
     return art::lower_bound(this, key);
 }
@@ -802,23 +862,58 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, const std::fu
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     value_type key = this->filter_key(unfiltered_key);
     auto n = from_unordered_set(key);
+    // TODO: check tomb stone flag for dependant deletes
     if (!n.null()) {
+        if (dependencies && n.cl()->is_tomb()) {
+            return nullptr;
+        }
         return n;
     }
 
     auto r = art_search(this, key);
     if (r.null()) {
+        if (dependencies) {
+            r = dependencies->search(key); // this can recurse down
+            if (!r.null()) {
+                return r;
+            }
+        }
         last_leaf_added = nullptr; // clear it before trying to retrieve
         this->repl_client.find_insert(key);
         return this->last_leaf_added;
     }
+    if (dependencies && r.cl()->is_tomb()) {
+        return nullptr;
+    }
+    // check if r.cl()->is_tombstone() and return nullptr
     return r;
 }
 art::node_ptr barch::shard::tree_minimum() const {
-    return art_minimum(this);
+    auto dmin = dependencies ? dependencies->tree_minimum() : nullptr;
+    auto tmin = art_minimum(this);
+    if (dmin.is_leaf && tmin.is_leaf) {
+        if (dmin.cl()->get_key() < tmin.cl()->get_key()) {
+            return dmin;
+        }
+        return tmin;
+    }
+    if (dmin.is_leaf) return dmin;
+    return tmin;
+
 }
 art::node_ptr barch::shard::tree_maximum() const {
-    return art::maximum(this);
+    auto dmax = dependencies ? dependencies->tree_maximum() : nullptr;
+    auto tmax = art::maximum(this);
+    if (dmax.is_leaf && tmax.is_leaf) {
+        if (dmax.cl()->get_key() < tmax.cl()->get_key()) {
+            return dmax;
+        }
+        return tmax;
+    }
+    if (dmax.is_leaf) {
+        return dmax;
+    }
+    return tmax;
 }
 #include "queue_server.h"
 void barch::shard::queue_consume() {
@@ -883,6 +978,9 @@ void barch::shard::load_hash() {
     lc.iterate_pages([this,&encountered](size_t s, size_t page, auto& data) {
         page_iterator(data, s, [page,this,&encountered](const leaf *l, uint32_t pos) {
             if (l->deleted()) return;
+            if (l->is_tomb()) {
+                ++tomb_stones;
+            }
             if (l->is_hashed()) {
 
                 logical_address lad{page,pos,this};

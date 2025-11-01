@@ -12,6 +12,7 @@
 namespace barch {
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
     public:
+        typedef std::shared_ptr<abstract_shard> shard_ptr;
         bool opt_ordered_keys = get_ordered_keys();
         bool opt_all_keys_lru = false;
         bool opt_volatile_keys_lru = false;
@@ -80,7 +81,9 @@ namespace barch {
         virtual art::node_ptr lower_bound(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) = 0;
         virtual void glob(const art::keys_spec &spec, art::value_type pattern, const std::function<bool(const art::leaf &)> &cb)  = 0;
-
+        virtual shard_ptr sources() = 0;
+        virtual void depends(const std::shared_ptr<abstract_shard> & source) = 0;
+        virtual void release(const std::shared_ptr<abstract_shard> & source) = 0;
         virtual art::node_ptr tree_minimum() const = 0;
         virtual art::node_ptr tree_maximum() const = 0;
         virtual art::node_ptr get_last_leaf_added() const = 0;
@@ -88,11 +91,8 @@ namespace barch {
         virtual art::value_type filter_key(art::value_type) const = 0;
         virtual art::node_ptr get_root() const = 0;
         virtual int range(art::value_type key, art::value_type key_end, art::CallBack cb, void *data) = 0;
-
         virtual int range(art::value_type key, art::value_type key_end, art::LeafCallBack cb) = 0;
-
         virtual bool update(art::value_type key, const std::function<art::node_ptr(const art::node_ptr &leaf)> &updater) = 0;
-
         virtual void queue_consume() = 0;
         virtual alloc_pair& get_ap() = 0;
         virtual const alloc_pair& get_ap() const = 0;
@@ -101,7 +101,7 @@ namespace barch {
         virtual size_t inc_queue_size() = 0;
         virtual size_t dec_queue_size() = 0;
     };
-    typedef std::shared_ptr<abstract_shard> shard_ptr;
+    typedef abstract_shard::shard_ptr shard_ptr;
     /**
      * gets per module per node type statistics for all art_node* types
      * @return art_statistics
@@ -131,10 +131,22 @@ struct storage_release {
     explicit storage_release(const barch::shard_ptr& t, bool cons = true) : t(t) {
         if (cons)
             t->queue_consume();
+        auto s = t->sources();
+        // TODO: this may cause deadlock
+        while (s) {
+            s->get_latch().lock_shared();
+            s = s->sources();
+        }
         t->get_latch().lock();
     }
     ~storage_release() {
         t->get_latch().unlock();
+        // TODO: this may cause deadlock we've got to at least test
+        auto s = t->sources();
+        while (s) {
+            s->get_latch().unlock_shared();
+            s = s->sources();
+        }
     }
 };
 struct read_lock {
@@ -143,13 +155,27 @@ struct read_lock {
     read_lock() = default;
     read_lock(const read_lock&) = delete;
     read_lock& operator=(const read_lock&) = delete;
+
     explicit read_lock(const barch::shard_ptr& t, bool consume = true) : t(t) {
         if (consume)
             t->queue_consume();
+        auto s = t->sources();
+        // TODO: this may cause deadlock
+        while (s) {
+            s->get_latch().lock_shared();
+            s = s->sources();
+        }
         t->get_latch().lock_shared();
     }
+
     ~read_lock() {
         t->get_latch().unlock_shared();
+        // TODO: this may cause deadlock we've got to at least test
+        auto s = t->sources();
+        while (s) {
+            s->get_latch().unlock_shared();
+            s = s->sources();
+        }
     }
 
 };

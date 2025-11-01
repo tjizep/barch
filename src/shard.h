@@ -89,9 +89,11 @@ namespace barch {
         mutable oh::unordered_set<hashed_key,hk_hash, hk_eq> h{hk_e,hk_h};
         mutable uint64_t saf_keys_found{};
         mutable uint64_t saf_get_ops{};
+
         bool remove_from_unordered_set(value_type key);
         void write_extra(std::ostream& of);
         void read_extra(std::istream& of);
+        shard_ptr dependencies;
     public:
         void inc_keys_found() const {
             ++saf_get_ops;
@@ -239,6 +241,9 @@ namespace barch {
         node_ptr search(value_type key) override;
         art::node_ptr lower_bound(art::value_type key) override;
         art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) override;
+        shard_ptr sources() override;
+        void depends(const std::shared_ptr<abstract_shard> & source) override;
+        void release(const std::shared_ptr<abstract_shard> & source) override;
         void glob(const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb)  override ;
         alloc_pair& get_ap() override {
             return *this;
@@ -250,13 +255,24 @@ namespace barch {
             return this->shard_number;
         }
         uint64_t get_tree_size() const override{
-            return this->size;
+            uint64_t dep_size = 0; //dependencies ? dependencies->get_tree_size() : 0;
+            return this->size + dep_size;
         }
-        virtual uint64_t get_size() const override{
-            return h.size() + this->size;
+        uint64_t get_size() const override{
+            uint64_t src_size = 0;
+            auto src = dependencies;
+            if (src) {
+                src_size += src->get_size(); // called recursively but no cycles
+            }
+            auto total = get_hash_size() + this->get_tree_size() + src_size;
+            if (tomb_stones >total) {
+                throw_exception<std::runtime_error>("invalid tombstone count");
+            }
+            return  total - this->tomb_stones;
         };
-        virtual uint64_t get_hash_size() const override{
-            return h.size();
+        uint64_t get_hash_size() const override{
+            uint64_t dep_size = 0;//dependencies ? dependencies->get_hash_size() : 0;
+            return h.size() + dep_size;
         };
         art::node_ptr tree_minimum() const override;
         art::node_ptr tree_maximum() const override;

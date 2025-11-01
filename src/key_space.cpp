@@ -49,7 +49,9 @@ namespace barch {
     void all_spaces(const std::function<void(const std::string& name, const barch::key_space_ptr&)>& cb ) {
         std::unique_lock l(lock);
         for (auto &ks : spaces) {
-            cb(undecorate(ks.first), ks.second);
+            auto un = undecorate(ks.first);
+            if (un.empty()) un = "(default)";
+            cb(un, ks.second);
         }
     }
 
@@ -183,4 +185,22 @@ namespace barch {
     heap::vector<shard_ptr> key_space::get_shards() {
         return shards;
     };
+    void key_space::depends(const key_space_ptr& source) {
+        this->src = source;
+        auto current = source;
+        while (current && current.get() != this) {
+            current = current->source();
+        }
+        if (current.get() == this) {
+            throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
+        }
+        for (auto &d : get_shards()) {
+            auto sn = d->get_shard_number();
+            d->depends(source->get(sn));
+        }
+
+    }
+    key_space_ptr key_space::source() const {
+        return this->src;
+    }
 } // barch

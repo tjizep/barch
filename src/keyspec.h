@@ -15,7 +15,9 @@ extern "C" {
 #include <initializer_list>
 #include "sastam.h"
 #include "glob.h"
-
+namespace barch {
+    extern bool check_ks_name(const std::string& name_);
+}
 namespace art {
     /**
          * the current time in milliseconds
@@ -32,20 +34,32 @@ namespace art {
         int r = 0;
         char empty[2] = {0x00, 0x00};
         mutable std::string s{};
+        mutable int syntax_error = 0;
+        int is_parse_error(int spos) const {
+            return (syntax_error == 0 && spos + 1 == argc) ? 0 : -1;
+        }
+        void clear_error() {
+            syntax_error = 0;
+        }
         base_key_spec() = default;
         base_key_spec(const arg_t& argv):argv(argv),argc(argv.size()){};
 
         const std::string &tos(int at) const {
             s.clear();
-            if (at >= argc) return s;
+            if (at >= argc) {
+                ++syntax_error;
+                return s;
+            }
             auto vt = argv[at];
             s.append(vt.chars(), vt.size);
             return s;
         }
 
         const char *toc(int at) const {
-            if (at >= argc) return empty;
-
+            if (at >= argc) {
+                ++syntax_error;
+                return empty;
+            }
             auto val = argv[at];
             if (val.empty()) {
                 return empty;
@@ -55,8 +69,10 @@ namespace art {
 
         std::string &tos(int at) {
             s.clear();
-            if (at >= argc) return s;
-
+            if (at >= argc) {
+                ++syntax_error;
+                return s;
+            }
             auto val = argv[at];
             if (val.empty()) {
                 return s;
@@ -75,10 +91,13 @@ namespace art {
 
         // integer
         int64_t tol(int at) const {
-            if (at >= argc) return 0;
-
+            if (at >= argc) {
+                ++syntax_error;
+                return 0;
+            }
             auto &scheck = tos(at);
             if (!std::regex_match(scheck, integer)) {
+                ++syntax_error;
                 return 0;
             }
             auto val = std::stoll(scheck);
@@ -88,14 +107,16 @@ namespace art {
         int has_enum(const std::initializer_list<const char *> &names, int at) {
             const char *token = toc(at);
             int ctr = 0;
+            auto l1 = std::tolower(*token);
             for (const char *name: names) {
-                if (std::tolower(*token) == *name) {
+                if (l1 == std::tolower(*name)) {
                     if (strcasecmp(token + 1, name + 1) == 0) {
                         return ctr;
                     }
                 }
                 ++ctr;
             }
+
             return ctr;
         }
         bool match(const char* pat, int at) const {
@@ -838,5 +859,6 @@ namespace art {
             return VALKEYMODULE_OK;
         }
     };
+
 };
 #endif //SET_H

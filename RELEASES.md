@@ -1,4 +1,4 @@
-# Release v0.3.4.2b 2025-10-27
+# Release v0.3.4.2b 2025-11-01
 
 ## New Features
 
@@ -11,15 +11,28 @@
    - `INFO SHARD #1` returns shard info for shard number 1
    - `INFO SHARD ##1` or `#ABC` returns shard info for key `##1` or `#ABC`
 6. add key space support with these new api's key space name's should match `[0-9,A-Z,a-z,_]+` 
-    - `USE ksname` the named keyspace is made the current store for all other API's
-    - `UNLOAD ksname` all memory used by named key space is cleared except if it's in use
-    - `SPACES` returns a list of loaded key spaces and their sizes
-    - total count in the entire db of all shards in all key spaces
-      `SIZEALL`
-    - save and clear all key spaces
-      `CLEARALL`
-      `SAVEALL`
-    - `KSOPTION SET [UNORDERED|ORDERED]` sets the current key space to ordered or unordered, option is saved in key space shards
+   - `SPACES USE ksname` the named keyspace is made the current store for all other API's, a new keyspace will be empty
+   - `SPACES UNLOAD ksname` all memory used by named key space is cleared except if it's in use
+   - `SPACES` returns a list of loaded key spaces and their sizes
+   - total count in the entire db of all shards in all key spaces
+     `SIZEALL`
+   - save and clear all key spaces
+     `CLEARALL`
+     `SAVEALL`
+   - Key space operators:
+   - `SPACES DEPENDS {depend[e|a]nt key space} ON {source key space name} [STATIC]`
+     Let a key space depend on a list of one or more source key spaces (dependant missing keys are resolved in source)
+     keys are added to the dependent and not propagated to the source
+   - `SPACES RELEASE {depend[e|a]nt key space} FROM {source key space name}`
+     release a source from a dependent
+   - `SPACES DEPENDANTS {key space name}`
+     list the dependants
+   - `SPACES MERGE {depend[e|a]nt key space} [TO {source key space name}]`
+      Merge a dependent named key space to its sources or any other random key space 
+   - `SPACES OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
+   - `SPACES OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
+   - `SPACES OPTION [SET|GET] RANDOM [ON|OFF|VOLATILE]` sets the current key space to evict randomly
+
 7. add optional extra part to storage for future backwards compatibility
 8. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group
    So keys is still fast but can not bring down a server
@@ -34,6 +47,7 @@
 5. Thread and memory cleanup (v0.3.4.2b 2025-10-24)
 6. Add key space name to rpc and repl (v0.3.4.2b 2025-10-24)
 7. fix route test (v0.3.4.2b 2025-10-27)
+8. parser case insensitivity (v0.3.4.2b 2025-10-28)
 
 # Release v0.3.3.32b 2025-09-24
 

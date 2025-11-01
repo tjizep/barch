@@ -108,6 +108,7 @@ namespace art {
         trace_list trace{};
         mutable std::string temp_key{};
         node_ptr last_leaf_added{};
+        uint64_t tomb_stones {};
         void update_trace(int direction);
         value_type tree_filter_key(value_type key) const;
         void clear_trace() {
@@ -126,6 +127,17 @@ namespace art {
                 trace.push_back(te);
         }
         void log_trace() const ;
+        bool erase_tomb(leaf* dl) {
+            if (dl && dl->is_tomb()) {
+                dl->unset_tomb();
+                if (tomb_stones == 0) {
+                    throw_exception<std::runtime_error>("invalid tombstone count");
+                }
+                --tomb_stones;
+                return true;
+            }
+            return false;
+        }
 
         /**
          * leaf allocation

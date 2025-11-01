@@ -547,7 +547,7 @@ int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack c
                     break;
                 node_ptr n = last_el(tl).child;
                 if (n.is_leaf) {
-                    const leaf *leaf = n.const_leaf();
+                    auto *leaf = n.const_leaf();
                     if (leaf->compare(key_end) <= 0) {
                         // upper bound is not
                         if (!leaf->expired()) {
@@ -614,6 +614,7 @@ art::node_ptr art::find(const tree* t, value_type key) {
 #include "iterator.h"
 
 art::iterator::iterator(barch::shard_ptr t) : t(t) {
+    if (!t) return;
     auto lb = t->tree_minimum(); //inner_min_bound(tl, t, key);
     if (lb.null()) return;
     const art::leaf *al = lb.const_leaf();
@@ -627,6 +628,7 @@ art::iterator::iterator(barch::shard_ptr t) : t(t) {
 art::iterator::iterator(barch::shard_ptr t, value_type unfiltered_key) : t(t) {
     ++statistics::lb_ops;
     try {
+        if (!t) return;
         value_type key = t->filter_key(unfiltered_key);
         auto lb = t->lower_bound(tl, key); //inner_min_bound(tl, t, key);
         if (lb.null()) return;
@@ -643,6 +645,7 @@ art::iterator::iterator(barch::shard_ptr t, value_type unfiltered_key) : t(t) {
 }
 
 bool art::iterator::previous() {
+    if (!t) return false;
     c = nullptr;
     bool r = decrement_trace(t->get_root(), tl);
     if (!r) {
@@ -657,6 +660,8 @@ bool art::iterator::previous() {
 }
 
 bool art::iterator::next() {
+    if (!t) return false;
+
     c = nullptr;
     bool r = increment_trace(t->get_root(), tl);
     if (!r) {
@@ -666,12 +671,16 @@ bool art::iterator::next() {
         if (!c.is_leaf) {
             c = nullptr;
         }
+
     }
+
     return r;
+
+
 }
 
 bool art::iterator::end() const {
-    return !c.is_leaf || (t->get_tree_size() > 1 && tl.empty()) || !t || t->get_tree_size() == 0;
+    return !t || !c.is_leaf || (t->get_tree_size() > 1 && tl.empty()) || t->get_tree_size() == 0;
 }
 
 bool art::iterator::ok() const {
@@ -679,6 +688,7 @@ bool art::iterator::ok() const {
 }
 
 art::node_ptr art::iterator::current() const {
+    if (!t) return nullptr;
     return c;
 }
 
@@ -687,10 +697,11 @@ const art::leaf *art::iterator::l() const {
 }
 
 art::value_type art::iterator::key() const {
+    if (!t) return {};
     return l()->get_key();
 }
 bool art::iterator::last() {
-    if (!t->get_tree_size()) return false;
+    if (!t || !t->get_tree_size()) return false;
     tl.clear();
     if (!extend_trace_max(t->get_root(), tl)) {
         tl.clear();
@@ -705,6 +716,7 @@ bool art::iterator::last() {
 }
 
 art::value_type art::iterator::value() const {
+    if (!t) return {};
     return l()->get_value();
 }
 
@@ -867,7 +879,7 @@ int64_t art::iterator::distance(value_type other, bool traced) const {
             abort_with("invalid key order");
         }
         prev = a.key();
-        ++r;
+
         a.next();
     }
     return r;
@@ -1003,6 +1015,7 @@ static art::node_ptr handle_leaf_replacement(
         // call back indicates actual replacement
         fc(n);
         art::leaf *dl = n.l();
+        t->erase_tomb(dl);
         if (art::is_leaf_direct_replacement(dl,value,options))
         {
             dl->set_value(value);
@@ -1035,7 +1048,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
     }
     // If we are at a leaf, we need to replace it with a node
     if (n.is_leaf) {
-        const art::leaf *l = n.const_leaf();
+        const art::leaf *l = n.cl();
         // Check if we are updating an existing value
         if (l->compare(key) == 0) {
             *old = 1;
@@ -1313,6 +1326,7 @@ void art_delete(art::tree *t, art::value_type key, const art::NodeResult &fc) {
         t->clear_trace();
         art::node_ptr l = recursive_delete(t, t->root, t->root, key, 0);
         if (!l.null()) {
+            t->erase_tomb(l.l());
             t->size--;
             t->update_trace(-1);
             if (!l.const_leaf()->expired())

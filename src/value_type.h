@@ -161,6 +161,12 @@ namespace art {
             abort_with("index out of range");
         }
     };
+    struct vt_hash{
+        size_t operator()(const value_type& k) const {
+            uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(k.chars(), k.size);
+            return hash;
+        }
+    };
 }
 typedef heap::small_vector<art::value_type> arg_t;
 #endif //VALUE_TYPE_H

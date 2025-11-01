@@ -63,7 +63,8 @@ namespace art {
         leaf_large_flag = 8u,
         leaf_hashed_flag = 16u,
         leaf_lru_flag = 32u,
-        leaf_last_flag = (1<<(5u+1u))-1,
+        leaf_tomb_flag = 64u,
+        leaf_last_flag = (1<<(6u+1u))-1,
     };
 
     struct leaf;
@@ -593,6 +594,25 @@ namespace art {
 
         [[nodiscard]] bool is_lru() const {
             return (flags & leaf_lru_flag) == leaf_lru_flag;
+        }
+
+        void set_tomb() {
+            flags |= leaf_tomb_flag;
+        }
+
+        void set_tomb(bool value) {
+            if (value)
+                set_tomb();
+            else
+                unset_tomb();
+        }
+
+        void unset_tomb() {
+            flags &= ~leaf_tomb_flag;
+        }
+
+        [[nodiscard]] bool is_tomb() const {
+            return (flags & leaf_tomb_flag) == leaf_tomb_flag;
         }
 
         void set_deleted() {

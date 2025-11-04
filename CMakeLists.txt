@@ -271,6 +271,10 @@ else()
 
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
+        add_test(NAME TestInstallRedisPy
+                COMMAND "pip" install redis
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
         add_test(NAME TestBarchInstallPy
                 COMMAND "pip" install .
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

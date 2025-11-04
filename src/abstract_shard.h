@@ -16,6 +16,7 @@ namespace barch {
         bool opt_ordered_keys = get_ordered_keys();
         bool opt_all_keys_lru = false;
         bool opt_volatile_keys_lru = false;
+        bool opt_drop_on_release = false;
         virtual ~abstract_shard() = default;
         virtual bool remove_leaf_from_uset(art::value_type key) = 0;
         virtual std::shared_mutex& get_latch() = 0;
@@ -70,7 +71,8 @@ namespace barch {
         // does not replicate
         virtual bool tree_remove(art::value_type key, const art::NodeResult &fc) = 0;
         virtual bool remove(art::value_type key) = 0;
-
+        virtual void merge(const shard_ptr& to) = 0;
+        virtual void merge() = 0;
         /**
          * find a key. if the key does not exist pull sources will be queried for the key
          * if the key is no-were a null is returned

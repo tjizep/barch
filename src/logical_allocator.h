@@ -864,6 +864,10 @@ public:
 
         return save_extra(main, filename, extra1);
     }
+    bool delete_files(const std::string &filename) {
+        std::string fname = main.name+filename;
+        return std::remove(fname.c_str())==0;
+    }
 
     bool send_extra(const arena::hash_arena &copy, std::ostream &out,
                     const std::function<void(std::ostream &of)> &extra1) const {

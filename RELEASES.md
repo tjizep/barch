@@ -1,4 +1,4 @@
-# Release v0.3.4.2b 2025-11-01
+# Release v0.3.4.2b 2025-11-04
 
 ## New Features
 
@@ -27,7 +27,9 @@
      release a source from a dependent
    - `SPACES DEPENDANTS {key space name}`
      list the dependants
-   - `SPACES MERGE {depend[e|a]nt key space} [TO {source key space name}]`
+   - `SPACES DROP {key space name}`
+       delete keyspace files when there's no more references to it or on program exit
+   - `SPACES MERGE {depend[e|a]nt key space} [INTO {source key space name}]`
       Merge a dependent named key space to its sources or any other random key space 
    - `SPACES OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
    - `SPACES OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
@@ -37,6 +39,8 @@
 8. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group
    So keys is still fast but can not bring down a server
 9. `VALUES` match all values in the db against a glob pattern while
+11. Added `CLIENT INFO` command - for resp interface only
+12. Added `MULTI` command - for resp interface only (transaction support in redis style)
 
 ## Fixes
 

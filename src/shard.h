@@ -231,7 +231,8 @@ namespace barch {
         bool remove(value_type key, const NodeResult &fc) override;
         bool tree_remove(value_type key, const NodeResult &fc) override;
         bool remove(value_type key) override;
-
+        void merge(const shard_ptr& to) override;
+        void merge() override;
         /**
          * find a key. if the key does not exist pull sources will be queried for the key
          * if the key is no-were a null is returned

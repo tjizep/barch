@@ -9,6 +9,7 @@
 #include "vector_stream.h"
 
 namespace barch {
+    extern std::atomic<uint64_t> client_id;
     class resp_session : public std::enable_shared_from_this<resp_session>
         {
         public:
@@ -18,6 +19,9 @@ namespace barch {
               : socket_(std::move(socket))
             {
                 parser.init(init_char);
+                caller.info_fun = [this]() -> std::string {
+                    return get_info();
+                };
                 ++statistics::repl::redis_sessions;
             }
             ~resp_session() {
@@ -37,10 +41,32 @@ namespace barch {
                 }
                 return true;
             }
+            std::string get_info() const {
+                auto rmote = socket_.remote_endpoint();
+                auto lcal = socket_.local_endpoint();
+                uint64_t seconds = (art::now() - created)/1000;
+                std::string laddress = lcal.address().to_string()+":"+ std::to_string(lcal.port());
+                std::string address = rmote.address().to_string()+":"+ std::to_string(rmote.port());
+
+                std::string r =
+                    "id="+std::to_string(this->id)+" addr="+address+ " "
+                    "laddr="+laddress+" fd="+"10"+ " "
+                    "name="+""+" age="+std::to_string(seconds)+" "+
+                    "idle=0 flags=N capa= db=0 sub=0 psub=0 ssub=0 "+
+                    "multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=10 multi-mem=0 "+
+                    "rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem="+std::to_string(rpc_io_buffer_size+parser.get_max_buffer_size())+" "+
+                    "events=r cmd=client|info user="+caller.get_user()+" redir=-1 "+
+                    "resp=2 lib-name= lib-ver= "+
+                    "tot-net-in="+ std::to_string(bytes_recv)+ " " +
+                    "tot-net-out=" + std::to_string(bytes_sent)+ " " +
+                    "tot-cmds=" + std::to_string(calls_recv) + "\n";
+                return r;
+            }
         private:
             template<typename PT>
             void run_params(vector_stream& stream, const PT& params) {
                 std::string cn{ params[0]};
+                ++calls_recv;
                 auto bf = barch_functions; // take a snapshot
                 if (prev_cn != cn) {
                     ic = bf->find(cn);
@@ -77,7 +103,7 @@ namespace barch {
                     {
 
                         if (!ec){
-
+                            bytes_recv += length;
                             parser.add_data(data_, length);
                             try {
 
@@ -109,6 +135,7 @@ namespace barch {
                         if (!ec){
                                 net_stat stat;
                                 stream_write_ctr += length;
+                                bytes_sent += length;
                         }else {
                             //art::std_err("error", ec.message(), ec.value());
                         }
@@ -121,6 +148,11 @@ namespace barch {
             vector_stream stream{};
             std::string prev_cn{};
             function_map::iterator ic{};
+            uint64_t id = ++client_id;
+            uint64_t bytes_recv = 0;
+            uint64_t bytes_sent = 0;
+            uint64_t calls_recv = 0;
+            uint64_t created = art::now();
         };
 
 }

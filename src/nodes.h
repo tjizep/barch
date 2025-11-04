@@ -528,7 +528,9 @@ namespace art {
             if (is_volatile) set_volatile();
             set_expiry(expiry);
         }
-
+        key_options options() const {
+            return {expiry_ms(),true,is_volatile(),is_hashed()};
+        }
         uint8_t flags{};
         LeafSize _key_len{}; // does not include null terminator (which is hidden: see make_leaf)
         LeafSize _val_len{};

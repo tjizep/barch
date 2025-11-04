@@ -882,7 +882,7 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
         this->repl_client.find_insert(key);
         return this->last_leaf_added;
     }
-    if (dependencies && r.cl()->is_tomb()) {
+    if (r.cl()->is_tomb()) {
         return nullptr;
     }
     // check if r.cl()->is_tombstone() and return nullptr
@@ -947,6 +947,11 @@ barch::shard::~shard() {
     thread_exit.wait();
     if (tmaintain.joinable())
         tmaintain.join();
+    if (opt_drop_on_release) {
+        this->get_leaves().delete_files(".dat");
+        this->get_nodes().delete_files(".dat");
+    }
+
 }
 
 #include "configuration.h"
@@ -970,7 +975,28 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
 
     }
 }
+void barch::shard::merge() {
+    merge(dependencies);
+}
+void barch::shard::merge(const shard_ptr& to) {
+    if (!to) return;
+    auto &lc = get_leaves();
 
+    lc.iterate_pages([&to](size_t s, size_t , auto& data) {
+        page_iterator(data, s, [&](const leaf *l, uint32_t ) {
+            if (l->deleted()) return;
+            if (l->is_tomb()) {
+                to->remove(l->get_key());
+                return;
+            }
+            if (l->is_hashed()) {
+                to->hash_insert(l->options(), l->get_key() ,l->get_value(), true, [](node_ptr){});
+            }else {
+                to->tree_insert(l->options(), l->get_key() ,l->get_value(), true, [](node_ptr){});
+            }
+        });
+    });
+}
 void barch::shard::load_hash() {
     auto &lc = get_leaves();
     size_t encountered = 0;

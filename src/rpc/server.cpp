@@ -24,6 +24,7 @@
 #include "repl_session.h"
 
 namespace barch {
+    std::atomic<uint64_t> client_id = 0;
     typedef asio::executor_work_guard<asio::io_context::executor_type> exec_guard;
     struct asio_work_unit {
         asio::io_context io{};
@@ -353,6 +354,9 @@ namespace barch {
             }
 
             call_result call(heap::vector<Variable>& result, const heap::vector<value_type>& params) override {
+                return tcall(result, params);
+            }
+            call_result call(heap::vector<Variable>& result, const arg_t& params) override {
                 return tcall(result, params);
             }
             call_result asynch_call(heap::vector<Variable>& result, const heap::vector<value_type>& params) override {

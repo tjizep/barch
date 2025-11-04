@@ -99,6 +99,10 @@ function_map& functions_by_name() {
         r["STATS"] = {::STATS,{"read","stats"}};
         r["OPS"] = {OPS,{"read","stats"}};
         r["INFO"] = {INFO,{"read","stats"}};
+        r["CLIENT"] = {CLIENT,{"read","stats"}};
+
+        r["MULTI"] = {MULTI,{"write"}};
+        r["EXEC"] = {EXEC,{"write"}};
 
         r["ADDROUTE"] = {::ADDROUTE,{"write","connection"}};
         r["ROUTE"] = {::ROUTE,{"read","connection"}};

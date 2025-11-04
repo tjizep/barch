@@ -24,6 +24,7 @@ namespace barch {
         shard_ptr get(art::value_type key);
         shard_ptr get(ValkeyModuleString **argv) ;
         [[nodiscard]] std::string get_name() const;
+        [[nodiscard]] std::string get_canonical_name() const;
         heap::vector<shard_ptr> get_shards();
         size_t get_shard_index(const char* key, size_t key_len);
         size_t get_shard_index(art::value_type key);
@@ -31,6 +32,9 @@ namespace barch {
         size_t get_shard_index(ValkeyModuleString **argv) ;
         void depends(const key_space_ptr& dependant);
         key_space_ptr source() const;
+        void merge(key_space_ptr into);
+        void merge();
+        void each_shard(std::function<void(shard_ptr)> f);
     };
     typedef key_space::key_space_ptr key_space_ptr;
     const std::string& get_ks_pattern_error();

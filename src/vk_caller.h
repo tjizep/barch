@@ -155,6 +155,9 @@ struct vk_caller : caller {
     [[nodiscard]] int error() const override {
         return VALKEYMODULE_ERR;
     }
+    std::string get_info() const override {
+        return "";
+    }
     int key_check_error(art::value_type k) override {
         check_ctx();
         ++call_counter;
@@ -194,6 +197,12 @@ struct vk_caller : caller {
 
     void use(const std::string& name) override {
         this->ks = barch::get_keyspace(name);
+    }
+    void start_call_buffer() override {
+
+    }
+    void finish_call_buffer() override {
+
     }
 };
 

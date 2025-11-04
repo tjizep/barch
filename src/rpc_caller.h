@@ -25,6 +25,8 @@ struct rpc_caller : caller {
     heap::vector<bool> acl{get_all_acl()};
     arg_t args{};
     std::string user = "default";
+    std::function<std::string()> info_fun;
+    bool call_buffering = false;
     void create(const std::string& h, uint_least16_t port) {
         this->host = barch::repl::create(h,port);
     }
@@ -145,13 +147,20 @@ struct rpc_caller : caller {
         }
         return 0;
     };
-    barch::repl::call_result call_route(const std::vector<std::string_view>& params) {
+    std::string convert(const std::string_view& v) {
+        return {v.data(),v.size()};
+    }
+    std::string convert(const art::value_type& v) {
+        return {v.chars(),v.size};
+    }
+    template<typename ArgT>
+    barch::repl::call_result call_route(const ArgT& params) {
         if (valid_routes && params.size() > 1) {
             size_t shard = ks->get_shard_index(params[1]);
             if (shard < routes.size()) {
                 if (routes[shard] != nullptr) { // dont do any lookups if there's no route for perf
                     auto fbn = barch::barch_functions;
-                    std::string n = {params[0].data(),params[0].size()};
+                    std::string n = convert(params[0]);
                     auto fi = fbn->find(n);
                     if (fi != fbn->end() && fi->second.is_data()) { // only route data calls
                         ++statistics::repl::attempted_routes;
@@ -170,10 +179,18 @@ struct rpc_caller : caller {
         }
         return {-1,-1};
     }
-
+    call_type fexec = EXEC;
+    commands_t commands;
     template<typename TC, typename VT>
     int call(const VT& params, TC&& f) {
-
+        if (params.empty()) {
+            barch::std_err("invalid parameters");
+            return 0;
+        }
+        if (is_buffering() && (params[0] != "EXEC" || params[0] == "MULTI")) {
+            commands.emplace_back(f, params);
+            return 0;
+        }
         ++statistics::local_calls;
         args.clear();
         errors.clear();
@@ -190,7 +207,7 @@ struct rpc_caller : caller {
             }
         }
         for (const auto& s : params) {
-            args.push_back({s.data(),s.size()});
+            args.push_back(s);
         }
         try {
             cr.call_error = f(*this, args);
@@ -210,6 +227,10 @@ struct rpc_caller : caller {
         return cr.call_error;
     }
 
+    std::string get_info() const override {
+        if (!info_fun) return "";
+        return info_fun();
+    }
     [[nodiscard]] const std::string& get_user() const override  {
         return user;
     }
@@ -230,6 +251,36 @@ struct rpc_caller : caller {
     }
     void use(const std::string& name) override {
         this->ks = barch::get_keyspace(name);
+    }
+    void start_call_buffer() override {
+        call_buffering = true;
+    }
+    void finish_call_buffer() override {
+        call_buffering = false;
+        heap::vector<Variable> buffered_results{};
+        heap::vector<std::string> buffered_errors{};
+        for (auto& cmd: commands) {
+
+            int e = this->call(cmd.args, cmd.call);
+            // analyze results
+            if (e != 0) {
+                buffered_results.emplace_back(error(errors[0].c_str()));
+            } else {
+                if (results.empty()) {
+                    buffered_results.emplace_back(nullptr);
+                }else {
+                    for (auto& r: results) {
+                        buffered_results.emplace_back(r);
+                    }
+                }
+            }
+
+        }
+
+        results = std::move(buffered_results);
+    }
+    bool is_buffering() const {
+        return call_buffering;
     }
 };
 

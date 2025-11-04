@@ -35,7 +35,11 @@ namespace barch {
         public:
             virtual ~rpc() = default;
             virtual call_result call(heap::vector<Variable>& result, const std::vector<std::string_view>& params) = 0;
+
             virtual call_result call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) = 0;
+
+            virtual call_result call(heap::vector<Variable>& result, const arg_t& params) = 0;
+
             virtual call_result asynch_call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) = 0;
             [[nodiscard]] virtual std::error_code net_error() const = 0;
         };

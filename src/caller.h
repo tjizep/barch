@@ -47,6 +47,9 @@ struct caller {
     virtual int reply_encoded_key(art::value_type key) = 0;
     virtual int reply(const std::string& value) = 0;
     virtual int reply_values(const std::initializer_list<Variable>& keys) = 0;
+    virtual std::string get_info() const = 0;
+    virtual void start_call_buffer() = 0;
+    virtual void finish_call_buffer() = 0;
     [[nodiscard]] virtual const std::string& get_user() const = 0;
     [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
@@ -54,5 +57,17 @@ struct caller {
     virtual void set_kspace(const barch::key_space_ptr& ks) = 0;
     virtual void use(const std::string& name) = 0;
 };
+typedef std::function<int(caller& call,const arg_t& argv)> call_type;
+struct command {
+    command(const call_type& call, const std::vector<std::string_view>& args_) : call(call) {
+        for (auto& a: args_) {
+            args.emplace_back(a);
+        }
+    }
+    command(const call_type& call, arg_t args) : call(call), args(args){}
+    call_type call{};
+    arg_t args{};
 
+};
+typedef heap::vector<command> commands_t;
 #endif //CALLER_H

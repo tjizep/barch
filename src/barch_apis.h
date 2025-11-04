@@ -52,6 +52,9 @@ extern "C"{
     int AUTH(caller& call,const arg_t& argv);
     int ACL(caller& call,const arg_t& argv);
     int INFO(caller& call, const arg_t& argv);
+    int CLIENT(caller& call, const arg_t& arg_v);
+    int MULTI(caller& call, const arg_t& arg_v);
+    int EXEC(caller& call, const arg_t& arg_v);
     // Keys
     int SET(caller& call,const arg_t& argv);
     int APPEND(caller& call,const arg_t& argv);

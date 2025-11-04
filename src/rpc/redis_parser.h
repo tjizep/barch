@@ -35,6 +35,7 @@ namespace redis {
         void add_data(const char * data, size_t len);
         [[nodiscard]] size_t remaining() const ;
         const std::vector<std::string_view>& read_new_request();
+        size_t get_max_buffer_size() const;
     private:
         int state = 0;
         int size = 0;
@@ -43,6 +44,7 @@ namespace redis {
         int32_t bstr_size = 0;
         size_t buffer_start = 0l;
         size_t buffer_size = 0l;
+        size_t max_buffer_size = 0l;
         size_t parameters_processed = 0l;
         size_t messages_processed = 0l;
         std::string full_buffer{};

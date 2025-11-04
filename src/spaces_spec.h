@@ -23,10 +23,12 @@ namespace art {
         bool is_dependants = false;
         bool is_release = false;
         bool is_merge = false;
+        bool is_merge_default = false;
         bool is_option = false;
         bool is_get = false;
         bool is_set = false;
         bool is_static = false;
+        bool is_drop = false;
 
         std::string dependant;
         std::string source;
@@ -80,9 +82,19 @@ namespace art {
                 }
                 return -1;
             }
+            if (has("DROP",spos)) {
+                is_drop = true;
+                source = tos(++spos);
+
+                return is_parse_error(spos);
+            }
 
             if (has("MERGE",spos)) {
                 is_merge = true;
+                if (spos + 1 == argc) {
+                    is_merge_default = true;
+                    return 0;
+                }
                 dependant = tos(++spos);
                 if (!barch::check_ks_name(dependant)) {
                     return -1;

@@ -173,7 +173,35 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
     return caller.vk_call(ctx, argv, argc, ::RANGE);
 }
-
+int CLIENT(caller& call, const arg_t& arg_v) {
+    if (arg_v.size()<=1) {
+        return call.wrong_arity();
+    }
+    if (arg_v[1] == "INFO") {
+        std::string r = call.get_info();
+        return call.reply(r);
+    }
+    if (arg_v[1] == "SETINFO") {
+        if (arg_v.size() == 4) {
+            return call.ok();
+        }
+    }
+    return call.syntax_error();
+}
+int MULTI(caller& call, const arg_t& arg_v) {
+    if (arg_v.size()!=1) {
+        return call.wrong_arity();
+    }
+    call.start_call_buffer();
+    return call.ok();
+}
+int EXEC(caller& call, const arg_t& arg_v) {
+    if (arg_v.size()!=1) {
+        return call.wrong_arity();
+    }
+    call.finish_call_buffer();
+    return 0;
+}
 int COUNT(caller& call, const arg_t& argv) {
 
     if (argv.size() != 3)
@@ -189,8 +217,10 @@ int COUNT(caller& call, const arg_t& argv) {
     long long count = 0;
     auto c1 = conversion::convert(k1);
     auto c2 = conversion::convert(k2);
-    for (auto shard : barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
+    auto space_cnt = [c1,c2](barch::key_space_ptr spce, size_t shard)-> size_t {
+        if (!spce) return 0;
+        size_t count = 0;
+        auto t = spce->get(shard);
         read_lock release(t);
 
         art::iterator i(t,c1.get_value());
@@ -203,6 +233,12 @@ int COUNT(caller& call, const arg_t& argv) {
             auto c = i.fast_distance(j) ;
             count += c; // they're all unique ?
         }
+        return count;
+    };
+    auto s = call.kspace();
+    for (auto shard : barch::get_shard_count()) {
+        count += space_cnt(s, shard);
+        count += space_cnt(s->source(), shard);
     }
     return call.any_int(count);
 }
@@ -1022,6 +1058,8 @@ int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
      release a source from a dependent
     - `KSPACE DEPENDANTS {key space name}`
      list the dependants
+    - `KSPACE DROP {key space name}`
+         list the dependants
     - `KSPACE MERGE {depend[e|a]nt key space} [TO {source key space name}]`
       Merge a dependent named key space to its sources or any other random key space
     - `KSPACE OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
@@ -1052,22 +1090,67 @@ int KSPACE(caller& call, const arg_t& argv) {
     }
 
     if (parser.is_merge) {
+        if (parser.is_merge_default) {
+            call.kspace()->merge();
+            return call.ok();
+        }
+        auto source = barch::get_keyspace(parser.source);
+        auto dependent = barch::get_keyspace(parser.dependant);
 
+        ks_shared shl(dependent);
+        ks_unique ul(source);
+        dependent->merge(source);
     }
 
     if (parser.is_release) {
-
+        auto dependent = barch::get_keyspace(parser.dependant);
+        auto source = dependent->source();
+        if (!source || source->get_canonical_name() != parser.source) {
+            if (!parser.source.empty())
+                return call.error("Invalid source keyspace name");
+        }
+        ks_unique shl(dependent);
+        ks_shared ul(source);
+        dependent->depends(nullptr);
+        return call.simple("OK");
+    }
+    if (parser.is_drop) {
+        auto source = parser.source.empty() ? call.kspace() : barch::get_keyspace(parser.source);
+        ks_unique shl(source);
+        source->depends(nullptr);
+        source->each_shard([](barch::shard_ptr shrd) {
+            shrd->opt_drop_on_release = true;
+        });
+        source = nullptr;
+        barch::unload_keyspace(parser.source);
+        return call.simple("OK");
     }
 
     if (parser.is_option && parser.is_get) {
-
+        auto spc = call.kspace();
+        ks_shared ul(spc);
+        if (parser.name == "ORDERED") {
+            barch::shard_ptr ptr = spc->get(0ul);
+            call.boolean(ptr->opt_ordered_keys);
+            return 0;
+        }
+        return call.simple("OK");
     }
 
     if (parser.is_option && parser.is_set) {
+        auto spc = call.kspace();
+        ks_unique ul(spc);
+        if (parser.name == "ORDERED") {
+            bool on = parser.value == "ON";
+            for (auto &shrd : spc->get_shards()) {
+                shrd->opt_ordered_keys = on;
+            }
+            return call.simple("OK");
+        }
 
     }
 
-    return call.simple("OK");
+    return call.null();
 }
 
 int cmd_KSPACE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

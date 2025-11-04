@@ -181,22 +181,40 @@ namespace barch {
     [[nodiscard]] std::string key_space::get_name() const {
         return name;
     };
+    [[nodiscard]] std::string key_space::get_canonical_name() const {
+        return undecorate(name);
+    };
 
     heap::vector<shard_ptr> key_space::get_shards() {
         return shards;
     };
+    void key_space::merge() {
+        merge(source());
+    }
+    void key_space::each_shard(std::function<void(shard_ptr)> f) {
+        for (auto& s: shards) {
+            f(s);
+        }
+    }
+    void key_space::merge(key_space_ptr into) {
+        if (!into) return;
+        for (auto &d : shards) {
+            auto sn = d->get_shard_number();
+            d->merge(into->get(sn));
+        }
+    }
     void key_space::depends(const key_space_ptr& source) {
         this->src = source;
         auto current = source;
         while (current && current.get() != this) {
             current = current->source();
         }
-        if (current.get() == this) {
+        if (current && current.get() == this) {
             throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
         }
-        for (auto &d : get_shards()) {
+        for (auto &d : shards) {
             auto sn = d->get_shard_number();
-            d->depends(source->get(sn));
+            d->depends(source ? source->get(sn) : nullptr);
         }
 
     }

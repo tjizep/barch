@@ -311,6 +311,14 @@ else()
                 COMMAND "python" ${CMAKE_SOURCE_DIR}/test/routetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
+        add_test(NAME TestRespClientLocal
+                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/redispytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestMerge
+                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/mergetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
     endif ()
 endif ()
 

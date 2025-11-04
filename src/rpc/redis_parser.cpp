@@ -53,6 +53,7 @@ namespace redis {
         }
         full_buffer.append(data, len);
         buffer_size+=len;
+        max_buffer_size = std::max(buffer_size,max_buffer_size);
     }
     size_t redis_parser::remaining() const {
         return std::max(buffer_size, buffer_start) - buffer_start; //buffer.size();
@@ -139,6 +140,11 @@ namespace redis {
         state_error,
         state_max
     };
+
+    size_t redis_parser::get_max_buffer_size() const {
+        return max_buffer_size;
+    }
+
     const std::vector<std::string_view>& redis_parser::read_new_request(){
         while (state != state_end) {
             // Assumes each RESP request is an array of bulk strings

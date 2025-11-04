@@ -195,11 +195,13 @@ namespace art {
             return r;
         }
 
-        [[nodiscard]] int64_t fast_distance(const iterator &other) const {
+        [[nodiscard]] int64_t fast_distance(const merge_iterator &other) const {
             check_end();
             auto r = 0ll;
+            size_t n = 0;
             for (auto& i: others) {
-                r += i.fast_distance(other);
+                r += i.fast_distance(other.others[n]);
+                ++n;
             }
             return r;
         }

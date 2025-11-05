@@ -323,6 +323,10 @@ else()
                 COMMAND "python" ${CMAKE_SOURCE_DIR}/test/mergetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestSpaceThread
+                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/spacethreadtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
     endif ()
 endif ()
 

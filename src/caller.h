@@ -59,15 +59,15 @@ struct caller {
 };
 typedef std::function<int(caller& call,const arg_t& argv)> call_type;
 struct command {
-    command(const call_type& call, const std::vector<std::string_view>& args_) : call(call) {
+    command(const call_type& call, const std::vector<std::string_view>& args_,barch::key_space_ptr space) : call(call),space(space) {
         for (auto& a: args_) {
             args.emplace_back(a);
         }
     }
-    command(const call_type& call, arg_t args) : call(call), args(args){}
+    command(const call_type& call, arg_t args, barch::key_space_ptr space) : call(call), args(args), space(space){}
     call_type call{};
     arg_t args{};
-
+    barch::key_space_ptr space{};
 };
 typedef heap::vector<command> commands_t;
 #endif //CALLER_H

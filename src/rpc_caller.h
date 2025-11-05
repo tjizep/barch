@@ -188,7 +188,7 @@ struct rpc_caller : caller {
             return 0;
         }
         if (is_buffering() && (params[0] != "EXEC" || params[0] == "MULTI")) {
-            commands.emplace_back(f, params);
+            commands.emplace_back(f, params, ks);
             return 0;
         }
         ++statistics::local_calls;
@@ -259,8 +259,9 @@ struct rpc_caller : caller {
         call_buffering = false;
         heap::vector<Variable> buffered_results{};
         heap::vector<std::string> buffered_errors{};
+        auto original = ks;
         for (auto& cmd: commands) {
-
+            this->ks = cmd.space;
             int e = this->call(cmd.args, cmd.call);
             // analyze results
             if (e != 0) {
@@ -278,6 +279,7 @@ struct rpc_caller : caller {
         }
 
         results = std::move(buffered_results);
+        ks = original;
     }
     bool is_buffering() const {
         return call_buffering;

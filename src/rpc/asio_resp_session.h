@@ -66,34 +66,54 @@ namespace barch {
             template<typename PT>
             void run_params(vector_stream& stream, const PT& params) {
                 std::string cn{ params[0]};
-                ++calls_recv;
-                auto bf = barch_functions; // take a snapshot
-                if (prev_cn != cn) {
-                    ic = bf->find(cn);
-                    prev_cn = cn;
-                    if (ic != bf->end() &&
-                        !is_authorized(ic->second.cats,caller.get_acl())) {
-                        redis::rwrite(stream, error{"not authorized"});
-                        return;
+
+                auto colon = cn.find_last_of(':');
+                auto spc = caller.kspace();
+                bool should_reset_space = false;
+                try {
+                    if (colon != std::string::npos && colon < cn.size()-1) {
+                        std::string space = cn.substr(0,colon);
+                        cn = cn.substr(colon+1);
+
+                        if (!spc || spc->get_canonical_name() != space) {
+
+                            caller.set_kspace(barch::get_keyspace(space));
+                            should_reset_space = true;
+                        }
                     }
-                }
-                if (ic == bf->end()) {
-                    redis::rwrite(stream, error{"unknown command"});
-                } else {
-
-                    auto &f = ic->second.call;
-                    ++ic->second.calls;
-
-                    int32_t r = caller.call(params,f);
-                    if (r < 0) {
-                        if (!caller.errors.empty())
-                            redis::rwrite(stream, error{caller.errors[0]});
-                        else
-                            redis::rwrite(stream, error{"null error"});
+                    ++calls_recv;
+                    auto bf = barch_functions; // take a snapshot
+                    if (prev_cn != cn) {
+                        ic = bf->find(cn);
+                        prev_cn = cn;
+                        if (ic != bf->end() &&
+                            !is_authorized(ic->second.cats,caller.get_acl())) {
+                            redis::rwrite(stream, error{"not authorized"});
+                            return;
+                        }
+                    }
+                    if (ic == bf->end()) {
+                        redis::rwrite(stream, error{"unknown command"});
                     } else {
-                        redis::rwrite(stream, caller.results);
+
+                        auto &f = ic->second.call;
+                        ++ic->second.calls;
+
+                        int32_t r = caller.call(params,f);
+                        if (r < 0) {
+                            if (!caller.errors.empty())
+                                redis::rwrite(stream, error{caller.errors[0]});
+                            else
+                                redis::rwrite(stream, error{"null error"});
+                        } else {
+                            redis::rwrite(stream, caller.results);
+                        }
                     }
+                }catch (std::exception& e) {
+                    redis::rwrite(stream, error{e.what()});
                 }
+                if (should_reset_space)
+                    caller.set_kspace(spc); // return to old value
             }
             void do_read()
             {

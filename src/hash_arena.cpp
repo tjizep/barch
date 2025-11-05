@@ -94,12 +94,12 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
 
 bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::function<void(std::istream &)> &extra,
                                         const std::string &filename) {
-    barch::std_log("reading from",std::filesystem::current_path().c_str(),filename);
     std::ifstream in{filename, std::ios::in | std::ios::binary};
     if (!in.is_open()) {
-        barch::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
+        //barch::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
         return false;
     }
+    barch::std_log("reading from",std::filesystem::current_path().c_str(),filename);
     in.seekg(0, std::ios::end);
     //uint64_t eof = in.tellg();
     in.seekg(0, std::ios::beg);

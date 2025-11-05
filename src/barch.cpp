@@ -933,9 +933,9 @@ int cmd_MAX(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     return call.vk_call(ctx, argv, argc, MAX);
 }
 /* B.LB <key>
+ * return first key not less than parameter in 1st slot
  *
- * Return the value of the specified key, or a null reply if the key
- * is not defined. */
+ */
 int LB(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
@@ -978,6 +978,13 @@ int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, LB);
 }
+
+/**
+ * upper bound
+ * @param call contains call context to place results
+ * @param argv 1st param is key for upperbound
+ * @return 0 if no error with key thats the upper bound (first larger than key in argv
+ */
 int UB(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
@@ -1083,16 +1090,22 @@ int KSPACE(caller& call, const arg_t& argv) {
         ks_shared shl(source);
         ks_unique ul(dependent);
         dependent->depends(source);
+        return call.simple("OK");
     }
 
     if (parser.is_dependants) {
-
+        auto dependent = barch::get_keyspace(parser.dependant); // this will throw if parameter is wrong
+        auto source = dependent->source();
+        if (source) {
+            return call.reply(source->get_canonical_name());
+        }
+        return call.null();
     }
 
     if (parser.is_merge) {
         if (parser.is_merge_default) {
             call.kspace()->merge();
-            return call.ok();
+            return call.simple("OK");
         }
         auto source = barch::get_keyspace(parser.source);
         auto dependent = barch::get_keyspace(parser.dependant);
@@ -1100,6 +1113,7 @@ int KSPACE(caller& call, const arg_t& argv) {
         ks_shared shl(dependent);
         ks_unique ul(source);
         dependent->merge(source);
+        return call.simple("OK");
     }
 
     if (parser.is_release) {
@@ -1122,8 +1136,8 @@ int KSPACE(caller& call, const arg_t& argv) {
             shrd->opt_drop_on_release = true;
         });
         source = nullptr;
-        barch::unload_keyspace(parser.source);
-        return call.simple("OK");
+        if (barch::unload_keyspace(parser.source))
+            return call.simple("OK");
     }
 
     if (parser.is_option && parser.is_get) {
@@ -1203,7 +1217,7 @@ int SPACES(caller& call, const arg_t& argv) {
     }else {
         return KSPACE(call, argv);
     }
-    return 0;
+    return call.ok();
 }
 int cmd_SPACES(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;

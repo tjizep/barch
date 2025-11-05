@@ -11,7 +11,7 @@
 namespace barch {
     static std::mutex lock{};
     static std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
-    static std::string ks_pattern_error = "name does not match the "+ks_pattern+" pattern";
+    static std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
     static std::regex name_check(ks_pattern);
     static heap::map<std::string, key_space_ptr> spaces{};
     static std::string decorate(const std::string& name_) {
@@ -92,10 +92,8 @@ namespace barch {
             std::unique_lock l(lock);
             auto s = spaces.find(name);
             if (s != spaces.end()) {
-                if (s->second.use_count() == 1) {
-                    spaces.erase(s);
-                    r = true;
-                }
+                spaces.erase(s);
+                r = true;
             }
         }
         return r; // destruction happens in callers thread - so hopefully no dl because shared ptr

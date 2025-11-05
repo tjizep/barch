@@ -259,7 +259,7 @@ namespace barch {
             uint64_t dep_size = 0; //dependencies ? dependencies->get_tree_size() : 0;
             return this->size + dep_size;
         }
-        uint64_t get_size() const override{
+        uint64_t get_size() const override {
             uint64_t src_size = 0;
             auto src = dependencies;
             if (src) {

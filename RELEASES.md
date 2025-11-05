@@ -1,4 +1,4 @@
-# Release v0.3.4.2b 2025-11-04
+# Release v0.3.4.2b 2025-11-05
 
 ## New Features
 
@@ -6,7 +6,7 @@
 2. Improve client replication io (v0.3.4.1b 2025-10-07)
 3. Make server replication asynch and faster (v0.3.4.1b 2025-10-08)
 4. server replication can be called multiple times per connection (v0.3.4.1b 2025-10-08)
-5. add shard info `INFO SHARD [key]|[#(shard number)]` (v0.3.4.2b 2025-10-17)
+5. add shard info `INFO SHARD [key]|[#(shard number)]` (v0.3.4.2b 2025-11-05)
    - `INFO SHARD 1` returns shard info for key `1`
    - `INFO SHARD #1` returns shard info for shard number 1
    - `INFO SHARD ##1` or `#ABC` returns shard info for key `##1` or `#ABC`
@@ -34,13 +34,15 @@
    - `SPACES OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
    - `SPACES OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
    - `SPACES OPTION [SET|GET] RANDOM [ON|OFF|VOLATILE]` sets the current key space to evict randomly
+   - Key Space random access i.e. `myspace:SET a spaced` or `:GET a` -> `(nil)` or `myspace:GET a` -> `"spaced"`
 
-7. add optional extra part to storage for future backwards compatibility
-8. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group
-   So keys is still fast but can not bring down a server
-9. `VALUES` match all values in the db against a glob pattern while
-11. Added `CLIENT INFO` command - for resp interface only
-12. Added `MULTI` command - for resp interface only (transaction support in redis style)
+8. add optional extra part to storage for future backwards compatibility (v0.3.4.2b 2025-11-05)
+8. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group (v0.3.4.2b 2025-11-05)
+   So keys is still fast but can not bring down a server (v0.3.4.2b 2025-11-05)
+9. `VALUES` match all values in the db against a glob pattern while (v0.3.4.2b 2025-11-05)
+11. Added `CLIENT INFO` command - for resp interface only (v0.3.4.2b 2025-11-05)
+12. Added `MULTI` command - for resp interface only (transaction support in redis style) (v0.3.4.2b 2025-11-05)
+13. Key Space access i.e. `myspace:SET a spaced` (v0.3.4.2b 2025-11-05)
 
 ## Fixes
 

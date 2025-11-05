@@ -10,6 +10,7 @@
 
 static std::random_device rd;
 static std::mt19937 gen(rd());
+static const std::string EXT = ".dat";
 
 using namespace art;
 uint64_t art_evict_lru(barch::shard_ptr t) {
@@ -338,11 +339,11 @@ bool barch::shard::save(bool stats) {
         saved = true;
         //leaves.borrow(get_leaves().get_main());
         //nodes.borrow(get_nodes().get_main());
-        if (!get_leaves().self_save_extra(".dat", save_stats_and_root)) {
+        if (!get_leaves().self_save_extra(EXT, save_stats_and_root)) {
             return false;
         }
 
-        if (!get_nodes().self_save_extra( ".dat", [&](std::ostream &) {
+        if (!get_nodes().self_save_extra( EXT, [&](std::ostream &) {
         })) {
             return false;
         }
@@ -429,11 +430,11 @@ bool barch::shard::load(bool) {
         };
         auto st = std::chrono::high_resolution_clock::now();
 
-        if (!get_nodes().load_extra(".dat", [&](std::istream &) {
+        if (!get_nodes().load_extra(EXT, [&](std::istream &) {
         })) {
             return false;
         }
-        if (!get_leaves().load_extra(".dat", load_stats_and_root)) {
+        if (!get_leaves().load_extra(EXT, load_stats_and_root)) {
             return false;
         }
         root = logical_address{root.address(), this};// translate root to the now
@@ -555,6 +556,7 @@ void barch::shard::clear() {
     root = {nullptr};
     size = 0;
     transacted = false;
+    tomb_stones = 0;
     get_leaves().clear();
     get_nodes().clear();
     h.clear();
@@ -928,12 +930,7 @@ uint64_t shard_size(barch::shard *s) {
     try {
         if (s == nullptr)
             return 0;
-        uint64_t size = s->size;
-
-        //if (!art::get_ordered_keys()) {
-        size += s->get_jump_size();
-        //}
-        return size;
+        return s->get_size();
     } catch (std::exception &e) {
         barch::log(e, __FILE__, __LINE__);
         ++statistics::exceptions_raised;
@@ -948,8 +945,8 @@ barch::shard::~shard() {
     if (tmaintain.joinable())
         tmaintain.join();
     if (opt_drop_on_release) {
-        this->get_leaves().delete_files(".dat");
-        this->get_nodes().delete_files(".dat");
+        this->get_leaves().delete_files(EXT);
+        this->get_nodes().delete_files(EXT);
     }
 
 }

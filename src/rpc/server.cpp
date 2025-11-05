@@ -44,11 +44,10 @@ namespace barch {
     };
     struct server_context {
         thread_pool pool{};
-        //thread_pool resp_pool{2};
         thread_pool asio_resp_pool{};
+
         asio::io_context io{};
         std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
-        //std::vector<std::shared_ptr<work_unit>> io_resp{resp_pool.size()};
 
         tcp::acceptor acc;
         std::string interface;

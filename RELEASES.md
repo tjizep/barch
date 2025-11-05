@@ -35,7 +35,7 @@
    - `SPACES OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
    - `SPACES OPTION [SET|GET] RANDOM [ON|OFF|VOLATILE]` sets the current key space to evict randomly
    - Key Space random access i.e. `myspace:SET a spaced` or `:GET a` -> `(nil)` or `myspace:GET a` -> `"spaced"`
-
+   - `KSPACE EXIST {key space name} return `1` if space exists else `0`
 8. add optional extra part to storage for future backwards compatibility (v0.3.4.2b 2025-11-05)
 8. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group (v0.3.4.2b 2025-11-05)
    So keys is still fast but can not bring down a server (v0.3.4.2b 2025-11-05)

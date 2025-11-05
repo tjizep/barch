@@ -59,7 +59,15 @@ namespace barch {
         auto name = decorate(name_);
         return std::regex_match(name, name_check);
     }
-
+    bool is_keyspace(const std::string &name_) {
+        if (!check_ks_name(name_)) {
+            return false;
+        }
+        std::unique_lock l(lock);
+        std::string name = decorate(name_);
+        auto s = spaces.find(name);
+        return  (s != spaces.end());
+    }
     key_space_ptr get_keyspace(const std::string &name_) {
         if (!check_ks_name(name_)) {
             throw_exception<std::invalid_argument>(get_ks_pattern_error().c_str());

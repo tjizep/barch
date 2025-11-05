@@ -15,6 +15,7 @@ r.execute_command("pipe:SET a spca")
 p.execute()
 assert(r.execute_command("pipe:GET a") == b'spca')
 assert(r.execute_command("GET a") == b'va')
+assert(r.execute_command("SPACES EXIST pipe") == 1)
 
 r.set("hello","barch")
 print(r.get("hello"))

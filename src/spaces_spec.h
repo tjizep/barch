@@ -29,6 +29,7 @@ namespace art {
         bool is_set = false;
         bool is_static = false;
         bool is_drop = false;
+        bool is_exist = false;
 
         std::string dependant;
         std::string source;
@@ -37,7 +38,15 @@ namespace art {
         int parse_options() {
             clear_error();
             int spos = 1; // the pattern is the first one
-
+            if (has("EXIST", spos)) {
+                is_exist = true;
+                ++spos;
+                name = tos(spos);
+                if (!barch::check_ks_name(name)) {
+                    return -1;
+                }
+                return is_parse_error(spos);
+            }
             if (has("DEPENDS", spos)) {
                 is_depends = true;
                 ++spos;

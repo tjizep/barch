@@ -38,6 +38,7 @@ namespace barch {
     };
     typedef key_space::key_space_ptr key_space_ptr;
     const std::string& get_ks_pattern_error();
+    bool is_keyspace(const std::string& name_);
     bool check_ks_name(const std::string& name_);
     std::string ks_undecorate(const std::string& name);
     key_space_ptr get_keyspace(const std::string &name);

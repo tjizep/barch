@@ -1072,6 +1072,7 @@ int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     - `KSPACE OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
     - `KSPACE OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
     - `KSPACE OPTION [SET|GET] RANDOM [ON|OFF|VOLATILE]` sets the current key space to evict randomly
+    - `KSPACE EXIST {key space name} return `1` if space exists else `0`
  */
 int KSPACE(caller& call, const arg_t& argv) {
     if (argv.size() < 3) {
@@ -1082,7 +1083,9 @@ int KSPACE(caller& call, const arg_t& argv) {
     if (parser.parse_options() != 0) {
         return call.syntax_error();
     }
-
+    if (parser.is_exist) {
+        return call.boolean(barch::is_keyspace(parser.name));
+    }
     if (parser.is_depends) {
         auto source = barch::get_keyspace(parser.source);
         auto dependent = barch::get_keyspace(parser.dependant);

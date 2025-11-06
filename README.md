@@ -11,7 +11,7 @@ A demo ubuntu 22.04 docker image is available at teejip/barch:apis
 Run below to expose an example flask application to see the API's in action
 ```
 sudo docker ps -a -q | sudo xargs docker stop 
-sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.3.4.1b
+sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.3.4.2b
 
 ```
 binaries are located under `/home/barch/setup` within the docker image
@@ -132,7 +132,7 @@ RETRIEVE                   LOAD
 ADDROUTE                   ROUTE
 REMROUTE                   OPS
 STATS                      UB, NEXT
-COUNT
+COUNT                      SPACE
 ```
 
 # Other VALKEY API's implemented (Mostly Key Value + TTL)
@@ -147,7 +147,9 @@ GET                        MGET
 REM                        FLUSHDB/FLUSHALL                   
 PING                       TTL
 EXPIRE                     EXISTS
-DBSIZE
+DBSIZE                     MULTI
+EXEC                       CLIENT INFO
+INFO
 ```
 ## Hash Set API's Implemented
 ```

@@ -1,3 +1,10 @@
+# Release v0.3.4.3b 2025-11-06
+
+## New Features
+
+## Fixes
+1. Add a smidgen of static analysis to builds
+
 # Release v0.3.4.2b 2025-11-06
 
 ## New Features

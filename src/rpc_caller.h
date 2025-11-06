@@ -253,6 +253,9 @@ struct rpc_caller : caller {
         this->ks = barch::get_keyspace(name);
     }
     void start_call_buffer() override {
+        if (!call_buffering) {
+            commands.clear();
+        }
         call_buffering = true;
     }
     void finish_call_buffer() override {

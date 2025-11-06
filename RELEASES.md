@@ -37,9 +37,9 @@
    - Key Space random access i.e. `myspace:SET a spaced` or `:GET a` -> `(nil)` or `myspace:GET a` -> `"spaced"`
    - `KSPACE EXIST {key space name} return `1` if space exists else `0`
 8. add optional extra part to storage for future backwards compatibility (v0.3.4.2b 2025-11-05)
-8. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group (v0.3.4.2b 2025-11-05)
+9. Prevent the `KEYS` command from bringing down a server by allowing only one match using the reserved glob thread group (v0.3.4.2b 2025-11-05)
    So keys is still fast but can not bring down a server (v0.3.4.2b 2025-11-05)
-9. `VALUES` match all values in the db against a glob pattern while (v0.3.4.2b 2025-11-05)
+10. `VALUES` match all values in the db against a glob pattern while (v0.3.4.2b 2025-11-05)
 11. Added `CLIENT INFO` command - for resp interface only (v0.3.4.2b 2025-11-05)
 12. Added `MULTI` command - for resp interface only (transaction support in redis style) (v0.3.4.2b 2025-11-05)
 13. Key Space access i.e. `myspace:SET a spaced` (v0.3.4.2b 2025-11-05)

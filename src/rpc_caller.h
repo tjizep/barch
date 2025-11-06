@@ -280,6 +280,7 @@ struct rpc_caller : caller {
 
         results = std::move(buffered_results);
         ks = original;
+        commands.clear();
     }
     bool is_buffering() const {
         return call_buffering;

@@ -638,8 +638,11 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
 
         t->get_ap().get_nodes().set_opt_enable_lfu(lfu);
         t->get_ap().get_leaves().set_opt_enable_lfu(lfu);
-        t->opt_all_keys_lru = record.evict_allkeys_lru;
-        t->opt_volatile_keys_lru = record.evict_volatile_lru;
+        t->opt_evict_all_keys_lru = record.evict_allkeys_lru;
+        t->opt_evict_volatile_keys_lru = record.evict_volatile_lru;
+        t->opt_evict_all_keys_lfu = record.evict_allkeys_lfu;
+        t->opt_evict_volatile_keys_lfu = record.evict_volatile_lfu;
+        t->opt_evict_all_keys_random = record.evict_allkeys_random;
     }
     return VALKEYMODULE_OK;
 }
@@ -854,7 +857,7 @@ const barch::configuration_record& barch::get_configuration() {
 
 uint64_t barch::get_maintenance_poll_delay() {
     std::lock_guard lock(config_mutex);
-    return record.max_defrag_page_count;
+    return record.maintenance_poll_delay;
 }
 
 uint64_t barch::get_max_defrag_page_count() {

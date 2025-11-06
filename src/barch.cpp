@@ -1151,6 +1151,16 @@ int KSPACE(caller& call, const arg_t& argv) {
             call.boolean(ptr->opt_ordered_keys);
             return 0;
         }
+        if (parser.name == "LRU") {
+            barch::shard_ptr ptr = spc->get(0ul);
+            call.boolean(ptr->opt_evict_all_keys_lru);
+            return 0;
+        }
+        if (parser.name == "RANDOM") {
+            barch::shard_ptr ptr = spc->get(0ul);
+            call.boolean(ptr->opt_evict_all_keys_random);
+            return 0;
+        }
         return call.simple("OK");
     }
 
@@ -1161,6 +1171,24 @@ int KSPACE(caller& call, const arg_t& argv) {
             bool on = parser.value == "ON";
             for (auto &shrd : spc->get_shards()) {
                 shrd->opt_ordered_keys = on;
+            }
+            return call.simple("OK");
+        }
+        if (parser.name == "LRU") {
+            bool on = parser.value == "ON";
+            bool evict_volatile = parser.value == "VOLATILE";
+            for (auto &shrd : spc->get_shards()) {
+                shrd->opt_evict_all_keys_lru = on;
+                shrd->opt_evict_volatile_keys_lru = evict_volatile;
+            }
+            return call.simple("OK");
+        }
+        if (parser.name == "RANDOM") {
+            bool on = parser.value == "ON";
+            bool evict_volatile = parser.value == "VOLATILE";
+            for (auto &shrd : spc->get_shards()) {
+                shrd->opt_evict_all_keys_random = on;
+                shrd->opt_evict_volatile_keys_random = evict_volatile;
             }
             return call.simple("OK");
         }

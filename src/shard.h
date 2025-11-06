@@ -107,10 +107,8 @@ namespace barch {
             return h.size();
         }
 
-        moodycamel::LightweightSemaphore thread_control{};
-        moodycamel::LightweightSemaphore thread_exit{};
+
         bool transacted = false;
-        std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
         // to support a transaction
         node_ptr save_root = nullptr;
         uint64_t save_size = 0;
@@ -120,6 +118,9 @@ namespace barch {
 
         barch::repl::client repl_client{};
         std::atomic<size_t> queue_size{};
+        std::chrono::high_resolution_clock::time_point start_save_time {};
+        uint64_t mods{};
+
         node_ptr get_root() const override {
             return root;
         }
@@ -139,8 +140,8 @@ namespace barch {
         // standard constructor
         shard(const node_ptr &root, uint64_t size, size_t shard_number) :
         tree{"node", shard_number, root,size}{
-            abstract_shard::opt_all_keys_lru = get_evict_allkeys_lru();
-            abstract_shard::opt_volatile_keys_lru = get_evict_volatile_lru();
+            abstract_shard::opt_evict_all_keys_lru = get_evict_allkeys_lru();
+            abstract_shard::opt_evict_volatile_keys_lru = get_evict_volatile_lru();
             repl_client.shard = shard_number;
             repl_client.name = name;
             barch::repl::clear_route(shard_number);
@@ -150,8 +151,8 @@ namespace barch {
         // name configurable
         shard(const std::string& name, uint64_t size, size_t shard_number) :
         tree{name, shard_number, root,size}{
-            abstract_shard::opt_all_keys_lru = get_evict_allkeys_lru();
-            abstract_shard::opt_volatile_keys_lru = get_evict_volatile_lru();
+            //abstract_shard::opt_evict_all_keys_lru = get_evict_allkeys_lru();
+            //abstract_shard::opt_evict_volatile_keys_lru = get_evict_volatile_lru();
             repl_client.shard = shard_number;
             repl_client.name = name;
             barch::repl::clear_route(shard_number);
@@ -280,7 +281,7 @@ namespace barch {
         art::node_ptr get_last_leaf_added() const override {
             return last_leaf_added;
         };
-
+        void maintenance() override;
         int range(art::value_type key, art::value_type key_end, CallBack cb, void *data) override;
 
         int range(art::value_type key, art::value_type key_end, LeafCallBack cb) override;

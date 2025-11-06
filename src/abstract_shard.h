@@ -13,9 +13,15 @@ namespace barch {
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
     public:
         typedef std::shared_ptr<abstract_shard> shard_ptr;
-        bool opt_ordered_keys = get_ordered_keys();
-        bool opt_all_keys_lru = false;
-        bool opt_volatile_keys_lru = false;
+        bool opt_ordered_keys = barch::get_ordered_keys();
+        bool opt_evict_all_keys_lru = barch::get_evict_allkeys_lru();
+        bool opt_evict_all_keys_lfu = barch::get_evict_allkeys_lfu();
+        bool opt_evict_all_keys_random = barch::get_evict_allkeys_random();
+        bool opt_evict_volatile_keys_lru = barch::get_evict_volatile_lru();
+        bool opt_evict_volatile_keys_lfu = barch::get_evict_volatile_lfu();
+        bool opt_evict_volatile_keys_random = false; //barch::get_evict_volatile_lfu();
+        bool opt_evict_volatile_ttl = barch::get_evict_volatile_ttl();
+        bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
         virtual ~abstract_shard() = default;
         virtual bool remove_leaf_from_uset(art::value_type key) = 0;
@@ -25,6 +31,7 @@ namespace barch {
         virtual uint64_t get_tree_size() const = 0;
         virtual uint64_t get_size() const = 0;
         virtual uint64_t get_hash_size() const = 0;
+        virtual void maintenance() = 0;
         /**
          * register a pull source on this shard/tree
          * currently non-existing hosts will also be added (they can come online later)

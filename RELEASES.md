@@ -1,4 +1,4 @@
-# Release v0.3.4.2b 2025-11-05
+# Release v0.3.4.2b 2025-11-06
 
 ## New Features
 
@@ -43,6 +43,7 @@
 11. Added `CLIENT INFO` command - for resp interface only (v0.3.4.2b 2025-11-05)
 12. Added `MULTI` command - for resp interface only (transaction support in redis style) (v0.3.4.2b 2025-11-05)
 13. Key Space access i.e. `myspace:SET a spaced` (v0.3.4.2b 2025-11-05)
+14. Reduce thread count
 
 ## Fixes
 

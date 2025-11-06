@@ -133,8 +133,32 @@ namespace barch {
             start_queue_server() ;
             shards.swap(shards_out);
         }
+        start_maintain();
     }
+    void key_space::start_maintain() {
+        tmaintain = std::thread([&]() -> void {
 
+            try {
+               auto tshards = this->get_shards();
+               while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
+                   for (auto &s : tshards) {
+                       s->maintenance();
+                   }
+
+               }
+            }catch (std::exception& e){
+               barch::std_err("shard maintenance thread error:",e.what());
+            }
+            thread_exit.signal(1);
+        });
+    }
+    key_space::~key_space() {
+        thread_control.signal(1);
+        thread_exit.wait();
+        if (tmaintain.joinable())
+            tmaintain.join();
+
+    }
     std::shared_ptr<abstract_shard> key_space::get(size_t shard) {
         if (shards.empty()) {
             abort_with("shard configuration is empty");

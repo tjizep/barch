@@ -813,6 +813,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     this->repl_client.remove(latch, key);
     return size < before;
 }
+
 int barch::shard::range(art::value_type key, art::value_type key_end, CallBack cb, void *data) {
     return art::range(this, key, key_end, cb, data);
 }
@@ -940,10 +941,6 @@ uint64_t shard_size(barch::shard *s) {
 
 barch::shard::~shard() {
     repl_client.stop();
-    thread_control.signal(1);
-    thread_exit.wait();
-    if (tmaintain.joinable())
-        tmaintain.join();
     if (opt_drop_on_release) {
         this->get_leaves().delete_files(EXT);
         this->get_nodes().delete_files(EXT);
@@ -1134,6 +1131,7 @@ void abstract_random_eviction(barch::shard *t, const std::function<bool(const ba
     abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
 }
 
+// used during sweep lru keys for the `stochastic` lru eviction
 void abstract_random_update(barch::shard *t, const std::function<void(const barch::leaf *l)> &updater) {
     if (get_total_memory() < barch::get_max_module_memory()) return;
     storage_release release(t->shared_from_this());
@@ -1152,28 +1150,38 @@ void abstract_lfu_eviction(barch::shard *t, const std::function<bool(const barch
 }
 
 void run_evict_all_keys_lru(barch::shard *t) {
-    if (!barch::get_evict_allkeys_lru()) return;
+    if (statistics::logical_allocated < barch::get_max_module_memory()) return;
+    if (!t->abstract_shard::opt_evict_all_keys_lru) return;
     abstract_lru_eviction(t, [](const barch::leaf * unused(l)) -> bool { return true; });
 }
 
 void run_evict_volatile_keys_lru(barch::shard *t) {
-    if (!barch::get_evict_volatile_lru()) return;
+    if (statistics::logical_allocated < barch::get_max_module_memory()) return;
+    if (!t->abstract_shard::opt_evict_volatile_keys_lru) return;
     abstract_lru_eviction(t, [](const barch::leaf *l) -> bool { return l->is_volatile(); });
 }
 
+void run_evict_all_keys_random(barch::shard *t) {
+    if (!t->opt_evict_all_keys_random) return;
+    abstract_random_eviction(t, [](const barch::leaf *) -> bool { return true; });
+}
 void run_evict_all_keys_lfu(barch::shard *t) {
-    if (!barch::get_evict_allkeys_lfu()) return;
+    if (!t->opt_evict_all_keys_lfu) return;
     abstract_lfu_eviction(t, [](const barch::leaf * unused(l)) -> bool { return true; });
 }
 
 void run_evict_volatile_keys_lfu(barch::shard *t) {
-    if (!barch::get_evict_volatile_lfu()) return;
-    abstract_lfu_eviction(t, [](const barch::leaf *l) -> bool { return l->is_volatile(); });
+    if (!t->opt_evict_volatile_keys_lfu) return;
+    abstract_lfu_eviction(t, [](const barch::leaf *l) -> bool {
+        return l->is_volatile();
+    });
 }
 
 void run_evict_volatile_expired_keys(barch::shard *t) {
-    if (!barch::get_evict_volatile_ttl()) return;
-    abstract_lru_eviction(t, [](const barch::leaf *l) -> bool { return l->expired(); });
+    if (!t->abstract_shard::opt_evict_volatile_ttl) return;
+    abstract_lru_eviction(t, [](const barch::leaf *l) -> bool {
+        return l->is_volatile() && l->expired();
+    });
 }
 
 void run_sweep_expired_keys(barch::shard *t) {
@@ -1183,7 +1191,8 @@ void run_sweep_expired_keys(barch::shard *t) {
 }
 
 void run_sweep_lru_keys(barch::shard *t) {
-    if (!barch::get_evict_allkeys_lru()) return;
+    if (!t) return;
+    if (!t->opt_evict_all_keys_lru && !t->opt_evict_volatile_keys_lru) return;
     abstract_random_update(t, [t](const barch::leaf *l) {
         if (l->is_lru()) {
             auto n = t->search(l->get_key());
@@ -1200,54 +1209,45 @@ static uint64_t get_modifications() {
 }
 
 void barch::shard::start_maintain() {
+    this->mods = get_modifications();
+    this->start_save_time = std::chrono::high_resolution_clock::now();
 
-    tmaintain = std::thread([&]() -> void {
-        //uint64_t jf = get_jump_factor();
-        {
-            std::string name = "maintain-";
-            name+=this->nodes.get_name();
-            pthread_setname_np(tmaintain.native_handle(), name.c_str());
-        }
-        try {
-            auto start_save_time = std::chrono::high_resolution_clock::now();
-            auto mods = get_modifications();
-            while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
-                run_sweep_lru_keys(this);
-                run_evict_all_keys_lfu(this);
-                run_evict_volatile_keys_lru(this);
-                run_evict_volatile_keys_lfu(this);
-                run_evict_volatile_expired_keys(this);
-                run_sweep_expired_keys(this);
-
-                // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
-                if (barch::get_active_defrag()) {
-                    run_defrag(); // periodic
-                }
-                if (saf_keys_found) {
-                    write_lock l(this->latch);
-                    statistics::keys_found += saf_keys_found;
-                    saf_keys_found = 0;
-                    statistics::get_ops += saf_get_ops;
-                    saf_get_ops = 0;
-                }
-
-                if (millis(start_save_time) > get_save_interval()
-                    || get_modifications() - mods > get_max_modifications_before_save()
-                ) {
-                    //if (get_modifications() - mods > 0) {
-                        this->save(with_stats);
-                        start_save_time = std::chrono::high_resolution_clock::now();
-                        mods = get_modifications();
-                    //}
-                }
-                ++statistics::maintenance_cycles;
-
-            }
-        }catch (std::exception& e){
-            barch::std_err("shard maintenance thread exception:",e.what());
-        }
-        thread_exit.signal(1);
-    });
 
 }
+void barch::shard::maintenance() {
+    try {
+        run_sweep_lru_keys(this);
+        run_evict_all_keys_lfu(this);
+        run_evict_all_keys_random(this);
+        run_evict_volatile_keys_lru(this);
+        run_evict_volatile_keys_lfu(this);
+        run_evict_volatile_expired_keys(this);
+        run_sweep_expired_keys(this);
 
+        // defrag will get rid of memory used by evicted keys if memory is pressured - if its configured
+        if (this->opt_active_defrag) {
+            run_defrag(); // periodic
+        }
+        if (saf_keys_found) {
+            write_lock l(this->latch);
+            statistics::keys_found += saf_keys_found;
+            saf_keys_found = 0;
+            statistics::get_ops += saf_get_ops;
+            saf_get_ops = 0;
+        }
+
+        if (millis(start_save_time) > get_save_interval()
+            || get_modifications() - mods > get_max_modifications_before_save()
+        ) {
+            //if (get_modifications() - mods > 0) {
+            this->save(with_stats);
+            start_save_time = std::chrono::high_resolution_clock::now();
+            mods = get_modifications();
+            //}
+        }
+    }catch (std::exception& e) {
+        barch::std_err(e.what());
+    }
+    ++statistics::maintenance_cycles;
+
+}

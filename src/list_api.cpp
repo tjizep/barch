@@ -61,17 +61,17 @@ struct list_header {
 };
 
 extern "C"{
-    int bpop(caller& cc, const arg_t& args, bool tail) {
+    int bpop(caller& cc, const arg_t& args, bool tail, bool blocking = true) {
         if (args.size() < 3) {
             return cc.wrong_arity();
         }
-        if (cc.has_blocks()) {
+        if (blocking && cc.has_blocks()) {
             return cc.push_error("block already set");
         }
         heap::vector<std::string> blocks;
 
         auto spc = cc.kspace();
-        uint64_t time_out = conversion::to_double(conversion::as_variable(args.back()))*1000ull;
+        uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
         cc.start_array();
         size_t popped = 0;
         for (size_t ki = 1; ki < args.size() - 1; ++ki) {
@@ -85,7 +85,7 @@ extern "C"{
             auto key = query.create({container});
             auto value = t->search(key);
             if (value.null()) {
-                blocks.emplace_back(args[ki].to_string());
+                if (blocking) blocks.emplace_back(args[ki].to_string());
                 // the key does not exist at all and we must add a block here
                 continue;
             }
@@ -95,7 +95,7 @@ extern "C"{
             int64_t start = conversion::dec_bytes_to_int(header.start);
             int64_t end = conversion::dec_bytes_to_int(header.end);
             if (start == end) {
-                blocks.emplace_back(args[ki].to_string());
+                if (blocking) blocks.emplace_back(args[ki].to_string());
                 continue; // this condition is somewhat strange but a key is already registered for blocking
                 // we do not send a notification in this case
             }
@@ -116,14 +116,14 @@ extern "C"{
 
             if (start == end) {
                 // usually the entire key must go (but were blocking so ++blocks)
-                blocks.emplace_back(args[ki].to_string());
+                if (blocking) blocks.emplace_back(args[ki].to_string());
             }
             // todo: we can set the header directly but that change would not be replicated
             t->insert(key, header.as_value(), true);
         }
         cc.end_array(0);
         if (!blocks.empty() && popped == 0) {
-            cc.add_block(blocks, time_out,[](caller& call, const heap::vector<std::string>& keys) {
+            cc.add_block(blocks, time_out,[tail](caller& call, const heap::vector<std::string>& keys) {
                 // this gets called as soon as the key gets pushed
                 // it happens on the same thread as the caller
                 if (keys.empty()) {
@@ -132,18 +132,7 @@ extern "C"{
                     return;
                 }
                 for (auto& k: keys) {
-                    call.push_string(k);
-                    auto r = LFRONT(call, {"LFRONT", k});
-                    if (r == call.ok()) {
-                        if (!call.back().isNull()) {
-                            r |= LPOP(call, {"LPOP", k, "1"});
-                            call.pop_back(1);
-                        }else {
-                            call.pop_back(2);
-                        }
-                    }else {
-                        call.pop_back(2);
-                    }
+                    bpop(call, {"bpop", k, "0"},tail,false);
                 }
             });
         }

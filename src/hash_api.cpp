@@ -21,7 +21,7 @@ int HSET(caller& cc, const arg_t& args) {
         ++updated;
     };
     if (key_ok(args[1]) != 0) {
-        return cc.null();
+        return cc.push_null();
     }
     auto t = cc.kspace()->get(args[1]);
     storage_release release(t);
@@ -43,7 +43,7 @@ int HSET(caller& cc, const arg_t& args) {
 
         query.pop_back();
     }
-    return cc.boolean(updated);
+    return cc.push_bool(updated);
 }
 }
 int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -66,7 +66,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
 
     auto n = argv[1];
     if (key_ok(n) != 0) {
-        return call.null();
+        return call.push_null();
     }
     auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
@@ -79,7 +79,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
 
         if (key_ok(k) != 0) {
             if (replies)
-                r |= call.null();
+                r |= call.push_null();
             ++responses;
             continue;
         }
@@ -88,7 +88,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
         auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
             if (leaf.null()) {
                 if (replies)
-                    r |= call.long_long(-2);
+                    r |= call.push_ll(-2);
             } else {
                 return modify(leaf);
             }
@@ -138,10 +138,10 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
             do_set = (l->expiry_ms() > 0 && l->expiry_ms() >= ttl);
         }
         if (do_set) {
-            r |= call.long_long(1);
+            r |= call.push_ll(1);
             return art::make_leaf(t->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile());
         } else {
-            r |= call.long_long( 0);
+            r |= call.push_ll( 0);
         }
         return nullptr;
     };
@@ -212,7 +212,7 @@ int HGETEX(caller& call, const arg_t &argv) {
                               do_set = true;
                           }
 
-                          r |= call.vt(l->get_value());
+                          r |= call.push_vt(l->get_value());
                           ++responses;
                           if (do_set) {
                               return art::make_leaf(call.kspace()->get(argv[1])->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile());
@@ -244,9 +244,9 @@ int HINCRBY(caller& call, const arg_t &argv) {
                           return leaf_numeric_update(l, old, by);
                       });
     if (r == VALKEYMODULE_OK) {
-        return call.long_long(l);
+        return call.push_ll(l);
     }
-    return call.null();
+    return call.push_null();
 }
 
 int cmd_HINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -270,9 +270,9 @@ int HINCRBYFLOAT(caller& call, const arg_t &argv) {
                       return leaf_numeric_update(l, old, by);
                   });
     if (r == VALKEYMODULE_OK) {
-        return call.double_(l);
+        return call.push_double(l);
     }
-    return call.null();
+    return call.push_null();
 }
 
 int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -289,7 +289,7 @@ int HDEL(caller& call, const arg_t &argv) {
     art::key_spec spec;
     auto k = argv[1];
     if (key_ok(k) != 0) {
-        return call.null();
+        return call.push_null();
     }
 
     auto t = call.kspace()->get(argv[1]);
@@ -312,7 +312,7 @@ int HDEL(caller& call, const arg_t &argv) {
         call.kspace()->get(argv[1])->remove(key, del_report);
         query.pop_back();
     }
-    call.long_long(responses);
+    call.push_ll(responses);
     return call.ok();
 }
 int cmd_HDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -328,7 +328,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
     art::key_spec spec;
     auto n = argv[1];
     if (key_ok(n) != 0) {
-        return call.null();
+        return call.push_null();
     }
     auto t = call.kspace()->get(argv[1]);
 
@@ -353,7 +353,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
         call.kspace()->get(argv[1])->remove(key, del_report);
         query.pop_back();
     }
-    call.long_long(responses);
+    call.push_ll(responses);
     return call.ok();
 }
 
@@ -384,26 +384,26 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     int responses = 0;
     auto n = argv[1];
     if (key_ok(n) != 0) {
-        return call.null();
+        return call.push_null();
     }
     auto t = call.kspace()->get(n);
     storage_release release(t);
     art::value_type any_key = query.create({conversion::convert(n)});
     art::node_ptr lb = t->lower_bound(any_key);
     if (lb.null()) {
-        return call.null();
+        return call.push_null();
     }
     if (lb.is_leaf) {
         // Check if the expanded path matches
         if (lb.const_leaf()->prefix(any_key) != 0) {
-            return call.null();
+            return call.push_null();
         }
     }
     call.start_array();
     for (size_t arg = fields_start; arg < argv.size(); ++arg) {
         auto k = argv[arg];
         if (key_ok(k) != 0) {
-            call.null();
+            call.push_null();
         } else {
             auto converted = conversion::convert(k);
             query.push(converted);
@@ -425,7 +425,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
 int HGET_(caller& call, const arg_t& argv,
          const std::function<void(art::node_ptr leaf)> &reporter) {
     return HQUERY(call, argv, false, reporter, [&]()-> void {
-        call.null();
+        call.push_null();
     });
 }
 extern "C"
@@ -434,13 +434,13 @@ int HTTL(caller& call,const arg_t& argv) {
         auto l = r.const_leaf();
         long long ttl = l->expiry_ms();
         if (ttl == 0) {
-            call.long_long(-1);
+            call.push_ll(-1);
         } else {
-            call.long_long((ttl - art::now()) / 1000);
+            call.push_ll((ttl - art::now()) / 1000);
         }
     };
     auto nullreport = [&]() -> void {
-        call.long_long(-2);
+        call.push_ll(-2);
     };
     int r = HQUERY(call, argv, true, reporter, nullreport);
     return r;
@@ -453,7 +453,7 @@ extern "C"
 int HGET(caller& call, const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto vt = r.const_leaf()->get_value();
-        call.vt(vt);
+        call.push_vt(vt);
     };
     return HGET_(call, argv, reporter);
 }
@@ -462,7 +462,7 @@ extern "C"
 int HMGET(caller& call, const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto vt = r.const_leaf()->get_value();
-        call.vt(vt);
+        call.push_vt(vt);
     };
     return HGET_(call, argv, reporter);
 }
@@ -479,7 +479,7 @@ int HLEN(caller& call, const arg_t& argv) {
     size_t nlen = 0;
     auto n = argv[1];
     if (key_ok(n) != 0) {
-        return call.null();
+        return call.push_null();
     }
 
     auto t = call.kspace()->get(argv[1]);
@@ -498,7 +498,7 @@ int HLEN(caller& call, const arg_t& argv) {
     };
     t->range(search_start, search_end, table_iter, nullptr);
 
-    return call.long_long(responses);
+    return call.push_ll(responses);
 }
 int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -512,9 +512,9 @@ extern "C"
 int HEXPIRETIME(caller& call, const arg_t& argv) {
     auto reporter = [&](art::node_ptr r) -> void {
         auto l = r.const_leaf();
-        call.long_long(l->expiry_ms() / 1000);
+        call.push_ll(l->expiry_ms() / 1000);
     };
-    return HQUERY(call, argv, true, reporter, [&]()-> void {call.null();});
+    return HQUERY(call, argv, true, reporter, [&]()-> void {call.push_null();});
 }
 
 int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -528,7 +528,7 @@ int HGETALL(caller& call, const arg_t& argv) {
     int responses = 0;
     auto n = argv[1];
     if (key_ok(n) != 0) {
-        return call.null();
+        return call.push_null();
     }
     auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
@@ -538,7 +538,7 @@ int HGETALL(caller& call, const arg_t& argv) {
     //bool exists = false;
     art::iterator ai(t, search_start);
     if (!ai.ok()) {
-        return call.null();
+        return call.push_null();
     }
     call.start_array();
 
@@ -550,8 +550,8 @@ int HGETALL(caller& call, const arg_t& argv) {
         if (!key.starts_with(table_key)) {
             return -1;
         }
-        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
-        call.vt(value);
+        call.push_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.push_vt(value);
         responses += 2;
         ai.next();
     }
@@ -571,7 +571,7 @@ int HKEYS(caller& call, const arg_t& argv) {
     int responses = 0;
     auto n = argv[1];
     if (key_ok(n) != 0) {
-        return call.null();
+        return call.push_null();
     };
     auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
@@ -583,7 +583,7 @@ int HKEYS(caller& call, const arg_t& argv) {
         if (!key.starts_with(search_start.pref(1))) {
             return -1;
         }
-        call.reply_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+        call.push_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
         responses += 1;
 
         return 0;
@@ -607,9 +607,9 @@ int HEXISTS(caller& call, const arg_t& argv) {
 
     });
     if (r == call.ok()) {
-        return call.boolean(cnt>0);
+        return call.push_bool(cnt>0);
     }
-    return call.null();
+    return call.push_null();
 }
 
 int cmd_HEXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

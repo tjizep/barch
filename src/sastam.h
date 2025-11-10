@@ -397,7 +397,17 @@ namespace heap {
         ~small_vector() {
             clear();
         }
-
+        small_vector(const std::initializer_list<T>& data) {
+            for (auto& d : data) {
+                emplace_back(d);
+            }
+        }
+        small_vector& operator=(const std::initializer_list<T>& data) {
+            for (auto& d : data) {
+                emplace_back(d);
+            }
+            return *this;
+        }
         small_vector(const small_vector &other) noexcept {
             *this = other;
         }

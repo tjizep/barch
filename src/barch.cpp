@@ -88,9 +88,9 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     };
     t->update(converted.get_value(), updater);
     if (r == 0) {
-        return call.any_int(l);
+        return call.push_int(l);
     } else {
-        return call.null();
+        return call.push_null();
     }
 }
 
@@ -159,7 +159,7 @@ int RANGE(caller& call, const arg_t& argv) {
     std::sort(sorted.begin(), sorted.end());
     call.start_array();
     for (auto&k : sorted) {
-        call.reply_encoded_key(k);
+        call.push_encoded_key(k);
         if (--count == 0) break;
     }
     call.end_array(0);
@@ -179,7 +179,7 @@ int CLIENT(caller& call, const arg_t& arg_v) {
     }
     if (arg_v[1] == "INFO") {
         std::string r = call.get_info();
-        return call.reply(r);
+        return call.push_string(r);
     }
     if (arg_v[1] == "SETINFO") {
         if (arg_v.size() == 4) {
@@ -240,7 +240,7 @@ int COUNT(caller& call, const arg_t& argv) {
         count += space_cnt(s, shard);
         count += space_cnt(s->source(), shard);
     }
-    return call.any_int(count);
+    return call.push_int(count);
 }
 int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
@@ -273,7 +273,7 @@ int KEYS(caller& call, const arg_t& argv) {
                 return true;
             });
         }
-        return call.long_long(replies);
+        return call.push_ll(replies);
     } else {
         /* Reply with the matching items. */
         call.start_array();
@@ -281,7 +281,7 @@ int KEYS(caller& call, const arg_t& argv) {
         for (auto shard : barch::get_shard_count()) {
             call.kspace()->get(shard)->glob(spec, pattern, [&](const art::leaf &l) -> bool {
                 std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
-                if (0 != call.reply_encoded_key(l.get_key())) {
+                if (0 != call.push_encoded_key(l.get_key())) {
                     return false;
                 };
                 ++replies;
@@ -321,7 +321,7 @@ int VALUES(caller& call, const arg_t& argv) {
                 return true;
             });
         }
-        return call.long_long(replies);
+        return call.push_ll(replies);
     } else {
         /* Reply with the matching items. */
         call.start_array();
@@ -329,7 +329,7 @@ int VALUES(caller& call, const arg_t& argv) {
         for (auto shard : barch::get_shard_count()) {
             call.kspace()->get(shard)->glob(spec, pattern, [&](const art::leaf &l) -> bool {
                 std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
-                if (0 != call.reply_encoded_key(l.get_key())) {
+                if (0 != call.push_encoded_key(l.get_key())) {
                     return false;
                 };
                 ++replies;
@@ -388,12 +388,12 @@ int SET(caller& call,const arg_t& argv) {
     if (spec.get) {
         if (reply.size) {
 
-            return call.reply_encoded_key(reply);
+            return call.push_encoded_key(reply);
         } else {
-            return call.null();
+            return call.push_null();
         }
     } else {
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
 }
 
@@ -452,7 +452,7 @@ int INCRBY(caller& call, const arg_t& argv) {
     long long by = 0;
 
     if (!conversion::to_ll(argv[2], by)) {
-        return call.error("not a valid integer");
+        return call.push_error("not a valid integer");
     }
     auto arg2 = argv;
     arg2.pop_back();
@@ -466,7 +466,7 @@ int UINCRBY(caller& call, const arg_t& argv) {
     uint64_t by = 0;
 
     if (!conversion::to_ui64(argv[2], by)) {
-        return call.error("not a valid integer");
+        return call.push_error("not a valid integer");
     }
     auto arg2 = argv;
     arg2.pop_back();
@@ -510,9 +510,9 @@ int APPEND(caller& call, const arg_t& argv) {
     };
     t->update(converted.get_value(), updater);
     if (r == 0) {
-        return call.simple("OK");
+        return call.push_simple("OK");
     } else {
-        return call.null();
+        return call.push_null();
     }
 }
 int PREPEND(caller& call, const arg_t& argv) {
@@ -553,9 +553,9 @@ int PREPEND(caller& call, const arg_t& argv) {
     };
     t->update(converted.get_value(), updater);
     if (r == 0) {
-        return call.simple("OK");
+        return call.push_simple("OK");
     } else {
-        return call.null();
+        return call.push_null();
     }
 }
 
@@ -632,7 +632,7 @@ int MSET(caller& call, const arg_t& argv) {
         auto v = argv[n + 1];
 
         if (key_ok(k) != 0) {
-            r |= call.null();
+            r |= call.push_null();
             ++responses;
             continue;
         }
@@ -648,7 +648,7 @@ int MSET(caller& call, const arg_t& argv) {
 
         ++responses;
     }
-    call.boolean(true);
+    call.push_bool(true);
     return call.ok();
 }
 int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -674,7 +674,7 @@ int ADD(caller& call, const arg_t& argv) {
     storage_release release(t);
     t->insert(spec, converted.get_value(), v, false, fc);
 
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 
 int cmd_ADD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -697,13 +697,13 @@ int GET(caller& call, const arg_t& argv) {
     art::node_ptr r = t->search(converted.get_value());
 
     if (r.null()) {
-        return call.null();
+        return call.push_null();
     } else {
         if (r.cl()->is_tomb()) {
-            return call.null();
+            return call.push_null();
         }
         auto vt = r.const_leaf()->get_value();
-        return call.vt(vt);
+        return call.push_vt(vt);
     }
 }
 
@@ -723,15 +723,15 @@ int TTL(caller& call, const arg_t& argv) {
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
     if (r.null()) {
-        return call.long_long(-1);
+        return call.push_ll(-1);
     }
     auto l = r.const_leaf();
     if (l->is_expiry()) {
         long long e = (l->expiry_ms() - art::now())/1000;
-        return call.long_long(e);
+        return call.push_ll(e);
     }
 
-    return call.long_long(-2);
+    return call.push_ll(-2);
 
 }
 int cmd_TTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -751,10 +751,10 @@ int EXISTS(caller& call, const arg_t& argv) {
         auto converted = conversion::convert(k);
         art::node_ptr r = t->search(converted.get_value());
         if (r.null()) {
-            return call.boolean(false);
+            return call.push_bool(false);
         }
     }
-    return call.boolean(true);
+    return call.push_bool(true);
 }
 
 int cmd_EXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -773,7 +773,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
     auto converted = conversion::convert(k);
     art::node_ptr r = t->search(converted.get_value());
     if (r.null()) {
-        return call.long_long(-1);
+        return call.push_ll(-1);
     }
     art::key_expire_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -783,21 +783,21 @@ int EXPIRE(caller& call, const arg_t& argv) {
     auto l = r.const_leaf();
     if (spec.nx) {
         if (l->is_expiry()) {
-            return call.long_long(-1);
+            return call.push_ll(-1);
         }
 
     } else if (spec.xx) {
         if (!l->is_expiry()) {
-            return call.long_long(-1);
+            return call.push_ll(-1);
         }
 
     } else if (spec.gt) {
         if (spec.ttl + art::now() < l->expiry_ms()) {
-            return call.long_long(-1);
+            return call.push_ll(-1);
         }
     } else if (spec.lt) {
         if (spec.ttl + art::now() > l->expiry_ms()) {
-            return call.long_long(-1);
+            return call.push_ll(-1);
         }
     }
     auto updater = [&t,spec](const art::node_ptr &leaf) -> art::node_ptr {
@@ -812,8 +812,8 @@ int EXPIRE(caller& call, const arg_t& argv) {
     };
     art::key_options opts{spec.ttl,true,false,false};
     if (t->update(l->get_key(),updater))
-        return call.long_long(1);
-    return call.long_long(-2);
+        return call.push_ll(1);
+    return call.push_ll(-2);
 }
 int cmd_EXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -832,17 +832,17 @@ int MGET(caller& call, const arg_t& argv) {
     for (size_t arg = 1; arg < argv.size(); ++arg) {
         auto k = argv[arg];
         if (key_ok(k) != 0) {
-            call.null();
+            call.push_null();
         } else {
             auto converted = conversion::convert(k);
             auto t = call.kspace()->get(k);
             storage_release release(t);
             art::node_ptr r = t->search(converted.get_value());
             if (r.null()) {
-                call.null();
+                call.push_null();
             } else {
                 auto vt = r.const_leaf()->get_value();
-                call.vt(vt);
+                call.push_vt(vt);
             }
             ++responses;
         }
@@ -881,9 +881,9 @@ int MIN(caller& call, const arg_t& argv) {
     }
     int ok = call.ok();
     if (the_min.empty()) {
-        ok = call.null();
+        ok = call.push_null();
     } else {
-        ok = call.reply_encoded_key(the_min);
+        ok = call.push_encoded_key(the_min);
     }
     return ok;
 }
@@ -922,9 +922,9 @@ int MAX(caller& call, const arg_t& ) {
     }
     int ok = call.ok();
     if (the_max.empty()) {
-        ok = call.null();
+        ok = call.push_null();
     } else {
-        ok = call.reply_encoded_key(the_max);
+        ok = call.push_encoded_key(the_max);
     }
     return ok;
 }
@@ -963,9 +963,9 @@ int LB(caller& call, const arg_t& argv) {
     }
     int ok = call.ok();
     if (the_lb.empty()) {
-        ok = call.null();
+        ok = call.push_null();
     } else {
-        ok = call.reply_encoded_key(the_lb);
+        ok = call.push_encoded_key(the_lb);
     }
     for (auto shard:barch::get_shard_count()) {
         auto t = call.kspace()->get(shard);
@@ -1011,9 +1011,9 @@ int UB(caller& call, const arg_t& argv) {
     }
     int ok = call.ok();
     if (the_lb.empty()) {
-        ok = call.null();
+        ok = call.push_null();
     } else {
-        ok = call.reply_encoded_key(the_lb);
+        ok = call.push_encoded_key(the_lb);
     }
     unlock(call.kspace());
     return ok;
@@ -1039,10 +1039,10 @@ int REM(caller& call, const arg_t& argv) {
     int r = 0;
     auto fc = [&r,&call](art::node_ptr n) -> void {
         if (n.null()) {
-            r = call.null();
+            r = call.push_null();
         } else {
             auto vt = n.const_leaf()->get_value();
-            r = call.vt(vt);
+            r = call.push_vt(vt);
         }
     };
 
@@ -1084,7 +1084,7 @@ int KSPACE(caller& call, const arg_t& argv) {
         return call.syntax_error();
     }
     if (parser.is_exist) {
-        return call.boolean(barch::is_keyspace(parser.name));
+        return call.push_bool(barch::is_keyspace(parser.name));
     }
     if (parser.is_depends) {
         auto source = barch::get_keyspace(parser.source);
@@ -1093,22 +1093,22 @@ int KSPACE(caller& call, const arg_t& argv) {
         ks_shared shl(source);
         ks_unique ul(dependent);
         dependent->depends(source);
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
 
     if (parser.is_dependants) {
         auto dependent = barch::get_keyspace(parser.dependant); // this will throw if parameter is wrong
         auto source = dependent->source();
         if (source) {
-            return call.reply(source->get_canonical_name());
+            return call.push_string(source->get_canonical_name());
         }
-        return call.null();
+        return call.push_null();
     }
 
     if (parser.is_merge) {
         if (parser.is_merge_default) {
             call.kspace()->merge();
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
         auto source = barch::get_keyspace(parser.source);
         auto dependent = barch::get_keyspace(parser.dependant);
@@ -1116,7 +1116,7 @@ int KSPACE(caller& call, const arg_t& argv) {
         ks_shared shl(dependent);
         ks_unique ul(source);
         dependent->merge(source);
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
 
     if (parser.is_release) {
@@ -1124,12 +1124,12 @@ int KSPACE(caller& call, const arg_t& argv) {
         auto source = dependent->source();
         if (!source || source->get_canonical_name() != parser.source) {
             if (!parser.source.empty())
-                return call.error("Invalid source keyspace name");
+                return call.push_error("Invalid source keyspace name");
         }
         ks_unique shl(dependent);
         ks_shared ul(source);
         dependent->depends(nullptr);
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
     if (parser.is_drop) {
         auto source = parser.source.empty() ? call.kspace() : barch::get_keyspace(parser.source);
@@ -1140,7 +1140,7 @@ int KSPACE(caller& call, const arg_t& argv) {
         });
         source = nullptr;
         if (barch::unload_keyspace(parser.source))
-            return call.simple("OK");
+            return call.push_simple("OK");
     }
 
     if (parser.is_option && parser.is_get) {
@@ -1148,20 +1148,20 @@ int KSPACE(caller& call, const arg_t& argv) {
         ks_shared ul(spc);
         if (parser.name == "ORDERED") {
             barch::shard_ptr ptr = spc->get(0ul);
-            call.boolean(ptr->opt_ordered_keys);
+            call.push_bool(ptr->opt_ordered_keys);
             return 0;
         }
         if (parser.name == "LRU") {
             barch::shard_ptr ptr = spc->get(0ul);
-            call.boolean(ptr->opt_evict_all_keys_lru);
+            call.push_bool(ptr->opt_evict_all_keys_lru);
             return 0;
         }
         if (parser.name == "RANDOM") {
             barch::shard_ptr ptr = spc->get(0ul);
-            call.boolean(ptr->opt_evict_all_keys_random);
+            call.push_bool(ptr->opt_evict_all_keys_random);
             return 0;
         }
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
 
     if (parser.is_option && parser.is_set) {
@@ -1172,7 +1172,7 @@ int KSPACE(caller& call, const arg_t& argv) {
             for (auto &shrd : spc->get_shards()) {
                 shrd->opt_ordered_keys = on;
             }
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
         if (parser.name == "LRU") {
             bool on = parser.value == "ON";
@@ -1181,7 +1181,7 @@ int KSPACE(caller& call, const arg_t& argv) {
                 shrd->opt_evict_all_keys_lru = on;
                 shrd->opt_evict_volatile_keys_lru = evict_volatile;
             }
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
         if (parser.name == "RANDOM") {
             bool on = parser.value == "ON";
@@ -1190,12 +1190,12 @@ int KSPACE(caller& call, const arg_t& argv) {
                 shrd->opt_evict_all_keys_random = on;
                 shrd->opt_evict_volatile_keys_random = evict_volatile;
             }
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
 
     }
 
-    return call.null();
+    return call.push_null();
 }
 
 int cmd_KSPACE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1208,25 +1208,25 @@ int cmd_KSPACE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int USE(caller& call, const arg_t& argv) {
     if (argv.size() == 1) {
         call.use("");
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
     if (argv.size() != 2) {
         return call.wrong_arity();
     }
 
     call.use(argv[1].to_string());
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int UNLOAD(caller& call, const arg_t& argv) {
     if (argv.size() == 1) {
         barch::unload_keyspace("");
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
     if (argv.size() != 2) {
         return call.wrong_arity();
     }
     barch::unload_keyspace(argv[1].to_string());
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int cmd_UNLOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1242,7 +1242,7 @@ int SPACES(caller& call, const arg_t& argv) {
             for (auto s: space->get_shards() ) {
                 size += s->get_size();
             }
-            call.reply_values({name,size});
+            call.push_values({name,size});
         });
         call.end_array(0);
     }else {
@@ -1267,7 +1267,7 @@ int SIZE(caller& call, const arg_t& argv) {
         storage_release release(t);
         size += (int64_t) t->get_size();
     }
-    return call.long_long(size);
+    return call.push_ll(size);
 }
 int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1281,7 +1281,7 @@ int SAVE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     size_t errors = save(call);
-    return errors ? call.error("some shards not saved"): call.simple("OK");
+    return errors ? call.push_error("some shards not saved"): call.push_simple("OK");
 }
 
 int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
@@ -1308,7 +1308,7 @@ int LOAD(caller& call, const arg_t& argv) {
         if (loader.joinable())
             loader.join();
     }
-    return errors>0 ? call.error("some shards did not load") : call.simple("OK");
+    return errors>0 ? call.push_error("some shards did not load") : call.push_simple("OK");
 }
 int START(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
@@ -1317,7 +1317,7 @@ int START(caller& call, const arg_t& argv) {
     auto interface = argv[1];
     auto port = argv[2];
     barch::server::start(interface.chars(), atoi(port.chars()));
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int PUBLISH(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
@@ -1328,7 +1328,7 @@ int PUBLISH(caller& call, const arg_t& argv) {
     for (auto shard: barch::get_shard_count()) {
         if (!ks->get(shard)->publish(interface.chars(), atoi(port.chars()))) {}
     }
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int PULL(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
@@ -1339,14 +1339,14 @@ int PULL(caller& call, const arg_t& argv) {
     for (auto shard: barch::get_shard_count()) {
         if (!ks->get(shard)->pull(interface.chars(), atoi(port.chars()))) {}
     }
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int STOP(caller& call, const arg_t& ) {
     if (call.get_context() == ctx_resp) {
-        return call.error("Cannot stop server");
+        return call.push_error("Cannot stop server");
     }
     barch::server::stop();
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int PING(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
@@ -1356,9 +1356,9 @@ int PING(caller& call, const arg_t& argv) {
     //barch::server::start(interface.chars(), atoi(port.chars()));
     barch::repl::client cli(interface.chars(), atoi(port.chars()), 0);
     if (!cli.ping()) {
-        return call.error("could not ping");
+        return call.push_error("could not ping");
     }
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int RETRIEVE(caller& call, const arg_t& argv) {
 
@@ -1377,10 +1377,10 @@ int RETRIEVE(caller& call, const arg_t& argv) {
                 }
             }
 
-            return call.error("could not load shard - all shards cleared");
+            return call.push_error("could not load shard - all shards cleared");
         }
     }
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 
 int cmd_PUBLISH(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1436,7 +1436,7 @@ int COMMIT(caller& call, const arg_t& argv) {
     for (auto shard : barch::get_shard_count()) {
         ks->get(shard)->commit();
     }
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1449,7 +1449,7 @@ int ROLLBACK(caller& call, const arg_t& argv) {
     for (auto shard : barch::get_shard_count()) {
         ks->get(shard)->rollback();
     }
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1463,7 +1463,7 @@ int CLEAR(caller& call, const arg_t& argv) {
         shard->clear();
     }
 
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 
 int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
@@ -1479,7 +1479,7 @@ int CLEARALL(caller& call, const arg_t& argv) {
     });
 
 
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 
 int cmd_CLEARALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
@@ -1494,18 +1494,18 @@ int KSOPTIONS(caller& call, const arg_t& argv) {
             for (auto &shard : call.kspace()->get_shards()) {
                 shard->opt_ordered_keys = false;
             }
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
         if (argv[2] == "ordered") {
             for (auto &shard : call.kspace()->get_shards()) {
                 shard->opt_ordered_keys = true;
             }
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
     }
 
 
-    return call.error("Unknown option");
+    return call.push_error("Unknown option");
 }
 
 int cmd_KSOPTIONS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
@@ -1520,7 +1520,7 @@ int SAVEALL(caller& call, const arg_t& argv) {
         shard->save(true);
     });
 
-    return call.simple("OK");
+    return call.push_simple("OK");
 }
 
 int cmd_SIZEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
@@ -1537,7 +1537,7 @@ int SIZEALL(caller& call, const arg_t& argv) {
         size += shard->get_size();
     });
 
-    return call.any_int(size);
+    return call.push_int(size);
 }
 
 int cmd_SAVEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
@@ -1555,35 +1555,35 @@ int STATS(caller& call, const arg_t& argv) {
         vbytes += call.kspace()->get(shard)->get_ap().get_nodes().get_bytes_allocated() + call.kspace()->get(shard)->get_ap().get_leaves().get_bytes_allocated();
     }
     call.start_array();
-    call.reply_values({"heap_bytes_allocated", get_total_memory()});
-    call.reply_values({"page_bytes_compressed",as.page_bytes_compressed});
-    call.reply_values({ "max_page_bytes_uncompressed", as.max_page_bytes_uncompressed});
-    call.reply_values({ "last_vacuum_time", as.last_vacuum_time});
-    call.reply_values({ "vacuum_count", as.vacuums_performed});
-    call.reply_values({ "page_bytes_uncompressed", as.page_bytes_uncompressed});
-    call.reply_values({ "bytes_addressable", as.bytes_allocated});
-    call.reply_values({ "interior_bytes_addressable", as.bytes_interior});
-    call.reply_values({ "leaf_nodes", as.leaf_nodes});
-    call.reply_values({ "size_4_nodes", as.node4_nodes});
-    call.reply_values({ "size_16_nodes", as.node16_nodes});
-    call.reply_values({ "size_48_nodes", as.node48_nodes});
-    call.reply_values({ "size_256_nodes", as.node256_nodes});
-    call.reply_values({ "size_256_occupancy", as.node256_occupants});
-    call.reply_values({ "leaf_nodes_replaced", as.leaf_nodes_replaced});
-    call.reply_values({ "pages_uncompressed", as.pages_uncompressed});
-    call.reply_values({ "pages_compressed", as.pages_compressed});
-    call.reply_values({ "pages_evicted", as.pages_evicted});
-    call.reply_values({ "keys_evicted", as.keys_evicted});
-    call.reply_values({ "pages_defragged", as.pages_defragged});
-    call.reply_values({ "exceptions_raised", as.exceptions_raised});
-    call.reply_values({ "maintenance_cycles", as.maintenance_cycles});
-    call.reply_values({ "shards", as.shards});
-    call.reply_values({ "local_calls", as.local_calls});
-    call.reply_values({ "max_spin", as.max_spin});
-    call.reply_values({"logical_allocated", as.logical_allocated});
-    call.reply_values({"oom_avoided_inserts", as.oom_avoided_inserts});
-    call.reply_values({"keys_found", as.keys_found});
-    call.reply_values({"queue_reorders", as.queue_reorders});
+    call.push_values({"heap_bytes_allocated", get_total_memory()});
+    call.push_values({"page_bytes_compressed",as.page_bytes_compressed});
+    call.push_values({ "max_page_bytes_uncompressed", as.max_page_bytes_uncompressed});
+    call.push_values({ "last_vacuum_time", as.last_vacuum_time});
+    call.push_values({ "vacuum_count", as.vacuums_performed});
+    call.push_values({ "page_bytes_uncompressed", as.page_bytes_uncompressed});
+    call.push_values({ "bytes_addressable", as.bytes_allocated});
+    call.push_values({ "interior_bytes_addressable", as.bytes_interior});
+    call.push_values({ "leaf_nodes", as.leaf_nodes});
+    call.push_values({ "size_4_nodes", as.node4_nodes});
+    call.push_values({ "size_16_nodes", as.node16_nodes});
+    call.push_values({ "size_48_nodes", as.node48_nodes});
+    call.push_values({ "size_256_nodes", as.node256_nodes});
+    call.push_values({ "size_256_occupancy", as.node256_occupants});
+    call.push_values({ "leaf_nodes_replaced", as.leaf_nodes_replaced});
+    call.push_values({ "pages_uncompressed", as.pages_uncompressed});
+    call.push_values({ "pages_compressed", as.pages_compressed});
+    call.push_values({ "pages_evicted", as.pages_evicted});
+    call.push_values({ "keys_evicted", as.keys_evicted});
+    call.push_values({ "pages_defragged", as.pages_defragged});
+    call.push_values({ "exceptions_raised", as.exceptions_raised});
+    call.push_values({ "maintenance_cycles", as.maintenance_cycles});
+    call.push_values({ "shards", as.shards});
+    call.push_values({ "local_calls", as.local_calls});
+    call.push_values({ "max_spin", as.max_spin});
+    call.push_values({"logical_allocated", as.logical_allocated});
+    call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
+    call.push_values({"keys_found", as.keys_found});
+    call.push_values({"queue_reorders", as.queue_reorders});
     call.end_array(0);
     return 0;
 }
@@ -1600,17 +1600,17 @@ int OPS(caller& call, const arg_t& argv) {
 
     art_ops_statistics as = barch::get_ops_statistics();
     call.start_array();
-    call.reply_values({"delete_ops", as.delete_ops});
-    call.reply_values({"retrieve_ops", as.get_ops});
-    call.reply_values({"insert_ops", as.insert_ops});
-    call.reply_values({"iterations", as.iter_ops});
-    call.reply_values({"range_iterations", as.iter_range_ops});
-    call.reply_values({"lower_bound_ops", as.lb_ops});
-    call.reply_values({"maximum_ops", as.max_ops});
-    call.reply_values({"minimum_ops", as.min_ops});
-    call.reply_values({"range_ops", as.range_ops});
-    call.reply_values({"set_ops", as.set_ops});
-    call.reply_values({"size_ops", as.size_ops});
+    call.push_values({"delete_ops", as.delete_ops});
+    call.push_values({"retrieve_ops", as.get_ops});
+    call.push_values({"insert_ops", as.insert_ops});
+    call.push_values({"iterations", as.iter_ops});
+    call.push_values({"range_iterations", as.iter_range_ops});
+    call.push_values({"lower_bound_ops", as.lb_ops});
+    call.push_values({"maximum_ops", as.max_ops});
+    call.push_values({"minimum_ops", as.min_ops});
+    call.push_values({"range_ops", as.range_ops});
+    call.push_values({"set_ops", as.set_ops});
+    call.push_values({"size_ops", as.size_ops});
     call.end_array(0);
     return 0;
 }
@@ -1643,7 +1643,7 @@ int HEAPBYTES(caller& call, const arg_t& argv) {
         storage_release release(s);
         vbytes += s->get_ap().get_nodes().get_bytes_allocated() + s->get_ap().get_leaves().get_bytes_allocated();
     }
-    return call.long_long( (int64_t) heap::allocated + vbytes);
+    return call.push_ll( (int64_t) heap::allocated + vbytes);
 }
 int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
@@ -1659,7 +1659,7 @@ int EVICT(caller& call, const arg_t& argv) {
         storage_release release(t);
         ev += art_evict_lru(t);
     }
-    return call.long_long((int64_t)ev );
+    return call.push_ll((int64_t)ev );
 }
 int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
@@ -1672,13 +1672,13 @@ int CONFIG(caller& call, const arg_t& argv) {
     if (strncmp("set", s.chars(), s.size) == 0 || strncmp("SET", s.chars(), s.size) == 0) {
         int r = barch::set_configuration_value(argv[2].chars(), argv[3].chars());
         if (r == 0) {
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
 
     }else {
-        return call.error("only SET keyword currently supported");
+        return call.push_error("only SET keyword currently supported");
     }
-    return call.error("could not set configuration value");
+    return call.push_error("could not set configuration value");
 }
 /* B.CONFIG [SET|GET] <key> [<value>]
  *
@@ -1696,13 +1696,13 @@ int COMMAND(caller& call, const arg_t& params) {
         std::vector<Variable> results;
         call.start_array();
         for (auto& p: functions_by_name()) {
-            call.simple(p.first.c_str());
-            call.simple("function");
+            call.push_simple(p.first.c_str());
+            call.push_simple("function");
         }
         call.end_array(0);
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
-    return call.error("unknown command");
+    return call.push_error("unknown command");
 }
 /* This function must be present on each module. It is used in order to
  * register the commands into the server. */

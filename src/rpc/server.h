@@ -12,17 +12,15 @@
 #include "key_options.h"
 #include "variable.h"
 #include "source.h"
-
+#include "asio_includes.h"
 namespace barch {
 
     typedef std::pair<std::string, size_t> host_id;
-
     host_id get_host_id();
     namespace server {
         void start(const std::string& interface, uint_least16_t port);
         void stop();
     };
-
     namespace repl {
         struct call_result {
             int call_error{};

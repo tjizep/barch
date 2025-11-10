@@ -1,9 +1,11 @@
-# Release v0.3.4.3b 2025-11-06
+# Release v0.3.4.3b 2025-11-10
 
 ## New Features
+1. Add `BLPOP` and `BRPOP` for lists
 
 ## Fixes
 1. Add a smidgen of static analysis to builds
+2. refactor `caller` vm
 
 # Release v0.3.4.2b 2025-11-06
 

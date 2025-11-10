@@ -11,6 +11,7 @@
 #include "module.h"
 #include "keys.h"
 #include "vk_caller.h"
+#include "rpc/block_api.h"
 thread_local composite query;
 template<typename T>
 art::value_type vt(const T& t) {
@@ -60,6 +61,100 @@ struct list_header {
 };
 
 extern "C"{
+    int bpop(caller& cc, const arg_t& args, bool tail) {
+        if (args.size() < 3) {
+            return cc.wrong_arity();
+        }
+        if (cc.has_blocks()) {
+            return cc.push_error("block already set");
+        }
+        heap::vector<std::string> blocks;
+
+        auto spc = cc.kspace();
+        uint64_t time_out = conversion::to_double(conversion::as_variable(args.back()))*1000ull;
+        cc.start_array();
+        size_t popped = 0;
+        for (size_t ki = 1; ki < args.size() - 1; ++ki) {
+            if (key_ok(args[ki]) != 0) {
+                return cc.push_error("invalid key");
+            }
+            auto t = spc->get(args[ki]);
+            storage_release release(t);
+            composite li;
+            auto container = conversion::convert(args[ki]);
+            auto key = query.create({container});
+            auto value = t->search(key);
+            if (value.null()) {
+                blocks.emplace_back(args[ki].to_string());
+                // the key does not exist at all and we must add a block here
+                continue;
+            }
+            li.create({container});
+
+            list_header header {value.const_leaf()->get_value()};
+            int64_t start = conversion::dec_bytes_to_int(header.start);
+            int64_t end = conversion::dec_bytes_to_int(header.end);
+            if (start == end) {
+                blocks.emplace_back(args[ki].to_string());
+                continue; // this condition is somewhat strange but a key is already registered for blocking
+                // we do not send a notification in this case
+            }
+            cc.push_encoded_key(value.cl()->get_key());
+            if (tail) {
+                li.push(conversion::comparable_key(--end));
+                header.end = conversion::make_int64_bytes(end);
+            } else {
+                li.push(conversion::comparable_key(++start));
+                header.start = conversion::make_int64_bytes(start);
+            }
+            ++popped;
+            t->remove(li.create(),[&](const art::node_ptr& old) {
+                if (!old.null())
+                    cc.push_vt(old.const_leaf()->get_value());
+            }); // remove the key
+            li.pop_back();
+
+            if (start == end) {
+                // usually the entire key must go (but were blocking so ++blocks)
+                blocks.emplace_back(args[ki].to_string());
+            }
+            // todo: we can set the header directly but that change would not be replicated
+            t->insert(key, header.as_value(), true);
+        }
+        cc.end_array(0);
+        if (!blocks.empty() && popped == 0) {
+            cc.add_block(blocks, time_out,[](caller& call, const heap::vector<std::string>& keys) {
+                // this gets called as soon as the key gets pushed
+                // it happens on the same thread as the caller
+                if (keys.empty()) {
+                    // theres a timeout
+                    call.push_null();
+                    return;
+                }
+                for (auto& k: keys) {
+                    call.push_string(k);
+                    auto r = LFRONT(call, {"LFRONT", k});
+                    if (r == call.ok()) {
+                        if (!call.back().isNull()) {
+                            r |= LPOP(call, {"LPOP", k, "1"});
+                            call.pop_back(1);
+                        }else {
+                            call.pop_back(2);
+                        }
+                    }else {
+                        call.pop_back(2);
+                    }
+                }
+            });
+        }
+        return 0;
+    }
+    int BLPOP(caller& cc, const arg_t& args) {
+        return bpop(cc, args, true);
+    }
+    int BRPOP(caller& cc, const arg_t& args) {
+        return bpop(cc, args, false);
+    }
     int LPUSH(caller& cc, const arg_t& args) {
         int64_t updated = 0;
         list_header header;
@@ -70,7 +165,7 @@ extern "C"{
             return cc.wrong_arity();
         }
         if (key_ok(args[1]) != 0) {
-            return cc.null();
+            return cc.push_null();
         }
         auto t = cc.kspace()->get(args[1]);
         storage_release release(t);
@@ -86,6 +181,9 @@ extern "C"{
         }
         int64_t start = conversion::dec_bytes_to_int(header.start);
         int64_t end = conversion::dec_bytes_to_int(header.end);
+        if (start == end) {
+            barch::call_unblock(args[1].to_string());
+        }
         for (size_t n = 2; n < args.size(); n += 1) {
             li.push(conversion::comparable_key(end));
             header.end = conversion::make_int64_bytes(++end);
@@ -105,7 +203,7 @@ extern "C"{
         if (conversion::dec_bytes_to_int(h.end) != end) {
             abort_with("header not updated");
         }
-        return cc.long_long(end - start);
+        return cc.push_ll(end - start);
     }
 
     int LPOP(caller& cc, const arg_t& args) {
@@ -113,7 +211,7 @@ extern "C"{
             return cc.wrong_arity();
         }
         if (key_ok(args[1]) != 0) {
-            return cc.null();
+            return cc.push_null();
         }
         auto count = conversion::to_int64(conversion::as_variable(args[2]));
         auto t = cc.kspace()->get(args[1]);
@@ -123,7 +221,7 @@ extern "C"{
         auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
-            return cc.null();
+            return cc.push_null();
         }
         li.create({container});
 
@@ -131,7 +229,7 @@ extern "C"{
         int64_t start = conversion::dec_bytes_to_int(header.start);
         int64_t end = conversion::dec_bytes_to_int(header.end);
         if (start == end) {
-            return cc.null();
+            return cc.push_null();
         }
         int64_t actual = 0;
 
@@ -142,14 +240,14 @@ extern "C"{
             header.end = conversion::make_int64_bytes(end);
             if (start == end) {
                 t->remove(key);
-                return cc.long_long(end - start);
+                return cc.push_ll(end - start);
             }
             ++actual;
         }
         // todo: we can set the header directly but that change would not be replicated
         t->insert(key, header.as_value(), true);
 
-        return cc.long_long(end - start);
+        return cc.push_ll(end - start);
     }
 
     int LLEN(caller& cc, const arg_t& args) {
@@ -157,7 +255,7 @@ extern "C"{
             return cc.wrong_arity();
         }
         if (key_ok(args[1]) != 0) {
-            return cc.null();
+            return cc.push_null();
         }
         auto t = cc.kspace()->get(args[1]);
         storage_release release(t);
@@ -165,14 +263,14 @@ extern "C"{
         auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
-            return cc.long_long(0);
+            return cc.push_ll(0);
 
         }
         list_header header {value.const_leaf()->get_value()};
         int64_t start = conversion::dec_bytes_to_int(header.start);
         int64_t end = conversion::dec_bytes_to_int(header.end);
 
-        return cc.long_long(end - start);
+        return cc.push_ll(end - start);
 
     }
     int LBACK(caller& cc, const arg_t& args) {
@@ -180,7 +278,7 @@ extern "C"{
             return cc.wrong_arity();
         }
         if (key_ok(args[1]) != 0) {
-            return cc.null();
+            return cc.push_null();
         }
         auto t = cc.kspace()->get(args[1]);
         storage_release release(t);
@@ -188,7 +286,7 @@ extern "C"{
         auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
-            return cc.null();
+            return cc.push_null();
 
         }
         list_header header {value.const_leaf()->get_value()};
@@ -197,9 +295,9 @@ extern "C"{
         li.create({container,conversion::comparable_key(--end)});
         auto back = t->search(li.create());
         if (back.null()) {
-            return cc.null();
+            return cc.push_null();
         }
-        return cc.vt(back.const_leaf()->get_value());
+        return cc.push_vt(back.const_leaf()->get_value());
     }
 
     int LFRONT(caller& cc, const arg_t& args) {
@@ -207,7 +305,7 @@ extern "C"{
             return cc.wrong_arity();
         }
         if (key_ok(args[1]) != 0) {
-            return cc.null();
+            return cc.push_null();
         }
         auto t = cc.kspace()->get(args[1]);
         storage_release release(t);
@@ -215,7 +313,7 @@ extern "C"{
         auto key = query.create({container});
         auto value = t->search(key);
         if (value.null()) {
-            return cc.null();
+            return cc.push_null();
         }
         list_header header {value.const_leaf()->get_value()};
         int64_t start = conversion::dec_bytes_to_int(header.start);
@@ -223,8 +321,8 @@ extern "C"{
         li.create({container,conversion::comparable_key(start)});
         auto front = t->search(li.create());
         if (front.null()) {
-            return cc.null();
+            return cc.push_null();
         }
-        return cc.vt(front.const_leaf()->get_value());
+        return cc.push_vt(front.const_leaf()->get_value());
     }
 }

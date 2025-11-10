@@ -121,7 +121,8 @@ extern "C"{
     int LPUSH(caller& cc, const arg_t& args);
     int LPOP(caller& cc, const arg_t& args);
     int LLEN(caller& cc, const arg_t& args);
-
+    int BLPOP(caller& cc, const arg_t& args);
+    int BRPOP(caller& cc, const arg_t& args);
     // Hash Set
     int HSET(caller& cc, const arg_t& args);
     int HEXPIREAT(caller& call, const arg_t& args);

@@ -28,7 +28,7 @@ int INFO(caller& call, const arg_t& argv) {
                 shard = call.kspace()->get_shard_index(argv[2]);
             }
             if (shard >= barch::get_shard_count().size()) {
-                return call.error("shard number out of range");
+                return call.push_error("shard number out of range");
             }
         }else {
             shard = call.kspace()->get_shard_index(argv[2]);
@@ -45,7 +45,7 @@ int INFO(caller& call, const arg_t& argv) {
         "bytes_allocated:"+tos(s->get_ap().get_leaves().get_bytes_allocated() + s->get_ap().get_nodes().get_bytes_allocated()) + "\n"
         "virtual_allocated:"+tos(s->get_ap().get_leaves().get_allocated() + s->get_ap().get_nodes().get_allocated()) + "\n";
 
-        call.vt(response);
+        call.push_vt(response);
         return 0;
     }
     if (argv.size() == 2 && argv[1] == "SERVER") {
@@ -80,9 +80,9 @@ int INFO(caller& call, const arg_t& argv) {
         "io_threads_active:"+tos(std::thread::hardware_concurrency())+"\n"
         "listener0:name=tcp,bind=*,bind=-::*,port="+port+"\n";
 
-        call.vt(response);
+        call.push_vt(response);
         return 0;
     }
-    return call.error("not implemented");
+    return call.push_error("not implemented");
 }
 }

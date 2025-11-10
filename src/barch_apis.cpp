@@ -116,6 +116,8 @@ function_map& functions_by_name() {
         r["LFRONT"] = {::LFRONT,{"read","list","data"}};
         r["LPUSH"] = {::LPUSH,{"write","list","data"}};
         r["LPOP"] = {::LPOP,{"write","list","data"}};
+        r["BLPOP"] = {::BLPOP,{"write","list","data"}};
+        r["BRPOP"] = {::BLPOP,{"write","list","data"}};
         r["LLEN"] = {::LLEN,{"read","list","data"}};
         r["START"] = {::START,{"write","connection","data"}};
         r["STOP"] = {::STOP,{"write","connection","data"}};

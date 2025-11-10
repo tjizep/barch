@@ -9,6 +9,7 @@
 
 #include "art.h"
 #include "iterator.h"
+#include "netstat.h"
 #include "shard.h"
 
 enum {

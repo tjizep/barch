@@ -93,7 +93,7 @@ extern "C"
 {
     int AUTH(caller& call, const arg_t& argv) {
         if (argv.size() < 3) {
-            return call.error("AUTH requires at least 3 arguments");
+            return call.push_error("AUTH requires at least 3 arguments");
         }
         auto user = argv[1];
         auto secret = argv[2];
@@ -101,7 +101,7 @@ extern "C"
         auto a = get_auth();
         if (a->get_size() == 0) {
             call.set_acl("default", get_all_acl());
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
         read_lock read(a,false);
         catmap cats;
@@ -125,17 +125,17 @@ extern "C"
         if (!s.null() && s.const_leaf()->get_value() == secret) {
             auto acl = cats2vec(cats);
             call.set_acl(user.to_string(), acl);
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
-        return call.error("authentication failed");
+        return call.push_error("authentication failed");
     }
     int ACL(caller& call, const arg_t& argv) {
         if (argv.size() < 3) {
-            return call.error("ACL requires at least 3 arguments");
+            return call.push_error("ACL requires at least 3 arguments");
         }
         barch::acl_spec spec(argv);
         if (spec.parse_options() != 0) {
-            return call.error("ACL syntax error");
+            return call.push_error("ACL syntax error");
         }
         auto a = get_auth();
         if (spec.get) {
@@ -151,7 +151,7 @@ extern "C"
                 if (!k.starts_with(key)) {
                     break;
                 }
-                call.reply_values({"$" + k.sub(key.size()).pref(1).to_string(),v.to_string()} );
+                call.push_values({"$" + k.sub(key.size()).pref(1).to_string(),v.to_string()} );
                 cat_data.next();
             }
             call.end_array(0);
@@ -176,7 +176,7 @@ extern "C"
             }
             key = user_secret(spec.user);
             a->remove(key);
-            return call.simple("OK");
+            return call.push_simple("OK");
         }
         auto &valid_categories = get_category_map();
         for (auto& cat : spec.cat) {
@@ -184,7 +184,7 @@ extern "C"
                 continue;
             }
             if (!valid_categories.count(cat.first)) {
-                return call.error("ACL category not found");
+                return call.push_error("ACL category not found");
             }
         }
 
@@ -192,6 +192,6 @@ extern "C"
         spec.cat.emplace("auth",true); // always add the data right
         write_lock write(a->get_latch());
         add_cats(a,spec.user,spec.secret,spec.cat);
-        return call.simple("OK");
+        return call.push_simple("OK");
     }
 }

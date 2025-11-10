@@ -153,7 +153,7 @@ int ZADD(caller& call, const arg_t &argv) {
     }
     auto key = argv[1];
     if (key_ok(key) != 0) {
-        return call.null();
+        return call.push_null();
     }
 
     auto t = call.kspace()->get(key);
@@ -182,7 +182,7 @@ int ZADD(caller& call, const arg_t &argv) {
         auto v =argv[n + 1];
 
         if (key_ok(k) != 0 || key_ok(v) != 0) {
-            r |= call.null();
+            r |= call.push_null();
             ++responses;
             continue;
         }
@@ -190,7 +190,7 @@ int ZADD(caller& call, const arg_t &argv) {
         auto score = conversion::convert(k, true);
         auto member = conversion::convert(v);
         if (score.ctype() != art::tfloat && score.ctype() != art::tdouble) {
-            r |= call.null();
+            r |= call.push_null();
             ++responses;
             continue;
         }
@@ -216,9 +216,9 @@ int ZADD(caller& call, const arg_t &argv) {
     }
     auto current = t->get_tree_size();
     if (zspec.CH) {
-        call.long_long(current - before + updated - fkadded);
+        call.push_ll(current - before + updated - fkadded);
     } else {
-        call.long_long(current - before - fkadded);
+        call.push_ll(current - before - fkadded);
     }
 
     return call.ok();
@@ -237,7 +237,7 @@ int ZREM(caller& call, const arg_t& argv) {
     int64_t removed = 0;
     auto key = argv[1];
     if (key_ok(key) != 0) {
-        return call.null();
+        return call.push_null();
     }
     auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
@@ -249,7 +249,7 @@ int ZREM(caller& call, const arg_t& argv) {
         auto mem = argv[n];
 
         if (key_ok(mem) != 0) {
-            r |= call.null();
+            r |= call.push_null();
             ++responses;
             continue;
         }
@@ -271,7 +271,7 @@ int ZREM(caller& call, const arg_t& argv) {
         ++responses;
     }
 
-    return call.long_long(removed);
+    return call.push_ll(removed);
 }
 int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -286,7 +286,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     int64_t updated = 0;
     auto key = argv[1];
     if (key_ok(key) != 0) {
-        return call.null();
+        return call.push_null();
     }
     auto t = call.kspace()->get(argv[1]);
     storage_release release(t);
@@ -296,12 +296,12 @@ int ZINCRBY(caller& call, const arg_t& argv) {
 
     double incr = 0.0f;
     if (!conversion::to_double(argv[2], incr)) {
-        return call.error("invalid argument");
+        return call.push_error("invalid argument");
     }
     auto v = argv[3];
 
     if (key_ok(v) != 0) {
-        return call.error("invalid argument");
+        return call.push_error("invalid argument");
     }
     auto target = conversion::convert(v, true);
     auto target_member = target.get_value();
@@ -333,11 +333,11 @@ int ZINCRBY(caller& call, const arg_t& argv) {
                         q1->pop(2);
                         if (!scores.remove()) // remove the current one
                         {
-                            return call.error("internal error");
+                            return call.push_error("internal error");
                         };
 
                         ++responses;
-                        return call.double_(number);
+                        return call.push_double(number);
                     }
                 }
             }
@@ -354,7 +354,7 @@ int ZINCRBY(caller& call, const arg_t& argv) {
         art::value_type qv = v ;
         t->insert( {}, qkey, qv, true, fcfk);
         q1->pop(2);
-        return call.double_(incr);
+        return call.push_double(incr);
     }
 
     return 0;
@@ -376,7 +376,7 @@ int ZCOUNT(caller& call, const arg_t& argv) {
     const char *smax = argv[3].chars();maxlen = argv[3].size;
 
     if (key_ok(smin, minlen) != 0 || key_ok(smax, maxlen) != 0 || key_ok(n, nlen) != 0) {
-        return call.null();
+        return call.push_null();
     }
 
     auto container = conversion::convert(n, nlen);
@@ -398,7 +398,7 @@ int ZCOUNT(caller& call, const arg_t& argv) {
         }
         ai.next();
     }
-    return call.long_long(count);
+    return call.push_ll(count);
 }
 int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -478,10 +478,10 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                 }
                 if (!pushed && !spec.REMOVE) // bylex should be in correct order
                 {
-                    call.reply_encoded_key(member);
+                    call.push_encoded_key(member);
                     ++replies;
                     if (spec.has_withscores) {
-                        call.reply_encoded_key(encoded_number);
+                        call.push_encoded_key(encoded_number);
                         ++replies;
                     }
                 }
@@ -500,10 +500,10 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         }
         for (auto &rec: bylex) {
             /// TODO: min max filter
-            call.reply_encoded_key(rec.first);
+            call.push_encoded_key(rec.first);
             ++replies;
             if (spec.has_withscores) {
-                call.reply_encoded_key(rec.second);
+                call.push_encoded_key(rec.second);
                 ++replies;
             }
         }
@@ -512,10 +512,10 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
             return b < a;
         });
         for (auto &rec: rev) {
-            call.reply_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
+            call.push_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
             ++replies;
             if (spec.has_withscores) {
-                call.reply_encoded_key(rec.sub(0, numeric_key_size));
+                call.push_encoded_key(rec.sub(0, numeric_key_size));
                 ++replies;
             }
         }
@@ -526,7 +526,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         for (auto &r: removals) {
             remove_ordered(call, r.score_key, r.member_key);
         }
-        return call.long_long(removals.size());
+        return call.push_ll(removals.size());
     }
 
     return 0;
@@ -539,7 +539,7 @@ int ZRANGE(caller& call, const arg_t& argv) {
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
 
     return zrange(call, t, spec);
@@ -558,7 +558,7 @@ int ZCARD(caller& call, const arg_t& argv) {
     auto n = argv[1];
 
     if (key_ok(n) != 0) {
-        return call.null();
+        return call.push_null();
     }
 
     auto container = conversion::convert(n);
@@ -576,7 +576,7 @@ int ZCARD(caller& call, const arg_t& argv) {
         }
         ai.next();
     }
-    return call.long_long(count);
+    return call.push_ll(count);
 }
 
 int cmd_ZCARD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -611,7 +611,7 @@ static int ZOPER(
     art::zops_spec spec(argv);
 
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
     if (spec.aggr == art::zops_spec::agg_none && store.empty())
         call.start_array();
@@ -699,10 +699,10 @@ static int ZOPER(
                 switch (spec.aggr) {
                     case art::zops_spec::agg_none:
                         if (store.empty()) {
-                            call.reply_encoded_key(member);
+                            call.push_encoded_key(member);
                             ++replies;
                             if (spec.has_withscores) {
-                                call.reply_encoded_key(encoded_number);
+                                call.push_encoded_key(encoded_number);
                                 ++replies;
                             }
                         } else {
@@ -748,12 +748,12 @@ static int ZOPER(
         remove_ordered(call, ordered_keys);
     }
     if (replies == 0 && spec.aggr != art::zops_spec::agg_none) {
-        return call.double_(results_added > 0 ? aggr : 0.0f);
+        return call.push_double(results_added > 0 ? aggr : 0.0f);
     }
     if (store.empty()) {
         call.end_array(replies);
     } else {
-        return call.long_long(replies);
+        return call.push_ll(replies);
     }
 
     return call.ok();
@@ -765,7 +765,7 @@ int ZDIFF(caller& call, const arg_t& argv) {
     } catch (std::exception &e) {
         barch::log(e,__FILE__,__LINE__);
     }
-    return call.error("internal error");
+    return call.push_error("internal error");
 }
 
 int cmd_ZDIFF(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -776,7 +776,7 @@ extern "C"
 int ZDIFFSTORE(caller& call, const arg_t& argv) {
     auto member = argv[1];
     if (member.empty())
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     arg_t narg;
     std::copy(++argv.begin(), argv.end(), std::back_inserter(narg));
     return ZOPER(call, narg, difference, member);
@@ -790,7 +790,7 @@ extern "C"
 int ZINTERSTORE(caller& call, const arg_t& argv) {
     auto member = argv[1];
     if (member.empty())
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     arg_t narg;
     std::copy(++argv.begin(), argv.end(), std::back_inserter(narg));
     return ZOPER(call, narg, intersect, member);
@@ -816,7 +816,7 @@ int ZINTER(caller& call, const arg_t& argv) {
     } catch (std::exception &e) {
         barch::log(e,__FILE__,__LINE__);
     }
-    return call.error("internal error");
+    return call.push_error("internal error");
 }
 
 int cmd_ZINTER(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -835,12 +835,12 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (argv.size() == 3) {
         if (call.ok() != conversion::to_ll(argv[2], count)) {
-            return call.error("invalid count");
+            return call.push_error("invalid count");
         }
     }
 
     if (key_ok(k) != 0) {
-        return call.null();
+        return call.push_null();
     }
     auto container = conversion::convert(k);
     query l, u;
@@ -856,8 +856,8 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
         if (!v.starts_with(lower.pref(1))) break;
         auto encoded_number = v.sub(lower.size, numeric_key_size);
         auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-        call.reply_encoded_key(encoded_number);
-        call.reply_encoded_key(member);
+        call.push_encoded_key(encoded_number);
+        call.push_encoded_key(member);
         replies += 2;
         if (!i.remove()) {
             break;
@@ -882,12 +882,12 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (argv.size() == 3) {
         if (!conversion::to_ll(argv[2], count)) {
-            return call.error("invalid count");
+            return call.push_error("invalid count");
         }
     }
 
     if (key_ok(k) != 0) {
-        return call.null();
+        return call.push_null();
     }
 
     auto container = conversion::convert(k);
@@ -914,8 +914,8 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
         if (!v.starts_with(lower)) break;
         auto encoded_number = v.sub(lower.size, numeric_key_size);
         auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-        call.reply_encoded_key(encoded_number);
-        call.reply_encoded_key(member);
+        call.push_encoded_key(encoded_number);
+        call.push_encoded_key(member);
         replies += 2;
 
         if (!i.remove()) {
@@ -938,7 +938,7 @@ int ZREVRANGE(caller& call, const arg_t& argv) {
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
     spec.REV = true;
     spec.BYLEX = false;
@@ -958,7 +958,7 @@ int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
     spec.REV = false;
     spec.BYLEX = false;
@@ -978,7 +978,7 @@ int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
     spec.REV = true;
     spec.BYLEX = false;
@@ -996,7 +996,7 @@ int ZREMRANGEBYLEX(caller& call, const arg_t& argv) {
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
     spec.REV = false;
     spec.BYLEX = true;
@@ -1016,7 +1016,7 @@ int ZRANGEBYLEX(caller& call, const arg_t& argv) {
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
     spec.REV = false;
     spec.BYLEX = true;
@@ -1035,7 +1035,7 @@ int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
     storage_release release(t);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.error("syntax error");
+        return call.push_error("syntax error");
     }
     spec.REV = true;
     spec.BYLEX = true;
@@ -1073,7 +1073,7 @@ int ZRANK(caller& call, const arg_t& argv) {
     auto min_key = qlower.create({container, lower},false);
     auto max_key = qupper.create({container, upper}, false);
     if (max_key < min_key) {
-        return call.long_long(0);
+        return call.push_ll(0);
     }
     art::iterator first(t, min_key);
 
@@ -1082,7 +1082,7 @@ int ZRANK(caller& call, const arg_t& argv) {
         rank = first.distance(max_key);
     }
 
-    return call.long_long(rank);
+    return call.push_ll(rank);
 }
 int cmd_ZRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1115,7 +1115,7 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
     auto min_key = qlower.create({container, lower},false);
     auto max_key = qupper.create({container, upper}, false);
     if (max_key < min_key) {
-        return call.long_long(0);
+        return call.push_ll(0);
     }
 
     art::iterator first(t, min_key);
@@ -1127,7 +1127,7 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
         rank += first.fast_distance(last);
     }
 
-    return call.long_long(rank);
+    return call.push_ll(rank);
 }
 int cmd_ZFASTRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;

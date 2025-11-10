@@ -14,6 +14,7 @@
 #include "sastam.h"
 #include "auth_api.h"
 #include "rpc/barch_functions.h"
+
 struct rpc_caller : caller {
     barch::key_space_ptr ks = get_default_ks();
     std::shared_ptr<barch::repl::rpc> host {};
@@ -27,6 +28,10 @@ struct rpc_caller : caller {
     std::string user = "default";
     std::function<std::string()> info_fun;
     bool call_buffering = false;
+    keys_t blocks{};
+    Variable empty{nullptr};
+    std::function<void(caller&, const keys_t&)> block_fun;
+    uint64_t block_to_ms = 0;
     void create(const std::string& h, uint_least16_t port) {
         this->host = barch::repl::create(h,port);
     }
@@ -46,6 +51,7 @@ struct rpc_caller : caller {
             barch::std_err("could not authenticate `default`");
         }
     }
+
     [[nodiscard]] int wrong_arity()  override {
         errors.emplace_back("Wrong Arity");
         return 0;
@@ -57,7 +63,7 @@ struct rpc_caller : caller {
     [[nodiscard]] int error() const override {
         return -1;
     }
-    [[nodiscard]] int error(const char * e) override {
+    [[nodiscard]] int push_error(const char * e) override {
         errors.emplace_back(e);
         return 0;
     }
@@ -69,58 +75,58 @@ struct rpc_caller : caller {
         }
         return 0;
     }
-    int null() override {
+    int push_null() override {
         results.emplace_back(nullptr);
         return 0;
     }
-    [[nodiscard]] int ok() override {
+    [[nodiscard]] int ok() const override {
         return 0;
     }
-    int boolean(bool value) override {
+    int push_bool(bool value) override {
         results.emplace_back(value);
         return 0;
     }
-    int long_long(int64_t l) override {
+    int push_ll(int64_t l) override {
         results.emplace_back(l);
         return 0;
     }
-    int any_int(long long l) override {
+    int push_int(long long l) override {
         results.emplace_back(l);
         return 0;
     }
-    int any_int(unsigned long long l) override {
+    int push_int(unsigned long long l) override {
         results.emplace_back(l);
         return 0;
     }
-    int any_int(int64_t l) override {
+    int push_int(int64_t l) override {
         results.emplace_back(l);
         return 0;
     }
-    int any_int(uint64_t l) override {
+    int push_int(uint64_t l) override {
         results.emplace_back(l);
         return 0;
     }
-    int any_int(int32_t l) override {
+    int push_int(int32_t l) override {
         results.emplace_back((int64_t)l);
         return 0;
     }
-    int any_int(uint32_t l) override {
+    int push_int(uint32_t l) override {
         results.emplace_back((uint64_t)l);
         return 0;
     }
 
-    int double_(double l) override {
+    int push_double(double l) override {
         results.emplace_back(l);
         return 0;
     }
-    int vt(art::value_type v) override {
+    int push_vt(art::value_type v) override {
         r.clear();
         r.push_back('$');
         r.insert(r.end(), v.begin(), v.end());
         results.emplace_back(r); // values are currently always a string
         return 0;
     }
-    int simple(const char * v) override {
+    int push_simple(const char * v) override {
         results.emplace_back(v);
         return 0;
     }
@@ -133,15 +139,15 @@ struct rpc_caller : caller {
         //results.emplace_back("end_array");
         return 0;
     }
-    int reply_encoded_key(art::value_type key) override {
+    int push_encoded_key(art::value_type key) override {
         results.emplace_back(encoded_key_as_variant(key));
         return 0;
     }
-    int reply(const std::string& value) override {
+    int push_string(const std::string& value) override {
         results.emplace_back(value);
         return 0;
     }
-    int reply_values(const std::initializer_list<Variable>& keys) override {
+    int push_values(const std::initializer_list<Variable>& keys) override {
         for (auto &k : keys) {
             results.emplace_back(k);
         }
@@ -152,6 +158,23 @@ struct rpc_caller : caller {
     }
     std::string convert(const art::value_type& v) {
         return {v.chars(),v.size};
+    }
+    size_t pop_back(size_t n) override {
+        size_t popped = 0;
+        while (!results.empty() && popped < n) {
+            results.pop_back();
+            ++popped;
+        }
+        return popped;
+    };
+    [[nodiscard]] size_t stack() const override {
+        return results.size();
+    }
+    [[nodiscard]] const Variable& back() const override {
+        if (!results.empty()) {
+            return results.back();
+        }
+        return empty;
     }
     template<typename ArgT>
     barch::repl::call_result call_route(const ArgT& params) {
@@ -226,7 +249,12 @@ struct rpc_caller : caller {
         }
         return cr.call_error;
     }
-
+    void call_blocks() {
+        results.clear();
+        errors.clear();
+        args.clear();
+        block_fun(*this, blocks);
+    }
     std::string get_info() const override {
         if (!info_fun) return "";
         return info_fun();
@@ -252,6 +280,21 @@ struct rpc_caller : caller {
     void use(const std::string& name) override {
         this->ks = barch::get_keyspace(name);
     }
+    void add_block(const heap::vector<std::string> &key_names, uint64_t to_ms,  std::function<void(caller&, const keys_t&)> fn) override {
+        this->blocks = key_names;
+        this->block_to_ms = to_ms;
+        this->block_fun = fn;
+    }
+    bool has_blocks() override {
+        return !this->blocks.empty();
+    }
+    void clear_blocks() {
+        this->blocks.clear();
+    }
+    [[nodiscard]] auto& get_blocks() const {
+        return this->blocks;
+    }
+
     void start_call_buffer() override {
         if (!call_buffering) {
             commands.clear();
@@ -268,7 +311,7 @@ struct rpc_caller : caller {
             int e = this->call(cmd.args, cmd.call);
             // analyze results
             if (e != 0) {
-                buffered_results.emplace_back(error(errors[0].c_str()));
+                buffered_results.emplace_back(push_error(errors[0].c_str()));
             } else {
                 if (results.empty()) {
                     buffered_results.emplace_back(nullptr);

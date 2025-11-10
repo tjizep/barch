@@ -226,6 +226,9 @@ namespace barch {
             server::stop();
         }
     };
+    asio::io_context& get_io_context() {
+        return srv->get_asio_unit()->io;
+    }
     static module_stopper stopper;
     namespace repl {
         class rpc_impl : public rpc {
@@ -688,26 +691,26 @@ extern "C"{
             return call.wrong_arity();
         size_t shard = conversion::as_variable(argv[1]).i();
         if (shard >= barch::get_shard_count().size())
-            return call.error("invalid shard");
+            return call.push_error("invalid shard");
         auto host = conversion::as_variable(argv[2]).s();
         auto port = conversion::as_variable(argv[3]).i();
         if (port <= 0 || port >= 65536)
-            return call.error("invalid port");
+            return call.push_error("invalid port");
         if (host.empty())
-            return call.error("no host");
+            return call.push_error("no host");
         barch::repl::set_route(shard, {host,port});
-        return call.simple(host.c_str());
+        return call.push_simple(host.c_str());
     }
     int ROUTE(caller& call, const arg_t& argv) {
         if (argv.size() != 2)
             return call.wrong_arity();
         size_t shard = atoi(argv[1].chars());
         if (shard >= barch::get_shard_count().size())
-            return call.error("invalid shard");
+            return call.push_error("invalid shard");
         auto route = barch::repl::get_route(shard);
         call.start_array();
-        call.simple(route.ip.c_str());
-        call.long_long(route.port);
+        call.push_simple(route.ip.c_str());
+        call.push_ll(route.port);
         call.end_array(0);
 //
         return 0;
@@ -717,12 +720,12 @@ extern "C"{
             return call.wrong_arity();
         size_t shard = atoi(argv[1].chars());
         if (shard >= barch::get_shard_count().size())
-            return call.error("invalid shard");
+            return call.push_error("invalid shard");
         auto route = barch::repl::get_route(shard);
         barch::repl::clear_route(shard);
         call.start_array();
-        call.simple(route.ip.c_str());
-        call.long_long(route.port);
+        call.push_simple(route.ip.c_str());
+        call.push_ll(route.port);
         call.end_array(0);
         return 0;
     }

@@ -14,40 +14,43 @@ enum contexts {
     ctx_rpc
 };
 struct caller {
+    typedef heap::vector<std::string> keys_t;
     virtual ~caller() = default;
     int ctx{ctx_valkey};
 
     void set_context(int in_ctx) {
         this->ctx = in_ctx;
     }
-    int get_context() {
+    [[nodiscard]] int get_context() const {
         return this->ctx;
     }
     [[nodiscard]] virtual int wrong_arity() = 0;
     [[nodiscard]] virtual int syntax_error() = 0;
     [[nodiscard]] virtual int error() const = 0;
-    [[nodiscard]] virtual int error(const char * e) = 0;
+    [[nodiscard]] virtual int push_error(const char * e) = 0;
     virtual int key_check_error(art::value_type k) = 0;
-    virtual int null() = 0;
-    [[nodiscard]] virtual int ok() = 0;
-    virtual int boolean(bool value) = 0;
-    virtual int long_long(int64_t l) = 0;
-    virtual int any_int(long long l) = 0;
-    virtual int any_int(unsigned long long l) = 0;
-    virtual int any_int(int64_t l) = 0;
-    virtual int any_int(uint64_t l) = 0;
-    virtual int any_int(int32_t l) = 0;
-    virtual int any_int(uint32_t l) = 0;
-    virtual int double_(double l) = 0;
-    virtual int vt(art::value_type v) = 0;
-    virtual int simple(const char * v) = 0;
-
+    virtual int push_null() = 0;
+    [[nodiscard]] virtual int ok() const = 0;
+    virtual int push_bool(bool value) = 0;
+    virtual int push_ll(int64_t l) = 0;
+    virtual int push_int(long long l) = 0;
+    virtual int push_int(unsigned long long l) = 0;
+    virtual int push_int(int64_t l) = 0;
+    virtual int push_int(uint64_t l) = 0;
+    virtual int push_int(int32_t l) = 0;
+    virtual int push_int(uint32_t l) = 0;
+    virtual int push_double(double l) = 0;
+    virtual int push_vt(art::value_type v) = 0;
+    virtual int push_simple(const char * v) = 0;
+    virtual size_t pop_back(size_t) {
+        return 0;
+    }
     virtual int start_array() = 0;
     virtual int end_array(size_t length) = 0;
-    virtual int reply_encoded_key(art::value_type key) = 0;
-    virtual int reply(const std::string& value) = 0;
-    virtual int reply_values(const std::initializer_list<Variable>& keys) = 0;
-    virtual std::string get_info() const = 0;
+    virtual int push_encoded_key(art::value_type key) = 0;
+    virtual int push_string(const std::string& value) = 0;
+    virtual int push_values(const std::initializer_list<Variable>& keys) = 0;
+    [[nodiscard]] virtual std::string get_info() const = 0;
     virtual void start_call_buffer() = 0;
     virtual void finish_call_buffer() = 0;
     [[nodiscard]] virtual const std::string& get_user() const = 0;
@@ -56,6 +59,16 @@ struct caller {
     virtual barch::key_space_ptr& kspace() = 0;
     virtual void set_kspace(const barch::key_space_ptr& ks) = 0;
     virtual void use(const std::string& name) = 0;
+    virtual void add_block(const heap::vector<std::string>& blocks, uint64_t to_ms, std::function<void(caller&, const keys_t&)>) = 0;
+    virtual bool has_blocks() = 0;
+    [[nodiscard]] virtual size_t stack() const {
+        return 0;
+    }
+    Variable empty {nullptr};
+
+    [[nodiscard]] virtual const Variable& back() const {
+        return empty;
+    }
 };
 typedef std::function<int(caller& call,const arg_t& argv)> call_type;
 struct command {

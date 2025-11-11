@@ -280,10 +280,29 @@ struct rpc_caller : caller {
     void use(const std::string& name) override {
         this->ks = barch::get_keyspace(name);
     }
-    void add_block(const heap::vector<std::string> &key_names, uint64_t to_ms,  std::function<void(caller&, const keys_t&)> fn) override {
+    void add_block(const keys_t &key_names, uint64_t to_ms,  std::function<void(caller&, const keys_t&)> fn) override {
         this->blocks = key_names;
         this->block_to_ms = to_ms;
         this->block_fun = fn;
+        for (auto& d:blocks) {
+            d.space = ks;
+        }
+    }
+    void transfer_rpc_blocks(const barch::abstract_session_ptr& session) override {
+        for (auto &d: blocks) {
+            auto shard = d.shard();
+            std::unique_lock lck(shard->get_latch());
+            d.space->get(d.shard_index)->add_rpc_block(d.key, session);
+        }
+        //add_rpc_blocks(caller.get_blocks(),session);
+    }
+    void erase_blocks(const barch::abstract_session_ptr& session) override {
+        for (auto &d: blocks) {
+            auto shard = d.shard();
+            std::unique_lock lck(shard->get_latch());
+            shard->erase_rpc_block(d.key, session);
+        }
+        clear_blocks();
     }
     bool has_blocks() override {
         return !this->blocks.empty();

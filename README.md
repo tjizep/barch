@@ -138,6 +138,7 @@ COUNT                      SPACE
 # Other VALKEY API's implemented (Mostly Key Value + TTL)
 ```
 AUTH                       ACL
+BRPOP                      BLPOP   
 SET                        KEYS
 INCR                       INCRBY
 UINCRBY                    UDECRBY
@@ -176,7 +177,13 @@ ZRANGEBYLEX                ZREVRANGEBYLEX
 ZRANK
  
 ``` 
-
+# List API's Implemented
+```
+LLEN                        LPUSH
+LPOP                        BLPOP
+BRPOP                       LFRONT
+LBACK
+```
 # Installation
 1. Checkout and build on (linux only) with gcc 10 or above
 2. `mkdir build`

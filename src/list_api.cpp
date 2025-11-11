@@ -11,7 +11,6 @@
 #include "module.h"
 #include "keys.h"
 #include "vk_caller.h"
-#include "rpc/block_api.h"
 thread_local composite query;
 template<typename T>
 art::value_type vt(const T& t) {
@@ -68,7 +67,7 @@ extern "C"{
         if (blocking && cc.has_blocks()) {
             return cc.push_error("block already set");
         }
-        heap::vector<std::string> blocks;
+        caller::keys_t blocks;
 
         auto spc = cc.kspace();
         uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
@@ -85,7 +84,7 @@ extern "C"{
             auto key = query.create({container});
             auto value = t->search(key);
             if (value.null()) {
-                if (blocking) blocks.emplace_back(args[ki].to_string());
+                if (blocking) blocks.emplace_back(args[ki].to_string(),t->get_shard_number());
                 // the key does not exist at all and we must add a block here
                 continue;
             }
@@ -95,7 +94,7 @@ extern "C"{
             int64_t start = conversion::dec_bytes_to_int(header.start);
             int64_t end = conversion::dec_bytes_to_int(header.end);
             if (start == end) {
-                if (blocking) blocks.emplace_back(args[ki].to_string());
+                if (blocking) blocks.emplace_back(args[ki].to_string(),t->get_shard_number());
                 continue; // this condition is somewhat strange but a key is already registered for blocking
                 // we do not send a notification in this case
             }
@@ -116,14 +115,14 @@ extern "C"{
 
             if (start == end) {
                 // usually the entire key must go (but were blocking so ++blocks)
-                if (blocking) blocks.emplace_back(args[ki].to_string());
+                if (blocking) blocks.emplace_back(args[ki].to_string(),t->get_shard_number());
             }
             // todo: we can set the header directly but that change would not be replicated
             t->insert(key, header.as_value(), true);
         }
         cc.end_array(0);
         if (!blocks.empty() && popped == 0) {
-            cc.add_block(blocks, time_out,[tail](caller& call, const heap::vector<std::string>& keys) {
+            cc.add_block(blocks, time_out,[tail](caller& call, const caller::keys_t& keys) {
                 // this gets called as soon as the key gets pushed
                 // it happens on the same thread as the caller
                 if (keys.empty()) {
@@ -132,7 +131,7 @@ extern "C"{
                     return;
                 }
                 for (auto& k: keys) {
-                    bpop(call, {"bpop", k, "0"},tail,false);
+                    bpop(call, {"bpop", k.key, "0"},tail,false);
                 }
             });
         }
@@ -171,7 +170,7 @@ extern "C"{
         int64_t start = conversion::dec_bytes_to_int(header.start);
         int64_t end = conversion::dec_bytes_to_int(header.end);
         if (start == end) {
-            barch::call_unblock(args[1].to_string());
+            t->call_unblock(args[1].to_string());
         }
         for (size_t n = 2; n < args.size(); n += 1) {
             li.push(conversion::comparable_key(end));

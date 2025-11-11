@@ -8,6 +8,7 @@
 #include <shared_mutex>
 #include "art.h"
 #include "key_options.h"
+#include "rpc/abstract_session.h"
 
 namespace barch {
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
@@ -109,6 +110,27 @@ namespace barch {
         virtual size_t get_queue_size() const = 0;
         virtual size_t inc_queue_size() = 0;
         virtual size_t dec_queue_size() = 0;
+        // blocking functions
+        // this function MUST be pre-locked by the caller using this shards latch
+        // add multiple rpc blocks (or callbacks) (called by session in asynch thread)
+        virtual void add_rpc_blocks(const heap::vector<std::string>& keys, const abstract_session_ptr& ptr) = 0;
+        // this function MUST be pre-locked by the caller using this shards latch
+        // add a rpc block (called by session in asynch thread)
+        virtual void add_rpc_block(const std::string& key, const abstract_session_ptr& ptr) = 0;
+        // this function MUST be pre-locked by the caller using this shards latch
+        // remove scheduled blocks on the key without scheduling calls (called by session in asynch thread)
+        // blocks are only removed for this shard - the caller must maintain the associated
+        // key space for this shard
+        virtual void erase_rpc_blocks(const heap::vector<std::string>& keys, const abstract_session_ptr& ptr) = 0;
+        // this function MUST be pre-locked by the caller using this shards latch
+        // remove scheduled blocks on the key without scheduling calls (called by session in asynch thread)
+        // blocks are only removed for this shard - the caller must maintain the associated
+        // key space for this shard
+        virtual void erase_rpc_block(const std::string& keys, const abstract_session_ptr& ptr) = 0;
+        // this function MUST be pre-locked by the caller using this shards latch
+        // schedule all asynch sessions that's blocking on this key on this shard to run once
+        // so the blocks are also erased
+        virtual void call_unblock(const std::string& key) = 0;
     };
     typedef abstract_shard::shard_ptr shard_ptr;
     /**

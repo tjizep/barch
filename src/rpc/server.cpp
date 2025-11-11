@@ -22,6 +22,7 @@
 #include "asio_resp_session.h"
 #include "rpc/barch_session.h"
 #include "repl_session.h"
+#include "rpc/constants.h"
 
 namespace barch {
     std::atomic<uint64_t> client_id = 0;

@@ -290,6 +290,56 @@ namespace barch {
 
         void queue_consume() override;
 
+        std::unordered_map<std::string, heap::vector<barch::abstract_session_ptr>> blocked_sessions;
+        void add_rpc_blocks(const heap::vector<std::string>& keys, const barch::abstract_session_ptr& ptr) override {
+            for (auto& k: keys) {
+                add_rpc_block(k,ptr);;
+            }
+        }
+        void unblock_key_(const std::string &k, const barch::abstract_session_ptr& ptr) {
+            auto i = blocked_sessions.find(k);
+            if (i != blocked_sessions.end()) {
+                auto at = i->second.begin();
+                for (auto& p : i->second) {
+                    if (p == ptr) {
+                        i->second.erase(at,at+1);
+                    }
+                    ++at;
+                }
+            }
+        }
+        void add_rpc_block(const std::string& key, const abstract_session_ptr& ptr) override{
+            auto i = blocked_sessions.find(key);
+            if (i != blocked_sessions.end()) {
+                i->second.emplace_back(ptr);
+            }else {
+                blocked_sessions[key] = {ptr};
+            }
+        }
+
+        void erase_rpc_blocks(const heap::vector<std::string>& keys, const barch::abstract_session_ptr& ptr) override {
+            for (auto& k: keys) {
+                unblock_key_(k, ptr);
+            }
+        }
+        void erase_rpc_block(const std::string& key, const abstract_session_ptr& ptr) override {
+            unblock_key_(key, ptr);
+        }
+
+        void call_unblock(const std::string& k) override {
+            heap::vector<barch::abstract_session_ptr> sessions;
+            auto i = blocked_sessions.find(k);
+            if (i != blocked_sessions.end()) {
+                sessions.swap(i->second);
+                blocked_sessions.erase(i);
+            }
+
+            for (auto& s:sessions) {
+                s->do_block_continue();
+            }
+        }
+
+
     };
 
 

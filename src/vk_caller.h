@@ -167,7 +167,7 @@ struct vk_caller : caller {
 
         return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
     }
-    void add_block(const heap::vector<std::string> &, uint64_t, std::function<void(caller& call, const heap::vector<std::string>&)>) override {
+    void add_block(const keys_t &, uint64_t, std::function<void(caller& call, const keys_t&)>) override {
         // were not entertaining any blocking
     }
     bool has_blocks() override {

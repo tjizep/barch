@@ -4,28 +4,29 @@
 
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
+#include "abstract_session.h"
 #include "asio_includes.h"
 #include "redis_parser.h"
 #include "rpc_caller.h"
 
 #include "vector_stream.h"
 #include "server.h"
-
+#include "constants.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
 
-    class resp_session : public std::enable_shared_from_this<resp_session>
+    class resp_session : public abstract_session, public std::enable_shared_from_this<resp_session>
     {
     public:
         resp_session(const resp_session&) = delete;
         resp_session& operator=(const resp_session&) = delete;
         resp_session(tcp::socket socket,char init_char);
-        ~resp_session();
+        ~resp_session() override;
 
         void start();
         //static bool is_authorized(const heap::vector<bool>& func,const heap::vector<bool>& user) ;
         std::string get_info() const ;
-        void do_block_continue();
+        void do_block_continue() override;
     private:
         void write_result(int32_t r);
         void run_params(vector_stream& stream, const std::vector<std::string_view>& params) ;

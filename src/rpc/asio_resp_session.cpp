@@ -9,62 +9,8 @@
 #include "netstat.h"
 #include "redis_parser.h"
 #include "server.h"
-#include "block_api.h"
 #include <ctime>
-namespace barch {
-    extern asio::io_context& get_io_context();
-}
-static std::mutex block_lock;
-static heap::string_map<heap::vector<barch::resp_session_ptr>> blocked_sessions;
-void barch::add_rpc_blocks(const heap::vector<std::string>& keys, const barch::resp_session_ptr& ptr) {
-    std::unique_lock l(block_lock);
-    for (auto& k: keys) {
-        auto i = blocked_sessions.find(k);
-        if (i != blocked_sessions.end()) {
-            i->second.emplace_back(ptr);
-        }else {
-            blocked_sessions[k] = {ptr};
-        }
-        ;
-    }
-}
-static void unblock_key_(const std::string &k, const barch::resp_session_ptr& ptr) {
-    auto i = blocked_sessions.find(k);
-    if (i != blocked_sessions.end()) {
-        auto at = i->second.begin();
-        for (auto& p : i->second) {
-            if (p == ptr) {
-                i->second.erase(at,at+1);
-            }
-            ++at;
-        }
-    }
-}
-void barch::erase_rpc_blocks(const heap::vector<std::string>& keys, const barch::resp_session_ptr& ptr) {
-    std::unique_lock l(block_lock);
-    for (auto& k: keys) {
-        unblock_key_(k, ptr);
-    }
-}
-void unblock_key(const std::string &key, const std::shared_ptr<barch::resp_session>& ptr) {
-    std::unique_lock l(block_lock);
-    unblock_key_(key, ptr);
-}
-void barch::call_unblock(const std::string& k) {
-    heap::vector<barch::resp_session_ptr> sessions;
-    {
-        std::unique_lock l(block_lock);
-        auto i = blocked_sessions.find(k);
-        if (i != blocked_sessions.end()) {
-            sessions.swap(i->second);
-            blocked_sessions.erase(i);
-        }
 
-    }
-    for (auto& s:sessions) {
-        s->do_block_continue();
-    }
-}
 barch::resp_session::resp_session(tcp::socket socket,char init_char)
               : socket_(std::move(socket)), timer( socket_.get_executor())
 {
@@ -217,11 +163,11 @@ void barch::resp_session::start_block_to() {
         });
 }
 void barch::resp_session::add_caller_blocks() {
-    add_rpc_blocks(caller.get_blocks(),shared_from_this());
+    caller.transfer_rpc_blocks(shared_from_this());
 }
 void barch::resp_session::erase_blocks() {
-    barch::erase_rpc_blocks(caller.get_blocks(), shared_from_this());
-    caller.clear_blocks();
+    caller.erase_blocks(shared_from_this());
+
 }
 void barch::resp_session::do_block_continue() {
     if (caller.has_blocks()) {

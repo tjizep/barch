@@ -272,63 +272,63 @@ else()
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
         add_test(NAME TestInstallRedisPy
-                COMMAND "pip" install redis
+                COMMAND "pip3" install redis
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
         add_test(NAME TestBarchInstallPy
-                COMMAND "pip" install .
+                COMMAND "pip3" install .
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPy
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/testbarch.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/testbarch.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchReplicationPy
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/repltest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchReplicationPy2
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/repltest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchLru
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/lrutest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/lrutest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchExpireMany
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/expiretest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/expiretest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPull
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/pulltest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/pulltest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestBarchList
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/listtest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/listtest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestBarchRPC
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/remotetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/remotetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestBarchSimpleClusterRPC
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/routetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/routetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestRespClientLocal
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/redispytest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/redispytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestMerge
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/mergetest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/mergetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestSpaceThread
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/spacethreadtest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/spacethreadtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBpopThread
-                COMMAND "python" ${CMAKE_SOURCE_DIR}/test/bstartest.py
+                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/bstartest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     endif ()

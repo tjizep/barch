@@ -7,14 +7,29 @@
 #include "value_type.h"
 #include "variable.h"
 #include <initializer_list>
+#include <utility>
 #include "key_space.h"
 enum contexts {
     ctx_resp = 1,
     ctx_valkey,
     ctx_rpc
 };
+
+struct block_data {
+    block_data(std::string key, size_t shard) : key(std::move(key)), shard_index(shard){}
+    std::string key{};
+    size_t shard_index{};
+    barch::key_space_ptr space{};
+    auto shard() {
+        if (!space) {
+            abort_with("key space not set");
+        }
+        return space->get(shard_index);
+    }
+};
+
 struct caller {
-    typedef heap::vector<std::string> keys_t;
+    typedef heap::vector<block_data> keys_t;
     virtual ~caller() = default;
     int ctx{ctx_valkey};
 
@@ -59,7 +74,9 @@ struct caller {
     virtual barch::key_space_ptr& kspace() = 0;
     virtual void set_kspace(const barch::key_space_ptr& ks) = 0;
     virtual void use(const std::string& name) = 0;
-    virtual void add_block(const heap::vector<std::string>& blocks, uint64_t to_ms, std::function<void(caller&, const keys_t&)>) = 0;
+    virtual void transfer_rpc_blocks(const barch::abstract_session_ptr& ) {};
+    virtual void erase_blocks(const barch::abstract_session_ptr& ) {};
+    virtual void add_block(const keys_t& blocks, uint64_t to_ms, std::function<void(caller&, const keys_t&)>) = 0;
     virtual bool has_blocks() = 0;
     [[nodiscard]] virtual size_t stack() const {
         return 0;

@@ -103,7 +103,7 @@ extern "C"{
                 li.push(conversion::comparable_key(--end));
                 header.end = conversion::make_int64_bytes(end);
             } else {
-                li.push(conversion::comparable_key(++start));
+                li.push(conversion::comparable_key(start++));
                 header.start = conversion::make_int64_bytes(start);
             }
             ++popped;

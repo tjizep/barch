@@ -17,6 +17,7 @@ def ctest(num):
     assert (popped == None or (popped[0] == b'testkey1' and popped[1] == b'l3'))
 def tloss(num):
     r = redis.Redis("127.0.0.1", 11000, 0)
+    time.sleep(1)
     for i in range(1,1000):
         r.lpush("testloss",f"l{i}")
         #print(f"Pushed {i}")
@@ -40,7 +41,7 @@ assert (rp.blpop(["nonekey"],0.1)== None)
 tl = threading.Thread(target=tloss, args=(1,))
 tl.start()
 i = 0
+at = 1
 for i in range(1,1000):
-    pp = rp.brpop(["testloss"],0.1)
-    if(not pp == None):
-        assert(f"l{i}" == pp[1].decode('utf-8'))
+    pp = rp.brpop(["testloss"],2.1)
+    assert(f"l{i}" == pp[1].decode('utf-8'))

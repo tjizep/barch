@@ -1,4 +1,4 @@
-# Release v0.3.4.4b 2025-11-12
+# Release v0.3.4.5b 2025-11-12
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
@@ -7,8 +7,9 @@
 1. Add a smidgen of static analysis to builds
 2. refactor `caller` vm
 3. improve test build (v0.3.4.3b 2025-11-11)
+4. fix intermittent crash when module gets unloaded
 
-# Release v0.3.4.2b 2025-11-06
+# Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 
 ## New Features
 

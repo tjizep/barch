@@ -10,7 +10,8 @@
 #include "composite.h"
 #include "module.h"
 #include "keys.h"
-#include "vk_caller.h"
+
+
 thread_local composite query;
 template<typename T>
 art::value_type vt(const T& t) {
@@ -68,16 +69,13 @@ extern "C"{
             return cc.push_error("block already set");
         }
         caller::keys_t blocks;
-        heap::vector<storage_release> locks;
-        locks.reserve(barch::get_shard_count().size());
+        ordered_lock<storage_release> locks;
+
         auto spc = cc.kspace();
         if (args.size() > 3) {
-            for (auto s : spc->get_shards()) {
-                locks.emplace_back(s);
-            }
+            locks.lock_space(spc);
         }else {
-            auto t = spc->get(args[1]);
-            locks.emplace_back(t);
+            locks.lock(spc->get(args[1]));
         }
 
         uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
@@ -145,6 +143,7 @@ extern "C"{
                 }
             });
         }
+
         return 0;
     }
     int BLPOP(caller& cc, const arg_t& args) {

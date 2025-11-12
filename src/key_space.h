@@ -54,5 +54,35 @@ namespace barch {
     bool unload_keyspace(const std::string& name);
     void all_spaces(const std::function<void(const std::string& name, const barch::key_space_ptr&)>& cb );
 } // barch
+template<typename Locker>
+struct ordered_lock {
+    heap::vector<Locker> locks;
+    ordered_lock() {
+        locks.reserve(barch::get_shard_count().size());
+    };
+    ordered_lock(const ordered_lock&) = delete;
+    ordered_lock(ordered_lock&&) = default;
+    ordered_lock& operator=(const ordered_lock&) = delete;
+    ~ordered_lock() {
+        while (!locks.empty()) {
+            locks.pop_back();
+        }
+    };
+    void lock(const barch::shard_ptr& t) {
+        locks.emplace_back(t);
+    }
+    void lock_space(barch::key_space_ptr& spc) {
+        release();
+        for (auto s : spc->get_shards()) {
+            locks.emplace_back(s);
+        }
+    }
+
+    void release() {
+        while (!locks.empty()) {
+            locks.pop_back();
+        }
+    }
+};
 
 #endif //BARCH_KEY_SPACE_H

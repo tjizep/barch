@@ -22,15 +22,16 @@ void lock_unique(barch::key_space_ptr ks) {
 }
 void unlock(barch::key_space_ptr ks) {
     if (!ks) return;
-    for (auto shard:barch::get_shard_count()) {
-        auto t = ks->get(shard);
+    ;
+    for (size_t shard = barch::get_shard_count().size(); shard > 0; --shard) {
+        auto t = ks->get(shard - 1);
         t->get_latch().unlock();
     }
 }
 void unlock_shared(barch::key_space_ptr ks) {
     if (!ks) return;
-    for (auto shard:barch::get_shard_count()) {
-        auto t = ks->get(shard);
+    for (size_t shard = barch::get_shard_count().size(); shard > 0; --shard) {
+        auto t = ks->get(shard - 1);
         t->get_latch().unlock_shared();
     }
 }

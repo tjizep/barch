@@ -10,13 +10,14 @@
 
 namespace barch {
     struct key_spaces {
+        std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
+        std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
+        std::regex name_check{ks_pattern};
         std::mutex lock{};
         heap::map<std::string, key_space_ptr> spaces{};
     };
 
-    static std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
-    static std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
-    static std::regex name_check(ks_pattern);
+
     static key_spaces ksp;
 
     static std::string decorate(const std::string& name_) {
@@ -39,7 +40,7 @@ namespace barch {
     }
 
     const std::string& get_ks_pattern_error() {
-        return ks_pattern_error;
+        return ksp.ks_pattern_error;
     }
 
     void all_shards(const std::function<void(const barch::shard_ptr&)>& cb ) {
@@ -62,7 +63,7 @@ namespace barch {
 
     bool check_ks_name(const std::string& name_) {
         auto name = decorate(name_);
-        return std::regex_match(name, name_check);
+        return std::regex_match(name, ksp.name_check);
     }
     bool is_keyspace(const std::string &name_) {
         if (!check_ks_name(name_)) {

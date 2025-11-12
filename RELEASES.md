@@ -7,7 +7,7 @@
 1. Add a smidgen of static analysis to builds
 2. refactor `caller` vm
 3. improve test build (v0.3.4.3b 2025-11-11)
-4. fix intermittent crash when module gets unloaded
+4. fix intermittent crash when module gets unloaded (v0.3.4.5b 2025-11-12)
 
 # Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 

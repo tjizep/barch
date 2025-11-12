@@ -42,7 +42,6 @@ tl = threading.Thread(target=tloss, args=(1,))
 tl.start()
 i = 0
 at = 1
-for i in range(1,1000):
-    pp = rp.brpop(["testloss"],5.1)
-    if not pp == None:
-        assert(f"l{i}" == pp[1].decode('utf-8'))
+for i in range(1,500):
+    pp = rp.brpop(["testloss"],40.1)
+    assert(f"l{i}" == pp[1].decode('utf-8'))

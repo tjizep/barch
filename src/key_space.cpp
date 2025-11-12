@@ -223,7 +223,7 @@ namespace barch {
         return undecorate(name);
     };
 
-    heap::vector<shard_ptr> key_space::get_shards() {
+    const heap::vector<shard_ptr>& key_space::get_shards() {
         return shards;
     };
     void key_space::merge() {

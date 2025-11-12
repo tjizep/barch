@@ -32,7 +32,7 @@ namespace barch {
         shard_ptr get(ValkeyModuleString **argv) ;
         [[nodiscard]] std::string get_name() const;
         [[nodiscard]] std::string get_canonical_name() const;
-        heap::vector<shard_ptr> get_shards();
+        const heap::vector<shard_ptr>& get_shards() ;
         size_t get_shard_index(const char* key, size_t key_len);
         size_t get_shard_index(art::value_type key);
         size_t get_shard_index(const std::string& key);

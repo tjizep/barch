@@ -68,8 +68,18 @@ extern "C"{
             return cc.push_error("block already set");
         }
         caller::keys_t blocks;
-
+        heap::vector<storage_release> locks;
+        locks.reserve(barch::get_shard_count().size());
         auto spc = cc.kspace();
+        if (args.size() > 3) {
+            for (auto s : spc->get_shards()) {
+                locks.emplace_back(s);
+            }
+        }else {
+            auto t = spc->get(args[1]);
+            locks.emplace_back(t);
+        }
+
         uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
         cc.start_array();
         size_t popped = 0;
@@ -79,7 +89,6 @@ extern "C"{
             }
             auto t = spc->get(args[ki]);
 
-            storage_release release(t);
             composite li;
             auto container = conversion::convert(args[ki]);
             auto key = query.create({container});

@@ -557,6 +557,12 @@ void barch::shard::clear() {
     size = 0;
     transacted = false;
     tomb_stones = 0;
+    shard::blocked_sessions.clear();
+    shard::mods = 0;
+    shard::saf_get_ops = 0;
+    shard::saf_keys_found = 0;
+    shard::queue_size = 0;
+
     get_leaves().clear();
     get_nodes().clear();
     h.clear();
@@ -941,6 +947,7 @@ uint64_t shard_size(barch::shard *s) {
 
 barch::shard::~shard() {
     repl_client.stop();
+    shard::blocked_sessions.clear();
     if (opt_drop_on_release) {
         this->get_leaves().delete_files(EXT);
         this->get_nodes().delete_files(EXT);

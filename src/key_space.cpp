@@ -141,7 +141,7 @@ namespace barch {
             try {
                auto tshards = this->get_shards();
                while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
-                   for (auto &s : tshards) {
+                   for (auto s : tshards) {
                        s->maintenance();
                    }
 
@@ -153,11 +153,12 @@ namespace barch {
         });
     }
     key_space::~key_space() {
+
         thread_control.signal(1);
         thread_exit.wait();
         if (tmaintain.joinable())
             tmaintain.join();
-
+        shards.clear();
     }
     std::shared_ptr<abstract_shard> key_space::get(size_t shard) {
         if (shards.empty()) {

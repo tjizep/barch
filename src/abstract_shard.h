@@ -158,6 +158,7 @@ struct storage_release {
     bool locked{false};
     storage_release() = delete;
     storage_release(const storage_release&) = delete;
+    storage_release(storage_release&&) = default;
     storage_release& operator=(const storage_release&) = default;
     explicit storage_release(const barch::shard_ptr& t, bool cons = true) : t(t) {
         if (cons)
@@ -171,6 +172,7 @@ struct storage_release {
         t->get_latch().lock();
     }
     ~storage_release() {
+        if (!t) return;
         t->get_latch().unlock();
         // TODO: this may cause deadlock we've got to at least test
         auto s = t->sources();
@@ -210,6 +212,28 @@ struct read_lock {
     }
 
 };
+template<typename Locker>
+    struct multi_lock {
+    heap::map<size_t, Locker> locks;
+    multi_lock() = default;
+    ~multi_lock() = default;
+    void lock(const barch::shard_ptr& t) {
+        auto shard = t->get_shard_number();
+        auto l = locks.find(shard);
+        if (l == locks.end()) {
+            locks.emplace(shard, t);
+        }
+    }
+    void unlock(const barch::shard_ptr& t) {
+        auto shard = t->get_shard_number();
+        locks.erase(shard);
+    }
+    void release() {
+        locks.clear();
+    }
+};
+typedef multi_lock<storage_release> write_locks;
+typedef multi_lock<read_lock> read_locks;
 /**
 * evict a lru page
 */

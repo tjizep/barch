@@ -1,4 +1,4 @@
-# Release v0.3.4.5b 2025-11-12
+# Release v0.3.4.6b 2025-11-12
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)

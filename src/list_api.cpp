@@ -73,14 +73,13 @@ extern "C"{
         uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
         cc.start_array();
         size_t popped = 0;
-        write_locks locks;
         for (size_t ki = 1; ki < args.size() - 1; ++ki) {
             if (key_ok(args[ki]) != 0) {
                 return cc.push_error("invalid key");
             }
             auto t = spc->get(args[ki]);
 
-            locks.lock(t); // all the locks gathered will be only released at the end
+            storage_release release(t);
             composite li;
             auto container = conversion::convert(args[ki]);
             auto key = query.create({container});

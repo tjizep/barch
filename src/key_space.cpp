@@ -13,10 +13,11 @@ namespace barch {
         std::mutex lock{};
         heap::map<std::string, key_space_ptr> spaces{};
     };
-    static key_spaces ksp;
+
     static std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
     static std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
     static std::regex name_check(ks_pattern);
+    static key_spaces ksp;
 
     static std::string decorate(const std::string& name_) {
         if (name_.empty())

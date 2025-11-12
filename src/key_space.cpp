@@ -139,8 +139,9 @@ namespace barch {
         tmaintain = std::thread([&]() -> void {
 
             try {
-               auto tshards = this->get_shards();
+
                while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
+                   auto tshards = this->get_shards();
                    for (auto s : tshards) {
                        s->maintenance();
                    }

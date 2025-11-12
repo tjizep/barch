@@ -32,7 +32,7 @@ threading.Thread(target=testspace, args=(4,))
 for i in t:
     i.start()
 
-time.sleep(5)
+time.sleep(1)
 
 for i in t:
     i.join()

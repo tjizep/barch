@@ -26,7 +26,8 @@ t = [
 threading.Thread(target=testspace, args=(1,)),
 threading.Thread(target=testspace, args=(2,)),
 threading.Thread(target=testspace, args=(3,)),
-threading.Thread(target=testspace, args=(4,))
+threading.Thread(target=testspace, args=(4,)),
+threading.Thread(target=testspace, args=(5,)),
 ]
 
 for i in t:
@@ -37,4 +38,7 @@ time.sleep(1)
 for i in t:
     i.join()
 r = redis.Redis(host="127.0.0.0", port=15000, db=0)
+
 assert(r.execute_command("SPACES EXIST t1") == 0)
+assert(r.execute_command("SPACES EXIST g") == 1)
+

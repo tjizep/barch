@@ -133,12 +133,12 @@ ADDROUTE                   ROUTE
 REMROUTE                   OPS
 STATS                      UB, NEXT
 COUNT                      SPACE
+USE
 ```
 
 # Other VALKEY API's implemented (Mostly Key Value + TTL)
 ```
 AUTH                       ACL
-BRPOP                      BLPOP   
 SET                        KEYS
 INCR                       INCRBY
 UINCRBY                    UDECRBY
@@ -150,7 +150,9 @@ PING                       TTL
 EXPIRE                     EXISTS
 DBSIZE                     MULTI
 EXEC                       CLIENT INFO
-INFO
+INFO                       APPEND
+KEYS                       VALUES
+
 ```
 ## Hash Set API's Implemented
 ```

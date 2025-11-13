@@ -450,7 +450,7 @@ namespace barch {
             return true;
         }
 
-        bool client::insert(std::shared_mutex& latch, const barch::key_options& options, value_type key, value_type value) {
+        bool client::insert(heap::shared_mutex& latch, const barch::key_options& options, value_type key, value_type value) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();
@@ -482,7 +482,7 @@ namespace barch {
 
         }
 
-        bool client::remove(std::shared_mutex& latch, value_type key) {
+        bool client::remove(heap::shared_mutex& latch, value_type key) {
             if (!connected) {
                 if (!destinations.empty()) ++statistics::repl::instructions_failed;
                 return destinations.empty();

@@ -76,8 +76,8 @@ namespace barch {
             // dees functions should already be latched by the shard calling them
             void add_destination(std::string host, int port);
             bool add_source(std::string host, int port);
-            bool insert(std::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value);
-            bool remove(std::shared_mutex& latch, art::value_type key);
+            bool insert(heap::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value);
+            bool remove(heap::shared_mutex& latch, art::value_type key);
             /**
              * finds a key in the tree
              * @param t the tree that receives the key if it does not exist

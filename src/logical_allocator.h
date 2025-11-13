@@ -803,7 +803,7 @@ public:
             found_page(pb.second, page, pb.first);
         });
     }
-    void iterate_pages(std::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
+    void iterate_pages(heap::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
         opt_iterate_workers = barch::get_iteration_worker_count();
         std::vector<std::thread> workers{opt_iterate_workers};
         std::atomic<bool> stop = false;
@@ -1006,7 +1006,7 @@ struct alloc_pair : public abstract_leaf_pair{
 
 
     size_t shard_number{};
-    std::shared_mutex latch{};
+    heap::shared_mutex latch{};
     bool is_debug = false;
     std::string name{};
 

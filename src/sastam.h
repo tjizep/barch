@@ -28,6 +28,7 @@
 #    endif
 
 namespace heap {
+    typedef std::shared_timed_mutex shared_mutex;
     uint64_t get_physical_memory_bytes();
 
     double get_physical_memory_ratio();

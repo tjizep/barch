@@ -10,21 +10,17 @@ extern void lock_unique(barch::key_space_ptr ks) ;
 extern void unlock(barch::key_space_ptr ks) ;
 extern void unlock_shared(barch::key_space_ptr ks);
 struct ks_shared {
-    barch::key_space_ptr spce;
-    explicit ks_shared(barch::key_space_ptr s) : spce(std::move(s)) {
-        lock_shared(spce);
+    ordered_lock<read_lock> locks;
+    ks_shared() = delete;
+    explicit ks_shared(barch::key_space_ptr s) : locks(s) {
     }
-    ~ks_shared() {
-        unlock(spce);
-    }
+
+    ~ks_shared() = default;
 };
 struct ks_unique {
-    barch::key_space_ptr spce;
-    explicit ks_unique(barch::key_space_ptr s) : spce(std::move(s)) {
-        lock_unique(spce);
+    ordered_lock<storage_release> locks;
+    explicit ks_unique(barch::key_space_ptr s) : locks(s) {
     }
-    ~ks_unique() {
-        unlock(spce);
-    }
+    ~ks_unique()  = default;
 };
 #endif //BARCH_KEYSPACE_LOCKS_H

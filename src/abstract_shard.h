@@ -24,9 +24,27 @@ namespace barch {
         bool opt_evict_volatile_ttl = barch::get_evict_volatile_ttl();
         bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
+        uint64_t lock_to_ms = 1*1000*60;
+        void lock_shared() {
+            if (!get_latch().try_lock_shared_for(std::chrono::milliseconds(lock_to_ms))) {
+                throw_exception<std::runtime_error>("read lock wait time exceeded");
+            }
+
+        }
+        void lock_unique() {
+            if (!get_latch().try_lock_for(std::chrono::milliseconds(lock_to_ms))) {
+                throw_exception<std::runtime_error>("write lock wait time exceeded");
+            }
+        }
+        void unlock_shared() {
+            get_latch().unlock_shared();
+        }
+        void unlock_unique() {
+            get_latch().unlock();
+        }
         virtual ~abstract_shard() = default;
         virtual bool remove_leaf_from_uset(art::value_type key) = 0;
-        virtual std::shared_mutex& get_latch() = 0;
+        virtual heap::shared_mutex& get_latch() = 0;
         virtual void set_thread_ap() = 0;
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;
@@ -155,7 +173,8 @@ namespace barch {
 
 struct storage_release {
     barch::shard_ptr  t{};
-    bool locked{false};
+    barch::shard_ptr sources_locked{};
+
     storage_release() = delete;
     storage_release(const storage_release&) = delete;
     storage_release(storage_release&&) = default;
@@ -163,77 +182,75 @@ struct storage_release {
     explicit storage_release(const barch::shard_ptr& t, bool cons = true) : t(t) {
         if (cons)
             t->queue_consume();
-        auto s = t->sources();
+        sources_locked = t->sources();
+        auto s = sources_locked;
         // TODO: this may cause deadlock
         while (s) {
-            s->get_latch().lock_shared();
+            s->lock_shared();
             s = s->sources();
         }
-        t->get_latch().lock();
+        t->lock_unique();
     }
     ~storage_release() {
         if (!t) return;
-        t->get_latch().unlock();
+        t->unlock_unique();
         // TODO: this may cause deadlock we've got to at least test
-        auto s = t->sources();
+        auto s = sources_locked;
         while (s) {
-            s->get_latch().unlock_shared();
+            s->unlock_shared();
             s = s->sources();
         }
     }
 };
 struct read_lock {
     barch::shard_ptr t{};
-    bool locked{false};
+    barch::shard_ptr sources_locked{};
+    void clear() {
+        t = nullptr;
+        sources_locked = nullptr;
+    }
     read_lock() = default;
     read_lock(const read_lock&) = delete;
+    read_lock(read_lock&& r)  noexcept {
+        t = r.t;
+        sources_locked = r.sources_locked;
+        r.clear();
+
+    };
+    read_lock& operator=(read_lock&& r)  noexcept {
+        t = r.t;
+        sources_locked = r.sources_locked;
+        r.clear();
+        return *this;
+    }
     read_lock& operator=(const read_lock&) = delete;
 
     explicit read_lock(const barch::shard_ptr& t, bool consume = true) : t(t) {
         if (consume)
             t->queue_consume();
-        auto s = t->sources();
+        sources_locked = t->sources();
+        auto s = sources_locked;
         // TODO: this may cause deadlock
         while (s) {
-            s->get_latch().lock_shared();
+            s->lock_shared();
             s = s->sources();
         }
-        t->get_latch().lock_shared();
+        t->lock_shared();
     }
 
     ~read_lock() {
-        t->get_latch().unlock_shared();
+        if (!t) return;
+        t->unlock_shared();
+
         // TODO: this may cause deadlock we've got to at least test
-        auto s = t->sources();
+        auto s = sources_locked;
         while (s) {
-            s->get_latch().unlock_shared();
+            s->unlock_shared();
             s = s->sources();
         }
     }
+};
 
-};
-template<typename Locker>
-    struct multi_lock {
-    heap::map<size_t, Locker> locks;
-    multi_lock() = default;
-    ~multi_lock() = default;
-    void lock(const barch::shard_ptr& t) {
-        auto shard = t->get_shard_number();
-        auto l = locks.find(shard);
-        if (l == locks.end()) {
-            locks.emplace(shard, t);
-        }
-    }
-    void unlock(const barch::shard_ptr& t) {
-        auto shard = t->get_shard_number();
-        locks.erase(shard);
-    }
-    void release() {
-        locks.clear();
-    }
-};
-typedef multi_lock<storage_release> write_locks;
-typedef multi_lock<read_lock> read_locks;
 /**
 * evict a lru page
 */

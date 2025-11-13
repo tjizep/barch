@@ -9,7 +9,7 @@
 #include "keyspec.h"
 #include "value_type.h"
 #include "rpc/server.h"
-typedef std::unique_lock<std::shared_mutex> write_lock;
+typedef std::unique_lock<heap::shared_mutex> write_lock;
 extern std::shared_mutex &get_lock();
 
 /**

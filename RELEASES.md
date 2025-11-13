@@ -1,7 +1,8 @@
-# Release v0.3.4.7b 2025-11-12
+# Release v0.3.4.7b 2025-11-13
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
+2. Add lock timeouts (for potential deadlocks) (v0.3.4.7b 2025-11-13)
 
 ## Fixes
 1. Add a smidgen of static analysis to builds
@@ -9,6 +10,7 @@
 3. improve test build (v0.3.4.3b 2025-11-11)
 4. fix intermittent crash when module gets unloaded (v0.3.4.5b 2025-11-12)
 5. fix potential race condition in b[r,l]pop (v0.3.4.7b 2025-11-12)
+6. refactor locking (v0.3.4.7b 2025-11-13)
 
 # Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 

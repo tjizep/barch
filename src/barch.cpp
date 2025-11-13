@@ -994,7 +994,7 @@ int UB(caller& call, const arg_t& argv) {
 
     auto converted = conversion::convert(k);
     art::value_type the_lb;
-    lock_unique(call.kspace());
+    ks_unique ulock(call.kspace());
     for (auto shard:barch::get_shard_count()) {
         auto t = call.kspace()->get(shard);
         if (!t->get_tree_size()) continue;
@@ -1015,7 +1015,6 @@ int UB(caller& call, const arg_t& argv) {
     } else {
         ok = call.push_encoded_key(the_lb);
     }
-    unlock(call.kspace());
     return ok;
 
 }
@@ -1110,12 +1109,19 @@ int KSPACE(caller& call, const arg_t& argv) {
             call.kspace()->merge();
             return call.push_simple("OK");
         }
-        auto source = barch::get_keyspace(parser.source);
-        auto dependent = barch::get_keyspace(parser.dependant);
-
-        ks_shared shl(dependent);
-        ks_unique ul(source);
-        dependent->merge(source);
+        auto to = barch::get_keyspace(parser.source);
+        auto from = barch::get_keyspace(parser.dependant);
+        barch::key_space_ptr old = nullptr;
+        if (to == from->source()) {
+            old = to;
+            from->depends(nullptr);
+        }
+        ks_shared shl(from);
+        ks_unique ul(to);
+        from->merge(to);
+        if (old) {
+            from->depends(to);
+        }
         return call.push_simple("OK");
     }
 

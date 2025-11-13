@@ -180,7 +180,7 @@ namespace barch {
         node_ptr from_unordered_set(value_type key) const;
 
         bool publish(std::string host, int port) override;
-        std::shared_mutex& get_latch() override {
+        heap::shared_mutex& get_latch() override {
             return latch;
         }
         art::value_type filter_key(value_type key) const override;

@@ -60,19 +60,28 @@ struct ordered_lock {
     ordered_lock() {
         locks.reserve(barch::get_shard_count().size());
     };
+    explicit ordered_lock(const barch::shard_ptr& t) {
+        locks.reserve(barch::get_shard_count().size());
+        lock(t);
+    }
+    explicit ordered_lock(const barch::key_space_ptr& spc) {
+        locks.reserve(barch::get_shard_count().size());
+        lock_space(spc);
+    }
     ordered_lock(const ordered_lock&) = delete;
     ordered_lock(ordered_lock&&) = default;
     ordered_lock& operator=(const ordered_lock&) = delete;
+    ordered_lock& operator=(ordered_lock&&) = default;
     ~ordered_lock() {
-        while (!locks.empty()) {
-            locks.pop_back();
-        }
+       release();
     };
     void lock(const barch::shard_ptr& t) {
+        release();
         locks.emplace_back(t);
     }
-    void lock_space(barch::key_space_ptr& spc) {
+    void lock_space(const barch::key_space_ptr& spc) {
         release();
+        if (!spc) return;
         for (auto s : spc->get_shards()) {
             locks.emplace_back(s);
         }
@@ -82,6 +91,7 @@ struct ordered_lock {
         while (!locks.empty()) {
             locks.pop_back();
         }
+        locks.clear();
     }
 };
 

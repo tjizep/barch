@@ -3,7 +3,7 @@
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
 2. Add lock timeouts (for potential deadlocks) (v0.3.4.7b 2025-11-13)
-3. Add `RPUSH` and `RPOP`
+3. Add `RPUSH` and `RPOP` (Release v0.3.4.8b 2025-11-13)
 
 ## Fixes
 1. Add a smidgen of static analysis to builds

@@ -115,6 +115,9 @@ function_map& functions_by_name() {
         r["LBACK"] = {::LBACK,{"write","list","data"}};
         r["LFRONT"] = {::LFRONT,{"read","list","data"}};
         r["LPUSH"] = {::LPUSH,{"write","list","data"}};
+        r["RPUSH"] = {::RPUSH,{"write","list","data"}};
+        r["RPOP"] = {::RPOP,{"write","list","data"}};
+
         r["LPOP"] = {::LPOP,{"write","list","data"}};
         r["BLPOP"] = {::BLPOP,{"write","list","data"}};
         r["BRPOP"] = {::BRPOP,{"write","list","data"}};

@@ -152,7 +152,7 @@ extern "C"{
     int BRPOP(caller& cc, const arg_t& args) {
         return bpop(cc, args, false);
     }
-    int LPUSH(caller& cc, const arg_t& args) {
+    int push(caller& cc, const arg_t& args, bool left) {
         int64_t updated = 0;
         list_header header;
         auto fc = [&](const art::node_ptr &) -> void {
@@ -182,10 +182,18 @@ extern "C"{
             t->call_unblock(args[1].to_string());
         }
         for (size_t n = 2; n < args.size(); n += 1) {
-            li.push(conversion::comparable_key(end));
-            header.end = conversion::make_int64_bytes(++end);
-            if (conversion::dec_bytes_to_int(header.end) != end) {
-                abort_with("end not updated");
+            if (left) {
+                li.push(conversion::comparable_key(end));
+                header.end = conversion::make_int64_bytes(++end);
+                if (conversion::dec_bytes_to_int(header.end) != end) {
+                    abort_with("end not updated");
+                }
+            }else {
+                li.push(conversion::comparable_key(--start));
+                header.start = conversion::make_int64_bytes(start);
+                if (conversion::dec_bytes_to_int(header.start) != start) {
+                    abort_with("end not updated");
+                }
             }
             t->insert(li.create(), args[n], true, fc);
             t->insert(key, header.as_value(), true);
@@ -197,13 +205,24 @@ extern "C"{
         list_header h;
         const art::leaf *dl = t->get_last_leaf_added().const_leaf();
         h = dl->get_value();
-        if (conversion::dec_bytes_to_int(h.end) != end) {
-            abort_with("header not updated");
+        if (left) {
+            if (conversion::dec_bytes_to_int(h.end) != end) {
+                abort_with("header not updated");
+            }
+        }else {
+            if (conversion::dec_bytes_to_int(h.start) != start) {
+                abort_with("header not updated");
+            }
         }
         return cc.push_ll(end - start);
     }
-
-    int LPOP(caller& cc, const arg_t& args) {
+    int LPUSH(caller& cc, const arg_t& args) {
+        return push(cc, args, true);
+    }
+    int RPUSH(caller& cc, const arg_t& args) {
+        return push(cc, args, false);
+    }
+    int pop(caller& cc, const arg_t& args, bool left) {
         if (args.size() < 3) {
             return cc.wrong_arity();
         }
@@ -231,10 +250,18 @@ extern "C"{
         int64_t actual = 0;
 
         for (auto i = 0; i < count; ++i) {
-            li.push(conversion::comparable_key(--end));
+            if (left) {
+                li.push(conversion::comparable_key(--end));
+            }else {
+                li.push(conversion::comparable_key(start++));
+            }
             t->remove(li.create());
             li.pop_back();
-            header.end = conversion::make_int64_bytes(end);
+            if (left) {
+                header.end = conversion::make_int64_bytes(end);
+            }else {
+                header.start = conversion::make_int64_bytes(start);
+            }
             if (start == end) {
                 t->remove(key);
                 return cc.push_ll(end - start);
@@ -246,7 +273,12 @@ extern "C"{
 
         return cc.push_ll(end - start);
     }
-
+    int LPOP(caller& cc, const arg_t& args) {
+        return pop(cc, args, true);
+    }
+    int RPOP(caller& cc, const arg_t& args) {
+        return pop(cc, args, false);
+    }
     int LLEN(caller& cc, const arg_t& args) {
         if (args.size() < 2) {
             return cc.wrong_arity();

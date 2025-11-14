@@ -10,7 +10,7 @@
 
 static std::random_device rd;
 static std::mt19937 gen(rd());
-static const std::string EXT = ".dat";
+
 
 using namespace art;
 uint64_t art_evict_lru(barch::shard_ptr t) {

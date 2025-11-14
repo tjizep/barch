@@ -5,10 +5,12 @@
 #ifndef BARCH_KEYSPACE_LOCKS_H
 #define BARCH_KEYSPACE_LOCKS_H
 #include "key_space.h"
+#if 0
 extern void lock_shared(barch::key_space_ptr ks) ;
 extern void lock_unique(barch::key_space_ptr ks) ;
 extern void unlock(barch::key_space_ptr ks) ;
 extern void unlock_shared(barch::key_space_ptr ks);
+#endif
 struct ks_shared {
     ordered_lock<read_lock> locks;
     ks_shared() = delete;

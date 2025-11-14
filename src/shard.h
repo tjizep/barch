@@ -79,7 +79,7 @@ namespace barch {
     struct shard : public abstract_shard, public art::tree{
     public:
     private:
-
+        const std::string EXT = ".dat";
         bool with_stats{true};
         //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
         //mutable heap::unordered_set<hashed_key,hk_hash > h{};

@@ -77,6 +77,7 @@ function_map& functions_by_name() {
         r["FIRST"] = r["LB"]; // alias
         r["NEXT"] = r["UB"];
         r["REM"] = {::REM,{"write","keys","data"}};
+        r["DEL"] = {::REM,{"write","keys","data"}};
         r["RANGE"] = {::RANGE,{"read","keys","data"}};
         r["TTL"] = {::TTL,{"read","keys","data"}};
         r["SIZE"] = {::SIZE,{"read"}};

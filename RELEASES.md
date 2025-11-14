@@ -1,11 +1,13 @@
-# Release v0.3.4.9b 2025-11-14
+# Release v0.3.4.10b 2025-11-14
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
 2. Add lock timeouts (for potential deadlocks) (v0.3.4.7b 2025-11-13)
 3. Add `RPUSH` and `RPOP` (Release v0.3.4.8b 2025-11-13)
+4. Add `DEL`(v0.3.4.10b 2025-11-14)
 
 ## Fixes
+
 1. Add a smidgen of static analysis to builds
 2. refactor `caller` vm
 3. improve test build (v0.3.4.3b 2025-11-11)
@@ -13,6 +15,7 @@
 5. fix potential race condition in b[r,l]pop (v0.3.4.7b 2025-11-12)
 6. refactor locking (v0.3.4.7b 2025-11-13)
 7. fix file extension init bug, causing data to not load (v0.3.4.9b 2025-11-14)
+8. Fix timeout on B*POP (v0.3.4.10b 2025-11-14)
 
 # Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 

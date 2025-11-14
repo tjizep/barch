@@ -151,7 +151,9 @@ void barch::resp_session::do_read()
 }
 
 void barch::resp_session::start_block_to() {
-
+    if (caller.block_to_ms == 0 || caller.block_to_ms >= std::numeric_limits<long>::max()) {
+        return;
+    }
     timer.cancel();
     timer.expires_after(std::chrono::milliseconds(caller.block_to_ms));
     auto self(shared_from_this());

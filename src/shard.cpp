@@ -594,10 +594,14 @@ bool barch::shard::insert(const key_options& options, value_type unfiltered_key,
         return false;
     }
     value_type key = filter_key(unfiltered_key);
-    size_t before = size;
-    art_insert(this, options, key, value, update, fc);
+    auto before = this->get_size();
+    if (opt_ordered_keys) {
+        tree_insert(options, key, value, update, fc);
+    }else {
+        hash_insert(options, key, value, update, fc);
+    }
     this->repl_client.insert(latch, options, key, value);
-    return size > before;
+    return this->get_size() > before;
 }
 bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
     return art_insert(this, options, key, value, update, fc);
@@ -990,11 +994,7 @@ void barch::shard::merge(const shard_ptr& to) {
                 to->remove(l->get_key());
                 return;
             }
-            if (l->is_hashed()) {
-                to->hash_insert(l->options(), l->get_key() ,l->get_value(), true, [](node_ptr){});
-            }else {
-                to->tree_insert(l->options(), l->get_key() ,l->get_value(), true, [](node_ptr){});
-            }
+            to->insert(l->options(), l->get_key() ,l->get_value(), true, [](node_ptr){});
         });
     });
 }

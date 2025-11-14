@@ -1,10 +1,12 @@
-# Release v0.3.4.10b 2025-11-14
+# Release v0.3.4.11b 2025-11-14
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
 2. Add lock timeouts (for potential deadlocks) (v0.3.4.7b 2025-11-13)
 3. Add `RPUSH` and `RPOP` (Release v0.3.4.8b 2025-11-13)
 4. Add `DEL`(v0.3.4.10b 2025-11-14)
+5. Allow changing the order during a merge (v0.3.4.11b 2025-11-14)
+6. improve hash resize (v0.3.4.11b 2025-11-14)
 
 ## Fixes
 

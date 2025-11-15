@@ -67,7 +67,6 @@ namespace barch {
             client() = default;
             client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}
             ~client();
-            void create_caller();
             void stop();
             [[nodiscard]] bool begin_transaction() const ;
             [[nodiscard]] bool commit_transaction() const ;
@@ -80,7 +79,6 @@ namespace barch {
             bool remove(heap::shared_mutex& latch, art::value_type key);
             /**
              * finds a key in the tree
-             * @param t the tree that receives the key if it does not exist
              * @param key the key which we want to retrieve
              * @return the node of the added key
              */

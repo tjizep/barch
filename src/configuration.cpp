@@ -13,6 +13,7 @@
 
 #define unused_arg
 struct config_state {
+    config_state() = default;
     std::recursive_mutex config_mutex{};
     barch::configuration_record record;
     // these values are kept for reflection

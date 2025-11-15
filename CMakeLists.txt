@@ -27,11 +27,11 @@ if (NOT USE_LIBURING)
     set(USE_LIBURING OFF)
 endif ()
 
-set(CMAKE_CPP_STANDARD 17)
+set(CMAKE_CPP_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(USE_AVX_INSTRUCTIONS ON)
 #remove -Werror because fmtlib
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -Wanalyzer-malloc-leak -Wanalyzer-double-free -Wall -Wextra -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -Wno-missing-attributes")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -march=native -Wanalyzer-malloc-leak -Wanalyzer-double-free -Wall -Wextra -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -Wno-missing-attributes")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
     #set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")

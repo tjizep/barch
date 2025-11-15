@@ -9,43 +9,10 @@
 #include <string>
 #include <string_view>
 
-#if __cplusplus >= 202002L
-#include <format>
-
-void barch::raw_write_to_log(std::string_view users_fmt, std::format_args&& args)
-{
-    size_t tid = gettid();
-    auto now = std::chrono::system_clock::now();
-    auto millis = std::chrono::steady_clock::now().time_since_epoch().count();
-    // %d %b %Y %H:%M:%OS
-    std::string logged = std::format("{}:M {:%d %b %Y %H:%M:%OS}.{:03d} * BARCH ",tid, now,millis%1000);
-    logged += std::vformat(users_fmt, args);
-    std::clog <<  logged << '\n';
-}
-
-void barch::log(const std::string& message, const std::exception& e)
-{
-
-    std_log(message, e.what());
-}
-
-void barch::log(const std::exception& e, const std::string& file, int line)
-{
-
-    std_log(e.what(), file, line);
-}
-void barch::log(const std::string& message)
-{
-    std_log(message);
-}
-#else
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Weffc++"
 #include <mutex>
 #include <fmt/core.h>
 #include <fmt/chrono.h>
 #include <fmt/color.h>
-#pragma GCC diagnostic pop
 #include <thread>
 static std::mutex& get_lock() {
     static std::mutex m;
@@ -124,4 +91,3 @@ void barch::log(const std::exception &e, const std::string &file, int line) {
 void barch::log(const std::string &message) {
     std_log(message);
 }
-#endif

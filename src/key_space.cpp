@@ -10,16 +10,17 @@
 
 namespace barch {
     struct key_spaces {
+        key_spaces() = default;
+        std::mutex lock{};
         std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
         std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
         std::regex name_check{ks_pattern};
-        std::mutex lock{};
         heap::map<std::string, key_space_ptr> spaces{};
     };
 
     key_spaces& ksp() {
-        static key_spaces ksp;
-        return ksp;
+        static key_spaces _ksp;
+        return _ksp;
     }
 
 

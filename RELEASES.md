@@ -19,6 +19,7 @@
 7. fix file extension init bug, causing data to not load (v0.3.4.9b 2025-11-14)
 8. Fix timeout on B*POP (v0.3.4.10b 2025-11-14)
 9. config initializers  (v0.3.4.11b,v0.3.4.12b 2025-11-14)
+9. move to C++ 20  (v0.3.4.12b 2025-11-14)
 
 # Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 

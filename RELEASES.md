@@ -1,4 +1,4 @@
-# Release v0.3.4.13b 2025-11-15
+# Release v0.3.4.14b 2025-11-15
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
@@ -18,8 +18,8 @@
 6. refactor locking (v0.3.4.7b 2025-11-13)
 7. fix file extension init bug, causing data to not load (v0.3.4.9b 2025-11-14)
 8. Fix timeout on B*POP (v0.3.4.10b 2025-11-14)
-9. config initializers  (v0.3.4.11b,v0.3.4.12b 2025-11-14)
-9. move to C++ 20  (v0.3.4.12b 2025-11-15)
+9. config initializers  (v0.3.4.11b,v0.3.4.12b,v0.3.4.14b 2025-11-14,2025-11-15)
+10. move to C++ 20  (v0.3.4.12b 2025-11-15)
 
 # Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 

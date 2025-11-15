@@ -17,8 +17,11 @@ namespace barch {
         heap::map<std::string, key_space_ptr> spaces{};
     };
 
+    key_spaces& ksp() {
+        static key_spaces ksp;
+        return ksp;
+    }
 
-    static key_spaces ksp;
 
     static std::string decorate(const std::string& name_) {
         if (name_.empty())
@@ -40,12 +43,12 @@ namespace barch {
     }
 
     const std::string& get_ks_pattern_error() {
-        return ksp.ks_pattern_error;
+        return ksp().ks_pattern_error;
     }
 
     void all_shards(const std::function<void(const barch::shard_ptr&)>& cb ) {
-        std::unique_lock l(ksp.lock);
-        for (auto &ks : ksp.spaces) {
+        std::unique_lock l(ksp().lock);
+        for (auto &ks : ksp().spaces) {
             for (auto &shard_ : ks.second->get_shards()) {
                 cb(shard_);
             }
@@ -53,8 +56,8 @@ namespace barch {
     }
 
     void all_spaces(const std::function<void(const std::string& name, const barch::key_space_ptr&)>& cb ) {
-        std::unique_lock l(ksp.lock);
-        for (auto &ks : ksp.spaces) {
+        std::unique_lock l(ksp().lock);
+        for (auto &ks : ksp().spaces) {
             auto un = undecorate(ks.first);
             if (un.empty()) un = "(default)";
             cb(un, ks.second);
@@ -63,32 +66,32 @@ namespace barch {
 
     bool check_ks_name(const std::string& name_) {
         auto name = decorate(name_);
-        return std::regex_match(name, ksp.name_check);
+        return std::regex_match(name, ksp().name_check);
     }
     bool is_keyspace(const std::string &name_) {
         if (!check_ks_name(name_)) {
             return false;
         }
-        std::unique_lock l(ksp.lock);
+        std::unique_lock l(ksp().lock);
         std::string name = decorate(name_);
-        auto s = ksp.spaces.find(name);
-        return  (s != ksp.spaces.end());
+        auto s = ksp().spaces.find(name);
+        return  (s != ksp().spaces.end());
     }
     key_space_ptr get_keyspace(const std::string &name_) {
         if (!check_ks_name(name_)) {
             throw_exception<std::invalid_argument>(get_ks_pattern_error().c_str());
         }
-        std::unique_lock l(ksp.lock);
+        std::unique_lock l(ksp().lock);
         std::string name = decorate(name_);
-        auto s = ksp.spaces.find(name);
-        if (s != ksp.spaces.end()) {
+        auto s = ksp().spaces.find(name);
+        if (s != ksp().spaces.end()) {
             return s->second;
         }
 
         heap::allocator<key_space> alloc;
         // cannot create keyspace without memory
         auto ks = std::allocate_shared<key_space>(alloc, name);
-        ksp.spaces[name] = ks;
+        ksp().spaces[name] = ks;
         return ks;
     }
 
@@ -103,10 +106,10 @@ namespace barch {
         }
         std::string name = decorate(name_);
         {
-            std::unique_lock l(ksp.lock);
-            auto s = ksp.spaces.find(name);
-            if (s != ksp.spaces.end()) {
-                ksp.spaces.erase(s);
+            std::unique_lock l(ksp().lock);
+            auto s = ksp().spaces.find(name);
+            if (s != ksp().spaces.end()) {
+                ksp().spaces.erase(s);
                 r = true;
             }
         }

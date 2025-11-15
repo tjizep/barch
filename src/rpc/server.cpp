@@ -206,9 +206,17 @@ namespace barch {
             }
         }
     };
+    static std::mutex& srv_mut() {
+        static std::mutex srv_get{};
+        return srv_get;
+    }
     std::shared_ptr<server_context>  srv = nullptr;
     void server::start(const std::string& interface, uint_least16_t port) {
-        if (srv) srv->stop();
+        std::unique_lock l(srv_mut());
+        if (srv) {
+            srv->stop();
+            srv = nullptr;
+        }
         try {
             if (port == 0) return;
             srv = std::make_shared<server_context>(interface, port);
@@ -219,7 +227,11 @@ namespace barch {
     }
 
     void server::stop() {
-        if (srv) srv->stop();
+        std::unique_lock l(srv_mut());
+        if (srv) {
+            srv->stop();
+            srv = nullptr;
+        }
     }
     struct module_stopper {
         module_stopper() = default;
@@ -230,7 +242,7 @@ namespace barch {
     asio::io_context& get_io_context() {
         return srv->get_asio_unit()->io;
     }
-    static module_stopper stopper;
+    static module_stopper _stopper;
     namespace repl {
         class rpc_impl : public rpc {
         private:

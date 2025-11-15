@@ -7,15 +7,20 @@
 #include "queue_server.h"
 #include "shard.h"
 #include "keys.h"
+#include "rpc/server.h"
 
 namespace barch {
     struct key_spaces {
         key_spaces() = default;
+        ~key_spaces() {
+            //server::stop();
+        }
         std::mutex lock{};
         std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
         std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
         std::regex name_check{ks_pattern};
         heap::map<std::string, key_space_ptr> spaces{};
+
     };
 
     key_spaces& ksp() {

@@ -3,14 +3,14 @@
 //
 // Created by teejip on 7/13/25.
 //
-static std::mutex& latch() {
-    static std::mutex l{};
+static std::recursive_mutex& latch() {
+    static std::recursive_mutex l{};
     return l;
 }
 catmap& get_category_map() {
     static catmap r;
     if (r.empty()) {
-        std::lock_guard lock(latch());
+        std::unique_lock lock(latch());
         if (!r.empty()) return r;
         size_t at = 0;
         for (auto& c : categories()) {
@@ -50,8 +50,8 @@ heap::vector<bool> cats2vec(const catmap& icats) {
 function_map& functions_by_name() {
     static function_map r;
     if (r.empty()) {
-        //std::lock_guard lock(latch());
-        //if (!r.empty()) return r;
+        std::unique_lock lock(latch());
+        if (!r.empty()) return r;
         r["SET"] = {::SET,{"write","keys","data"}};
         r["APPEND"] = {::APPEND,{"write","keys","data"}};
         r["PREPEND"] = {::PREPEND,{"write","keys","data"}};

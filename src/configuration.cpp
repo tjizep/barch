@@ -12,8 +12,8 @@
 #include "rpc/server.h"
 
 #define unused_arg
-static std::recursive_mutex config_mutex{};
 struct config_state {
+    std::recursive_mutex config_mutex{};
     barch::configuration_record record;
     // these values are kept for reflection
 
@@ -64,7 +64,7 @@ bool check_type(const std::string &et, const VT &valid) {
 }
 
 static ValkeyModuleString *GetRPCMaxBuffer(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().max_memory_bytes.c_str(), state().max_memory_bytes.length());;
 }
 
@@ -73,7 +73,7 @@ static int SetRPCMaxBuffer(const std::string& test_rpc_max_buffer) {
     if (!std::regex_match(test_rpc_max_buffer, check)) {
         return VALKEYMODULE_ERR;
     }
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     state().rpc_max_buffer = test_rpc_max_buffer;
     char *notn = nullptr;
     const char *str = state().rpc_max_buffer.c_str();
@@ -114,7 +114,7 @@ static int ApplyRPCMaxBuffer(ValkeyModuleCtx *unused(ctx), void *unused(priv), V
 
 // ===========================================================================================================
 static ValkeyModuleString *GetRPCClientMaxWait(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().max_memory_bytes.c_str(), state().max_memory_bytes.length());;
 }
 
@@ -123,7 +123,7 @@ static int SetRPCClientMaxWait(const std::string& test_rpc_client_max_wait_ms) {
     if (!std::regex_match(test_rpc_client_max_wait_ms, check)) {
         return VALKEYMODULE_ERR;
     }
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     state().rpc_client_max_wait_ms = test_rpc_client_max_wait_ms;
     char *notn = nullptr;
     const char *str = state().rpc_max_buffer.c_str();
@@ -147,7 +147,7 @@ static int ApplyRPCClientMaxWait(ValkeyModuleCtx *unused(ctx), void *unused(priv
 }
 // ===========================================================================================================
 static ValkeyModuleString *GetServerPort(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().max_memory_bytes.c_str(), state().max_memory_bytes.length());;
 }
 
@@ -156,7 +156,7 @@ static int SetServerPort(const std::string& test_server_port) {
     if (!std::regex_match(test_server_port, check)) {
         return VALKEYMODULE_ERR;
     }
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     state().server_port = test_server_port;
     char *notn = nullptr;
     const char *str = state().server_port.c_str();
@@ -188,7 +188,7 @@ static int ApplyServerPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), Val
 // ===========================================================================================================
 
 static ValkeyModuleString *GetMaxMemoryRatio(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().max_memory_bytes.c_str(), state().max_memory_bytes.length());;
 }
 
@@ -197,7 +197,7 @@ static int SetMaxMemoryBytes(const std::string& test_max_memory_bytes) {
     if (!std::regex_match(test_max_memory_bytes, check)) {
         return VALKEYMODULE_ERR;
     }
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     state().max_memory_bytes = test_max_memory_bytes;
     char *notn = nullptr;
     const char *str = state().max_memory_bytes.c_str();
@@ -238,13 +238,13 @@ static int ApplyMaxMemoryRatio(ValkeyModuleCtx *unused(ctx), void *unused(priv),
 
 // ===========================================================================================================
 static ValkeyModuleString *GetUseVMMemory(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().use_vmm_mem.c_str(), state().use_vmm_mem.length());
 }
 
 static int SetUseVMMemory(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
                           ValkeyModuleString **unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::string test_use_vmm_memory = ValkeyModule_StringPtrLen(val, nullptr);
     std::transform(test_use_vmm_memory.begin(), test_use_vmm_memory.end(), test_use_vmm_memory.begin(),
                    ::tolower);
@@ -264,12 +264,12 @@ static int ApplyUseVMMemory(ValkeyModuleCtx *unused_arg, void *unused_arg, Valke
 }
 // ===========================================================================================================
 static ValkeyModuleString *GetExternalHost(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().external_host.c_str(), state().external_host.length());
 }
 
 static int SetExternalHost(const std::string& test_external_host) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     if (test_external_host.empty()) {
         return VALKEYMODULE_ERR;
     }
@@ -290,12 +290,12 @@ static int ApplyExternalHost(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
 
 // ===========================================================================================================
 static ValkeyModuleString *GetListenPort(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().listen_port.c_str(), state().listen_port.length());
 }
 
 static int SetListenPort(const std::string& test_listen_port) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     if (test_listen_port.empty()) {
         return VALKEYMODULE_ERR;
     }
@@ -319,12 +319,12 @@ static int ApplyListenPort(ValkeyModuleCtx *unused_arg, void *unused_arg, Valkey
 }
 // ===========================================================================================================
 static ValkeyModuleString *GetCompressionType(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().compression_type.c_str(), state().compression_type.length());
 }
 
 static int SetCompressionType(const std::string& val) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::string test_compression_type = val;
     std::transform(test_compression_type.begin(), test_compression_type.end(), test_compression_type.begin(),
                    ::tolower);
@@ -349,12 +349,12 @@ static int ApplyCompressionType(ValkeyModuleCtx *unused_arg, void *unused_arg, V
 
 // ===========================================================================================================
 static ValkeyModuleString *GetMaxDefragPageCount(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().max_defrag_page_count.c_str(), state().max_defrag_page_count.length());
 }
 
 static int SetMaxDefragPageCount(const std::string& val) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::string test_max_defrag_page_count = val;
     std::regex check("[0-9]+");
     if (!std::regex_match(test_max_defrag_page_count, check)) {
@@ -376,12 +376,12 @@ static int ApplyMaxDefragPageCount(ValkeyModuleCtx *unused_arg, void *unused_arg
 
 // ===========================================================================================================
 static ValkeyModuleString *GetIterationWorkerCount(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().iteration_worker_count.c_str(), state().iteration_worker_count.length());
 }
 
 static int SetIterationWorkerCount(const std::string& test_iteration_worker_count) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::regex check("[0-9]+");
     if (!std::regex_match(test_iteration_worker_count, check)) {
         return VALKEYMODULE_ERR;
@@ -402,12 +402,12 @@ static int ApplyIterationWorkerCount(ValkeyModuleCtx *unused_arg, void *unused_a
 
 // ===========================================================================================================
 static ValkeyModuleString *GetSaveInterval(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().save_interval.c_str(), state().save_interval.length());
 }
 
 static int SetSaveInterval(const std::string& test_save_interval) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::regex check("[0-9]+");
     if (!std::regex_match(test_save_interval, check)) {
         return VALKEYMODULE_ERR;
@@ -429,13 +429,13 @@ static int ApplySaveInterval(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
 
 // ===========================================================================================================
 static ValkeyModuleString *GetMaxModificationsBeforeSave(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().max_modifications_before_save.c_str(),
                                      state().max_modifications_before_save.length());
 }
 
 static int SetMaxModificationsBeforeSave(const std::string& test_max_modifications_before_save) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
 
     std::regex check("[0-9]+");
     if (!std::regex_match(test_max_modifications_before_save, check)) {
@@ -459,12 +459,12 @@ static int ApplyMaxModificationsBeforeSave(ValkeyModuleCtx *unused_arg, void *un
 
 // ===========================================================================================================
 static ValkeyModuleString *GetMaintenancePollDelay(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().maintenance_poll_delay.c_str(), state().maintenance_poll_delay.length());
 }
 
 static int SetMaintenancePollDelay(const std::string& test_maintenance_poll_delay) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::regex check("[0-9]+");
     if (!std::regex_match(test_maintenance_poll_delay, check)) {
         return VALKEYMODULE_ERR;
@@ -487,12 +487,12 @@ static int ApplyMaintenancePollDelay(ValkeyModuleCtx *unused_arg, void *unused_a
 
 // ===========================================================================================================
 static ValkeyModuleString *GetMinFragmentation(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().min_fragmentation_ratio.c_str(), state().min_fragmentation_ratio.length());
 }
 
 static int SetMinFragmentation(const std::string& val) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     state().min_fragmentation_ratio = val;
     config().min_fragmentation_ratio = std::stof(state().min_fragmentation_ratio);
     return VALKEYMODULE_OK;
@@ -509,12 +509,12 @@ static int ApplyMinFragmentation(ValkeyModuleCtx *unused_arg, void *unused_arg, 
 }
 // ===========================================================================================================
 static ValkeyModuleString *GetOrderedKeys(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().ordered_keys.c_str(), state().ordered_keys.length());
 }
 
 static int SetOrderedKeys(std::string test_ordered_keys) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::transform(test_ordered_keys.begin(), test_ordered_keys.end(), test_ordered_keys.begin(), ::tolower);
 
     if (!check_type(test_ordered_keys, state().valid_ordered_keys)) {
@@ -542,12 +542,12 @@ static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, Valke
 
 // ===========================================================================================================
 static ValkeyModuleString *GetActiveDefragType(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().active_defrag.c_str(), state().active_defrag.length());
 }
 
 static int SetActiveDefragType(std::string test_active_defrag) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::transform(test_active_defrag.begin(), test_active_defrag.end(), test_active_defrag.begin(), ::tolower);
 
     if (!check_type(test_active_defrag, state().valid_defrag)) {
@@ -571,12 +571,12 @@ static int ApplyActiveDefragType(ValkeyModuleCtx *unused_arg, void *unused_arg, 
 
 // ===========================================================================================================
 static ValkeyModuleString *GetEnablePageTrace(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().log_page_access_trace.c_str(), state().log_page_access_trace.length());
 }
 
 static int SetEnablePageTrace(std::string test_log_page_access_trace) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::transform(test_log_page_access_trace.begin(), test_log_page_access_trace.end(),
                    test_log_page_access_trace.begin(), ::tolower);
 
@@ -597,7 +597,7 @@ static int SetEnablePageTrace(const char *unused_arg, ValkeyModuleString *val, v
 }
 
 static int ApplyEnablePageTrace(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     //art::get_leaves().set_opt_trace_page(record.log_page_access_trace);
     //art::get_nodes().set_opt_trace_page(record.log_page_access_trace);
     return VALKEYMODULE_OK;
@@ -605,13 +605,13 @@ static int ApplyEnablePageTrace(ValkeyModuleCtx *unused_arg, void *unused_arg, V
 
 // ===========================================================================================================
 static ValkeyModuleString *GetEvictionType(const char *unused_arg, void *unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().eviction_type.c_str(), state().eviction_type.length());;
 }
 
 
 static int SetEvictionType(std::string test_eviction_type) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     std::transform(test_eviction_type.begin(), test_eviction_type.end(), test_eviction_type.begin(), ::tolower);
 
     if (!check_type(test_eviction_type, state().valid_evictions)) {
@@ -641,7 +641,7 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
     return SetEvictionType(test_eviction_type);
 }
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     bool lfu = (config().evict_volatile_lfu || config().evict_allkeys_lfu) ;
     for (auto t : get_default_ks()->get_shards()) {
         storage_release r(t);
@@ -806,7 +806,7 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
 }
 
 bool barch::get_compression_enabled() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().compression == compression_zstd;
 }
 
@@ -815,78 +815,78 @@ uint64_t barch::get_max_module_memory() {
 }
 
 float barch::get_min_fragmentation_ratio() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().min_fragmentation_ratio;
 }
 
 bool barch::get_active_defrag() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().active_defrag;
 }
 
 
 bool barch::get_evict_volatile_lru() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_lru;
 }
 
 bool barch::get_evict_allkeys_lru() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().evict_allkeys_lru;
 }
 
 bool barch::get_evict_volatile_lfu() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_lfu;
 }
 
 bool barch::get_evict_allkeys_lfu() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().evict_allkeys_lfu;
 }
 
 bool barch::get_evict_volatile_random() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_random;
 };
 
 bool barch::get_evict_allkeys_random() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().evict_allkeys_random;
 }
 
 bool barch::get_evict_volatile_ttl() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_ttl;
 }
 
 const barch::configuration_record& barch::get_configuration() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return state().record;
 }
 
 uint64_t barch::get_maintenance_poll_delay() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().maintenance_poll_delay;
 }
 
 uint64_t barch::get_max_defrag_page_count() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().max_defrag_page_count;
 }
 
 unsigned barch::get_iteration_worker_count() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().iteration_worker_count;
 }
 
 uint64_t barch::get_save_interval() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().save_interval;
 }
 
 uint64_t barch::get_max_modifications_before_save() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().max_modifications_before_save;
 }
 uint64_t barch::get_rpc_max_buffer() {
@@ -898,7 +898,7 @@ int64_t barch::get_rpc_max_client_wait_ms() {
 }
 
 bool barch::get_log_page_access_trace() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().log_page_access_trace;
 }
 
@@ -912,7 +912,7 @@ std::chrono::seconds barch::get_rpc_write_to_s() {
     return std::chrono::seconds(config().rpc_write_to_s);
 }
 bool barch::get_use_vmm_memory() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().use_vmm_memory;
 }
 bool barch::get_ordered_keys() {
@@ -924,7 +924,7 @@ uint64_t barch::get_internal_shards() {
 }
 
 uint64_t barch::get_server_port() {
-    std::lock_guard lock(config_mutex);
+    std::lock_guard lock(state().config_mutex);
     return config().server_port;
 }
 

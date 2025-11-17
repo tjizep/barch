@@ -69,7 +69,7 @@ void barch::resp_session::write_result(int32_t r) {
     }
 }
 
-void barch::resp_session::run_params(vector_stream& stream, const std::vector<std::string_view>& params) {
+void barch::resp_session::run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) {
     std::string cn{ params[0]};
 
     auto colon = cn.find_last_of(':');
@@ -124,6 +124,7 @@ void barch::resp_session::do_read()
             if (!ec){
                 bytes_recv += length;
                 parser.add_data(data_, length);
+                size_t run_count = 0;
                 try {
 
                     stream.clear();
@@ -131,6 +132,7 @@ void barch::resp_session::do_read()
                         auto &params = parser.read_new_request();
                         if (!params.empty()) {
                             run_params(stream, params);
+                            ++run_count;
                         }else {
                             break;
                         }
@@ -139,6 +141,7 @@ void barch::resp_session::do_read()
                         start_block_to();
                         add_caller_blocks();
                     }else {
+                        //if (run_count > 0)
                         do_write(stream);
                         do_read();
                     }

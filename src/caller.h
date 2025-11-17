@@ -94,6 +94,11 @@ struct command {
             args.emplace_back(a);
         }
     }
+    command(const call_type& call, const std::vector<std::string>& args_,barch::key_space_ptr space) : call(call),space(space) {
+        for (auto& a: args_) {
+            args.emplace_back(a);
+        }
+    }
     command(const call_type& call, arg_t args, barch::key_space_ptr space) : call(call), args(args), space(space){}
     call_type call{};
     arg_t args{};

@@ -29,7 +29,7 @@ namespace barch {
         void do_block_continue() override;
     private:
         void write_result(int32_t r);
-        void run_params(vector_stream& stream, const std::vector<std::string_view>& params) ;
+        void run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) ;
         void do_read();
         void start_block_to();
         void add_caller_blocks();

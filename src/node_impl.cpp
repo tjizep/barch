@@ -46,9 +46,6 @@ namespace art {
         thread_local tleaf2 temp;
         key = temp.copy_key(key);
         v = temp.copy_value(v);
-        if (key_len > 255) {
-            barch::std_log("large");
-        }
         size_t leaf_size = leaf::make_size(key_len,val_len,ttl,is_volatile);
         // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
         logical_address logical{&alloc};

@@ -11,6 +11,7 @@
 #include "sastam.h"
 
 namespace redis {
+    typedef std::string string_param_t;
     enum {
         redis_max_item_len = 6400000,
         redis_max_buffer_size = 4096
@@ -25,7 +26,7 @@ namespace redis {
         bool validate_array_size(const std::string_view& size_item);
         bool validate_bstr_size(const std::string_view& size_item);
         bool validate_crlf(const std::string_view& bstr);
-        std::vector<std::string_view> empty{};
+        std::vector<string_param_t> empty{};
     public:
         redis_parser() = default;
         void init(char cs){
@@ -34,12 +35,12 @@ namespace redis {
         };
         void add_data(const char * data, size_t len);
         [[nodiscard]] size_t remaining() const ;
-        const std::vector<std::string_view>& read_new_request();
+        const std::vector<string_param_t>& read_new_request();
         size_t get_max_buffer_size() const;
     private:
         int state = 0;
         int size = 0;
-        std::vector<std::string_view> req{};
+        std::vector<string_param_t> req{};
         int item_nr = 0;
         int32_t bstr_size = 0;
         size_t buffer_start = 0l;

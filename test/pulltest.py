@@ -19,12 +19,12 @@ serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
 print(f"serverdir{serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 
-serverCmd = [f"{serverdir}valkey-server", f"--loadmodule", f"{barchdir}/_barch.so"]
+serverCmd = [f"{serverdir}valkey-server", "--port","7777",f"--loadmodule", f"{barchdir}/_barch.so"]
 if launchServer :
     serverProc = subprocess.Popen(serverCmd,cwd=barchdir)
 time.sleep(1)
 
-cliCmd = [f"{clidir}valkey-cli", f"--eval", f"{srcdir}/smallsourcestart.lua"]
+cliCmd = [f"{clidir}valkey-cli","-p","7777", f"--eval", f"{srcdir}/smallsourcestart.lua"]
 if launchServer :
     cliProcess = subprocess.Popen(cliCmd)
 time.sleep(1)

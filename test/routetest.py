@@ -17,11 +17,11 @@ serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
 print(f"serverdir{serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 
-serverCmd = [f"{serverdir}valkey-server", f"--loadmodule", f"{barchdir}/_barch.so"]
+serverCmd = [f"{serverdir}valkey-server", "--port", "7777", "--loadmodule", f"{barchdir}/_barch.so"]
 serverProc = subprocess.Popen(serverCmd,cwd=serverdir)
 time.sleep(1)
 # sourcestart.lua starts a barch on port 14000 and adds some data while publishing to port 13000
-cliCmd = [f"{clidir}valkey-cli", f"--eval", f"{srcdir}/sourcestart.lua"]
+cliCmd = [f"{clidir}valkey-cli", "-p", "7777", "--eval", f"{srcdir}/sourcestart.lua"]
 cliProcess = subprocess.Popen(cliCmd)
 time.sleep(1) # wait for published data to come here
 

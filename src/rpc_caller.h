@@ -153,6 +153,9 @@ struct rpc_caller : caller {
         }
         return 0;
     };
+    std::string convert(const std::string& v) {
+        return v;
+    }
     std::string convert(const std::string_view& v) {
         return {v.data(),v.size()};
     }

@@ -381,6 +381,9 @@ namespace barch {
             call_result call(heap::vector<Variable>& result, const std::vector<std::string_view>& params) override {
                 return tcall(result, params);
             }
+            call_result call(heap::vector<Variable>& result, const std::vector<std::string>& params) override {
+                return tcall(result, params);
+            }
         };
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
             return std::make_shared<rpc_impl>(host, port);

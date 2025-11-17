@@ -32,6 +32,8 @@ namespace barch {
         class rpc {
         public:
             virtual ~rpc() = default;
+            virtual call_result call(heap::vector<Variable>& result, const std::vector<std::string>& params) = 0;
+
             virtual call_result call(heap::vector<Variable>& result, const std::vector<std::string_view>& params) = 0;
 
             virtual call_result call(heap::vector<Variable>& result, const heap::vector<art::value_type>& params) = 0;

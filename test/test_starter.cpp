@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <thread>
 using namespace std;
-static std::string valkey_cli = "_deps/valkey-src/src/valkey-cli";
+static std::string valkey_cli = "_deps/valkey-src/src/valkey-cli -p 7777";
 static std::string ping_cmd = valkey_cli + " -e PING ";
 static std::string failed = "failure: ";
 static std::string binary_name = "_barch.so";
@@ -53,7 +53,7 @@ int main(int argc, char *argv[]) {
     auto run_server = [&]()
     {
         cout << "server start" << endl;
-        std::string server_cmd = "_deps/valkey-src/src/valkey-server --loadmodule ";
+        std::string server_cmd = "_deps/valkey-src/src/valkey-server --port 7777 --loadmodule ";
         server_cmd += bindir + "/";
         server_cmd += binary_name + " &";
         cout << server_cmd << endl;

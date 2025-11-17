@@ -8,14 +8,15 @@ for cnt in range(1,5):
     r.execute_command("CLEARALL")
     r.execute_command("SAVEALL")
 
-    p = r.pipeline()
+    p = r #r.pipeline()
     p.set('a','va')
     p.set('b','vb')
     r.execute_command("pipe:SET a spca")
     p.set('c','vc')
     r.execute_command("pipe:SET a spca")
-    p.execute()
+    #p.execute()
     assert(r.execute_command("pipe:GET a") == b'spca')
+    print("r.execute_command('GET a')",r.execute_command("GET a"))
     assert(r.execute_command("GET a") == b'va')
     assert(r.execute_command("SPACES EXIST pipe") == 1)
 

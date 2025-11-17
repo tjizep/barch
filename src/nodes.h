@@ -746,12 +746,12 @@ namespace art {
 
         void set_key(const unsigned char *k, unsigned len) {
             auto l = std::min<unsigned>(len, key_len());
-            memcpy(data, k, l);
+            memcpy(key(), k, l);
         }
 
         void set_key(value_type k) {
             auto l = std::min<unsigned>(k.size, key_len());
-            memcpy(data, k.bytes, l);
+            memcpy(key(), k.bytes, l);
         }
 
         void set_value(const void *v, unsigned len) {

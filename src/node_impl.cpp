@@ -40,13 +40,15 @@ namespace art {
             return {sv.data(), sv.size()};
         }
     };
-    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile ){
-
+    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile ) {
         unsigned val_len = v.size;
         unsigned key_len = key.length();
         thread_local tleaf2 temp;
         key = temp.copy_key(key);
         v = temp.copy_value(v);
+        if (key_len > 255) {
+            barch::std_log("large");
+        }
         size_t leaf_size = leaf::make_size(key_len,val_len,ttl,is_volatile);
         // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
         logical_address logical{&alloc};

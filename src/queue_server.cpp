@@ -215,7 +215,7 @@ void stop_queue_server() {
 }
 
 bool is_queue_server_running() {
-    return server != nullptr && server->started;
+    return false; //server != nullptr && server->started;
 }
 
 

@@ -11,7 +11,7 @@
 #include "sastam.h"
 
 namespace redis {
-    typedef std::string string_param_t;
+    typedef std::string_view string_param_t;
     enum {
         redis_max_item_len = 6400000,
         redis_max_buffer_size = 4096

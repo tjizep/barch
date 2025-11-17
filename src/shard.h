@@ -94,6 +94,9 @@ namespace barch {
         void write_extra(std::ostream& of);
         void read_extra(std::istream& of);
         shard_ptr dependencies;
+        uint64_t deletes{};
+        uint64_t inserts{};
+        uint64_t get_modifications() const ;
     public:
         void inc_keys_found() const {
             ++saf_get_ops;

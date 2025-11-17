@@ -604,6 +604,7 @@ bool barch::shard::insert(const key_options& options, value_type unfiltered_key,
     return this->get_size() > before;
 }
 bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
+    ++inserts;
     return art_insert(this, options, key, value, update, fc);
 }
 bool barch::shard::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
@@ -612,7 +613,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
         ++statistics::oom_avoided_inserts;
         return false;
     }
-
+    ++inserts;
     ++statistics::insert_ops;
     set_hash_query_context(key);
     auto i = h.find(key);
@@ -768,13 +769,14 @@ bool barch::shard::evict(value_type unfiltered_key) {
 }
 bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
     auto sbef = size;
+    ++deletes;
     art_delete(this, key, fc);
     return sbef < size;
 }
 
 
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
-    //storage_release release(this);
+    ++deletes;
     size_t before = size;
 
     auto key = filter_key(unfiltered_key);
@@ -819,6 +821,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             return true;
         }
     } // else continue
+
     art_delete(this, key, fc);
     this->repl_client.remove(latch, key);
     return size < before;
@@ -1211,8 +1214,8 @@ void run_sweep_lru_keys(barch::shard *t) {
     });
 }
 
-static uint64_t get_modifications() {
-    return statistics::insert_ops + statistics::delete_ops + statistics::set_ops;
+uint64_t barch::shard::get_modifications() const {
+    return deletes + inserts;
 }
 
 void barch::shard::start_maintain() {
@@ -1242,12 +1245,13 @@ void barch::shard::maintenance() {
             statistics::get_ops += saf_get_ops;
             saf_get_ops = 0;
         }
-
-        if (millis(start_save_time) > get_save_interval()
+        auto currtime = std::chrono::high_resolution_clock::now();
+        if (millis(currtime, start_save_time) > get_save_interval()
             || get_modifications() - mods > get_max_modifications_before_save()
         ) {
             //if (get_modifications() - mods > 0) {
             this->save(with_stats);
+
             start_save_time = std::chrono::high_resolution_clock::now();
             mods = get_modifications();
             //}

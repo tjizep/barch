@@ -21,8 +21,8 @@ namespace barch {
         uint64_t n_max_memory_bytes{std::numeric_limits<uint64_t>::max()};
         uint64_t maintenance_poll_delay{80};
         uint64_t max_defrag_page_count{6};
-        uint64_t save_interval{120 * 1000};
-        uint64_t max_modifications_before_save{1300000};
+        uint64_t save_interval{30 * 1000};
+        uint64_t max_modifications_before_save{100000};
         uint64_t rpc_max_buffer{32768*4};
         uint64_t rpc_client_max_wait_ms{30000};
         uint64_t rpc_connect_to_s{30};

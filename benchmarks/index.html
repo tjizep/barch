@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SET Pipeline 1 Benchmark</title>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.5.0/Recharts.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-type="module">
+    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
+
+    function BenchmarkChart() {
+        const data = [
+            { threads: 1, set1: 132388.3, set2: 134621.1 },
+            { threads: 2, set1: 257109.6, set2: 177616.7 },
+            { threads: 3, set1: 358434.0, set2: 157952.3 },
+            { threads: 4, set1: 444980.9, set2: 173930.3 },
+            { threads: 5, set1: 520701.3, set2: 159478.3 }
+        ];
+
+        const formatYAxis = (value) => `${(value / 1000).toFixed(0)}k`;
+        const formatTooltip = (value) => value.toLocaleString('en-US', { maximumFractionDigits: 1 });
+
+        return (
+            <div className="w-full h-screen flex items-center justify-center bg-gray-50 p-8">
+                <div className="w-full max-w-4xl bg-white p-6 rounded-lg shadow-lg">
+                    <h2 className="text-2xl font-bold text-center mb-6 text-gray-800">
+                        SET Pipeline 1
+                    </h2>
+                    <ResponsiveContainer width="100%" height={500}>
+                        <BarChart data={data} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                            <XAxis dataKey="threads" label={{ value: 'Threads', position: 'insideBottom', offset: -10 }} tick={{ fill: '#666' }} />
+                            <YAxis label={{ value: 'Queries per Second', angle: -90, position: 'insideLeft' }} tickFormatter={formatYAxis} tick={{ fill: '#666' }} />
+                            <Tooltip formatter={formatTooltip} contentStyle={{ backgroundColor: '#fff', border: '1px solid #ccc' }} />
+                            <Legend wrapperStyle={{ paddingTop: '20px' }} iconType="square" />
+                            <Bar dataKey="set1" fill="#4b5563" name="Set 1" radius={[4, 4, 0, 0]} />
+                            <Bar dataKey="set2" fill="#ef4444" name="Set 2" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </div>
+            </div>
+        );
+    }
+
+    ReactDOM.render(<BenchmarkChart />, document.getElementById('root'));
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</body>
+</html>

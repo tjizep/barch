@@ -20,6 +20,12 @@ It's also usable as a valkey module and can be started as
 ```
 valkey-server --loadmodule _barch.so
 ```
+### Memtier and Valkey Benchmarks of Ordered index (ART)
+- [More extensive benchmarks](https://tjizep.github.io/barch_benchmark/index_memtier_1_10.html)
+- The Unordered index has even better random point query performance at the expense of `MIN`, `MAX`, `RANGE` and `COUNT` functions 
+- Use `CONFIG SET ordered_keys off` using a redis client on port 14000
+- or `CONFIG SET B.ordered_keys off` within the valkey server (if Barch is loaded as a module)
+
 ### Some preliminary benchmark(s)
 
 Machine is 8 core AMD Zen 4 32 GiB Ram, Ubuntu 20.04

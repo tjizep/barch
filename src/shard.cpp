@@ -861,20 +861,23 @@ void barch::shard::depends(const std::shared_ptr<abstract_shard> & source) {
         throw_exception<std::invalid_argument>("cannot have cyclic dependencies");
     }
 }
-void barch::shard::release(const std::shared_ptr<abstract_shard> & unused(source)) {
 
+void barch::shard::release(const std::shared_ptr<abstract_shard> & unused(source)) {
     dependencies = nullptr;
 }
 
 art::node_ptr barch::shard::lower_bound(art::value_type key) {
     return art::lower_bound(this, key);
 }
+
 art::node_ptr barch::shard::lower_bound(art::trace_list &trace, art::value_type key) {
     return art::lower_bound(trace, this, key);
 }
-void barch::shard::glob(const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb)  {
-    art::glob(this, spec, pattern, cb);
+
+void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  {
+    art::glob(this, spec, pattern, value, cb);
 }
+
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     value_type key = this->filter_key(unfiltered_key);
     auto n = from_unordered_set(key);

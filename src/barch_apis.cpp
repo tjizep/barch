@@ -55,8 +55,8 @@ function_map& functions_by_name() {
         r["SET"] = {::SET,{"write","keys","data"}};
         r["APPEND"] = {::APPEND,{"write","keys","data"}};
         r["PREPEND"] = {::PREPEND,{"write","keys","data"}};
-        r["KEYS"] = {::KEYS,{"read","keys","data"}};
-        r["VALUES"] = {::VALUES,{"read","keys","data"}};
+        r["KEYS"] = {::KEYS,{"read","keys","data"}, true};
+        r["VALUES"] = {::VALUES,{"read","keys","data"}, true};
         r["INCR"] = {::INCR,{"write","keys","data"}};
         r["INCRBY"] = {::INCRBY,{"write","keys","data"}};
         r["UINCRBY"] = {::UINCRBY,{"write","keys","data"}};
@@ -78,7 +78,7 @@ function_map& functions_by_name() {
         r["NEXT"] = r["UB"];
         r["REM"] = {::REM,{"write","keys","data"}};
         r["DEL"] = {::REM,{"write","keys","data"}};
-        r["RANGE"] = {::RANGE,{"read","keys","data"}};
+        r["RANGE"] = {::RANGE,{"read","keys","data"}, true};
         r["TTL"] = {::TTL,{"read","keys","data"}};
         r["SIZE"] = {::SIZE,{"read"}};
         r["DBSIZE"] = {::SIZE,{"read"}};

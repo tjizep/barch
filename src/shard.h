@@ -249,7 +249,7 @@ namespace barch {
         shard_ptr sources() override;
         void depends(const std::shared_ptr<abstract_shard> & source) override;
         void release(const std::shared_ptr<abstract_shard> & source) override;
-        void glob(const keys_spec &spec, value_type pattern, const std::function<bool(const leaf &)> &cb)  override ;
+        void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  override ;
         alloc_pair& get_ap() override {
             return *this;
         };

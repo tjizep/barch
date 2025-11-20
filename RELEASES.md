@@ -1,4 +1,4 @@
-# Release v0.3.4.15b 2025-11-20
+# Release v0.3.4.16b 2025-11-20
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
@@ -7,6 +7,7 @@
 4. Add `DEL`(v0.3.4.10b 2025-11-14)
 5. Allow changing the order during a merge (v0.3.4.11b 2025-11-14)
 6. improve hash resize (v0.3.4.11b 2025-11-14)
+7. Make `RANGE`,`VALUES`,`KEYS` asynch so that they cannot overwhelm the server (v0.3.4.16b 2025-11-20)
 
 ## Fixes
 
@@ -21,7 +22,8 @@
 9. config initializers  (v0.3.4.11b,v0.3.4.12b,v0.3.4.14b 2025-11-14,2025-11-15)
 10. move to C++ 20  (v0.3.4.12b 2025-11-15)
 11. fix leaf size bug when key >= 256 bytes (v0.3.4.15b 2025-11-17)
-12. update readme ((v0.3.4.15b 2025-11-20)
+12. update readme (v0.3.4.15b 2025-11-20)
+13. forgot to add `VALUES` (v0.3.4.16b 2025-11-20)
 
 # Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 

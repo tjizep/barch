@@ -278,7 +278,8 @@ struct rpc_caller : caller {
         return ks;
     }
     void set_kspace(const barch::key_space_ptr& kspace) override{
-        this->ks = kspace;
+        if (ks != kspace)
+            this->ks = kspace;
     }
     void use(const std::string& name) override {
         this->ks = barch::get_keyspace(name);

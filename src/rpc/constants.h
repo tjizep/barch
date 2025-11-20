@@ -13,6 +13,7 @@ enum {
     rpc_io_buffer_size = 1024 * 64,
     rpc_max_param_buffer_size = 1024 * 1024 * 10,
     rpc_resp_asynch_reads = 1,
-    rpc_resp_asynch_writes = 0
+    rpc_resp_asynch_writes = 0,
+    asynch_proccess_workers = 4
 };
 #endif //BARCH_CONSTANTS_H

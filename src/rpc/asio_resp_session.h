@@ -20,16 +20,16 @@ namespace barch {
     public:
         resp_session(const resp_session&) = delete;
         resp_session& operator=(const resp_session&) = delete;
-        resp_session(tcp::socket socket,char init_char);
+        resp_session(tcp::socket socket,asio::io_context& workers,char init_char);
         ~resp_session() override;
 
         void start();
-        //static bool is_authorized(const heap::vector<bool>& func,const heap::vector<bool>& user) ;
         std::string get_info() const ;
         void do_block_continue() override;
+        void do_callback_into_socket_context(vector_stream& local_stream);
     private:
-        void write_result(int32_t r);
-        void run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) ;
+        void write_result(rpc_caller& caller, vector_stream& stream, int32_t r);
+        bool run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) ;
         void do_read();
         void start_block_to();
         void add_caller_blocks();
@@ -51,6 +51,7 @@ namespace barch {
         uint64_t created = art::now();
 
         time_t_timer timer;
+        asio::io_context& workers;
     };
     typedef std::shared_ptr<resp_session> resp_session_ptr;
 }

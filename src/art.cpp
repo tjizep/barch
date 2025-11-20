@@ -1556,7 +1556,7 @@ void art::tree::update_trace(int direction) {
 // we don't want to concurrently start too many globs
 static std::mutex glob_queue{};
 
-void art::glob(tree * t, const keys_spec &spec, value_type pattern,
+void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                const std::function<bool(const leaf &l)> &cb) {
     try {
         // make sure only one call can use the intensive KEYS without blocking other requests
@@ -1578,11 +1578,12 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern,
                         if (!spec.count && ++counter > spec.max_count) {
                             return false;
                         }
-                        if (tstring != *l->key()) // glob on string keys only
+
+                        if (!value && tstring != *l->key()) // glob on string keys only
                         {
                             return true;
                         }
-                        if (1 == glob::stringmatchlen(pattern, l->get_clean_key(), 0)) {
+                        if (1 == glob::stringmatchlen(pattern, value ? l->get_value() : l->get_clean_key(), 0)) {
                             if (!cb(*l)) {
                                 return false;
                             }

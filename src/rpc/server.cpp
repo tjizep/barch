@@ -46,8 +46,11 @@ namespace barch {
     struct server_context {
         thread_pool pool{};
         thread_pool asio_resp_pool{};
+        thread_pool work_pool{asynch_proccess_workers};
 
         asio::io_context io{};
+        asio::io_context workers{};
+        exec_guard worker_guard {asio::make_work_guard(workers)};
         std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
 
         tcp::acceptor acc;
@@ -86,6 +89,14 @@ namespace barch {
             }catch (std::exception& e) {
                 barch::std_err("failed to stop io service", e.what());
             }
+
+            try {
+                workers.stop();
+
+            }catch (std::exception& e) {
+                barch::std_err("failed to workers service", e.what());
+            }
+            work_pool.stop();
             pool.stop();
 
             asio_resp_pool.stop();
@@ -123,7 +134,7 @@ namespace barch {
                     auto unit = this->get_asio_unit();
                     tcp::socket socket (unit->io);
                     socket.assign(tcp::v4(),endpoint.release());
-                    auto session = std::make_shared<resp_session>(std::move(socket),cs[0]);
+                    auto session = std::make_shared<resp_session>(std::move(socket),workers, cs[0]);
                     session->start();
                     return;
                 }
@@ -192,6 +203,10 @@ namespace barch {
                 });
                 io.run();
                 barch::std_log("server stopped on", this->interface,this->port,"using thread",tid);
+            });
+            work_pool.start([this](size_t tid) -> void{
+                workers.run();
+                barch::std_log("worker stopped using thread",tid);
             });
             std::atomic<size_t> started = 0;
             barch::std_log("resp pool size",asio_resp_pool.size());

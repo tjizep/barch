@@ -11,8 +11,8 @@
 #include "server.h"
 #include <ctime>
 
-barch::resp_session::resp_session(tcp::socket socket,char init_char)
-              : socket_(std::move(socket)), timer( socket_.get_executor())
+barch::resp_session::resp_session(tcp::socket socket,asio::io_context &workers, char init_char)
+              : socket_(std::move(socket)), timer( socket_.get_executor()), workers(workers)
 {
     parser.init(init_char);
     caller.info_fun = [this]() -> std::string {
@@ -58,29 +58,28 @@ std::string barch::resp_session::get_info() const {
         "tot-cmds=" + std::to_string(calls_recv) + "\n";
     return r;
 }
-void barch::resp_session::write_result(int32_t r) {
+void barch::resp_session::write_result(rpc_caller& local_caller, vector_stream& local_stream, int32_t r) {
     if (r < 0) {
-        if (!caller.errors.empty())
-            redis::rwrite(stream, error{caller.errors[0]});
+        if (!local_caller.errors.empty())
+            redis::rwrite(local_stream, error{local_caller.errors[0]});
         else
-            redis::rwrite(stream, error{"null error"});
+            redis::rwrite(local_stream, error{"null error"});
     } else {
-        redis::rwrite(stream, caller.results);
+        redis::rwrite(local_stream, local_caller.results);
     }
 }
-
-void barch::resp_session::run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) {
+bool barch::resp_session::run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) {
     std::string cn{ params[0]};
 
     auto colon = cn.find_last_of(':');
-    auto spc = caller.kspace();
+    auto old_spc = caller.kspace();
     bool should_reset_space = false;
     try {
         if (colon != std::string::npos && colon < cn.size()-1) {
             std::string space = cn.substr(0,colon);
             cn = cn.substr(colon+1);
 
-            if (!spc || spc->get_canonical_name() != space) {
+            if (!old_spc || old_spc->get_canonical_name() != space) {
 
                 caller.set_kspace(barch::get_keyspace(space));
                 should_reset_space = true;
@@ -94,7 +93,7 @@ void barch::resp_session::run_params(vector_stream& stream, const std::vector<re
             if (ic != bf->end() &&
                 !is_authorized(ic->second.cats,caller.get_acl())) {
                 redis::rwrite(stream, error{"not authorized"});
-                return;
+                return false;
             }
         }
         if (ic == bf->end()) {
@@ -103,16 +102,46 @@ void barch::resp_session::run_params(vector_stream& stream, const std::vector<re
 
             auto &f = ic->second.call;
             ++ic->second.calls;
+            if (ic->second.is_asynch) {
+                auto self = shared_from_this();
+                // TODO: we have to offload this to another executor that's not servicing
+                // io so that long duration calls do not block other calls eventually
+                //
+                auto actual_ksp = caller.kspace();
+                asio::dispatch(workers,[this,self,should_reset_space,params,&f,actual_ksp,old_spc]() {
+                    vector_stream stream;
+                    // copy the caller so that we dont have thread issues - maybe
+                    // some other issues may be that routes can get called here
+                    rpc_caller local;
+                    local.set_kspace(actual_ksp);
+                    try {
+                        int32_t r = local.call(params,f);
+                        if (!local.has_blocks()) // its a new caller so no blocks
+                            write_result(local,stream, r);
 
+                    }catch (std::exception& e) {
+                        redis::rwrite(stream, error{e.what()});
+                    }
+                    local.set_kspace(old_spc); // return to old value
+                    do_callback_into_socket_context(stream); // to write data and start reading in original context again
+                });
+                return true;
+            }
             int32_t r = caller.call(params,f);
             if (!caller.has_blocks())
-                write_result(r);
+                write_result(caller, stream, r);
         }
     }catch (std::exception& e) {
         redis::rwrite(stream, error{e.what()});
     }
     if (should_reset_space)
-        caller.set_kspace(spc); // return to old value
+        caller.set_kspace(old_spc); // return to old value
+
+    return false;
+}
+void barch::resp_session::do_callback_into_socket_context(vector_stream& local_stream) {
+    do_write(local_stream);
+    do_read();
 }
 void barch::resp_session::do_read()
 {
@@ -131,6 +160,7 @@ void barch::resp_session::do_read()
                     while (parser.remaining() > 0) {
                         auto &params = parser.read_new_request();
                         if (!params.empty()) {
+
                             run_params(stream, params);
                             ++run_count;
                         }else {
@@ -150,7 +180,6 @@ void barch::resp_session::do_read()
                 }
             }
         });
-
 }
 
 void barch::resp_session::start_block_to() {
@@ -179,7 +208,7 @@ void barch::resp_session::do_block_continue() {
         auto self(shared_from_this());
         this->socket_.get_executor().execute([this,self]() {
             caller.call_blocks();
-            write_result(0);
+            write_result(caller, stream, 0);
             erase_blocks();
             do_write(stream);
             do_read();
@@ -190,15 +219,15 @@ void barch::resp_session::do_block_continue() {
 void barch::resp_session::do_block_to() {
     erase_blocks();
     caller.call_blocks();
-    write_result(0);
+    write_result(caller, stream, 0);
     do_write(stream);
     do_read();
 }
-void barch::resp_session::do_write(vector_stream& stream) {
+void barch::resp_session::do_write(vector_stream& local_stream) {
     auto self(shared_from_this());
-    if (stream.empty()) return;
+    if (local_stream.empty()) return;
 
-    asio::async_write(socket_, asio::buffer(stream.buf),
+    asio::async_write(socket_, asio::buffer(local_stream.buf),
         [this, self](std::error_code ec, std::size_t length){
             if (!ec){
                     net_stat stat;

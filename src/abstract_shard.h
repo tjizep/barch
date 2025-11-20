@@ -108,7 +108,7 @@ namespace barch {
         virtual art::node_ptr search(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) = 0;
-        virtual void glob(const art::keys_spec &spec, art::value_type pattern, const std::function<bool(const art::leaf &)> &cb)  = 0;
+        virtual void glob(const art::keys_spec &spec, art::value_type pattern, bool value, const std::function<bool(const art::leaf &)> &cb)  = 0;
         virtual shard_ptr sources() = 0;
         virtual void depends(const std::shared_ptr<abstract_shard> & source) = 0;
         virtual void release(const std::shared_ptr<abstract_shard> & source) = 0;

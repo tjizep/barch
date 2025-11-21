@@ -39,6 +39,7 @@ bool arena::base_hash_arena::save(const std::string &filename,
                                   const std::function<void(std::ostream &)> &extra) const {
     barch::log("writing to " + filename);
     std::string wal_filename = filename + ".wal";
+    std::remove(wal_filename.c_str()); // remove wal if its existing
     std::ofstream out{wal_filename, std::ios::out | std::ios::binary}; // the wal file is truncated if it exists
     if (!out.is_open()) {
         barch::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);

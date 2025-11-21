@@ -1,4 +1,4 @@
-# Release v0.3.4.16b 2025-11-20
+# Release v0.3.4.16b 2025-11-21
 
 ## New Features
 1. Add `BLPOP` and `BRPOP` for lists (v0.3.4.3b 2025-11-11)
@@ -8,6 +8,7 @@
 5. Allow changing the order during a merge (v0.3.4.11b 2025-11-14)
 6. improve hash resize (v0.3.4.11b 2025-11-14)
 7. Make `RANGE`,`VALUES`,`KEYS` asynch so that they cannot overwhelm the server (v0.3.4.16b 2025-11-20)
+8. Add simple atomic durability to avoid data corruption (v0.3.4.16b 2025-11-21)
 
 ## Fixes
 

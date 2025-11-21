@@ -38,8 +38,8 @@ void append(std::ostream &out, size_t page, const storage &s, const uint8_t *dat
 bool arena::base_hash_arena::save(const std::string &filename,
                                   const std::function<void(std::ostream &)> &extra) const {
     barch::log("writing to " + filename);
-    //std::string wal_filename = filename + ".wal";
-    std::ofstream out{filename, std::ios::out | std::ios::binary}; // the wal file is truncated if it exists
+    std::string wal_filename = filename + ".wal";
+    std::ofstream out{wal_filename, std::ios::out | std::ios::binary}; // the wal file is truncated if it exists
     if (!out.is_open()) {
         barch::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
 
@@ -55,8 +55,11 @@ bool arena::base_hash_arena::save(const std::string &filename,
     writep(out, completed);
     out.flush();
     out.close();
-    //std::remove(filename.c_str());
-    //std::rename(wal_filename.c_str(), filename.c_str());
+    std::string bak = filename + ".back";
+    std::remove(bak.c_str()); // make sure back file is gone
+    std::rename(filename.c_str(), bak.c_str());
+    std::rename(wal_filename.c_str(), filename.c_str());
+    std::remove(bak.c_str()); // remove the old version
     barch::log("completed writing to " + filename);
 
     return !out.fail();

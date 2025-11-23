@@ -9,7 +9,6 @@
 #include "vk_caller.h"
 #include "keys.h"
 #include "thread_pool.h"
-#include "queue_server.h"
 /* cdict --
  *
  * This module implements a volatile key-value store on top of the
@@ -376,12 +375,9 @@ int SET(caller& call,const arg_t& argv) {
         }
     };
 
-    if (!spec.get && is_queue_server_running() && t->get_queue_size() < max_process_queue_size) {
-        queue_insert(t, spec, key, v);
-    }else {
-        storage_release l(t);
-        t->opt_insert(spec, key, v, true, fc);
-    }
+    storage_release l(t);
+    t->opt_insert(spec, key, v, true, fc);
+
 
 
 
@@ -692,8 +688,9 @@ int GET(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto t = call.kspace()->get(argv[1]);
-    read_lock release(t);
     auto converted = conversion::convert(k);
+
+    read_lock release(t);
     art::node_ptr r = t->search(converted.get_value());
 
     if (r.null()) {
@@ -947,7 +944,6 @@ int LB(caller& call, const arg_t& argv) {
     art::value_type the_lb;
     for (auto shard:barch::get_shard_count()) {
         auto t = call.kspace()->get(shard);
-        queue_consume(t);
         t->get_latch().lock();
     }
     for (auto shard:barch::get_shard_count()) {

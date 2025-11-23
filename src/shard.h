@@ -11,7 +11,6 @@
 #include "abstract_shard.h"
 #include "overflow_hash.h"
 #include "vector_stream.h"
-#include "moodycamel/blockingconcurrentqueue.h"
 
 namespace barch {
     using namespace art;

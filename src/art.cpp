@@ -11,7 +11,6 @@
 #include "keys.h"
 #include "logger.h"
 #include "module.h"
-#include "queue_server.h"
 
 // Recursively destroys the tree
 static void destroy_node(const art::node_ptr& n) {

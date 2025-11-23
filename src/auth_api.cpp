@@ -103,7 +103,7 @@ extern "C"
             call.set_acl("default", get_all_acl());
             return call.push_simple("OK");
         }
-        read_lock read(a,false);
+        read_lock read(a);
         catmap cats;
         std::string key = user_cats(user.to_string());
         barch::iterator cat_data(a,key);
@@ -139,7 +139,7 @@ extern "C"
         }
         auto a = get_auth();
         if (spec.get) {
-            read_lock read(a,false);
+            read_lock read(a);
             std::string key = user_cats(spec.user);
             call.start_array();
             barch::iterator cat_data(a,key);

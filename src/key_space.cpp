@@ -4,7 +4,6 @@
 
 #include "key_space.h"
 #include <thread>
-#include "queue_server.h"
 #include "shard.h"
 #include "keys.h"
 #include "rpc/server.h"
@@ -145,7 +144,6 @@ namespace barch {
             auto end_time = std::chrono::high_resolution_clock::now();
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             barch::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
-            start_queue_server() ;
             shards.swap(shards_out);
         }
         start_maintain();
@@ -176,6 +174,18 @@ namespace barch {
             tmaintain.join();
         shards.clear();
     }
+    shard_ptr key_space::get_local() {
+        static std::atomic<uint64_t> sid;
+        thread_local shard_ptr shard;
+        if (!shard) {
+            heap::allocator<key_space> alloc;
+            ++sid;
+            shard = std::allocate_shared<barch::shard>(alloc,  name + std::to_string(sid.load()), 0, 0);
+            //shard->load(true);
+        }
+        return shard;
+    }
+
     std::shared_ptr<abstract_shard> key_space::get(size_t shard) {
         if (shards.empty()) {
             abort_with("shard configuration is empty");

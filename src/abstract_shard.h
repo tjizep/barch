@@ -179,9 +179,8 @@ struct storage_release {
     storage_release(const storage_release&) = delete;
     storage_release(storage_release&&) = default;
     storage_release& operator=(const storage_release&) = default;
-    explicit storage_release(const barch::shard_ptr& t, bool cons = true) : t(t) {
-        if (cons)
-            t->queue_consume();
+    explicit storage_release(const barch::shard_ptr& t) : t(t) {
+
         sources_locked = t->sources();
         auto s = sources_locked;
         // TODO: this may cause deadlock
@@ -225,9 +224,7 @@ struct read_lock {
     }
     read_lock& operator=(const read_lock&) = delete;
 
-    explicit read_lock(const barch::shard_ptr& t, bool consume = true) : t(t) {
-        if (consume)
-            t->queue_consume();
+    explicit read_lock(const barch::shard_ptr& t) : t(t) {
         sources_locked = t->sources();
         auto s = sources_locked;
         // TODO: this may cause deadlock

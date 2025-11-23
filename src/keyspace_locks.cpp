@@ -3,12 +3,10 @@
 //
 #include "keyspace_locks.h"
 #include "abstract_shard.h"
-#include "queue_server.h"
 void lock_shared(barch::key_space_ptr ks) {
     if (!ks) return;
     for (auto shard:barch::get_shard_count()) {
         auto t = ks->get(shard);
-        queue_consume(t);
         t->get_latch().lock_shared();
     }
 }
@@ -16,7 +14,6 @@ void lock_unique(barch::key_space_ptr ks) {
     if (!ks) return;
     for (auto shard:barch::get_shard_count()) {
         auto t = ks->get(shard);
-        queue_consume(t);
         t->get_latch().lock();
     }
 }

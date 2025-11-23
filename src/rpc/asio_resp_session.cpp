@@ -68,7 +68,9 @@ void barch::resp_session::write_result(rpc_caller& local_caller, vector_stream& 
         redis::rwrite(local_stream, local_caller.results);
     }
 }
+static bool no_call = false;
 bool barch::resp_session::run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) {
+
     std::string cn{ params[0]};
 
     auto colon = cn.find_last_of(':');
@@ -85,7 +87,7 @@ bool barch::resp_session::run_params(vector_stream& stream, const std::vector<re
                 should_reset_space = true;
             }
         }
-        ++calls_recv;
+
         auto bf = barch_functions; // take a snapshot
         if (prev_cn != cn) {
             ic = bf->find(cn);
@@ -93,13 +95,12 @@ bool barch::resp_session::run_params(vector_stream& stream, const std::vector<re
             if (ic != bf->end() &&
                 !is_authorized(ic->second.cats,caller.get_acl())) {
                 redis::rwrite(stream, error{"not authorized"});
-                return false;
+                return true;
             }
         }
         if (ic == bf->end()) {
             redis::rwrite(stream, error{"unknown command"});
         } else {
-
             auto &f = ic->second.call;
             ++ic->second.calls;
             if (ic->second.is_asynch) {
@@ -123,13 +124,19 @@ bool barch::resp_session::run_params(vector_stream& stream, const std::vector<re
                         redis::rwrite(stream, error{e.what()});
                     }
                     local.set_kspace(old_spc); // return to old value
+                    //do_write(stream);
                     do_callback_into_socket_context(stream); // to write data and start reading in original context again
                 });
-                return true;
+                return false;
             }
-            int32_t r = caller.call(params,f);
-            if (!caller.has_blocks())
-                write_result(caller, stream, r);
+            if (no_call) {
+                redis::rwrite(stream, "OK");
+                return true;
+            }else{
+                int32_t r = caller.call(params,f);
+                if (!caller.has_blocks())
+                    write_result(caller, stream, r);
+            }
         }
     }catch (std::exception& e) {
         redis::rwrite(stream, error{e.what()});
@@ -137,7 +144,7 @@ bool barch::resp_session::run_params(vector_stream& stream, const std::vector<re
     if (should_reset_space)
         caller.set_kspace(old_spc); // return to old value
 
-    return false;
+    return true;
 }
 void barch::resp_session::do_callback_into_socket_context(vector_stream& local_stream) {
     do_write(local_stream);
@@ -160,9 +167,11 @@ void barch::resp_session::do_read()
                     while (parser.remaining() > 0) {
                         auto &params = parser.read_new_request();
                         if (!params.empty()) {
+                            ++calls_recv;
+                            if (run_params(stream, params)) {
+                                ++run_count;
+                            }
 
-                            run_params(stream, params);
-                            ++run_count;
                         }else {
                             break;
                         }
@@ -170,7 +179,8 @@ void barch::resp_session::do_read()
                     if (caller.has_blocks()) {
                         start_block_to();
                         add_caller_blocks();
-                    }else {
+                    }else  {
+
                         //if (run_count > 0)
                         do_write(stream);
                         do_read();

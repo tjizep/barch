@@ -18,7 +18,6 @@
 #include "vk_caller.h"
 #include "redis_parser.h"
 #include "thread_pool.h"
-#include "queue_server.h"
 #include "asio_resp_session.h"
 #include "rpc/barch_session.h"
 #include "repl_session.h"
@@ -71,7 +70,6 @@ namespace barch {
         }
 
         void stop() {
-            ::stop_queue_server();
             try {
                 acc.close();
             }catch (std::exception& ) {}
@@ -108,7 +106,7 @@ namespace barch {
                 acc.async_accept([this](asio::error_code error, tcp::socket endpoint) {
                     if (error) {
                         barch::std_err("accept error",error.message(),error.value());
-                        return; // this happens if there are not threads
+                        return; // this happens if there are no threads
                     }
                     {
                         net_stat stat;
@@ -135,6 +133,7 @@ namespace barch {
                     tcp::socket socket (unit->io);
                     socket.assign(tcp::v4(),endpoint.release());
                     auto session = std::make_shared<resp_session>(std::move(socket),workers, cs[0]);
+                    //auto session = std::make_shared<resp_session>(std::move(endpoint),workers, cs[0]);
                     session->start();
                     return;
                 }
@@ -198,7 +197,8 @@ namespace barch {
 
             start_accept();
             pool.start([this](size_t tid) -> void{
-                io.dispatch([this,tid]() {
+
+                asio::dispatch(io ,[this,tid]() {
                     barch::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
                 });
                 io.run();

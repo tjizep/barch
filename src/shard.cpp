@@ -934,9 +934,7 @@ art::node_ptr barch::shard::tree_maximum() const {
     }
     return tmax;
 }
-#include "queue_server.h"
 void barch::shard::queue_consume() {
-    ::queue_consume(this->shared_from_this());
 }
 
 /**

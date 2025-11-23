@@ -1,7 +1,10 @@
+print("loading remotetest.py")
 import time
 
 import barch
+print("starting server")
 barch.start("127.0.0.1",13000)
+print("server started")
 k = barch.KeyValue("127.0.0.1",13000)
 #k = barch.KeyValue()
 k.set("key1","value1")

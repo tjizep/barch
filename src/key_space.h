@@ -8,7 +8,7 @@
 #include "valkeymodule.h"
 #include "abstract_shard.h"
 #include "value_type.h"
-#include "moodycamel/blockingconcurrentqueue.h"
+
 namespace barch {
     class key_space {
     public:
@@ -19,6 +19,7 @@ namespace barch {
         decltype(std::chrono::high_resolution_clock::now) start_time;
         std::string name{};
         key_space_ptr src;
+
         moodycamel::LightweightSemaphore thread_control{};
         moodycamel::LightweightSemaphore thread_exit{};
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
@@ -27,6 +28,7 @@ namespace barch {
     public:
         key_space(const std::string &name);
         virtual  ~key_space();
+        shard_ptr get_local();
         shard_ptr get(size_t shard);
         shard_ptr get(art::value_type key);
         shard_ptr get(ValkeyModuleString **argv) ;

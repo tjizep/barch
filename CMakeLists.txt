@@ -24,7 +24,7 @@ if (NOT TEST_OD)
     set(TEST_OD ON)
 endif ()
 if (NOT USE_LIBURING)
-    set(USE_LIBURING OFF)
+    set(USE_LIBURING ON)
 endif ()
 
 set(CMAKE_CPP_STANDARD 20)
@@ -47,6 +47,7 @@ endif ()
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
+set(PYTHON3_EXEC /usr/bin/python3)
 
 set(TEST_BUILD_DIR build)
 
@@ -82,7 +83,7 @@ if (USE_ASIO)
             asio
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
             #SOURCE_SUBDIR build/cmake
-            URL "https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-1.tar.gz"
+            URL "https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-36-0.tar.gz"
     )
     FetchContent_MakeAvailable(asio)
     include_directories(${asio_SOURCE_DIR}/asio/include)
@@ -271,6 +272,7 @@ else()
 
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
+
         add_test(NAME TestInstallRedisPy
                 COMMAND "pip3" install redis
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
@@ -280,55 +282,55 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPy
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/testbarch.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/testbarch.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchReplicationPy
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/repltest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchReplicationPy2
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/repltest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchLru
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/lrutest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/lrutest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchExpireMany
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/expiretest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/expiretest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPull
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/pulltest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/pulltest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestBarchList
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/listtest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/listtest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestBarchRPC
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/remotetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/remotetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestBarchSimpleClusterRPC
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/routetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/routetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
 
         add_test(NAME TestRespClientLocal
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/redispytest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/redispytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestMerge
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/mergetest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/mergetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestSpaceThread
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/spacethreadtest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/spacethreadtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBpopThread
-                COMMAND "python3" ${CMAKE_SOURCE_DIR}/test/bstartest.py
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/bstartest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     endif ()

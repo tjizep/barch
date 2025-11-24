@@ -24,11 +24,12 @@ time.sleep(1)
 cliCmd = [f"{clidir}valkey-cli", "-p", "7777", "--eval", f"{srcdir}/sourcestart.lua"]
 cliProcess = subprocess.Popen(cliCmd)
 time.sleep(1) # wait for published data to come here
+barch.clear()
+barch.save()
 
 # create a simple cluster by adding some routes to port 14000
-barch.setRoute(0,"127.0.0.1",14000)
-barch.setRoute(1,"127.0.0.1",14000)
-barch.setRoute(23,"127.0.0.1",14000)
+for i in range(0,500) :
+    barch.setRoute(i,"127.0.0.1",14000)
 # clear the db we have no keys now
 # size is not pulled from the source (port 14000) - keys are on demand only
 k = barch.KeyValue()

@@ -3,7 +3,7 @@ vk = redis
 vk.call('B.CLEAR')
 vk.call('B.SAVE')
 vk.call('B.START','127.0.0.1','14000')
-vk.call('B.PUBLISH','127.0.0.1','13000')
+--vk.call('B.PUBLISH','127.0.0.1','13000')
 
 vk.call('B.SET','1','one:test')
 vk.call('B.SET','2','two:test')

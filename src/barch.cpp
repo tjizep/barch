@@ -355,9 +355,7 @@ int SET(caller& call,const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
     }
-    if (!barch::get_ordered_keys()) {
-        spec.hash = true;
-    }
+    spec.hash = !barch::get_ordered_keys();
 
     art::value_type reply{"", 0};
     auto fc = [&](const art::node_ptr &) -> void {

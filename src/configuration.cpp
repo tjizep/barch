@@ -525,7 +525,9 @@ static int SetOrderedKeys(std::string test_ordered_keys) {
     state().ordered_keys = test_ordered_keys;
     config().ordered_keys =
             state().ordered_keys == "on" || state().ordered_keys == "true" || state().ordered_keys == "yes";
-
+    for (auto s : get_default_ks()->get_shards()) {
+        s->opt_ordered_keys = config().ordered_keys;
+    }
     return VALKEYMODULE_OK;
 }
 static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,

@@ -28,7 +28,7 @@ namespace barch {
         uint64_t rpc_connect_to_s{30};
         uint64_t rpc_read_to_s{30};
         uint64_t rpc_write_to_s{30};
-        uint64_t internal_shards{470};
+        uint64_t internal_shards{373};
         uint64_t server_port{14000};
         std::string server_binding{"0.0.0.0"};
 

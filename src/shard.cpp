@@ -883,15 +883,16 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, c
 
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     value_type key = this->filter_key(unfiltered_key);
-    auto n = from_unordered_set(key);
-    // TODO: check tomb stone flag for dependant deletes
-    if (!n.null()) {
-        if (dependencies && n.cl()->is_tomb()) {
-            return nullptr;
+    if (!opt_ordered_keys) {
+        auto n = from_unordered_set(key);
+        // TODO: check tomb stone flag for dependant deletes
+        if (!n.null()) {
+            if (dependencies && n.cl()->is_tomb()) {
+                return nullptr;
+            }
         }
         return n;
     }
-
     auto r = art_search(this, key);
     if (r.null()) {
         if (dependencies) {

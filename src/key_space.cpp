@@ -145,6 +145,7 @@ namespace barch {
         start_maintain();
     }
     void key_space::start_maintain() {
+        exiting = false;
         tmaintain = std::thread([&]() -> void {
 
             try {
@@ -153,6 +154,7 @@ namespace barch {
                    auto tshards = this->get_shards();
                    for (auto s : tshards) {
                        s->maintenance();
+                       if (exiting) break;
                    }
 
                }
@@ -164,6 +166,7 @@ namespace barch {
     }
     key_space::~key_space() {
 
+        exiting = true;
         thread_control.signal(1);
         thread_exit.wait();
         if (tmaintain.joinable())

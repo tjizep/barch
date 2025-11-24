@@ -13,11 +13,11 @@ else :
     barchdir = ""
     srcdir = "."
 
-print(f"barchdir {barchdir}")
-print(f"srcdir {srcdir}")
-print(f"current dir {os.getcwd()}")
+print(f"barchdir: {barchdir}")
+print(f"srcdir: {srcdir}")
+print(f"current dir: {os.getcwd()}")
 serverdir = f"{os.getcwd()}/_deps/valkey-src/src/"
-print(f"serverdir{serverdir}")
+print(f"serverdir: {serverdir}")
 clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 serverProc = None
 cliProcess = None
@@ -28,7 +28,7 @@ time.sleep(1)
 
 
 if launchServer :
-    cliCmd = [f"{clidir}valkey-cli","-p","7777", f"--eval", f"{srcdir}/smallsourcestart.lua"]
+    cliCmd = [f"{clidir}valkey-cli","-p","7777", f"--eval", f"{srcdir}/pullsourcesstart.lua"]
     cliProcess = subprocess.Popen(cliCmd)
 time.sleep(1)
 # published keys are received here
@@ -38,11 +38,12 @@ barch.pull("127.0.0.1","14000")
 # clear the db we have no keys now
 # size is not pulled from the source (port 14000) - keys are on demand only
 # and the lru will clear some of them anyway
-# barch.clear()
-# barch.save()
+barch.clear()
+barch.save()
 
 k = barch.KeyValue()
 # get the key from the source (port 14000)
+print(k.get("1"))
 assert(k.get("1") == "one:test")
 assert(barch.size() == 1)
 assert(k.get("2") == "two:test")

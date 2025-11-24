@@ -406,16 +406,42 @@ namespace barch {
 
         client::~client() {
             connected = false;
-            if (tpoll.joinable())
-                tpoll.join();
         };
 
         void client::stop() {
             connected = false;
-            if (tpoll.joinable())
-                tpoll.join();
         }
+        void client::poll() {
+            if (!connected) return;
 
+            thread_local heap::vector<uint8_t> to_send;
+            thread_local art_fun sender;
+            thread_local heap::vector<repl_dest> dests;
+            to_send.reserve(barch::get_rpc_max_buffer());
+            try {
+
+                {
+                    std::lock_guard lock(this->latch);
+                    to_send.swap(this->buffer);
+                    sender.message_count = this->messages; // detect missing
+                    this->buffer.clear();
+                    this->messages = 0;
+                    dests = destinations;
+                }
+
+                if (!to_send.empty()) {
+                    for (auto& dest : dests) {
+                        // statistics are updated
+                        sender.send(this->shard, this->name, dest.host, dest.port, to_send);
+                    }
+                    to_send.clear();
+                }
+
+            }catch (std::exception& e) {
+                this->connected = false;
+                barch::std_err("failed to connect to remote server", this->host, this->port,e.what());
+            }
+        }
         void client::add_destination(std::string host, int port) {
             auto dest = repl_dest{std::move(host), port, shard};
             {
@@ -431,38 +457,7 @@ namespace barch {
             std::lock_guard lock(this->latch);
             if (!connected) {
                 connected = true;
-                tpoll = std::thread([this]() {
-                heap::vector<uint8_t> to_send;
-                art_fun sender;
-                to_send.reserve(barch::get_rpc_max_buffer());
-                try {
-                    heap::vector<repl_dest> dests;
-                    while (connected) {
-                        {
-                            std::lock_guard lock(this->latch);
-                            to_send.swap(this->buffer);
-                            sender.message_count = this->messages; // detect missing
-                            this->buffer.clear();
-                            this->messages = 0;
-                            dests = destinations;
-                        }
-                        if (!to_send.empty()) {
-                            for (auto& dest : dests) {
-                                // statistics are updated
-                                sender.send(this->shard, this->name, dest.host, dest.port, to_send);
-                            }
-                            to_send.clear();
-                        }
-                        if (this->messages == 0) // send asap
-                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    }
-                }catch (std::exception& e) {
-                    this->connected = false;
-                    barch::std_err("failed to connect to remote server", this->host, this->port,e.what());
-                }
-            });
             }
-
         }
 
         bool client::add_source(std::string host, int port) {

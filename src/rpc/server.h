@@ -62,13 +62,13 @@ namespace barch {
             heap::vector<uint8_t> buffer{};
             heap::vector<repl_dest> destinations{};
             heap::vector<std::shared_ptr<source>> sources{};
-            std::thread tpoll{};
             std::mutex latch{};
             std::shared_ptr<rpc> dest{};
             bool connected = false;
             client() = default;
             client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}
             ~client();
+            void poll();
             void stop();
             [[nodiscard]] bool begin_transaction() const ;
             [[nodiscard]] bool commit_transaction() const ;

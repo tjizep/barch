@@ -40,23 +40,14 @@ extern "C" {
 #include "spaces_spec.h"
 #include "keyspace_locks.h"
 static size_t save(caller& call) {
-    std::vector<std::thread> saviors{barch::get_shard_count().size()};
-    size_t shard = 0;
     std::atomic<size_t> errors = 0;
-    for (auto& t: saviors) {
-        t = std::thread([&errors,&call, shard]() {
-            if (!call.kspace()->get(shard)->save(true)) {
-                barch::std_err("could not save",shard);
+    shard_thread_processor(barch::get_shard_count().size(),[&](size_t shard_num) {
+        if (!call.kspace()->get(shard_num)->save(true)) {
+                barch::std_err("could not save",shard_num);
                 ++errors;
             }
-        });
-        ++shard;
-    }
+    });
     save_auth();
-    for (auto& t: saviors) {
-        if (t.joinable())
-            t.join();
-    }
     return errors;
 }
 static auto startTime = std::chrono::high_resolution_clock::now();
@@ -377,9 +368,6 @@ int SET(caller& call,const arg_t& argv) {
 
     storage_release l(t);
     t->opt_insert(spec, key, v, true, fc);
-
-
-
 
     if (spec.get) {
         if (reply.size) {

@@ -125,26 +125,22 @@ namespace barch {
         if (shards.empty()) {
             decltype(shards) shards_out;
             shards_out.resize(barch::get_shard_count().size());
-            std::vector<std::thread> loaders{shards_out.size()};
-            size_t shard_num = 0;
-            auto start_time = std::chrono::high_resolution_clock::now();
             heap::allocator<barch::shard> alloc;
-            for (auto &shard : shards_out) {
-                loaders[shard_num] = std::thread([shard_num, &shard, &alloc, name]() {
-                    shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
-                    shard->load(true);
-                });
-                ++shard_num;
-            }
-            for (auto &loader : loaders) {
-                if (loader.joinable())
-                    loader.join();
+            auto start_time = std::chrono::high_resolution_clock::now();
+            size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
+                shard_ptr& shard = shards_out[shard_num];
+                shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
+                shard->load(true);
+            });
+            if (shards_out.size() != shards_loaded) {
+                abort_with("shard loading threads invalid count");
             }
             statistics::shards = shards_out.size();
             auto end_time = std::chrono::high_resolution_clock::now();
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-            barch::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s");
             shards.swap(shards_out);
+            barch::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s", shards_loaded);
+
         }
         start_maintain();
     }

@@ -1227,6 +1227,7 @@ void barch::shard::start_maintain() {
 }
 void barch::shard::maintenance() {
     try {
+        repl_client.poll();
         run_sweep_lru_keys(this);
         run_evict_all_keys_lfu(this);
         run_evict_all_keys_random(this);

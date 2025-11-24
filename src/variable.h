@@ -35,42 +35,42 @@ public:
     }
 
     Variable& operator=(const Variable&) = default;
-     bool isBoolean() const {
+    [[nodiscard]] bool isBoolean() const {
         return index() == var_bool;
     }
-    bool isInteger() const {
+    [[nodiscard]] bool isInteger() const {
         return index() == var_int64;
     }
-    bool isUnsignedInteger() const {
+    [[nodiscard]] bool isUnsignedInteger() const {
          return index() == var_uint64;
      }
-    bool isDouble() const {
+    [[nodiscard]] bool isDouble() const {
         return index() == var_double;
     }
-    bool isString() const {
+    [[nodiscard]] bool isString() const {
         return index() == var_string;
     }
-    bool isError() const {
+    [[nodiscard]] bool isError() const {
         return index() == var_error;
     }
-    bool isNull() const {
+    [[nodiscard]] bool isNull() const {
         return index() == var_null;
     }
-    bool is_bulk(const std::string& item) const {
+    [[nodiscard]] bool is_bulk(const std::string& item) const {
          if (item.empty()) { return false;}
          return item[0] == '$';
     }
 
-    const char* bulk_str(const std::string& item) const {
+    [[nodiscard]] const char* bulk_str(const std::string& item) const {
          if (is_bulk(item)) return item.data()+1;
          return item.c_str();
      }
-    art::value_type bulk_vt(const std::string& item) const {
+    [[nodiscard]] art::value_type bulk_vt(const std::string& item) const {
          if (is_bulk(item)) return {item.data()+1,item.size()-1};
          return {item.data(),item.size()};
      }
 
-    std::string to_string() const {
+    [[nodiscard]] std::string to_string() const {
         switch (index()) {
             case var_bool:
                 return std::get<bool>(*this) ? "true" : "false";
@@ -97,7 +97,7 @@ public:
         }
     }
 
-    double to_double() const {
+    [[nodiscard]] double to_double() const {
         switch (index()) {
             case var_bool:
                 return std::get<bool>(*this) ? 1 : 0;
@@ -145,7 +145,7 @@ public:
         }
     }
 
-    int64_t to_int64() const {
+    [[nodiscard]] int64_t to_int64() const {
         switch (index()) {
             case var_bool:
                 return std::get<bool>(*this) ? 1 : 0;
@@ -166,7 +166,7 @@ public:
                 abort_with("invalid type");
         }
     }
-    int64_t to_uint64() const {
+    [[nodiscard]] uint64_t to_uint64() const {
          uint64_t v = 0;
         switch (index()) {
             case var_bool:
@@ -190,26 +190,26 @@ public:
         }
     }
 
-    std::string s() const {
+    [[nodiscard]] std::string s() const {
         return to_string();
     }
 
-    double d() const {
+    [[nodiscard]] double d() const {
         return to_double();
     }
 
-    long long i() const {
+    [[nodiscard]] long long i() const {
         return to_int64();
     }
-    unsigned long long ui() const {
+    [[nodiscard]] unsigned long long ui() const {
         return to_uint64();
     }
 
-    long long b() const {
+    [[nodiscard]] long long b() const {
         return to_bool();
     }
 
-    std::string t() const {
+    [[nodiscard]] std::string t() const {
         switch (index()) {
             case var_bool: return "boolean";
             case var_int64: return "integer";
@@ -284,12 +284,10 @@ public:
     bool operator>=(const long long& r) const {
         return i() >= r;
     }
-    operator std::string() const {
+    explicit operator std::string() const {
         return s();
     }
-    operator std::string_view() const {
-        return s();
-    }
+
 };
 
 inline void writep(std::ostream& os, const Variable& v) {

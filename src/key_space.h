@@ -23,7 +23,7 @@ namespace barch {
         moodycamel::LightweightSemaphore thread_control{};
         moodycamel::LightweightSemaphore thread_exit{};
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
-
+        bool exiting = false;
         void start_maintain();
     public:
         key_space(const std::string &name);

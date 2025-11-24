@@ -37,7 +37,8 @@ void append(std::ostream &out, size_t page, const storage &s, const uint8_t *dat
 /// file io
 bool arena::base_hash_arena::save(const std::string &filename,
                                   const std::function<void(std::ostream &)> &extra) const {
-    barch::log("writing to " + filename);
+    if (log_saving_messages == 1)
+        barch::log("writing to " + filename);
     std::string wal_filename = filename + ".wal";
     std::remove(wal_filename.c_str()); // remove wal if its existing
     std::ofstream out{wal_filename, std::ios::out | std::ios::binary}; // the wal file is truncated if it exists
@@ -61,7 +62,8 @@ bool arena::base_hash_arena::save(const std::string &filename,
     std::rename(filename.c_str(), bak.c_str());
     std::rename(wal_filename.c_str(), filename.c_str());
     std::remove(bak.c_str()); // remove the old version
-    barch::log("completed writing to " + filename);
+    if (log_saving_messages == 1)
+        barch::log("completed writing to " + filename);
 
     return !out.fail();
 }
@@ -86,8 +88,10 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
         append(out, page, s, get_page_data({page, 0, nullptr},false));
         ++record_pos;
     });
-    barch::std_log("saved [",record_pos,"] out of [",size,"] pages");
-    barch::std_log("memory used by data",(double)statistics::logical_allocated/(1024.0*1024.0),"MB");
+    if (log_loading_messages == 1) {
+        barch::std_log("saved [",record_pos,"] out of [",size,"] pages");
+        barch::std_log("memory used by data",(double)statistics::logical_allocated/(1024.0*1024.0),"MB");
+    }
     if (out.fail()) {
         barch::log(std::runtime_error("out of disk space or device error"),__FILE__,__LINE__);
         return false; // usually disk full at this stage
@@ -100,15 +104,18 @@ bool arena::base_hash_arena::arena_read(base_hash_arena &arena, const std::funct
                                         const std::string &filename) {
     std::ifstream in{filename, std::ios::in | std::ios::binary};
     if (!in.is_open()) {
-        //barch::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
+        if (log_loading_messages == 1)
+            barch::log(std::runtime_error("file could not be opened"),__FILE__,__LINE__);
         return false;
     }
-    barch::std_log("reading from",std::filesystem::current_path().c_str(),filename);
+    if (log_loading_messages == 1)
+        barch::std_log("reading from",std::filesystem::current_path().c_str(),filename);
     in.seekg(0, std::ios::end);
     //uint64_t eof = in.tellg();
     in.seekg(0, std::ios::beg);
     arena_retrieve(arena, in, extra);
-    barch::std_log("complete reading from",std::filesystem::current_path().c_str(),filename);
+    if (log_loading_messages == 1)
+        barch::std_log("complete reading from",std::filesystem::current_path().c_str(),filename);
     return true;
 }
 
@@ -186,8 +193,10 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
         barch::log(std::runtime_error("data could not be accessed"),__FILE__,__LINE__);
         return false;
     }
-    barch::std_log("loaded [",size,"] pages");
-    barch::log("complete reading from stream" );
+    if (log_loading_messages == 1) {
+        barch::std_log("loaded [",size,"] pages");
+        barch::log("complete reading from stream" );
+    }
     return true;
 }
 

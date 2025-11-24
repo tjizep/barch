@@ -252,5 +252,35 @@ struct read_lock {
 * evict a lru page
 */
 uint64_t art_evict_lru(barch::shard_ptr t);
+template<typename SFun>
+size_t shard_thread_processor(size_t count, SFun && sfun ) {
+    std::vector<std::thread> loaders;
+    loaders.resize(std::thread::hardware_concurrency());
+    size_t shard_num = 0;
 
+    size_t remaining_shards = count;
+    while (remaining_shards > 0) {
+        size_t active_shards = std::min<size_t>(remaining_shards,loaders.size());
+        for (size_t l = 0; l < active_shards; ++l) {
+            loaders[l] = std::thread([shard_num, sfun]() {
+                sfun(shard_num);
+            });
+
+            ++shard_num;
+        }
+        size_t iterations = 0;
+        for (auto &loader : loaders) {
+            if (loader.joinable())
+                loader.join();
+            --active_shards;
+            --remaining_shards;
+            ++iterations;
+            if (active_shards == 0) {
+                break;
+            }
+
+        }
+    }
+    return shard_num;
+}
 #endif //BARCH_ABSTRACT_SHARD_H

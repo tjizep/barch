@@ -352,7 +352,8 @@ bool barch::shard::save(bool stats) {
     auto current = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
-    std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+    if (log_saving_messages == 1)
+        std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
             "seconds");
     return true;
 }
@@ -449,10 +450,12 @@ bool barch::shard::load(bool) {
         auto now = std::chrono::high_resolution_clock::now();
         const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
         const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        std_log("Done loading BARCH, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
+        if (log_loading_messages == 1) {
+            std_log("Done loading BARCH, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
 
-        std_log("loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb");
+            std_log("loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds");
+            std_log("db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb");
+        }
     }catch (std::exception &e) {
         std_log("could not load",e.what());
         return false;
@@ -1025,7 +1028,8 @@ void barch::shard::load_hash() {
     if (encountered != h.size()) {
         abort_with("hashed keys where not unique");
     }
-    std_log("loaded hash [",lc.get_name(),"] keys:",h.size(),", bytes per key:",sizeof(hashed_key));
+    if (log_loading_messages == 1)
+        std_log("loaded hash [",lc.get_name(),"] keys:",h.size(),", bytes per key:",sizeof(hashed_key));
 }
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those
@@ -1227,6 +1231,7 @@ void barch::shard::start_maintain() {
 }
 void barch::shard::maintenance() {
     try {
+        repl_client.poll();
         run_sweep_lru_keys(this);
         run_evict_all_keys_lfu(this);
         run_evict_all_keys_random(this);

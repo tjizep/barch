@@ -30,12 +30,15 @@ namespace redis {
      * Returns false otherwise.
     */
     bool redis_parser::buffer_get_valid_item(art::value_type &item) {
-        for (size_t i = buffer_start; i < buffer_size; i++) {
-            item.size++;
-            size_t tis = item.size;
-            if(item.size >= 2 &&
-               item[tis-2] == '\r' &&
-               item[tis-1] == '\n') {
+        if (buffer_size - buffer_start < 2) {
+            item.size = buffer_size - buffer_start;
+            return false;
+        }
+        item.size = 2;
+        for (size_t i = buffer_start + 2; i < buffer_size; i++) {
+            size_t tis = ++item.size;
+            if (item.bytes[tis-2] == '\r' &&
+                item.bytes[tis-1] == '\n') {
                 buffer_start += tis;
                 ++parameters_processed;
                 return true;

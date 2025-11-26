@@ -14,7 +14,7 @@ namespace redis {
     typedef std::string string_param_t;
     enum {
         redis_max_item_len = 6400000,
-        redis_max_buffer_size = 4096
+        redis_max_buffer_size = 8192
     };
     typedef std::function<size_t (char* buf,size_t bytes)> reader_t;
     static char CRLF[2] = {'\r','\n'};

@@ -171,7 +171,6 @@ void barch::resp_session::do_read()
                             if (run_params(stream, params)) {
                                 ++run_count;
                             }
-
                         }else {
                             break;
                         }

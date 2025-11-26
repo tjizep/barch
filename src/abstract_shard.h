@@ -255,7 +255,7 @@ uint64_t art_evict_lru(barch::shard_ptr t);
 template<typename SFun>
 size_t shard_thread_processor(size_t count, SFun && sfun ) {
     std::vector<std::thread> loaders;
-    loaders.resize(std::thread::hardware_concurrency());
+    loaders.resize(std::max<size_t>(1, std::thread::hardware_concurrency()/2));
     size_t shard_num = 0;
 
     size_t remaining_shards = count;

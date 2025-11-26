@@ -15,7 +15,6 @@
 #include <vector>
 #include <ankerl/unordered_dense.h>
 #include <jg/dense_hash_map.hpp>
-
 #define unused_arg
 #define unused(x)
 
@@ -28,6 +27,9 @@
 #    endif
 
 namespace heap {
+
+    uint64_t random_range(uint64_t lower, uint64_t upper);
+
     typedef std::shared_timed_mutex shared_mutex;
     uint64_t get_physical_memory_bytes();
 
@@ -721,6 +723,7 @@ namespace heap {
     <K
         ,   allocator<K>
     >;
+
 }
 
 extern void abort_with(const char *message) __THROW __attribute__ ((__noreturn__));

@@ -43,8 +43,8 @@ namespace barch {
         }
     };
     struct server_context {
-        thread_pool pool{};
-        thread_pool asio_resp_pool{};
+        thread_pool pool{0.5f};
+        thread_pool asio_resp_pool{0.5f};
         thread_pool work_pool{asynch_proccess_workers};
 
         asio::io_context io{};

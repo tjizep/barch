@@ -6,7 +6,11 @@
 #include <sys/types.h>
 #include <sys/sysinfo.h>
 #include "logger.h"
+#include <random>
 static long long physical_ram_cache = 0;
+
+static std::random_device rd;
+static std::mt19937 gen(rd());
 
 static long long getTotalPhysicalMemory() {
     if (!physical_ram_cache) {
@@ -32,6 +36,12 @@ static uint32_t get_ptr_val(const void *v) {
     ax &= ((1ll << 30) - 1);
     uint32_t ax32 = ax;
     return ax32;
+}
+
+uint64_t heap::random_range(uint64_t lower, uint64_t upper) {
+    std::uniform_int_distribution<uint64_t> dist(lower, upper);
+    uint64_t r = dist(gen);
+    return r;
 }
 
 void *heap::allocate(size_t size) {

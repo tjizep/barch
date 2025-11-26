@@ -20,7 +20,8 @@ namespace oh {
     struct unordered_set {
     private:
         enum {
-            PROBES = 3
+            PROBES = 2,
+            INI_SIZE = 8192
         };
         using key_type = K;
         using hash_type = H;
@@ -51,7 +52,7 @@ namespace oh {
             }
             bool insert(const key_type &k) {
                 if (keys.empty()) {
-                    resize(4);
+                    resize(heap::random_range(INI_SIZE/2,INI_SIZE));
                 }
                 if (h2.contains(k)) return false;
 
@@ -80,7 +81,7 @@ namespace oh {
             }
             key_type* find_or_insert(const key_type &k) {
                 if (keys.empty()) {
-                    resize(4);
+                    resize(heap::random_range(INI_SIZE/2,INI_SIZE));
                 }
                 auto i = h2.find(k);
                 if (i != h2.end()) {
@@ -118,7 +119,7 @@ namespace oh {
              */
             bool insert_unique(const key_type &k) {
                 if (keys.empty()) {
-                    resize(4);
+                    resize(heap::random_range(INI_SIZE/2,INI_SIZE));
                 }
                 size_t pos = hash(k);
                 size_t s = keys.size();

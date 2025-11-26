@@ -1,4 +1,4 @@
-# Release v0.3.4.17b 2025-11-26
+# Release v0.3.4.18b 2025-11-26
 
 ## New Features
 
@@ -11,6 +11,7 @@
 7. Make `RANGE`,`VALUES`,`KEYS` asynch so that they cannot overwhelm the server (v0.3.4.16b 2025-11-20)
 8. Add simple atomic durability to avoid data corruption (v0.3.4.16b 2025-11-21)
 9. Improve high thread count performance by reducing contention (Release v0.3.4.17b 2025-11-24)
+10. Improve performance (Release v0.3.4.18b 2025-11-26)
 
 ## Fixes
 

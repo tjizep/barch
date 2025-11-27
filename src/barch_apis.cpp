@@ -84,6 +84,7 @@ function_map& functions_by_name() {
         r["DBSIZE"] = {::SIZE,{"read"}};
         r["SIZEALL"] = {::SIZEALL,{"read"}};
         r["USE"] = {::USE,{"write"}};
+        r["SELECT"] = {::USE,{"write"}};
         r["KSOPTIONS"] = {::KSOPTIONS,{"write"}};
         r["UNLOAD"] = {::UNLOAD,{"write"}};
         r["SPACES"] = {::SPACES,{"read"}};

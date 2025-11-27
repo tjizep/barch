@@ -5,7 +5,8 @@ import time
 
 barch.start("0.0.0.0", 15000)
 gr = redis.Redis(host="127.0.0.0", port=15000, db=0)
-gr.execute_command("USE g")
+gr.execute_command("SELECT 0")
+gr.execute_command("SELECT g")
 gr.set("g","vg")
 def testspace(num):
     r = redis.Redis(host="127.0.0.0", port=15000, db=0)

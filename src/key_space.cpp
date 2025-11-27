@@ -29,7 +29,7 @@ namespace barch {
 
 
     static std::string decorate(const std::string& name_) {
-        if (name_.empty())
+        if (name_.empty() || name_ == "0")
             return "node";
         return name_ + "_"; // so that system stores dont get clobbered
     }

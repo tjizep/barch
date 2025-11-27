@@ -1,4 +1,4 @@
-# Release v0.3.4.19b 2025-11-26
+# Release v0.3.4.20b 2025-11-27
 
 ## New Features
 
@@ -12,6 +12,7 @@
 8. Add simple atomic durability to avoid data corruption (v0.3.4.16b 2025-11-21)
 9. Improve high thread count performance by reducing contention (Release v0.3.4.17b 2025-11-24)
 10. Improve performance (Release v0.3.4.18b 2025-11-26)
+11. Add real `SELECT` support with `SELECT 0` (v0.3.4.20b 2025-11-27) 
 
 ## Fixes
 
@@ -29,7 +30,7 @@
 12. update readme (v0.3.4.15b 2025-11-20)
 13. forgot to add `VALUES` (v0.3.4.16b 2025-11-20)
 14. Fix stop time (Release v0.3.4.17b 2025-11-24)
-14. Fix loading due to random gen init issue (Release v0.3.4.19b 2025-11-24)
+15. Fix loading due to random gen init issue (Release v0.3.4.19b 2025-11-24)
 
 # Release v0.3.4.2b 2025-11-06 (v0.3.4.5b 2025-11-12)
 

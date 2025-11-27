@@ -1201,10 +1201,25 @@ int USE(caller& call, const arg_t& argv) {
     if (argv.size() != 2) {
         return call.wrong_arity();
     }
-
-    call.use(argv[1].to_string());
+    auto name = argv[1].to_string();
+    if (name == "0") {
+        call.use("");
+    }else {
+        call.use(name);
+    }
     return call.push_simple("OK");
 }
+
+int cmd_USE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, USE);
+}
+
+int cmd_SELECT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, USE);
+}
+
 int UNLOAD(caller& call, const arg_t& argv) {
     if (argv.size() == 1) {
         barch::unload_keyspace("");
@@ -1753,6 +1768,12 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(REM), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(SELECT), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(USE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(RANGE), "readonly", 1, 2, 0) == VALKEYMODULE_ERR)

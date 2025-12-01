@@ -64,7 +64,8 @@ namespace art {
         leaf_hashed_flag = 16u,
         leaf_lru_flag = 32u,
         leaf_tomb_flag = 64u,
-        leaf_last_flag = (1<<(6u+1u))-1,
+        leaf_compressed_flag = 128u,
+        leaf_last_flag = (1<<(7+1))-1
     };
 
     struct leaf;
@@ -515,7 +516,7 @@ namespace art {
 
         leaf() = delete;
 
-        leaf(unsigned kl, unsigned vl, int64_t expiry, bool is_volatile) {
+        leaf(unsigned kl, unsigned vl, int64_t expiry, bool is_volatile, bool is_compressed) {
             if (kl >= std::numeric_limits<LeafSize>::max() || vl >= std::numeric_limits<LeafSize>::max()) {
                 set_is_large();
             }
@@ -527,11 +528,12 @@ namespace art {
             if (expiry > 0) set_is_expiry();
             if (is_volatile) set_volatile();
             set_expiry(expiry);
+            set_compressed(is_compressed);
         }
-        key_options options() const {
-            return {expiry_ms(),true,is_volatile(),is_hashed()};
+        [[nodiscard]] key_options options() const {
+            return {expiry_ms(),true,is_volatile(),is_hashed(),is_compressed()};
         }
-        uint8_t flags{};
+        flags_t flags{};
         LeafSize _key_len{}; // does not include null terminator (which is hidden: see make_leaf)
         LeafSize _val_len{};
 
@@ -617,6 +619,25 @@ namespace art {
             return (flags & leaf_tomb_flag) == leaf_tomb_flag;
         }
 
+        void set_compressed() {
+            flags |= leaf_compressed_flag;
+        }
+
+        void unset_compressed() {
+            flags &= ~leaf_compressed_flag;
+        }
+
+        void set_compressed(bool value) {
+            if (value)
+                set_compressed();
+            else
+                unset_compressed();
+        }
+
+        [[nodiscard]] bool is_compressed() const {
+            return (flags & leaf_compressed_flag) == leaf_compressed_flag;
+        }
+
         void set_deleted() {
             flags |= leaf_deleted_flag;
         }
@@ -669,7 +690,7 @@ namespace art {
             return n > expiry;
         }
         [[nodiscard]] bool bad() const {
-            return  flags > leaf_last_flag ;
+            return  false; //flags > leaf_last_flag ;
         }
         [[nodiscard]] bool deleted() const {
             if (bad()) {
@@ -870,8 +891,8 @@ namespace art {
 
     void free_node(node_ptr n);
 
-    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false);
-    node_ptr make_leaf_at(uint8_t * key_store, logical_address addr, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile );
+    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false, bool is_compressed = false);
+    node_ptr make_leaf_at(uint8_t * key_store, logical_address addr, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile, bool is_compressed );
 
     node_ptr alloc_8_node_ptr(alloc_pair& alloc, unsigned nt);
 

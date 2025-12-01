@@ -21,7 +21,7 @@ STAT_FIELDS = [
     "node48_nodes",
     "node256_nodes",
     "node256_occupants",
-    "page_bytes_compressed",
+    "value_bytes_compressed",
     "pages_compressed",
     "pages_evicted",
     "pages_defragged",

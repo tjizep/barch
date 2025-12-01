@@ -8,16 +8,18 @@
 #include "ioutil.h"
 #include "keyspec.h"
 namespace art {
+    typedef uint8_t flags_t;
     struct key_options {
         enum {
             flag_is_keep_ttl = 1,
             flag_is_volatile = 2,
             flag_has_expiry = 4,
             flag_is_hashed = 8,
+            flag_is_compressed = 16,
         };
 
         key_options() = default;
-        key_options(int64_t expiry, bool keep_ttl, bool is_volatile, bool is_hashed) : expiry(expiry), flags(0) {
+        key_options(int64_t expiry, bool keep_ttl, bool is_volatile, bool is_hashed, bool is_compressed) : expiry(expiry), flags(0) {
             if (keep_ttl) {
                 flags |= flag_is_keep_ttl;
             }
@@ -29,6 +31,9 @@ namespace art {
             }
             if (is_hashed) {
                 flags |= flag_is_hashed;
+            }
+            if (is_compressed) {
+                flags |= flag_is_compressed;
             }
         }
         void writep(std::ostream& out) const {
@@ -46,23 +51,26 @@ namespace art {
             set_hashed(s.hash);
             //set_is_volatile(s.is_volatile);
         }
-        bool is_keep_ttl() const {
+        [[nodiscard]] bool is_keep_ttl() const {
             return flags & flag_is_keep_ttl;
         }
-        bool is_volatile() const {
+        [[nodiscard]] bool is_volatile() const {
             return flags & flag_is_volatile;
         }
-        bool is_hashed() const {
+        [[nodiscard]] bool is_hashed() const {
             return flags & flag_is_hashed;
         }
-        bool has_expiry() const {
+        [[nodiscard]] bool has_expiry() const {
             return flags & flag_has_expiry;
+        }
+        [[nodiscard]] bool is_compressed() const {
+            return flags & flag_is_compressed;
         }
         void set_expiry(uint64_t ttl) {
             this->expiry = ttl;
             set_has_expiry(ttl > 0);
         }
-        uint64_t get_expiry() const {
+        [[nodiscard]] uint64_t get_expiry() const {
             return expiry;
         }
         void set_has_expiry(bool truth) {
@@ -93,11 +101,18 @@ namespace art {
                 flags &= ~flag_is_hashed;
             }
         }
+        void set_compressed(bool truth) {
+            if (truth) {
+                flags |= flag_is_compressed;
+            }else {
+                flags &= ~flag_is_compressed;
+            }
+        }
 
     private:
         uint64_t expiry{};
     public:
-        uint8_t flags{flag_is_keep_ttl};
+        flags_t flags{flag_is_keep_ttl};
     };
 };
 #endif //KEY_OPTIONS_H

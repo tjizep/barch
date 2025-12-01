@@ -16,8 +16,12 @@ namespace art {
     void set_leaf_lru(art::leaf * l) {
         l->set_lru();
     }
-    node_ptr tree::tree_make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile) {
-        return art::make_leaf(*this, key, v, ttl, is_volatile);
+    node_ptr tree::tree_make_leaf(value_type key, value_type v, key_options options) {
+        return art::make_leaf(*this, key, v, options.get_expiry(), options.is_volatile(), options.is_compressed());
+    }
+
+    node_ptr tree::tree_make_leaf(value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile, bool is_compressed) {
+        return art::make_leaf(*this, key, v, ttl, is_volatile, is_compressed);
     }
     //
     // TODO: this function's interface can lend itself to crashes when used with parameter pointers which
@@ -40,7 +44,10 @@ namespace art {
             return {sv.data(), sv.size()};
         }
     };
-    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile ) {
+    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, key_options options) {
+        return make_leaf(alloc, key, v, options.get_expiry(), options.is_volatile(), options.is_compressed());
+    }
+    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile, bool is_compressed ) {
         unsigned val_len = v.size;
         unsigned key_len = key.length();
         thread_local tleaf2 temp;
@@ -50,7 +57,7 @@ namespace art {
         // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
         logical_address logical{&alloc};
         auto ldata = alloc.get_leaves().new_address(logical, leaf_size);
-        auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile);
+        auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile, is_compressed);
         if (alloc.is_debug) {
             barch::std_log("allocated leaf at", logical.address(),"size", leaf_size);
         }

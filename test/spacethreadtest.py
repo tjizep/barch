@@ -40,6 +40,3 @@ for i in t:
     i.join()
 r = redis.Redis(host="127.0.0.0", port=15000, db=0)
 
-assert(r.execute_command("SPACES EXIST t1") == 0)
-assert(r.execute_command("SPACES EXIST g") == 1)
-

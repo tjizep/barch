@@ -68,8 +68,7 @@ void barch::resp_session::write_result(rpc_caller& local_caller, vector_stream& 
         redis::rwrite(local_stream, local_caller.results);
     }
 }
-static bool no_call = false;
-bool barch::resp_session::run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) {
+bool barch::resp_session::run_params(vector_stream& ostream, const std::vector<redis::string_param_t>& params) {
 
     std::string cn{ params[0]};
 
@@ -94,52 +93,22 @@ bool barch::resp_session::run_params(vector_stream& stream, const std::vector<re
             prev_cn = cn;
             if (ic != bf->end() &&
                 !is_authorized(ic->second.cats,caller.get_acl())) {
-                redis::rwrite(stream, error{"not authorized"});
+                redis::rwrite(ostream, error{"not authorized"});
                 return true;
             }
         }
         if (ic == bf->end()) {
-            redis::rwrite(stream, error{"unknown command"});
+            redis::rwrite(ostream, error{"unknown command"});
         } else {
+            // TODO: ic->second.is_asynch
             auto &f = ic->second.call;
             ++ic->second.calls;
-            if (ic->second.is_asynch) {
-                auto self = shared_from_this();
-                // TODO: we have to offload this to another executor that's not servicing
-                // io so that long duration calls do not block other calls eventually
-                //
-                auto actual_ksp = caller.kspace();
-                asio::dispatch(workers,[this,self,should_reset_space,params,&f,actual_ksp,old_spc]() {
-                    vector_stream stream;
-                    // copy the caller so that we dont have thread issues - maybe
-                    // some other issues may be that routes can get called here
-                    rpc_caller local;
-                    local.set_kspace(actual_ksp);
-                    try {
-                        int32_t r = local.call(params,f);
-                        if (!local.has_blocks()) // its a new caller so no blocks
-                            write_result(local,stream, r);
-
-                    }catch (std::exception& e) {
-                        redis::rwrite(stream, error{e.what()});
-                    }
-                    local.set_kspace(old_spc); // return to old value
-                    //do_write(stream);
-                    do_callback_into_socket_context(stream); // to write data and start reading in original context again
-                });
-                return false;
-            }
-            if (no_call) {
-                redis::rwrite(stream, "OK");
-                return true;
-            }else{
-                int32_t r = caller.call(params,f);
-                if (!caller.has_blocks())
-                    write_result(caller, stream, r);
-            }
+            int32_t r = caller.call(params,f);
+            if (!caller.has_blocks())
+                write_result(caller, ostream, r);
         }
     }catch (std::exception& e) {
-        redis::rwrite(stream, error{e.what()});
+        redis::rwrite(ostream, error{e.what()});
     }
     if (should_reset_space)
         caller.set_kspace(old_spc); // return to old value

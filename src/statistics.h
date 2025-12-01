@@ -12,7 +12,7 @@ namespace statistics {
     extern std::atomic<uint64_t> n256_nodes;
     extern std::atomic<uint64_t> node256_occupants;
     extern std::atomic<uint64_t> leaf_nodes;
-    extern std::atomic<uint64_t> page_bytes_compressed;
+    extern std::atomic<uint64_t> value_bytes_compressed;
     extern std::atomic<uint64_t> max_page_bytes_uncompressed;
     extern std::atomic<uint64_t> page_bytes_uncompressed;
     extern std::atomic<uint64_t> pages_uncompressed;

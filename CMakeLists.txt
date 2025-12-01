@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
-project(barch VERSION 0.3.4 LANGUAGES CXX)
+project(barch VERSION 0.4.0 LANGUAGES CXX)
 enable_testing()
 message("barch version: ${PROJECT_VERSION}")
 
 if (NOT ADD_ZSTD_COMPRESSION)
-    set(ADD_ZSTD_COMPRESSION OFF)
+    set(ADD_ZSTD_COMPRESSION ON)
 endif ()
 if (NOT ADD_FAST_FLOAT)
     set(ADD_FAST_FLOAT ON)
@@ -98,7 +98,7 @@ if (ADD_ZSTD_COMPRESSION)
     FetchContent_Declare(
             zstd
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-            #SOURCE_SUBDIR build/cmake
+            SOURCE_SUBDIR build/cmake
             URL "https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz"
     )
 else ()
@@ -331,6 +331,10 @@ else()
 
         add_test(NAME TestBpopThread
                 COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/bstartest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestCompression
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/compresstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     endif ()

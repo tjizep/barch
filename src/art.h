@@ -34,7 +34,7 @@ struct art_statistics {
     int64_t bytes_allocated {};
     int64_t bytes_interior {};
     int64_t heap_bytes_allocated {};
-    int64_t page_bytes_compressed {};
+    int64_t value_bytes_compressed {};
     int64_t pages_uncompressed {};
     int64_t pages_compressed {};
     int64_t max_page_bytes_uncompressed {};
@@ -147,7 +147,8 @@ namespace art {
          * @param is_volatile it may be evicted if the lru/lfu-evict volatile flags are on
          * @return address of leaf created
          */
-        node_ptr tree_make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false) ;
+        node_ptr tree_make_leaf(value_type key, value_type v, key_options options);
+        node_ptr tree_make_leaf(value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false, bool is_compressed = false) ;
         node_ptr alloc_node_ptr(unsigned ptrsize, unsigned nt, const children_t &c);
         node_ptr alloc_8_node_ptr(unsigned nt);
         virtual ~tree() = default;

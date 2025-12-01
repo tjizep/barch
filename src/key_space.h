@@ -7,6 +7,7 @@
 #include <string>
 #include "valkeymodule.h"
 #include "abstract_shard.h"
+#include "merge_options.h"
 #include "value_type.h"
 
 namespace barch {
@@ -41,8 +42,8 @@ namespace barch {
         size_t get_shard_index(ValkeyModuleString **argv) ;
         void depends(const key_space_ptr& dependant);
         key_space_ptr source() const;
-        void merge(key_space_ptr into);
-        void merge();
+        void merge(key_space_ptr into, merge_options options);
+        void merge(merge_options options);
         void each_shard(std::function<void(shard_ptr)> f);
     };
     typedef key_space::key_space_ptr key_space_ptr;

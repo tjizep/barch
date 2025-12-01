@@ -5,6 +5,8 @@
 #include <vector>
 #include <atomic>
 #include "art.h"
+
+#include "dictionary_compressor.h"
 #include "valkeymodule.h"
 #include "statistics.h"
 #include "logical_allocator.h"
@@ -746,25 +748,30 @@ bool art::iterator::update(std::function<node_ptr(const leaf *l)> updater) {
 
 bool art::iterator::update(int64_t ttl, bool volat) {
     return update([&](const art::leaf *l) -> node_ptr {
-        return t->make_leaf(l->get_key(), l->get_value(), ttl, volat);
+        auto opts = l->options();
+        opts.set_volatile(volat);
+        opts.set_expiry(ttl);
+        return t->make_leaf(l->get_key(), l->get_value(), opts);
     });
 }
 
 bool art::iterator::update(int64_t ttl) {
     return update([&](const art::leaf *l) -> node_ptr {
-        return t->make_leaf(l->get_key(), l->get_value(), ttl, l->is_volatile());
+        auto opts = l->options();
+        opts.set_expiry(ttl);
+        return t->make_leaf(l->get_key(), l->get_value(), opts);
     });
 }
 
 bool art::iterator::update(value_type value, int64_t ttl, bool volat) {
     return update([&](const art::leaf *l) -> node_ptr {
-        return t->make_leaf(l->get_key(), value, ttl, volat);
+        return t->make_leaf(l->get_key(), value, ttl, volat, false);
     });
 }
 
 bool art::iterator::update(value_type value) {
     return update([&](const art::leaf *l) -> node_ptr {
-        return t->make_leaf(l->get_key(), value, l->expiry_ms(), l->is_volatile());
+        return t->make_leaf(l->get_key(), value, l->expiry_ms(), l->is_volatile(), false);
     });
 }
 
@@ -1025,7 +1032,7 @@ static art::node_ptr handle_leaf_replacement(
         else
         {
             // create a new leaf to carry the new value
-            ref = t->tree_make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile());
+            ref = t->tree_make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile(), dl->is_compressed());
             t->last_leaf_added = ref;
             ++statistics::leaf_nodes_replaced;
             return n; // the old val (n) will be removed by caller
@@ -1040,7 +1047,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
                                       art::value_type key, art::value_type value, int depth, int *old, int replace,const art::NodeResult &fc) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
-        ref = t->tree_make_leaf(key, value, options.get_expiry());
+        ref = t->tree_make_leaf(key, value, options);
         // The last leaf added must match the `key` parameter
         t->last_leaf_added = ref;
         return nullptr;
@@ -1056,7 +1063,7 @@ static art::node_ptr recursive_insert(art::tree *t, const art::key_options &opti
         }
         art::node_ptr l1 = n;
         // Create a new leaf
-        art::node_ptr l2 = t->tree_make_leaf(key, value, options.get_expiry(), options.is_volatile());
+        art::node_ptr l2 = t->tree_make_leaf(key, value, options);
         t->last_leaf_added = l2;
         // New value, we must split the leaf into a initial_node, pasts the new children to get optimal pointer size
         auto new_stored = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {l1, l2});
@@ -1143,7 +1150,7 @@ RECURSE_SEARCH:;
     }
 
     // No child, node goes within the current node (n)
-    art::node_ptr l = t->tree_make_leaf(key, value, options.get_expiry(), options.is_volatile());
+    art::node_ptr l = t->tree_make_leaf(key, value, options);
     t->last_leaf_added = l;
     // check to see if pointers need to expand to 8 bytes (usually starts at 4 bytes for compression)
     n = n.modify()->expand_pointers(ref, {l});
@@ -1582,7 +1589,16 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                         {
                             return true;
                         }
-                        if (1 == glob::stringmatchlen(pattern, value ? l->get_value() : l->get_clean_key(), 0)) {
+                        value_type td;
+                        if (value) {
+                            td = l->get_value();
+                            if (l->is_compressed()) {
+                                td = dictionary::decompress(td);
+                            }
+                        }else {
+                            td = l->get_clean_key();
+                        }
+                        if (1 == glob::stringmatchlen(pattern, td, 0)) {
                             if (!cb(*l)) {
                                 return false;
                             }

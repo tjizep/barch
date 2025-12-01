@@ -19,6 +19,7 @@ struct config_state {
     // these values are kept for reflection
 
     std::string compression_type{};
+    std::string min_compressed_size{};
     std::string eviction_type{};
     std::string max_memory_bytes{};
     std::string min_fragmentation_ratio{};
@@ -509,6 +510,32 @@ static int ApplyMinFragmentation(ValkeyModuleCtx *unused_arg, void *unused_arg, 
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
+static ValkeyModuleString *GetMinCompressedSize(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().min_compressed_size.c_str(), state().min_compressed_size.length());
+}
+
+static int SetMinCompressedSize(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    state().min_compressed_size = val;
+    config().min_compressed_size = std::stoull(state().min_compressed_size);
+    return VALKEYMODULE_OK;
+}
+
+static int SetMinCompressedSize(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    std::string min_compressed_size = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMinCompressedSize(min_compressed_size);
+}
+
+static int ApplyMinCompressedSize(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
 static ValkeyModuleString *GetOrderedKeys(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().ordered_keys.c_str(), state().ordered_keys.length());
@@ -685,6 +712,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetMaxDefragPageCount, SetMaxDefragPageCount, ApplyMaxDefragPageCount,
                                              nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "min_compressed_size", "64", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetMinCompressedSize, SetMinCompressedSize, ApplyMinCompressedSize,
+                                             nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
@@ -803,13 +834,19 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyServerPort(nullptr, nullptr, nullptr);
         }
         return r;
+    }else if (name == "min_compressed_size") {
+        auto r = SetMinCompressedSize(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyMinCompressedSize(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else {
         return VALKEYMODULE_ERR;
     }
 }
 
 bool barch::get_compression_enabled() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().compression == compression_zstd;
 }
 
@@ -820,6 +857,10 @@ uint64_t barch::get_max_module_memory() {
 float barch::get_min_fragmentation_ratio() {
     std::lock_guard lock(state().config_mutex);
     return config().min_fragmentation_ratio;
+}
+uint64_t barch::get_min_compressed_size() {
+    //std::lock_guard lock(state().config_mutex);
+    return config().min_compressed_size;
 }
 
 bool barch::get_active_defrag() {

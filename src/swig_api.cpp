@@ -474,7 +474,7 @@ statistics_values stats() {
     r.node48_nodes = t.node48_nodes;
     r.node256_nodes = t.node256_nodes;
     r.node256_occupants = t.node256_occupants;
-    r.page_bytes_compressed = t.page_bytes_compressed;
+    r.value_bytes_compressed = t.value_bytes_compressed;
     r.pages_compressed = t.pages_compressed;
     r.pages_evicted = t.pages_evicted;
     r.pages_defragged = t.pages_defragged;

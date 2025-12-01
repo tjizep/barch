@@ -6,6 +6,8 @@
 #include "module.h"
 #include <random>
 #include <algorithm>
+
+#include "dictionary_compressor.h"
 #include "time_conversion.h"
 
 static std::random_device rd;
@@ -62,7 +64,7 @@ art_statistics barch::get_statistics() {
     barch::all_shards( [&as](const shard_ptr &shard) {
         as.bytes_interior += (int64_t)shard->get_ap().get_nodes().get_allocated();
     });
-    as.page_bytes_compressed = (int64_t) statistics::page_bytes_compressed;
+    as.value_bytes_compressed = (int64_t) statistics::value_bytes_compressed;
     as.page_bytes_uncompressed = (int64_t) statistics::page_bytes_uncompressed;
     as.pages_uncompressed = (int64_t) statistics::pages_uncompressed;
     as.pages_compressed = (int64_t) statistics::pages_compressed;
@@ -153,7 +155,7 @@ static void stats_to_stream(OutStream &of) {
     writep(of, statistics::n256_nodes);
     writep(of, statistics::node256_occupants);
     writep(of, statistics::leaf_nodes);
-    writep(of, statistics::page_bytes_compressed);
+    writep(of, statistics::value_bytes_compressed);
     writep(of, statistics::page_bytes_uncompressed);
     writep(of, statistics::pages_uncompressed);
     writep(of, statistics::pages_compressed);
@@ -177,7 +179,7 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::n256_nodes);
     readp(in, statistics::node256_occupants);
     readp(in, statistics::leaf_nodes);
-    readp(in, statistics::page_bytes_compressed);
+    readp(in, statistics::value_bytes_compressed);
     readp(in, statistics::page_bytes_uncompressed);
     readp(in, statistics::pages_uncompressed);
     readp(in, statistics::pages_compressed);
@@ -576,7 +578,7 @@ void barch::shard::clear() {
     statistics::n256_nodes = 0;
     statistics::node256_occupants = 0;
     statistics::leaf_nodes = 0;
-    statistics::page_bytes_compressed = 0;
+    statistics::value_bytes_compressed = 0;
     statistics::page_bytes_uncompressed = 0;
     statistics::pages_uncompressed = 0;
     statistics::pages_compressed = 0;
@@ -646,7 +648,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
     }else {
         ++statistics::new_keys_added;
     }
-    node_ptr l = this->make_leaf(key, value, options.get_expiry(), options.is_volatile());
+    node_ptr l = this->make_leaf(key, value, options);
     l.l()->set_hashed();
     h.insert_unique(l);
     return true;
@@ -841,8 +843,11 @@ int barch::shard::range(art::value_type key, art::value_type key_end, LeafCallBa
 art::value_type barch::shard::filter_key(value_type key) const {
     return tree_filter_key(key);
 }
-node_ptr barch::shard::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile ) {
-    return tree_make_leaf(key, v, ttl, is_volatile);
+node_ptr barch::shard::make_leaf(value_type key, value_type v, key_options opts ) {
+    return tree_make_leaf(key, v, opts);
+}
+node_ptr barch::shard::make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile, bool is_compressed ) {
+    return tree_make_leaf(key, v, ttl, is_volatile, is_compressed);
 }
 
 bool barch::shard::remove(value_type key) {
@@ -989,21 +994,36 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
 
     }
 }
-void barch::shard::merge() {
-    merge(dependencies);
+void barch::shard::merge(merge_options options) {
+    merge(dependencies,options);
 }
-void barch::shard::merge(const shard_ptr& to) {
+void barch::shard::merge(const shard_ptr& to, merge_options options) {
     if (!to) return;
     auto &lc = get_leaves();
 
-    lc.iterate_pages([&to](size_t s, size_t , auto& data) {
+    lc.iterate_pages([&to, options](size_t s, size_t , auto& data) {
         page_iterator(data, s, [&](const leaf *l, uint32_t ) {
             if (l->deleted()) return;
             if (l->is_tomb()) {
                 to->remove(l->get_key());
                 return;
             }
-            to->insert(l->options(), l->get_key() ,l->get_value(), true, [](node_ptr){});
+            auto opts = l->options();
+            auto v = l->get_value();
+            if (options.is_compressed() && !opts.is_compressed()) {
+                auto vcomp = dictionary::compress(v);
+                if (!vcomp.empty()) {
+                    v = vcomp;
+                    opts.set_compressed(true);
+                }
+            }else if (options.is_decompress() && opts.is_compressed()) {
+                auto vdec = dictionary::decompress(v);
+                if (!vdec.empty()) {
+                    opts.set_compressed(false);
+                    v = vdec;
+                }
+            }
+            to->insert(opts, l->get_key() ,l->get_value(), true, [](node_ptr){});
         });
     });
 }
@@ -1029,6 +1049,9 @@ void barch::shard::load_hash() {
 
     if (encountered != h.size()) {
         abort_with("hashed keys where not unique");
+    }
+    if (h.size() > 0) {
+        opt_ordered_keys = false;
     }
     if (log_loading_messages == 1)
         std_log("loaded hash [",lc.get_name(),"] keys:",h.size(),", bytes per key:",sizeof(hashed_key));

@@ -8,6 +8,7 @@
 #include <shared_mutex>
 #include "art.h"
 #include "key_options.h"
+#include "merge_options.h"
 #include "rpc/abstract_session.h"
 
 namespace barch {
@@ -97,8 +98,8 @@ namespace barch {
         // does not replicate
         virtual bool tree_remove(art::value_type key, const art::NodeResult &fc) = 0;
         virtual bool remove(art::value_type key) = 0;
-        virtual void merge(const shard_ptr& to) = 0;
-        virtual void merge() = 0;
+        virtual void merge(const shard_ptr& to, merge_options options) = 0;
+        virtual void merge(merge_options options) = 0;
         /**
          * find a key. if the key does not exist pull sources will be queried for the key
          * if the key is no-were a null is returned
@@ -115,7 +116,8 @@ namespace barch {
         virtual art::node_ptr tree_minimum() const = 0;
         virtual art::node_ptr tree_maximum() const = 0;
         virtual art::node_ptr get_last_leaf_added() const = 0;
-        virtual art::node_ptr make_leaf(art::value_type key, art::value_type v, art::leaf::ExpiryType ttl , bool is_volatile ) = 0;
+        virtual art::node_ptr make_leaf(art::value_type key, art::value_type v, art::key_options opts) = 0;
+        virtual art::node_ptr make_leaf(art::value_type key, art::value_type v, art::leaf::ExpiryType ttl , bool is_volatile , bool is_compressed ) = 0;
         virtual art::value_type filter_key(art::value_type) const = 0;
         virtual art::node_ptr get_root() const = 0;
         virtual int range(art::value_type key, art::value_type key_end, art::CallBack cb, void *data) = 0;

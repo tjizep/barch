@@ -24,6 +24,7 @@ namespace art {
         bool is_release = false;
         bool is_merge = false;
         bool is_merge_default = false;
+        bool is_merge_compress = false;
         bool is_option = false;
         bool is_get = false;
         bool is_set = false;
@@ -113,6 +114,10 @@ namespace art {
                     source = tos(++spos);
                     if (!barch::check_ks_name(source)) {
                         return -1;
+                    }
+                    if (has("COMPRESS", spos+1)) {
+                        ++spos;
+                        is_merge_compress = true;
                     }
                     return is_parse_error(spos);
                 }

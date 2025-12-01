@@ -110,7 +110,8 @@ extern "C"{
     int STOP(caller& call, const arg_t& argv);
     int RETRIEVE(caller& call, const arg_t& argv);
     int PING(caller& call, const arg_t& argv);
-
+    // compression
+    int TRAIN(caller& call, const arg_t& argv);
     // stats
     int OPS(caller& call, const arg_t& argv);
     int STATS(caller& call, const arg_t& argv);

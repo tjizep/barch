@@ -83,6 +83,7 @@ function_map& functions_by_name() {
         r["SIZE"] = {::SIZE,{"read"}};
         r["DBSIZE"] = {::SIZE,{"read"}};
         r["SIZEALL"] = {::SIZEALL,{"read"}};
+        r["TRAIN"] = {::TRAIN,{"write"}};
         r["USE"] = {::USE,{"write"}};
         r["SELECT"] = {::USE,{"write"}};
         r["KSOPTIONS"] = {::KSOPTIONS,{"write"}};

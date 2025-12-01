@@ -1,3 +1,15 @@
+# Release v0.4.0.0b 2025-11-29
+
+## New Features
+
+1. ZSTD Dictionary Compression
+   - Use `SET CONFIG compression zstd` (port 14000) or `SET CONFIG B.compression zstd` on the valkey port
+   - You can use `valkey-server --port 7777 --loadmodule _barch.so` which will put valkey on port 7777 and barch on port 14000
+   - Use `TRAIN SOME DATA` to add samples for training the dictionary
+   - Use `TRAIN` (no parameters) to complete training and save the trained dictionary
+
+## Fixes
+
 # Release v0.3.4.20b 2025-11-27
 
 ## New Features

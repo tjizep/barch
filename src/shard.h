@@ -9,6 +9,7 @@
  */
 #include "art.h"
 #include "abstract_shard.h"
+#include "merge_options.h"
 #include "overflow_hash.h"
 #include "vector_stream.h"
 
@@ -184,7 +185,8 @@ namespace barch {
             return latch;
         }
         art::value_type filter_key(value_type key) const override;
-        art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile ) ;
+        node_ptr make_leaf(value_type key, value_type v, key_options opts );
+        art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile, bool is_compressed ) ;
 
         /**
          * register a pull source on this shard/tree
@@ -232,8 +234,8 @@ namespace barch {
         bool remove(value_type key, const NodeResult &fc) override;
         bool tree_remove(value_type key, const NodeResult &fc) override;
         bool remove(value_type key) override;
-        void merge(const shard_ptr& to) override;
-        void merge() override;
+        void merge(const shard_ptr& to, merge_options options) override;
+        void merge(merge_options options) override;
         /**
          * find a key. if the key does not exist pull sources will be queried for the key
          * if the key is no-were a null is returned

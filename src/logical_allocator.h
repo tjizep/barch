@@ -31,14 +31,6 @@ enum {
 
 };
 struct alloc_pair;
-struct training_entry {
-    training_entry(const uint8_t *data, size_t size) : data(data), size(size) {
-    }
-
-    const uint8_t *data;
-    size_t size;
-};
-
 
 struct size_offset {
     PageSizeType size{};
@@ -777,7 +769,7 @@ public:
 
     size_t full_vacuum() {
 
-        if (!last_heap_bytes) last_heap_bytes = statistics::page_bytes_compressed;
+        if (!last_heap_bytes) last_heap_bytes = statistics::value_bytes_compressed;
 
         return 0;
     }

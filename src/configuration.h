@@ -34,6 +34,7 @@ namespace barch {
 
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
+        uint64_t min_compressed_size = {64};
         bool ordered_keys{true};
         bool use_vmm_memory{true};
         bool active_defrag{true};
@@ -70,6 +71,8 @@ namespace barch {
     unsigned get_iteration_worker_count();
 
     float get_min_fragmentation_ratio();
+
+    uint64_t get_min_compressed_size();
 
     bool get_active_defrag();
 

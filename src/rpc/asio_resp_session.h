@@ -29,7 +29,7 @@ namespace barch {
         void do_callback_into_socket_context(vector_stream& local_stream);
     private:
         void write_result(rpc_caller& caller, vector_stream& stream, int32_t r);
-        bool run_params(vector_stream& stream, const std::vector<redis::string_param_t>& params) ;
+        bool run_params(vector_stream& ostream, const std::vector<redis::string_param_t>& params) ;
         void do_read();
         void start_block_to();
         void add_caller_blocks();

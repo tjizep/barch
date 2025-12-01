@@ -39,6 +39,8 @@ extern "C" {
 #include "caller.h"
 #include "spaces_spec.h"
 #include "keyspace_locks.h"
+#include "dictionary_compressor.h"
+
 static size_t save(caller& call) {
     std::atomic<size_t> errors = 0;
     shard_thread_processor(barch::get_shard_count().size(),[&](size_t shard_num) {
@@ -335,6 +337,14 @@ int cmd_VALUES(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, VALUES);
 }
+int TRAIN(caller& call, const arg_t& argv) {
+    std::string d;
+    for (size_t i = 1; i < argv.size(); ++i) {
+        d += argv[i].to_string();
+        d += " ";
+    }
+    return call.push_ll(dictionary::train(d));
+}
 /* B.SET <key> <value>
  *
  * Set the specified key to the specified value. */
@@ -364,8 +374,16 @@ int SET(caller& call,const arg_t& argv) {
         }
     };
 
+    art::key_options opts = spec;
+    static std::atomic<size_t> compressed_ctr = 0;
+    const auto& compressed = dictionary::compress(v);
+    if (!compressed.empty()) {
+        statistics::value_bytes_compressed += compressed.size;
+        opts.set_compressed(true);
+        v = compressed;
+    }
     storage_release l(t);
-    t->opt_insert(spec, key, v, true, fc);
+    t->opt_insert(opts, key, v, true, fc);
 
     if (spec.get) {
         if (reply.size) {
@@ -473,9 +491,13 @@ int APPEND(caller& call, const arg_t& argv) {
             return nullptr;
         }
         const art::leaf *leaf = old.const_leaf();
+        auto ov = leaf->get_value();
+        if (leaf->is_compressed()) {
+            ov = dictionary::decompress(ov);
+        }
         auto& alloc = const_cast<alloc_pair&>(old.logical.get_ap<alloc_pair>());
         heap::small_vector<uint8_t, 128> s;
-        s.append(leaf->get_value().to_view());
+        s.append(ov.to_view());
         s.append(v.to_view());
         art::node_ptr l = make_leaf
         (  alloc
@@ -483,6 +505,7 @@ int APPEND(caller& call, const arg_t& argv) {
         ,  {s.data(),s.size()}
         ,  leaf->expiry_ms()
         ,  leaf->is_volatile()
+        // no compression by design!
         );
 
         if (!l.null()) {
@@ -673,7 +696,7 @@ int GET(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto t = call.kspace()->get(argv[1]);
+    auto t = call.kspace()->get(k);
     auto converted = conversion::convert(k);
 
     read_lock release(t);
@@ -685,7 +708,11 @@ int GET(caller& call, const arg_t& argv) {
         if (r.cl()->is_tomb()) {
             return call.push_null();
         }
-        auto vt = r.const_leaf()->get_value();
+        auto cl = r.const_leaf();
+        auto vt = cl->get_value();
+        if (cl->is_compressed()) {
+            vt = dictionary::decompress(vt);
+        }
         return call.push_vt(vt);
     }
 }
@@ -793,7 +820,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
         }
         return art::make_leaf(t->get_ap(), l->get_key(), l->get_value(),  art::now() + spec.ttl, l->is_volatile());
     };
-    art::key_options opts{spec.ttl,true,false,false};
+    art::key_options opts{spec.ttl,true,false,false, false};
     if (t->update(l->get_key(),updater))
         return call.push_ll(1);
     return call.push_ll(-2);
@@ -1088,7 +1115,9 @@ int KSPACE(caller& call, const arg_t& argv) {
 
     if (parser.is_merge) {
         if (parser.is_merge_default) {
-            call.kspace()->merge();
+            merge_options opts;
+            opts.set_compressed(parser.is_merge_compress);
+            call.kspace()->merge(opts);
             return call.push_simple("OK");
         }
         auto to = barch::get_keyspace(parser.source);
@@ -1100,7 +1129,8 @@ int KSPACE(caller& call, const arg_t& argv) {
         }
         ks_shared shl(from);
         ks_unique ul(to);
-        from->merge(to);
+
+        from->merge(to, {});
         if (old) {
             from->depends(to);
         }
@@ -1559,7 +1589,7 @@ int STATS(caller& call, const arg_t& argv) {
     }
     call.start_array();
     call.push_values({"heap_bytes_allocated", get_total_memory()});
-    call.push_values({"page_bytes_compressed",as.page_bytes_compressed});
+    call.push_values({"value_bytes_compressed",as.value_bytes_compressed});
     call.push_values({ "max_page_bytes_uncompressed", as.max_page_bytes_uncompressed});
     call.push_values({ "last_vacuum_time", as.last_vacuum_time});
     call.push_values({ "vacuum_count", as.vacuums_performed});

@@ -244,19 +244,19 @@ namespace barch {
     const heap::vector<shard_ptr>& key_space::get_shards() {
         return shards;
     };
-    void key_space::merge() {
-        merge(source());
+    void key_space::merge(merge_options options) {
+        merge(source(), options);
     }
     void key_space::each_shard(std::function<void(shard_ptr)> f) {
         for (auto& s: shards) {
             f(s);
         }
     }
-    void key_space::merge(key_space_ptr into) {
+    void key_space::merge(key_space_ptr into, merge_options options) {
         if (!into) return;
         for (auto &d : shards) {
             auto sn = d->get_shard_number();
-            d->merge(into->get(sn));
+            d->merge(into->get(sn),options);
         }
     }
     void key_space::depends(const key_space_ptr& source) {

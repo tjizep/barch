@@ -20,7 +20,7 @@ namespace oh {
     struct unordered_set {
     private:
         enum {
-            PROBES = 2,
+            PROBES = 3,
             INI_SIZE = 8192
         };
         using key_type = K;
@@ -30,8 +30,8 @@ namespace oh {
 
         struct data {
             float max_leakage = 0.15f;
-            float max_load_factor = 0.8f;
-            float max_rehash_multiplier = 12; // a large multiplier is ok
+            float max_load_factor = 0.75f;
+            float max_rehash_multiplier = 16; // a large multiplier is ok
             // because the hash itself is small relative to the data it indexes
             // it wont work well where the data is small
             key_compare eq{};

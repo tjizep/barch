@@ -6,12 +6,12 @@
 
 Additionally, it has an embedded server+client for python which can reduce read latency to micro-seconds.
 It implements the Z* (OrderedSet), H* (HashSet) and key value API's available in redis.
-A demo ubuntu 22.04 docker image is available at teejip/barch:v0.3.4.20b
+A demo ubuntu 22.04 docker image is available at teejip/barch:v0.4.0.0b
 
 Run below to expose an example flask application to see the API's in action
 ```
 sudo docker ps -a -q | sudo xargs docker stop 
-sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.3.4.20b
+sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.4.0.0b
 
 ```
 binaries are located under `/home/barch/setup` within the docker image
@@ -20,6 +20,16 @@ It's also usable as a valkey module and can be started as
 ```
 valkey-server --loadmodule _barch.so
 ```
+## New Features in v0.4.0.0b (and later)
+
+1. ZSTD Dictionary Compression
+    - Use `SET CONFIG compression zstd` (port 14000) or `SET CONFIG B.compression zstd` on the valkey port
+    - You can use `valkey-server --port 7777 --loadmodule _barch.so` which will put valkey on port 7777 and barch on port 14000
+    - Use `TRAIN "SOME DATA"` to add samples for training the dictionary, should be at least five (5)
+    - See test/test_data.py for generating some training data - training isn't required though you can just enable compression
+    - Use `TRAIN` (no parameters) to complete training and save the trained dictionary - this is used to compress all data
+    - If training data does not exist barch will use the values as training data and save a dictionary automatically
+
 ### Memtier and Valkey Benchmarks of Ordered index (ART)
 - [More extensive benchmarks](https://tjizep.github.io/barch_benchmark/index_memtier_1_10.html)
 - The Unordered index has even better random point query performance at the expense of `MIN`, `MAX`, `RANGE` and `COUNT` functions 

@@ -99,7 +99,7 @@ if (ADD_ZSTD_COMPRESSION)
             zstd
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
             SOURCE_SUBDIR build/cmake
-            URL "https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz"
+            URL "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"
     )
 else ()
     message("ZSTD compression not used use -DADD_ZSTD_COMPRESSION=ON")
@@ -331,6 +331,14 @@ else()
 
         add_test(NAME TestBpopThread
                 COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/bstartest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestLargeDataSave
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/largetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestLargeDataLoad
+                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/largetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestCompression

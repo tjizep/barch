@@ -120,7 +120,8 @@ art::value_type dictionary_compressor::decompress(art::value_type compressed_dat
 
     uint64_t rSize = ZSTD_getFrameContentSize(compressed_data.data(), compressed_data.size);
     
-    if (rSize == ZSTD_CONTENTSIZE_ERROR || rSize == ZSTD_CONTENTSIZE_UNKNOWN) {
+    if (ZSTD_isError(rSize)) {
+        barch::std_err("decompression frame error",ZSTD_getErrorName(rSize));
         return {};
     }
     decompressed.resize(rSize);
@@ -135,6 +136,7 @@ art::value_type dictionary_compressor::decompress(art::value_type compressed_dat
     );
 
     if (ZSTD_isError(dSize)) {
+        barch::std_err("decompression error [",ZSTD_getErrorName(rSize),"]");
         return {};
     }
 
@@ -146,13 +148,14 @@ void dictionary_compressor::create_from_dictionary(const buffer_type& other_dict
     if (cdict) ZSTD_freeCDict(cdict);
     if (ddict) ZSTD_freeDDict(ddict);
     dict_ready = false;
+
     // Create Contexts
     cdict = ZSTD_createCDict(other_dictionary_data.data(), other_dictionary_data.size(), 3); // Compression level 3
     ddict = ZSTD_createDDict(other_dictionary_data.data(), other_dictionary_data.size());
 
     if (cdict && ddict) {
         dict_ready = true;
-
+        dictionary_data = other_dictionary_data;
         // Clear training data to free memory
         training_samples.clear();
         training_samples.shrink_to_fit();
@@ -268,6 +271,9 @@ namespace dictionary {
         return {};
     }
     art::value_type compress(art::value_type data) {
+        if (!barch::get_compression_enabled()) {
+            return {};
+        }
         if (get_main().is_dictionary_ready()) {
             if (!get_dc().is_dictionary_ready()) {
                 std::lock_guard l(get_dc_mut());

@@ -7,7 +7,7 @@
 
 enum {
     node_checks = 0,
-    page_size = 32768*4, // must be a power of two
+    page_size = 32768*8, // must be a power of two
     physical_page_size = page_size,
     maximum_allocation_size = page_size - (page_size % 1000),
     initial_node_ptr_size = 4, // must be a power of twp
@@ -16,7 +16,7 @@ enum {
     test_memory = 1,
     allocation_padding = 0,
     initialize_memory = 1,
-    storage_version = 10*page_size,
+    storage_version = 10,
     ticker_size = 16,
     numeric_key_size = 12,
     num32_key_size = 6,

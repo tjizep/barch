@@ -12,6 +12,8 @@
 
 ## Fixes
 
+1. Set shards to more sane values and increase maximum object size
+
 # Release v0.3.4.20b 2025-11-27
 
 ## New Features

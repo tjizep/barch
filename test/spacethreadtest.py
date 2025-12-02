@@ -1,17 +1,17 @@
+
 import threading
 import barch
 import redis
 import time
-
+print("start thread test")
 barch.start("0.0.0.0", 15000)
 gr = redis.Redis(host="127.0.0.0", port=15000, db=0)
+gr.flushdb()
 gr.select(0)
 gr.select("g") #Yes! we can select strings too
 gr.set("g","vg")
 def testspace(num):
     r = redis.Redis(host="127.0.0.0", port=15000, db=0)
-    r.flushdb()
-
     for i in range(1,1000):
         r.execute_command(f"USE t{num}")
         r.execute_command(f"SPACES DEPENDS t{num} ON g")
@@ -34,7 +34,7 @@ threading.Thread(target=testspace, args=(5,)),
 for i in t:
     i.start()
 
-time.sleep(1)
+time.sleep(10)
 
 for i in t:
     i.join()

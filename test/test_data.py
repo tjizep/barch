@@ -24,7 +24,7 @@ def wiki_search(query, results):
 def load_set_in(aset, in_):
     loaded = 0
     for w in words:
-        name = f'{script_dir}/data/{in_}/{w}.dat'
+        name = f'{script_dir}/data/{in_}/{w}.json'
         try:
             with open(name, 'rb') as file:
                 aset[w] = file.read()
@@ -55,7 +55,7 @@ def load_train_data(_set):
 def save_data(test_, as_):
     for w in words:
         print(f'saving {as_} data for {w}')
-        with open(f'{script_dir}/data/{as_}/{w}.dat', 'wb') as f:
+        with open(f'{script_dir}/data/{as_}/{w}.json', 'wb') as f:
             f.write(test_[w])
 def save_test_data(test_):
     save_data(test_,'test')

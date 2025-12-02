@@ -44,4 +44,4 @@ time.sleep(1)
 for i in t:
     i.join()
 
-#assert(barch.stats().value_bytes_compressed > 0)
+assert(barch.stats().value_bytes_compressed > 0)

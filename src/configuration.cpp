@@ -182,7 +182,7 @@ static int SetServerPort(const char *unused_arg, ValkeyModuleString *val, void *
 }
 static int ApplyServerPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     barch::server::stop();
-    barch::server::start(config().server_binding,config().server_port);
+    barch::server::start(config().server_binding,config().server_port, false);
     return VALKEYMODULE_OK;
 }
 
@@ -314,7 +314,7 @@ static int SetListenPort(const char *unused_arg, ValkeyModuleString *val, void *
 
 static int ApplyListenPort(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     barch::server::stop();
-    barch::server::start(config().bind_interface, config().listen_port);
+    barch::server::start(config().bind_interface, config().listen_port, false);
     //get_art()->get_leaves().set_opt_use_vmm(record.use_vmm_memory);
     //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;

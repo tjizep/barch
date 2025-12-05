@@ -1344,12 +1344,15 @@ int LOAD(caller& call, const arg_t& argv) {
     return errors>0 ? call.push_error("some shards did not load") : call.push_simple("OK");
 }
 int START(caller& call, const arg_t& argv) {
-    if (argv.size() != 3)
+    if (argv.size() > 4)
         return call.wrong_arity();
-
+    if (argv.size() == 4 && argv[3] != "SSL") {
+        return call.push_error("invalid argument");
+    };
     auto interface = argv[1];
     auto port = argv[2];
-    barch::server::start(interface.chars(), atoi(port.chars()));
+    bool ssl = argv.size() == 4 && argv[3] == "SSL";
+    barch::server::start(interface.chars(), atoi(port.chars()), ssl);
     return call.push_simple("OK");
 }
 int PUBLISH(caller& call, const arg_t& argv) {
@@ -1905,7 +1908,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         }
     }
     if (barch::get_server_port() > 0)
-        barch::server::start("0.0.0.0",barch::get_server_port());
+        barch::server::start("0.0.0.0",barch::get_server_port(), false);
     return VALKEYMODULE_OK;
 }
 

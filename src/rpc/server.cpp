@@ -52,12 +52,14 @@ namespace barch {
         exec_guard worker_guard {asio::make_work_guard(workers)};
         std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
 
-        tcp::acceptor acc;
+        tcp::acceptor accept;
+        asio::ssl::context ssl_context;
         std::string interface;
         uint_least16_t port;
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
         std::atomic<size_t> asio_resp_distributor{};
+        bool use_ssl = false;
 #if 0
         std::shared_ptr<work_unit> get_unit() {
             size_t r = resp_distributor++ % io_resp.size();
@@ -71,7 +73,7 @@ namespace barch {
 
         void stop() {
             try {
-                acc.close();
+                accept.close();
             }catch (std::exception& ) {}
             for (auto &proc: asio_resp_ios) {
                 try {
@@ -103,14 +105,21 @@ namespace barch {
         void start_accept() {
             try {
 
-                acc.async_accept([this](asio::error_code error, tcp::socket endpoint) {
+                accept.async_accept([this](asio::error_code error, tcp::socket endpoint) {
                     if (error) {
                         barch::std_err("accept error",error.message(),error.value());
                         return; // this happens if there are no threads
                     }
                     {
                         net_stat stat;
-                        process_data(endpoint);
+                        if (use_ssl) {
+                            auto ssl = ssl_stream(std::move(endpoint), ssl_context);
+                            auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
+                            session->start_ssl();
+                            return;
+                        }else {
+                            process_data(endpoint);
+                        }
                     }
                     start_accept();
                 });
@@ -132,9 +141,11 @@ namespace barch {
                     auto unit = this->get_asio_unit();
                     tcp::socket socket (unit->io);
                     socket.assign(tcp::v4(),endpoint.release());
-                    auto session = std::make_shared<resp_session>(std::move(socket),workers, cs[0]);
-                    //auto session = std::make_shared<resp_session>(std::move(endpoint),workers, cs[0]);
+                    auto session = std::make_shared<resp_session<tcp::socket>>(std::move(socket),workers, cs[0]);
+                        //auto session = std::make_shared<resp_session>(std::move(endpoint),workers, cs[0]);
                     session->start();
+
+
                     return;
                 }
                 uint32_t cmd = 0;
@@ -190,16 +201,40 @@ namespace barch {
             }
 
         }
-        server_context(std::string interface, uint_least16_t port)
-        :   acc(io, tcp::endpoint(tcp::v4(), port))
+        std::string get_password() const
+        {
+            return "test";
+        }
+        void do_ssl_handshake() {
+
+        }
+        server_context(std::string interface, uint_least16_t port, bool ssl)
+        :   accept(io, tcp::endpoint(tcp::v4(), port))
+        ,   ssl_context(asio::ssl::context::tlsv13)
         ,   interface(interface)
-        ,   port(port){
+        ,   port(port)
+        ,   use_ssl(ssl) {
+
+            if (use_ssl) {
+                ssl_context.set_options(
+                asio::ssl::context::default_workarounds
+                | asio::ssl::context::no_sslv2
+                | asio::ssl::context::no_sslv3
+                | asio::ssl::context::no_tlsv1
+                | asio::ssl::context::no_tlsv1_1
+                | asio::ssl::context::no_tlsv1_2
+                | asio::ssl::context::single_dh_use);
+                ssl_context.set_password_callback(std::bind(&server_context::get_password, this));
+                ssl_context.use_certificate_chain_file("server.pem");
+                //ssl_context.use_private_key_file("server.pem", asio::ssl::context::asn1);
+                ssl_context.use_tmp_dh_file("dh4096.pem");
+            }
 
             start_accept();
             pool.start([this](size_t tid) -> void{
 
                 asio::dispatch(io ,[this,tid]() {
-                    barch::std_log("TCP connections accepted on", this->interface,this->port,"using thread",tid);
+                    barch::std_log(use_ssl ? "TLS/SSL":"TCP","connections accepted on", this->interface,this->port,"using thread",tid);
                 });
                 io.run();
                 barch::std_log("server stopped on", this->interface,this->port,"using thread",tid);
@@ -225,28 +260,41 @@ namespace barch {
         static std::mutex srv_get{};
         return srv_get;
     }
-    std::shared_ptr<server_context>  srv = nullptr;
-    void server::start(const std::string& interface, uint_least16_t port) {
-        std::unique_lock l(srv_mut());
-        if (srv) {
-            srv->stop();
-            srv = nullptr;
+
+    std::shared_ptr<server_context> srv = nullptr;
+    std::shared_ptr<server_context> srv_ssl = nullptr;
+    void handle_start(const std::string& interface, uint_least16_t port, bool ssl, std::shared_ptr<server_context>& s) {
+        if (s) {
+            s->stop();
+            s = nullptr;
         }
         try {
             if (port == 0) return;
-            srv = std::make_shared<server_context>(interface, port);
+            s = std::make_shared<server_context>(interface, port, ssl);
         }catch (std::exception& e) {
             barch::std_err("failed to start server", e.what());
         }
 
     }
+    void handle_stop(std::shared_ptr<server_context>& s) {
+        if (s) {
+            s->stop();
+            s = nullptr;
+        }
+    }
+    void server::start(const std::string& interface, uint_least16_t port, bool ssl) {
+        std::unique_lock l(srv_mut());
+        if (ssl) {
+            handle_start(interface, port, true, srv_ssl);
+        }else {
+            handle_start(interface, port, false, srv);
+        }
+    }
 
     void server::stop() {
         std::unique_lock l(srv_mut());
-        if (srv) {
-            srv->stop();
-            srv = nullptr;
-        }
+        handle_stop(srv);
+        handle_stop(srv_ssl);
     }
     struct module_stopper {
         module_stopper() = default;
@@ -254,9 +302,6 @@ namespace barch {
             server::stop();
         }
     };
-    asio::io_context& get_io_context() {
-        return srv->get_asio_unit()->io;
-    }
     static module_stopper _stopper;
     namespace repl {
         class rpc_impl : public rpc {

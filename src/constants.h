@@ -34,6 +34,8 @@ enum {
     page_extension_on_allocation = 1,
     max_process_queue_size = 20000,
     log_loading_messages = 0,
-    log_saving_messages = 0
+    log_saving_messages = 0,
+    resp_pool_factor = 50,
+    tcp_accept_pool_factor = 50
 };
 #endif //CONSTANTS_H

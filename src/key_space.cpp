@@ -13,15 +13,20 @@ namespace barch {
     struct key_spaces {
         key_spaces() {
             barch::std_log("Starting Barch",
-                "\n\tversion","0.4.1 (2)",
-                "\n\tpage_size",(size_t)page_size,
-                "\n\tmaximum_allocation_size",(size_t)maximum_allocation_size,
-                "\n\tshards",get_shard_count().size(),
-                "\n\tactive_defrag",get_active_defrag(),
-                "\n\tordered_keys",get_ordered_keys(),
-                "\n\tmax_module_memory",get_max_module_memory(),
-                "\n\tsave_interval",get_save_interval(),
-                "\n\tmin_threads",get_min_threads());
+                "\n",
+                "\n\tversion","[","0.4.1.1b","]",
+                "\n\tpage_size","[",(size_t)page_size,"] bytes",
+                "maximum_allocation_size [",(size_t)maximum_allocation_size,"] bytes",
+                "\n\tshards","[",get_shard_count().size(),"]",
+                "\n\tactive_defrag","[",get_active_defrag(),"]",
+                "ordered_keys","[",get_ordered_keys(),"]",
+                "\n\tmax_module_memory","[",get_max_module_memory()/(1024.0f*1024.0f*1024.0f),"] GB"
+                "\n\tsave_interval","[",get_save_interval(),"] ms"
+                "\n\tmin_threads","[",thread_pool::get_min_threads(),"]",
+                "\n\tresp service threads","[",(thread_pool::get_system_threads()*resp_pool_factor)/100.0f,"] "
+                "socket accept threads","[",(thread_pool::get_system_threads()*tcp_accept_pool_factor)/100.0f,"]"
+                "\n\tdefault eviction policy","[",get_eviction_policy(),"]",
+                "\n\tcompression","[",get_compression_enabled(),"]","\n");
 
         };
         ~key_spaces() {

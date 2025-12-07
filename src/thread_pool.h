@@ -6,11 +6,17 @@
 #define THREAD_POOL_H
 #include <thread>
 #include <atomic>
+
+#include "configuration.h"
 #include "sastam.h"
-static bool get_min_threads() {
-    return false;
-}
+
 struct thread_pool {
+    static bool get_min_threads() {
+        return barch::get_use_minimum_threads();
+    }
+    static size_t get_system_threads() {
+        return std::thread::hardware_concurrency();
+    }
 
     heap::vector<std::thread> pool{};
     bool started = false;
@@ -24,14 +30,14 @@ struct thread_pool {
             pool.resize(1);
             return;
         }
-        pool.resize(std::max<size_t>(4, std::thread::hardware_concurrency()));
+        pool.resize(std::max<size_t>(4, get_system_threads()));
     }
     explicit thread_pool(double factor) {
         if (get_min_threads()) {
             pool.resize(1);
             return;
         }
-        double cores = std::thread::hardware_concurrency();
+        double cores = get_system_threads();
         pool.resize(std::max<size_t>(4, (size_t)(cores*factor)));
     }
     explicit thread_pool(int threads) {

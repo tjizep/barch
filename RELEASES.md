@@ -2,13 +2,14 @@
 
 ## New Features
 
-1. Add SSL/TLS Support [still incomplete - do not use] (v0.4.1.1b 2025-12-07)
-2. Some performance improvements (v0.4.1.1b 2025-12-07)
-3. add startup config+version banner (v0.4.1.1b 2025-12-07)
+1. Some performance improvements (v0.4.1.1b 2025-12-07)
+2. Add startup config+version banner (v0.4.1.1b 2025-12-07)
+3. ignore training commands when dictionary is complete (v0.4.1.1b 2025-12-07)
 
 ## Fixes
 
 1. fix heap corruption at program termination due to race condition (v0.4.1.1b 2025-12-07)
+2. fix race condition at program termination due to static initializers (v0.4.1.1b 2025-12-07)
 
 # Release v0.4.0.1b 2025-12-02
 

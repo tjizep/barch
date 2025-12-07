@@ -50,8 +50,8 @@ namespace barch {
         bool started = false;
         std::atomic<size_t> num_started = 0;
 
-        thread_pool pool{0.5f};
-        thread_pool asio_resp_pool{0.5f};
+        thread_pool pool{(double)tcp_accept_pool_factor/100.0f};
+        thread_pool asio_resp_pool{(double)resp_pool_factor/100.0f};
         thread_pool work_pool{asynch_proccess_workers};
 
         asio::io_context io{};

@@ -46,6 +46,7 @@ namespace barch {
         bool evict_allkeys_random{false};
         bool evict_volatile_ttl{false};
         bool log_page_access_trace{false};
+        bool use_minimum_threads{false};
         std::string external_host{"localhost"};
         std::string bind_interface{"127.0.0.1"};
         int listen_port{12145};
@@ -96,6 +97,7 @@ namespace barch {
 
     bool get_ordered_keys();
 
+    std::string get_eviction_policy();
     uint64_t get_internal_shards();
 
     uint64_t get_rpc_max_buffer();
@@ -105,6 +107,7 @@ namespace barch {
     std::chrono::seconds get_rpc_connect_to_s();
     std::chrono::seconds get_rpc_read_to_s() ;
     std::chrono::seconds get_rpc_write_to_s() ;
+    bool get_use_minimum_threads();
     int set_configuration_value(ValkeyModuleString *name, ValkeyModuleString *value);
     int set_configuration_value(const std::string& name, const std::string &val);
 

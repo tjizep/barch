@@ -903,7 +903,14 @@ bool barch::get_evict_volatile_ttl() {
     std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_ttl;
 }
+std::string barch::get_eviction_policy() {
+    std::lock_guard lock(state().config_mutex);
+    return state().eviction_type;
+}
 
+bool barch::get_use_minimum_threads() {
+    return config().use_minimum_threads;
+}
 const barch::configuration_record& barch::get_configuration() {
     std::lock_guard lock(state().config_mutex);
     return state().record;

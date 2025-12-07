@@ -304,7 +304,9 @@ namespace dictionary {
         auto& dc = get_main(false);
         // check if dictionary is saved
         if (dc.is_dictionary_ready()) {
-            dc.clear();
+            // the dictionary needs to be cleared with the data
+            // that's if there is compressed data
+            return 0;
         }
 
         dc.compress(data);

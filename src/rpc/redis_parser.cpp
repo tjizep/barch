@@ -223,7 +223,7 @@ namespace redis {
                         throw_exception<std::domain_error>("Bulk string size does not match");
                     }
                     *(char*)(bstr.data()+bstr.size()) = 0x00; // we need to do this because string views are not null terminated
-                    req[item_nr++] = std::string_view{bstr.data(),bstr.length()};
+                    req[item_nr++] = string_param_t{bstr.data(),bstr.length()};
 
                     state = state_bstr;
                 }

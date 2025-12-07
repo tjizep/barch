@@ -218,8 +218,6 @@ namespace barch {
                         }catch (std::exception& e) {
                             barch::std_err("error", e.what());
                         }
-                    }else {
-                         barch::std_err(ec.message().c_str());
                     }
                 });
         }

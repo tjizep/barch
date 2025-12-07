@@ -67,7 +67,8 @@ namespace barch {
         }
 #endif
         std::shared_ptr<asio_work_unit> get_asio_unit() {
-            size_t r = asio_resp_distributor++ % asio_resp_ios.size();
+            size_t r = (asio_resp_distributor % asio_resp_ios.size());
+            asio_resp_distributor++;
             return asio_resp_ios[r];
         }
 
@@ -261,8 +262,14 @@ namespace barch {
         return srv_get;
     }
 
-    std::shared_ptr<server_context> srv = nullptr;
-    std::shared_ptr<server_context> srv_ssl = nullptr;
+    static std::shared_ptr<server_context>& get_srv() {
+        static std::shared_ptr<server_context> srv = nullptr;
+        return srv;
+    }
+    static std::shared_ptr<server_context>& get_srv_ssl() {
+        static std::shared_ptr<server_context> srv = nullptr;
+        return srv;
+    }
     void handle_start(const std::string& interface, uint_least16_t port, bool ssl, std::shared_ptr<server_context>& s) {
         if (s) {
             s->stop();
@@ -285,16 +292,16 @@ namespace barch {
     void server::start(const std::string& interface, uint_least16_t port, bool ssl) {
         std::unique_lock l(srv_mut());
         if (ssl) {
-            handle_start(interface, port, true, srv_ssl);
+            handle_start(interface, port, true, get_srv_ssl());
         }else {
-            handle_start(interface, port, false, srv);
+            handle_start(interface, port, false, get_srv());
         }
     }
 
     void server::stop() {
         std::unique_lock l(srv_mut());
-        handle_stop(srv);
-        handle_stop(srv_ssl);
+        handle_stop(get_srv());
+        handle_stop(get_srv_ssl());
     }
     struct module_stopper {
         module_stopper() = default;

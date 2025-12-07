@@ -127,11 +127,15 @@ namespace barch {
             shards_out.resize(barch::get_shard_count().size());
             heap::allocator<barch::shard> alloc;
             auto start_time = std::chrono::high_resolution_clock::now();
-            size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
+            //size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
+            size_t shards_loaded = 0;
+            for (size_t shard_num = 0; shard_num < shards_out.size(); ++ shard_num){
                 shard_ptr& shard = shards_out[shard_num];
                 shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
                 shard->load(true);
-            });
+                ++shards_loaded;
+            }
+        //);
             if (shards_out.size() != shards_loaded) {
                 abort_with("shard loading threads invalid count");
             }
@@ -165,7 +169,6 @@ namespace barch {
         });
     }
     key_space::~key_space() {
-
         exiting = true;
         thread_control.signal(1);
         thread_exit.wait();
@@ -173,6 +176,7 @@ namespace barch {
             tmaintain.join();
         shards.clear();
     }
+
     shard_ptr key_space::get_local() {
         static std::atomic<uint64_t> sid;
         thread_local shard_ptr shard;

@@ -52,7 +52,7 @@ namespace oh {
             }
             bool insert(const key_type &k) {
                 if (keys.empty()) {
-                    resize(heap::random_range(INI_SIZE/2,INI_SIZE));
+                    resize(0);
                 }
                 if (h2.contains(k)) return false;
 
@@ -81,7 +81,7 @@ namespace oh {
             }
             key_type* find_or_insert(const key_type &k) {
                 if (keys.empty()) {
-                    resize(heap::random_range(INI_SIZE/2,INI_SIZE));
+                    resize(0);
                 }
                 auto i = h2.find(k);
                 if (i != h2.end()) {
@@ -119,7 +119,7 @@ namespace oh {
              */
             bool insert_unique(const key_type &k) {
                 if (keys.empty()) {
-                    resize(heap::random_range(INI_SIZE/2,INI_SIZE));
+                    resize(0);
                 }
                 size_t pos = hash(k);
                 size_t s = keys.size();
@@ -210,9 +210,13 @@ namespace oh {
                 std::swap(rehashed, with.rehashed);
             }
             void resize(size_t new_size) {
+                if (new_size == 0) {
+                    new_size = heap::random_range(INI_SIZE/2,INI_SIZE);
+                }
                 keys.resize(new_size);
                 has.resize(new_size,false);
             }
+
             size_t get_size() const {
                 return size + h2.size();
             }

@@ -2,9 +2,9 @@
 
 ## New Features
 
-1. Add SSL/TLS Support [still incomplete - do not use]
-2. Some performance improvements
-3. add startup config+version banner
+1. Add SSL/TLS Support [still incomplete - do not use] (v0.4.1.1b 2025-12-07)
+2. Some performance improvements (v0.4.1.1b 2025-12-07)
+3. add startup config+version banner (v0.4.1.1b 2025-12-07)
 
 ## Fixes
 

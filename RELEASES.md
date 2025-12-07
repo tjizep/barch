@@ -4,6 +4,7 @@
 
 1. Add SSL/TLS Support [still incomplete - do not use]
 2. Some performance improvements
+3. add startup config+version banner
 
 ## Fixes
 

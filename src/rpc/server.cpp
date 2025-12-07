@@ -42,7 +42,14 @@ namespace barch {
             guard.reset();
         }
     };
+    static std::recursive_mutex& srv_mut() {
+        static std::recursive_mutex srv_get{};
+        return srv_get;
+    }
     struct server_context {
+        bool started = false;
+        std::atomic<size_t> num_started = 0;
+
         thread_pool pool{0.5f};
         thread_pool asio_resp_pool{0.5f};
         thread_pool work_pool{asynch_proccess_workers};
@@ -73,6 +80,10 @@ namespace barch {
         }
 
         void stop() {
+            if ( num_started == 0) {
+                barch::std_err("server not started");
+                return;
+            }
             try {
                 accept.close();
             }catch (std::exception& ) {}
@@ -102,6 +113,7 @@ namespace barch {
 
             asio_resp_pool.stop();
             port = 0;
+            started = false;
         }
         void start_accept() {
             try {
@@ -206,9 +218,7 @@ namespace barch {
         {
             return "test";
         }
-        void do_ssl_handshake() {
 
-        }
         server_context(std::string interface, uint_least16_t port, bool ssl)
         :   accept(io, tcp::endpoint(tcp::v4(), port))
         ,   ssl_context(asio::ssl::context::tlsv13)
@@ -244,23 +254,25 @@ namespace barch {
                 workers.run();
                 barch::std_log("worker stopped using thread",tid);
             });
-            std::atomic<size_t> started = 0;
+            num_started = 0;
             barch::std_log("resp pool size",asio_resp_pool.size());
             asio_resp_ios.resize(asio_resp_pool.size());
-            asio_resp_pool.start([this, &started](size_t tid) -> void {
-                ++started;
+            asio_resp_pool.start([this](size_t tid) -> void {
+                ++num_started;
                 asio_resp_ios[tid] = std::make_shared<asio_work_unit>();
                 asio_resp_ios[tid]->run();
             });
-            while (started != asio_resp_pool.size()) {
+            while (num_started != asio_resp_pool.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+            started = true;
+        }
+        ~server_context() {
+            std::lock_guard f(srv_mut());
+            stop();
         }
     };
-    static std::mutex& srv_mut() {
-        static std::mutex srv_get{};
-        return srv_get;
-    }
+
 
     static std::shared_ptr<server_context>& get_srv() {
         static std::shared_ptr<server_context> srv = nullptr;
@@ -271,10 +283,7 @@ namespace barch {
         return srv;
     }
     void handle_start(const std::string& interface, uint_least16_t port, bool ssl, std::shared_ptr<server_context>& s) {
-        if (s) {
-            s->stop();
-            s = nullptr;
-        }
+        s = nullptr;
         try {
             if (port == 0) return;
             s = std::make_shared<server_context>(interface, port, ssl);
@@ -284,10 +293,8 @@ namespace barch {
 
     }
     void handle_stop(std::shared_ptr<server_context>& s) {
-        if (s) {
-            s->stop();
-            s = nullptr;
-        }
+
+        s = nullptr;
     }
     void server::start(const std::string& interface, uint_least16_t port, bool ssl) {
         std::unique_lock l(srv_mut());
@@ -309,7 +316,7 @@ namespace barch {
             server::stop();
         }
     };
-    static module_stopper _stopper;
+    //static module_stopper _stopper;
     namespace repl {
         class rpc_impl : public rpc {
         private:

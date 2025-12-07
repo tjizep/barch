@@ -1125,7 +1125,7 @@ void barch::shard::run_defrag() {
         ++statistics::exceptions_raised;
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(40)); // chill a little we've worked hard
+    //std::this_thread::sleep_for(std::chrono::milliseconds(40)); // chill a little we've worked hard
 }
 
 void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,

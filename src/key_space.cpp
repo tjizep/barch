@@ -6,13 +6,25 @@
 #include <thread>
 #include "shard.h"
 #include "keys.h"
+#include "thread_pool.h"
 #include "rpc/server.h"
 
 namespace barch {
     struct key_spaces {
-        key_spaces() = default;
+        key_spaces() {
+            barch::std_log("Starting Barch",
+                "\n\tversion","0.4.1 (2)",
+                "\n\tpage_size",(size_t)page_size,
+                "\n\tmaximum_allocation_size",(size_t)maximum_allocation_size,
+                "\n\tshards",get_shard_count().size(),
+                "\n\tactive_defrag",get_active_defrag(),
+                "\n\tordered_keys",get_ordered_keys(),
+                "\n\tmax_module_memory",get_max_module_memory(),
+                "\n\tsave_interval",get_save_interval(),
+                "\n\tmin_threads",get_min_threads());
+
+        };
         ~key_spaces() {
-            //server::stop();
         }
         std::mutex lock{};
         std::string ks_pattern = "[0-9,A-Z,a-z,_]+";

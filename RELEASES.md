@@ -3,6 +3,7 @@
 ## New Features
 
 1. Add SSL/TLS Support [still incomplete - do not use]
+2. Some performance improvements
 
 ## Fixes
 

@@ -1,8 +1,12 @@
-# Release v0.4.1.0b 2025-12-05
+# Release v0.4.1.1b 2025-12-07
 
 ## New Features
 
-1. Add SSL/TLS Support 
+1. Add SSL/TLS Support [still incomplete - do not use]
+
+## Fixes
+
+1. fix heap corruption at program termination due to race condition (v0.4.1.1b 2025-12-07)
 
 # Release v0.4.0.1b 2025-12-02
 

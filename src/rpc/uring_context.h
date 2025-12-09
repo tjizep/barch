@@ -7,15 +7,7 @@
 #include "ioutil.h"
 #include "value_type.h"
 #include <liburing.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Weffc++"
-//#define ASIO_HAS_IO_URING
-//#define ASIO_DISABLE_EPOLL
-#include <asio/io_context.hpp>
-#include <asio/detached.hpp>
-#include <asio/ip/tcp.hpp>
-#include <asio.hpp>
-#pragma GCC diagnostic pop
+#include "asio_includes.h"
 enum {
     u_read = 1,
     u_write = 2,
@@ -23,11 +15,9 @@ enum {
     u_shutdown = 4
 };
 enum {
-    opt_uring_queue_size = 8192,
+    opt_uring_queue_size = 16,
     opt_debug_uring = 0
 };
-using asio::ip::tcp;
-using asio::local::stream_protocol;
 
 typedef std::function<void(art::value_type data)> uring_cb;
 struct request {

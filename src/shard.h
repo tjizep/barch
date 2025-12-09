@@ -209,6 +209,8 @@ namespace barch {
 
         bool load(bool stats) override;
 
+        void load_bloom() override;
+
         bool retrieve(std::istream& in) override;
 
         void begin() override;

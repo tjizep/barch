@@ -34,12 +34,14 @@ namespace redis {
             item.size = buffer_size - buffer_start;
             return false;
         }
+        size_t len = buffer_size - buffer_start + 2;
         item.size = 2;
-        for (size_t i = buffer_start + 2; i < buffer_size; i++) {
-            size_t tis = ++item.size;
-            if (item.bytes[tis-2] == '\r' &&
-                item.bytes[tis-1] == '\n') {
-                buffer_start += tis;
+        for (size_t i = 2; i < len + 2; i++) {
+
+            if (item.bytes[i-2] == '\r' &&
+                item.bytes[i-1] == '\n') {
+                buffer_start += i;
+                item.size = i;
                 ++parameters_processed;
                 return true;
             }

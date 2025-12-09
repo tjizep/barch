@@ -15,6 +15,44 @@ namespace barch {
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
     public:
         typedef std::shared_ptr<abstract_shard> shard_ptr;
+        typedef std::vector<bool> bloom_t;
+        bloom_t bloom{};
+        void add_bloom(art::value_type key) {
+            if (static_bloom_size != bloom.size()) return;
+            uint64_t ash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
+            bool bval = bloom[ash % static_bloom_size];
+            if (!bval)
+                bloom[ash % static_bloom_size] = true;
+        }
+
+        void erase_bloom(art::value_type key) {
+            if (static_bloom_size != bloom.size()) return;
+            uint64_t ash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
+            bloom[ash % static_bloom_size] = false;
+        }
+
+        bool is_bloom(art::value_type key) const {
+            if (static_bloom_size != bloom.size()) return true; // yes we assume the key exists
+            uint64_t ash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
+            return bloom[ash % static_bloom_size] ;
+        }
+        void create_bloom(bool enable) {
+            bloom_t ebl;
+            bloom.swap(ebl);
+            if (enable) {
+                opt_static_bloom_filter = true;
+                bloom.resize(static_bloom_size);
+            }else {
+                opt_static_bloom_filter = false;
+            }
+
+        }
+    private:
+        bool opt_static_bloom_filter = barch::get_static_bloom_filter();
+    public:
+        bool has_static_bloom_filter() const {
+            return opt_static_bloom_filter;
+        }
         bool opt_ordered_keys = barch::get_ordered_keys();
         bool opt_evict_all_keys_lru = barch::get_evict_allkeys_lru();
         bool opt_evict_all_keys_lfu = barch::get_evict_allkeys_lfu();
@@ -43,6 +81,8 @@ namespace barch {
         void unlock_unique() {
             get_latch().unlock();
         }
+        abstract_shard() = default;
+
         virtual ~abstract_shard() = default;
         virtual bool remove_leaf_from_uset(art::value_type key) = 0;
         virtual heap::shared_mutex& get_latch() = 0;
@@ -52,6 +92,7 @@ namespace barch {
         virtual uint64_t get_size() const = 0;
         virtual uint64_t get_hash_size() const = 0;
         virtual void maintenance() = 0;
+        virtual void load_bloom() = 0;
         /**
          * register a pull source on this shard/tree
          * currently non-existing hosts will also be added (they can come online later)

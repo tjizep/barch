@@ -1,10 +1,11 @@
-# Release v0.4.1.1b 2025-12-07
+# Release v0.4.1.2b 2025-12-09
 
 ## New Features
 
 1. Some performance improvements (v0.4.1.1b 2025-12-07)
 2. Add startup config+version banner (v0.4.1.1b 2025-12-07)
 3. ignore training commands when dictionary is complete (v0.4.1.1b 2025-12-07)
+4. add bloom filter to improve performance in some situations
 
 ## Fixes
 

@@ -12,6 +12,20 @@
 #include "rpc/server.h"
 
 #define unused_arg
+static bool is_on(const std::string& val) {
+    return (val == "on" || val == "true" || val == "yes");
+}
+
+static bool is_float(const std::string& buffer) {
+    char* ptr = nullptr;
+    const char * cdata = buffer.c_str();
+    const char * ed = cdata + buffer.length();
+    //auto dv =
+        std::strtod(cdata, &ptr);
+    if (ptr != ed) return false;
+    return true;
+}
+
 struct config_state {
     config_state() = default;
     std::recursive_mutex config_mutex{};
@@ -40,15 +54,19 @@ struct config_state {
     std::string ordered_keys{};
     std::string server_port{};
     std::string server_binding{};
+    std::string static_bloom_filter{};
     std::vector<std::string> valid_evictions = {
         "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
     };
+    std::vector<std::string> valid_on_off = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
+
     std::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
-    std::vector<std::string> valid_use_vmm_mem = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
-    std::vector<std::string> valid_defrag = {"on", "true", "off", "yes", "no", "null", "nil"};
+    std::vector<std::string> valid_use_vmm_mem = valid_on_off;
+    std::vector<std::string> valid_defrag = valid_on_off;
     // we want alloc tests but the db has to be created with alloc tests in the first place
-    std::vector<std::string> valid_alloc_tests = {"on", "true", "off", "yes", "no", "null", "nil"};
-    std::vector<std::string> valid_ordered_keys = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
+    std::vector<std::string> valid_alloc_tests = valid_on_off;
+    std::vector<std::string> valid_ordered_keys = valid_on_off;
+
 };
 
 static config_state& state() {
@@ -289,6 +307,43 @@ static int ApplyExternalHost(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
     //art::get_nodes().set_opt_use_vmm(record.use_vmm_memory);
     return VALKEYMODULE_OK;
 }
+// ===========================================================================================================
+static ValkeyModuleString *GetStaticBloomFilter(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().static_bloom_filter.c_str(), state().static_bloom_filter.length());
+}
+
+static int SetStaticBloomFilter(const std::string& valu) {
+    std::lock_guard lock(state().config_mutex);
+    if (valu.empty()) {
+        return VALKEYMODULE_ERR;
+    }
+    std::string val = valu;
+    std::transform(val.begin(), val.end(), val.begin(),::tolower);
+
+    if (!check_type(val, state().valid_on_off)) {
+        return VALKEYMODULE_ERR;
+    }
+
+    state().static_bloom_filter = val;
+    config().static_bloom_filter = is_on(state().static_bloom_filter);
+
+    return VALKEYMODULE_OK;
+}
+static int SetStaticBloomFilter(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                          ValkeyModuleString **unused_arg) {
+    std::string s = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetStaticBloomFilter(s);
+}
+
+static int ApplyStaticBloomFilter(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    barch::all_shards([](auto& shard) {
+        storage_release l(shard);
+        shard->create_bloom(config().static_bloom_filter);
+        shard->load_bloom();
+    });
+    return VALKEYMODULE_OK;
+}
 
 // ===========================================================================================================
 static ValkeyModuleString *GetListenPort(const char *unused_arg, void *unused_arg) {
@@ -495,6 +550,9 @@ static ValkeyModuleString *GetMinFragmentation(const char *unused_arg, void *unu
 
 static int SetMinFragmentation(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
+    if (!is_float(val)) {
+        return VALKEYMODULE_ERR;
+    }
     state().min_fragmentation_ratio = val;
     config().min_fragmentation_ratio = std::stof(state().min_fragmentation_ratio);
     return VALKEYMODULE_OK;
@@ -737,6 +795,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetUseVMMemory, SetUseVMMemory,
                                              ApplyUseVMMemory, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "static_bloom_filter", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+                                         GetStaticBloomFilter, SetStaticBloomFilter,
+                                         ApplyStaticBloomFilter, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "listen_port", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetListenPort, SetListenPort,
                                              ApplyListenPort, nullptr);
@@ -802,6 +864,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetMaxModificationsBeforeSave(val);
     } else if (name == "external_host") {
         return SetExternalHost(val);
+    } else if (name == "static_bloom_filter") {
+        auto r = SetStaticBloomFilter(val);
+        if ( VALKEYMODULE_OK == r) {
+            return ApplyStaticBloomFilter(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "rpc_max_buffer") {
         return SetRPCMaxBuffer(val);
     } else if (name == "listen_port") {
@@ -903,10 +971,16 @@ bool barch::get_evict_volatile_ttl() {
     std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_ttl;
 }
+
 std::string barch::get_eviction_policy() {
     std::lock_guard lock(state().config_mutex);
     return state().eviction_type;
 }
+
+bool barch::get_static_bloom_filter() {
+    return config().static_bloom_filter;
+}
+
 
 bool barch::get_use_minimum_threads() {
     return config().use_minimum_threads;

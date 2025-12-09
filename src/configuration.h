@@ -34,9 +34,10 @@ namespace barch {
 
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
-        uint64_t min_compressed_size = {64};
+        uint64_t min_compressed_size {64};
         bool ordered_keys{true};
         bool use_vmm_memory{true};
+        bool static_bloom_filter{false};
         bool active_defrag{true};
         bool evict_volatile_lru{false};
         bool evict_allkeys_lru{false};
@@ -96,6 +97,8 @@ namespace barch {
     bool get_use_vmm_memory();
 
     bool get_ordered_keys();
+
+    bool get_static_bloom_filter();
 
     std::string get_eviction_policy();
     uint64_t get_internal_shards();

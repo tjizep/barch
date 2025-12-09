@@ -10,7 +10,6 @@
 #include "rpc_caller.h"
 #include "netstat.h"
 #include "vector_stream.h"
-#include "server.h"
 #include "constants.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
@@ -133,8 +132,7 @@ namespace barch {
             }
         }
 
-        bool run_params(vector_stream& ostream, const std::vector<redis::string_param_t>& params) {
-
+        void run_params(vector_stream& ostream, const std::vector<redis::string_param_t>& params) {
             std::string cn{ params[0]};
 
             auto colon = cn.find_last_of(':');
@@ -159,7 +157,7 @@ namespace barch {
                     if (ic != bf->end() &&
                         !is_authorized(ic->second.cats,caller.get_acl())) {
                         redis::rwrite(ostream, error{"not authorized"});
-                        return true;
+                        return ;
                     }
                 }
                 if (ic == bf->end()) {
@@ -178,7 +176,6 @@ namespace barch {
             if (should_reset_space)
                 caller.set_kspace(old_spc); // return to old value
 
-            return true;
         }
 
         void do_read()
@@ -199,9 +196,8 @@ namespace barch {
                                 auto &params = parser.read_new_request();
                                 if (!params.empty()) {
                                     ++calls_recv;
-                                    if (run_params(stream, params)) {
-                                        ++run_count;
-                                    }
+                                    run_params(stream, params);
+                                    ++run_count;
                                 }else {
                                     break;
                                 }
@@ -218,6 +214,9 @@ namespace barch {
                         }catch (std::exception& e) {
                             barch::std_err("error", e.what());
                         }
+                    }else {
+                        //if (ec.category())
+                         //barch::std_err(ec.message().c_str());
                     }
                 });
         }

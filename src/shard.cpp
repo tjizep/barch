@@ -15,6 +15,8 @@ static std::mt19937 gen(rd());
 
 
 using namespace art;
+void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<void(const barch::leaf *, uint32_t pos)> cb);
+
 uint64_t art_evict_lru(barch::shard_ptr t) {
     try {
         auto page = t->get_ap().get_leaves().get_lru_page();
@@ -85,7 +87,6 @@ art_statistics barch::get_statistics() {
     as.keys_found = (int64_t) statistics::keys_found;
     as.new_keys_added = (int64_t) statistics::new_keys_added;
     as.keys_replaced = (int64_t) statistics::keys_replaced;
-    as.queue_reorders = (int64_t) statistics::queue_reorders;
 
     return as;
 }
@@ -408,6 +409,7 @@ bool barch::shard::send(std::ostream& out) {
             "seconds");
     return true;
 }
+
 bool barch::shard::load(bool) {
 
     //
@@ -555,7 +557,17 @@ void barch::shard::rollback() {
     stream_to_stats(save_stats);
     transacted = false;
 }
+void barch::shard::load_bloom() {
+    if (!has_static_bloom_filter()) return;
+    auto &lc = get_leaves();
+    lc.iterate_pages([this](size_t s, size_t unused(page), auto& data) {
+        page_iterator(data, s, [this](const leaf *l, uint32_t unused(pos)) {
+            if (l->deleted() || l->is_tomb()) return;
+            add_bloom(l->get_key());
+        });
+    });
 
+}
 void barch::shard::clear() {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     storage_release release(this->shared_from_this());
@@ -568,7 +580,7 @@ void barch::shard::clear() {
     shard::saf_get_ops = 0;
     shard::saf_keys_found = 0;
     shard::queue_size = 0;
-
+    create_bloom(has_static_bloom_filter()); // resets the bloom
     get_leaves().clear();
     get_nodes().clear();
     h.clear();
@@ -660,8 +672,11 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
         ++statistics::oom_avoided_inserts;
         return false;
     }
+
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
+    add_bloom(key);
+
     size_t before = size;
     if (options.is_hashed()) {
         hash_insert(options, key, value, update, fc);
@@ -784,7 +799,7 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     ++deletes;
     size_t before = size;
-
+    erase_bloom(unfiltered_key);
     auto key = filter_key(unfiltered_key);
     node_ptr old = from_unordered_set(key);
     if (!old.null()) {
@@ -889,6 +904,7 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, c
 
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     value_type key = this->filter_key(unfiltered_key);
+
     if (!opt_ordered_keys) {
         auto n = from_unordered_set(key);
         // TODO: check tomb stone flag for dependant deletes
@@ -1036,7 +1052,10 @@ void barch::shard::load_hash() {
             if (l->deleted()) return;
             if (l->is_tomb()) {
                 ++tomb_stones;
+            }else {
+                add_bloom(l->get_key());
             }
+
             if (l->is_hashed()) {
 
                 logical_address lad{page,pos,this};

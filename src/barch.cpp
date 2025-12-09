@@ -698,10 +698,12 @@ int GET(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     auto t = call.kspace()->get(k);
     auto converted = conversion::convert(k);
-
+    auto ckey = converted.get_value();
+    if (t->has_static_bloom_filter() && !t->is_bloom(ckey)) {
+        return call.push_null();
+    }
     read_lock release(t);
-    art::node_ptr r = t->search(converted.get_value());
-
+    art::node_ptr r = t->search(ckey);
     if (r.null()) {
         return call.push_null();
     } else {
@@ -1619,7 +1621,6 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({"logical_allocated", as.logical_allocated});
     call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
     call.push_values({"keys_found", as.keys_found});
-    call.push_values({"queue_reorders", as.queue_reorders});
     call.end_array(0);
     return 0;
 }

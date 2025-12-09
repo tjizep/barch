@@ -59,7 +59,6 @@ namespace statistics {
      * queue stats
      */
     extern std::atomic<uint64_t> queue_failures;
-    extern std::atomic<uint64_t> queue_reorders;
     extern std::atomic<uint64_t> queue_added;
     extern std::atomic<uint64_t> queue_processed;
 

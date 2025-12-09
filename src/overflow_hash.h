@@ -43,7 +43,7 @@ namespace oh {
             size_t rehash_multiplier = 4;
             // (size_t) (max_leakage * keys.size()
             size_t size{};
-            heap::vector<bool> has{};
+            std::vector<bool> has{};
             heap::vector<key_type> keys{};
             H2 h2{};
             size_t rehashed = 0;

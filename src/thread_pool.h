@@ -72,6 +72,28 @@ struct thread_pool {
     size_t active() const {
         return running - stopped;
     }
+    void pin_threads() {
+        if (!started) {
+            return;
+        }
+
+        size_t core_id = 0;
+        size_t num_cores = std::max<size_t>(1, get_system_threads());
+
+        for (auto& t : pool) {
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(core_id % num_cores, &cpuset);
+
+            int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpu_set_t), &cpuset);
+            if (rc != 0) {
+                barch::std_err("Failed to pin thread ", core_id, " error: ", rc);
+            }
+            core_id++;
+        }
+
+
+    }
     void stop() {
         if (!started) {
             return;

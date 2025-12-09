@@ -265,6 +265,7 @@ namespace barch {
             while (num_started != asio_resp_pool.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+            asio_resp_pool.pin_threads();
             started = true;
         }
         ~server_context() {

@@ -83,7 +83,9 @@ namespace barch {
                                 clear();
                                 return false;
                             }
-                            buffer.resize(buffers_size);
+                            if (buffer.size() < buffers_size) {
+                                buffer.resize(buffers_size);
+                            }
                             state = barch_wait_for_buffer;
                         }else {
                             state = barch_wait_for_header;

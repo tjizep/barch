@@ -229,11 +229,7 @@ namespace barch {
             if (use_ssl) {
                 ssl_context.set_options(
                 asio::ssl::context::default_workarounds
-                | asio::ssl::context::no_sslv2
-                | asio::ssl::context::no_sslv3
-                | asio::ssl::context::no_tlsv1
                 | asio::ssl::context::no_tlsv1_1
-                | asio::ssl::context::no_tlsv1_2
                 | asio::ssl::context::single_dh_use);
                 ssl_context.set_password_callback(std::bind(&server_context::get_password, this));
                 ssl_context.use_certificate_chain_file("server.pem");

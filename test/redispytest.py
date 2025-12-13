@@ -1,7 +1,7 @@
 for cnt in range(1,5):
     import redis
     import barch
-    print("start redis test")
+    print(f"start redis test {cnt}")
     barch.start("0.0.0.0", 14000)
     # connect redis client to barch running inside this process
     r = redis.Redis(host="127.0.0.0", port=14000, db=0)

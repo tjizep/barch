@@ -148,6 +148,7 @@ namespace art {
         }
 
         [[nodiscard]] bool null() const {
+            check();
             if (is_leaf) return logical.null();
             return storage.null();
         }
@@ -215,6 +216,13 @@ namespace art {
         }
 
         void check() const {
+
+            if (is_leaf && is_leaf != true) {
+                abort_with("heap corruption detected");
+            }
+            if (storage.size > 256) {
+                abort_with("heap corruption detected");
+            }
         }
 
         void free_from_storage() {

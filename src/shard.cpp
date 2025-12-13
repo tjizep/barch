@@ -67,10 +67,6 @@ art_statistics barch::get_statistics() {
         as.bytes_interior += (int64_t)shard->get_ap().get_nodes().get_allocated();
     });
     as.value_bytes_compressed = (int64_t) statistics::value_bytes_compressed;
-    as.page_bytes_uncompressed = (int64_t) statistics::page_bytes_uncompressed;
-    as.pages_uncompressed = (int64_t) statistics::pages_uncompressed;
-    as.pages_compressed = (int64_t) statistics::pages_compressed;
-    as.max_page_bytes_uncompressed = (int64_t) statistics::max_page_bytes_uncompressed;
     as.vacuums_performed = (int64_t) statistics::vacuums_performed;
     as.last_vacuum_time = (int64_t) statistics::last_vacuum_time;
     as.leaf_nodes_replaced = (int64_t) statistics::leaf_nodes_replaced;
@@ -158,9 +154,10 @@ static void stats_to_stream(OutStream &of) {
     writep(of, statistics::leaf_nodes);
     writep(of, statistics::value_bytes_compressed);
     writep(of, statistics::page_bytes_uncompressed);
-    writep(of, statistics::pages_uncompressed);
-    writep(of, statistics::pages_compressed);
-    writep(of, statistics::max_page_bytes_uncompressed);
+    int64_t empty = 0;
+    writep(of, empty);
+    writep(of, empty);
+    writep(of, empty);
     writep(of, statistics::oom_avoided_inserts);
     writep(of, statistics::logical_allocated);
 
@@ -182,9 +179,10 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::leaf_nodes);
     readp(in, statistics::value_bytes_compressed);
     readp(in, statistics::page_bytes_uncompressed);
-    readp(in, statistics::pages_uncompressed);
-    readp(in, statistics::pages_compressed);
-    readp(in, statistics::max_page_bytes_uncompressed);
+    int64_t empty = 0;
+    readp(in, empty);
+    readp(in, empty);
+    readp(in, empty);
     readp(in, statistics::oom_avoided_inserts);
     readp(in, statistics::logical_allocated);
 }
@@ -591,10 +589,6 @@ void barch::shard::clear() {
     statistics::node256_occupants = 0;
     statistics::leaf_nodes = 0;
     statistics::value_bytes_compressed = 0;
-    statistics::page_bytes_uncompressed = 0;
-    statistics::pages_uncompressed = 0;
-    statistics::pages_compressed = 0;
-    statistics::max_page_bytes_uncompressed = 0;
     statistics::oom_avoided_inserts = 0;
     statistics::keys_found = 0;
     statistics::new_keys_added = 0;

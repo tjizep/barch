@@ -1,4 +1,4 @@
-# Release v0.4.1.4b 2025-12-10
+# Release v0.4.1.5b 2025-12-13
 
 ## New Features
 
@@ -13,6 +13,7 @@
 1. fix heap corruption at program termination due to race condition (v0.4.1.1b 2025-12-07)
 2. fix race condition at program termination due to static initializers (v0.4.1.1b 2025-12-07)
 3. stabilize optimizations a little more (v0.4.1.3b 2025-12-09)
+4. add more heap checks (v0.4.1.5b 2025-12-13)
 
 # Release v0.4.0.1b 2025-12-02
 

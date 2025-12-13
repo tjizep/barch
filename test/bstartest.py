@@ -42,8 +42,12 @@ tl = threading.Thread(target=tloss, args=(1,))
 tl.start()
 i = 0
 at = 1
-tl.join()
-for i in range(1,500):
+
+for i in range(1,900):
     print(f"pop {i}")
-    pp = rp.brpop(["testloss"],180.1)
+    pp = None
+    while pp == None:
+        pp = rp.brpop(["testloss"],2)
+
     assert(f"l{i}" == pp[1].decode('utf-8'))
+tl.join()

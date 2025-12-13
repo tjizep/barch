@@ -120,8 +120,8 @@ namespace barch {
             }
             return true;
         }
-
-        void write_result(rpc_caller& local_caller, vector_stream& local_stream, int32_t r) {
+        template<typename Stream>
+        void write_result(rpc_caller& local_caller, Stream& local_stream, int32_t r) {
             if (r < 0) {
                 if (!local_caller.errors.empty())
                     redis::rwrite(local_stream, error{local_caller.errors[0]});
@@ -131,8 +131,8 @@ namespace barch {
                 redis::rwrite(local_stream, local_caller.results);
             }
         }
-
-        void run_params(vector_stream& ostream, const std::vector<redis::string_param_t>& params) {
+        template<typename Stream>
+        void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params) {
             std::string cn{ params[0]};
 
             auto colon = cn.find_last_of(':');
@@ -168,7 +168,7 @@ namespace barch {
                     ++ic->second.calls;
                     int32_t r = caller.call(params,f);
                     if (!caller.has_blocks())
-                        write_result(caller, ostream, r);
+                        write_result<Stream>(caller, ostream, r);
                 }
             }catch (std::exception& e) {
                 redis::rwrite(ostream, error{e.what()});

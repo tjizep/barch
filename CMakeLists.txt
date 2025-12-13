@@ -66,22 +66,39 @@ include(ExternalProject)
 
 if (USE_OPENSSL)
     message("Using OpenSSL")
-    FetchContent_Declare(
+    if (BUILD_OPENSSL)
+        FetchContent_Declare(
             openssl
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
             #SOURCE_SUBDIR build/cmake
             URL "https://github.com/openssl/openssl/releases/download/openssl-3.6.0/openssl-3.6.0.tar.gz"
-    )
+        )
 
-    FetchContent_MakeAvailable(openssl)
+        FetchContent_MakeAvailable(openssl)
 
-    execute_process(COMMAND ./Configure
+        execute_process(COMMAND ./Configure
             WORKING_DIRECTORY ${openssl_SOURCE_DIR})
-    execute_process(COMMAND make -j4
+        execute_process(COMMAND make -j4
             WORKING_DIRECTORY ${openssl_SOURCE_DIR})
+        include_directories(${openssl_SOURCE_DIR}/src/include)
+        set(OPENSSL_LIB_PATH ${openssl_SOURCE_DIR}/libssl.a ${openssl_SOURCE_DIR}/libcrypto.a)
+        message("OpenSSL static Linking against ${OPENSSL_LIB_PATH}")
+    else()
+        set(OPENSSL_USE_STATIC_LIBS on)
+        find_package(OpenSSL COMPONENTS Crypto SSL)
+        # Avoid a rare circumstance of not finding all components but the end-user did their
+        # own call for OpenSSL, which might trick us into thinking we'd otherwise have what we wanted
+        if(OPENSSL_FOUND)
+            include_directories(${OPENSSL_INCLUDE_DIR})
+            message(STATUS "OpenSSL libs: " ${OPENSSL_LIBRARIES})
+            set(OPENSSL_LIB_PATH ${OPENSSL_LIBRARIES})
+            message("OpenSSL static Linking against ${OPENSSL_LIB_PATH}")
+        else()
+            message(STATUS "Did not find OpenSSL libs use -DBUILD_OPENSSL to build it")
+        endif()
 
-    include_directories(${openssl_SOURCE_DIR}/src/include)
-    set(OPENSSL_LIB_PATH ${openssl_SOURCE_DIR}/libssl.a ${openssl_SOURCE_DIR}/libcrypto.a)
+
+    endif ()
 
 endif ()
 
@@ -180,7 +197,7 @@ else()
 endif ()
 
 file(GLOB SOURCES
-    "src/*.c" "src/*.cpp" "src/*.cxx" "src/rpc/*.cpp"
+    "src/*.c" "src/*.cpp" "src/*.cxx" "src/rpc/*.cpp" "src/art/*.cpp" "src/io/*.cpp" "src/keys/*.cpp" "src/shard/*.cpp" "src/parsers/*.cpp"
 )
 if (ADD_SWIG)
     find_package (Python3 COMPONENTS Interpreter Development)
@@ -210,6 +227,8 @@ if (ADD_SWIG)
         set(PYBARCH_TEST ON)
     else ()
         message("SWIG python interface generation skipped - python not found")
+        message("building non SWIG library")
+        add_library(barch SHARED ${SOURCES})
     endif ()
 else ()
     message("SWIG local interface not used use -DADD_SWIG=ON")

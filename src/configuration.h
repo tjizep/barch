@@ -32,6 +32,10 @@ namespace barch {
         uint64_t server_port{14000};
         std::string server_binding{"0.0.0.0"};
 
+        std::string tls_pem_certificate_chain_file{"server.crt"};
+        std::string tls_private_key_file{"server.key"};
+        std::string tls_tmp_dh_file{"server.dh"};
+
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
         uint64_t min_compressed_size {64};
@@ -99,6 +103,9 @@ namespace barch {
     bool get_ordered_keys();
 
     bool get_static_bloom_filter();
+    std::string get_tls_pem_certificate_chain_file();
+    std::string get_tls_private_key_file();
+    std::string get_tls_tmp_dh_file();
 
     std::string get_eviction_policy();
     uint64_t get_internal_shards();

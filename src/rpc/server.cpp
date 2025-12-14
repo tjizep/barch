@@ -129,7 +129,6 @@ namespace barch {
                             auto ssl = ssl_stream(std::move(endpoint), ssl_context);
                             auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
                             session->start_ssl();
-                            return;
                         }else {
                             process_data(endpoint);
                         }
@@ -232,9 +231,9 @@ namespace barch {
                 | asio::ssl::context::no_tlsv1_1
                 | asio::ssl::context::single_dh_use);
                 ssl_context.set_password_callback(std::bind(&server_context::get_password, this));
-                ssl_context.use_certificate_chain_file("server.pem");
-                //ssl_context.use_private_key_file("server.pem", asio::ssl::context::asn1);
-                ssl_context.use_tmp_dh_file("dh4096.pem");
+                ssl_context.use_certificate_chain_file(get_tls_pem_certificate_chain_file());
+                ssl_context.use_private_key_file(get_tls_private_key_file(), asio::ssl::context::pem);
+                ssl_context.use_tmp_dh_file(get_tls_tmp_dh_file());
             }
 
             start_accept();

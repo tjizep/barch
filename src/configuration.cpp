@@ -67,6 +67,10 @@ struct config_state {
     std::vector<std::string> valid_alloc_tests = valid_on_off;
     std::vector<std::string> valid_ordered_keys = valid_on_off;
 
+    std::string tls_pem_certificate_chain_file{};
+    std::string tls_private_key_file{};
+    std::string tls_tmp_dh_file{};
+
 };
 
 static config_state& state() {
@@ -401,6 +405,76 @@ static int SetCompressionType(const char *unused_arg, ValkeyModuleString *val, v
 static int ApplyCompressionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     //art::get_leaves().set_opt_enable_compression(art::get_compression_enabled());
     //art::get_nodes().set_opt_enable_compression(art::get_compression_enabled());
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// tls_pem_certificate_chain_file
+static ValkeyModuleString *GetTlsPemCertificateChainFile(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tls_pem_certificate_chain_file.c_str(), state().tls_pem_certificate_chain_file.length());
+}
+
+static int SetTlsPemCertificateChainFile(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    std::string test_val = val;
+    state().tls_pem_certificate_chain_file = test_val;
+    config().tls_pem_certificate_chain_file = test_val;
+    return VALKEYMODULE_OK;
+}
+static int SetTlsPemCertificateChainFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                              ValkeyModuleString **unused_arg) {
+    std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetTlsPemCertificateChainFile(value);
+}
+static int ApplyTlsPemCertificateChainFile(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+// tls_private_key_file
+
+static ValkeyModuleString *GetTlsPrivateKeyFile(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tls_private_key_file.c_str(), state().tls_private_key_file.length());
+}
+
+static int SetTlsPrivateKeyFile(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    std::string test_val = val;
+    state().tls_private_key_file = test_val;
+    config().tls_private_key_file = test_val;
+    return VALKEYMODULE_OK;
+}
+static int SetTlsPrivateKeyFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                              ValkeyModuleString **unused_arg) {
+    std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetTlsPrivateKeyFile(value);
+}
+static int ApplyTlsPrivateKeyFile(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+// dh is for diffie helman
+// tls_tmp_dh_file
+
+static ValkeyModuleString *GetTlsTmpDhFile(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().tls_tmp_dh_file.c_str(), state().tls_tmp_dh_file.length());
+}
+
+static int SetTlsTmpDhFile(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    std::string test_val = val;
+    state().tls_tmp_dh_file = test_val;
+    config().tls_tmp_dh_file = test_val;
+    return VALKEYMODULE_OK;
+}
+static int SetTlsTmpDhFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                              ValkeyModuleString **unused_arg) {
+    std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetTlsTmpDhFile(value);
+}
+static int ApplyTlsTmpDhFile(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
 
@@ -823,6 +897,18 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                      GetServerPort, SetServerPort,
                                                      ApplyServerPort, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tls_pem_certificate_chain_file", "server.crt", VALKEYMODULE_CONFIG_DEFAULT,
+                                                         GetTlsPemCertificateChainFile, SetTlsPemCertificateChainFile,
+                                                         ApplyTlsPemCertificateChainFile, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tls_private_key_file", "server.key", VALKEYMODULE_CONFIG_DEFAULT,
+                                                         GetTlsPrivateKeyFile, SetTlsPrivateKeyFile,
+                                                         ApplyTlsPrivateKeyFile, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "tls_tmp_dh_file", "server.dh", VALKEYMODULE_CONFIG_DEFAULT,
+                                                         GetTlsTmpDhFile, SetTlsTmpDhFile,
+                                                         ApplyTlsTmpDhFile, nullptr);
+
     return ret;
 }
 
@@ -910,6 +996,27 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return r;
     } else {
         return VALKEYMODULE_ERR;
+    }
+    if (name == "tls_pem_certificate_chain_file") {
+        auto r = SetTlsPemCertificateChainFile(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTlsPemCertificateChainFile(nullptr, nullptr, nullptr);
+        }
+        return r;
+    }
+    if (name == "tls_private_key_file") {
+        auto r = SetTlsPrivateKeyFile(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTlsPrivateKeyFile(nullptr, nullptr, nullptr);
+        }
+        return r;
+    };
+    if (name == "tls_tmp_dh_file") {
+        auto r = SetTlsTmpDhFile(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyTlsTmpDhFile(nullptr, nullptr, nullptr);
+        }
+        return r;
     }
 }
 
@@ -1063,4 +1170,18 @@ static std::vector<size_t> init_shard_sizes() {
 static std::vector<size_t> shards = init_shard_sizes();
 const std::vector<size_t>& barch::get_shard_count() {
     return shards;
+}
+namespace barch{
+    std::string get_tls_pem_certificate_chain_file() {
+        std::lock_guard lock(state().config_mutex);
+        return config().tls_pem_certificate_chain_file;
+    }
+    std::string get_tls_private_key_file() {
+        std::lock_guard lock(state().config_mutex);
+        return config().tls_private_key_file;
+    }
+    std::string get_tls_tmp_dh_file() {
+        std::lock_guard lock(state().config_mutex);
+        return config().tls_tmp_dh_file;
+    }
 }

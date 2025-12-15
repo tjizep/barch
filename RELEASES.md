@@ -1,28 +1,10 @@
-# Release v0.4.1.5b 2025-12-14
+# Release v0.4.2.0b 2025-12-14
 
 ## New Features
 
-1. Some performance improvements (v0.4.1.1b 2025-12-07)
-2. Add startup config+version banner (v0.4.1.1b 2025-12-07)
-3. ignore training commands when dictionary is complete (v0.4.1.1b 2025-12-07)
-4. add bloom filter to improve performance in some situations
-5. Small but measurable and constant perf improvement (v0.4.1.4b 2025-12-10)
-6. SSL/TLS Support
-7. add TLS and config - as a valkey module, python or redis-cli (Release v0.4.1.5b 2025-12-14)
-   - `CONFIG SET B.tls_pem_certificate_chain_file server.crt`
-   - `CONFIG SET B.tls_private_key_file server.key`
-   - `CONFIG SET B.tls_tmp_dh_file server.dh`
-   - `B.START 0.0.0.0 13010 SSL` from the redis/valkey command line (cli)
-   - You can use the same files as provided in valkey/test/tls or redis/test/tls
-   - for instance `redis-cli --tls --cacert ca.crt -p 13010`
-   - some sample certificates are provided in barch/tls
-
 ## Fixes
 
-1. fix heap corruption at program termination due to race condition (v0.4.1.1b 2025-12-07)
-2. fix race condition at program termination due to static initializers (v0.4.1.1b 2025-12-07)
-3. stabilize optimizations a little more (v0.4.1.3b 2025-12-09)
-4. add more heap checks (v0.4.1.5b 2025-12-13)
+1. Fix multi, exec allocation bug. sorry people
 
 # Release v0.4.0.1b 2025-12-02
 

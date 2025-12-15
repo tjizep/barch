@@ -99,9 +99,13 @@ struct command {
             args.emplace_back(a);
         }
     }
-    command(const call_type& call, arg_t args, barch::key_space_ptr space) : call(call), args(args), space(space){}
+    command(const call_type& call, arg_t args_, barch::key_space_ptr space) : call(call), space(space) {
+        for (auto a : args_) {
+            args.push_back(a.to_string());
+        }
+    }
     call_type call{};
-    arg_t args{};
+    std::vector<std::string> args{};
     barch::key_space_ptr space{};
 };
 typedef heap::vector<command> commands_t;

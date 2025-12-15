@@ -575,10 +575,10 @@ namespace heap {
         }
 
         const T &at(size_t ix) const {
-            //if (ix >= size())
-            //{
-            //    throw_exception<std::out_of_range> ("at()");
-            //}
+            if (ix >= size())
+            {
+                throw_exception<std::out_of_range> ("at()");
+            }
             if (ssize < scontent.size()) {
                 return scontent[ix];
             }
@@ -593,14 +593,14 @@ namespace heap {
             return &at(0);
         }
 
-        iterator raw_begin() {
+        iterator raw_begin() noexcept {
             if (ssize < scontent.size()) {
-                return (T *) scontent.begin();
+                return iterator{ scontent.begin()};
             }
-            return &content[0];
+            return iterator{&content[0]};
         };
 
-        const_iterator raw_begin() const {
+        const_iterator raw_begin() const noexcept {
             if (ssize < scontent.size()) {
                 return const_iterator(&*scontent.cbegin());
             }
@@ -608,7 +608,7 @@ namespace heap {
         };
 
         iterator begin() {
-            if (empty()) return nullptr;
+            if (empty()) return {};
 
             return raw_begin();
         };
@@ -621,37 +621,38 @@ namespace heap {
         }
 
         const_iterator cbegin() {
-            if (empty()) return nullptr;
+            if (empty()) return {};
 
             return raw_begin();
         }
 
         reverse_iterator rbegin() {
-            if (empty()) return nullptr;
+            if (empty()) return {};
 
             return --end();
         }
 
         const_reverse_iterator rbegin() const {
-            if (empty()) return nullptr;
+            if (empty()) return {};
 
             return --end();
         }
 
         reverse_iterator rend() {
-            if (empty()) return nullptr;
+            if (empty()) return {};
 
             return --begin();
         }
 
         const_reverse_iterator rend() const {
-            if (empty()) return nullptr;
+            if (empty()) return {};
             return --begin();
         }
 
         iterator end() {
-            if (empty()) return nullptr;
-            return &at(0) + size();
+            if (empty()) return {};
+            T* r = &at(0) + size();
+            return iterator{r};
         }
 
         const_iterator end() const {
@@ -662,7 +663,7 @@ namespace heap {
         }
 
         const_iterator cend() const {
-            if (empty()) return nullptr;
+            if (empty()) return {};
             return &at(0) + size();
         }
     };

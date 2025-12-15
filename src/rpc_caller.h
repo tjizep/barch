@@ -32,6 +32,9 @@ struct rpc_caller : caller {
     Variable empty{nullptr};
     std::function<void(caller&, const keys_t&)> block_fun;
     uint64_t block_to_ms = 0;
+    heap::vector<Variable> buffered_results{};
+    heap::vector<std::string> buffered_errors{};
+
     void create(const std::string& h, uint_least16_t port) {
         this->host = barch::repl::create(h,port);
     }
@@ -324,10 +327,12 @@ struct rpc_caller : caller {
         }
         call_buffering = true;
     }
+
+
     void finish_call_buffer() override {
         call_buffering = false;
-        heap::vector<Variable> buffered_results{};
-        heap::vector<std::string> buffered_errors{};
+        buffered_results.clear();
+        buffered_errors.clear();
         auto original = ks;
         for (auto& cmd: commands) {
             this->ks = cmd.space;

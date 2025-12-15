@@ -32,9 +32,9 @@ struct config_state {
     barch::configuration_record record;
     // these values are kept for reflection
 
-    std::string compression_type{};
+    std::string compression_type{"none"};
     std::string min_compressed_size{};
-    std::string eviction_type{};
+    std::string eviction_type{"none"};
     std::string max_memory_bytes{};
     std::string min_fragmentation_ratio{};
     std::string max_defrag_page_count{};

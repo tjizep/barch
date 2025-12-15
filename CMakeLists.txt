@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(barch VERSION 0.4.1 LANGUAGES CXX)
+project(barch VERSION 0.4.2 LANGUAGES CXX)
 enable_testing()
 message("barch version: ${PROJECT_VERSION}")
 

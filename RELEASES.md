@@ -2,9 +2,12 @@
 
 ## New Features
 
+1. Allocation improvement in multi, exec work flow (Release v0.4.2.0b 2025-12-14)
+
 ## Fixes
 
-1. Fix multi, exec allocation bug. sorry people
+1. Fix multi, exec allocation bug. sorry people (Release v0.4.2.0b 2025-12-14)
+2. Some defaults where empty (Release v0.4.2.0b 2025-12-14)
 
 # Release v0.4.0.1b 2025-12-02
 

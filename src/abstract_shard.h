@@ -6,8 +6,8 @@
 #define BARCH_ABSTRACT_SHARD_H
 #include <memory>
 #include <shared_mutex>
-#include "art.h"
-#include "key_options.h"
+#include "art/art.h"
+#include "art/key_options.h"
 #include "merge_options.h"
 #include "rpc/abstract_session.h"
 

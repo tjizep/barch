@@ -7,7 +7,7 @@
 #include <cstdlib>
 #include <string>
 #include <regex>
-#include "art.h"
+#include "art/art.h"
 #include "module.h"
 #include "rpc/server.h"
 

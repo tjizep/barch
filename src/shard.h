@@ -7,7 +7,7 @@
 /**
  * a barch shard
  */
-#include "art.h"
+#include "art/art.h"
 #include "abstract_shard.h"
 #include "merge_options.h"
 #include "overflow_hash.h"

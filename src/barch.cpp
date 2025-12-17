@@ -4,7 +4,7 @@
 
 #include "auth_api.h"
 #include "barch_apis.h"
-#include "iterator.h"
+#include "art/iterator.h"
 #include "rpc/redis_parser.h"
 #include "vk_caller.h"
 #include "keys.h"
@@ -26,7 +26,7 @@ extern "C" {
 #include <cmath>
 #include <shared_mutex>
 #include "conversion.h"
-#include "art.h"
+#include "art/art.h"
 #include "configuration.h"
 #include <fast_float/fast_float.h>
 #include <functional>
@@ -108,7 +108,6 @@ extern "C" {
 int RANGE(caller& call, const arg_t& argv) {
 
     int r = 0;
-    //read_lock rl(get_lock());
     if (argv.size() < 3 || argv.size() > 4)
         return call.wrong_arity();
 
@@ -174,7 +173,7 @@ int RANGE(caller& call, const arg_t& argv) {
         return usorted;
     };
     auto sorted = collect();
-    std::sort(sorted.begin(), sorted.end());
+    std::sort(sorted.begin(), sorted.end()); // sort must happen inside the lock
     call.start_array();
     for (auto&k : sorted) {
         call.push_encoded_key(k);// TODO: replace this with streaming api to reduce memory

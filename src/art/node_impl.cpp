@@ -4,11 +4,11 @@
 #include <random>
 
 #include "art.h"
-#include "statistics.h"
+#include "../statistics.h"
 #include "nodes.h"
 #include "node_impl.h"
-#include "time_conversion.h"
-#include "module.h"
+#include "../time_conversion.h"
+#include "../module.h"
 #include <algorithm>
 
 

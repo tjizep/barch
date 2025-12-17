@@ -5,10 +5,10 @@
 
 //#include "abstract_shard.h"
 #include "nodes.h"
-#include "logical_allocator.h"
-#include "keyspec.h"
-#include "value_type.h"
-#include "rpc/server.h"
+#include "../logical_allocator.h"
+#include "../keyspec.h"
+#include "../value_type.h"
+#include "../rpc/server.h"
 typedef std::unique_lock<heap::shared_mutex> write_lock;
 extern std::shared_mutex &get_lock();
 

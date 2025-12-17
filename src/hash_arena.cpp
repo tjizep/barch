@@ -5,7 +5,7 @@
 
 #include <filesystem>
 
-#include "art.h"
+#include "art/art.h"
 #include "rpc/server.h"
 #include "module.h"
 

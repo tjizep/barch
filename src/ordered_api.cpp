@@ -4,9 +4,9 @@
 
 #include "ordered_api.h"
 #include "conversion.h"
-#include "art.h"
+#include "art/art.h"
 #include "composite.h"
-#include "iterator.h"
+#include "art/iterator.h"
 #include "keys.h"
 #include "module.h"
 #include "vk_caller.h"

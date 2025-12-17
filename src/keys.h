@@ -6,7 +6,7 @@
 #define KEYS_H
 #include <cstdlib>
 #include "valkeymodule.h"
-#include "art.h"
+#include "art/art.h"
 #include "conversion.h"
 #include "value_type.h"
 

@@ -5,7 +5,7 @@
 #ifndef MODULE_H
 #define MODULE_H
 
-#include "art.h"
+#include "art/art.h"
 #include "abstract_shard.h"
 #include "key_space.h"
 #define NAME(x) "B." #x , cmd_##x

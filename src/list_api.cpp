@@ -5,7 +5,7 @@
 #include "list_api.h"
 #include "value_type.h"
 #include "valkeymodule.h"
-#include "art.h"
+#include "art/art.h"
 #include "caller.h"
 #include "composite.h"
 #include "module.h"

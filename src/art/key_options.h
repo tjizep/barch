@@ -5,8 +5,8 @@
 #ifndef KEY_OPTIONS_H
 #define KEY_OPTIONS_H
 #include <cstdint>
-#include "ioutil.h"
-#include "keyspec.h"
+#include "../ioutil.h"
+#include "../keyspec.h"
 namespace art {
     typedef uint8_t flags_t;
     struct key_options {

@@ -7,8 +7,8 @@
 #include "source.h"
 #include <unistd.h>
 
-#include "art.h"
-#include "iterator.h"
+#include "../art/art.h"
+#include "../art/iterator.h"
 #include "netstat.h"
 #include "shard.h"
 

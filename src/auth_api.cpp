@@ -7,7 +7,7 @@
 #include "caller.h"
 #include "shard.h"
 #include "barch_apis.h"
-#include "iterator.h"
+#include "art/iterator.h"
 
 static const std::string CAT_PREFIX = "user:cat:";
 static const std::string SECRET_PREFIX = "user:secret:";

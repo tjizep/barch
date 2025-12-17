@@ -3,9 +3,9 @@
 #include <cstdint>
 #include <limits>
 #include <array>
-#include "logical_allocator.h"
-#include "value_type.h"
-#include "keyspec.h"
+#include "../logical_allocator.h"
+#include "../value_type.h"
+#include "../keyspec.h"
 
 #include "key_options.h"
 namespace art {

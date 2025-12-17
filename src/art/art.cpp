@@ -6,13 +6,13 @@
 #include <atomic>
 #include "art.h"
 
-#include "dictionary_compressor.h"
-#include "valkeymodule.h"
-#include "statistics.h"
-#include "logical_allocator.h"
-#include "keys.h"
-#include "logger.h"
-#include "module.h"
+#include "../dictionary_compressor.h"
+#include "../valkeymodule.h"
+#include "../statistics.h"
+#include "../logical_allocator.h"
+#include "../keys.h"
+#include "../logger.h"
+#include "../module.h"
 
 // Recursively destroys the tree
 static void destroy_node(const art::node_ptr& n) {

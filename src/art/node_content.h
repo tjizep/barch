@@ -5,9 +5,9 @@
 #ifndef NODE_ABSTRACT_H
 #define NODE_ABSTRACT_H
 #include "nodes.h"
-#include "statistics.h"
-#include "simd.h"
-#include "logical_allocator.h"
+#include "../statistics.h"
+#include "../simd.h"
+#include "../logical_allocator.h"
 
 namespace art {
     template<typename EncodingType>

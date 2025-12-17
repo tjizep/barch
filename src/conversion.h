@@ -1,6 +1,6 @@
 #pragma once
 #include <cstdint>
-#include "nodes.h"
+#include "art/nodes.h"
 #include <fast_float/fast_float.h>
 #include "sastam.h"
 #include "variable.h"

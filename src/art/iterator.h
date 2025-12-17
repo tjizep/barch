@@ -4,7 +4,7 @@
 
 #ifndef BARCH_ITERATOR_H
 #define BARCH_ITERATOR_H
-#include "abstract_shard.h"
+#include "../abstract_shard.h"
 namespace art {
     struct iterator {
         barch::shard_ptr t;

@@ -208,18 +208,18 @@ LBACK
 3. `cd build`
 4. `cmake .. -DTEST_OD=ON` -  add `-DCMAKE_BUILD_TYPE=Debug` for debug modes
 5. Test: `ctest`
-6. `start valkey-server valkey.conf --loadmodule {src code/Release/cdict.so}`
+6. `start valkey-server valkey.conf --loadmodule {[src code]/build/_barch.so}`
 
 # Hardware Compatibility
 1. amd64+sse
 2. arm+neon
 
 # Toolchain Compatibility
-1. Debian + gcc 13
+1. Debian + gcc 11+
 2. any compiler that supports C++ 20
 
 # Server Environment
-1. Valkey v. 8.0
+1. Valkey v. 8.0+
 
 # Configuration
 1. Set max memory use to any value lower than valkey maxmemory if it's higher it will be ignored. postfix with k,m or g for kilo,mega or giga -bytes

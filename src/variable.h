@@ -189,6 +189,27 @@ public:
                 abort_with("invalid type");
         }
     }
+    bool operator<(const Variable& other) {
+        if (index() != other.index()) return index() < other.index();
+        switch (index()) {
+            case var_bool:
+                return std::get<bool>(*this) < std::get<bool>(other);
+            case var_int64:
+                return std::get<int64_t>(*this) < std::get<int64_t>(other);
+            case var_uint64:
+                return std::get<uint64_t>(*this) < std::get<uint64_t>(other);
+            case var_double:
+                return std::get<double>(*this) < std::get<double>(other);
+            case var_string:
+                return std::get<std::string>(*this) < std::get<std::string>(other);
+            case var_null:
+            case var_error:
+                return false;
+            default:
+                abort_with("invalid type");
+        }
+        return false;
+    }
 
     [[nodiscard]] std::string s() const {
         return to_string();

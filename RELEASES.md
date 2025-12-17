@@ -1,9 +1,12 @@
-# Release v0.4.2.0b 2025-12-14
+# Release v0.4.2.1b 2025-12-17
 
 ## New Features
 
 1. Allocation improvement in multi, exec work flow (Release v0.4.2.0b 2025-12-14)
-
+2. Improved `RANGE` function. Much reduced latency if count is specified (Release v0.4.2.1b 2025-12-17)
+   - lets say `RANGE k0000001 k3333333` contains many keys then `RANGE k0000001 k3333333 10` will return much sooner  
+   - uses shard striated algorithm
+                     
 ## Fixes
 
 1. Fix multi, exec allocation bug. sorry people (Release v0.4.2.0b 2025-12-14)

@@ -109,11 +109,13 @@ int RANGE(caller& call, const arg_t& argv) {
 
     int r = 0;
     //read_lock rl(get_lock());
-    if (argv.size() != 4)
+    if (argv.size() < 3 || argv.size() > 4)
         return call.wrong_arity();
 
     /* Parse the count argument. */
-    long long count = std::atoll(argv[3].chars());
+    long long count = -1;
+    if (argv.size() == 4)
+        count = std::atoll(argv[3].chars());
 
     auto k1 = argv[1];
     auto k2 = argv[2];
@@ -126,32 +128,56 @@ int RANGE(caller& call, const arg_t& argv) {
     auto c1 = conversion::convert(k1);
     auto c2 = conversion::convert(k2);
     /* Reply with the matching items. */
-    heap::std_vector<art::value_type> sorted{};
+
     auto ks = call.kspace();
     ks_shared kss(ks->source());
     ks_shared ksl(ks);
-
-    for (auto shard : barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
-        auto i = make_merged(t,c1.get_value());
-        while (i.ok()) {
-            auto k = i.key();
-            if (i.current().cl()->is_tomb()) {
-                i.next();
-                continue;
+    auto collect = [&]() -> heap::std_vector<art::value_type>{
+        heap::std_vector<art::value_type> usorted;
+        heap::vector<art::merge_iterator> iters;
+        heap::unordered_set<size_t> active;
+        for (auto shard : barch::get_shard_count()) {
+            // iterate the 'striations'
+            auto t = call.kspace()->get(shard);
+            auto i = make_merged(t,c1.get_value());
+            if (i.ok()) {
+                active.insert(shard);
             }
-            if (k >= c1.get_value() && k < c2.get_value()) {
-                sorted.push_back(k);
-            }else {
+            iters.push_back(i);
+        }
+
+        while (!active.empty()) {
+            for (auto shard : active) {
+                auto& i = iters[shard];
+                if (i.current().cl()->is_tomb()) {
+                    if (!i.next()) {
+                        active.erase(shard);
+                    }
+                }else {
+                    auto k = i.key();
+                    if (k >= c1.get_value() && k < c2.get_value()) {
+                        usorted.push_back(k);
+                        if (!i.next()) {
+                            active.erase(shard);
+                        }
+                    }else {
+                        active.erase(shard);
+                    }
+                }
+            }
+            if (count > 0 && (int64_t)usorted.size() > count) {
+                // we can return early because we are certain the list contains the maximum entry
+                // among all shards
                 break;
             }
-            i.next();
         }
-    }
+        return usorted;
+    };
+    auto sorted = collect();
     std::sort(sorted.begin(), sorted.end());
     call.start_array();
     for (auto&k : sorted) {
-        call.push_encoded_key(k);
+        call.push_encoded_key(k);// TODO: replace this with streaming api to reduce memory
         if (--count == 0) break;
     }
     call.end_array(0);

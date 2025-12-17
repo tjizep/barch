@@ -173,7 +173,9 @@ struct vk_caller : caller {
     bool has_blocks() override {
         return false;
     }
+    void sort_pushed_results() override {
 
+    }
     template<typename TF>
     int vk_call(ValkeyModuleCtx *ctx_, ValkeyModuleString **argv, int argc, TF &&call) {
         this->ctx = ctx_;

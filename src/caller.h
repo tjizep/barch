@@ -78,6 +78,7 @@ struct caller {
     virtual void erase_blocks(const barch::abstract_session_ptr& ) {};
     virtual void add_block(const keys_t& blocks, uint64_t to_ms, std::function<void(caller&, const keys_t&)>) = 0;
     virtual bool has_blocks() = 0;
+    virtual void sort_pushed_results() = 0;
     [[nodiscard]] virtual size_t stack() const {
         return 0;
     }
@@ -99,13 +100,18 @@ struct command {
             args.emplace_back(a);
         }
     }
+    command(const call_type& call, const heap::vector<std::string>& args_,barch::key_space_ptr space) : call(call),space(space) {
+        for (auto& a: args_) {
+            args.emplace_back(a);
+        }
+    }
     command(const call_type& call, arg_t args_, barch::key_space_ptr space) : call(call), space(space) {
         for (auto a : args_) {
             args.push_back(a.to_string());
         }
     }
     call_type call{};
-    std::vector<std::string> args{};
+    heap::vector<std::string> args{};
     barch::key_space_ptr space{};
 };
 typedef heap::vector<command> commands_t;

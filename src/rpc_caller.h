@@ -356,6 +356,9 @@ struct rpc_caller : caller {
         ks = original;
         commands.clear();
     }
+    void sort_pushed_results() override {
+        std::sort(results.begin(), results.end());
+    }
     bool is_buffering() const {
         return call_buffering;
     }

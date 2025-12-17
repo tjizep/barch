@@ -437,7 +437,9 @@ namespace barch {
 
                 return r;
             }
-
+            call_result call(heap::vector<Variable>& result, const heap::vector<std::string>& params) override {
+                return tcall(result, params);
+            }
             call_result call(heap::vector<Variable>& result, const heap::vector<value_type>& params) override {
                 return tcall(result, params);
             }

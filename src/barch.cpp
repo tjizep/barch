@@ -132,9 +132,10 @@ int RANGE(caller& call, const arg_t& argv) {
     ks_shared kss(ks->source());
     ks_shared ksl(ks);
     auto collect = [&]() -> heap::std_vector<art::value_type>{
+        int64_t striation_counter = 0;
         heap::std_vector<art::value_type> usorted;
         heap::vector<art::merge_iterator> iters;
-        heap::unordered_set<size_t> active;
+        heap::unordered_set<size_t> active; // set must be ordered
         for (auto shard : barch::get_shard_count()) {
             // iterate the 'striations'
             auto t = call.kspace()->get(shard);
@@ -144,8 +145,9 @@ int RANGE(caller& call, const arg_t& argv) {
             }
             iters.push_back(i);
         }
-
+        art::value_type list_max;
         while (!active.empty()) {
+            bool has_first = false; // key in striation
             for (auto shard : active) {
                 auto& i = iters[shard];
                 if (i.current().cl()->is_tomb()) {
@@ -155,6 +157,15 @@ int RANGE(caller& call, const arg_t& argv) {
                 }else {
                     auto k = i.key();
                     if (k >= c1.get_value() && k < c2.get_value()) {
+
+                        if (k > list_max) {
+                            if (!has_first) {
+                                // this may or may not increment striation counter - it's an optimization to get correct results quicker
+                                striation_counter = std::max<int64_t>(usorted.size(), striation_counter);
+                                has_first = true;
+                            }
+                            list_max = k;
+                        }
                         usorted.push_back(k);
                         if (!i.next()) {
                             active.erase(shard);
@@ -164,11 +175,13 @@ int RANGE(caller& call, const arg_t& argv) {
                     }
                 }
             }
-            if (count > 0 && (int64_t)usorted.size() > count) {
-                // we can return early because we are certain the list contains the maximum entry
-                // among all shards
+
+            if (count > 0 && striation_counter >= count) {
+                // we can return early because we are certain the list contains the globally first count entries
+                // although the list is at most count*shard_count large
                 break;
             }
+            ++striation_counter;
         }
         return usorted;
     };

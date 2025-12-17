@@ -10,6 +10,7 @@
 #include <cstring> // for memcpy
 #include <new> // bad_alloc, bad_array_new_length
 #include <memory>
+#include <set>
 #include <statistics.h>
 #include <stdexcept>
 #include <vector>

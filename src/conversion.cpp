@@ -28,7 +28,11 @@ namespace conversion {
         return v.to_bool();
     }
 
-    int64_t to_int64(const Variable& v) {
+    int64_t to_i64(const Variable& v) {
+        return v.to_int64();
+    }
+
+    uint64_t to_ui64(const Variable& v) {
         return v.to_int64();
     }
 }

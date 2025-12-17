@@ -153,8 +153,9 @@ static void stats_to_stream(OutStream &of) {
     writep(of, statistics::node256_occupants);
     writep(of, statistics::leaf_nodes);
     writep(of, statistics::value_bytes_compressed);
-    writep(of, statistics::page_bytes_uncompressed);
     int64_t empty = 0;
+    writep(of, empty);
+
     writep(of, empty);
     writep(of, empty);
     writep(of, empty);
@@ -178,8 +179,9 @@ static void stream_to_stats(InStream &in) {
     readp(in, statistics::node256_occupants);
     readp(in, statistics::leaf_nodes);
     readp(in, statistics::value_bytes_compressed);
-    readp(in, statistics::page_bytes_uncompressed);
     int64_t empty = 0;
+    readp(in, empty);
+
     readp(in, empty);
     readp(in, empty);
     readp(in, empty);
@@ -1134,6 +1136,7 @@ void barch::shard::run_defrag() {
                 ++statistics::pages_defragged;
             }
         }
+        ++statistics::vacuums_performed;
     } catch (std::exception &) {
         ++statistics::exceptions_raised;
     }

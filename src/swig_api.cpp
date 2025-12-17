@@ -117,7 +117,7 @@ unsigned long long size()  {
     rpc_caller sc;
     int r = sc.call(params, ::SIZE);
     if (r == 0) {
-        return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+        return sc.results.empty() ? 0 : sc.results[0].to_int64();
     }
     return 0;
 }
@@ -126,7 +126,7 @@ unsigned long long sizeAll()  {
     rpc_caller sc;
     int r = sc.call(params, ::SIZEALL);
     if (r == 0) {
-        return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+        return sc.results.empty() ? 0 : sc.results[0].to_int64();
     }
     return 0;
 }
@@ -173,7 +173,7 @@ long long List::push(const std::string &key, const std::vector<std::string> &ite
     if (r != 0) {
         barch::std_err("set failed", key);
     }
-    return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+    return sc.results.empty() ? 0 : sc.results[0].to_int64();
 
 }
 long long List::len(const std::string &key) {
@@ -183,7 +183,7 @@ long long List::len(const std::string &key) {
     if (r != 0) {
         barch::std_err("len failed", key);
     }
-    return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+    return sc.results.empty() ? 0 : sc.results[0].to_int64();
 
 }
 
@@ -194,7 +194,7 @@ long List::pop(const std::string &key, long long count) {
     if (r != 0) {
         barch::std_err("pop failed", key);
     }
-    return sc.results.empty() ? 0 : conversion::to_int64(sc.results[0]);
+    return sc.results.empty() ? 0 : sc.results[0].to_int64();
 }
 std::string List::back(const std::string &key) {
     params = {"LBACK", key};
@@ -202,7 +202,7 @@ std::string List::back(const std::string &key) {
     if (r != 0) {
         barch::std_err("back failed", key);
     }
-    return sc.results.empty() ? "" : conversion::to_string(sc.results[0]);
+    return sc.results.empty() ? "" : sc.results[0].to_string();
 }
 
 std::string List::front(const std::string &key) {
@@ -377,7 +377,7 @@ size_t KeyValue::globCount(const std::string& glob) const {
 
     int r = sc.call(params, ::KEYS);
     if (r == 0) {
-        return sc.results.empty() ? 0: conversion::to_int64(sc.results[0]);
+        return sc.results.empty() ? 0: conversion::to_i64(sc.results[0]);
     }
     return 0;
 
@@ -468,18 +468,15 @@ statistics_values stats() {
     r.last_vacuum_time = t.last_vacuum_time;
     r.leaf_nodes = t.leaf_nodes;
     r.leaf_nodes_replaced = t.leaf_nodes_replaced;
-    r.max_page_bytes_uncompressed = t.max_page_bytes_uncompressed;
     r.node4_nodes = t.node4_nodes;
     r.node16_nodes = t.node16_nodes;
     r.node48_nodes = t.node48_nodes;
     r.node256_nodes = t.node256_nodes;
     r.node256_occupants = t.node256_occupants;
     r.value_bytes_compressed = t.value_bytes_compressed;
-    r.pages_compressed = t.pages_compressed;
     r.pages_evicted = t.pages_evicted;
     r.pages_defragged = t.pages_defragged;
     r.pages_evicted = t.pages_evicted;
-    r.pages_uncompressed = t.pages_uncompressed;
     r.vacuums_performed = t.vacuums_performed;
     r.maintenance_cycles = t.maintenance_cycles;
     r.shards = t.shards;

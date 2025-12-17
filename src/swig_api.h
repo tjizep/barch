@@ -76,10 +76,6 @@ struct statistics_values {
     long long bytes_interior {};
     long long heap_bytes_allocated {};
     long long value_bytes_compressed {};
-    long long pages_uncompressed {};
-    long long pages_compressed {};
-    long long max_page_bytes_uncompressed {};
-    long long page_bytes_uncompressed {};
     long long vacuums_performed {};
     long long last_vacuum_time {};
     long long leaf_nodes_replaced {};

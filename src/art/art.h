@@ -35,10 +35,6 @@ struct art_statistics {
     int64_t bytes_interior {};
     int64_t heap_bytes_allocated {};
     int64_t value_bytes_compressed {};
-    int64_t pages_uncompressed {};
-    int64_t pages_compressed {};
-    int64_t max_page_bytes_uncompressed {};
-    int64_t page_bytes_uncompressed {};
     int64_t vacuums_performed {};
     int64_t last_vacuum_time {};
     int64_t leaf_nodes_replaced {};

@@ -10,7 +10,8 @@ namespace conversion {
     std::string to_string(const Variable& v);
     double to_double(const Variable& v);
     bool to_bool(const Variable& v);
-    int64_t to_int64(const Variable& v);
+    int64_t to_i64(const Variable& v);
+    uint64_t to_ui64(const Variable& v);
 
     bool to_ll(art::value_type vt, long long& l);
     bool to_double(art::value_type vt, double& l);

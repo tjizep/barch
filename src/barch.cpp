@@ -1620,10 +1620,8 @@ int STATS(caller& call, const arg_t& argv) {
     call.start_array();
     call.push_values({"heap_bytes_allocated", get_total_memory()});
     call.push_values({"value_bytes_compressed",as.value_bytes_compressed});
-    call.push_values({ "max_page_bytes_uncompressed", as.max_page_bytes_uncompressed});
     call.push_values({ "last_vacuum_time", as.last_vacuum_time});
     call.push_values({ "vacuum_count", as.vacuums_performed});
-    call.push_values({ "page_bytes_uncompressed", as.page_bytes_uncompressed});
     call.push_values({ "bytes_addressable", as.bytes_allocated});
     call.push_values({ "interior_bytes_addressable", as.bytes_interior});
     call.push_values({ "leaf_nodes", as.leaf_nodes});
@@ -1633,8 +1631,6 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({ "size_256_nodes", as.node256_nodes});
     call.push_values({ "size_256_occupancy", as.node256_occupants});
     call.push_values({ "leaf_nodes_replaced", as.leaf_nodes_replaced});
-    call.push_values({ "pages_uncompressed", as.pages_uncompressed});
-    call.push_values({ "pages_compressed", as.pages_compressed});
     call.push_values({ "pages_evicted", as.pages_evicted});
     call.push_values({ "keys_evicted", as.keys_evicted});
     call.push_values({ "pages_defragged", as.pages_defragged});

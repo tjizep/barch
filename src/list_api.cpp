@@ -229,7 +229,7 @@ extern "C"{
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
-        auto count = conversion::to_int64(conversion::as_variable(args[2]));
+        auto count = conversion::to_i64(conversion::as_variable(args[2]));
         auto t = cc.kspace()->get(args[1]);
         storage_release release(t);
         composite li;

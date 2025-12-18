@@ -1,4 +1,4 @@
-# Release v0.4.2.1b 2025-12-17
+# Release v0.4.2.1b 2025-12-18
 
 ## New Features
 
@@ -6,12 +6,13 @@
 2. Improved `RANGE` function. Much reduced latency if count is specified (Release v0.4.2.1b 2025-12-17)
    - lets say `RANGE k0000001 k3333333` contains many keys then `RANGE k0000001 k3333333 10` will return much sooner  
    - uses a shard striated algorithm
+3. Add some more build and version info to `INFO SERVER` (Release v0.4.2.1b 2025-12-18)
                      
 ## Fixes
 
 1. Fix multi, exec allocation bug. sorry people (Release v0.4.2.0b 2025-12-14)
 2. Some defaults where empty (Release v0.4.2.0b 2025-12-14)
-3. Cleanup unused stats variables 
+3. Cleanup unused stats variables (Release v0.4.2.1b 2025-12-17)
 
 # Release v0.4.0.1b 2025-12-02
 

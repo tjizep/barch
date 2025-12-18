@@ -1,0 +1,9 @@
+//
+// Created by teejip on 12/18/25.
+//
+
+#ifndef BARCH_VERSION_H
+#define BARCH_VERSION_H
+#define BARCH_PROJECT_VERSION "@PROJECT_VERSION@"
+#define BARCH_GIT_COMMIT_HASH "@GIT_COMMIT_HASH@"
+#endif //BARCH_VERSION_H

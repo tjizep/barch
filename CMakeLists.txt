@@ -1,7 +1,30 @@
 cmake_minimum_required(VERSION 3.22)
 project(barch VERSION 0.4.2 LANGUAGES CXX)
 enable_testing()
-message("barch version: ${PROJECT_VERSION}")
+# Get the current git commit hash
+execute_process(
+        COMMAND git rev-parse HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_COMMIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+)
+
+# Fallback if git is not available
+if(NOT GIT_COMMIT_HASH)
+    set(GIT_COMMIT_HASH "unknown")
+endif()
+
+# Generate the header file
+configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/version.h.in
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/version.h
+)
+
+# Ensure the generated directory is in the include path
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+message("barch version: ${PROJECT_VERSION} (commit: ${GIT_COMMIT_HASH})")
 
 if (NOT ADD_ZSTD_COMPRESSION)
     set(ADD_ZSTD_COMPRESSION ON)

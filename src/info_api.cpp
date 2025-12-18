@@ -9,7 +9,11 @@
 #include "shard.h"
 #include "time_conversion.h"
 #include "asio/detail/chrono.hpp"
-
+#include "version.h"
+void print_version() {
+    std::cout << "Version: " << BARCH_PROJECT_VERSION << std::endl;
+    std::cout << "Commit: " << BARCH_GIT_COMMIT_HASH << std::endl;
+}
 auto start_time = std::chrono::high_resolution_clock::now();
 auto now() {
     return std::chrono::high_resolution_clock::now();
@@ -54,11 +58,21 @@ int INFO(caller& call, const arg_t& argv) {
         std::string os = "Linux x86_64";
         std::string response =
         "# Server\n\n"
-        "redis_version:8.2.0\n"
-        "redis_git_sha1:00000000\n"
+        "redis_version:"
+        BARCH_PROJECT_VERSION
+        "\n"
+        "redis_git_sha1:"
+        BARCH_GIT_COMMIT_HASH
+        "\n"
+        "barch_version:"
+       BARCH_PROJECT_VERSION
+       "\n"
+       "barch_git_sha1:"
+       BARCH_GIT_COMMIT_HASH
+       "\n"
         "redis_git_dirty:1\n"
-        "redis_build_id:00000000000000\n"
-        "redis_mode:standalone\n"
+        "redis_build_id:0\n"
+        "redis_mode:library\n"
         "os:"+os+"\n"
         "arch_bits:64\n"
         "monotonic_clock:POSIX clock_gettime\n"
@@ -75,8 +89,8 @@ int INFO(caller& call, const arg_t& argv) {
         "hz:10\n"
         "configured_hz:10\n"
         "lru_clock:0\n"
-        "executable:_barch.so\n"
-        "config_file:_barch.so\n"
+        "executable:_barch.so or libbarch.so\n"
+        "config_file:NONE/RESP\n"
         "io_threads_active:"+tos(std::thread::hardware_concurrency())+"\n"
         "listener0:name=tcp,bind=*,bind=-::*,port="+port+"\n";
 

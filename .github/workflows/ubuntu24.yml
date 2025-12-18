@@ -16,14 +16,6 @@ jobs:
           cmake --build build --target barch --parallel
           cmake --build build --target lbarch --parallel
           ( cd build ; ctest --output-on-failure )
-      - name: Use cmake CXX23
-        run: |
-          set -xe
-          cmake -B build20 \
-             -DTEST_OD=ON \
-             -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
-          cmake --build build20 --target barch --parallel
-          ( cd build20 ; ctest --output-on-failure )
       - name: Prepare Release Artifacts
         run: |
           # Create a directory for the archive

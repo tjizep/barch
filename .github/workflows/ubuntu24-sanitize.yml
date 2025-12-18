@@ -9,8 +9,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Use cmake
         run: |
-          mkdir build &&
-          cd build &&
-          cmake -DTEST_OD=ON  ..  &&
-          cmake --build --target barch .   &&
+          set -xe
+          cmake -B build \
+             -DTEST_OD=ON
+          cmake --build build --target barch --parallel
           ctest --output-on-failure

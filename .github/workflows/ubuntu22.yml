@@ -43,7 +43,7 @@ jobs:
           mkdir -p release_dist
           # Copy the library (adjust path if it's in a subdirectory of build)
           cp build/liblbarch.so release_dist/
-          cp RUNVALKEY.so release_dist/README.md
+          cp RUNVALKEY.md release_dist/README.md
           # Create the gzip archive
           tar -czvf barch-valkey-module-ubuntu22-x86_64.tar.gz -C release_dist liblbarch.so README.md
           mkdir -p release_py_dist

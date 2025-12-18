@@ -15,7 +15,8 @@ jobs:
              -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
       - name: build
         run: |
-          cmake --build build --parallel
+          cmake --build build --target barch --parallel
+          cmake --build build --target lbarch --parallel
           ( cd build ; ctest --output-on-failure )
       - name: Log in to Docker Hub
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
@@ -36,3 +37,25 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Prepare Release Artifacts
+        run: |
+          # Create a directory for the archive
+          mkdir -p release_dist
+          # Copy the library (adjust path if it's in a subdirectory of build)
+          cp build/liblbarch.so release_dist/
+          cp RUNVALKEY.so release_dist/README.md
+          # Create the gzip archive
+          tar -czvf barch-valkey-module-ubuntu22-x86_64.tar.gz -C release_dist liblbarch.so README.md
+          mkdir -p release_py_dist
+          cp build/_barch.so release_py_dist/
+          cp build/barch.py release_py_dist/
+          cp build/setup.py release_py_dist/
+          cp RUNPY.py release_py_dist/README.md
+          tar -czvf barch-py-ubuntu22-x86_64.tar.gz -C release_py_dist _barch.so setup.py barch.py README.md
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: barch-py-ubuntu22-x86_64.tar.gz barch-valkey-module-ubuntu22-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -13,7 +13,7 @@ jobs:
           cmake -B build \
              -DTEST_OD=ON \
              -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
-          cmake --build build --parallel
+          cmake --build build --target barch --parallel
           ( cd build ; ctest --output-on-failure )
       - name: Use cmake CXX23
         run: |

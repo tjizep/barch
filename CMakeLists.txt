@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(barch VERSION 0.4.2 LANGUAGES CXX)
 enable_testing()
+set(TARGETS barch lbarch)
 # Get the current git commit hash
 execute_process(
         COMMAND git rev-parse HEAD
@@ -251,30 +252,34 @@ if (ADD_SWIG)
     else ()
         message("SWIG python interface generation skipped - python not found")
         message("building non SWIG library")
-        add_library(barch SHARED ${SOURCES})
     endif ()
 else ()
     message("SWIG local interface not used use -DADD_SWIG=ON")
     message("building non SWIG library")
-    add_library(barch SHARED ${SOURCES})
+
 endif ()
 
+add_library(lbarch SHARED ${SOURCES})
 
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
+    target_link_libraries(lbarch PRIVATE libzstd_static)
 endif ()
 
 if (USE_LIBURING)
     target_link_libraries(barch PRIVATE ${LIBURING_LIB_PATH})
+    target_link_libraries(lbarch PRIVATE ${LIBURING_LIB_PATH})
 endif ()
 
 if (USE_OPENSSL)
     message("OpenSSL static Linking against ${OPENSSL_LIB_PATH}")
     target_link_libraries(barch PRIVATE ${OPENSSL_LIB_PATH})
+    target_link_libraries(lbarch PRIVATE ${OPENSSL_LIB_PATH})
 endif ()
 
 if (ADD_FMT)
     target_link_libraries(barch PRIVATE fmt::fmt)
+    target_link_libraries(lbarch PRIVATE fmt::fmt)
 endif ()
 
 if (NOT TEST_OD)

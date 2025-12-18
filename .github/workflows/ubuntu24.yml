@@ -22,7 +22,7 @@ jobs:
           cmake -B build20 \
              -DTEST_OD=ON \
              -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
-          cmake --build build20 --parallel
+          cmake --build build20 --target barch --parallel
           ( cd build20 ; ctest --output-on-failure )
       - name: Prepare Release Artifacts
         run: |

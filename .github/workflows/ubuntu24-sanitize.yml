@@ -12,5 +12,5 @@ jobs:
           mkdir build &&
           cd build &&
           cmake -DTEST_OD=ON  ..  &&
-          cmake --build .   &&
+          cmake --build --target barch .   &&
           ctest --output-on-failure

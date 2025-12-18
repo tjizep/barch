@@ -52,10 +52,17 @@ jobs:
           cp build/setup.py release_py_dist/
           cp RUNPY.md release_py_dist/README.md
           tar -czvf barch-py-ubuntu22-x86_64.tar.gz -C release_py_dist _barch.so setup.py barch.py README.md
-      - name: Publish Release
+      - name: Ubuntu 22.04 Python x86_64 Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: barch-py-ubuntu22-x86_64.tar.gz barch-valkey-module-ubuntu22-x86_64.tar.gz
+          files: barch-py-ubuntu22-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Ubuntu 22.02 Valkey x86_64 Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: barch-valkey-module-ubuntu22-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

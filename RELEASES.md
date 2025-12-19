@@ -3,6 +3,7 @@
 ## New Features
 1. Autodetect appropriate shard count for current platform
 2. Improved docs
+3. Publish binaries to pipeline builds
 
 # Release v0.4.2.1b 2025-12-18
 

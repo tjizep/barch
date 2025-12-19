@@ -1,3 +1,18 @@
+# Docker Image from dockerhub
+
+Run below to expose an example flask application to see the API's in action
+```
+sudo docker ps -a -q | sudo xargs docker stop 
+sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.4.2.3b
+
+```
+binaries are located under `/home/barch/setup` within the docker image
+
+It's also usable as a valkey module and can be started as
+```
+valkey-server --loadmodule _barch.so
+```
+
 # Docker Examples
 
 Barch can run in a docker image called barch:api

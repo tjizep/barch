@@ -1,3 +1,9 @@
+# Release v0.4.2.4b 2025-12-19
+
+## New Features
+1. Autodetect appropriate shard count for current platform
+2. Improved docs
+
 # Release v0.4.2.1b 2025-12-18
 
 ## New Features

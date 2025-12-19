@@ -424,6 +424,9 @@ static int SetTlsPemCertificateChainFile(const std::string& val) {
 static int SetTlsPemCertificateChainFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
                               ValkeyModuleString **unused_arg) {
     std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    if (value.empty()) {
+        return VALKEYMODULE_ERR;
+    }
     return SetTlsPemCertificateChainFile(value);
 }
 static int ApplyTlsPemCertificateChainFile(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -447,6 +450,9 @@ static int SetTlsPrivateKeyFile(const std::string& val) {
 static int SetTlsPrivateKeyFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
                               ValkeyModuleString **unused_arg) {
     std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    if (value.empty()) {
+        return VALKEYMODULE_ERR;
+    }
     return SetTlsPrivateKeyFile(value);
 }
 static int ApplyTlsPrivateKeyFile(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -472,6 +478,9 @@ static int SetTlsTmpDhFile(const std::string& val) {
 static int SetTlsTmpDhFile(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
                               ValkeyModuleString **unused_arg) {
     std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    if (value.empty()) {
+        return VALKEYMODULE_ERR;
+    }
     return SetTlsTmpDhFile(value);
 }
 static int ApplyTlsTmpDhFile(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -848,15 +857,15 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetMinCompressedSize, SetMinCompressedSize, ApplyMinCompressedSize,
                                              nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "4", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "360000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "36000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "43000000",
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_modifications_before_save", "4300000",
                                              VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxModificationsBeforeSave, SetMaxModificationsBeforeSave,
                                              ApplyMaxModificationsBeforeSave, nullptr);

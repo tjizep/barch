@@ -22,7 +22,7 @@ enum {
     num32_key_size = 6,
     composite_key_size = 2,
     max_queries_per_call = 32,
-    static_bloom_size = 32768*100,
+    static_bloom_size = 32768*128,
     leaf_type = 1,
     non_leaf_type = 2,
     comparable_key_static_size = 32,

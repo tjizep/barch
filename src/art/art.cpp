@@ -1528,7 +1528,7 @@ art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
     }
     return key;
 }
-
+thread_local std::string temp_key{};
 art::value_type art::tree::tree_filter_key(value_type key) const {
     return s_filter_key(temp_key, key);
 }

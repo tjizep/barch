@@ -4,6 +4,10 @@
 1. Autodetect appropriate shard count for current platform
 2. Improved docs
 3. Publish binaries to pipeline builds
+4. Memory use improvements for small caches
+
+## Fixes
+1. race condition in hash queries
 
 # Release v0.4.2.1b 2025-12-18
 

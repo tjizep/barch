@@ -16,12 +16,12 @@
 namespace barch {
     using namespace art;
     struct query_pair {
-        query_pair(abstract_leaf_pair * leaves, value_type key) : leaves(leaves), key(key) {}
+        query_pair(abstract_leaf_pair * leaves) : leaves(leaves) {}//, key(key) , value_type key
         query_pair() = default;
         query_pair& operator=(const query_pair&) = default;
         query_pair(const query_pair&) = default;
         abstract_leaf_pair * leaves{};
-        value_type key{};
+        //value_type key{};
     };
     struct hashed_key {
         // we can reduce memory use by setting this to uint32_t
@@ -81,9 +81,7 @@ namespace barch {
     private:
         const std::string EXT = ".dat";
         bool with_stats{true};
-        //mutable std::unordered_set<hashed_key,hk_hash,std::equal_to<hashed_key>,heap::allocator<hashed_key> > h{};
-        //mutable heap::unordered_set<hashed_key,hk_hash > h{};
-        mutable query_pair qp{this, {}};
+        mutable query_pair qp{this};
         mutable hk_hash hk_h{qp};
         mutable hk_eq hk_e{qp};
         mutable oh::unordered_set<hashed_key,hk_hash, hk_eq> h{hk_e,hk_h};

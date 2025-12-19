@@ -219,10 +219,11 @@ const barch::leaf* barch::hashed_key::get_leaf(const query_pair& q) const {
     node_ptr n = logical_address{addr, q.leaves};
     return n.is_leaf ? n.const_leaf() : nullptr;
 }
-
+thread_local value_type query_key;
 value_type barch::hashed_key::get_key(const query_pair& q) const {
     if (!addr) {
-        return q.key;
+        //throw_exception<std::invalid_argument>("the address for the query is empty");
+        return query_key;
     }
     return get_leaf(q)->get_key();
 }
@@ -230,11 +231,12 @@ value_type barch::hashed_key::get_key(const query_pair& q) const {
 void barch::shard::clear_hash() {
     h.clear();
 }
+
 void barch::shard::set_hash_query_context(value_type k) {
-    qp.key = k;
+    query_key = k;
 }
 void barch::shard::set_hash_query_context(value_type k) const {
-    qp.key = k;
+    query_key = k;
 }
 void barch::shard::set_thread_ap() {
 }

@@ -102,7 +102,6 @@ namespace art {
         uint64_t size{};
         bool opt_use_trace = true;
         trace_list trace{};
-        mutable std::string temp_key{};
         node_ptr last_leaf_added{};
         uint64_t tomb_stones {};
         void update_trace(int direction);

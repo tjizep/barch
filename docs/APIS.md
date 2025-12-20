@@ -61,6 +61,7 @@ DBSIZE                     MULTI
 EXEC                       CLIENT INFO
 INFO                       APPEND
 KEYS                       VALUES
+SELECT
 
 ```
 ## Hash Set API's Implemented

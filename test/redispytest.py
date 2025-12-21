@@ -69,6 +69,35 @@ for cnt in range(1,5):
     assert(r.execute_command("SPACES DROP mspce") == b'OK')
     assert(r.execute_command("a:GET a") == None)
     assert(r.execute_command("SPACES DROP a") == b'OK')
+    r.set("i","0")
+    r.incr("i")
+    r.execute_command("UINCRBY i 1")
+    print(r.get("i"))
+    assert r.get("i") == b'2'
+    r.append("i","0")
+    assert r.get("i") == b'20'
+
+    r.execute_command("PREPEND i 1")
+    assert r.get("i") == b'120'
+    r.decr("i")
+    r.execute_command("DECR i")
+    assert r.get("i") == b'118'
+    r.decrby("i", 1)
+    assert r.get("i") == b'117'
+    r.execute_command("UDECRBY i 1")
+    assert r.get("i") == b'116'
+    r.execute_command("MSET j 1 k 2 l 3")
+    assert r.get("j") == b'1'
+    r.execute_command("ADD 1test1 one")
+    assert r.get("1test1") == b'one'
+    print(r.execute_command("MGET j k l"))
+    assert r.execute_command("MIN") != None
+    assert r.execute_command("MAX") != None
+    assert r.execute_command("STATS") != None
+    assert r.execute_command("OPS") != None
+    assert r.execute_command("VALUES *") != None
+    assert r.execute_command("KEYS *") != None
+    assert r.execute_command("UNLOAD a") != None
     r.close()
     barch.stop()
 print(f"complete redis test")

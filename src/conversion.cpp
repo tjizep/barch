@@ -142,30 +142,3 @@ art::value_type conversion::to_value(const std::string &s) {
     return {s.c_str(), (unsigned) s.length()};
 }
 
-const char *conversion::eat_space(const char *str, size_t l) {
-    const char *s = str;
-    for (; s != str + l; ++s) // eat continuous initial spaces
-    {
-        if (*s == ' ')
-            continue;
-        break;
-    }
-    return s;
-}
-
-bool conversion::is_integer(const char *str, size_t l) {
-    const char *s = eat_space(str, l);
-    if (s == str + l) {
-        return false;
-    }
-    if (*s == '-' || *s == '+') {
-        ++s;
-    }
-    s = eat_space(s, l - (s - str));
-
-    for (; s != str + l; ++s) {
-        if (!fast_float::is_integer(*s))
-            return false;
-    }
-    return true;
-}

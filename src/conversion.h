@@ -307,9 +307,9 @@ namespace conversion {
         }
     };
 
-    const char *eat_space(const char *str, size_t l);
+    //const char *eat_space(const char *str, size_t l);
 
-    bool is_integer(const char *str, size_t l);
+    //bool is_integer(const char *str, size_t l);
 
     template<typename IntType>
     static bool convert_value(IntType &i, art::value_type v) {

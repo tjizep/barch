@@ -54,16 +54,27 @@ if (NOT USE_OPENSSL)
     set(USE_OPENSSL ON)
 endif ()
 
+option(COVERAGE "Enable code coverage reporting" OFF)
+
 set(CMAKE_CPP_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(USE_AVX_INSTRUCTIONS ON)
 
 #remove -Werror because fmtlib
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -march=native -Wanalyzer-malloc-leak -Wanalyzer-double-free -Wall -Wextra -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -Wno-missing-attributes")
+
+if (COVERAGE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-arcs -ftest-coverage")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
+    message("Code coverage enabled")
+endif ()
+
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
     #set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
 endif ()
+
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Og")
     message("Using debuggable optimizations")
@@ -208,6 +219,10 @@ include_directories(${zstd_SOURCE_DIR}/lib)
 if (NOT TEST_OD)
     message("Testing not enabled Use -DTEST_OD=ON")
 else()
+    set(EXTRA_TEST_ARGS "")
+    if (COVERAGE)
+        set(EXTRA_TEST_ARGS "-DCOVERAGE=ON")
+    endif ()
     ## CMake sub project executables only works if you pretend they are not subprojects
     execute_process(COMMAND rm -rf ${TEST_BUILD_DIR} RESULT_VARIABLE result
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test)
@@ -261,6 +276,19 @@ endif ()
 
 add_library(lbarch SHARED ${SOURCES})
 
+set(TEST_SOURCE_PATH ${CMAKE_SOURCE_DIR}/test/)
+set(TEST_BUILD_PATH ${TEST_SOURCE_PATH}/${TEST_BUILD_DIR})
+
+if (COVERAGE)
+    add_custom_target(coverage_report
+            COMMAND lcov --capture --directory . --directory "${TEST_BUILD_PATH}" --output-file coverage.info
+            COMMAND lcov --remove coverage.info '${CMAKE_BINARY_DIR}/_deps/*' '/usr/*' 'external/*' '*/CMakeFiles/*' --output-file coverage.info
+            COMMAND genhtml coverage.info --output-directory coverage_html
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Generating HTML coverage report"
+    )
+endif ()
+
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
     target_link_libraries(lbarch PRIVATE libzstd_static)
@@ -286,69 +314,70 @@ if (NOT TEST_OD)
     message("Testing not enabled tests not generated :Use -DTEST_OD=ON")
 else()
 
+
     add_test(NAME TestIntegers
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testintegers.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testintegers.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestDoubles
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testdouble.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testdouble.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME BicycleTest
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testbicycle.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testbicycle.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestAbc
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testabc.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testabc.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME Test123
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} test123.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/test123.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestRandom
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testrnd.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testrnd.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestBounds
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testbounds.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testbounds.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestKeys
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testkeys.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testkeys.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME LargeKeys
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testgloblarge.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testgloblarge.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME Test1111111
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} test111111.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/test111111.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestMSG
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testmulti.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testmulti.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestIntArithmetic
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testintarith.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testintarith.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestComposites
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testcomposites.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testcomposites.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestZRank
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} testzrank.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/testzrank.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestBenchy
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} zbenchy.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/zbenchy.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestHashBenchy
-            COMMAND ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR}/TestStarter ${CMAKE_BINARY_DIR} zwbenchy.lua
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+            COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/zwbenchy.lua ${TEST_BUILD_PATH}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
@@ -362,67 +391,67 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPy
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/testbarch.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/testbarch.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchReplicationPy
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/repltest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchReplicationPy2
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/repltest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/repltest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchLru
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/lrutest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/lrutest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchExpireMany
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/expiretest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/expiretest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPull
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/pulltest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/pulltest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestBarchList
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/listtest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listtest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestBarchRPC
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/remotetest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/remotetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchSimpleClusterRPC
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/routetest.py ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/test
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/${TEST_BUILD_DIR})
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/routetest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestRespClientLocal
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/redispytest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redispytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestMerge
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/mergetest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/mergetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestSpaceThread
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/spacethreadtest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/spacethreadtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBpopThread
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/bstartest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/bstartest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestLargeDataSave
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/largetest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/largetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestLargeDataLoad
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/largetest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/largetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestCompression
-                COMMAND ${PYTHON3_EXEC} ${CMAKE_SOURCE_DIR}/test/compresstest.py
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/compresstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     endif ()

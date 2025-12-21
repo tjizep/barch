@@ -4,6 +4,8 @@
 
 #include "key_space.h"
 #include <thread>
+#include <version.h>
+
 #include "shard.h"
 #include "keys.h"
 #include "thread_pool.h"
@@ -14,7 +16,7 @@ namespace barch {
         key_spaces() {
             barch::std_log("Starting Barch",
                 "\n",
-                "\n\tversion","[","0.4.1.1b","]",
+                "\n\tversion","[",BARCH_PROJECT_VERSION,"]",
                 "\n\tpage_size","[",(size_t)page_size,"] bytes",
                 "maximum_allocation_size [",(size_t)maximum_allocation_size,"] bytes",
                 "\n\tshards","[",get_shard_count().size(),"]",

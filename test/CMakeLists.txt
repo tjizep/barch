@@ -17,7 +17,11 @@ execute_process(COMMAND make RESULT_VARIABLE result
 if(result)
     message(FATAL_ERROR "could not build valkey ${result}")
 endif()
-
+option(COVERAGE "Enable coverage" OFF)
+if (COVERAGE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-arcs -ftest-coverage")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+endif ()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wall -Wextra -Weffc++")
 set(CMAKE_CPP_STANDARD 17)

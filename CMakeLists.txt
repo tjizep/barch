@@ -276,12 +276,12 @@ endif ()
 
 add_library(lbarch SHARED ${SOURCES})
 
-set(TEST_SOURCE_PATH ${CMAKE_SOURCE_DIR}/test/)
+set(TEST_SOURCE_PATH ${CMAKE_SOURCE_DIR}/test)
 set(TEST_BUILD_PATH ${TEST_SOURCE_PATH}/${TEST_BUILD_DIR})
 
 if (COVERAGE)
     add_custom_target(coverage_report
-            COMMAND lcov --capture --directory . --directory "${TEST_BUILD_PATH}" --output-file coverage.info
+            COMMAND lcov --capture --directory . --output-file coverage.info
             COMMAND lcov --remove coverage.info '${CMAKE_BINARY_DIR}/_deps/*' '/usr/*' 'external/*' '*/CMakeFiles/*' --output-file coverage.info
             COMMAND genhtml coverage.info --output-directory coverage_html
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}

@@ -362,7 +362,7 @@ bool barch::shard::save(bool stats) {
             "seconds");
     return true;
 }
-bool barch::shard::send(std::ostream& out) {
+bool barch::shard::send(std::ostream& unused(out)) {
 #ifdef _TEST_COVERED_
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
@@ -472,7 +472,7 @@ bool barch::shard::load(bool) {
     }
     return true;
 }
-bool barch::shard::retrieve(std::istream& in) {
+bool barch::shard::retrieve(std::istream& unused(in)) {
 
 #ifdef _TEST_COVERED_
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently

@@ -38,6 +38,7 @@ jobs:
           cd ..
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          cp build/coverage.svg docs/coverage.svg
+          cp coverage.svg docs/coverage.svg
+          git add coverage.svg
           git add docs/coverage.svg
           git diff --quiet && git diff --staged --quiet || (git commit -m "docs: update coverage badge" && git push)

@@ -293,7 +293,7 @@ if (COVERAGE)
     add_custom_target(coverage_badge
             DEPENDS coverage_report
             COMMAND bash "${CMAKE_SOURCE_DIR}/generate_badge.sh" "${LCOV_REPORT}" "${BADGE_OUTPUT}"
-            COMMENT "Generating coverage badge from ${LCOV_REPORT}"
+            COMMENT "Generating coverage badge from ${LCOV_REPORT} into ${BADGE_OUTPUT}"
             VERBATIM
     )
 endif ()

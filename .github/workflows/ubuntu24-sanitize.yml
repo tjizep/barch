@@ -35,6 +35,7 @@ jobs:
       - name: Commit and push coverage badge
         if: github.event_name == 'push'
         run: |
+          cd ..
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           cp build/coverage.svg docs/coverage.svg

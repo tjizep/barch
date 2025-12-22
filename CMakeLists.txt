@@ -64,7 +64,7 @@ set(USE_AVX_INSTRUCTIONS ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -march=native -Wanalyzer-malloc-leak -Wanalyzer-double-free -Wall -Wextra -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -Wno-missing-attributes")
 
 if (COVERAGE)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-arcs -ftest-coverage")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-arcs -ftest-coverage -fprofile-update=atomic")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
     message("Code coverage enabled")
@@ -287,13 +287,14 @@ if (COVERAGE)
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
             COMMENT "Generating HTML coverage report"
     )
+    set(LCOV_REPORT "${CMAKE_BINARY_DIR}/coverage.info")
+    set(BADGE_OUTPUT "${CMAKE_SOURCE_DIR}/coverage.svg")
+
     add_custom_target(coverage_badge
             DEPENDS coverage_report
-            COMMAND bash -c "PERCENT=$$(lcov --summary coverage.info | grep lines | cut -d ' ' -f 4 | cut -d '%' -f 1); \
-                             COLOR=$$( [ $$(echo \"$$PERCENT > 90\" | bc) -eq 1 ] && echo 'brightgreen' || ([ $$(echo \"$$PERCENT > 70\" | bc) -eq 1 ] && echo 'yellow' || echo 'red') ); \
-                             curl -s \"https://img.shields.io/badge/coverage-$$PERCENT%25-$$COLOR.svg\" > coverage.svg"
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-            COMMENT "Generating coverage badge"
+            COMMAND bash "${CMAKE_SOURCE_DIR}/generate_badge.sh" "${LCOV_REPORT}" "${BADGE_OUTPUT}"
+            COMMENT "Generating coverage badge from ${LCOV_REPORT}"
+            VERBATIM
     )
 endif ()
 

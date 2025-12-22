@@ -1720,22 +1720,7 @@ int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HEAPBYTES);
 }
-int EVICT(caller& call, const arg_t& argv) {
 
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    int64_t ev = 0;
-    for (auto shard : barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
-        storage_release release(t);
-        ev += art_evict_lru(t);
-    }
-    return call.push_ll((int64_t)ev );
-}
-int cmd_EVICT(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, EVICT);
-}
 int CONFIG(caller& call, const arg_t& argv) {
     if (argv.size() != 4)
         return call.wrong_arity();
@@ -1875,9 +1860,6 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(HEAPBYTES), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(EVICT), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(START), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)

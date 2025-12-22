@@ -1,6 +1,7 @@
 # Introducing *BARCH*
 [![Ubuntu 24.04 CI (GCC 13)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu24.yml)
 [![Ubuntu 22.04 CI (GCC 11)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml/badge.svg)](https://github.com/tjizep/barch/actions/workflows/ubuntu22.yml)
+![Coverage Status](./coverage.svg)
 
 `BARCH` is a low-memory, dynamically configurable, constant access time ordered cache similar to [valkey](https://valkey.io/) and redis
 

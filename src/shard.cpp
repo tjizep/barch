@@ -16,7 +16,7 @@ static std::mt19937 gen(rd());
 
 using namespace art;
 void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<void(const barch::leaf *, uint32_t pos)> cb);
-
+#ifdef _TESTED_
 uint64_t art_evict_lru(barch::shard_ptr t) {
     try {
         auto page = t->get_ap().get_leaves().get_lru_page();
@@ -47,7 +47,7 @@ uint64_t art_evict_lru(barch::shard_ptr t) {
     }
     return 0;
 }
-
+#endif
 
 art_statistics barch::get_statistics() {
     art_statistics as{};
@@ -363,6 +363,7 @@ bool barch::shard::save(bool stats) {
     return true;
 }
 bool barch::shard::send(std::ostream& out) {
+#ifdef _TEST_COVERED_
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     auto *t = this;
     if (nodes.get_main().get_bytes_allocated()==0) return true;
@@ -409,6 +410,8 @@ bool barch::shard::send(std::ostream& out) {
 
     std_log("sent barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
             "seconds");
+#endif
+
     return true;
 }
 
@@ -471,7 +474,7 @@ bool barch::shard::load(bool) {
 }
 bool barch::shard::retrieve(std::istream& in) {
 
-    //
+#ifdef _TEST_COVERED_
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
         storage_release release(this->shared_from_this());
@@ -522,6 +525,8 @@ bool barch::shard::retrieve(std::istream& in) {
         std_log("could not load",e.what());
         return false;
     }
+#endif
+
     return true;
 }
 

@@ -14,4 +14,4 @@ B.GET 10
 Key type will be auto-detected on input. 
 
 ## Key Order
-See (Order)[./SET.MD] for more information on key order
+See (Order)[./SET] for more information on key order

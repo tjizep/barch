@@ -287,6 +287,14 @@ if (COVERAGE)
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
             COMMENT "Generating HTML coverage report"
     )
+    add_custom_target(coverage_badge
+            DEPENDS coverage_report
+            COMMAND bash -c "PERCENT=$$(lcov --summary coverage.info | grep lines | cut -d ' ' -f 4 | cut -d '%' -f 1); \
+                             COLOR=$$( [ $$(echo \"$$PERCENT > 90\" | bc) -eq 1 ] && echo 'brightgreen' || ([ $$(echo \"$$PERCENT > 70\" | bc) -eq 1 ] && echo 'yellow' || echo 'red') ); \
+                             curl -s \"https://img.shields.io/badge/coverage-$$PERCENT%25-$$COLOR.svg\" > coverage.svg"
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Generating coverage badge"
+    )
 endif ()
 
 if (ADD_ZSTD_COMPRESSION)

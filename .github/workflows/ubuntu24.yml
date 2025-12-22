@@ -1,7 +1,14 @@
 name: Ubuntu 24.04 CI (GCC 13)
 
-on: [push, pull_request]
-
+on:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
 jobs:
   ubuntu-build:
     runs-on: ubuntu-24.04

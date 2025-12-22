@@ -1,16 +1,42 @@
 name: Ubuntu 24.04 CI Sanitized (GCC 13)
 
-on: [push, pull_request]
-
+on:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
 jobs:
   ubuntu-build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lcov bc curl
+
       - name: Use cmake
         run: |
           set -xe
           cmake -B build \
-             -DTEST_OD=ON
+             -DTEST_OD=ON \
+             -DCOVERAGE=ON \
+             -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --target barch --parallel
-          ctest --output-on-failure
+          cmake --build build --target lbarch --parallel
+          ( cd build ; ctest --output-on-failure )
+      - name: Generate Coverage Badge
+        run: |
+          cmake --build build --target coverage_badge
+      - name: Commit and push coverage badge
+        if: github.event_name == 'push'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          cp build/coverage.svg .
+          git add coverage.svg
+          git diff --quiet && git diff --staged --quiet || (git commit -m "docs: update coverage badge" && git push)

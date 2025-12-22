@@ -20,22 +20,22 @@ A demo ubuntu 22.04 docker image is available at teejip/barch:v0.4.2.3b
 
 The embedded server can also run in a multi-writer replication configuration in conjunction with a standalone server.
 An embedded server can also be quickly synchronized with a standalone server using the block load api.
-   - See [python example](https://github.com/tjizep/barch/blob/main/docs/PYTHONSERVEREXAMPLE.md)
+   - See [python example](https://tjizep.github.io/barch/PYTHONSERVEREXAMPLE.md)
 
-### [Some Benchmarks](https://github.com/tjizep/barch/blob/main/docs/BENCHMARKS.md)
+### [Some Benchmarks](https://tjizep.github.io/barch/BENCHMARKS.md)
 
 # Features
 1. Ordered: minimum, lower-bound and maximum operations are constant time
 2. Low memory footprint: Half that of standard hash map while providing similar single threaded latency 
-   - Also see [Compression](https://github.com/tjizep/barch/blob/main/docs/COMPRESSION.md)
+   - Also see [Compression](https://tjizep.github.io/barch/COMPRESSION.md)
 3. Dynamic config: All options can be configured at runtime without restarts or reload
 4. Scalability: All reads are concurrent and scales linearly with core count
 
 # Use Cases
-1. [Fast Ranged Queries, Prefix Queries and Aggregates](https://github.com/tjizep/barch/blob/main/docs/USECASE.md)
+1. [Fast Ranged Queries, Prefix Queries and Aggregates](https://tjizep.github.io/barch/USECASE.md)
 2. Prefix-cache for fast loading of hints  
 3. Z-Order/Morton code range queries for quick spatial bounds checking
-4. Fast and accurate counting of small ranges (age, population etc) See [ZfastRank](https://github.com/tjizep/barch/blob/main/docs/ZFASTRANK.md)
+4. Fast and accurate counting of small ranges (age, population etc) See [ZfastRank](https://tjizep.github.io/barch/ZFASTRANK.md)
 5. Many small key value pairs in small footprint with minimal overhead
 6. Constant time access priority queue
 
@@ -49,13 +49,13 @@ An embedded server can also be quickly synchronized with a standalone server usi
    ```
    Test: `ctest`
    start `valkey-server valkey.conf --loadmodule {[src code]/build/_barch.so}`
-2. [Via Docker image](https://github.com/tjizep/barch/blob/main/docs/DOCKER.md)
+2. [Via Docker image](https://tjizep.github.io/barch/DOCKER.md)
 
 # Docs
-1. [Documentation for API's](https://github.com/tjizep/barch/blob/main/docs/APIS.md)
+1. [Documentation for API's](https://tjizep.github.io/barch/APIS.md)
 
 # Configuration
-See [Configuration](https://github.com/tjizep/barch/blob/main/docs/DOCKER.md) docs
+See [Configuration](https://tjizep.github.io/barch/DOCKER.md) docs
 
 # Hardware Compatibility
 1. amd64+sse

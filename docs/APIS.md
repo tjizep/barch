@@ -4,22 +4,22 @@
 All api's are also available on the built in RESP interface without the `B.` prefix.
 Api's with the same signature as VALKEY or REDIS works the same
 
-1. `B.ADD K V` add a key and value [more](https://github.com/tjizep/barch/blob/main/docs/ADD.md)
-2. `B.SET K V` set a key overriding existing value [more](https://github.com/tjizep/barch/blob/main/docs/SET.md)
-3. `B.GET K` retrieve a key, returns nil if no key exists [more](https://github.com/tjizep/barch/blob/main/docs/GET.md)
-4. `B.REM K` removes a key, returns value if success [more](https://github.com/tjizep/barch/blob/main/docs/REM.md)
+1. `B.ADD K V` add a key and value [more](https://tjizep.github.io/barch/ADD.md)
+2. `B.SET K V` set a key overriding existing value [more](https://tjizep.github.io/barch/SET.md)
+3. `B.GET K` retrieve a key, returns nil if no key exists [more](https://tjizep.github.io/barch/GET.md)
+4. `B.REM K` removes a key, returns value if success [more](https://tjizep.github.io/barch/REM.md)
 5. `B.MAX` returns largest key  (or nil) - numbers are less than text
 6. `B.MIN` returns smallest key (or nil) if there are no keys
-7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://github.com/tjizep/barch/blob/main/docs/USECASE.md)
-8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://github.com/tjizep/barch/blob/main/docs/USECASE.md)
+7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://tjizep.github.io/barch/USECASE.md)
+8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://tjizep.github.io/barch/USECASE.md)
 9. `B.LB K1` lower bound: first key not less than K1
 10. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys
 11. `B.HEAPBYTES` bytes allocated by `BARCH` alone
 12. `B.STATS` lots of statistics on internal datastructures, node count, defrag, pages etc.
 13. `B.OPS` operation counts of various `BARCH` api commands
-14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/docs/KEYS.md)
-15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://github.com/tjizep/barch/blob/main/docs/KEYS.md)
-15. `ACL` and `AUTH` [more](https://github.com/tjizep/barch/blob/main/docs/ACL.md)
+14. `B.KEYS` scan keys with a glob pattern without blocking other calls [more](https://tjizep.github.io/barch/KEYS.md)
+15. `B.VALUES` scan values with a glob pattern without blocking other calls [more](https://tjizep.github.io/barch/KEYS.md)
+15. `ACL` and `AUTH` [more](https://tjizep.github.io/barch/ACL.md)
 16. `B.FIRST` or `B.LB` the lower bound or first key not less than the input
 17. `B.NEXT` or `B.UB` the upper bound or next key larger than the input
 

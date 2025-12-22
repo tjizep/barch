@@ -11,7 +11,7 @@ PERCENT=$(awk -F: '/LF:/ {found += $2} /LH:/ {hit += $2} END {printf "%.0f", (fo
 
 # 3. Generate SVG
 cat <<EOF > "$OUTPUT_FILE"
-<svg xmlns="www.w3.org" width="104" height="20">
+<svg xmlns="http://www.w3.org/2000/svg" width="104" height="20">
   <linearGradient id="b" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
   <mask id="a"><rect width="104" height="20" rx="3" fill="#fff"/></mask>
   <g mask="url(#a)"><path fill="#555" d="M0 0h63v20H0z"/><path fill="$COLOR" d="M63 0h41v20H63z"/><path fill="url(#b)" d="M0 0h104v20H0z"/></g>

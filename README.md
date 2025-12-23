@@ -7,7 +7,7 @@
 
 Additionally, it has an embedded server+client for python which can reduce read latency to micro-seconds.
 It implements the Z* (OrderedSet), H* (HashSet) and key value API's available in redis.
-A demo ubuntu 22.04 docker image is available at teejip/barch:v0.4.2.3b
+A demo ubuntu 22.04 docker image is available at teejip/barch:v0.4.2.6b
 
 
 ### Advantages of the embedded L1 server

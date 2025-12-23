@@ -1,4 +1,4 @@
-# Release v0.4.2.5b 2025-12-22
+# Release v0.4.2.6b 2025-12-23
 
 ## New Features
 1. Autodetect the appropriate shard count for the current platform
@@ -6,6 +6,7 @@
 3. Publish binaries to pipeline builds
 4. Memory use improvements for small caches
 5. add a test coverage report
+6. improve eviction algorithm
 
 ## Fixes
 1. race condition in hash queries

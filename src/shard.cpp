@@ -1150,11 +1150,15 @@ void barch::shard::run_defrag() {
 
     //std::this_thread::sleep_for(std::chrono::milliseconds(40)); // chill a little we've worked hard
 }
+static uint64_t calc_mem_threshold() {
+    auto mm = barch::get_max_module_memory() ;
+    return mm * barch::get_pre_evict_thresh() ;
+}
 
 void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
 
-    if (get_total_memory() < barch::get_max_module_memory()) return;
+    if (get_total_memory() < calc_mem_threshold()) return;
 
     auto page = src();
     page_iterator(page.first, page.second, [fupdate](const barch::leaf *l, uint32_t) {
@@ -1178,13 +1182,13 @@ void abstract_eviction(barch::shard *t,
 }
 
 void abstract_lru_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (get_total_memory() < barch::get_max_module_memory()) return;
+    if (get_total_memory() < calc_mem_threshold()) return;
     write_lock release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 void abstract_random_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (get_total_memory() < barch::get_max_module_memory()) return;
+    if (get_total_memory() < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_page_num();
@@ -1196,7 +1200,7 @@ void abstract_random_eviction(barch::shard *t, const std::function<bool(const ba
 
 // used during sweep lru keys for the `stochastic` lru eviction
 void abstract_random_update(barch::shard *t, const std::function<void(const barch::leaf *l)> &updater) {
-    if (get_total_memory() < barch::get_max_module_memory()) return;
+    if (get_total_memory() < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_page_num();
@@ -1207,19 +1211,19 @@ void abstract_random_update(barch::shard *t, const std::function<void(const barc
     abstract_eviction(updater, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
 }
 void abstract_lfu_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (statistics::logical_allocated < barch::get_max_module_memory()) return;
+    if (statistics::logical_allocated < calc_mem_threshold()) return;
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 
 void run_evict_all_keys_lru(barch::shard *t) {
-    if (statistics::logical_allocated < barch::get_max_module_memory()) return;
+    if (statistics::logical_allocated < calc_mem_threshold()) return;
     if (!t->abstract_shard::opt_evict_all_keys_lru) return;
     abstract_lru_eviction(t, [](const barch::leaf * unused(l)) -> bool { return true; });
 }
 
 void run_evict_volatile_keys_lru(barch::shard *t) {
-    if (statistics::logical_allocated < barch::get_max_module_memory()) return;
+    if (statistics::logical_allocated < calc_mem_threshold()) return;
     if (!t->abstract_shard::opt_evict_volatile_keys_lru) return;
     abstract_lru_eviction(t, [](const barch::leaf *l) -> bool { return l->is_volatile(); });
 }

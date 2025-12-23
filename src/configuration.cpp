@@ -17,6 +17,7 @@ static bool is_on(const std::string& val) {
 }
 
 static bool is_float(const std::string& buffer) {
+    if (buffer.empty()) return false;
     char* ptr = nullptr;
     const char * cdata = buffer.c_str();
     const char * ed = cdata + buffer.length();
@@ -37,6 +38,7 @@ struct config_state {
     std::string eviction_type{"none"};
     std::string max_memory_bytes{};
     std::string min_fragmentation_ratio{};
+    std::string pre_evict_thresh{};
     std::string max_defrag_page_count{};
     std::string iteration_worker_count{};
     std::string maintenance_poll_delay{};
@@ -636,6 +638,11 @@ static int SetMinFragmentation(const std::string& val) {
     if (!is_float(val)) {
         return VALKEYMODULE_ERR;
     }
+    double test_val = std::stof(val);
+    if (test_val < 0 || test_val > 100) {
+        return VALKEYMODULE_ERR;
+    }
+
     state().min_fragmentation_ratio = val;
     config().min_fragmentation_ratio = std::stof(state().min_fragmentation_ratio);
     return VALKEYMODULE_OK;
@@ -648,6 +655,35 @@ static int SetMinFragmentation(const char *unused_arg, ValkeyModuleString *val, 
 }
 
 static int ApplyMinFragmentation(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString *GetPreEvictThresh(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().pre_evict_thresh.c_str(), state().pre_evict_thresh.length());
+}
+
+static int SetPreEvictThresh(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    if (!is_float(val)) {
+        return VALKEYMODULE_ERR;
+    }
+    double test_val = std::stof(val);
+    if (test_val < 0 || test_val > 0.99) {
+        return VALKEYMODULE_ERR;
+    }
+    state().pre_evict_thresh = val;
+    config().pre_evict_thresh = std::stof(state().pre_evict_thresh);
+    return VALKEYMODULE_OK;
+}
+
+static int SetPreEvictThresh(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    std::string preet = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetPreEvictThresh(preet);
+}
+
+static int ApplyPreEvictThresh(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -842,6 +878,9 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "pre_evict_thresh", "0.85", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetPreEvictThresh, SetPreEvictThresh, ApplyPreEvictThresh, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "active_defrag", "on", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetActiveDefragType, SetActiveDefragType, ApplyActiveDefragType, nullptr);
 
@@ -945,6 +984,8 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetMaxMemoryBytes(val);
     } else if (name == "min_fragmentation_ratio") {
         return SetMinFragmentation(val);
+    } else if (name == "pre_evict_thresh") {
+        return SetPreEvictThresh(val);
     } else if (name == "active_defrag") {
         return SetActiveDefragType(val);
     } else if (name == "iteration_worker_count") {
@@ -1041,6 +1082,10 @@ uint64_t barch::get_max_module_memory() {
 float barch::get_min_fragmentation_ratio() {
     std::lock_guard lock(state().config_mutex);
     return config().min_fragmentation_ratio;
+}
+double barch::get_pre_evict_thresh() {
+    std::lock_guard lock(state().config_mutex);
+    return config().pre_evict_thresh;
 }
 uint64_t barch::get_min_compressed_size() {
     //std::lock_guard lock(state().config_mutex);

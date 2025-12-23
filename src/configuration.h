@@ -40,6 +40,7 @@ namespace barch {
 
         unsigned iteration_worker_count{4};
         float min_fragmentation_ratio = 0.6f;
+        double pre_evict_thresh = 0.85;
         uint64_t min_compressed_size {64};
         bool ordered_keys{true};
         bool use_vmm_memory{true};
@@ -79,6 +80,7 @@ namespace barch {
     unsigned get_iteration_worker_count();
 
     float get_min_fragmentation_ratio();
+    double get_pre_evict_thresh();
 
     uint64_t get_min_compressed_size();
 

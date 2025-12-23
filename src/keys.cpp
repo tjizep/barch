@@ -190,7 +190,8 @@ std::string encoded_key_as_string(art::value_type key) {
     }
     return "";
 }
-unsigned log_encoded_key(art::value_type key, bool start) {
+unsigned log_encoded_key(art::value_type unused(key), bool unused(start)) {
+#ifdef _TEST_COVERAGE_
     double dk;
     float fk;
     int64_t ik;
@@ -269,5 +270,7 @@ unsigned log_encoded_key(art::value_type key, bool start) {
         return key_len;
     }
     if (start) barch::std_end();
+#endif
+
     return 0;
 }

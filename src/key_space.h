@@ -5,7 +5,7 @@
 #ifndef BARCH_KEY_SPACE_H
 #define BARCH_KEY_SPACE_H
 #include <string>
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 #include "abstract_shard.h"
 #include "merge_options.h"
 #include "value_type.h"

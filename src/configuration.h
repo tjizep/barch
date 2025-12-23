@@ -4,7 +4,7 @@
 
 #ifndef CONFIGURATION_H
 #define CONFIGURATION_H
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 #include <limits>
 #include <thread>
 

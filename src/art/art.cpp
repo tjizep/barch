@@ -7,7 +7,7 @@
 #include "art.h"
 
 #include "../dictionary_compressor.h"
-#include "../valkeymodule.h"
+#include "../../external/include/valkeymodule.h"
 #include "../statistics.h"
 #include "../logical_allocator.h"
 #include "../keys.h"

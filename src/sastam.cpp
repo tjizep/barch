@@ -1,7 +1,7 @@
 //
 // Created by linuxlite on 2/10/25.
 //
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 #include "sastam.h"
 #include <sys/types.h>
 #include <sys/sysinfo.h>

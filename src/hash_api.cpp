@@ -4,7 +4,7 @@
 
 #include "hash_api.h"
 #include "value_type.h"
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 #include "art/art.h"
 #include "caller.h"
 #include "composite.h"

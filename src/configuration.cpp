@@ -2,7 +2,7 @@
 // Created by linuxlite on 3/13/25.
 //
 
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 #include "configuration.h"
 #include <cstdlib>
 #include <string>

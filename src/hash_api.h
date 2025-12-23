@@ -5,7 +5,7 @@
 #ifndef HASH_API_H
 #define HASH_API_H
 
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 
 int add_hash_api(ValkeyModuleCtx *ctx);
 

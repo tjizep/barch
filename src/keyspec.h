@@ -6,7 +6,7 @@
 #define SET_H
 #include "value_type.h"
 extern "C" {
-    #include "valkeymodule.h"
+    #include "../external/include/valkeymodule.h"
 }
 
 #include <string>

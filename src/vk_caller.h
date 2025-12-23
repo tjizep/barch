@@ -5,7 +5,7 @@
 #ifndef VK_CALLER_H
 #define VK_CALLER_H
 #include "caller.h"
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 #include "keys.h"
 #include "module.h"
 struct vk_caller : caller {

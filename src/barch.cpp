@@ -17,7 +17,7 @@
  * -----------------------------------------------------------------------------
  * */
 extern "C" {
-#include "valkeymodule.h"
+#include "../external/include/valkeymodule.h"
 }
 
 #include <cctype>

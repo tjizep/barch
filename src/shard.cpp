@@ -802,7 +802,6 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     ++deletes;
     size_t before = size;
-    erase_bloom(unfiltered_key);
     auto key = filter_key(unfiltered_key);
     node_ptr old = from_unordered_set(key);
     if (!old.null()) {

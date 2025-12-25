@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(barch VERSION 0.4.2 LANGUAGES CXX)
+project(barch VERSION 0.4.3 LANGUAGES CXX)
 enable_testing()
 set(TARGETS barch lbarch)
 # Get the current git commit hash

@@ -25,11 +25,6 @@ namespace barch {
                 bloom[ash % static_bloom_size] = true;
         }
 
-        void erase_bloom(art::value_type key) {
-            if (static_bloom_size != bloom.size()) return;
-            uint64_t ash = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-            bloom[ash % static_bloom_size] = false;
-        }
 
         bool is_bloom(art::value_type key) const {
             if (static_bloom_size != bloom.size()) return true; // yes we assume the key exists

@@ -1,4 +1,4 @@
-# Release v0.4.3.0b 2025-12-23
+# Release v0.4.3.0b 2025-12-28
 
 ## New Features
 1. make replication shard count agnostic

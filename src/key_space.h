@@ -32,6 +32,7 @@ namespace barch {
         shard_ptr get_local();
         shard_ptr get(size_t shard);
         shard_ptr get(art::value_type key);
+        shard_ptr get_type_aware(art::value_type key);
         shard_ptr get(ValkeyModuleString **argv) ;
         [[nodiscard]] std::string get_name() const;
         [[nodiscard]] std::string get_canonical_name() const;

@@ -665,6 +665,10 @@ namespace barch {
         bool client::find_insert(value_type key) {
             if (sources.empty()) return false;
             bool added = false;
+            if (debug_repl == 1) {
+                std_log("looking for key");
+                log_encoded_key(key);
+            }
             heap::vector<uint8_t> to_send, rbuff;
             to_send.push_back('f');// <-- to find a key
             push_value(to_send, key);
@@ -689,9 +693,7 @@ namespace barch {
                     // TODO: check if this name exists
                     auto ks = get_keyspace(ks_undecorate(name));
                     // we are in a lock here (from the caller)
-                    auto t = ks->get(this->shard); // TODO: use name
-                    //t->last_leaf_added = nullptr;
-                    auto r = process_art_fun_cmd(t, 0, *source, rbuff);
+                    auto r = process_art_fun_cmd(ks, 0, *source, rbuff, false);
                     if (r.add_applied > 0) {
                         added = true;
                         break; // don't call the other servers - paxos would have us get a quorum

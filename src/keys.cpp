@@ -178,7 +178,7 @@ std::string encoded_key_as_string(art::value_type key) {
         case 0:
             return std::to_string(std::get<bool>(v));
         case 1:
-            return std::to_string(std::get<int64_t>(v));
+            return conversion::to_string(std::get<int64_t>(v));
         case 2:
             return std::to_string(std::get<double>(v));
         case 3:
@@ -190,8 +190,7 @@ std::string encoded_key_as_string(art::value_type key) {
     }
     return "";
 }
-unsigned log_encoded_key(art::value_type unused(key), bool unused(start)) {
-#ifdef _TEST_COVERAGE_
+unsigned log_encoded_key(art::value_type key, bool start) {
     double dk;
     float fk;
     int64_t ik;
@@ -207,11 +206,11 @@ unsigned log_encoded_key(art::value_type unused(key), bool unused(start)) {
         ik = conversion::enc_bytes_to_int(enck, key_len);
         if (*enck == art::tdouble) {
             memcpy(&dk, &ik, sizeof(ik));
-            barch::std_continue("{double}[", dk, "]");
+            barch::std_continue("{ double }[", dk, "]");
             if (start) barch::std_end();
             return numeric_key_size;
         } else {
-            barch::std_continue("{integer}[", ik, "]");
+            barch::std_continue("{ integer }[", ik, "]");
             if (start) barch::std_end();
             return numeric_key_size;
         }
@@ -219,11 +218,11 @@ unsigned log_encoded_key(art::value_type unused(key), bool unused(start)) {
         sk = conversion::enc_bytes_to_int32(enck, key_len);
         if (*enck == art::tfloat) {
             memcpy(&fk, &sk, sizeof(sk));
-            barch::std_continue("{float}[", fk, "]");
+            barch::std_continue("{ float }[", fk, "]");
             if (start) barch::std_end();
             return num32_key_size;
         } else {
-            barch::std_continue("{short}[", sk, "]");
+            barch::std_continue("{ short }[", sk, "]");
             if (start) barch::std_end();
             return num32_key_size;
         }
@@ -232,12 +231,11 @@ unsigned log_encoded_key(art::value_type unused(key), bool unused(start)) {
         kl = key_len - 2;
         std::string s;
         s.insert(s.end(), k, k + kl);
-        barch::std_continue("{string}[", s, "][", kl, "]");
+        barch::std_continue("{ string }[", s, "][", kl, "]");
         if (start) barch::std_end();
         return 2 + kl;
     } else if (key_len > 1 && *enck == art::tcomposite) {
-        barch::std_continue("<", 2, ">");
-        barch::std_continue("{composite}[");
+        barch::std_continue("{ composite [2] }[");
         unsigned kl = 2;
         const char *ptr = (const char *) &enck[2];
         while (kl < key_len) {
@@ -261,16 +259,15 @@ unsigned log_encoded_key(art::value_type unused(key), bool unused(start)) {
                     if (start) barch::std_end();
                     return 0;
             }
-            barch::std_continue("<", len, ">");
+            barch::std_continue("[", len, "]");
             ptr += log_encoded_key({ptr, len}, false);
             kl += len;
         }
-        barch::std_continue("] <", kl, ">");
+        barch::std_continue("] [", kl, "]");
         if (start) barch::std_end();
         return key_len;
     }
     if (start) barch::std_end();
-#endif
 
     return 0;
 }

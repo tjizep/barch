@@ -208,7 +208,7 @@ namespace barch {
      */
 
     template<typename StreamT>
-     af_result process_art_fun_cmd(barch::shard_ptr t, uint32_t name_size, StreamT& stream, const heap::vector<uint8_t>& buffer) {
+     af_result process_art_fun_cmd(barch::key_space_ptr ks, uint32_t name_size, StreamT& stream, const heap::vector<uint8_t>& buffer, bool lock = true) {
         af_result r;
         heap::vector<uint8_t> tosend;
         std::string name;
@@ -236,6 +236,8 @@ namespace barch {
                         auto fc = [](const node_ptr &){
                         };
                         bool added_or = false;
+                        auto t = ks->get_type_aware(key.first);
+                        storage_write_lock wl(t, lock);
                         if (t->opt_ordered_keys) {
                             added_or = t->tree_insert(options.first, key.first, value.first,true, fc);
                         }else
@@ -255,6 +257,8 @@ namespace barch {
                     break;
                 case 'r': {
                     auto key = get_value(i+1, buffer);
+                    auto t = ks->get_type_aware(key.first);
+                    storage_write_lock wl(t, lock);
                     if (t->opt_ordered_keys) {
                         t->tree_remove(key.first,[&r](const node_ptr &) {
                             ++statistics::repl::key_rem_recv_applied;
@@ -275,7 +279,11 @@ namespace barch {
                     break;
                 case 'f': {
                     auto key = get_value(i+1, buffer);
+                    std_log("'f'inding key");
+                    log_encoded_key(key.first);
                     // TODO: this may pull replicate
+                    auto t = ks->get_type_aware(key.first);
+                    read_lock rl(t, lock);
                     found = t->search(key.first);
                     if (found.is_leaf) {
                         auto l = found.const_leaf();
@@ -284,6 +292,9 @@ namespace barch {
                         push_value(tosend, l->get_key());
                         push_value(tosend, l->get_value());
                         ++r.find_applied;
+                        log_encoded_key(l->get_key());
+                    }else {
+                        std_log("key not found in shard", t->get_shard_number());
                     }
                     i = key.second;
                     ++statistics::repl::key_find_recv;
@@ -295,6 +306,8 @@ namespace barch {
                     auto lkey = get_value(i+1, buffer);
                     auto ukey = get_value(lkey.second, buffer);
                     ++r.find_called;
+                    auto t = ks->get_type_aware(lkey.first);
+                    read_lock rl(t, lock);
                     art::iterator ai(t, lkey.first);
                     while (ai.ok()) {
                         auto k = ai.key();

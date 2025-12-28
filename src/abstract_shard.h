@@ -212,13 +212,15 @@ namespace barch {
 struct storage_release {
     barch::shard_ptr  t{};
     barch::shard_ptr sources_locked{};
+    bool lock = true;
 
     storage_release() = delete;
     storage_release(const storage_release&) = delete;
     storage_release(storage_release&&) = default;
-    storage_release& operator=(const storage_release&) = default;
-    explicit storage_release(const barch::shard_ptr& t) : t(t) {
-
+    storage_release& operator=(storage_release&&) = default;
+    storage_release& operator=(const storage_release&) = delete;
+    explicit storage_release(const barch::shard_ptr& t, bool lock = true) : t(t) , lock(lock){
+        if (!lock) return;
         sources_locked = t->sources();
         auto s = sources_locked;
         // TODO: this may cause deadlock
@@ -227,9 +229,11 @@ struct storage_release {
             s = s->sources();
         }
         t->lock_unique();
+
     }
     ~storage_release() {
         if (!t) return;
+        if (!lock) return;
         t->unlock_unique();
         // TODO: this may cause deadlock we've got to at least test
         auto s = sources_locked;
@@ -239,9 +243,11 @@ struct storage_release {
         }
     }
 };
+typedef storage_release storage_write_lock;
 struct read_lock {
     barch::shard_ptr t{};
     barch::shard_ptr sources_locked{};
+    bool lock = true;
     void clear() {
         t = nullptr;
         sources_locked = nullptr;
@@ -252,17 +258,20 @@ struct read_lock {
         t = r.t;
         sources_locked = r.sources_locked;
         r.clear();
+        lock = r.lock;
 
     };
     read_lock& operator=(read_lock&& r)  noexcept {
         t = r.t;
+        lock = r.lock;
         sources_locked = r.sources_locked;
         r.clear();
         return *this;
     }
     read_lock& operator=(const read_lock&) = delete;
 
-    explicit read_lock(const barch::shard_ptr& t) : t(t) {
+    explicit read_lock(const barch::shard_ptr& t, bool lock = true) : t(t), lock(lock) {
+        if (!lock) return;
         sources_locked = t->sources();
         auto s = sources_locked;
         // TODO: this may cause deadlock
@@ -275,6 +284,7 @@ struct read_lock {
 
     ~read_lock() {
         if (!t) return;
+        if (!lock) return;
         t->unlock_shared();
 
         // TODO: this may cause deadlock we've got to at least test

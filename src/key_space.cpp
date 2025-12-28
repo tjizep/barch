@@ -257,6 +257,29 @@ namespace barch {
         return get(get_shard_index(key.chars(), key.size));
     }
 
+    shard_ptr key_space::get_type_aware(art::value_type key) {
+        switch (key[0]) {
+            // convert all these back to string
+            case tinteger:
+            case tshort:
+            case tfloat:
+            case tdouble:
+                return get(encoded_key_as_string(key));
+            case tstring:
+                return get(key.sub(1));
+                break;
+            case tcomposite:
+                // convert use first value in composite key and recurse
+                return get(encoded_key_as_string(key.sub(2))); // 2 because composite has extra byte
+                break;
+
+            default:
+                // TODO: it's probably a normal key or perhaps an error needs throwing here
+                return get(get_shard_index(key.chars(), key.size));
+        }
+
+    }
+
     [[nodiscard]] std::string key_space::get_name() const {
         return name;
     };

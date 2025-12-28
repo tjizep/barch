@@ -29,13 +29,13 @@ void barch::raw_start_log(bool err) {
     if (err) {
         text_color = fg(fmt::color::burly_wood) | fmt::emphasis::italic;
         header_color = fg(fmt::color::white_smoke) | fmt::emphasis::italic;
-        logged = fmt::format(header_color, "{}:E {:%d %b %Y %H:%M:%S} * {} BARCH ", tid,
-                             std::chrono::floor<std::chrono::milliseconds>(now),std::thread::hardware_concurrency());
+        logged = fmt::format(header_color, "{}:E {:%d %b %Y %H:%M:%S} * BARCH ", tid,
+                             std::chrono::floor<std::chrono::milliseconds>(now));
     } else {
         text_color = fg(fmt::color::burly_wood);
         header_color = fg(fmt::color::white_smoke);
-        logged = fmt::format(header_color, "{}:M {:%d %b %Y %H:%M:%S} * {} BARCH ", tid,
-                             std::chrono::floor<std::chrono::milliseconds>(now),std::thread::hardware_concurrency());
+        logged = fmt::format(header_color, "{}:M {:%d %b %Y %H:%M:%S} * BARCH ", tid,
+                             std::chrono::floor<std::chrono::milliseconds>(now));
     }
     std::clog << logged;
 }

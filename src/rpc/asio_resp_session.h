@@ -63,7 +63,7 @@ namespace barch {
         std::string get_info_l(const std::string& laddress, const std::string& raddress ) const {
             uint64_t seconds = (art::now() - created)/1000;
             std::string r =
-                "id="+std::to_string(this->id)+" addr="+raddress+ " "
+                "$id="+std::to_string(this->id)+" addr="+raddress+ " "
                 "laddr="+laddress+" fd="+"10"+ " "
                 "name="+""+" age="+std::to_string(seconds)+" "+
                 "idle=0 flags=N capa= db=0 sub=0 psub=0 ssub=0 "+

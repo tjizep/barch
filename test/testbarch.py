@@ -1,6 +1,8 @@
 import time
 import barch
 barch.setRoute(0,"127.0.0.1",14500)
+barch.clearAll()
+barch.saveAll()
 r = barch.getRoute(0)
 assert(r.host.s() == "127.0.0.1")
 assert(r.port.i() == 14500)

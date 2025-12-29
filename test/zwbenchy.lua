@@ -62,14 +62,14 @@ local test = function()
             valids = valids + 1
         end
 	end
-
+    assert(valids == vk.call('B.SIZE'))
 	result[inc()] = {'TIME', vk.call('B.MILLIS')-t}
     result[inc()] = {'VALIDS', valids}
     result[inc()] = {'B MEM', vk.call('B.HEAPBYTES')}
     result[inc()] = {'SIZE', vk.call('B.SIZE')}
-    --result[inc()] = {'CLEAR B', vk.call('B.CLEAR')}
+    result[inc()] = {'CLEAR B', vk.call('B.CLEAR')}
     result[inc()] = {'SAVE B', vk.call('B.SAVE')}
-    assert(valids == vk.call('B.SIZE'))
+
 end
 
 

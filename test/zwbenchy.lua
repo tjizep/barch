@@ -74,6 +74,7 @@ end
 
 
 --result[inc()] = vk.call("B.CONFIG", "SET","max_memory_bytes", "80m")
+result[inc()] = vk.call("B.CONFIG", "SET","ordered_keys", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","active_defrag", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","compression", "off")
 result[inc()] = vk.call("B.CONFIG", "SET","save_interval", "10000000000")

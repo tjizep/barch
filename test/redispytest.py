@@ -5,6 +5,8 @@ for cnt in range(1,5):
     barch.start("0.0.0.0", 14000)
     # connect redis client to barch running inside this process
     r = redis.Redis(host="127.0.0.0", port=14000, db=0)
+    r.execute_command("CLIENT INFO")
+
     r.execute_command("CLEARALL")
     r.execute_command("SAVEALL")
 

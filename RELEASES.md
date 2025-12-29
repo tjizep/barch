@@ -1,8 +1,12 @@
-# Release v0.4.3.0b 2025-12-28
+# Release v0.4.3.0b 2025-12-29
 
 ## New Features
-1. make replication shard count agnostic
-2. add debug replication mode
+1. make replication shard count agnostic (v0.4.3.0b 2025-12-28)
+2. add debug replication mode (v0.4.3.0b 2025-12-28)
+
+## Fixes
+1. fix string push along with `CLIENT INFO` (v0.4.3.0b 2025-12-29)
+2. hash test did not test hash (v0.4.3.0b 2025-12-29)
 
 # Release v0.4.2.6b 2025-12-23
 

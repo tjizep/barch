@@ -146,8 +146,12 @@ struct rpc_caller : caller {
         results.emplace_back(encoded_key_as_variant(key));
         return 0;
     }
-    int push_string(const std::string& value) override {
-        results.emplace_back(value);
+    int push_string(const std::string& v) override {
+        r.clear();
+        r.push_back('$');
+        r.insert(r.end(), v.begin(), v.end());
+
+        results.emplace_back(r);
         return 0;
     }
     int push_values(const std::initializer_list<Variable>& keys) override {

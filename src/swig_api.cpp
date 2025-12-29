@@ -66,8 +66,8 @@ void start(const std::string &host, const std::string& port) {
 void start(const std::string &host, int port) {
     start(host, std::to_string(port));
 }
-void start(const std::string& port) {
-    start("127.0.0.1", port);
+void start(int port) {
+    start("127.0.0.1", std::to_string(port));
 }
 void stop() {
     std::vector<std::string_view> params = {"STOP"};

@@ -14,7 +14,7 @@ void ping(const std::string &host, const std::string& port);
 void ping(const std::string &host, int port);
 void start(const std::string &host, const std::string& port);
 void start(const std::string &host, int port);
-void start(const std::string& port);
+void start(int port);
 void stop();
 
 

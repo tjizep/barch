@@ -3,6 +3,11 @@ for cnt in range(1,5):
     import barch
     print(f"start redis test {cnt}")
     barch.start("0.0.0.0", 14000)
+    barch.stop()
+    barch.start(14000)
+
+    barch.ping("127.0.0.1", 14000)
+
     # connect redis client to barch running inside this process
     r = redis.Redis(host="127.0.0.0", port=14000, db=0)
     r.execute_command("CLIENT INFO")
@@ -12,7 +17,9 @@ for cnt in range(1,5):
 
     p = r.pipeline()
     p.set('a','va')
+    assert(p.exists('a'))
     p.set('b','vb')
+
     r.execute_command("pipe:SET a spca")
     p.set('c','vc')
     r.execute_command("pipe:SET a spca")

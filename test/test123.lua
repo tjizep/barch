@@ -1,7 +1,7 @@
 local vk
 vk = redis
 
-local count = 150000
+local count = 100000
 local result = {}
 local chars = {'a','b','c','e','f','g','h'}
 local radix = #chars
@@ -23,7 +23,7 @@ end
 local test = function()
 
     tests = tests + 1
-    --vk.call('B.BEGIN')
+    vk.call('B.BEGIN')
     for i = 1, count do
         local k = convert(i-1)
         local v = '#'..i
@@ -34,10 +34,10 @@ local test = function()
             --vk.log(vk.LOG_NOTICE, "Adding "..i)
         end
     end
-    --vk.call('B.COMMIT')
-
+    vk.call('B.COMMIT')
+    vk.call('B.BEGIN')
     for i = 1, count do
-        --vk.call('B.BEGIN')
+
         local k = convert(i-1)
         local v = '#'..i
         local actual = vk.call('B.GET',k)
@@ -49,9 +49,9 @@ local test = function()
         if math.mod(i,logperiod) == 0 then
             --vk.log(vk.LOG_NOTICE, "Checking "..i.." "..failures)
         end
-        --vk.call('B.ROLLBACK')
-    end
 
+    end
+    vk.call('B.ROLLBACK')
     result[inc()] = {"'B.RANGE',convert(2), convert(count-2), 10", vk.call('B.RANGE',convert(2), convert(count-2), 4)}
     result[inc()] = {[['B.MIN']], vk.call('B.MIN')}
     result[inc()] = {[['B.MAX']], vk.call('B.MAX')}

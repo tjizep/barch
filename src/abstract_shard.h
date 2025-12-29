@@ -15,7 +15,7 @@ namespace barch {
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
     public:
         typedef std::shared_ptr<abstract_shard> shard_ptr;
-        typedef std::vector<bool> bloom_t;
+        typedef heap::vector<bool> bloom_t;
         bloom_t bloom{};
         void add_bloom(art::value_type key) {
             if (static_bloom_size != bloom.size()) return;
@@ -33,10 +33,10 @@ namespace barch {
         }
         void create_bloom(bool enable) {
             bloom_t ebl;
-            bloom.swap(ebl);
+            bloom = std::move(ebl);
             if (enable) {
                 opt_static_bloom_filter = true;
-                bloom.resize(static_bloom_size);
+                //bloom.resize(static_bloom_size);
             }else {
                 opt_static_bloom_filter = false;
             }

@@ -388,6 +388,10 @@ else()
             COMMAND ${TEST_BUILD_PATH}/TestStarter ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}/zwbenchy.lua ${TEST_BUILD_PATH}
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+    add_test(NAME TestClean
+            COMMAND sh -c "rm -f *.dat"
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
 

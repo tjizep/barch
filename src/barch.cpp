@@ -1563,16 +1563,16 @@ int cmd_CLEARALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     return call.vk_call(ctx, argv, argc, CLEAR);
 }
 int KSOPTIONS(caller& call, const arg_t& argv) {
-    if (argv.size() < 3)
+    if (argv.size() != 3)
         return call.wrong_arity();
     if (argv[1] == "SET") {
-        if (argv[2] == "unordered") {
+        if (argv[2] == "UNORDERED") {
             for (auto &shard : call.kspace()->get_shards()) {
                 shard->opt_ordered_keys = false;
             }
             return call.push_simple("OK");
         }
-        if (argv[2] == "ordered") {
+        if (argv[2] == "ORDERED") {
             for (auto &shard : call.kspace()->get_shards()) {
                 shard->opt_ordered_keys = true;
             }
@@ -1902,6 +1902,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(CLEARALL), "write", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(KSOPTIONS), "write", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (add_hash_api(ctx) != VALKEYMODULE_OK) {

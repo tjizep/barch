@@ -287,8 +287,9 @@ int art_iter(art::tree *t, art::CallBack cb, void *data);
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
+#if 0
 int art_iter_prefix(art::tree *t, art::value_type prefix, art::CallBack cb, void *data);
-
+#endif
 /**
  * iterates through a range from small to large from key to key_end
  * the first key is located in constant time
@@ -299,9 +300,9 @@ namespace art {
     node_ptr find(const art::tree* t, value_type key);
 
     int range(const tree *t, value_type key, value_type key_end, CallBack cb, void *data);
-
+#if 0
     int range(const tree *t, value_type key, value_type key_end, LeafCallBack cb);
-
+#endif
     int64_t distance(const tree *t, const trace_list &a, const trace_list &b);
 
     int64_t fast_distance(const trace_list &a, const trace_list &b);

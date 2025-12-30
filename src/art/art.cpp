@@ -76,7 +76,7 @@ static art::trace_element lower_bound_child(const art::node_ptr &n,
         *is_equal = r.second;
     return r.first;
 }
-
+#if 0
 static art::node_ptr find_child(const art::node_ptr& n, unsigned char c) {
     if (n.null()) return nullptr;
     if (n.is_leaf) return nullptr;
@@ -84,7 +84,7 @@ static art::node_ptr find_child(const art::node_ptr& n, unsigned char c) {
     unsigned i = n->index(c);
     return n->get_child(i);
 }
-
+#endif
 
 /**
  * return last element of trace unless its empty
@@ -534,7 +534,7 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
     }
     return 0;
 }
-
+#if 0
 int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack cb) {
     ++statistics::range_ops;
     try {
@@ -571,7 +571,7 @@ int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack c
     }
     return 0;
 }
-
+#endif
 
 art::node_ptr art::find(const tree* t, value_type key) {
     ++statistics::get_ops;
@@ -1346,6 +1346,7 @@ void art_delete(art::tree *t, art::value_type key, const art::NodeResult &fc) {
 }
 
 // Recursively iterates over the tree
+#if 0
 static int recursive_iter(art::node_ptr n, art::CallBack cb, void *data) {
     // Handle base cases
     if (n.null()) return 0;
@@ -1394,6 +1395,7 @@ static int recursive_iter(art::node_ptr n, art::CallBack cb, void *data) {
     }
     return 0;
 }
+#endif
 
 /**
  * Iterates through the entries pairs in the map,
@@ -1405,6 +1407,7 @@ static int recursive_iter(art::node_ptr n, art::CallBack cb, void *data) {
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
+#if 0
 int art_iter(art::tree *t, art::CallBack cb, void *data) {
     ++statistics::iter_start_ops;
     try {
@@ -1430,7 +1433,7 @@ static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
     // Compare the keys
     return memcmp(n->key(), prefix.bytes, prefix.length());
 }
-
+#endif
 /**
  * Iterates through the entries pairs in the map,
  * invoking a callback for each that matches a given prefix.
@@ -1443,6 +1446,7 @@ static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
  * @arg data Opaque handle passed to the callback
  * @return 0 on success, or the return of the callback.
  */
+#if 0 // replaced by iterator in iterator.h
 int art_iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *data) {
     ++statistics::iter_start_ops;
     try {
@@ -1506,7 +1510,7 @@ int art_iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *d
     }
     return 0;
 }
-
+#endif
 art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
     if (key.size > maximum_allocation_size) {
         throw_exception<std::runtime_error>("value too large");

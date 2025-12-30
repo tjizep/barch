@@ -854,8 +854,9 @@ int barch::shard::range(art::value_type key, art::value_type key_end, CallBack c
     return art::range(this, key, key_end, cb, data);
 }
 
-int barch::shard::range(art::value_type key, art::value_type key_end, LeafCallBack cb) {
-    return art::range(this, key, key_end, cb);
+int barch::shard::range(art::value_type unused(key), art::value_type unused(key_end), LeafCallBack unused(cb)) {
+    //return art::range(this, key, key_end, cb);
+    return -1;
 }
 art::value_type barch::shard::filter_key(value_type key) const {
     return tree_filter_key(key);

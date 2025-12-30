@@ -14,6 +14,17 @@ for cnt in range(1,5):
 
     r.execute_command("CLEARALL")
     r.execute_command("SAVEALL")
+    r.execute_command("INFO SERVER")
+    r.execute_command("INFO SHARD 0")
+    r.execute_command("INFO SHARD k")
+    r.execute_command("CONFIG SET rpc_max_buffer 64k")
+    r.execute_command("CONFIG SET rpc_max_buffer 1m")
+    r.execute_command("CONFIG SET rpc_max_buffer 1g")
+    #r.execute_command("CONFIG SET listen_port 14000")
+    #r.execute_command("CONFIG SET server_port 14100")
+    r.execute_command("CONFIG SET log_page_access_trace off")
+    #r.execute_command("CONFIG SET rpc_client_max_wait_ms 15000")
+    r.execute_command("CONFIG SET min_compressed_size 128")
 
     p = r.pipeline()
     p.set('a','va')

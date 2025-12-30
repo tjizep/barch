@@ -299,7 +299,7 @@ Value KeyValue::max() const {
 }
 
 void KeyValue::incr(const std::string& key, double by) {
-    std::string b = std::to_string(by);
+    std::string b = std::to_string((int64_t)by);
     params = {"INCRBY",key, b};
 
     int r = sc.call(params, ::INCRBY);
@@ -307,7 +307,7 @@ void KeyValue::incr(const std::string& key, double by) {
 }
 
 void KeyValue::decr(const std::string& key, double by) {
-    std::string b = std::to_string(by);
+    std::string b = std::to_string((int64_t)by);
     params = {"DECRBY", key,b};
 
     int r = sc.call(params, ::DECRBY);

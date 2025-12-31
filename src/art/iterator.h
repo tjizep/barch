@@ -52,6 +52,7 @@ namespace art {
 
         [[nodiscard]] node_ptr current() const;
 
+#if 0
         bool update(std::function<node_ptr(const leaf *l)> updater);
 
         bool update(value_type value);
@@ -61,6 +62,7 @@ namespace art {
         bool update(int64_t ttl, bool volat);
 
         bool update(int64_t ttl);
+#endif
 
         [[nodiscard]] bool remove() const;
 

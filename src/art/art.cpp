@@ -728,7 +728,7 @@ bool art::iterator::remove() const {
     t->tree_remove(key(),[](const node_ptr &) {});
     return bef > t->get_tree_size();
 }
-
+#if 0
 bool art::iterator::update(std::function<node_ptr(const leaf *l)> updater) {
     if (end()) return false;
     auto &el = last_el(tl);
@@ -774,7 +774,7 @@ bool art::iterator::update(value_type value) {
         return t->make_leaf(l->get_key(), value, l->expiry_ms(), l->is_volatile(), false);
     });
 }
-
+#endif
 static art::trace_element first(const art::trace_element &el) {
     if (el.parent.is_leaf) return {};
     if (el.parent.null()) return {};

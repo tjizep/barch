@@ -102,11 +102,11 @@ namespace art {
             return resolve_read_node(logical_address((int64_t) value + base, &alloc));
         }
 
-        node_ptr as_leaf(logical_address parent) const  {
+        [[nodiscard]] node_ptr as_leaf(logical_address parent) const  {
             return get_leaf(parent.get_ap<alloc_pair>());
         }
 
-        node_ptr as_node(logical_address parent) const  {
+        [[nodiscard]] node_ptr as_node(logical_address parent) const  {
             return get_node(parent.get_ap<alloc_pair>());
         }
 

@@ -755,7 +755,7 @@ bool barch::shard::evict(const leaf* l) {
     if (l->is_hashed()) {
         set_hash_query_context(l->get_key());
         auto i = h.find(l->get_key());
-        if (i != h.end()) {
+        if (i != h.end()) { // we don't need to de-count delete ops here
             auto n = i->node(this);
             erase_tomb(n.l());
             h.erase(i);
@@ -763,12 +763,15 @@ bool barch::shard::evict(const leaf* l) {
             ++statistics::keys_evicted;
             return true;
         }
+        // else ...
+
+        return false;
     }
-    --statistics::delete_ops; // were not counting these deletes
     art_delete(this, l->get_key(), [](const art::node_ptr &){});
     if (size < before) {
         ++statistics::keys_evicted;
     }
+    --statistics::delete_ops; // were not counting these deletes
     return size < before;
 }
 bool barch::shard::evict(value_type unfiltered_key) {

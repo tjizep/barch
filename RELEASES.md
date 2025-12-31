@@ -1,4 +1,4 @@
-# Release v0.4.3.1b 2025-12-30
+# Release v0.4.3.1b 2025-12-31
 
 ## New Features
 1. make replication shard count agnostic (v0.4.3.0b 2025-12-28)
@@ -9,6 +9,7 @@
 2. hash test did not test hash (v0.4.3.0b 2025-12-29)
 3. remove unused code (v0.4.3.1b 2025-12-30)
 4. fix incr/decr for doubles (v0.4.3.1b 2025-12-30)
+6. fix memcpy/buffer overflow bug (v0.4.3.2b 2025-12-31)
 
 # Release v0.4.2.6b 2025-12-23
 

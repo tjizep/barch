@@ -22,19 +22,15 @@ extern "C" {
 
 #include <cctype>
 #include <cstring>
-#include <cstdlib>
 #include <cmath>
 #include <shared_mutex>
 #include "conversion.h"
 #include "art/art.h"
 #include "configuration.h"
-#include <fast_float/fast_float.h>
-#include <functional>
 #include "keyspec.h"
 #include "ioutil.h"
 #include "module.h"
 #include "hash_api.h"
-#include "keys.h"
 #include "ordered_api.h"
 #include "caller.h"
 #include "spaces_spec.h"
@@ -413,7 +409,6 @@ int SET(caller& call,const arg_t& argv) {
     };
 
     art::key_options opts = spec;
-    static std::atomic<size_t> compressed_ctr = 0;
     const auto& compressed = dictionary::compress(v);
     if (!compressed.empty()) {
         statistics::value_bytes_compressed += compressed.size;
@@ -668,7 +663,6 @@ int cmd_DECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int MSET(caller& call, const arg_t& argv) {
     if (argv.size() < 3)
         return call.wrong_arity();
-    int responses = 0;
     int r = call.ok();
     for (size_t n = 1; n < argv.size(); n += 2) {
         auto k = argv[n];
@@ -676,7 +670,6 @@ int MSET(caller& call, const arg_t& argv) {
 
         if (key_ok(k) != 0) {
             r |= call.push_null();
-            ++responses;
             continue;
         }
 
@@ -689,7 +682,6 @@ int MSET(caller& call, const arg_t& argv) {
         storage_release release(t);
         t->insert( spec, converted.get_value(), v, true, fc);
 
-        ++responses;
     }
     call.push_bool(true);
     return call.ok();

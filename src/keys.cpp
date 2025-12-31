@@ -194,7 +194,7 @@ unsigned log_encoded_key(art::value_type key, bool start) {
     double dk;
     float fk;
     int64_t ik;
-    int64_t sk;
+    int32_t sk;
     const char *k;
     size_t kl;
     const unsigned char *enck = key.bytes;

@@ -25,7 +25,7 @@ jobs:
           cmake -B build \
              -DTEST_OD=ON \
              -DCOVERAGE=ON \
-             -DCMAKE_BUILD_TYPE=Debug
+             -DCMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build --target barch --parallel
           cmake --build build --target lbarch --parallel
           ( cd build ; ctest --output-on-failure )

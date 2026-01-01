@@ -68,34 +68,16 @@ conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool 
     double d;
 
     if (!noint) {
-#if 1
         if (to_i64({v,vlen},i)) {
             return comparable_key(i);
         }
-#else
-		char * ep;
-		i = strtoll(v,&ep,10 );
-		if (ep == v + vlen)
-		{
-			return comparable_key(i);
-		}
-#endif
+
     }
-#if 1
     auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
 
     if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen) {
         return comparable_key(d);
     }
-#else
-	char * ep;
-	d = strtod(v,&ep);
-	if (ep == v + vlen)
-	{
-		return comparable_key(d);
-	}
-
-#endif
     return {v, vlen + 1};
 }
 Variable conversion::as_variable(const char *v, size_t vlen, bool noint) {

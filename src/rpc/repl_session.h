@@ -27,6 +27,9 @@ namespace barch {
         :   socket_(std::move(socket))
         ,   bytes_already_read(bytes_alread_read)
         {
+            asio::socket_base::send_buffer_size option(65536); // or larger
+            socket_.set_option(option);
+            socket_.set_option(asio::ip::tcp::no_delay(true));
             ++statistics::repl::art_sessions;
         }
         ~repl_session() {

@@ -75,10 +75,13 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     #set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
 endif ()
 
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
+        "-O2 -g -fno-omit-frame-pointer")
+
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Og")
     message("Using debuggable optimizations")
 endif ()
+
 if (CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto -O3 -funroll-all-loops")
     message("Not Using debuggable optimizations")

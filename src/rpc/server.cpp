@@ -21,6 +21,7 @@
 #include "asio_resp_session.h"
 #include "rpc/barch_session.h"
 #include "repl_session.h"
+#include "uring_resp_session.h"
 #include "rpc/constants.h"
 
 namespace barch {
@@ -52,12 +53,14 @@ namespace barch {
 
         thread_pool pool{(double)tcp_accept_pool_factor/100.0f};
         thread_pool asio_resp_pool{(double)resp_pool_factor/100.0f};
+        thread_pool uring_resp_pool{(double)resp_pool_factor/100.0f};
         thread_pool work_pool{asynch_proccess_workers};
 
         asio::io_context io{};
         asio::io_context workers{};
         exec_guard worker_guard {asio::make_work_guard(workers)};
         std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
+        std::vector<std::shared_ptr<uring_work_unit>> uring_resp_ios{};
 
         tcp::acceptor accept;
         asio::ssl::context ssl_context;
@@ -66,9 +69,10 @@ namespace barch {
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
         std::atomic<size_t> asio_resp_distributor{};
+        std::atomic<size_t> uring_resp_distributor{};
         bool use_ssl = false;
 #if 0
-        std::shared_ptr<work_unit> get_unit() {
+        std::shared_ptr<uring_work_unit> get_unit() {
             size_t r = resp_distributor++ % io_resp.size();
             return io_resp[r];
         }
@@ -77,6 +81,11 @@ namespace barch {
             size_t r = (asio_resp_distributor % asio_resp_ios.size());
             asio_resp_distributor++;
             return asio_resp_ios[r];
+        }
+        std::shared_ptr<uring_work_unit> get_uring_unit() {
+            size_t r = (uring_resp_distributor % uring_resp_ios.size());
+            uring_resp_distributor++;
+            return uring_resp_ios[r];
         }
 
         void stop() {
@@ -88,6 +97,14 @@ namespace barch {
                 accept.close();
             }catch (std::exception& ) {}
             for (auto &proc: asio_resp_ios) {
+                try {
+                    proc->stop();
+                }catch (std::exception& e) {
+                    barch::std_err("failed to stop resp io service", e.what());
+                }
+
+            }
+            for (auto &proc: uring_resp_ios) {
                 try {
                     proc->stop();
                 }catch (std::exception& e) {
@@ -143,6 +160,7 @@ namespace barch {
 
 
         void start() {}
+        bool use_uring = false;
         void process_data(tcp::socket& endpoint) {
             try {
                 char cs[1] ;
@@ -150,14 +168,22 @@ namespace barch {
                 endpoint.read_some(asio::buffer(cs,1));
                 stream_read_ctr += 1;
                 if (cs[0]) {
-                    auto unit = this->get_asio_unit();
-                    tcp::socket socket (unit->io);
-                    socket.assign(tcp::v4(),endpoint.release());
-                    auto session = std::make_shared<resp_session<tcp::socket>>(std::move(socket),workers, cs[0]);
-                        //auto session = std::make_shared<resp_session>(std::move(endpoint),workers, cs[0]);
-                    session->start();
+                    if (use_uring) {
+                        auto unit = this->get_uring_unit();
+                        auto session = std::make_shared<uring_resp_session>(std::move(endpoint), unit, cs[0]);
+                        session->start();
+                    }else {
+                        auto unit = this->get_asio_unit();
+                        tcp::socket socket (unit->io);
 
+                        socket.assign(tcp::v4(),endpoint.release());
+                        auto fd = socket.lowest_layer().native_handle();
+                        int quickack = 1;
+                        setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
 
+                        auto session = std::make_shared<resp_session<tcp::socket>>(std::move(socket),workers, cs[0]);
+                        session->start();
+                    }
                     return;
                 }
                 uint32_t cmd = 0;
@@ -252,6 +278,7 @@ namespace barch {
             num_started = 0;
             barch::std_log("resp pool size",asio_resp_pool.size());
             asio_resp_ios.resize(asio_resp_pool.size());
+            uring_resp_ios.resize(uring_resp_pool.size());
             asio_resp_pool.start([this](size_t tid) -> void {
                 ++num_started;
                 asio_resp_ios[tid] = std::make_shared<asio_work_unit>();
@@ -260,7 +287,17 @@ namespace barch {
             while (num_started != asio_resp_pool.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            asio_resp_pool.pin_threads();
+            num_started = 0;
+            uring_resp_pool.start([this](size_t tid) -> void {
+                ++num_started;
+                uring_resp_ios[tid] = std::make_shared<uring_work_unit>();
+                uring_resp_ios[tid]->run(tid);
+            });
+            while (num_started != asio_resp_pool.size()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            //asio_resp_pool.pin_threads();
             started = true;
         }
         ~server_context() {

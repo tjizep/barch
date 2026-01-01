@@ -30,6 +30,9 @@ namespace barch {
             caller.info_fun = [this]() -> std::string {
                 return get_info(socket_);
             };
+            //asio::socket_base::send_buffer_size option(65536); // or larger
+            //socket_.set_option(option);
+
             ++statistics::repl::redis_sessions;
         }
         template<typename sock_T>

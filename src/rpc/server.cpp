@@ -811,17 +811,17 @@ extern "C"{
     int ADDROUTE(caller& call, const arg_t& argv) {
         if (argv.size() != 4)
             return call.wrong_arity();
-        size_t shard = conversion::as_variable(argv[1]).i();
-        if (shard >= barch::get_shard_count().size())
+        Variable shard = argv[1];
+        if (shard.ui() >= barch::get_shard_count().size())
             return call.push_error("invalid shard");
-        auto host = conversion::as_variable(argv[2]).s();
-        auto port = conversion::as_variable(argv[3]).i();
-        if (port <= 0 || port >= 65536)
+        Variable host = argv[2];
+        Variable port = argv[3];
+        if (port.i() <= 0 || port.i() >= 65536)
             return call.push_error("invalid port");
-        if (host.empty())
+        if (host.s().empty())
             return call.push_error("no host");
-        barch::repl::set_route(shard, {host,port});
-        return call.push_simple(host.c_str());
+        barch::repl::set_route(shard.i(), {host.s(),port.i()});
+        return call.push_simple(host.s());
     }
     int ROUTE(caller& call, const arg_t& argv) {
         if (argv.size() != 2)

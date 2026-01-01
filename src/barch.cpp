@@ -8,6 +8,7 @@
 #include "rpc/redis_parser.h"
 #include "vk_caller.h"
 #include "keys.h"
+#include "swig_api.h"
 #include "thread_pool.h"
 /* cdict --
  *
@@ -1390,22 +1391,22 @@ int START(caller& call, const arg_t& argv) {
 int PUBLISH(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto interface = argv[1];
-    auto port = argv[2];
+    Variable interface = argv[1];
+    Variable port = argv[2];
     auto ks = call.kspace();
     for (auto shard: barch::get_shard_count()) {
-        if (!ks->get(shard)->publish(interface.chars(), atoi(port.chars()))) {}
+        if (!ks->get(shard)->publish(interface.s(), port.i())) {}
     }
     return call.push_simple("OK");
 }
 int PULL(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto interface = argv[1];
-    auto port = argv[2];
+    Variable interface = argv[1];
+    Variable port = argv[2];
     auto ks = call.kspace();
     for (auto shard: barch::get_shard_count()) {
-        if (!ks->get(shard)->pull(interface.chars(), atoi(port.chars()))) {}
+        if (!ks->get(shard)->pull(interface.s(), port.i())) {}
     }
     return call.push_simple("OK");
 }
@@ -1432,11 +1433,11 @@ int RETRIEVE(caller& call, const arg_t& argv) {
 
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto host = argv[1];
-    auto port = argv[2];
+    Variable host = argv[1];
+    Variable port = argv[2];
 
     for (auto shard : barch::get_shard_count()) {
-        barch::repl::client cli(host.chars(), atoi(port.chars()), shard);
+        barch::repl::client cli(host.s(), port.i(), shard);
         if (!cli.load(shard)) {
             if (shard > 0) {
                 auto ks = call.kspace();

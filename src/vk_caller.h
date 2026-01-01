@@ -153,6 +153,11 @@ struct vk_caller : caller {
         ++call_counter;
         return ValkeyModule_ReplyWithSimpleString(ctx, v);
     };
+    int push_simple(const std::string&  v) override {
+        check_ctx();
+        ++call_counter;
+        return ValkeyModule_ReplyWithSimpleString(ctx, v.c_str());
+    };
     [[nodiscard]] int error() const override {
         return VALKEYMODULE_ERR;
     }

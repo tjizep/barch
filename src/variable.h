@@ -24,7 +24,17 @@ struct error {
     std::string name;
 };
 typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error> variable_t;
+
 extern bool to_ui64(art::value_type v, uint64_t &i);
+extern bool to_ui32(art::value_type v, uint32_t &i);
+extern bool to_ui16(art::value_type v, uint16_t &i);
+
+extern bool to_i64(art::value_type v, int64_t &i);
+extern bool to_i32(art::value_type v, int32_t &i);
+extern bool to_i16(art::value_type v, int16_t &i);
+
+extern variable_t as_variable(art::value_type v);
+
 class Variable : public variable_t {
 public:
     Variable() = default;
@@ -33,7 +43,7 @@ public:
     Variable(const TM & m) {
         variable_t::operator=(m);
     }
-
+    Variable(const art::value_type & v) : variable_t(::as_variable(v)){}
     Variable& operator=(const Variable&) = default;
     [[nodiscard]] bool isBoolean() const {
         return index() == var_bool;

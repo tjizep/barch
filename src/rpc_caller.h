@@ -133,6 +133,10 @@ struct rpc_caller : caller {
         results.emplace_back(v);
         return 0;
     }
+    int push_simple(const std::string& v) override {
+        results.emplace_back(v);
+        return 0;
+    }
 
     int start_array() override {
         //results.emplace_back("start_array");

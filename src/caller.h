@@ -57,6 +57,7 @@ struct caller {
     virtual int push_double(double l) = 0;
     virtual int push_vt(art::value_type v) = 0;
     virtual int push_simple(const char * v) = 0;
+    virtual int push_simple(const std::string& v) = 0;
     virtual size_t pop_back(size_t) {
         return 0;
     }

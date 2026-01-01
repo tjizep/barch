@@ -49,6 +49,21 @@ bool conversion::to_ll(art::value_type v, long long &i) {
 bool to_ui64(art::value_type v, uint64_t &i) {
     return to_t(v, i);
 }
+bool to_ui32(art::value_type v, uint32_t &i) {
+    return to_t(v, i);
+}
+bool to_ui16(art::value_type v, uint16_t &i) {
+    return to_t(v, i);
+}
+bool to_i64(art::value_type v, int64_t &i) {
+    return to_t(v, i);
+}
+bool to_i32(art::value_type v, int32_t &i) {
+    return to_t(v, i);
+}
+bool to_i16(art::value_type v, int16_t &i) {
+    return to_t(v, i);
+}
 bool conversion::to_ui64(art::value_type v, uint64_t &i) {
     return to_t(v, i);
 }
@@ -80,40 +95,27 @@ conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool 
     }
     return {v, vlen + 1};
 }
-Variable conversion::as_variable(const char *v, size_t vlen, bool noint) {
+variable_t as_variable(const char *v, size_t vlen, bool noint) {
     int64_t i;
     double d;
 
     if (!noint) {
-#if 1
         if (to_i64({v,vlen},i)) {
             return {i};
         }
-#else
-        char * ep;
-        i = strtoll(v,&ep,10 );
-        if (ep == v + vlen)
-        {
-            return {i};
-        }
-#endif
     }
-#if 1
     auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
 
     if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen) {
         return d;
     }
-#else
-    char * ep;
-    d = strtod(v,&ep);
-    if (ep == v + vlen)
-    {
-        return comparable_key(d);
-    }
-
-#endif
     return std::string(v,vlen);
+}
+variable_t as_variable(art::value_type v) {
+    return as_variable(v.data(), v.size, false);
+}
+Variable conversion::as_variable(const char *v, size_t vlen, bool noint) {
+    return ::as_variable(v, vlen, noint);
 }
 
 conversion::comparable_key conversion::convert(const std::string &str, bool noint) {

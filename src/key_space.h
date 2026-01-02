@@ -42,10 +42,11 @@ namespace barch {
         size_t get_shard_index(const std::string& key);
         size_t get_shard_index(ValkeyModuleString **argv) ;
         void depends(const key_space_ptr& dependant);
-        key_space_ptr source() const;
+        [[nodiscard]] key_space_ptr source() const;
         void merge(key_space_ptr into, merge_options options);
         void merge(merge_options options);
         void each_shard(std::function<void(shard_ptr)> f);
+        [[nodiscard]] size_t get_shard_count() const;
     };
     typedef key_space::key_space_ptr key_space_ptr;
     const std::string& get_ks_pattern_error();

@@ -1362,12 +1362,13 @@ int LOAD(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    std::vector<std::thread> loaders{barch::get_shard_count().size()};
+    std::vector<std::thread> loaders;
     size_t errors = 0;
     auto ks = call.kspace();
-    for (auto shard : barch::get_shard_count()) {
-        loaders[shard] = std::thread([&errors,shard,&ks]() {
-            if (!ks->get(shard)->load(true)) ++errors;
+    loaders.resize(ks->get_shard_count());
+    for (const auto& shard : ks->get_shards()) {
+        loaders[shard->get_shard_number()] = std::thread([&errors,shard,&ks]() {
+            if (!shard->load(true)) ++errors;
         });
     }
     for (auto &loader : loaders) {

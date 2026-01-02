@@ -730,6 +730,8 @@ static int SetOrderedKeys(std::string test_ordered_keys) {
     config().ordered_keys =
             state().ordered_keys == "on" || state().ordered_keys == "true" || state().ordered_keys == "yes";
     for (auto s : get_default_ks()->get_shards()) {
+        if (!s)
+            abort_with("invalid shard");
         s->opt_ordered_keys = config().ordered_keys;
     }
     return VALKEYMODULE_OK;
@@ -1084,7 +1086,7 @@ float barch::get_min_fragmentation_ratio() {
     return config().min_fragmentation_ratio;
 }
 double barch::get_pre_evict_thresh() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().pre_evict_thresh;
 }
 uint64_t barch::get_min_compressed_size() {
@@ -1093,48 +1095,48 @@ uint64_t barch::get_min_compressed_size() {
 }
 
 bool barch::get_active_defrag() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().active_defrag;
 }
 
 
 bool barch::get_evict_volatile_lru() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_lru;
 }
 
 bool barch::get_evict_allkeys_lru() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().evict_allkeys_lru;
 }
 
 bool barch::get_evict_volatile_lfu() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_lfu;
 }
 
 bool barch::get_evict_allkeys_lfu() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().evict_allkeys_lfu;
 }
 
 bool barch::get_evict_volatile_random() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_random;
 };
 
 bool barch::get_evict_allkeys_random() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().evict_allkeys_random;
 }
 
 bool barch::get_evict_volatile_ttl() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().evict_volatile_ttl;
 }
 
 std::string barch::get_eviction_policy() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return state().eviction_type;
 }
 
@@ -1184,7 +1186,7 @@ int64_t barch::get_rpc_max_client_wait_ms() {
 }
 
 bool barch::get_log_page_access_trace() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().log_page_access_trace;
 }
 
@@ -1198,7 +1200,7 @@ std::chrono::seconds barch::get_rpc_write_to_s() {
     return std::chrono::seconds(config().rpc_write_to_s);
 }
 bool barch::get_use_vmm_memory() {
-    std::lock_guard lock(state().config_mutex);
+    //std::lock_guard lock(state().config_mutex);
     return config().use_vmm_memory;
 }
 bool barch::get_ordered_keys() {

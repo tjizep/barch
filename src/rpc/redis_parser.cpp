@@ -35,15 +35,21 @@ namespace redis {
             return false;
         }
         item.size = 2;
-        for (size_t i = buffer_start + 2; i < buffer_size; i++) {
-            size_t tis = ++item.size;
-            if (item.bytes[tis-2] == '\r' &&
-                item.bytes[tis-1] == '\n') {
-                buffer_start += tis;
+        ptrdiff_t end = buffer_size - buffer_start + 1;
+
+        for (ptrdiff_t i = 2; i < end; i++) {
+            const auto* d = (const uint8_t*) memchr(&item.bytes[i-2],'\r',end);
+            if (d == nullptr) break;
+            i += (d - &item.bytes[i-2]);
+            if (item.bytes[i-2] == '\r' &&
+                item.bytes[i-1] == '\n') {
+                item.size = i;
+                buffer_start += i;
                 ++parameters_processed;
                 return true;
             }
         }
+
         return false;
     }
 

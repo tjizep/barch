@@ -71,12 +71,7 @@ namespace barch {
         std::atomic<size_t> asio_resp_distributor{};
         std::atomic<size_t> uring_resp_distributor{};
         bool use_ssl = false;
-#if 0
-        std::shared_ptr<uring_work_unit> get_unit() {
-            size_t r = resp_distributor++ % io_resp.size();
-            return io_resp[r];
-        }
-#endif
+
         std::shared_ptr<asio_work_unit> get_asio_unit() {
             size_t r = (asio_resp_distributor % asio_resp_ios.size());
             asio_resp_distributor++;

@@ -122,11 +122,19 @@ struct rpc_caller : caller {
         results.emplace_back(l);
         return 0;
     }
+
     int push_vt(art::value_type v) override {
-        r.clear();
-        r.push_back('$');
-        r.insert(r.end(), v.begin(), v.end());
-        results.emplace_back(r); // values are currently always a string
+        results.emplace_back(std::string{});
+        auto& s = std::get<std::string>(results.back()); // values are currently always a string
+        s.push_back('$');
+        s.insert(s.end(), v.begin(), v.end());
+        return 0;
+    }
+
+    int push_simple(art::value_type v) override {
+        results.emplace_back(std::string{}); // values are currently always a string
+        auto& s = std::get<std::string>(results.back()); // values are currently always a string
+        s.insert(s.end(), v.begin(), v.end());
         return 0;
     }
     int push_simple(const char * v) override {

@@ -11,7 +11,8 @@
 #include "ioutil.h"
 
 struct vector_stream  {
-    bool nostats() const {
+    // stats not collected for this stream type
+    [[nodiscard]] bool nostats() const {
         return true;
     }
     size_t pos{};

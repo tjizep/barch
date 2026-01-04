@@ -146,7 +146,7 @@ namespace redis {
     template<typename TS>
     inline void rwrite(TS& io, const heap::vector<Variable>& v) {
         if (v.empty()) {
-            rwrite(io,nullptr);
+            rwrite(io, nullptr);
             return;
         }
         if (v.size() == 1) {

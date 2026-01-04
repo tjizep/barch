@@ -163,11 +163,7 @@ namespace barch {
                 endpoint.read_some(asio::buffer(cs,1));
                 stream_read_ctr += 1;
                 if (cs[0]) {
-                    if (use_uring) {
-                        auto unit = this->get_uring_unit();
-                        auto session = std::make_shared<uring_resp_session>(std::move(endpoint), unit, cs[0]);
-                        session->start();
-                    }else {
+
                         auto unit = this->get_asio_unit();
                         tcp::socket socket (unit->io);
 
@@ -175,10 +171,11 @@ namespace barch {
                         auto fd = socket.lowest_layer().native_handle();
                         int quickack = 1;
                         setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
-
+                        int flag = 1;
+                        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
                         auto session = std::make_shared<resp_session<tcp::socket>>(std::move(socket),workers, cs[0]);
                         session->start();
-                    }
+
                     return;
                 }
                 uint32_t cmd = 0;

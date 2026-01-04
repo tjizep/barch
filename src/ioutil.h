@@ -12,6 +12,7 @@
 #include "configuration.h"
 #include <experimental/type_traits>
 
+struct vector_stream;
 template<typename T>
 using expires_from_now_t = decltype( std::declval<T&>().expires_from_now(std::chrono::seconds(10)) );
 
@@ -85,6 +86,8 @@ static void writep(OStream &of, const T &data) {
     }
     incr_write_stat(of,sizeof(data));
 }
+
+
 template<typename OStream>
 static void writep(OStream &of, const char* data) {
     write_expires(of);

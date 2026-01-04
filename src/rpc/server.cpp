@@ -53,7 +53,6 @@ namespace barch {
 
         thread_pool pool{(double)tcp_accept_pool_factor/100.0f};
         thread_pool asio_resp_pool{(double)resp_pool_factor/100.0f};
-        thread_pool uring_resp_pool{(double)resp_pool_factor/100.0f};
         thread_pool work_pool{asynch_proccess_workers};
 
         asio::io_context io{};
@@ -69,7 +68,6 @@ namespace barch {
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
         std::atomic<size_t> asio_resp_distributor{};
-        //std::atomic<size_t> uring_resp_distributor{};
         bool use_ssl = false;
 
         std::shared_ptr<asio_work_unit> get_asio_unit() {
@@ -218,11 +216,12 @@ namespace barch {
             }
 
         }
+#if 0
         std::string get_password() const
         {
             return "test";
         }
-
+#endif
         server_context(std::string interface, uint_least16_t port, bool ssl)
         :   accept(io, tcp::endpoint(tcp::v4(), port))
         ,   ssl_context(asio::ssl::context::tlsv13)
@@ -235,7 +234,9 @@ namespace barch {
                 asio::ssl::context::default_workarounds
                 | asio::ssl::context::no_tlsv1_1
                 | asio::ssl::context::single_dh_use);
+#if 0
                 ssl_context.set_password_callback(std::bind(&server_context::get_password, this));
+#endif
                 ssl_context.use_certificate_chain_file(get_tls_pem_certificate_chain_file());
                 ssl_context.use_private_key_file(get_tls_private_key_file(), asio::ssl::context::pem);
                 ssl_context.use_tmp_dh_file(get_tls_tmp_dh_file());
@@ -257,16 +258,11 @@ namespace barch {
             num_started = 0;
             barch::std_log("resp pool size",asio_resp_pool.size());
             asio_resp_ios.resize(asio_resp_pool.size());
-            //uring_resp_ios.resize(uring_resp_pool.size());
             asio_resp_pool.start([this](size_t tid) -> void {
                 ++num_started;
                 asio_resp_ios[tid] = std::make_shared<asio_work_unit>();
                 asio_resp_ios[tid]->run();
             });
-            while (num_started != asio_resp_pool.size()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            num_started = 0;
             while (num_started != asio_resp_pool.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }

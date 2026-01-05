@@ -244,9 +244,9 @@ int COUNT(caller& call, const arg_t& argv) {
     long long count = 0;
     auto c1 = conversion::convert(k1);
     auto c2 = conversion::convert(k2);
-    auto space_cnt = [c1,c2](barch::key_space_ptr spce, size_t shard)-> size_t {
+    auto space_cnt = [c1,c2](const barch::key_space_ptr& spce, size_t shard)-> long long {
         if (!spce) return 0;
-        size_t count = 0;
+        long long count = 0;
         auto t = spce->get(shard);
         read_lock release(t);
 
@@ -684,7 +684,8 @@ int MSET(caller& call, const arg_t& argv) {
         t->insert( spec, converted.get_value(), v, true, fc);
 
     }
-    call.push_bool(true);
+
+    call.push_bool(r == call.ok());
     return call.ok();
 }
 int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1367,7 +1368,7 @@ int LOAD(caller& call, const arg_t& argv) {
     auto ks = call.kspace();
     loaders.resize(ks->get_shard_count());
     for (const auto& shard : ks->get_shards()) {
-        loaders[shard->get_shard_number()] = std::thread([&errors,shard,&ks]() {
+        loaders[shard->get_shard_number()] = std::thread([&errors,shard]() {
             if (!shard->load(true)) ++errors;
         });
     }

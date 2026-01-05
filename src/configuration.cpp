@@ -874,7 +874,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "eviction_policy", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEvictionType, SetEvictionType, ApplyEvictionType, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", "32g", VALKEYMODULE_CONFIG_DEFAULT,
+    auto physical = heap::get_physical_memory_bytes();
+    auto def = physical;// - physical / 4ull;
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", std::to_string(def).c_str(), VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxMemoryRatio, SetMaxMemoryBytes, ApplyMaxMemoryRatio, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
@@ -1181,7 +1184,7 @@ uint64_t barch::get_rpc_max_buffer() {
     return config().rpc_max_buffer;
 }
 
-int64_t barch::get_rpc_max_client_wait_ms() {
+uint64_t barch::get_rpc_max_client_wait_ms() {
     return config().rpc_client_max_wait_ms;
 }
 

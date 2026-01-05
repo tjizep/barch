@@ -16,7 +16,7 @@ static std::mt19937& get_gen() {
 }
 
 
-static long long getTotalPhysicalMemory() {
+long long get_total_physical_memory() {
     if (!physical_ram_cache) {
         struct sysinfo memInfo;
         sysinfo(&memInfo);
@@ -131,7 +131,7 @@ void heap::free(void *ptr) {
 }
 
 uint64_t heap::get_physical_memory_bytes() {
-    return getTotalPhysicalMemory();
+    return get_total_physical_memory();
 }
 
 double heap::get_physical_memory_ratio() {

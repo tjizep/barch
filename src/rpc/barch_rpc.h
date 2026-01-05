@@ -27,7 +27,7 @@ enum {
 namespace barch {
 
     template<typename T>
-    bool time_wait(int64_t millis, T&& fwait ) {
+    bool time_wait(uint64_t millis, T&& fwait ) {
         if (fwait()) {
             return true;
         }
@@ -37,7 +37,7 @@ namespace barch {
                 return true;
             }
             auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > millis) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > (int64_t)millis) {
                 return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

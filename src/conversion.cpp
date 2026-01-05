@@ -46,28 +46,28 @@ bool to_t(art::value_type v, T &i) {
 bool conversion::to_ll(art::value_type v, long long &i) {
     return to_t(v, i);
 }
-bool to(art::value_type v, double &d) {
+bool conversion::to(art::value_type v, double &d) {
     return to_t(v, d);
 }
-bool to(art::value_type v, float &f) {
+bool conversion::to(art::value_type v, float &f) {
     return to_t(v, f);
 }
-bool to(art::value_type v, uint64_t &i) {
+bool conversion::to(art::value_type v, uint64_t &i) {
     return to_t(v, i);
 }
-bool to(art::value_type v, uint32_t &i) {
+bool conversion::to(art::value_type v, uint32_t &i) {
     return to_t(v, i);
 }
-bool to(art::value_type v, uint16_t &i) {
+bool conversion::to(art::value_type v, uint16_t &i) {
     return to_t(v, i);
 }
-bool to(art::value_type v, int64_t &i) {
+bool conversion::to(art::value_type v, int64_t &i) {
     return to_t(v, i);
 }
-bool to(art::value_type v, int32_t &i) {
+bool conversion::to(art::value_type v, int32_t &i) {
     return to_t(v, i);
 }
-bool to(art::value_type v, int16_t &i) {
+bool conversion::to(art::value_type v, int16_t &i) {
     return to_t(v, i);
 }
 bool conversion::to_ui64(art::value_type v, uint64_t &i) {
@@ -106,7 +106,7 @@ variable_t as_variable(const char *v, size_t vlen, bool noint) {
     double d;
 
     if (!noint) {
-        if (to({v,vlen},i)) {
+        if (conversion::to({v,vlen},i)) {
             return {i};
         }
     }

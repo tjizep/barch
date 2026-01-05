@@ -4,7 +4,6 @@
 
 #ifndef VARIABLE_H
 #define VARIABLE_H
-#include <cstdint>
 #include <string>
 #include <variant>
 #include "value_type.h"
@@ -24,25 +23,25 @@ struct error {
     std::string name;
 };
 typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error> variable_t;
+namespace conversion {
+    extern bool to(art::value_type v, double &d);
+    extern bool to(art::value_type v, float &f);
+    extern bool to(art::value_type v, uint64_t &i);
+    extern bool to(art::value_type v, uint32_t &i);
+    extern bool to(art::value_type v, uint16_t &i);
 
-extern bool to(art::value_type v, double &d);
-extern bool to(art::value_type v, float &f);
-extern bool to(art::value_type v, uint64_t &i);
-extern bool to(art::value_type v, uint32_t &i);
-extern bool to(art::value_type v, uint16_t &i);
-
-extern bool to(art::value_type v, int64_t &i);
-extern bool to(art::value_type v, int32_t &i);
-extern bool to(art::value_type v, int16_t &i);
-template<typename T>
-static T to_e(art::value_type v) {
-    T t;
-    if (!to(v, t)) {
-        throw_exception<std::runtime_error>("conversion failed");
+    extern bool to(art::value_type v, int64_t &i);
+    extern bool to(art::value_type v, int32_t &i);
+    extern bool to(art::value_type v, int16_t &i);
+    template<typename T>
+    static T to_e(art::value_type v) {
+        T t;
+        if (!to(v, t)) {
+            throw_exception<std::runtime_error>("conversion failed");
+        }
+        return t;
     }
-    return t;
 }
-
 extern variable_t as_variable(art::value_type v);
 
 class Variable : public variable_t {
@@ -128,7 +127,7 @@ public:
             case var_double:
                 return std::get<double>(*this);
             case var_string:
-                return to_e<double>(bulk_str(std::get<std::string>(*this)));
+                return conversion::to_e<double>(bulk_str(std::get<std::string>(*this)));
             case var_null:
                 return 0.0f;
             case var_error:
@@ -149,7 +148,7 @@ public:
             case var_double:
                 return std::get<double>(*this) == 0.0f;
             case var_string:
-                return to_e<int>(bulk_str(std::get<std::string>(*this))) > 0;
+                return conversion::to_e<int>(bulk_str(std::get<std::string>(*this))) > 0;
             case var_null:
                 return false;
             case var_error:
@@ -170,7 +169,7 @@ public:
             case var_double:
                 return std::get<double>(*this);
             case var_string:
-                return to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
+                return conversion::to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
             case var_null:
             case var_error:
                 return 0;
@@ -189,7 +188,7 @@ public:
             case var_double:
                 return std::get<double>(*this);
             case var_string:
-                return to_e<uint64_t>(bulk_vt(std::get<std::string>(*this)));
+                return conversion::to_e<uint64_t>(bulk_vt(std::get<std::string>(*this)));
             case var_null:
             case var_error:
                 return 0;

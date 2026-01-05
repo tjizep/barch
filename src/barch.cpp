@@ -111,7 +111,7 @@ int RANGE(caller& call, const arg_t& argv) {
     /* Parse the count argument. */
     long long count = -1;
     if (argv.size() == 4)
-        count = std::atoll(argv[3].chars());
+        count = conversion::as_variable(argv[3]).i();
 
     auto k1 = argv[1];
     auto k2 = argv[2];
@@ -676,7 +676,6 @@ int MSET(caller& call, const arg_t& argv) {
 
         auto converted = conversion::convert(k);
         art::key_spec spec; //(argv, argc);
-        art::value_type reply{"", 0};
         auto fc = [&](art::node_ptr) -> void {
         };
         auto t = call.kspace()->get(k);
@@ -854,7 +853,6 @@ int EXPIRE(caller& call, const arg_t& argv) {
         }
         return art::make_leaf(t->get_ap(), l->get_key(), l->get_value(),  art::now() + spec.ttl, l->is_volatile());
     };
-    art::key_options opts{spec.ttl,true,false,false, false};
     if (t->update(l->get_key(),updater))
         return call.push_ll(1);
     return call.push_ll(-2);
@@ -1305,8 +1303,8 @@ int SPACES(caller& call, const arg_t& argv) {
     if (argv.size() == 1) {
         call.start_array();
         barch::all_spaces([&call](const std::string& name, const barch::key_space_ptr& space) {
-            int64_t size = 0;
-            for (auto s: space->get_shards() ) {
+            uint64_t size = 0;
+            for (const auto& s: space->get_shards() ) {
                 size += s->get_size();
             }
             call.push_values({name,size});
@@ -1530,7 +1528,7 @@ int CLEAR(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
 
-    for (auto shard : call.kspace()->get_shards()) {
+    for (const auto& shard : call.kspace()->get_shards()) {
         shard->clear();
     }
 
@@ -1620,11 +1618,7 @@ int STATS(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     art_statistics as = barch::get_statistics();
-    auto vbytes = 0ll;
-    for (auto shard : barch::get_shard_count()) {
-        storage_release release(call.kspace()->get(shard));
-        vbytes += call.kspace()->get(shard)->get_ap().get_nodes().get_bytes_allocated() + call.kspace()->get(shard)->get_ap().get_leaves().get_bytes_allocated();
-    }
+
     call.start_array();
     call.push_values({"heap_bytes_allocated", get_total_memory()});
     call.push_values({"value_bytes_compressed",as.value_bytes_compressed});

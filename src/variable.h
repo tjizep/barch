@@ -25,13 +25,23 @@ struct error {
 };
 typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error> variable_t;
 
-extern bool to_ui64(art::value_type v, uint64_t &i);
-extern bool to_ui32(art::value_type v, uint32_t &i);
-extern bool to_ui16(art::value_type v, uint16_t &i);
+extern bool to(art::value_type v, double &d);
+extern bool to(art::value_type v, float &f);
+extern bool to(art::value_type v, uint64_t &i);
+extern bool to(art::value_type v, uint32_t &i);
+extern bool to(art::value_type v, uint16_t &i);
 
-extern bool to_i64(art::value_type v, int64_t &i);
-extern bool to_i32(art::value_type v, int32_t &i);
-extern bool to_i16(art::value_type v, int16_t &i);
+extern bool to(art::value_type v, int64_t &i);
+extern bool to(art::value_type v, int32_t &i);
+extern bool to(art::value_type v, int16_t &i);
+template<typename T>
+static T to_e(art::value_type v) {
+    T t;
+    if (!to(v, t)) {
+        throw_exception<std::runtime_error>("conversion failed");
+    }
+    return t;
+}
 
 extern variable_t as_variable(art::value_type v);
 
@@ -117,11 +127,8 @@ public:
                 return std::get<uint64_t>(*this);
             case var_double:
                 return std::get<double>(*this);
-            case var_string: {
-                auto &s = std::get<std::string>(*this);
-
-                return std::atof(bulk_str(s));
-            }
+            case var_string:
+                return to_e<double>(bulk_str(std::get<std::string>(*this)));
             case var_null:
                 return 0.0f;
             case var_error:
@@ -141,11 +148,8 @@ public:
                 return std::get<uint64_t>(*this) == 0 ;
             case var_double:
                 return std::get<double>(*this) == 0.0f;
-            case var_string: {
-                auto &s = std::get<std::string>(*this);
-
-                return std::atoi(bulk_str(s)) > 0;
-            }
+            case var_string:
+                return to_e<int>(bulk_str(std::get<std::string>(*this))) > 0;
             case var_null:
                 return false;
             case var_error:
@@ -165,10 +169,8 @@ public:
                 return std::get<uint64_t>(*this);
             case var_double:
                 return std::get<double>(*this);
-            case var_string: {
-                auto &s = std::get<std::string>(*this);
-                return std::atoll(bulk_str(s));
-            }
+            case var_string:
+                return to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
             case var_null:
             case var_error:
                 return 0;
@@ -177,7 +179,6 @@ public:
         }
     }
     [[nodiscard]] uint64_t to_uint64() const {
-         uint64_t v = 0;
         switch (index()) {
             case var_bool:
                 return std::get<bool>(*this) ? 1 : 0;
@@ -187,11 +188,8 @@ public:
                 return std::get<uint64_t>(*this);
             case var_double:
                 return std::get<double>(*this);
-            case var_string: {
-                auto &s = std::get<std::string>(*this);
-                to_ui64(bulk_vt(s),v);
-                return v;
-            }
+            case var_string:
+                return to_e<uint64_t>(bulk_vt(std::get<std::string>(*this)));
             case var_null:
             case var_error:
                 return 0;

@@ -16,7 +16,7 @@
 #include "rpc/barch_functions.h"
 
 struct rpc_caller : caller {
-    barch::key_space_ptr ks = get_default_ks();
+    barch::key_space_ptr ks {get_default_ks()};
     std::shared_ptr<barch::repl::rpc> host {};
     heap::vector<std::shared_ptr<barch::repl::rpc>> routes {};
     size_t valid_routes{};
@@ -39,20 +39,12 @@ struct rpc_caller : caller {
         this->host = barch::repl::create(h,port);
     }
     rpc_caller() {
-        routes.resize(barch::get_shard_count().size());
-        for (size_t shard : barch::get_shard_count()) {
-            auto route = barch::repl::get_route(shard);
-            if (route.ip.empty()) {
-                routes[shard] = nullptr;
-            }else {
-                ++valid_routes;
-                routes[shard] =barch::repl::create(route.ip,route.port);
-            }
-        }
+        update_routes();
         std::vector<std::string_view> auth = {"AUTH","default","empty"};
         if (this->call( auth,::AUTH) != 0) {
             barch::std_err("could not authenticate `default`");
         }
+
     }
 
     [[nodiscard]] int wrong_arity()  override {
@@ -195,10 +187,25 @@ struct rpc_caller : caller {
         }
         return empty;
     }
+    void update_routes() {
+        if (ks != nullptr) {
+            routes.resize(ks->get_shard_count());
+            valid_routes = 0;
+            for (size_t shard = 0; shard < ks->get_shard_count(); ++shard) {
+                auto route = barch::repl::get_route(shard);
+                if (route.ip.empty()) {
+                    routes[shard] = nullptr;
+                }else {
+                    ++valid_routes;
+                    routes[shard] =barch::repl::create(route.ip,route.port);
+                }
+            }
+        }
+    }
     template<typename ArgT>
     barch::repl::call_result call_route(const ArgT& params) {
         if (valid_routes && params.size() > 1) {
-            size_t shard = ks->get_shard_index(params[1]);
+            size_t shard = kspace()->get_shard_index(params[1]);
             if (shard < routes.size()) {
                 if (routes[shard] != nullptr) { // dont do any lookups if there's no route for perf
                     auto fbn = barch::barch_functions;
@@ -289,16 +296,20 @@ struct rpc_caller : caller {
         this->acl = acl;
     };
     barch::key_space_ptr& kspace() override {
-        if (!ks ) {throw_exception<std::runtime_error>("key space not set");
+
+        if (!ks ) {
+            throw_exception<std::runtime_error>("key space not set");
         }
         return ks;
     }
     void set_kspace(const barch::key_space_ptr& kspace) override{
-        if (ks != kspace)
+        if (ks != kspace) {
             this->ks = kspace;
+            update_routes();
+        }
     }
     void use(const std::string& name) override {
-        this->ks = barch::get_keyspace(name);
+        set_kspace( barch::get_keyspace(name));
     }
     void add_block(const keys_t &key_names, uint64_t to_ms,  std::function<void(caller&, const keys_t&)> fn) override {
         this->blocks = key_names;

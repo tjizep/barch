@@ -8,6 +8,7 @@
 
 #include "shard.h"
 #include "keys.h"
+#include "swig_api.h"
 #include "thread_pool.h"
 #include "rpc/server.h"
 
@@ -33,7 +34,7 @@ namespace barch {
         };
         ~key_spaces() {
         }
-        std::mutex lock{};
+        std::recursive_mutex lock{};
         std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
         std::string ks_pattern_error = "space name does not match the "+ks_pattern+" pattern";
         std::regex name_check{ks_pattern};
@@ -143,16 +144,22 @@ namespace barch {
     key_space::key_space(const std::string &name) :name(name) {
         if (shards.empty()) {
             decltype(shards) shards_out;
-            shards_out.resize(barch::get_shard_count().size());
+            size_t scount = barch::get_shard_count().size();
+            if (name != "configuration_" && name != "node") {
+                // cannot configure configuration or the default ns "node" it is what it is
+                std::string real = undecorate(name);
+                KeyValue kv("configuration"); // this will also be replicated
+                auto sc = kv.get(real+".shards");
+                if (!sc.empty())
+                    conversion::to(sc, scount);
+            }
+            shards_out.resize(scount);
             heap::allocator<barch::shard> alloc;
             auto start_time = std::chrono::high_resolution_clock::now();
             size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
-            //size_t shards_loaded = 0;
-            //for (size_t shard_num = 0; shard_num < shards_out.size(); ++ shard_num){
                 shard_ptr& shard = shards_out[shard_num];
                 shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
                 shard->load(true);
-                ++shards_loaded;
             });
             if (shards_out.size() != shards_loaded) {
                 abort_with("shard loading threads invalid count");
@@ -224,14 +231,14 @@ namespace barch {
     }
 
     size_t key_space::get_shard_index(const char* key, size_t key_len) {
-        if (barch::get_shard_count().size() == 1) {
+        if (get_shard_count() == 1) {
             return 0;
         }
         auto shard_key = art::value_type{key,key_len};
 
         uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(shard_key.chars(), shard_key.size);
 
-        size_t hshard = hash % barch::get_shard_count().size();
+        size_t hshard = hash % get_shard_count();
         return hshard;
     }
 

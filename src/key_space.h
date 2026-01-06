@@ -70,7 +70,8 @@ struct ordered_lock {
         lock(t);
     }
     explicit ordered_lock(const barch::key_space_ptr& spc) {
-        locks.reserve(barch::get_shard_count().size());
+        if (spc)
+            locks.reserve(spc->get_shard_count());
         lock_space(spc);
     }
     ordered_lock(const ordered_lock&) = delete;

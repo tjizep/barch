@@ -40,7 +40,7 @@ extern "C" {
 
 static size_t save(caller& call) {
     std::atomic<size_t> errors = 0;
-    shard_thread_processor(barch::get_shard_count().size(),[&](size_t shard_num) {
+    shard_thread_processor(call.kspace()->get_shard_count(),[&](size_t shard_num) {
         if (!call.kspace()->get(shard_num)->save(true)) {
                 barch::std_err("could not save",shard_num);
                 ++errors;
@@ -133,12 +133,12 @@ int RANGE(caller& call, const arg_t& argv) {
         heap::std_vector<art::value_type> usorted;
         heap::vector<art::merge_iterator> iters;
         heap::unordered_set<size_t> active; // set must be ordered
-        for (auto shard : barch::get_shard_count()) {
+        for (const auto& shard : ks->get_shards()) {
             // iterate the 'striations'
-            auto t = call.kspace()->get(shard);
+            auto t = shard;
             auto i = make_merged(t,c1.get_value());
             if (i.ok()) {
-                active.insert(shard);
+                active.insert(t->get_shard_number());
             }
             iters.push_back(i);
         }
@@ -263,9 +263,9 @@ int COUNT(caller& call, const arg_t& argv) {
         return count;
     };
     auto s = call.kspace();
-    for (auto shard : barch::get_shard_count()) {
-        count += space_cnt(s, shard);
-        count += space_cnt(s->source(), shard);
+    for (const auto& shard : s->get_shards()) {
+        count += space_cnt(s, shard->get_shard_number());
+        count += space_cnt(s->source(), shard->get_shard_number());
     }
     return call.push_int(count);
 }
@@ -294,8 +294,9 @@ int KEYS(caller& call, const arg_t& argv) {
     auto cpat = argv[1];
     art::value_type pattern = cpat;
     if (spec.count) {
-        for (auto shard : barch::get_shard_count()) {
-            call.kspace()->get(shard)->glob(spec, pattern, false, [&](const art::leaf & unused(l)) -> bool {
+        auto ks = call.kspace();
+        for (const auto& shard : ks->get_shards()) {
+            shard->glob(spec, pattern, false, [&](const art::leaf & unused(l)) -> bool {
                 ++replies;
                 return true;
             });
@@ -916,8 +917,8 @@ int MIN(caller& call, const arg_t& argv) {
     auto ks = call.kspace();
     ks_shared kss(ks->source());
     ks_shared ksl(ks);
-    for (auto shard:barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
+    for (const auto& shard : ks->get_shards()) {
+        auto t = shard;
         art::node_ptr r = t->tree_minimum();
         if (!t->get_tree_size()) continue;
         the_min = min_fun(the_min, r);
@@ -949,8 +950,8 @@ int MAX(caller& call, const arg_t& ) {
     auto ks = call.kspace();
     ks_shared kss(ks->source());
     ks_shared ksl(ks);
-    for (auto shard:barch::get_shard_count()) {
-        auto t = ks->get(shard);
+    for (const auto& shard : ks->get_shards()) {
+        auto t = shard;
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_maximum();
         if (!r.is_leaf) {
@@ -988,12 +989,12 @@ int LB(caller& call, const arg_t& argv) {
 
     auto converted = conversion::convert(k);
     art::value_type the_lb;
-    for (auto shard:barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
+    for (const auto& shard : call.kspace()->get_shards()) {
+        auto t = shard;
         t->get_latch().lock();
     }
-    for (auto shard:barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
+    for (const auto& shard : call.kspace()->get_shards()) {
+        auto t = shard;
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->lower_bound(converted.get_value());
         if (r.is_leaf && the_lb.empty()) {
@@ -1009,9 +1010,8 @@ int LB(caller& call, const arg_t& argv) {
     } else {
         ok = call.push_encoded_key(the_lb);
     }
-    for (auto shard:barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
-        t->get_latch().unlock();
+    for (const auto& shard : call.kspace()->get_shards()) {
+        shard->get_latch().unlock();
     }
     return ok;
 
@@ -1037,8 +1037,7 @@ int UB(caller& call, const arg_t& argv) {
     auto converted = conversion::convert(k);
     art::value_type the_lb;
     ks_unique ulock(call.kspace());
-    for (auto shard:barch::get_shard_count()) {
-        auto t = call.kspace()->get(shard);
+    for (const auto& t : call.kspace()->get_shards()) {
         if (!t->get_tree_size()) continue;
         auto key = converted.get_value();
         art::iterator ilb(t, key);
@@ -1395,8 +1394,8 @@ int PUBLISH(caller& call, const arg_t& argv) {
     Variable interface = argv[1];
     Variable port = argv[2];
     auto ks = call.kspace();
-    for (auto shard: barch::get_shard_count()) {
-        if (!ks->get(shard)->publish(interface.s(), port.i())) {}
+    for (const auto& t : call.kspace()->get_shards()) {
+        if (!t->publish(interface.s(), port.i())) {}
     }
     return call.push_simple("OK");
 }
@@ -1406,8 +1405,8 @@ int PULL(caller& call, const arg_t& argv) {
     Variable interface = argv[1];
     Variable port = argv[2];
     auto ks = call.kspace();
-    for (auto shard: barch::get_shard_count()) {
-        if (!ks->get(shard)->pull(interface.s(), port.i())) {}
+    for (const auto& t : call.kspace()->get_shards()) {
+        if (!t->pull(interface.s(), port.i())) {}
     }
     return call.push_simple("OK");
 }
@@ -1437,13 +1436,13 @@ int RETRIEVE(caller& call, const arg_t& argv) {
     Variable host = argv[1];
     Variable port = argv[2];
 
-    for (auto shard : barch::get_shard_count()) {
-        barch::repl::client cli(host.s(), port.i(), shard);
-        if (!cli.load(shard)) {
+    for (const auto& shard : call.kspace()->get_shards()) {
+        barch::repl::client cli(host.s(), port.i(), shard->get_shard_number());
+        if (!cli.load(shard->get_shard_number())) {
             if (shard > 0) {
                 auto ks = call.kspace();
-                for (auto s : barch::get_shard_count()) {
-                    ks->get(s)->clear();
+                for (auto s : ks->get_shards()) {
+                    s->clear();
                 }
             }
 
@@ -1488,8 +1487,8 @@ int BEGIN(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    for (auto shard : barch::get_shard_count()) {
-        call.kspace()->get(shard)->begin();
+    for (const auto& t : call.kspace()->get_shards()) {
+        t->begin();
     }
     return call.ok();
 }
@@ -1503,8 +1502,8 @@ int COMMIT(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     auto ks = call.kspace();
-    for (auto shard : barch::get_shard_count()) {
-        ks->get(shard)->commit();
+    for (const auto& t : call.kspace()->get_shards()) {
+        t->commit();
     }
     return call.push_simple("OK");
 }
@@ -1515,9 +1514,8 @@ int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int ROLLBACK(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    auto ks = call.kspace();
-    for (auto shard : barch::get_shard_count()) {
-        ks->get(shard)->rollback();
+    for (const auto& t : call.kspace()->get_shards()) {
+        t->rollback();
     }
     return call.push_simple("OK");
 }
@@ -1697,10 +1695,7 @@ int HEAPBYTES(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();;
     auto vbytes = 0ll;
-    auto ks = call.kspace();
-
-    for (auto shard : barch::get_shard_count()) {
-        auto s = ks->get(shard);
+    for (const auto& s : call.kspace()->get_shards()) {
         storage_release release(s);
         vbytes += s->get_ap().get_nodes().get_bytes_allocated() + s->get_ap().get_leaves().get_bytes_allocated();
     }
@@ -1912,10 +1907,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
     }
     auto ks = get_default_ks();
-    for (auto shard : barch::get_shard_count()) {
-        if (ks->get(shard) == nullptr) {
-            return VALKEYMODULE_ERR;
-        }
+    if (ks == nullptr) {
+        return VALKEYMODULE_ERR;
     }
     if (barch::get_server_port() > 0)
         barch::server::start("0.0.0.0",barch::get_server_port(), false);

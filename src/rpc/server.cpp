@@ -194,7 +194,7 @@ namespace barch {
                             readp(stream,shard);
                             // TODO: add named keyspace support
                             auto ks = get_default_ks();
-                            if (shard < barch::get_shard_count().size()) {
+                            if (shard < ks->get_shard_count()) {
                                 ks->get(shard)->send(stream);
                                 stream.flush();
                             }else {
@@ -781,7 +781,7 @@ extern "C"{
         if (argv.size() != 4)
             return call.wrong_arity();
         Variable shard = argv[1];
-        if (shard.ui() >= barch::get_shard_count().size())
+        if (shard.ui() >= call.kspace()->get_shard_count())
             return call.push_error("invalid shard");
         Variable host = argv[2];
         Variable port = argv[3];
@@ -796,7 +796,7 @@ extern "C"{
         if (argv.size() != 2)
             return call.wrong_arity();
         size_t shard = atoi(argv[1].chars());
-        if (shard >= barch::get_shard_count().size())
+        if (shard >= call.kspace()->get_shard_count())
             return call.push_error("invalid shard");
         auto route = barch::repl::get_route(shard);
         call.start_array();
@@ -810,7 +810,7 @@ extern "C"{
         if (argv.size() != 2)
             return call.wrong_arity();
         size_t shard = atoi(argv[1].chars());
-        if (shard >= barch::get_shard_count().size())
+        if (shard >= call.kspace()->get_shard_count())
             return call.push_error("invalid shard");
         auto route = barch::repl::get_route(shard);
         barch::repl::clear_route(shard);

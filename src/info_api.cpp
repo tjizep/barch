@@ -10,10 +10,6 @@
 #include "time_conversion.h"
 #include "asio/detail/chrono.hpp"
 #include "version.h"
-void print_version() {
-    std::cout << "Version: " << BARCH_PROJECT_VERSION << std::endl;
-    std::cout << "Commit: " << BARCH_GIT_COMMIT_HASH << std::endl;
-}
 auto start_time = std::chrono::high_resolution_clock::now();
 auto now() {
     return std::chrono::high_resolution_clock::now();
@@ -26,18 +22,18 @@ extern "C"{
 int INFO(caller& call, const arg_t& argv) {
     if (argv.size() == 3 && argv[1] == "SHARD") {
         uint64_t shard = 0;
-
+        auto ks = call.kspace();
         if (argv[2].starts_with("#") && argv[2].size > 1) {
             if (!conversion::to_ui64(argv[2].sub(1), shard)) {
-                shard = call.kspace()->get_shard_index(argv[2]);
+                shard = ks->get_shard_index(argv[2]);
             }
-            if (shard >= barch::get_shard_count().size()) {
+            if (shard >= ks->get_shard_count()) {
                 return call.push_error("shard number out of range");
             }
         }else {
-            shard = call.kspace()->get_shard_index(argv[2]);
+            shard = ks->get_shard_index(argv[2]);
         }
-        auto s = call.kspace()->get(shard);
+        auto s = ks->get(shard);
         std::string order = s->opt_ordered_keys ? "ordered" : "unordered";
         std::string index = s->opt_ordered_keys ? "ART" : "HASH";
         std::string response =
@@ -89,7 +85,7 @@ int INFO(caller& call, const arg_t& argv) {
         "hz:10\n"
         "configured_hz:10\n"
         "lru_clock:0\n"
-        "executable:_barch.so or libbarch.so\n"
+        "executable:_barch.so or liblbarch.so\n"
         "config_file:NONE/RESP\n"
         "io_threads_active:"+tos(std::thread::hardware_concurrency())+"\n"
         "listener0:name=tcp,bind=*,bind=-::*,port="+port+"\n";

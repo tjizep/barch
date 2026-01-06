@@ -26,7 +26,7 @@ cliProcess = subprocess.Popen(cliCmd)
 time.sleep(1) # wait for published data to come here
 barch.clear()
 barch.save()
-
+barch.ping("127.0.0.1","14000")
 # create a simple cluster by adding some routes to port 14000
 for i in range(0,500) :
     barch.setRoute(i,"127.0.0.1",14000)

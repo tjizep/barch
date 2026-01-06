@@ -217,6 +217,9 @@ std::string List::front(const std::string &key) {
 KeyValue::KeyValue() {
 
 }
+KeyValue::KeyValue(std::string keys_space) {
+    sc.set_kspace(barch::get_keyspace(keys_space));
+}
 KeyValue::KeyValue(const std::string& host, int port) {
     sc.host = barch::repl::create(host,port);
 }
@@ -238,6 +241,16 @@ std::string KeyValue::get(const std::string &key) const {
         return sc.results.empty() ? "": conversion::to_string(sc.results[0]);
     }
     return "";
+}
+
+Value KeyValue::vget(const std::string &key) const {
+    params = {"GET", key};
+
+    int r = sc.call(params, ::GET);
+    if (r == 0) {
+        return sc.results.empty() ? nullptr: sc.results[0];
+    }
+    return nullptr;
 }
 
 void KeyValue::erase(const std::string &key) {

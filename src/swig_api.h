@@ -290,11 +290,13 @@ public:
 class KeyValue : public Caller {
 public:
     KeyValue();
+    KeyValue(std::string keys_space);
     KeyValue(const std::string& host, int port);
     std::vector<Value> range(const std::string &start, const std::string &end, long long limit = -1);
     long long count(const std::string &start, const std::string &end);
     void set(const std::string &key, const std::string &value);
     std::string get(const std::string &key) const;
+    Value vget(const std::string &key) const;
     void incr(const std::string& key, double by);
     void incr(const std::string& key, long long by);
     void decr(const std::string& key, double by);

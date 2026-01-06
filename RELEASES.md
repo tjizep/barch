@@ -2,7 +2,16 @@
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
-
+2. add per key space configuration in the `configuration` key space (v0.4.3.3b 2025-01-06)
+   currently only `shards` or shard count is configurable
+   ```redis
+      SELECT configuration
+      SET mys.shards 1
+      SELECT mys
+      SET foo bar
+      SELECT configuration
+      GET mys.shards
+   ```
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
 

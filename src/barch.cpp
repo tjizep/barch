@@ -304,9 +304,9 @@ int KEYS(caller& call, const arg_t& argv) {
     } else {
         /* Reply with the matching items. */
         call.start_array();
-
-        for (auto shard : barch::get_shard_count()) {
-            call.kspace()->get(shard)->glob(spec, pattern, false, [&](const art::leaf &l) -> bool {
+        auto ks = call.kspace();
+        for (const auto& shard : ks->get_shards()) {
+            shard->glob(spec, pattern, false, [&](const art::leaf &l) -> bool {
                 std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
                 if (0 != call.push_encoded_key(l.get_key())) {
                     return false;
@@ -316,7 +316,6 @@ int KEYS(caller& call, const arg_t& argv) {
             });
         }
         call.end_array(replies);
-
     }
     return call.ok();
 }
@@ -342,8 +341,9 @@ int VALUES(caller& call, const arg_t& argv) {
     auto cpat = argv[1];
     art::value_type pattern = cpat;
     if (spec.count) {
-        for (auto shard : barch::get_shard_count()) {
-            call.kspace()->get(shard)->glob(spec, pattern, true, [&](const art::leaf & unused(l)) -> bool {
+        auto ks = call.kspace();
+        for (const auto& shard : ks->get_shards()) {
+            shard->glob(spec, pattern, true, [&](const art::leaf & unused(l)) -> bool {
                 ++replies;
                 return true;
             });
@@ -353,8 +353,9 @@ int VALUES(caller& call, const arg_t& argv) {
         /* Reply with the matching items. */
         call.start_array();
 
-        for (auto shard : barch::get_shard_count()) {
-            call.kspace()->get(shard)->glob(spec, pattern, true, [&](const art::leaf &l) -> bool {
+        auto ks = call.kspace();
+        for (const auto& shard : ks->get_shards()) {
+                shard->glob(spec, pattern, true, [&](const art::leaf &l) -> bool {
                 std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
                 if (0 != call.push_encoded_key(l.get_key())) {
                     return false;

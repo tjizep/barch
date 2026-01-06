@@ -12,6 +12,8 @@
       SELECT configuration
       GET mys.shards
    ```
+3. add python/hints example
+
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
 

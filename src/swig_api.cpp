@@ -544,6 +544,17 @@ bool Caller::use(const std::string& key_space) {
     }
     return false;
 }
+
+bool Caller::setOrdered(bool ordered) {
+    params = {"SPACES", "OPTIONS", "SET", "ORDERED", ordered?"ON":"OFF"};
+    sc.call(params, ::SPACES);
+
+    if (!sc.results.empty()) {
+        return sc.results[0] == "OK";
+    }
+    return false;
+}
+
 std::vector<Value> Caller::call(const std::string &method, const std::vector<Value> &args) {
     std::string cn = std::string{params[0]};
     auto ic = barch_functions.find(cn);

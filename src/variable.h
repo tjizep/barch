@@ -4,8 +4,11 @@
 
 #ifndef VARIABLE_H
 #define VARIABLE_H
+#include <charconv>
 #include <string>
 #include <variant>
+#include <fast_float/fast_float.h>
+#include <fmt/format.h>
 #include "value_type.h"
 #include "ioutil.h"
 
@@ -97,8 +100,15 @@ public:
                 return std::to_string(std::get<int64_t>(*this));
             case var_uint64:
                 return std::to_string(std::get<uint64_t>(*this));
-            case var_double:
-                return std::to_string(std::get<double>(*this));
+            case var_double: {
+                int64_t t =0 ;
+                auto d = std::get<double>(*this);
+                auto s = fmt::format("{}",d);
+                if (conversion::to(s,t)) {
+                    s += ".0"; // so that the result will be converted back as a double
+                }
+                return s;
+            }
             case var_string: {
                 auto &s = std::get<std::string>(*this);
                 if (is_bulk(s)) {

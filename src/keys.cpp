@@ -57,6 +57,8 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
 
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
+    // TODO: should probably use the existing function in conversion.cpp
+
     double dk;
     float fk;
     int64_t ik;
@@ -68,7 +70,7 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
     // TODO: integers sometimes go in here as one longer than they should be
     // we make the test a little more slack
     if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
-        ik = conversion::enc_bytes_to_int(enck, key_len);
+        ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
         if (*enck == art::tdouble) {
             memcpy(&dk, &ik, sizeof(ik));
             if (ValkeyModule_ReplyWithDouble(ctx, dk) == VALKEYMODULE_ERR) {
@@ -80,7 +82,7 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
             }
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
-        sk = conversion::enc_bytes_to_int32(enck, key_len);
+        sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
         if (*enck == art::tfloat) {
             memcpy(&fk, &sk, sizeof(sk));
             if (ValkeyModule_ReplyWithDouble(ctx, fk) == VALKEYMODULE_ERR) {
@@ -98,6 +100,7 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
             return -1;
         }
     } else if (key_len >= 1 && (*enck == art::tcomposite)) {
+
         return reply_encoded_key(ctx, key.sub(2));
     } else {
         abort();
@@ -143,7 +146,7 @@ Variable encoded_key_as_variant(art::value_type key) {
     // TODO: integers sometimes go in here as one longer than they should be
     // we make the test a little more slack
     if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
-        ik = conversion::enc_bytes_to_int(enck, key_len);
+        ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
         if (*enck == art::tdouble) {
             memcpy(&dk, &ik, sizeof(ik));
             return dk;
@@ -151,7 +154,7 @@ Variable encoded_key_as_variant(art::value_type key) {
             return ik;
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
-        sk = conversion::enc_bytes_to_int32(enck, key_len);
+        sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
         if (*enck == art::tfloat) {
             memcpy(&fk, &sk, sizeof(sk));
             return fk;
@@ -166,7 +169,36 @@ Variable encoded_key_as_variant(art::value_type key) {
         return s;
 
     } else if (key_len >= 1 && (*enck == art::tcomposite)) {
-        return encoded_key_as_variant(key.sub(2));
+        // not recurrent composites yet
+        unsigned kl = 2;
+        const char *ptr = (const char *) &enck[2];
+        std::string r;
+        while (kl < key_len) {
+            unsigned len = 0;
+
+            switch (*ptr) {
+                case art::tinteger:
+                case art::tdouble:
+                    len = numeric_key_size;
+                    break;
+                case art::tfloat:
+                case art::tshort:
+                    len = num32_key_size;
+                    break;
+                case art::tstring: {
+                    len = encoded_str_len(ptr + 1,key_len - kl) + 2;
+                }
+                    break;
+                default:
+                    return r;
+            }
+            if (!r.empty())
+                r += " ";
+            r += encoded_key_as_variant(key.sub(kl, len)).s();
+            ptr += len;
+            kl += len;
+        }
+        return r;
     } else {
         abort();
     }
@@ -174,21 +206,7 @@ Variable encoded_key_as_variant(art::value_type key) {
 }
 std::string encoded_key_as_string(art::value_type key) {
     Variable v = encoded_key_as_variant(key);
-    switch (v.index()) {
-        case 0:
-            return std::to_string(std::get<bool>(v));
-        case 1:
-            return conversion::to_string(std::get<int64_t>(v));
-        case 2:
-            return std::to_string(std::get<double>(v));
-        case 3:
-            return std::get<std::string>(v);
-        case 4:
-            return {};
-        default:
-            abort_with("invalid type");
-    }
-    return "";
+    return v.s();
 }
 unsigned log_encoded_key(art::value_type key, bool start) {
     double dk;
@@ -203,7 +221,7 @@ unsigned log_encoded_key(art::value_type key, bool start) {
     // we make the test a little more slack
     if (start) barch::std_start();
     if (key_len >= numeric_key_size && (*enck == art::tinteger || *enck == art::tdouble)) {
-        ik = conversion::enc_bytes_to_int(enck, key_len);
+        ik = conversion::enc_bytes_to_int(enck, numeric_key_size);
         if (*enck == art::tdouble) {
             memcpy(&dk, &ik, sizeof(ik));
             barch::std_continue("{ double }[", dk, "]");
@@ -215,7 +233,7 @@ unsigned log_encoded_key(art::value_type key, bool start) {
             return numeric_key_size;
         }
     } else if (key_len >= num32_key_size && (*enck == art::tshort || *enck == art::tfloat)) {
-        sk = conversion::enc_bytes_to_int32(enck, key_len);
+        sk = conversion::enc_bytes_to_int32(enck, num32_key_size);
         if (*enck == art::tfloat) {
             memcpy(&fk, &sk, sizeof(sk));
             barch::std_continue("{ float }[", fk, "]");

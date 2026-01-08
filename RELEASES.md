@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-06
+# Release v0.4.3.3b 2025-01-08
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -12,10 +12,14 @@
       SELECT configuration
       GET mys.shards
    ```
-3. add python/hints example
+3. add python/hints example (v0.4.3.3b 2025-01-06)
+4. add multi key operations (v0.4.3.3b 2025-01-08)
+   `SET "123 abc"` will create a key composed of a number and a string
+   `SET "word 12"` can for instance be used to store a text index entry uniquely
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
+2. fix bloom filter bug when dependency is active (v0.4.3.3b 2025-01-06)
 
 # Release v0.4.3.2b 2025-01-05
 

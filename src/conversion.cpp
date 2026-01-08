@@ -2,6 +2,8 @@
 // Created by teejip on 4/9/25.
 //
 #include "conversion.h"
+
+#include "composite.h"
 // take a string and convert to a number as bytes or leave it alone
 // and return the bytes directly. the bytes will be copied
 conversion::comparable_key conversion::convert(art::value_type vt, bool noint) {
@@ -83,6 +85,29 @@ bool conversion::to_double(art::value_type v, double &i) {
 
 Variable conversion::as_variable(art::value_type v, bool noint) {
     return as_variable(v.chars(), v.size, noint);
+}
+conversion::comparable_key conversion::as_composite(art::value_type v, bool noint, char sep) {
+
+    auto plast = (const char * )memchr(v.begin(),sep, v.size);
+
+    if (plast == nullptr) [[likely]]
+        return conversion::convert(v.chars(), v.size, noint);
+    {
+        thread_local composite tuple;
+        tuple.create({});
+        char spc[] = {sep,'\0'};
+        char * state;
+        auto last_tok = (char *)v.begin();
+        auto token = strtok_r(last_tok, &spc[0], &state);
+        while (token != nullptr) {
+            size_t len = state - token;
+            if (*state != 0) --len;
+            tuple.push(convert(token, len, noint));
+            token = strtok_r(0, &spc[0], &state);
+        }
+
+        return tuple.create();
+    }
 }
 conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool noint) {
     int64_t i;

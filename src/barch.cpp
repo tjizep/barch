@@ -55,14 +55,16 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
     auto k = argv[1];
+    auto converted = conversion::as_composite(k);
+    auto t = call.kspace()->get(converted.get_value());
+    storage_release release(t);
+
     art::key_spec spec;
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::convert(k);
+
     int r = -1;
     IntT l = 0;
     auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
@@ -121,8 +123,8 @@ int RANGE(caller& call, const arg_t& argv) {
     if (key_ok(k2) != 0)
         return call.key_check_error(k2);
 
-    auto c1 = conversion::convert(k1);
-    auto c2 = conversion::convert(k2);
+    auto c1 = conversion::as_composite(k1);
+    auto c2 = conversion::as_composite(k2);
     /* Reply with the matching items. */
 
     auto ks = call.kspace();
@@ -242,8 +244,8 @@ int COUNT(caller& call, const arg_t& argv) {
     if (key_ok(k2) != 0)
         return call.key_check_error(k2);
     long long count = 0;
-    auto c1 = conversion::convert(k1);
-    auto c2 = conversion::convert(k2);
+    auto c1 = conversion::as_composite(k1);
+    auto c2 = conversion::as_composite(k2);
     auto space_cnt = [c1,c2](const barch::key_space_ptr& spce, size_t shard)-> long long {
         if (!spce) return 0;
         long long count = 0;
@@ -395,9 +397,9 @@ int SET(caller& call,const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto t = call.kspace()->get(argv[1]);
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
     auto key = converted.get_value();
+    auto t = call.kspace()->get(key);
     art::key_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
@@ -444,14 +446,14 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = get_art(argv[1]);
-    storage_release release(t);
     auto k = argv[1];
     art::key_spec spec;
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
+    auto t = call.kspace()->get(converted.get_value());
+    storage_release release(t);
     int r = -1;
     double l = 0;
     auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
@@ -512,15 +514,15 @@ int APPEND(caller& call, const arg_t& argv) {
     ++statistics::set_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
     auto k = argv[1];
     auto v = argv[2];
     art::key_spec spec;
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
+    auto t = call.kspace()->get(converted.get_value());
+    storage_release release(t);
     int r = -1;
     auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
         if (old.null()) {
@@ -560,15 +562,14 @@ int PREPEND(caller& call, const arg_t& argv) {
     ++statistics::set_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
     auto k = argv[1];
     auto v = argv[2];
     art::key_spec spec;
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
+    auto t = call.kspace()->get(converted.get_value());
+    storage_release release(t);
     int r = -1;
     auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
         if (old.null()) {
@@ -676,11 +677,11 @@ int MSET(caller& call, const arg_t& argv) {
             continue;
         }
 
-        auto converted = conversion::convert(k);
+        auto converted = conversion::as_composite(k);
         art::key_spec spec; //(argv, argc);
         auto fc = [&](art::node_ptr) -> void {
         };
-        auto t = call.kspace()->get(k);
+        auto t = call.kspace()->get(converted.get_value());
         storage_release release(t);
         t->insert( spec, converted.get_value(), v, true, fc);
 
@@ -699,7 +700,6 @@ int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int ADD(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
     auto k = argv[1];
     auto v = argv[2];
 
@@ -707,7 +707,9 @@ int ADD(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     auto fc = [](art::node_ptr) -> void {
     };
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
+    auto t = call.kspace()->get(converted.get_value());
+
     art::key_spec spec(argv);
     storage_release release(t);
     t->insert(spec, converted.get_value(), v, false, fc);
@@ -729,10 +731,12 @@ int GET(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto t = call.kspace()->get(k);
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
     auto ckey = converted.get_value();
-    if (t->has_static_bloom_filter() && !t->is_bloom(ckey)) {
+    auto t = call.kspace()->get(ckey);
+    auto src = t->sources();
+
+    if (!src && t->has_static_bloom_filter() && !t->is_bloom(ckey)) {
         return call.push_null();
     }
     read_lock release(t);
@@ -763,9 +767,10 @@ int TTL(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto t = call.kspace()->get(argv[1]);
+    auto converted = conversion::as_composite(k);
+    auto t = call.kspace()->get(converted.get_value());
     read_lock release(t);
-    auto converted = conversion::convert(k);
+
     art::node_ptr r = t->search(converted.get_value());
     if (r.null()) {
         return call.push_ll(-1);
@@ -790,10 +795,9 @@ int EXISTS(caller& call, const arg_t& argv) {
         auto k = argv[i];
         if (key_ok(k) != 0)
             return call.key_check_error(k);
-
-        auto t = call.kspace()->get(argv[i]);
+        auto converted = conversion::as_composite(k);
+        auto t = call.kspace()->get(converted.get_value());
         read_lock release(t);
-        auto converted = conversion::convert(k);
         art::node_ptr r = t->search(converted.get_value());
         if (r.null()) {
             return call.push_bool(false);
@@ -813,9 +817,10 @@ int EXPIRE(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto t = call.kspace()->get(argv[1]);
+    auto converted = conversion::as_composite(k);
+    auto t = call.kspace()->get(converted.get_value());
     read_lock release(t);
-    auto converted = conversion::convert(k);
+
     art::node_ptr r = t->search(converted.get_value());
     if (r.null()) {
         return call.push_ll(-1);
@@ -878,8 +883,8 @@ int MGET(caller& call, const arg_t& argv) {
         if (key_ok(k) != 0) {
             call.push_null();
         } else {
-            auto converted = conversion::convert(k);
-            auto t = call.kspace()->get(k);
+            auto converted = conversion::as_composite(k);
+            auto t = call.kspace()->get(converted.get_value());
             storage_release release(t);
             art::node_ptr r = t->search(converted.get_value());
             if (r.null()) {
@@ -987,7 +992,7 @@ int LB(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
     art::value_type the_lb;
     for (const auto& shard : call.kspace()->get_shards()) {
         auto t = shard;
@@ -1034,7 +1039,7 @@ int UB(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
     art::value_type the_lb;
     ks_unique ulock(call.kspace());
     for (const auto& t : call.kspace()->get_shards()) {
@@ -1075,7 +1080,7 @@ int REM(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::convert(k);
+    auto converted = conversion::as_composite(k);
     int r = 0;
     auto fc = [&r,&call](art::node_ptr n) -> void {
         if (n.null()) {
@@ -1086,7 +1091,7 @@ int REM(caller& call, const arg_t& argv) {
         }
     };
 
-    auto t = call.kspace()->get(argv[1]);
+    auto t = call.kspace()->get(converted.get_value());
     storage_release release(t);
     t->remove(converted.get_value(), fc);
 

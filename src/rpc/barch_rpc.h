@@ -236,7 +236,7 @@ namespace barch {
                         auto fc = [](const node_ptr &){
                         };
                         bool added_or = false;
-                        auto t = ks->get_type_aware(key.first);
+                        auto t = ks->get(key.first);
                         storage_write_lock wl(t, lock);
                         if (t->opt_ordered_keys) {
                             added_or = t->tree_insert(options.first, key.first, value.first,true, fc);
@@ -257,7 +257,7 @@ namespace barch {
                     break;
                 case 'r': {
                     auto key = get_value(i+1, buffer);
-                    auto t = ks->get_type_aware(key.first);
+                    auto t = ks->get(key.first);
                     storage_write_lock wl(t, lock);
                     if (t->opt_ordered_keys) {
                         t->tree_remove(key.first,[&r](const node_ptr &) {
@@ -282,7 +282,7 @@ namespace barch {
                     std_log("'f'inding key");
                     log_encoded_key(key.first);
                     // TODO: this may pull replicate
-                    auto t = ks->get_type_aware(key.first);
+                    auto t = ks->get(key.first);
                     read_lock rl(t, lock);
                     found = t->search(key.first);
                     if (found.is_leaf) {
@@ -306,7 +306,7 @@ namespace barch {
                     auto lkey = get_value(i+1, buffer);
                     auto ukey = get_value(lkey.second, buffer);
                     ++r.find_called;
-                    auto t = ks->get_type_aware(lkey.first);
+                    auto t = ks->get(lkey.first);
                     read_lock rl(t, lock);
                     art::iterator ai(t, lkey.first);
                     while (ai.ok()) {

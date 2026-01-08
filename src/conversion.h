@@ -330,6 +330,7 @@ namespace conversion {
 
     comparable_key convert(art::value_type vt, bool noint = false);
 
+    comparable_key as_composite(art::value_type v, bool noint = false, char sep = ' ');
     comparable_key convert(const std::string &str, bool noint = false);
 
     inline int64_t enc_bytes_to_int(const uint8_t *bytes, size_t len) {

@@ -1043,8 +1043,15 @@ static art::node_ptr handle_leaf_replacement(
     return nullptr;
 }
 
-static art::node_ptr recursive_insert(art::tree *t, const art::key_options &options, art::node_ptr n, art::node_ptr &ref,
-                                      art::value_type key, art::value_type value, int depth, int *old, int replace,const art::NodeResult &fc) {
+static art::node_ptr recursive_insert(
+    art::tree *t,
+    const art::key_options &options,
+    art::node_ptr n,
+    art::node_ptr &ref,
+    art::value_type key,
+    art::value_type value,
+    int depth, int *old, int replace,
+    const art::NodeResult &fc) {
     // If we are at a nullptr node, inject a leaf
     if (n.null()) {
         ref = t->tree_make_leaf(key, value, options);

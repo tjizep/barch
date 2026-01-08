@@ -75,20 +75,19 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     #set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
 endif ()
 
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
         "-O2 -g -fno-omit-frame-pointer")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
+        "-O3 -funroll-all-loops")
 
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     message("Using debuggable optimizations")
 endif ()
 
-if (CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto -O3 -funroll-all-loops")
-    message("Not Using debuggable optimizations")
-endif ()
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
 set(PYTHON3_EXEC /usr/bin/python3)
 
 set(TEST_BUILD_DIR build)

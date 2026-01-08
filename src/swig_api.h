@@ -268,6 +268,7 @@ public:
     Caller();
     Caller(const std::string& host, int port);
     bool use(const std::string& keyspace);
+    bool setOrdered(bool ordered);
     std::vector<Value> call(const std::string &method, const std::vector<Value> &args);
 protected:
     mutable std::vector<std::string_view> params {};

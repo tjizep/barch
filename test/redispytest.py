@@ -129,6 +129,15 @@ for cnt in range(1,5):
     r.execute_command("SPACES OPTION SET LRU OFF")
     r.execute_command("SPACES OPTION SET RANDOM ON")
     r.execute_command("SPACES OPTION SET RANDOM OFF")
+    r.set(f"1 a","1a")
+    r.set(f"1 b","1b")
+    r.set(f"1 c","1c")
+    r.set(f"1.1 a","1.1a")
+    r.set(f"1.1 b","1.1b")
+    r.set(f"1.2 a","1.2a")
+    assert r.get(f"1.1 a") == b'1.1a'
+    assert r.get(f"1.2 a") == b'1.2a'
+    assert r.execute_command(f'RANGE "1.1 a"') != None
     r.close()
     barch.stop()
 print(f"complete redis test")

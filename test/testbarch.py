@@ -108,6 +108,20 @@ r = k.range(f"z1000",f"z1009",11)
 assert(len(r)==9)
 assert(r[0].s()=="z1000")
 assert(r[1].s()=="z1001")
+z1 = barch.KeyValue()
+z1.use("z1")
+z1.set(f"1 a","1a")
+z1.set(f"1 b","1b")
+z1.set(f"1 c","1c")
+z1.set(f"1.1 a","1.1a")
+z1.set(f"1.1 b","1.1b")
+z1.set(f"1.2 a","1.2a")
+z1.set(f"1200.0 a","1200a")
+assert z1.get(f"1.1 a") == "1.1a"
+assert z1.get(f"1200.0 a") == "1200a"
+assert z1.get(f"1.2E3 a") == "1200a"
+print(z1.range(f'1.0 a', f'1.11 a')[0].s())
+assert(z1.range(f'1.0 a', f'1.11 a')[0].s() == "1.1 a")
 conf = barch.KeyValue()
 conf.use("configuration")
 

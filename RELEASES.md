@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-08
+# Release v0.4.3.3b 2025-01-09
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -20,6 +20,7 @@
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
 2. fix bloom filter bug when dependency is active (v0.4.3.3b 2025-01-06)
+3. fix conversion bugs (v0.4.3.3b 2025-01-09)
 
 # Release v0.4.3.2b 2025-01-05
 

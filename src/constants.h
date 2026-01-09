@@ -25,7 +25,7 @@ enum {
     static_bloom_size = 32768*128,
     leaf_type = 1,
     non_leaf_type = 2,
-    comparable_key_static_size = 32,
+    comparable_key_static_size = 64,
     node_pointer_storage_size = 64,
     log_streams = 0,
     encoding_width = 128,

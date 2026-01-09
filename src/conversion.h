@@ -242,6 +242,8 @@ namespace conversion {
                   || val.bytes[0] == art::tdouble
                   || val.bytes[0] == art::tcomposite
                   || val.bytes[0] == art::tfloat
+                  || val.bytes[0] == art::tshort
+                  || val.bytes[0] == art::tlast_valid
                   || val.bytes[0] == art::tend)) {
                 throw_exception<std::invalid_argument>("invalid value_type");
             }
@@ -249,7 +251,8 @@ namespace conversion {
                 memset(storage, 0, sizeof(storage));
                 data = storage;
             } else {
-                bytes = heap::allocate<uint8_t>(this->size);
+                // we need to allocate one more byte for the null terminator (which is not explicitly implied)
+                bytes = heap::allocate<uint8_t>(this->size + 1);
                 data = bytes;
             }
             memcpy(data, val.bytes, this->size);

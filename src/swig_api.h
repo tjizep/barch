@@ -269,6 +269,8 @@ public:
     Caller(const std::string& host, int port);
     bool use(const std::string& keyspace);
     bool setOrdered(bool ordered);
+    long long getShardCount() const ;
+    bool getOrdered() const ;
     std::vector<Value> call(const std::string &method, const std::vector<Value> &args);
 protected:
     mutable std::vector<std::string_view> params {};
@@ -293,6 +295,8 @@ public:
     KeyValue();
     KeyValue(std::string keys_space);
     KeyValue(const std::string& host, int port);
+    long long getShards() const ;
+    bool getOrdered() const ;
     std::vector<Value> range(const std::string &start, const std::string &end, long long limit = -1);
     long long count(const std::string &start, const std::string &end);
     void set(const std::string &key, const std::string &value);

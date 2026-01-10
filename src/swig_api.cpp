@@ -217,6 +217,12 @@ std::string List::front(const std::string &key) {
 KeyValue::KeyValue() {
 
 }
+long long KeyValue::getShards() const {
+    return sc.kspace()->opt_shard_count;
+}
+bool KeyValue::getOrdered() const {
+    return sc.kspace()->opt_ordered_keys;
+}
 KeyValue::KeyValue(std::string keys_space) {
     sc.set_kspace(barch::get_keyspace(keys_space));
 }
@@ -544,7 +550,12 @@ bool Caller::use(const std::string& key_space) {
     }
     return false;
 }
-
+long long Caller::getShardCount() const {
+    return sc.kspace()->opt_shard_count;
+}
+bool Caller::getOrdered() const {
+    return sc.kspace()->opt_ordered_keys;
+}
 bool Caller::setOrdered(bool ordered) {
     params = {"SPACES", "OPTIONS", "SET", "ORDERED", ordered?"ON":"OFF"};
     sc.call(params, ::SPACES);

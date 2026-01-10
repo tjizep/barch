@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-09
+# Release v0.4.3.3b 2025-01-10
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -16,11 +16,14 @@
 4. add multi key operations (v0.4.3.3b 2025-01-08)
    `SET "123 abc"` will create a key composed of a number and a string
    `SET "word 12"` can for instance be used to store a text index entry uniquely
+5. add `ordered` to per space configuration (v0.4.3.3b 2025-01-10)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
 2. fix bloom filter bug when dependency is active (v0.4.3.3b 2025-01-06)
 3. fix conversion bugs (v0.4.3.3b 2025-01-09)
+4. fix multi key operations (v0.4.3.3b 2025-01-10)
+5. fix string trimming (v0.4.3.3b 2025-01-10)
 
 # Release v0.4.3.2b 2025-01-05
 

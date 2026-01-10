@@ -715,6 +715,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         this->repl_client.insert(latch, options, key, l->get_value());
         return value;
     };
+    set_hash_query_context(key);
     auto i = h.find(key);
     if (i != h.end()) {
 

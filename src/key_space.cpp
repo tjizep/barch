@@ -144,21 +144,28 @@ namespace barch {
     key_space::key_space(const std::string &name) :name(name) {
         if (shards.empty()) {
             decltype(shards) shards_out;
-            size_t scount = barch::get_shard_count().size();
+            if (name == "configuration" || name == "configuration_") {
+                opt_shard_count = 1;
+            }
             if (name != "configuration_" && name != "node") {
                 // cannot configure configuration or the default ns "node" it is what it is
                 std::string real = undecorate(name);
                 KeyValue kv("configuration"); // this will also be replicated
                 auto sc = kv.get(real+".shards");
                 if (!sc.empty())
-                    conversion::to(sc, scount);
+                    conversion::to(sc, opt_shard_count);
+                auto ordered = kv.get(real+".ordered");
+                if (!ordered.empty())
+                    opt_ordered_keys = ordered != "0";
             }
-            shards_out.resize(scount);
+            opt_shard_count = std::max<size_t>(opt_shard_count, 1);
+            shards_out.resize(opt_shard_count);
             heap::allocator<barch::shard> alloc;
             auto start_time = std::chrono::high_resolution_clock::now();
             size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
                 shard_ptr& shard = shards_out[shard_num];
                 shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
+                shard->opt_ordered_keys = opt_ordered_keys;
                 shard->load(true);
             });
             if (shards_out.size() != shards_loaded) {
@@ -263,28 +270,6 @@ namespace barch {
         return get(get_shard_index(key.chars(), key.size));
     }
 
-    shard_ptr key_space::get_type_aware(art::value_type key) {
-        switch (key[0]) {
-            // convert all these back to string
-            case tinteger:
-            case tshort:
-            case tfloat:
-            case tdouble:
-                return get(encoded_key_as_string(key));
-            case tstring:
-                return get(key.sub(1));
-                break;
-            case tcomposite:
-                // convert use first value in composite key and recurse
-                return get(encoded_key_as_string(key.sub(2))); // 2 because composite has extra byte
-                break;
-
-            default:
-                // TODO: it's probably a normal key or perhaps an error needs throwing here
-                return get(get_shard_index(key.chars(), key.size));
-        }
-
-    }
 
     [[nodiscard]] std::string key_space::get_name() const {
         return name;

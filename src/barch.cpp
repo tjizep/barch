@@ -397,14 +397,15 @@ int SET(caller& call,const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
+    auto sp = call.kspace();
     auto converted = conversion::as_composite(k);
     auto key = converted.get_value();
-    auto t = call.kspace()->get(key);
+    auto t = sp->get(key);
     art::key_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
     }
-    spec.hash = !barch::get_ordered_keys();
+    spec.hash = !sp->opt_ordered_keys;
 
     art::value_type reply{"", 0};
     auto fc = [&](const art::node_ptr &) -> void {

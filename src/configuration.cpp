@@ -742,6 +742,7 @@ static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void 
     return SetOrderedKeys(test_ordered_keys);
 }
 static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    get_default_ks()->opt_ordered_keys = config().ordered_keys;
     for (auto s : get_default_ks()->get_shards()) {
         s->opt_ordered_keys = config().ordered_keys;
     }

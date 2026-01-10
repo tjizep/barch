@@ -14,7 +14,8 @@ namespace barch {
     class key_space {
     public:
         typedef std::shared_ptr<key_space> key_space_ptr;
-
+        bool opt_ordered_keys = barch::get_ordered_keys();
+        size_t opt_shard_count = barch::get_shard_count().size();
     private:
         heap::vector<shard_ptr> shards{};
         decltype(std::chrono::high_resolution_clock::now) start_time;
@@ -32,7 +33,6 @@ namespace barch {
         shard_ptr get_local();
         shard_ptr get(size_t shard);
         shard_ptr get(art::value_type key);
-        shard_ptr get_type_aware(art::value_type key);
         shard_ptr get(ValkeyModuleString **argv) ;
         [[nodiscard]] std::string get_name() const;
         [[nodiscard]] std::string get_canonical_name() const;

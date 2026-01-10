@@ -102,6 +102,11 @@ conversion::comparable_key conversion::as_composite(art::value_type v, bool noin
         while (token != nullptr) {
             size_t len = state - token;
             if (*state != 0) --len;
+            if (!len) continue;
+            if (token[len - 1] == 0) {
+                --len;
+            }
+            if (!len) continue;
             tuple.push(convert(token, len, noint));
             token = strtok_r(0, &spc[0], &state);
         }

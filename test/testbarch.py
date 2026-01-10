@@ -110,6 +110,7 @@ assert(r[0].s()=="z1000")
 assert(r[1].s()=="z1001")
 z1 = barch.KeyValue()
 z1.use("z1")
+z1.set("snippy ", " ")
 z1.set(f"1 a","1a")
 z1.set(f"1 b","1b")
 z1.set(f"1 c","1c")
@@ -130,3 +131,29 @@ mys = barch.KeyValue()
 mys.use("mys")
 mys.set("hello","world")
 assert(mys.get("hello") == "world")
+
+conf = barch.KeyValue("configuration")
+conf.set("text_data.shards","1")
+conf.set("spatial_data.shards","1")
+conf.set("counters.ordered","0")
+conf.set("counters.shards","1")
+assert conf.getOrdered()
+txt = barch.KeyValue("text_data")
+spc = barch.KeyValue("spatial_data")
+spc.set("snippy ", " ")
+assert spc.get("snippy ") == " "
+spc.set(" snippy 1", " ")
+assert spc.get(" snippy 1") == " "
+spc.set(" snippy2  ", " ")
+assert spc.get(" snippy2  ") == " "
+spc.set(" snippy1 ", " ")
+assert spc.get(" snippy1 ") == " "
+assert spc.getShards() == 1
+assert txt.getShards() == 1
+cnt = barch.KeyValue("counters")
+cnt.set("records","0")
+counter = cnt.get("records")
+assert counter == "0"
+cnt.incr("records",1)
+assert cnt.get("records") == "1"
+assert not cnt.getOrdered()

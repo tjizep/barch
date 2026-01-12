@@ -186,7 +186,26 @@ long long List::len(const std::string &key) {
     return sc.results.empty() ? 0 : sc.results[0].to_int64();
 
 }
+Value List::brpop(const std::string &key, double timeout) {
+    params = {"BRPOP", key, std::to_string(timeout)};
 
+    int r = sc.call(params, BRPOP);
+    if (r != 0) {
+        barch::std_err("brpop failed", key);
+    }
+    return sc.results.empty() ? nullptr : sc.results[0];
+
+}
+Value List::blpop(const std::string &key, double timeout) {
+    params = {"BLPOP", key, std::to_string(timeout)};
+
+    int r = sc.call(params, BLPOP);
+    if (r != 0) {
+        barch::std_err("blpop failed", key);
+    }
+    return sc.results.empty() ? nullptr : sc.results[0];
+
+}
 long List::pop(const std::string &key, long long count) {
     params = {"LPOP", key, std::to_string(count)};
 
@@ -274,6 +293,15 @@ bool KeyValue::exists(const std::string &key) {
     }
     return false;
 }
+bool KeyValue::append(const std::string& key, const std::string& value) {
+    params = {"APPEND", key, value};
+
+    int r = sc.call(params, ::APPEND);
+    if (r == 0) {
+        return sc.results.empty() ? false: sc.results[0] == "OK";
+    }
+    return false;
+}
 
 bool KeyValue::expire(const std::string &key, long long sec, const std::string& flag) {
     if (flag.empty()) {
@@ -332,6 +360,9 @@ void KeyValue::decr(const std::string& key, double by) {
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
+void KeyValue::decr(const std::string& key) {
+    decr(key, 1ll);
+}
 
 void KeyValue::incr(const std::string& key, long long by) {
     std::string b = std::to_string(by);
@@ -339,6 +370,9 @@ void KeyValue::incr(const std::string& key, long long by) {
 
     int r = sc.call(params, ::INCRBY);
     if (r == 0) {}
+}
+void KeyValue::incr(const std::string& key) {
+    incr(key, 1ll);
 }
 
 void KeyValue::decr(const std::string& key, long long by) {

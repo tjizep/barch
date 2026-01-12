@@ -288,6 +288,8 @@ public:
     std::string back(const std::string &key);
     std::string front(const std::string &key);
     long pop(const std::string &key,long long count);
+    Value brpop(const std::string &key, double timeout);
+    Value blpop(const std::string &key, double timeout);
 };
 
 class KeyValue : public Caller {
@@ -304,8 +306,10 @@ public:
     Value vget(const std::string &key) const;
     void incr(const std::string& key, double by);
     void incr(const std::string& key, long long by);
+    void incr(const std::string& key);
     void decr(const std::string& key, double by);
     void decr(const std::string& key, long long by);
+    void decr(const std::string& key);
     void erase(const std::string &key);
     long long ttl(const std::string &key);
     bool exists(const std::string &key);
@@ -318,6 +322,7 @@ public:
     Value max() const ;
     Value upperBound(const std::string& key) const ;
     long long size() const ;
+    bool append(const std::string& key, const std::string& value);
 };
 
 /**

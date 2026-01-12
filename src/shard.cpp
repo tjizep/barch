@@ -32,12 +32,12 @@ uint64_t art_evict_lru(barch::shard_ptr t) {
                 abort_with("invalid key or key size");
             }
             if (l->deleted()) {
-                i += (l->byte_size() + test_memory);
+                i += l->next_leaf();
                 continue;
             }
             t->remove(l->get_key(),fc);
             //art_delete(t, l->get_key(), fc);
-            i += (l->byte_size() + test_memory);
+            i += l->next_leaf();
         }
         ++statistics::pages_evicted;
         return page.second;
@@ -1012,8 +1012,8 @@ void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::f
         } else {
             cb(l,pos);
         }
-        pos += l->byte_size() + test_memory + allocation_padding;
-        i += (l->byte_size() + test_memory + allocation_padding);
+        pos += l->next_leaf();
+        i += l->next_leaf();
 
     }
 }

@@ -902,7 +902,7 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetMinCompressedSize, SetMinCompressedSize, ApplyMinCompressedSize,
                                              nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "4", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "iteration_worker_count", "2", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
 

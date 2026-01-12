@@ -86,6 +86,7 @@ struct free_bin {
 
     abstract_leaf_pair * alloc = nullptr;
     unsigned size = 0;
+    size_t bytes = 0;
     heap::vector<uint32_t> page_index{};
     heap::vector<free_page> pages{};
 
@@ -106,13 +107,12 @@ struct free_bin {
     }
 
     [[nodiscard]] bool empty() const {
-        if (!pages.empty()) {
-            return pages.back().empty();
-        }
-        return true;
+
+        return bytes == 0;
     }
 
-    void get(size_t page, const std::function<void(free_page &p)> &f) {
+    template<typename  TF>
+    void get(size_t page, const TF &&f) {
         if (page < page_index.size()) {
             size_t at = page_index.at(page);
             if (at != 0) {
@@ -126,8 +126,7 @@ struct free_bin {
         return !empty();
     }
 
-    heap::vector<size_t> get_addresses(size_t page) {
-        heap::vector<size_t> r;
+    void get_addresses(heap::vector<size_t>& r,size_t page) {
         if (page < page_index.size()) {
             size_t at = page_index.at(page);
             if (at != 0) {
@@ -138,7 +137,6 @@ struct free_bin {
                 }
             }
         }
-        return r;
     }
 
     unsigned erase(size_t page) {
@@ -147,10 +145,15 @@ struct free_bin {
             if (p.page != page) {
                 abort_with("page does not match");
             }
+
             r = p.offsets.size() * size;
             p.clear();
             page_index[p.page] = 0;
         });
+        if (bytes < r) {
+            abort_with("invalid free size");
+        }
+        bytes -= r;
         return r;
     }
 
@@ -170,6 +173,7 @@ struct free_bin {
         size_t page = page_index[addr_page] - 1;
 
         pages[page].push(address.offset());
+        bytes += s;
     }
 
     logical_address pop(unsigned s) {
@@ -194,6 +198,10 @@ struct free_bin {
             page_index[p.page] = 0;
             pages.pop_back();
         }
+        if (bytes < s) {
+            abort_with("invalid free size");
+        }
+        bytes -= s;
         return address;
     }
 };
@@ -212,6 +220,7 @@ struct free_list {
         added = other.added;
         min_bin = other.min_bin;
         max_bin = other.max_bin;
+        available_bins = other.available_bins;
         addresses = other.addresses;
         free_bins = other.free_bins;
         return *this;
@@ -224,6 +233,7 @@ struct free_list {
         addresses.clear();
         max_bin = 0;
         min_bin = LPageSize;
+        available_bins.clear();
         free_bins.clear();
     }
 
@@ -247,12 +257,13 @@ struct free_list {
             return;
         }
 
-        if (test_memory == 1) {
+        if (fl_test_memory == 1) {
             if (addresses.count(address.address()) > 0) {
                 abort_with("address already freed");
             }
             addresses.insert(address.address());
         }
+        available_bins.insert(size);
         free_bins[size].add(address, size);
         min_bin = std::min(min_bin, (size_t) size);
         max_bin = std::max(max_bin, (size_t) size);
@@ -264,14 +275,23 @@ struct free_list {
         inner_add(address, size);
     }
 
+    heap::vector<size_t> tobe{};
+    heap::vector<size_t> unavailer{};
+    heap::unordered_set<size_t> available_bins{};
+
     void erase(size_t page) {
-        for (size_t b = min_bin; b <= max_bin; ++b) {
+
+        unavailer.clear();
+        //for (size_t b = min_bin; b <= max_bin; ++b) {
+        for (size_t b: available_bins){
             auto &f = free_bins[b];
-            auto tobe = f.get_addresses(page);
-            if (test_memory == 1) {
+
+            if (fl_test_memory == 1) {
+                tobe.clear();
+                f.get_addresses(tobe, page);
                 for (auto o: tobe) {
                     if (addresses.count(o) == 0) {
-                        abort();
+                        abort_with("cannot erase pages which are allocated");
                     }
                     addresses.erase(o);
                 }
@@ -283,6 +303,13 @@ struct free_list {
             } else {
                 abort_with("unbalanced pointer size");
             }
+            if (f.empty()) {
+                // opportunistic
+                unavailer.push_back(b);
+            }
+        }
+        for (auto b: unavailer) {
+            available_bins.erase(b);
         }
     }
 
@@ -293,11 +320,14 @@ struct free_list {
         if (!added) return logical_address{0,alloc};
 
         logical_address r = free_bins[size].pop(size);
+        if (free_bins[size].empty()) {
+            available_bins.erase(size);
+        }
         if (!r.null()) {
             if (added < size) {
                 abort_with("trying to free too many bytes");
             }
-            if (test_memory == 1) {
+            if (fl_test_memory == 1) {
                 auto& tap = r.get_ap<abstract_leaf_pair>();
                 if (&tap != this->alloc) {
                     abort_with("allocation pair from different tree");
@@ -309,9 +339,7 @@ struct free_list {
                 addresses.erase(r.address());
             }
             added -= size;
-
         }
-
 
         return r;
     }
@@ -547,7 +575,8 @@ public:
     }
 
     void free(logical_address at, size_t sz) {
-        size_t size = sz + test_memory + allocation_padding;
+        sz = pad(sz);
+        size_t size = sz + test_memory;
         uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size) {
             barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
@@ -680,9 +709,15 @@ public:
         new_address(r, sz);
         return r;
     }
+    // this reduces the total amount pf different allocations sizes possible
+    size_t pad(size_t size) const {
 
+        return alloc_pad(size);
+    }
     uint8_t *new_address(logical_address &r, size_t sz) {
-        size_t size = sz + test_memory + allocation_padding;
+        sz = pad(sz);
+        size_t size = sz + test_memory;
+
         r = emancipated.get(size);
         if (!r.null() && r.page() <= max_logical_address() && !retrieve_page(r.page()).empty()) {
             if (test_memory) {

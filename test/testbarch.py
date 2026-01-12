@@ -110,7 +110,7 @@ assert(r[0].s()=="z1000")
 assert(r[1].s()=="z1001")
 z1 = barch.KeyValue()
 z1.use("z1")
-z1.set("snippy ", " ")
+z1.set("snippy    ", " ")
 z1.set(f"1 a","1a")
 z1.set(f"1 b","1b")
 z1.set(f"1 c","1c")
@@ -148,6 +148,11 @@ spc.set(" snippy2  ", " ")
 assert spc.get(" snippy2  ") == " "
 spc.set(" snippy1 ", " ")
 assert spc.get(" snippy1 ") == " "
+spc.set(" snippy1 2 ", "2")
+assert spc.get(" snippy1  2 ") == "2"
+assert spc.get(" snippy1 2") == "2"
+assert spc.get("snippy1 2") == "2"
+
 assert spc.getShards() == 1
 assert txt.getShards() == 1
 cnt = barch.KeyValue("counters")

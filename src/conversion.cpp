@@ -101,9 +101,7 @@ conversion::comparable_key conversion::as_composite(art::value_type v, bool noin
         auto token = strtok_r(last_tok, &spc[0], &state);
         while (token != nullptr) {
             size_t len = state - token;
-            if (*state != 0) --len;
-            if (!len) continue;
-            if (token[len - 1] == 0) {
+            while (len && token[len - 1] == 0) {
                 --len;
             }
             if (!len) continue;

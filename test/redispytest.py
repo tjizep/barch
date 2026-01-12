@@ -96,6 +96,7 @@ for cnt in range(1,5):
     print(r.get("i"))
     assert r.get("i") == b'2'
     r.append("i","0")
+    print(r.get("i"))
     assert r.get("i") == b'20'
 
     r.execute_command("PREPEND i 1")

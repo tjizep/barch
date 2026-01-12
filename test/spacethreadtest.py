@@ -34,7 +34,7 @@ threading.Thread(target=testspace, args=(5,)),
 for i in t:
     i.start()
 
-time.sleep(10)
+time.sleep(3)
 
 for i in t:
     i.join()

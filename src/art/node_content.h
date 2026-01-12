@@ -44,8 +44,10 @@ namespace art {
             }
             if (t.is_leaf) {
                 set_leaf(t.logical);
-            } else {
+            } else if (!t.null()) {
                 set_node(t.get_node());
+            } else {
+                value = 0;
             }
             return *this;
         }

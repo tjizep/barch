@@ -1186,7 +1186,7 @@ bool art_insert
     try {
         int old_val = 0;
         if (key.size + value.size > maximum_allocation_size) {
-            throw std::runtime_error("value too large");
+            throw_exception<std::runtime_error>("value too large");
         }
         t->clear_trace();
 
@@ -1617,7 +1617,7 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                             ++misses;
                         }
                     }
-                    i += (l->byte_size() + test_memory);
+                    i += l->next_leaf();
                 }
 
                 return true;
@@ -1658,7 +1658,7 @@ void art::values(tree * t, const keys_spec &spec, value_type pattern,
                             ++misses;
                         }
                     }
-                    i += (l->byte_size() + test_memory);
+                    i += l->next_leaf();
                 }
 
                 return true;

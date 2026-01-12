@@ -511,7 +511,7 @@ int UINCRBY(caller& call, const arg_t& argv) {
     arg2.pop_back();
     return BarchModifyInteger(call, arg2, by);
 }
-int APPEND(caller& call, const arg_t& argv) {
+int _APPEND(caller& call, const arg_t& argv, bool pre) {
     ++statistics::set_ops;
     if (argv.size() != 3)
         return call.wrong_arity();
@@ -524,82 +524,54 @@ int APPEND(caller& call, const arg_t& argv) {
     auto converted = conversion::as_composite(k);
     auto t = call.kspace()->get(converted.get_value());
     storage_release release(t);
-    int r = -1;
-    auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
-        if (old.null()) {
-            return nullptr;
-        }
-        const art::leaf *leaf = old.const_leaf();
+    auto fc = [&](art::node_ptr) -> void {
+    };
+    auto n = t->search(converted.get_value());
+    if (n.is_leaf) {
+        auto leaf = n.const_leaf();
+        art::key_options opts = leaf->options();
+
         auto ov = leaf->get_value();
         if (leaf->is_compressed()) {
             ov = dictionary::decompress(ov);
         }
-        auto& alloc = const_cast<alloc_pair&>(old.logical.get_ap<alloc_pair>());
-        heap::small_vector<uint8_t, 128> s;
-        s.append(ov.to_view());
-        s.append(v.to_view());
-        art::node_ptr l = make_leaf
-        (  alloc
-        ,  leaf->get_key()
-        ,  {s.data(),s.size()}
-        ,  leaf->expiry_ms()
-        ,  leaf->is_volatile()
-        // no compression by design!
-        );
-
-        if (!l.null()) {
-            r = 0;
+        // threadsafe, non-re-entrant, faster
+        thread_local heap::vector<uint8_t> s;
+        s.clear();
+        if (pre) {
+            s.insert(s.end(), v.begin(), v.end());
+            s.insert(s.end(), ov.begin(), ov.end());
+        }else {
+            s.insert(s.end(), ov.begin(), ov.end());
+            s.insert(s.end(), v.begin(), v.end());
         }
-        return l;
-    };
-    t->update(converted.get_value(), updater);
-    if (r == 0) {
-        return call.push_simple("OK");
-    } else {
-        return call.push_null();
+        const auto& compressed = dictionary::compress(v);
+        if (!compressed.empty()) {
+            statistics::value_bytes_compressed += compressed.size;
+            opts.set_compressed(true);
+            v = compressed;
+        }else {
+            v = {s.data(),s.size()};
+        }
+        if (converted.get_value().size + v.size > maximum_allocation_size) {
+            return call.push_error("Maximum allocation size exceeded");
+        }
+
+        t->opt_insert( opts, converted.get_value(), v, true, fc);
+
+    }else {
+        art::key_options options;
+
+        t->opt_insert(options, converted.get_value(), v, true, fc);
+
     }
+    return call.push_simple("OK");
+}
+int APPEND(caller& call, const arg_t& argv) {
+    return _APPEND(call, argv, false);
 }
 int PREPEND(caller& call, const arg_t& argv) {
-    ++statistics::set_ops;
-    if (argv.size() != 3)
-        return call.wrong_arity();
-    auto k = argv[1];
-    auto v = argv[2];
-    art::key_spec spec;
-    if (key_ok(k) != 0)
-        return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
-    auto t = call.kspace()->get(converted.get_value());
-    storage_release release(t);
-    int r = -1;
-    auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
-        if (old.null()) {
-            return nullptr;
-        }
-        const art::leaf *leaf = old.const_leaf();
-        auto& alloc = const_cast<alloc_pair&>(old.logical.get_ap<alloc_pair>());
-        heap::small_vector<uint8_t, 128> s;
-        s.append(v.to_view());
-        s.append(leaf->get_value().to_view());
-        art::node_ptr l = make_leaf
-        (  alloc
-        ,  leaf->get_key()
-        ,  {s.data(),s.size()}
-        ,  leaf->expiry_ms()
-        ,  leaf->is_volatile()
-        );
-
-        if (!l.null()) {
-            r = 0;
-        }
-        return l;
-    };
-    t->update(converted.get_value(), updater);
-    if (r == 0) {
-        return call.push_simple("OK");
-    } else {
-        return call.push_null();
-    }
+    return _APPEND(call, argv, true);
 }
 
 int cmd_PREPEND(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

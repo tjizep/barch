@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-10
+# Release v0.4.3.3b 2025-01-12
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -17,6 +17,9 @@
    `SET "123 abc"` will create a key composed of a number and a string
    `SET "word 12"` can for instance be used to store a text index entry uniquely
 5. add `ordered` to per space configuration (v0.4.3.3b 2025-01-10)
+6. improve allocation (v0.4.3.3b 2025-01-10)
+7. add large geo coding example (v0.4.3.3b 2025-01-12)
+8. add standalone RESP server in python example - with messages passed using lbpop (v0.4.3.3b 2025-01-12)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
@@ -24,6 +27,8 @@
 3. fix conversion bugs (v0.4.3.3b 2025-01-09)
 4. fix multi key operations (v0.4.3.3b 2025-01-10)
 5. fix string trimming (v0.4.3.3b 2025-01-10)
+6. fix string decoding (v0.4.3.3b 2025-01-12)
+7. fix `APPEND` and `PREPEND` functions (v0.4.3.3b 2025-01-12)
 
 # Release v0.4.3.2b 2025-01-05
 

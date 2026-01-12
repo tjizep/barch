@@ -690,6 +690,9 @@ namespace art {
             size_t lsize = (large() ? sizeof(uint32_t)*2:0);
             return key_len() + 1 + val_len() + lsize + esize + sizeof(leaf);
         }
+        size_t next_leaf() const {
+            return alloc_pad(byte_size()) + test_memory;
+        }
 
         [[nodiscard]] bool expired() const {
             ExpiryType expiry = expiry_ms();

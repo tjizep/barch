@@ -172,7 +172,8 @@ Variable encoded_key_as_variant(art::value_type key) {
         // not recurrent composites yet
         unsigned kl = 2;
         const char *ptr = (const char *) &enck[2];
-        std::string r;
+        std::string r = "$";
+        size_t cnt = 0;
         while (kl < key_len) {
             unsigned len = 0;
 
@@ -192,11 +193,12 @@ Variable encoded_key_as_variant(art::value_type key) {
                 default:
                     return r;
             }
-            if (!r.empty())
+            if (!r.empty() && cnt > 0)
                 r += " ";
             r += encoded_key_as_variant(key.sub(kl, len)).s();
             ptr += len;
             kl += len;
+            ++cnt;
         }
         return r;
     } else {

@@ -4,7 +4,7 @@
 
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
-
+#include <cstdlib>
 enum {
     node_checks = 0,
     page_size = 32768*8, // must be a power of two

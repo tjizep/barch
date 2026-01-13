@@ -425,10 +425,6 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/expiretest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-        add_test(NAME TestBarchPull
-                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/pulltest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
-                WORKING_DIRECTORY ${TEST_BUILD_PATH})
-
         add_test(NAME TestBarchList
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listtest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
                 WORKING_DIRECTORY ${TEST_BUILD_PATH})

@@ -46,7 +46,11 @@ namespace barch {
             [[nodiscard]] virtual std::error_code net_error() const = 0;
         };
         std::shared_ptr<rpc> create(const std::string& host, int port);
-
+        void publish(const std::string& host, int port);
+        bool has_destinations();
+        void call(const std::vector<std::string>& params);
+        void distribute();
+        void stop_repl();
         struct repl_dest {
             std::string host {};
             std::string name {};
@@ -59,37 +63,17 @@ namespace barch {
             repl_dest& operator=(const repl_dest&) = default;
         };
         std::shared_ptr<source> create_source(const std::string& host, const std::string& port, size_t shard);
-        struct client : repl_dest {
-            std::atomic<uint32_t> messages = 0;
-            heap::vector<uint8_t> buffer{};
-            heap::vector<repl_dest> destinations{};
-            heap::vector<std::shared_ptr<source>> sources{};
-            std::mutex latch{};
-            std::shared_ptr<rpc> dest{};
-            bool connected = false;
-            client() = default;
-            client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}
-            ~client();
-            void poll();
-            void stop();
-            [[nodiscard]] bool begin_transaction() const ;
-            [[nodiscard]] bool commit_transaction() const ;
-            bool load(size_t shard);
+
+
+        struct temp_client: repl_dest {
+            temp_client() = default;
+            temp_client(std::string host, int port, size_t shard) : repl_dest(std::move(host), port, shard) {}
+            ~temp_client();
+            bool load(const std::string& name, size_t shard);
             [[nodiscard]] bool ping() const;
-            // dees functions should already be latched by the shard calling them
-            void add_destination(std::string host, int port);
-            bool add_source(std::string host, int port);
-            bool insert(heap::shared_mutex& latch, const art::key_options& options, art::value_type key, art::value_type value);
-            bool remove(heap::shared_mutex& latch, art::value_type key);
-            /**
-             * finds a key in the tree
-             * @param key the key which we want to retrieve
-             * @return the node of the added key
-             */
-            bool find_insert(art::value_type key);
-        private:
-            //void send_art_fun(std::iostream& stream,  const heap::vector<uint8_t>& to_send);
+
         };
+
         struct route {
             std::string ip{};
             int64_t port{};

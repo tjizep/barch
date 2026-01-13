@@ -198,150 +198,7 @@ namespace barch {
         size_t find_applied {};
         bool error{false};
     };
-    /**
-     * process a cmd_art_fun buffer
-     * Note: no latching in this function all latches are set outside
-     * @param t
-     * @param buffer buffer containing commands and data
-     * @param stream for writing reply data
-     * @return true if no errors occurred
-     */
 
-    template<typename StreamT>
-     af_result process_art_fun_cmd(barch::key_space_ptr ks, uint32_t name_size, StreamT& stream, const heap::vector<uint8_t>& buffer, bool lock = true) {
-        af_result r;
-        heap::vector<uint8_t> tosend;
-        std::string name;
-        node_ptr found;
-        uint32_t buffers_size = buffer.size();
-        bool flush_buffers = false;
-        const char* chard = (const char *)buffer.data();
-        name.insert(name.begin(), chard, chard + name_size);
-        for (size_t i = name_size; i < buffers_size;) {
-            char cmd = (char)buffer[i];
-            switch (cmd) {
-                case 'c': {
-
-                }
-                case 'i': {
-                    auto options = get_options(i+1, buffer);
-                    auto key = get_value(options.second, buffer);
-                    auto value = get_value(key.second, buffer);
-                    if (get_total_memory() > get_max_module_memory()) {
-                        // do not add data if the memory limit is reached
-                        ++statistics::oom_avoided_inserts;
-                        r.error = true;
-                        return r;
-                    } else {
-                        auto fc = [](const node_ptr &){
-                        };
-                        bool added_or = false;
-                        auto t = ks->get(key.first);
-                        storage_write_lock wl(t, lock);
-                        if (t->opt_ordered_keys) {
-                            added_or = t->tree_insert(options.first, key.first, value.first,true, fc);
-                        }else
-                        {
-                            added_or = t->hash_insert(options.first, key.first, value.first,true, fc);
-                        }
-                        if (added_or) {
-                            ++statistics::repl::key_add_recv_applied;
-                            ++r.add_applied;
-                        }
-
-                    }
-                    ++statistics::repl::key_add_recv;
-                    ++r.add_called;
-                    i = value.second;
-                }
-                    break;
-                case 'r': {
-                    auto key = get_value(i+1, buffer);
-                    auto t = ks->get(key.first);
-                    storage_write_lock wl(t, lock);
-                    if (t->opt_ordered_keys) {
-                        t->tree_remove(key.first,[&r](const node_ptr &) {
-                            ++statistics::repl::key_rem_recv_applied;
-                            ++r.remove_applied;
-                        });
-                    }else {
-                        if (t->remove_leaf_from_uset(key.first)) {
-                            ++statistics::repl::key_rem_recv_applied;
-                            ++r.remove_applied;
-                        }
-                    }
-
-
-                    i = key.second;
-                    ++statistics::repl::key_rem_recv;
-                    ++r.remove_called;
-                }
-                    break;
-                case 'f': {
-                    auto key = get_value(i+1, buffer);
-                    std_log("'f'inding key");
-                    log_encoded_key(key.first);
-                    // TODO: this may pull replicate
-                    auto t = ks->get(key.first);
-                    read_lock rl(t, lock);
-                    found = t->search(key.first);
-                    if (found.is_leaf) {
-                        auto l = found.const_leaf();
-                        tosend.push_back('i');
-                        push_options(tosend, *l);
-                        push_value(tosend, l->get_key());
-                        push_value(tosend, l->get_value());
-                        ++r.find_applied;
-                        log_encoded_key(l->get_key());
-                    }else {
-                        std_log("key not found in shard", t->get_shard_number());
-                    }
-                    i = key.second;
-                    ++statistics::repl::key_find_recv;
-                    ++r.find_called;
-                    flush_buffers = true;
-                }
-                    break;
-                case 'a': {
-                    auto lkey = get_value(i+1, buffer);
-                    auto ukey = get_value(lkey.second, buffer);
-                    ++r.find_called;
-                    auto t = ks->get(lkey.first);
-                    read_lock rl(t, lock);
-                    art::iterator ai(t, lkey.first);
-                    while (ai.ok()) {
-                        auto k = ai.key();
-                        if (k >= lkey.first && k <= ukey.first) {
-                            tosend.push_back('i');
-                            auto l = found.const_leaf();
-                            push_options(tosend, *l);
-                            push_value(tosend, l->get_key());
-                            push_value(tosend, l->get_value());
-                            ++r.find_applied;
-                        } else {
-                            break;
-                        }
-                        ai.next();
-                    }
-                    flush_buffers = true;
-                    i = ukey.second;
-                    ++statistics::repl::key_find_recv;
-                }
-                    break;
-                default:
-                    std_err("unknown command", cmd);
-                    r.error = true;
-                    return r;
-            }
-        }
-        if (flush_buffers) {
-            auto s = (uint32_t)tosend.size();
-            writep(stream,s);
-            writep(stream,tosend.data(),tosend.size());
-            stream.flush();
-        }
-        return r;
-    }
     template<typename SockT>
     bool run_to(asio::io_context& ioc, SockT& s, std::chrono::steady_clock::duration timeout) {
         ioc.restart();
@@ -454,17 +311,15 @@ namespace barch {
         vector_stream stream{};
         uint32_t message_count = 0;
 
-        bool send(size_t shard, const std::string& name, const std::string& host, uint16_t port, const heap::vector<uint8_t> &to_send) {
+        bool send(const std::string& name, const std::string& host, uint16_t port, const heap::vector<uint8_t> &to_send) {
             stream.clear();
             error.clear();
             if (connect(host,std::to_string(port))) {
                 uint32_t cmd = cmd_art_fun;
                 uint32_t buffers_size = to_send.size();
-                uint32_t sh = shard;
                 uint32_t name_size = name.size();
                 writep(stream, uint8_t{0x00});
                 writep(stream, cmd);
-                writep(stream, sh);
                 writep(stream, message_count);
                 writep(stream, name_size);
                 if (buffers_size == 0) {

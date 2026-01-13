@@ -20,7 +20,6 @@
 #include "thread_pool.h"
 #include "asio_resp_session.h"
 #include "rpc/barch_session.h"
-#include "repl_session.h"
 //#include "uring_resp_session.h"
 #include "rpc/constants.h"
 
@@ -170,7 +169,7 @@ namespace barch {
                     return;
                 }
                 if (cmd == cmd_art_fun) {
-                    std::make_shared<repl_session>(std::move(endpoint),1+sizeof(cmd))->start();
+                    barch::std_err("command not implemented");
                     return;
                 }
                 heap::vector<uint8_t> buffer{};
@@ -308,6 +307,7 @@ namespace barch {
     }
 
     void server::stop() {
+
         std::unique_lock l(srv_mut());
         handle_stop(get_srv());
         handle_stop(get_srv_ssl());
@@ -315,6 +315,7 @@ namespace barch {
     struct module_stopper {
         module_stopper() = default;
         ~module_stopper() {
+            repl::stop_repl();
             server::stop();
         }
     };
@@ -466,163 +467,78 @@ namespace barch {
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
             return std::make_shared<rpc_impl>(host, port);
         }
+        struct consumers {
+            std::mutex m;
+            heap::vector<std::vector<std::string>> buffer;
+            heap::string_map<std::shared_ptr<rpc>> destinations;
+            bool exit = false;
+            consumers() {
 
-        client::~client() {
-            connected = false;
-        };
+            }
+            ~consumers() {
+                stop();
+            }
+            void distribute() {
 
-        void client::stop() {
-            connected = false;
-        }
-        void client::poll() {
-            if (!connected) return;
-
-            thread_local heap::vector<uint8_t> to_send;
-            thread_local art_fun sender;
-            thread_local heap::vector<repl_dest> dests;
-            to_send.reserve(barch::get_rpc_max_buffer());
-            try {
-
+                if (exit) return;
+                heap::vector<std::vector<std::string>> todo;
+                heap::string_map<std::shared_ptr<rpc>> active;
                 {
-                    std::lock_guard lock(this->latch);
-                    to_send.swap(this->buffer);
-                    sender.message_count = this->messages; // detect missing
-                    this->buffer.clear();
-                    this->messages = 0;
-                    dests = destinations;
+                    std::lock_guard l(m);
+                    todo.swap(buffer);
+                    active = destinations;
                 }
-
-                if (!to_send.empty()) {
-                    for (auto& dest : dests) {
-                        // statistics are updated
-                        sender.send(this->shard, this->name, dest.host, dest.port, to_send);
+                for (auto dest: active) {
+                    heap::vector<Variable> results{};
+                    for (const auto&p : todo) {
+                        results.clear();
+                        auto r = dest.second->call(results,p);
+                        if (r.net_error) {
+                            barch::std_err("call to",dest.first,"failed");
+                            break;
+                        }
+                        if (exit) return;
                     }
-                    to_send.clear();
+                    if (exit) return;
                 }
-
-            }catch (std::exception& e) {
-                this->connected = false;
-                barch::std_err("failed to connect to remote server", this->host, this->port,e.what());
             }
+            void add(const std::string &host, int port) {
+                std::lock_guard l(m);
+                std::string addr = host;
+                addr += ":";
+                addr += std::to_string(port);
+                destinations[addr] = create(host,port);
+            }
+            void consume(const std::vector<std::string>& params) {
+                if (destinations.empty()) return;
+                std::lock_guard l(m);
+                buffer.push_back(params);
+            }
+            void stop() {
+                std::lock_guard l(m);
+                destinations.clear();
+                buffer.clear();
+                exit = true;
+            }
+        };
+        consumers& dests() {
+            static consumers d;
+            return d;
         }
-        void client::add_destination(std::string host, int port) {
-            auto dest = repl_dest{std::move(host), port, shard};
-            {
-                std::lock_guard lock(this->latch);
-                for (auto& d : destinations) {
-                    if (d.host == dest.host && d.port == dest.port) {
-                        barch::std_err("destination already added", d.host, d.port);
-                        return;
-                    }
-                }
-                destinations.emplace_back(dest);
-            }
-            std::lock_guard lock(this->latch);
-            if (!connected) {
-                connected = true;
-            }
+        void publish(const std::string& host, int port) {
+            dests().add(host, port);
         }
-
-        bool client::add_source(std::string host, int port) {
-            auto src = create_source(std::move(host), std::to_string(port), shard);
-            {
-                std::lock_guard lock(this->latch);
-                for (auto& d : sources) {
-                    if (d->host == src->host && d->port == src->port) {
-                        barch::std_err("source already added", d->host, d->port);
-                        return false;
-                    }
-                }
-                sources.emplace_back(src);
-            }
-            return true;
+        bool has_destinations() {
+            return !dests().destinations.empty();
+        }
+        void call(const std::vector<std::string>& params){
+            dests().consume(params);
+        }
+        void distribute() {
+            dests().distribute();
         }
 
-        bool client::insert(heap::shared_mutex& latch, const barch::key_options& options, value_type key, value_type value) {
-            if (!connected) {
-                if (!destinations.empty()) ++statistics::repl::instructions_failed;
-                return destinations.empty();
-            }
-            bool ok = time_wait(barch::get_rpc_max_client_wait_ms(), [this,&latch]() {
-                bool r = buffer.size() < barch::get_rpc_max_buffer();
-                if (!r) {
-                    latch.unlock();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    latch.lock();
-                }
-                r = buffer.size() < barch::get_rpc_max_buffer();
-                return r;
-            });
 
-            if (!ok) {
-                ++statistics::repl::instructions_failed;
-                barch::std_err("replication buffer size exceeded", buffer.size());
-                return false;
-            }
-            std::lock_guard lock(this->latch);
-            buffer.push_back('i');
-            push_options(buffer, options);
-            push_value(buffer, key);
-            push_value(buffer, value);
-            ++statistics::repl::insert_requests;
-            ++messages;
-            return true;
-
-        }
-
-        bool client::remove(heap::shared_mutex& latch, value_type key) {
-            if (!connected) {
-                if (!destinations.empty()) ++statistics::repl::instructions_failed;
-                return destinations.empty();
-            }
-            bool ok = time_wait(barch::get_rpc_max_client_wait_ms(), [this, &latch]() {
-                bool r = buffer.size() < barch::get_rpc_max_buffer();
-                if (!r) {
-                    latch.unlock();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    latch.lock();
-                }
-                r = buffer.size() < barch::get_rpc_max_buffer();
-                return r;
-            });
-            if (!ok) {
-                ++statistics::repl::instructions_failed;
-                barch::std_err("replication buffer size exceeded", buffer.size());
-                return false;
-            }
-
-            std::lock_guard lock(this->latch);
-            buffer.push_back('r');
-            push_value(buffer, key);
-            ++statistics::repl::remove_requests;
-            ++messages;
-            return true;
-        }
-
-        template<typename Stream>
-        auto get_value() {
-            return cmd_art_fun;
-        }
-
-        template<typename Stream>
-        void send_art_fun(Stream& stream, const std::string& uname, const heap::vector<uint8_t>& to_send, uint32_t messages, size_t shard) {
-            std::string name = barch::ks_undecorate(uname);
-            uint32_t cmd = get_value<Stream>();
-            uint32_t buffers_size = to_send.size();
-            uint32_t sh = shard;
-            writep(stream, uint8_t{0x00});
-            writep(stream, cmd);
-            writep(stream, sh);
-            writep(stream, messages);
-            writep(stream, (uint32_t)name.size());
-            writep(stream, buffers_size);
-            // the header must always be the same size
-
-            writep(stream, name.data(), name.size());
-            writep(stream, to_send.data(), to_send.size());
-            stream.flush();
-
-        }
         std::shared_ptr<source> create_source(const std::string& host, const std::string& port, size_t shard) {
             std::shared_ptr src = std::make_shared<sock_fun>();
             src->host = host;
@@ -630,15 +546,11 @@ namespace barch {
             src->shard = shard;
             return src;
         }
-        [[nodiscard]] bool client::begin_transaction() const {
-            try {
-            }catch (std::exception& e) {
-                barch::std_err("failed to begin transaction", e.what());
-                return false;
-            }
-            return true;
+        temp_client::~temp_client() {
+
         }
-        bool client::load(size_t shard) {
+
+        bool temp_client::load(const std::string& name, size_t shard) {
             try {
                 if (!ping()) {
                     return false;
@@ -655,7 +567,7 @@ namespace barch {
                 writep(stream,uint8_t{0x00});
                 writep(stream,cmd);
                 writep(stream, s);
-                auto ks = get_keyspace(ks_undecorate(this->name));
+                auto ks = get_keyspace(ks_undecorate(name));
                 if (!ks->get(shard)->retrieve(stream)) {
                     barch::std_err("failed to retrieve shard", shard);
                     return false;
@@ -668,63 +580,8 @@ namespace barch {
                 return false;
             }
         }
-        bool client::find_insert(value_type key) {
-            if (sources.empty()) return false;
-            bool added = false;
-            if (debug_repl == 1) {
-                std_log("looking for key");
-                log_encoded_key(key);
-            }
-            heap::vector<uint8_t> to_send, rbuff;
-            to_send.push_back('f');// <-- to find a key
-            push_value(to_send, key);
-            // todo: r we choosing a random 1
-            for (auto& source : sources) {
-                try {
 
-                    net_stat stat;
-
-                    if (!source->is_open())
-                        source->connect(source->host, source->port);
-
-                    if (source->fail()) {
-                        barch::std_err("failed to connect to remote server", host, this->port);
-                        continue;
-                    }
-                    //
-                    send_art_fun(*source, this->name, to_send, messages, shard);
-                    if (!recv_buffer(*source, rbuff)) {
-                        continue;
-                    }
-                    // TODO: check if this name exists
-                    auto ks = get_keyspace(ks_undecorate(name));
-                    // we are in a lock here (from the caller)
-                    auto r = process_art_fun_cmd(ks, 0, *source, rbuff, false);
-                    if (r.add_applied > 0) {
-                        added = true;
-                        break; // don't call the other servers - paxos would have us get a quorum
-                    }
-                }catch (std::exception& e) {
-                    source->close();
-                    barch::std_err("failed to write to stream", e.what(),"to",source->host,source->port);
-                    ++statistics::repl::request_errors;
-                }
-                ++statistics::repl::find_requests;
-            }
-            ++messages;
-            return added;
-        }
-
-        [[nodiscard]] bool client::commit_transaction() const {
-            try {
-            } catch (std::exception& e) {
-
-                barch::std_err("failed to commit transaction", e.what());
-                return false;
-            }
-            return true;
-        }
-        bool client::ping() const {
+        bool temp_client::ping() const {
             try {
                 tcp::iostream stream(host, std::to_string(this->port ));
                 if (!stream) {
@@ -819,5 +676,12 @@ extern "C"{
         call.push_ll(route.port);
         call.end_array(0);
         return 0;
+    }
+}
+namespace barch {
+    namespace repl {
+        void stop_repl() {
+            dests().stop();
+        }
     }
 }

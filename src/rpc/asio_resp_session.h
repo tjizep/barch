@@ -169,6 +169,9 @@ namespace barch {
                     // TODO: ic->second.is_asynch
                     auto &f = ic->second.call;
                     ++ic->second.calls;
+                    if (ic->second.is_write() && ic->second.is_data()) {
+                        repl::call(params);
+                    }
                     int32_t r = caller.call(params,f);
                     if (!caller.has_blocks())
                         write_result<Stream>(caller, ostream, r);

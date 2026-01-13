@@ -9,7 +9,7 @@
 #include "module.h"
 #include "configuration.h"
 #include "rpc_caller.h"
-
+#include "rpc/server.h"
 
 void setConfiguration(const std::string& name, const std::string& value) {
     barch::set_configuration_value(name,value);
@@ -111,6 +111,14 @@ void pull(const std::string &ip, const std::string &port) {
 void pull(const std::string &host, int port) {
     pull(host, std::to_string(port));
 }
+long long calls(const std::string& name) {
+    auto barch_functions = functions_by_name();
+    auto f = barch_functions->find(name);
+    if (f!=barch_functions->end()) {
+        return f->second.calls.load();
+    }
+    return 0;
+}
 
 unsigned long long size()  {
     std::vector<std::string_view> params = {"SIZE"};
@@ -168,7 +176,7 @@ List::List(const std::string &host, int port) {
 long long List::push(const std::string &key, const std::vector<std::string> &items) {
     params = {"LPUSH", key};
     params.insert(params.end(), items.begin(), items.end());
-
+    barch::repl::call(params);
     int r = sc.call(params, LPUSH);
     if (r != 0) {
         barch::std_err("set failed", key);
@@ -208,7 +216,7 @@ Value List::blpop(const std::string &key, double timeout) {
 }
 long List::pop(const std::string &key, long long count) {
     params = {"LPOP", key, std::to_string(count)};
-
+    barch::repl::call(params);
     int r = sc.call(params, LPOP);
     if (r != 0) {
         barch::std_err("pop failed", key);
@@ -250,7 +258,7 @@ KeyValue::KeyValue(const std::string& host, int port) {
 }
 void KeyValue::set(const std::string &key, const std::string &value) {
     params = {"SET", key, value};
-
+    barch::repl::call(params);
     int r = sc.call(params, SET);
     if (r != 0) {
         barch::std_err("set failed", key, value);
@@ -280,7 +288,7 @@ Value KeyValue::vget(const std::string &key) const {
 
 void KeyValue::erase(const std::string &key) {
     params = {"REM", key};
-
+    barch::repl::call(params);
     int r = sc.call(params, ::REM);
     if (r == 0) {}
 }
@@ -295,7 +303,7 @@ bool KeyValue::exists(const std::string &key) {
 }
 bool KeyValue::append(const std::string& key, const std::string& value) {
     params = {"APPEND", key, value};
-
+    barch::repl::call(params);
     int r = sc.call(params, ::APPEND);
     if (r == 0) {
         return sc.results.empty() ? false: sc.results[0] == "OK";
@@ -308,7 +316,7 @@ bool KeyValue::expire(const std::string &key, long long sec, const std::string& 
         params = {"EXPIRE", key, std::to_string(sec)};
     }else
         params = {"EXPIRE", key, std::to_string(sec), flag};
-
+    barch::repl::call(params);
     int r = sc.call(params, ::EXPIRE);
     if (r == 0) {
         return sc.results.empty() ? false: sc.results[0].i() == 1;
@@ -348,7 +356,7 @@ Value KeyValue::max() const {
 void KeyValue::incr(const std::string& key, double by) {
     std::string b = std::to_string((int64_t)by);
     params = {"INCRBY",key, b};
-
+    barch::repl::call(params);
     int r = sc.call(params, ::INCRBY);
     if (r == 0) {}
 }
@@ -356,7 +364,7 @@ void KeyValue::incr(const std::string& key, double by) {
 void KeyValue::decr(const std::string& key, double by) {
     std::string b = std::to_string((int64_t)by);
     params = {"DECRBY", key,b};
-
+    barch::repl::call(params);
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
@@ -367,7 +375,7 @@ void KeyValue::decr(const std::string& key) {
 void KeyValue::incr(const std::string& key, long long by) {
     std::string b = std::to_string(by);
     params = {"INCRBY",key, b};
-
+    barch::repl::call(params);
     int r = sc.call(params, ::INCRBY);
     if (r == 0) {}
 }
@@ -378,7 +386,7 @@ void KeyValue::incr(const std::string& key) {
 void KeyValue::decr(const std::string& key, long long by) {
     std::string b = std::to_string(by);
     params = {"DECRBY", key,b};
-
+    barch::repl::call(params);
     int r = sc.call(params, ::DECRBY);
     if (r == 0) {}
 }
@@ -477,10 +485,6 @@ void load() {
 repl_statistics repl_stats() {
     auto ar = barch::get_repl_statistics();
     repl_statistics r;
-    r.key_add_recv = ar.key_add_recv;
-    r.key_add_recv_applied = ar.key_add_recv_applied;
-    r.key_rem_recv = ar.key_rem_recv;
-    r.key_rem_recv_applied = ar.key_rem_recv_applied;
     r.instructions_failed = ar.instructions_failed;
     r.out_queue_size = ar.out_queue_size;
     r.bytes_recv = ar.bytes_recv;
@@ -490,6 +494,7 @@ repl_statistics repl_stats() {
     r.routes_succeeded = ar.routes_succeeded;
     r.attempted_routes = ar.attempted_routes;
     r.request_errors = ar.request_errors;
+    r.barch_requests = ar.barch_requests;
     return r;
 }
 
@@ -602,16 +607,20 @@ bool Caller::setOrdered(bool ordered) {
 
 std::vector<Value> Caller::call(const std::string &method, const std::vector<Value> &args) {
     std::string cn = std::string{params[0]};
-    auto ic = barch_functions.find(cn);
-    if (ic == barch_functions.end()) {
+    auto ic = barch_functions->find(cn);
+    if (ic == barch_functions->end()) {
         barch::std_err("invalid call", cn);
         return {};
     }
     auto f = ic->second.call;
     ++ic->second.calls;
+
     params = {method};
     params.insert(params.end(), args.begin(), args.end());
     result.clear();
+    if (ic->second.is_write()) {
+        barch::repl::call(params);
+    }
     int r = sc.call(params, f);
     if (r != 0) {
         result.insert(result.end(), sc.errors.begin(), sc.errors.end());
@@ -630,6 +639,7 @@ HashSet::HashSet(const std::string &host, int port) {
 void HashSet::set(const std::string &k, const std::vector<std::string>& members) {
     params = {"HSET", k};
     params.insert(params.end(), members.begin(), members.end());
+    barch::repl::call(params);
     int r = sc.call(params, ::HSET);
     if (r != 0) {
         barch::std_err("set failed");
@@ -721,7 +731,7 @@ std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::
     params.emplace_back("FIELDS");
     params.emplace_back(std::to_string(fields.size()));
     params.insert(params.end(), fields.begin(), fields.end());
-
+    barch::repl::call(params);
     sc.call(params, ::HEXPIRE);
     result.insert(result.end(), sc.results.begin(), sc.results.end());
     return result;
@@ -737,6 +747,7 @@ std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const 
 Value HashSet::incrby(const std::string &k, const std::string& field, long long by) {
     result.clear();
     params = {"HINCRBY", k, field, std::to_string(by)};
+    barch::repl::call(params);
     sc.call(params, ::HINCRBY);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -755,6 +766,7 @@ Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flag
     params = {"ZADD", k};
     params.insert(params.end(), flags.begin(), flags.end());
     params.insert(params.end(), members.begin(), members.end());
+    barch::repl::call(params);
     sc.call(params, ::ZADD);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -815,6 +827,7 @@ Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& m
     result.clear();
     params = {"ZREM", k};
     params.insert(params.end(), members.begin(), members.end());
+    barch::repl::call(params);
     sc.call(params, ::ZREM);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -833,6 +846,7 @@ Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::s
     result.clear();
     params = {"ZDIFFSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
+    barch::repl::call(params);
     sc.call(params, ::ZDIFFSTORE);
     return sc.results[0];
 }
@@ -840,6 +854,7 @@ Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::s
 Value OrderedSet::incrby(const std::string &key, double val, const std::string &field) {
     result.clear();
     params = {"ZINCRBY", key, std::to_string(val), field};
+    barch::repl::call(params);
     sc.call(params, ::ZINCRBY);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -859,6 +874,7 @@ Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::
     result.clear();
     params = {"ZINTERSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
+    barch::repl::call(params);
     sc.call(params, ::ZINTERSTORE);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -868,6 +884,7 @@ Value OrderedSet::intercard(const std::vector<std::string>& keys) {
     result.clear();
     params = {"ZINTERCARD", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
+    barch::repl::call(params);
     sc.call(params, ::ZINTERCARD);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];
@@ -876,6 +893,7 @@ Value OrderedSet::intercard(const std::vector<std::string>& keys) {
 Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower, const std::string& upper) {
     result.clear();
     params = {"ZREMRANGEBYLEX", key, lower, upper};
+    barch::repl::call(params);
     sc.call(params, ::ZREMRANGEBYLEX);
     if (sc.results.empty()) return {nullptr};
     return sc.results[0];

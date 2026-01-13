@@ -5,5 +5,5 @@
 #include "barch_apis.h"
 
 namespace barch {
-    std::shared_ptr<function_map> barch_functions = std::make_shared<function_map>(functions_by_name());
+    std::shared_ptr<function_map> barch_functions = functions_by_name();
 }

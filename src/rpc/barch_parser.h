@@ -123,6 +123,7 @@ namespace barch {
                             }
                             auto f = ic->second.call;
                             ++ic->second.calls;
+                            ++statistics::repl::barch_requests;
                             r = caller.call(params,f);
                             replies.clear();
                             for (auto &v: caller.results) {

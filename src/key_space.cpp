@@ -33,6 +33,7 @@ namespace barch {
 
         };
         ~key_spaces() {
+
         }
         std::recursive_mutex lock{};
         std::string ks_pattern = "[0-9,A-Z,a-z,_]+";
@@ -188,6 +189,7 @@ namespace barch {
 
                while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
                    auto tshards = this->get_shards();
+                   repl::distribute();
                    for (auto s : tshards) {
                        s->maintenance();
                        if (exiting) break;

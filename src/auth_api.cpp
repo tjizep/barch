@@ -62,7 +62,7 @@ barch::shard_ptr get_auth() {
         std::lock_guard lock(latch());
         heap::allocator<barch::shard> alloc;
         if (auth) return auth;
-        auth = std::allocate_shared<barch::shard>(alloc,"auth", nullptr, 0, 0);
+        auth = std::allocate_shared<barch::shard>( alloc, "auth", nullptr, 0, 0);
         auth->opt_ordered_keys = true;
         auth->load(false);
         init_auth(auth);

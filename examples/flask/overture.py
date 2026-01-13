@@ -121,9 +121,9 @@ for batch in reader:
                 overflow = overflows.incr(f"{street}", 1)
                 txt.append(f"{street} {overflow}",f",{counter}")
             # txt.set(f"{row.number}_{street}{counter}",key) # add street number text index
-            # postcodes.set(f"{row.postcode} {counter}",f"{counter}") # postcode index
-            # provinces.set(f"{prov} {counter}",f"{counter}") # province index
-            # cities.set(f"{row.city} {counter}",f"{counter}") # city index
+            postcodes.incr(f"{row.postcode}",1) # postcode index
+            provinces.incr(f"{prov}",1) # province index
+            cities.incr(f"{row.city}",1) # city index
             cnt.incr("records", 1)
             if int(cnt.get("records")) % 2000000 == 0:
                 print("saving...")

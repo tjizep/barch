@@ -20,6 +20,7 @@ struct barch_info {
         }
         this->cats = cats2vec(mycats);
         this->dp = get_category_map().at("data");
+        this->wr = get_category_map().at("write");
     }
     barch_info(const barch_function& call, const std::initializer_list<const char *>& cats, bool asynch = false) : call(call), is_asynch(asynch) {
         set_cats(cats);
@@ -28,6 +29,7 @@ struct barch_info {
         call = binfo.call;
         calls = (uint64_t)binfo.calls;
         cats = binfo.cats;
+        wr = binfo.wr;
         dp = binfo.dp;
         is_asynch = binfo.is_asynch;
     }
@@ -36,17 +38,22 @@ struct barch_info {
         calls = (uint64_t)binfo.calls;
         cats = binfo.cats;
         dp = binfo.dp;
+        wr = binfo.wr;
         is_asynch = binfo.is_asynch;
         return *this;
     }
     bool is_data() const {
         return cats[dp];
     }
+    bool is_write() const {
+        return cats[wr];
+    }
     barch_function call{};
     heap::vector<bool> cats{};
     std::atomic<uint64_t> calls {0};
     bool is_asynch{false};
     int dp = 0;
+    int wr = 0;
 };
 typedef heap::string_map<barch_info> function_map;
 extern "C"{
@@ -171,5 +178,5 @@ extern "C"{
 
 }
 
-extern function_map& functions_by_name();
+extern std::shared_ptr<function_map> functions_by_name();
 #endif //BARCH_APIS_H

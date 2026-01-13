@@ -71,10 +71,6 @@ struct art_ops_statistics {
 };
 
 struct art_repl_statistics {
-    int64_t key_add_recv{};
-    int64_t key_add_recv_applied{};
-    int64_t key_rem_recv{};
-    int64_t key_rem_recv_applied{};
     int64_t bytes_recv{};
     int64_t bytes_sent{};
     int64_t out_queue_size{};
@@ -82,6 +78,7 @@ struct art_repl_statistics {
     int64_t insert_requests{};
     int64_t remove_requests{};
     int64_t find_requests{};
+    int64_t barch_requests{};
     int64_t request_errors{};
     int64_t redis_sessions{};
     int64_t attempted_routes{};

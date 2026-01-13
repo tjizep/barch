@@ -1371,10 +1371,7 @@ int PUBLISH(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     Variable interface = argv[1];
     Variable port = argv[2];
-    auto ks = call.kspace();
-    for (const auto& t : call.kspace()->get_shards()) {
-        if (!t->publish(interface.s(), port.i())) {}
-    }
+    barch::repl::publish(interface.s(), port.i());
     return call.push_simple("OK");
 }
 int PULL(caller& call, const arg_t& argv) {
@@ -1401,7 +1398,7 @@ int PING(caller& call, const arg_t& argv) {
     auto interface = argv[1];
     auto port = argv[2];
     //barch::server::start(interface.chars(), atoi(port.chars()));
-    barch::repl::client cli(interface.chars(), atoi(port.chars()), 0);
+    barch::repl::temp_client cli(interface.chars(), atoi(port.chars()), 0);
     if (!cli.ping()) {
         return call.push_error("could not ping");
     }
@@ -1413,13 +1410,13 @@ int RETRIEVE(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     Variable host = argv[1];
     Variable port = argv[2];
-
-    for (const auto& shard : call.kspace()->get_shards()) {
-        barch::repl::client cli(host.s(), port.i(), shard->get_shard_number());
-        if (!cli.load(shard->get_shard_number())) {
+    // TODO: this cannot work anymore if the remote key space has a different shard count than the local
+    auto ks = call.kspace();
+    for (const auto& shard : ks->get_shards()) {
+        barch::repl::temp_client cli(host.s(), port.i(), shard->get_shard_number());
+        if (!cli.load(ks->get_name(), shard->get_shard_number())) {
             if (shard > 0) {
-                auto ks = call.kspace();
-                for (auto s : ks->get_shards()) {
+                 for (auto s : ks->get_shards()) {
                     s->clear();
                 }
             }
@@ -1714,7 +1711,7 @@ int COMMAND(caller& call, const arg_t& params) {
     if (params[1] == "DOCS") {
         std::vector<Variable> results;
         call.start_array();
-        for (auto& p: functions_by_name()) {
+        for (auto& p: *functions_by_name()) {
             call.push_simple(p.first.c_str());
             call.push_simple("function");
         }

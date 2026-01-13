@@ -63,11 +63,7 @@ namespace statistics {
      */
     namespace repl {
         extern std::atomic<uint64_t> push_connections_open;
-        extern std::atomic<uint64_t> key_add_recv;
-        extern std::atomic<uint64_t> key_add_recv_applied;
-        extern std::atomic<uint64_t> key_rem_recv;
         extern std::atomic<uint64_t> key_find_recv;
-        extern std::atomic<uint64_t> key_rem_recv_applied;
         extern std::atomic<uint64_t> bytes_recv;
         extern std::atomic<uint64_t> bytes_sent;
         extern std::atomic<uint64_t> out_queue_size;
@@ -75,6 +71,7 @@ namespace statistics {
         extern std::atomic<uint64_t> insert_requests;
         extern std::atomic<uint64_t> remove_requests;
         extern std::atomic<uint64_t> find_requests;
+        extern std::atomic<uint64_t> barch_requests;
         extern std::atomic<uint64_t> request_errors;
         extern std::atomic<uint64_t> redis_sessions;
         extern std::atomic<uint64_t> art_sessions;

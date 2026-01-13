@@ -197,7 +197,7 @@ struct rpc_caller : caller {
                     routes[shard] = nullptr;
                 }else {
                     ++valid_routes;
-                    routes[shard] =barch::repl::create(route.ip,route.port);
+                    routes[shard] = barch::repl::create(route.ip,route.port);
                 }
             }
         }
@@ -259,6 +259,7 @@ struct rpc_caller : caller {
             args.push_back(s);
         }
         try {
+
             cr.call_error = f(*this, args);
         }catch (const std::exception& e) {
             ++statistics::exceptions_raised;

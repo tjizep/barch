@@ -128,16 +128,13 @@ art_repl_statistics barch::get_repl_statistics(){
     rs.insert_requests = (int64_t) statistics::repl::insert_requests;
     rs.remove_requests = (int64_t) statistics::repl::remove_requests;
     rs.find_requests = (int64_t) statistics::repl::find_requests;
+    rs.barch_requests = (int64_t) statistics::repl::barch_requests;
     rs.request_errors = (int64_t) statistics::repl::request_errors;
     rs.redis_sessions = (int64_t) statistics::repl::redis_sessions;
     rs.attempted_routes = (int64_t) statistics::repl::attempted_routes;
     rs.routes_succeeded = (int64_t) statistics::repl::routes_succeeded;
     rs.instructions_failed = (int64_t) statistics::repl::instructions_failed;
-    rs.key_add_recv = (int64_t) statistics::repl::key_add_recv;
-    rs.key_add_recv_applied = (int64_t) statistics::repl::key_add_recv_applied;
-    rs.key_rem_recv = (int64_t) statistics::repl::key_rem_recv;
     rs.out_queue_size = (int64_t) statistics::repl::out_queue_size;
-    rs.key_rem_recv_applied = (int64_t) statistics::repl::key_rem_recv_applied;
     rs.routes_succeeded = (int64_t) statistics::repl::routes_succeeded;
     rs.attempted_routes = (int64_t) statistics::repl::attempted_routes;
     return rs;
@@ -274,12 +271,12 @@ bool barch::shard::remove_from_unordered_set(value_type key) {
 }
 
 
-bool barch::shard::publish(std::string host, int port) {
-    repl_client.add_destination(std::move(host), port);
+bool barch::shard::publish(std::string , int ) {
+
     return true;
 }
-bool barch::shard::pull(std::string host, int port) {
-    repl_client.add_source(std::move(host), port);
+bool barch::shard::pull(std::string , int ) {
+    throw_exception<std::runtime_error>("implement this");
     return true;
 }
 void barch::shard::read_extra(std::istream &in) {
@@ -621,7 +618,6 @@ bool barch::shard::insert(const key_options& options, value_type unfiltered_key,
     }else {
         hash_insert(options, key, value, update, fc);
     }
-    this->repl_client.insert(latch, options, key, value);
     return this->get_size() > before;
 }
 bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
@@ -694,7 +690,6 @@ bool barch::shard::opt_insert(const key_options& options, value_type unfiltered_
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
     if (opt_rpc_insert(options, key, value, update, fc)) {
-        this->repl_client.insert(latch, options, key, value);
         return true;
     }
     return false;
@@ -710,9 +705,6 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         if (value.null()) {
             return value;
         }
-        auto l = value.const_leaf();
-        key_options options = *l;
-        this->repl_client.insert(latch, options, key, l->get_value());
         return value;
     };
     set_hash_query_context(key);
@@ -831,7 +823,6 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
             h.erase(key);
             n.free_from_storage();
 
-            this->repl_client.remove(latch, key);
             return true;
         }
     }
@@ -850,7 +841,6 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     } // else continue
 
     art_delete(this, key, fc);
-    this->repl_client.remove(latch, key);
     return size < before;
 }
 
@@ -931,7 +921,7 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
             }
         }
         last_leaf_added = nullptr; // clear it before trying to retrieve
-        this->repl_client.find_insert(key);
+        // TODO: retrieve if pull is enabled
         return this->last_leaf_added;
     }
     if (r.cl()->is_tomb()) {
@@ -987,7 +977,6 @@ uint64_t shard_size(barch::shard *s) {
 }
 
 barch::shard::~shard() {
-    repl_client.stop();
     shard::blocked_sessions.clear();
     if (opt_drop_on_release) {
         this->get_leaves().delete_files(EXT);
@@ -1287,7 +1276,6 @@ void barch::shard::start_maintain() {
 }
 void barch::shard::maintenance() {
     try {
-        repl_client.poll();
         run_sweep_lru_keys(this);
         run_evict_all_keys_lfu(this);
         run_evict_all_keys_random(this);

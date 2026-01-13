@@ -29,13 +29,10 @@ void publish(const std::string &ip, const std::string &port);
 void publish(const std::string &ip, int port);
 void pull(const std::string &ip, const std::string &port);
 void pull(const std::string &ip, int port);
+long long calls(const std::string &name);
 struct repl_statistics {
     repl_statistics(){}
     ~repl_statistics(){}
-    long long key_add_recv{};
-    long long key_add_recv_applied{};
-    long long key_rem_recv{};
-    long long key_rem_recv_applied{};
     long long bytes_recv{};
     long long bytes_sent{};
     long long out_queue_size{};
@@ -43,6 +40,7 @@ struct repl_statistics {
     long long insert_requests{};
     long long remove_requests{};
     long long find_requests{};
+    long long barch_requests{};
     long long request_errors{};
     long long redis_sessions{};
     long long attempted_routes{};
@@ -273,10 +271,10 @@ public:
     bool getOrdered() const ;
     std::vector<Value> call(const std::string &method, const std::vector<Value> &args);
 protected:
-    mutable std::vector<std::string_view> params {};
+    mutable std::vector<std::string> params {};
     mutable std::vector<Value> result{};
     mutable rpc_caller sc{};
-    function_map& barch_functions = functions_by_name();
+    std::shared_ptr<function_map> barch_functions = functions_by_name();
 };
 
 class List : public Caller {

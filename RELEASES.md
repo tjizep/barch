@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-12
+# Release v0.4.3.3b 2025-01-13
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -20,6 +20,7 @@
 6. improve allocation (v0.4.3.3b 2025-01-10)
 7. add large geo coding example (v0.4.3.3b 2025-01-12)
 8. add standalone RESP server in python example - with messages passed using lbpop (v0.4.3.3b 2025-01-12)
+9. rework replication (v0.4.3.3b 2025-01-13)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)

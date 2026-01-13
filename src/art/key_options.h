@@ -19,6 +19,7 @@ namespace art {
         };
 
         key_options() = default;
+        key_options(flags_t f, uint64_t expiry)  : expiry(expiry), flags(f){}
         key_options(int64_t expiry, bool keep_ttl, bool is_volatile, bool is_hashed, bool is_compressed) : expiry(expiry), flags(0) {
             if (keep_ttl) {
                 flags |= flag_is_keep_ttl;

@@ -117,7 +117,6 @@ namespace barch {
         std::shared_mutex save_load_mutex{};
 
 
-        barch::repl::client repl_client{};
         std::atomic<size_t> queue_size{};
         std::chrono::high_resolution_clock::time_point start_save_time {};
         uint64_t mods{};
@@ -143,8 +142,6 @@ namespace barch {
         tree{"node", shard_number, root,size}{
             abstract_shard::opt_evict_all_keys_lru = get_evict_allkeys_lru();
             abstract_shard::opt_evict_volatile_keys_lru = get_evict_volatile_lru();
-            repl_client.shard = shard_number;
-            repl_client.name = name;
             barch::repl::clear_route(shard_number);
             start_maintain();
 
@@ -152,8 +149,6 @@ namespace barch {
         // name configurable
         shard(const std::string& name, uint64_t size, size_t shard_number) :
         tree{name, shard_number, root,size}{
-            repl_client.shard = shard_number;
-            repl_client.name = name;
             barch::repl::clear_route(shard_number);
             start_maintain();
 
@@ -165,7 +160,7 @@ namespace barch {
         with_stats(false) {
             nodes.get_main().set_check_mem(false);
             leaves.get_main().set_check_mem(false);
-            repl_client.shard = shard_number;
+            //repl_client.shard = shard_number;
             barch::repl::clear_route(shard_number);
             start_maintain();
         }

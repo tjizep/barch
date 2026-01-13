@@ -87,7 +87,7 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     if (r == 0) {
         return call.push_int(l);
     } else {
-        return call.push_null();
+        return call.push_error("invalid integer or overflow");
     }
 }
 

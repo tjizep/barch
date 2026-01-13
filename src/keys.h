@@ -34,8 +34,17 @@ template<typename UT>
 static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by) {
     const art::leaf *leaf = old.const_leaf();
     if (conversion::convert_value(l, leaf->get_value())) {
-        l += by;
+
         auto& alloc = const_cast<alloc_pair&>(old.logical.get_ap<alloc_pair>());
+
+        auto old = l;
+        l += by;
+        if (by > 0 && l < old) {
+            return nullptr;
+        }
+        if (by < 0 && l > old) {
+            return nullptr;
+        }
         auto s = std::to_string(l);
         return make_leaf
         (  alloc

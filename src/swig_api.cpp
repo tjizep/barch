@@ -256,16 +256,21 @@ KeyValue::KeyValue(std::string keys_space) {
 KeyValue::KeyValue(const std::string& host, int port) {
     sc.host = barch::repl::create(host,port);
 }
-void KeyValue::set(const std::string &key, const std::string &value) {
+Value KeyValue::set(const std::string &key, const std::string &value) {
     params = {"SET", key, value};
     barch::repl::call(params);
-    int r = sc.call(params, SET);
-    if (r != 0) {
-        barch::std_err("set failed", key, value);
-    }
-
+    return sc.callv(params, SET);
 }
-
+Value KeyValue::set(const std::string &key, long long value) {
+    params = {"SET", key, Variable{value}.s()};
+    barch::repl::call(params);
+    return sc.callv(params, SET);
+}
+Value KeyValue::set(const std::string &key, double value) {
+    params = {"SET", key, Variable{value}.s()};
+    barch::repl::call(params);
+    return sc.callv(params, SET);
+}
 std::string KeyValue::get(const std::string &key) const {
     params = {"GET", key};
 
@@ -286,11 +291,10 @@ Value KeyValue::vget(const std::string &key) const {
     return nullptr;
 }
 
-void KeyValue::erase(const std::string &key) {
+Value KeyValue::erase(const std::string &key) {
     params = {"REM", key};
     barch::repl::call(params);
-    int r = sc.call(params, ::REM);
-    if (r == 0) {}
+    return sc.callv(params, ::REM);
 }
 bool KeyValue::exists(const std::string &key) {
     params = {"EXISTS", key};
@@ -337,70 +341,47 @@ long long KeyValue::ttl(const std::string &key) {
 Value KeyValue::min() const {
     params = {"MIN"};
 
-    int r = sc.call(params, ::MIN);
-    if (r == 0) {
-        return sc.results.empty() ? "": sc.results[0];
-    }
-    return "";
+    return sc.callv(params, ::MIN);
 }
 Value KeyValue::max() const {
     params = {"MAX"};
-
-    int r = sc.call(params, ::MAX);
-    if (r == 0) {
-        return sc.results.empty() ? "": sc.results[0];
-    }
-    return {""};
+    return sc.callv(params, ::MAX);
 }
 
-void KeyValue::incr(const std::string& key, double by) {
-    std::string b = std::to_string((int64_t)by);
-    params = {"INCRBY",key, b};
+Value KeyValue::incr(const std::string& key, double by) {
+    params = {"INCRBY",key, Value((long long)by).s()};
     barch::repl::call(params);
-    int r = sc.call(params, ::INCRBY);
-    if (r == 0) {}
+    return sc.callv(params, ::INCRBY);
 }
 
-void KeyValue::decr(const std::string& key, double by) {
-    std::string b = std::to_string((int64_t)by);
-    params = {"DECRBY", key,b};
+Value KeyValue::decr(const std::string& key, double by) {
+    params = {"DECRBY", key, Value((long long)by).s()};
     barch::repl::call(params);
-    int r = sc.call(params, ::DECRBY);
-    if (r == 0) {}
+    return sc.callv(params, ::DECRBY);
 }
-void KeyValue::decr(const std::string& key) {
-    decr(key, 1ll);
+Value KeyValue::decr(const std::string& key) {
+    return decr(key, 1ll);
 }
 
-void KeyValue::incr(const std::string& key, long long by) {
-    std::string b = std::to_string(by);
-    params = {"INCRBY",key, b};
+Value KeyValue::incr(const std::string& key, long long by) {
+    params = {"INCRBY",key, Value(by).s()};
     barch::repl::call(params);
-    int r = sc.call(params, ::INCRBY);
-    if (r == 0) {}
+    return sc.callv(params, ::INCRBY);
 }
-void KeyValue::incr(const std::string& key) {
-    incr(key, 1ll);
+Value KeyValue::incr(const std::string& key) {
+    return incr(key, 1ll);
 }
 
-void KeyValue::decr(const std::string& key, long long by) {
-    std::string b = std::to_string(by);
-    params = {"DECRBY", key,b};
+Value KeyValue::decr(const std::string& key, long long by) {
+    params = {"DECRBY", key, Value{by}.s()};
     barch::repl::call(params);
-    int r = sc.call(params, ::DECRBY);
-    if (r == 0) {}
+    return sc.callv(params, ::DECRBY);
+
 }
 long long KeyValue::count(const std::string &start, const std::string &end) {
     result.clear();
     params = {"COUNT", start, end} ;
-    int r = sc.call(params, ::COUNT);
-    if (r == 0) {
-        if (!sc.results.empty()) {
-            return sc.results[0].i();
-        }
-    }
-
-    return 0;
+    return sc.callv(params, ::COUNT).i();
 }
 std::vector<Value> KeyValue::range(const std::string &start, const std::string &end, long long limit) {
     result.clear();
@@ -415,11 +396,11 @@ std::vector<Value> KeyValue::range(const std::string &start, const std::string &
     return result;
 }
 
-std::vector<Value> KeyValue::glob(const std::string &glob, unsigned long long max_) const {
+std::vector<Value> KeyValue::glob(const std::string &glob, long long max_) const {
     result.clear();
 
     if ( max_ > 0) {
-        params = {"KEYS", glob, "MAX", std::to_string(max_)} ;
+        params = {"KEYS", glob, "MAX", Value{max_}.s()} ;
     }else {
         params = {"KEYS", glob} ;
     }
@@ -436,42 +417,24 @@ std::vector<Value> KeyValue::glob(const std::string &glob, unsigned long long ma
 size_t KeyValue::globCount(const std::string& glob) const {
     params = {"KEYS", glob, "COUNT"};
 
-    int r = sc.call(params, ::KEYS);
-    if (r == 0) {
-        return sc.results.empty() ? 0: conversion::to_i64(sc.results[0]);
-    }
-    return 0;
+    return sc.callv(params, ::KEYS).i();
 
 }
 Value KeyValue::lowerBound(const std::string& key) const {
-
     params = {"LB", key};
-
-    int r = sc.call(params, ::LB);
-    if (r == 0) {
-        return sc.results.empty() ? "": sc.results[0];
-    }
-    return "";
+    return  sc.callv(params, ::LB);
 }
 
 Value KeyValue::upperBound(const std::string& key) const {
 
     params = {"UB", key};
 
-    int r = sc.call(params, ::UB);
-    if (r == 0) {
-        return sc.results.empty() ? "": sc.results[0];
-    }
-    return "";
+    return sc.callv(params, ::UB, "");
 }
 
 long long KeyValue::size() const {
     std::vector<std::string_view> params = {"SIZE"};
-    int r = sc.call(params, ::SIZE);
-    if (r == 0) {
-        return sc.results.empty() ? 0 : sc.results[0].i();
-    }
-    return 0;
+    return sc.callv(params, ::SIZE, 0).i();
 }
 
 void load() {
@@ -582,12 +545,7 @@ Caller::Caller(const std::string& host, int port) {
 }
 bool Caller::use(const std::string& key_space) {
     params = {"USE",key_space};
-    sc.call(params, ::USE);
-
-    if (!sc.results.empty()) {
-        return sc.results[0] == "OK";
-    }
-    return false;
+    return sc.callv(params, ::USE) == "OK";
 }
 long long Caller::getShardCount() const {
     return sc.kspace()->opt_shard_count;
@@ -597,12 +555,7 @@ bool Caller::getOrdered() const {
 }
 bool Caller::setOrdered(bool ordered) {
     params = {"SPACES", "OPTIONS", "SET", "ORDERED", ordered?"ON":"OFF"};
-    sc.call(params, ::SPACES);
-
-    if (!sc.results.empty()) {
-        return sc.results[0] == "OK";
-    }
-    return false;
+    return sc.callv(params, ::SPACES) == "OK";
 }
 
 std::vector<Value> Caller::call(const std::string &method, const std::vector<Value> &args) {
@@ -647,12 +600,7 @@ void HashSet::set(const std::string &k, const std::vector<std::string>& members)
 }
 Value HashSet::get(const std::string &k, const std::string &member) {
     params = {"HGET", k, member};
-    sc.call(params, ::HGET);
-
-    if (!sc.results.empty()) {
-        return sc.results[0];
-    }
-    return {nullptr};
+    return sc.callv(params, ::HGET);
 }
 std::vector<Value> HashSet::mget(const std::string& k, const std::vector<std::string> &fields) {
     result.clear();
@@ -678,7 +626,7 @@ std::vector<Value> HashSet::getall(const std::string& k) {
 }
 std::vector<Value> HashSet::expiretime(const std::string &k, const std::vector<std::string> &fields) {
     result.clear();
-    params = {"HEXPIRETIME", k, "FIELDS", std::to_string(fields.size())};
+    params = {"HEXPIRETIME", k, "FIELDS", Value{(long long)fields.size()}.s()};
 
     params.insert(params.end(), fields.begin(), fields.end());
 

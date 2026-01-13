@@ -46,7 +46,18 @@ struct rpc_caller : caller {
         }
 
     }
-
+    Variable retval(int r, Variable def) {
+        if (!errors.empty()) {
+            return errors[0];
+        }
+        if (r != ok()) {
+            return Variable{::error{"there was an error"}};
+        }
+        if (results.empty()) {
+            return def;
+        }
+        return results[0];
+    }
     [[nodiscard]] int wrong_arity()  override {
         errors.emplace_back("Wrong Arity");
         return 0;
@@ -275,6 +286,10 @@ struct rpc_caller : caller {
             cr.call_error = -1;
         }
         return cr.call_error;
+    }
+    template<typename TC, typename VT>
+    Variable callv(const VT& params, TC&& f, Variable def = nullptr) {
+        return retval(call(params, f),def);
     }
     void call_blocks() {
         results.clear();

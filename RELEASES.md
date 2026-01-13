@@ -30,6 +30,7 @@
 5. fix string trimming (v0.4.3.3b 2025-01-10)
 6. fix string decoding (v0.4.3.3b 2025-01-12)
 7. fix `APPEND` and `PREPEND` functions (v0.4.3.3b 2025-01-12)
+8. fix `INCR` and `INCRBY` edge cases, incl rollover/under (v0.4.3.3b 2025-01-13)
 
 # Release v0.4.3.2b 2025-01-05
 

@@ -622,6 +622,7 @@ bool barch::shard::insert(const key_options& options, value_type unfiltered_key,
 }
 bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
     ++inserts;
+    //add_bloom(key);
     return art_insert(this, options, key, value, update, fc);
 }
 bool barch::shard::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
@@ -709,37 +710,36 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
     };
     set_hash_query_context(key);
     auto i = h.find(key);
-    if (i != h.end()) {
+    if (!opt_ordered_keys){
+        if (i != h.end()) {
 
-        node_ptr old = logical_address{i->addr,this};
-        if (old.l()->is_tomb()) {
-            old.l()->unset_tomb();
-            if (tomb_stones == 0) {
-                throw_exception<std::runtime_error>("invalid tombstone count");
+            node_ptr old = logical_address{i->addr,this};
+            if (old.l()->is_tomb()) {
+                old.l()->unset_tomb();
+                if (tomb_stones == 0) {
+                    throw_exception<std::runtime_error>("invalid tombstone count");
+                }
+                --tomb_stones;
             }
-            --tomb_stones;
-        }
-        bool hashed = old.cl()->is_hashed();
-        if (!hashed)
-            abort_with("no art caching allowed");
-        node_ptr n = repl_updateresult(old);
+            bool hashed = old.cl()->is_hashed();
+            if (!hashed)
+                abort_with("no art caching allowed");
+            node_ptr n = repl_updateresult(old);
 
-        if (n == old) {
+            if (n == old) {
 
-            return false; // nothing to do
+                return false; // nothing to do
+            }
+            if (!n.null()) {
+                n.l()->set_hashed();
+                h.erase(i);
+                h.insert(n);
+                old.free_from_storage();// ok if old is null - nothing will happen
+            }
+            return !n.null();
         }
-        if (!n.null()) {
-            n.l()->set_hashed();
-            h.erase(i);
-            h.insert(n);
-            old.free_from_storage();// ok if old is null - nothing will happen
-        }
-        return !n.null();
-    }
-    if (!opt_ordered_keys) {
         return false;
     }
-
     return barch::update(this, key, repl_updateresult);
 }
 bool barch::shard::evict(const leaf* l) {

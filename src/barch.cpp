@@ -66,7 +66,7 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
 
 
     int r = -1;
-    IntT l = 0;
+    IntT l = IntT();
     auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
         if (value.null()) {
             return nullptr;
@@ -77,7 +77,13 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
         }
         return val;
     };
-    t->update(converted.get_value(), updater);
+    if (!t->update(converted.get_value(), updater)) {
+        l += by;
+        Variable s = l;
+        auto fc = [&](const art::node_ptr &) -> void {};
+        t->opt_insert({},converted.get_value(), {s.s()}, true, fc);
+        r = 0;
+    }
     if (r == 0) {
         return call.push_int(l);
     } else {
@@ -468,7 +474,9 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
         return val;
     };
 
-    t->update(converted.get_value(), updater);
+    if (!t->update(converted.get_value(), updater)) {
+
+    }
     if (r == 0) {
         return call.double_(l);
     } else {

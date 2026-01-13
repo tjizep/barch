@@ -9,7 +9,7 @@ enum {
     node_checks = 0,
     page_size = 32768*8, // must be a power of two
     physical_page_size = page_size,
-    logical_allocation_padding = 32,
+    logical_allocation_padding = 64,
     min_logical_allocation_for_pad = 1024,
     maximum_allocation_size = page_size - 256,
     initial_node_ptr_size = 4, // must be a power of twp

@@ -39,10 +39,10 @@ static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by)
 
         auto old = l;
         l += by;
-        if (by > 0 && l < old) {
+        if ((long long)by > 0ll && l < old) {
             return nullptr;
         }
-        if (by < 0 && l > old) {
+        if ((long long)by < 0ll && l > old) {
             return nullptr;
         }
         auto s = std::to_string(l);

@@ -36,36 +36,40 @@ def filter_street(sn):
     return False
 
 h3_res = 12
-# 1. Fetch the data
+# Configure barch for memory use + performance
 barch.setConfiguration("compression","zstd")
+barch.setConfiguration("maintenance_poll_delay","500")
 barch.start("0.0.0.0", 14000)
 conf = barch.KeyValue("configuration")
-conf.set("text_data.shards","1")
-conf.set("overflow.ordered","0")
+conf.set("streets.shards","1")
+conf.set("overflows.ordered","0")
+conf.set("overflows.shards","1")
 conf.set("spatial_data.shards","1")
 conf.set("counters.ordered","0")
 conf.set("counters.shards","1")
 conf.set("postcodes.shards","1")
+conf.set("postcode_street.shards","1")
 conf.set("provinces.shards","1")
 conf.set("cities.shards","1")
 conf.set("tokey.ordered", "0")
-txt = barch.KeyValue("text_data")
+conf.set("tokey.shards", "8")
+streets = barch.KeyValue("streets")
 spc = barch.KeyValue("spatial_data")
 overflows = barch.KeyValue("overflows")
 postcodes = barch.KeyValue("postcodes")
+pcode_street = barch.KeyValue("postcode_street")
 provinces = barch.KeyValue("provinces")
 cities =  barch.KeyValue("cities")
 tokey = barch.KeyValue("tokey")
 
 assert spc.getShards() == 1
-assert txt.getShards() == 1
+assert streets.getShards() == 1
 cnt = barch.KeyValue("counters")
 cnt.set("records","0")
 counter = cnt.get("records")
 
 #bbox = (-74.001, 40.710, -73.990, 40.720) # Small slice of NYC
-bbox = (-141.0, 41.7, -52.6, 83.1) # Canada
-#gdf = core.geodataframe("address", bbox=bbox, connect_timeout=60,  request_timeout=120)
+bbox = (-141.0, 41.7, -52.6, 83.1) # All of Canada
 reader = overturemaps.record_batch_reader("address", bbox, connect_timeout=60,  request_timeout=120)
 ignored = 0
 # Process in chunks (batches) to stay under RAM limits
@@ -116,18 +120,27 @@ for batch in reader:
                 overflow = 0
                 overflows.set(f"{street}","0")
 
-            if not txt.append(f"{street} {overflow}",f",{counter}"):
+            if not streets.append(f"{street} {overflow}", f",{counter}"):
                 print("Street overflow",street)
-                overflow = overflows.incr(f"{street}", 1)
+                overflow = overflows.incr(f"{street}", 1).s()
 
-            txt.append(f"{street} {overflow}",f",{counter}")
-            txt.set(f"{row.number}_{street} {counter}",key) # add street number text index
-            postcodes.incr(f"{row.postcode}_",1) # postcode index
-            provinces.incr(f"{prov}_",1) # province index
-            #cities.incr(f"{row.city}",1) # city index
+            streets.append(f"{street} {overflow}", f",{counter}")
+            # txt.set(f"{row.number}_{street}",key) # add street number text index
+            postcodes.incr(f"{row.postcode}",1) # postcode index forward
+            # postcodes.incr(f"s {street} {row.postcode}",1) # postcode index street reverse
+            pcode_street.incr(f"{row.postcode} {street}",1) # postcode index street
+            # provinces.incr(f"{prov}",1) # province index
+            # cities.incr(f"{row.city}",1) # city index
             cnt.incr("records", 1)
             if int(cnt.get("records")) % 2000000 == 0:
                 print("saving...")
                 barch.saveAll()
                 print(f"saved {cnt.get('records')} records")
+
     print(cnt.get("records"),"rows loaded",ignored,"rows ignored")
+
+print("saving...")
+barch.saveAll()
+print(f"saved {cnt.get('records')} records")
+
+

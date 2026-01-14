@@ -76,14 +76,12 @@ namespace art {
 
     struct node_ptr_storage {
         uint8_t storage[node_pointer_storage_size]{};
-        size_t size{};
+        uint32_t size{};
 
         node_ptr_storage() {
         };
 
-        node_ptr_storage(const node_ptr_storage &src) {
-            *this = src;
-        }
+        node_ptr_storage(const node_ptr_storage &src)  = default;
 
         template<class T, typename... Args>
         T *emplace(Args &&... args) {
@@ -93,12 +91,7 @@ namespace art {
             return reinterpret_cast<T *>(&storage[0]);
         }
 
-        node_ptr_storage &operator=(const node_ptr_storage &src) {
-            if (this == &src) return *this;
-            size = src.size;
-            memcpy(storage, src.storage, sizeof(storage));
-            return *this;
-        }
+        node_ptr_storage &operator=(const node_ptr_storage &src) = default;
 
         template<typename T>
         void set(const T *t) {

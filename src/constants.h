@@ -9,13 +9,13 @@ enum {
     node_checks = 0,
     page_size = 32768*8, // must be a power of two
     physical_page_size = page_size,
-    logical_allocation_padding = 64,
+    logical_allocation_padding = 128,
     min_logical_allocation_for_pad = 1024,
     maximum_allocation_size = page_size - 256,
     initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,
     iterate_workers = 4,
-    test_memory = 1,
+    test_memory = 0,
     fl_test_memory = 0,
     initialize_memory = 1, // currently this should always be one - if the program needs to work
     storage_version = 10,
@@ -28,7 +28,7 @@ enum {
     leaf_type = 1,
     non_leaf_type = 2,
     comparable_key_static_size = 64,
-    node_pointer_storage_size = 64,
+    node_pointer_storage_size = 48,
     log_streams = 0,
     encoding_width = 128,
     encoding_delta = 0,

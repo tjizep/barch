@@ -333,7 +333,7 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, KEYS);
 }
 /* B.VALUES
-*
+* i.e. VALUES *ZZZ* COUNT
 * match against all values using a glob pattern
 * */
 int VALUES(caller& call, const arg_t& argv) {

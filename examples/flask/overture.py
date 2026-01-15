@@ -11,7 +11,8 @@ import unicodedata
 class OvertureEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.ndarray):
-            return obj.tolist() # Convert ndarray to list
+            #return obj.tolist() # Convert ndarray to list
+            return "[]"
         if hasattr(obj, 'wkt'): # Handle Shapely geometry
             return obj.wkt
         return super().default(obj)
@@ -50,14 +51,16 @@ conf.set("counters.shards","1")
 conf.set("postcodes.shards","1")
 conf.set("postcode_street.shards","1")
 conf.set("provinces.shards","1")
+conf.set("street_province","1")
 conf.set("cities.shards","1")
 conf.set("tokey.ordered", "0")
-conf.set("tokey.shards", "8")
+conf.set("tokey.shards", "1")
 streets = barch.KeyValue("streets")
 spc = barch.KeyValue("spatial_data")
 overflows = barch.KeyValue("overflows")
 postcodes = barch.KeyValue("postcodes")
 pcode_street = barch.KeyValue("postcode_street")
+street_province = barch.KeyValue("street_province")
 provinces = barch.KeyValue("provinces")
 cities =  barch.KeyValue("cities")
 tokey = barch.KeyValue("tokey")
@@ -84,7 +87,6 @@ for batch in reader:
     )
     print(df.head())
 
-    # 2. Iterate using itertuples
     for row in df.itertuples(index=False):
         # Access columns by name: row.street, row.house_number, etc.
         # Geometry is usually accessed via row.geometry
@@ -97,15 +99,14 @@ for batch in reader:
         else:
             prov = 'NONE'
             if len(row.address_levels) > 1:
-                prov = row.address_levels[1]['value']
-
+                prov = f"{row.address_levels[1]['value']}"
+            if prov is None:
+                prov = 'UNSPECIFIED'
             h3_index = int(h3.latlng_to_cell(lat, lon, h3_res), 16)
             street = remove_accents(f"{row.street}").upper()
             # Handle the geometry (Shapely objects aren't natively JSON serializable)
             if 'geometry' in row_dict:
                 row_dict['geometry'] = row_dict['geometry'].wkt # Convert to text (WKT)
-
-            # Now, convert to JSON
 
             json_val = json.dumps(row_dict, cls=OvertureEncoder)
             #print(json_val)
@@ -129,10 +130,12 @@ for batch in reader:
             postcodes.incr(f"{row.postcode}",1) # postcode index forward
             # postcodes.incr(f"s {street} {row.postcode}",1) # postcode index street reverse
             pcode_street.incr(f"{row.postcode} {street}",1) # postcode index street
+            street_province.incr(f"{street} _{prov.upper()}")
             # provinces.incr(f"{prov}",1) # province index
             # cities.incr(f"{row.city}",1) # city index
             cnt.incr("records", 1)
             if int(cnt.get("records")) % 2000000 == 0:
+                print(json_val)
                 print("saving...")
                 barch.saveAll()
                 print(f"saved {cnt.get('records')} records")

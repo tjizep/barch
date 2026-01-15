@@ -603,7 +603,7 @@ void barch::shard::clear() {
 }
 
 bool barch::shard::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
-    return this->insert({}, key, value, update, fc);
+    return this->opt_insert({}, key, value, update, fc);
 }
 bool barch::shard::insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
     if (get_total_memory() > get_max_module_memory()) {
@@ -697,7 +697,7 @@ bool barch::shard::opt_insert(const key_options& options, value_type unfiltered_
 }
 
 bool barch::shard::insert(value_type key, value_type value, bool update) {
-    return this->insert(key, value, update, [](const node_ptr &) {}) ;
+    return this->opt_insert({},key, value, update, [](const node_ptr &) {}) ;
 }
 bool barch::shard::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     auto key = filter_key(unfiltered_key);

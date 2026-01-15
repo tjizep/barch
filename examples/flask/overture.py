@@ -126,11 +126,9 @@ for batch in reader:
                 overflow = overflows.incr(f"{street}", 1).s()
 
             streets.append(f"{street} {overflow}", f",{counter}")
-            # txt.set(f"{row.number}_{street}",key) # add street number text index
             postcodes.incr(f"{row.postcode}",1) # postcode index forward
-            # postcodes.incr(f"s {street} {row.postcode}",1) # postcode index street reverse
             pcode_street.incr(f"{row.postcode} {street}",1) # postcode index street
-            street_province.incr(f"{street} _{prov.upper()}")
+            street_province.incr(f"{street} *{prov.upper()}")
             # provinces.incr(f"{prov}",1) # province index
             # cities.incr(f"{row.city}",1) # city index
             cnt.incr("records", 1)

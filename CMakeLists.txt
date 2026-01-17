@@ -44,7 +44,7 @@ if (NOT ADD_FMT)
 endif ()
 
 if (NOT TEST_OD)
-    set(TEST_OD OFF)
+    set(TEST_OD ON)
 endif ()
 if (NOT USE_LIBURING)
     set(USE_LIBURING OFF)

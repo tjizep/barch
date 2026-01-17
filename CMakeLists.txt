@@ -90,10 +90,10 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     message("Using debuggable optimizations")
 endif ()
-find_package(Boost REQUIRED)
-
+# maybe one day we may want boost
+#find_package(Boost REQUIRED)
 # include boost for all targets
-include_directories(${Boost_INCLUDE_DIRS})
+#include_directories(${Boost_INCLUDE_DIRS})
 
 set(PYTHON3_EXEC /usr/bin/python3)
 

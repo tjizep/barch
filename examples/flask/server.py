@@ -1,13 +1,22 @@
 import barch
-import redis
+import time
+tcp = False
+if tcp:
+    port = 14000
+    interface = "0.0.0.0"
+else: #if its not tcp it's local unix domain sockets
+    port = 0
+    interface = "/tmp/lbarch"
 
-barch.start("0.0.0.0", 14000)
+barch.start("/tmp/lbarch", 0)
+listen = barch.KeyValue()
 print ("Started Barch server waiting for 'exit' on 'message'"
-       " 'LPUSH message exit' (on port 14000)")
-rp = redis.Redis("127.0.0.1", 14000, 0)
-rp.lpush("message","start")
-msg = (b'message', b'start')
+       " 'SET message exit' (on /tmp/lbarch)")
+
+msg = "start"
+listen.set("message",msg)
 print(msg)
-while msg != (b'message', b'exit'):
-    msg = rp.blpop(["message"],10.0)
+while msg != "exit":
+    msg = listen.get("message")
+    time.sleep(0.1)
 barch.saveAll()

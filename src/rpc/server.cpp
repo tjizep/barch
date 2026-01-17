@@ -14,7 +14,7 @@
 #include <cstdio>
 #include "barch_apis.h"
 #include "swig_api.h"
-#include "rpc_caller.h"
+//#include "rpc_caller.h"
 #include "vk_caller.h"
 #include "redis_parser.h"
 #include "thread_pool.h"
@@ -46,6 +46,7 @@ namespace barch {
         static std::recursive_mutex srv_get{};
         return srv_get;
     }
+    template<typename Proto>
     struct server_context {
         bool started = false;
         std::atomic<size_t> num_started = 0;
@@ -60,10 +61,12 @@ namespace barch {
         std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
         //std::vector<std::shared_ptr<uring_work_unit>> uring_resp_ios{};
 
-        tcp::acceptor accept;
+        Proto::acceptor accept;
         asio::ssl::context ssl_context;
-        std::string interface;
-        uint_least16_t port;
+        //std::string interface;
+        //uint_least16_t port;
+
+        std::string description;
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
         std::atomic<size_t> asio_resp_distributor{};
@@ -108,13 +111,34 @@ namespace barch {
             pool.stop();
 
             asio_resp_pool.stop();
-            port = 0;
+            //port = 0;
             started = false;
         }
+        void handle_ssl(tcp::endpoint &ep) {
+            auto ssl = ssl_stream(std::move(ep), ssl_context);
+            auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
+            session->start_ssl();
+        }
+        template<typename UnknT>
+        void handle_ssl(UnknT&) {
+
+        }
+        static void handle_assign(tcp::socket& socket, tcp::socket& endpoint) {
+            socket.assign(tcp::v4(),endpoint.release());
+        }
+        static void handle_assign(asio::local::stream_protocol::socket& socket, asio::local::stream_protocol::socket& endpoint) {
+            socket.assign(asio::local::stream_protocol(), endpoint.release());
+        }
+
+        template<typename UnkProto>
+        static void handle_assign(typename UnkProto::socket& socket, typename UnkProto::socket& endpoint) {
+
+        }
+
         void start_accept() {
             try {
 
-                accept.async_accept([this](asio::error_code error, tcp::socket endpoint) {
+                accept.async_accept([this](asio::error_code error, Proto::socket endpoint) {
                     if (error) {
                         barch::std_err("accept error",error.message(),error.value());
                         return; // this happens if there are no threads
@@ -122,9 +146,7 @@ namespace barch {
                     {
                         net_stat stat;
                         if (use_ssl) {
-                            auto ssl = ssl_stream(std::move(endpoint), ssl_context);
-                            auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
-                            session->start_ssl();
+                            handle_ssl(endpoint);
                         }else {
                             process_data(endpoint);
                         }
@@ -133,14 +155,14 @@ namespace barch {
                 });
 
             }catch (std::exception& e) {
-                barch::std_err("failed to start/run replication server", interface, port, e.what());
+                barch::std_err("failed to start/run replication server", e.what());
             }
         }
 
 
         void start() {}
         bool use_uring = false;
-        void process_data(tcp::socket& endpoint) {
+        void process_data(Proto::socket& endpoint) {
             try {
                 char cs[1] ;
                 //readp(stream, cs);
@@ -149,15 +171,9 @@ namespace barch {
                 if (cs[0]) {
 
                         auto unit = this->get_asio_unit();
-                        tcp::socket socket (unit->io);
-
-                        socket.assign(tcp::v4(),endpoint.release());
-                        auto fd = socket.lowest_layer().native_handle();
-                        int quickack = 1;
-                        setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
-                        int flag = 1;
-                        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-                        auto session = std::make_shared<resp_session<tcp::socket>>(std::move(socket),workers, cs[0]);
+                        typename Proto::socket socket (unit->io);
+                        handle_assign(socket, endpoint);
+                        auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(socket),workers, cs[0]);
                         session->start();
 
                     return;
@@ -165,7 +181,7 @@ namespace barch {
                 uint32_t cmd = 0;
                 endpoint.read_some(asio::buffer(&cmd, sizeof(cmd)));
                 if (cmd == cmd_barch_call) {
-                    std::make_shared<barch_session>(std::move(endpoint))->start();
+                    std::make_shared<barch_session<Proto>>(std::move(endpoint))->start();
                     return;
                 }
                 if (cmd == cmd_art_fun) {
@@ -174,8 +190,7 @@ namespace barch {
                 }
                 heap::vector<uint8_t> buffer{};
                 barch::key_spec spec;
-
-                tcp::iostream stream(std::move(endpoint));
+                typename Proto::iostream stream(std::move(endpoint));
                 if (stream.fail())
                     return;
                 switch (cmd) {
@@ -221,11 +236,10 @@ namespace barch {
             return "test";
         }
 #endif
-        server_context(std::string interface, uint_least16_t port, bool ssl)
-        :   accept(io, tcp::endpoint(tcp::v4(), port))
+
+        server_context(Proto::endpoint ep, bool ssl)
+        :   accept(io, ep)
         ,   ssl_context(asio::ssl::context::tlsv13)
-        ,   interface(interface)
-        ,   port(port)
         ,   use_ssl(ssl) {
 
             if (use_ssl) {
@@ -245,10 +259,11 @@ namespace barch {
             pool.start([this](size_t tid) -> void{
 
                 asio::dispatch(io ,[this,tid]() {
-                    barch::std_log(use_ssl ? "TLS/SSL":"TCP","connections accepted on", this->interface,this->port,"using thread",tid);
+
+                    barch::std_log(use_ssl ? "TLS/SSL":"TCP","connections accepted on",description,"using thread",tid);
                 });
                 io.run();
-                barch::std_log("server stopped on", this->interface,this->port,"using thread",tid);
+                barch::std_log("server stopped on", description,"using thread",tid);
             });
             work_pool.start([this](size_t tid) -> void{
                 workers.run();
@@ -275,34 +290,46 @@ namespace barch {
     };
 
 
-    static std::shared_ptr<server_context>& get_srv() {
-        static std::shared_ptr<server_context> srv = nullptr;
+    static std::shared_ptr<server_context<tcp>>& get_srv() {
+        static std::shared_ptr<server_context<tcp>> srv = nullptr;
         return srv;
     }
-    static std::shared_ptr<server_context>& get_srv_ssl() {
-        static std::shared_ptr<server_context> srv = nullptr;
+
+    static std::shared_ptr<server_context<tcp>>& get_srv_ssl() {
+        static std::shared_ptr<server_context<tcp>> srv = nullptr;
         return srv;
     }
-    void handle_start(const std::string& interface, uint_least16_t port, bool ssl, std::shared_ptr<server_context>& s) {
+
+    static std::shared_ptr<server_context<asio::local::stream_protocol>>& get_srv_unix() {
+        static std::shared_ptr<server_context<asio::local::stream_protocol>> srv = nullptr;
+        return srv;
+    }
+    template<typename Proto>
+    void handle_start(typename Proto::endpoint ep, bool ssl, std::shared_ptr<server_context<Proto>>& s) {
         s = nullptr;
         try {
-            if (port == 0) return;
-            s = std::make_shared<server_context>(interface, port, ssl);
+            s = std::make_shared<server_context<Proto>>(ep, ssl);
         }catch (std::exception& e) {
             barch::std_err("failed to start server", e.what());
         }
 
     }
-    void handle_stop(std::shared_ptr<server_context>& s) {
+    void handle_stop(std::shared_ptr<server_context<tcp>>& s) {
 
         s = nullptr;
     }
     void server::start(const std::string& interface, uint_least16_t port, bool ssl) {
         std::unique_lock l(srv_mut());
-        if (ssl) {
-            handle_start(interface, port, true, get_srv_ssl());
+        if (port == 0) {
+            ::unlink(interface.c_str());
+            asio::local::stream_protocol::endpoint ep(interface);
+            handle_start(ep, false, get_srv_unix());
+        }else if (ssl) {
+            auto ep = tcp::endpoint(tcp::v4(), port);
+            handle_start(ep, true, get_srv_ssl());
         }else {
-            handle_start(interface, port, false, get_srv());
+            auto ep = tcp::endpoint(tcp::v4(), port);
+            handle_start(ep, false, get_srv());
         }
     }
 
@@ -321,14 +348,15 @@ namespace barch {
     };
     //static module_stopper _stopper;
     namespace repl {
+        template<typename Proto>
         class rpc_impl : public rpc {
         private:
             std::mutex latch{};
             std::string host;
             int port;
             asio::io_context ioc{};
-            tcp::resolver resolver{ioc};
-            tcp::socket s;
+
+            Proto::socket s;
             size_t requests_in_stream = 0;
             std::error_code error{};
             heap::vector<uint8_t> replies{};
@@ -382,6 +410,26 @@ namespace barch {
                 };
                 return r;
             }
+            template<typename OC>
+            void do_connect(tcp::socket & sock, OC&& once_connected) {
+                tcp::resolver resolver{ioc};
+                auto resolution = resolver.resolve(host,std::to_string(port));
+                asio::async_connect(sock, resolution, once_connected);
+
+            }
+            template<typename OC>
+            void do_connect(asio::local::stream_protocol::socket & sock, OC&& once_connected) {
+                typename Proto::endpoint ep(host);
+                try {
+                    sock.connect(ep);
+                    std::error_code ec{};
+                    once_connected(ec,ep);
+                }catch (std::exception& e) {
+                    barch::std_err("error connecting to[",host,"]",e.what());
+                }
+
+            }
+
             template<typename ResultT,typename ParamT>
             call_result tcall(ResultT& result, const ParamT& params) {
 
@@ -395,16 +443,15 @@ namespace barch {
                     net_stat stat;
                     if (!s.is_open()) {
                         stream.clear();
-
-                        auto resolution = resolver.resolve(host,std::to_string(port));
-                        asio::async_connect(s, resolution,[this](const std::error_code& ec, tcp::endpoint unused(endpoint)) {
+                        auto once_connected = [this](const std::error_code& ec, typename Proto::endpoint unused(ep)) {
                             if (!ec) {
                                 uint32_t cmd = cmd_barch_call;
                                 writep(stream,uint8_t{0x00});
                                 writep(stream, cmd);
                             }
                             error = ec;
-                        });
+                        };
+                        do_connect(s, once_connected);
                         run(barch::get_rpc_connect_to_s());
                         if (error) {
                             throw_exception<std::runtime_error>("failed to connect");
@@ -465,7 +512,10 @@ namespace barch {
             }
         };
         std::shared_ptr<barch::repl::rpc> create(const std::string& host, int port) {
-            return std::make_shared<rpc_impl>(host, port);
+            if (port == 0) {
+                return std::make_shared<rpc_impl<asio::local::stream_protocol>>(host, port);
+            }
+            return std::make_shared<rpc_impl<tcp>>(host, port);
         }
         struct consumers {
             std::mutex m;

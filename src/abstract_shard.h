@@ -59,6 +59,7 @@ namespace barch {
         bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
         uint64_t lock_to_ms = 1*1000*60;
+
         void lock_shared() {
             if (!get_latch().try_lock_shared_for(std::chrono::milliseconds(lock_to_ms))) {
                 throw_exception<std::runtime_error>("read lock wait time exceeded");

@@ -79,19 +79,35 @@ namespace barch {
                 "tot-cmds=" + std::to_string(calls_recv) + "\n";
             return r;
         }
+        static std::string remote_address_of(const tcp::socket& sock) {
+            auto rep = sock.lowest_layer().remote_endpoint();
+            return rep.address().to_string() +":"+ std::to_string(rep.port());
+        }
+        static std::string local_address_of(const tcp::socket& sock) {
+            auto rep = sock.lowest_layer().local_endpoint();
+            return rep.address().to_string() + +":"+ std::to_string(rep.port());
+        }
+
+        static std::string remote_address_of(const asio::basic_stream_socket<asio::local::stream_protocol>& sock) {
+            auto rep = sock.lowest_layer().remote_endpoint();
+            return rep.path();
+        }
+
+        static std::string local_address_of(const asio::basic_stream_socket<asio::local::stream_protocol>& sock) {
+            auto rep = sock.lowest_layer().remote_endpoint();
+            return rep.path();
+        }
         template<typename  LowestLType>
         std::string get_info_t(const LowestLType& sock) const {
 
-            auto rmote = sock.remote_endpoint();
-            auto lcal = sock.local_endpoint();
 
-            std::string laddress = lcal.address().to_string()+":"+ std::to_string(lcal.port());
-            std::string raddress = rmote.address().to_string()+":"+ std::to_string(rmote.port());
+            std::string laddress = local_address_of(sock);
+            std::string raddress = remote_address_of(sock);
             return get_info_l(laddress, raddress);
         }
 
         std::string get_info(const TSock& sock) const {
-           return get_info_t( sock.lowest_layer());
+           return get_info_t( sock);
         }
 
         void do_block_continue() override {

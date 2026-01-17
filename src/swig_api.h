@@ -30,6 +30,7 @@ void publish(const std::string &ip, int port);
 void pull(const std::string &ip, const std::string &port);
 void pull(const std::string &ip, int port);
 long long calls(const std::string &name);
+void testKv();
 struct repl_statistics {
     repl_statistics(){}
     ~repl_statistics(){}
@@ -295,11 +296,13 @@ public:
     KeyValue();
     KeyValue(std::string keys_space);
     KeyValue(const std::string& host, int port);
+    KeyValue(const std::string& host, int port, const std::string& keys_space);
     long long getShards() const ;
     bool getOrdered() const ;
     std::vector<Value> range(const std::string &start, const std::string &end, long long limit = -1);
     long long count(const std::string &start, const std::string &end);
     Value set(const std::string &key, const std::string &value);
+    Value seti(long long key, long long value) ;
     Value set(const std::string &key, long long value);
     Value set(const std::string &key, double value);
     std::string get(const std::string &key) const;
@@ -322,6 +325,7 @@ public:
     Value max() const ;
     Value upperBound(const std::string& key) const ;
     long long size() const ;
+    bool clear();
     bool append(const std::string& key, const std::string& value);
 };
 

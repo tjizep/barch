@@ -61,11 +61,14 @@ int INFO(caller& call, const arg_t& argv) {
         BARCH_GIT_COMMIT_HASH
         "\n"
         "barch_version:"
-       BARCH_PROJECT_VERSION
-       "\n"
-       "barch_git_sha1:"
-       BARCH_GIT_COMMIT_HASH
-       "\n"
+        BARCH_PROJECT_VERSION
+        "\n"
+        "barch_git_sha1:"
+        BARCH_GIT_COMMIT_HASH
+        "\n"
+        "barch_build_type:"
+        BARCH_BUILD_TYPE
+        "\n"
         "redis_git_dirty:1\n"
         "redis_build_id:0\n"
         "redis_mode:library\n"

@@ -65,6 +65,7 @@ provinces = barch.KeyValue("provinces")
 cities =  barch.KeyValue("cities")
 tokey = barch.KeyValue("tokey")
 
+
 assert spc.getShards() == 1
 assert streets.getShards() == 1
 cnt = barch.KeyValue("counters")

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(barch VERSION 0.4.3 LANGUAGES CXX)
 enable_testing()
 set(TARGETS barch lbarch)
-# Get the current git commit hash
+# Get the current git commit hash for versioning purposes
 execute_process(
         COMMAND git rev-parse HEAD
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -16,13 +16,12 @@ if(NOT GIT_COMMIT_HASH)
     set(GIT_COMMIT_HASH "unknown")
 endif()
 
-# Generate the header file
+# Generate the barch version header file
 configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/src/version.h.in
         ${CMAKE_CURRENT_BINARY_DIR}/generated/version.h
 )
 
-# Ensure the generated directory is in the include path
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 message("barch version: ${PROJECT_VERSION} (commit: ${GIT_COMMIT_HASH})")
@@ -48,10 +47,14 @@ if (NOT TEST_OD)
     set(TEST_OD ON)
 endif ()
 if (NOT USE_LIBURING)
-    set(USE_LIBURING ON)
+    set(USE_LIBURING OFF)
 endif ()
 if (NOT USE_OPENSSL)
     set(USE_OPENSSL ON)
+endif ()
+
+if (NOT GEN_LUA)
+    set(GEN_LUA ON)
 endif ()
 
 option(COVERAGE "Enable code coverage reporting" OFF)
@@ -87,6 +90,10 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     message("Using debuggable optimizations")
 endif ()
+# maybe one day we may want boost
+#find_package(Boost REQUIRED)
+# include boost for all targets
+#include_directories(${Boost_INCLUDE_DIRS})
 
 set(PYTHON3_EXEC /usr/bin/python3)
 
@@ -192,6 +199,7 @@ if (ADD_FAST_FLOAT)
             GIT_TAG main
     )
     FetchContent_MakeAvailable(fast_float)
+    include_directories(${fast_float_SOURCE_DIR}/include)
 endif ()
 if (ADD_FMT)
 
@@ -202,10 +210,12 @@ if (ADD_FMT)
     SET(BUILD_SHARED_LIBS FALSE)
     SET(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
     FetchContent_MakeAvailable(fmt)
+    include_directories(${fmt_SOURCE_DIR}/include)
 endif ()
 
 if (ADD_ZSTD_COMPRESSION)
     FetchContent_MakeAvailable(zstd)
+    include_directories(${zstd_SOURCE_DIR}/lib)
 endif ()
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
@@ -213,10 +223,6 @@ set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
 
 include_directories(src)
 include_directories(external/include)
-
-include_directories(${fast_float_SOURCE_DIR}/include)
-include_directories(${zstd_SOURCE_DIR}/lib)
-
 
 if (NOT TEST_OD)
     message("Testing not enabled Use -DTEST_OD=ON")
@@ -245,6 +251,64 @@ if (ADD_SWIG)
     find_package (SWIG)
     include (UseSWIG)
     set_property(SOURCE src/barch.i PROPERTY CPLUSPLUS ON)
+    if (${GEN_LUA})
+        find_package(LuaJIT)
+        # for luajit, lua and openresty
+        if (${LuaJIT_FOUND})
+            message("Found LuaJIT generating a binding")
+            include_directories(${LUAJIT_INCLUDE_DIR})
+            swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${SOURCES})
+            target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
+            if (USE_LIBURING)
+                target_link_libraries(barchlua PRIVATE ${LIBURING_LIB_PATH})
+            endif ()
+            if (USE_OPENSSL)
+                target_link_libraries(barchlua PRIVATE ${OPENSSL_LIB_PATH})
+            endif ()
+            target_link_libraries(barchlua PRIVATE fmt::fmt)
+            target_link_libraries(barchlua PRIVATE libzstd_static)
+            set_target_properties(barchlua PROPERTIES
+                    OUTPUT_NAME "barch"
+            )
+            install(TARGETS barchlua DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/lua/5.1 COMPONENT barchlua)
+
+        else()
+            message("The Lua language was not found - perhaps install Lua?")
+        endif ()
+    endif ()
+    if (${GEN_JNI})
+        find_package(Java)
+        find_package(JNI)
+
+        include(UseJava)
+        set_property(SOURCE src/barch.i PROPERTY CPLUSPLUS ON)
+        if (${JNI_FOUND})
+
+            message("Java includes:${JNI_INCLUDE_DIRS}")
+            message("Java libraries:${JNI_LIBRARIES} '${Java_LIBRARIES}'")
+            include_directories(${JNI_INCLUDE_DIRS})
+            swig_add_library(barchjni LANGUAGE java OUTPUT_DIR org/barch SOURCES src/barch.i ${SOURCES})
+            set_property(TARGET barchjni PROPERTY SWIG_COMPILE_OPTIONS -package org.barch)
+            target_link_libraries(barchjni PRIVATE ${Java_LIBRARIES})
+            add_jar(barchj
+                    SOURCES
+                    ${CMAKE_BINARY_DIR}/org/barch/barchJNI.java
+            )
+            set(BARCHJNI_TEST ON)
+            if (USE_LIBURING)
+                target_link_libraries(barchjni PRIVATE ${LIBURING_LIB_PATH})
+            endif ()
+            if (USE_OPENSSL)
+                target_link_libraries(barchjni PRIVATE ${OPENSSL_LIB_PATH})
+            endif ()
+            target_link_libraries(barchjni PRIVATE fmt::fmt)
+            target_link_libraries(barchjni PRIVATE libzstd_static)
+        else ()
+            message("Did not find Java and Jni libraries - please set the JAVA_HOME environment variable ")
+        endif ()
+    else ()
+        message("Java JNI off")
+    endif ()
     if (${Python3_FOUND})
         message("Python includes:${Python3_INCLUDE_DIRS}")
         message("Python libraries:${Python3_LIBRARIES} '${PYTHON_LIBRARIES}'")

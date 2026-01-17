@@ -15,6 +15,28 @@ void setConfiguration(const std::string& name, const std::string& value) {
     barch::set_configuration_value(name,value);
 }
 
+void testKv() {
+#if 0
+    auto spc = barch::get_keyspace("test");
+    barch::std_log("test","shard count",spc->get_shard_count());
+    size_t z = 0;
+    auto kv = spc->get(z);
+
+    for (long i =0 ; i < 1000000;++i) {
+        auto k = conversion::comparable_key(i);
+        auto v = Variable(i);
+        storage_release l(kv);
+        kv->insert(k.get_value(),v.to_string(), true);
+    }
+#else
+    KeyValue test("test");
+    for (long long i = 0; i < 1000000; ++i) {
+        test.set(Value(i).s(),Value(i).s());
+    }
+#endif
+
+}
+
 void setRoute(int shard, const std::string& host, int port) {
     std::vector<std::string_view> params = {"ADDROUTE", std::to_string(shard), host, std::to_string(port)};
     rpc_caller sc;
@@ -196,49 +218,26 @@ long long List::len(const std::string &key) {
 }
 Value List::brpop(const std::string &key, double timeout) {
     params = {"BRPOP", key, std::to_string(timeout)};
-
-    int r = sc.call(params, BRPOP);
-    if (r != 0) {
-        barch::std_err("brpop failed", key);
-    }
-    return sc.results.empty() ? nullptr : sc.results[0];
-
+    return sc.callv(params, BRPOP);
 }
 Value List::blpop(const std::string &key, double timeout) {
     params = {"BLPOP", key, std::to_string(timeout)};
-
-    int r = sc.call(params, BLPOP);
-    if (r != 0) {
-        barch::std_err("blpop failed", key);
-    }
-    return sc.results.empty() ? nullptr : sc.results[0];
-
+    return sc.callv(params, BLPOP);
 }
 long List::pop(const std::string &key, long long count) {
     params = {"LPOP", key, std::to_string(count)};
     barch::repl::call(params);
-    int r = sc.call(params, LPOP);
-    if (r != 0) {
-        barch::std_err("pop failed", key);
-    }
-    return sc.results.empty() ? 0 : sc.results[0].to_int64();
+    return sc.callv(params, LPOP).i();
 }
+
 std::string List::back(const std::string &key) {
     params = {"LBACK", key};
-    int r = sc.call(params, LBACK);
-    if (r != 0) {
-        barch::std_err("back failed", key);
-    }
-    return sc.results.empty() ? "" : sc.results[0].to_string();
+    return  sc.callv(params, LBACK).s();
 }
 
 std::string List::front(const std::string &key) {
     params = {"LFRONT", key};
-    int r = sc.call(params, LFRONT);
-    if (r != 0) {
-        barch::std_err("front failed", key);
-    }
-    return sc.results.empty() ? "" : conversion::to_string(sc.results[0]);
+    return sc.callv(params, LFRONT).s();
 }
 
 KeyValue::KeyValue() {
@@ -247,20 +246,34 @@ KeyValue::KeyValue() {
 long long KeyValue::getShards() const {
     return sc.kspace()->opt_shard_count;
 }
+
 bool KeyValue::getOrdered() const {
     return sc.kspace()->opt_ordered_keys;
 }
+
 KeyValue::KeyValue(std::string keys_space) {
     sc.set_kspace(barch::get_keyspace(keys_space));
 }
+
 KeyValue::KeyValue(const std::string& host, int port) {
     sc.host = barch::repl::create(host,port);
 }
+KeyValue::KeyValue(const std::string& host, int port, const std::string& keys_space) {
+    sc.host = barch::repl::create(host,port);
+    Caller::use(keys_space);
+}
+
 Value KeyValue::set(const std::string &key, const std::string &value) {
     params = {"SET", key, value};
     barch::repl::call(params);
     return sc.callv(params, SET);
 }
+
+Value KeyValue::seti(long long key, long long value) {
+    params = {"SET", Value{key}.s(), Value{value}.s()};
+    barch::repl::call(params);
+    return sc.callv(params, SET);}
+
 Value KeyValue::set(const std::string &key, long long value) {
     params = {"SET", key, Variable{value}.s()};
     barch::repl::call(params);
@@ -283,12 +296,7 @@ std::string KeyValue::get(const std::string &key) const {
 
 Value KeyValue::vget(const std::string &key) const {
     params = {"GET", key};
-
-    int r = sc.call(params, ::GET);
-    if (r == 0) {
-        return sc.results.empty() ? nullptr: sc.results[0];
-    }
-    return nullptr;
+    return sc.callv(params, ::GET);
 }
 
 Value KeyValue::erase(const std::string &key) {
@@ -298,21 +306,18 @@ Value KeyValue::erase(const std::string &key) {
 }
 bool KeyValue::exists(const std::string &key) {
     params = {"EXISTS", key};
-
-    int r = sc.call(params, ::EXISTS);
-    if (r == 0) {
-        return sc.results.empty() ? false: sc.results[0].b();
-    }
-    return false;
+    return sc.callv(params, ::EXISTS).b(); // may be too short
 }
 bool KeyValue::append(const std::string& key, const std::string& value) {
     params = {"APPEND", key, value};
     barch::repl::call(params);
-    int r = sc.call(params, ::APPEND);
-    if (r == 0) {
-        return sc.results.empty() ? false: sc.results[0] == "OK";
-    }
-    return false;
+    return sc.callv(params, ::APPEND) == "OK";
+}
+
+bool KeyValue::clear() {
+    params = {"CLEAR"};
+    barch::repl::call(params);
+    return sc.callv(params, ::CLEAR) == "OK";
 }
 
 bool KeyValue::expire(const std::string &key, long long sec, const std::string& flag) {
@@ -597,6 +602,7 @@ void HashSet::set(const std::string &k, const std::vector<std::string>& members)
     if (r != 0) {
         barch::std_err("set failed");
     }
+
 }
 Value HashSet::get(const std::string &k, const std::string &member) {
     params = {"HGET", k, member};

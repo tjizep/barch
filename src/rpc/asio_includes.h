@@ -8,12 +8,14 @@
 //#define ASIO_HAS_IO_URING
 #//define ASIO_DISABLE_EPOLL
 #include "moodycamel/blockingconcurrentqueue.h"
-#include <asio/ip/tcp.hpp>
+//#include <asio/ip/tcp.hpp>
 #include <asio.hpp>
 #include <asio/ssl.hpp>
 //#include "asio/io_service.hpp"
 using asio::ip::tcp;
-using asio::local::stream_protocol;
+
+typedef  asio::local::stream_protocol::acceptor local_acceptor;
+typedef  asio::local::stream_protocol::socket local_socket;
 typedef asio::ssl::stream<tcp::socket> ssl_stream;
 // A custom implementation of the Clock concept from the standard C++ library.
 struct time_t_clock

@@ -11,12 +11,13 @@
 #include <memory>
 
 namespace barch {
-    class barch_session : public std::enable_shared_from_this<barch_session>
+    template<typename Proto>
+    class barch_session : public std::enable_shared_from_this<barch_session<Proto>>
     {
     public:
         barch_session(const barch_session&) = delete;
         barch_session& operator=(const barch_session&) = delete;
-        explicit barch_session(tcp::socket socket)
+        explicit barch_session(Proto::socket socket)
           : socket_(std::move(socket))
         {
             ++statistics::repl::redis_sessions;
@@ -33,7 +34,7 @@ namespace barch {
     private:
         void do_read()
         {
-            auto self(shared_from_this());
+            auto self(this->shared_from_this());
             socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
                 [this, self](std::error_code ec, std::size_t length)
             {
@@ -69,7 +70,7 @@ namespace barch {
                     }
                 });
         }
-        tcp::socket socket_;
+        Proto::socket socket_;
         uint8_t data_[rpc_io_buffer_size]{};
         barch_parser parser{};
     };

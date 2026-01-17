@@ -22,8 +22,9 @@ h = barch.HashSet()
 k.erase("ttdef")
 assert k.incr("ttdef") == 1
 assert k.get("ttdef") == "1"
+assert k.exists("ttdef")
 k.erase("ttdef")
-
+assert not k.exists("ttdef")
 k.set("1","one")
 k.set("2","two")
 k.set("3","three")

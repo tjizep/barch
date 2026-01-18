@@ -190,7 +190,6 @@ namespace barch {
                while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
                    auto tshards = this->get_shards();
                    repl::distribute();
-                   flush_insert_buffer();
                    for (auto s : tshards) {
                        s->maintenance();
                        if (exiting) break;
@@ -229,6 +228,7 @@ namespace barch {
         if (shards.empty()) {
             abort_with("shard configuration is empty");
         }
+        flush_insert_buffer();
         auto r = shards[shard % shards.size()];
         if (r == nullptr) {
             abort_with("shard not found");
@@ -347,7 +347,7 @@ namespace barch {
             key_buffer.emplace_back(key,value);
             bufs = key_buffer.size();
         }
-        if (bufs > 160000) {
+        if (bufs > 256) {
             flush_insert_buffer();
         }
     }

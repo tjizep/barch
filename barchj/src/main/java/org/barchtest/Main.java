@@ -16,8 +16,14 @@ public class Main {
     static void main() {
 
         KeyValue conf = new KeyValue("configuration");
-        conf.set("test.ordered", "1");
-        conf.set("test.shards", "1"); // more shards is more concurrency, but only for writes, reads are concurrent- but this is single threaded
+        if (conf.size() == 0) {
+            System.out.println("creating configuration");
+            conf.set("test.ordered", "1");
+            conf.set("test.shards", "1"); // more shards is more concurrency, but only for writes, reads are concurrent- but this is single threaded
+        }else {
+            System.out.println("configuration already exists");
+
+        }
         KeyValue kv = new KeyValue("test");
         System.out.println("ordered:"+kv.getOrdered());
         System.out.println("current size:"+kv.size());
@@ -33,7 +39,6 @@ public class Main {
         System.out.println("size:" + kv.size() + " 100:" + kv.get("100"));
         System.out.println("ok");
 
-        clearAll();
         barchJNI.saveAll();
 
     }

@@ -26,7 +26,11 @@ namespace barch {
         moodycamel::LightweightSemaphore thread_exit{};
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
         bool exiting = false;
+        heap::vector<std::pair<std::string,std::string>> key_buffer{};
+        bool flushing {false};
+        std::mutex lock{};
         void start_maintain();
+
     public:
         key_space(const std::string &name);
         virtual  ~key_space();
@@ -47,6 +51,8 @@ namespace barch {
         void merge(merge_options options);
         void each_shard(std::function<void(shard_ptr)> f);
         [[nodiscard]] size_t get_shard_count() const;
+        void buffer_insert(const std::string& key, const std::string& value);
+        void flush_insert_buffer();
     };
     typedef key_space::key_space_ptr key_space_ptr;
     const std::string& get_ks_pattern_error();

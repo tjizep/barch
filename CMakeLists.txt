@@ -56,7 +56,9 @@ endif ()
 if (NOT GEN_LUA)
     set(GEN_LUA ON)
 endif ()
-
+if (NOT GEN_JNI)
+    set(GEN_JNI ON)
+endif ()
 option(COVERAGE "Enable code coverage reporting" OFF)
 
 set(CMAKE_CPP_STANDARD 20)

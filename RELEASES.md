@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-17
+# Release v0.4.3.3b 2025-01-18
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -25,6 +25,8 @@
 11. example improvements (v0.4.3.3b 2025-01-14)
 12. add local socket support, just start with unix socket (i.e. `/tmp/barch') on port 0 (v0.4.3.3b 2025-01-17)
 13. add luajit build support interfaces are suitable of for openresty and nginx (v0.4.3.3b 2025-01-17)
+14. add java build and tests (v0.4.3.3b 2025-01-18)
+15. multi thread buffer opt using KeyValue::put (v0.4.3.3b 2025-01-18) 
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)

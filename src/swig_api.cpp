@@ -247,6 +247,9 @@ long long KeyValue::getShards() const {
     return sc.kspace()->opt_shard_count;
 }
 
+void KeyValue::flush() {
+}
+
 bool KeyValue::getOrdered() const {
     return sc.kspace()->opt_ordered_keys;
 }
@@ -262,36 +265,37 @@ KeyValue::KeyValue(const std::string& host, int port, const std::string& keys_sp
     sc.host = barch::repl::create(host,port);
     Caller::use(keys_space);
 }
-
+bool KeyValue::put(const std::string &key, const std::string& value) {
+    sc.kspace()->buffer_insert(key, value);
+    return true;
+}
 Value KeyValue::set(const std::string &key, const std::string &value) {
+    //sc.kspace()->buffer_insert(key, value);
     params = {"SET", key, value};
     barch::repl::call(params);
     return sc.callv(params, SET);
+    //return true;
 }
 
 Value KeyValue::seti(long long key, long long value) {
     params = {"SET", Value{key}.s(), Value{value}.s()};
     barch::repl::call(params);
-    return sc.callv(params, SET);}
+    return sc.callv(params, SET) == "OK";
+}
 
 Value KeyValue::set(const std::string &key, long long value) {
     params = {"SET", key, Variable{value}.s()};
     barch::repl::call(params);
-    return sc.callv(params, SET);
+    return sc.callv(params, SET)=="OK";
 }
 Value KeyValue::set(const std::string &key, double value) {
     params = {"SET", key, Variable{value}.s()};
     barch::repl::call(params);
-    return sc.callv(params, SET);
+    return sc.callv(params, SET) == "OK";
 }
 std::string KeyValue::get(const std::string &key) const {
     params = {"GET", key};
-
-    int r = sc.call(params, ::GET);
-    if (r == 0) {
-        return sc.results.empty() ? "": conversion::to_string(sc.results[0]);
-    }
-    return "";
+    return  sc.callv(params, ::GET).s();
 }
 
 Value KeyValue::vget(const std::string &key) const {
@@ -431,7 +435,6 @@ Value KeyValue::lowerBound(const std::string& key) const {
 }
 
 Value KeyValue::upperBound(const std::string& key) const {
-
     params = {"UB", key};
 
     return sc.callv(params, ::UB, "");

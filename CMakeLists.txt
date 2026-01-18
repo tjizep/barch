@@ -305,6 +305,8 @@ if (ADD_SWIG)
             endif ()
             target_link_libraries(barchjni PRIVATE fmt::fmt)
             target_link_libraries(barchjni PRIVATE libzstd_static)
+            # after the installation we should run below if maven is available
+            # mvn install:install-file -Dfile=barchj.jar -DgroupId=org.barch -DartifactId=barch -Dversion=${PROJECT_VERSION} -Dpackaging=jar
         else ()
             message("Did not find Java and Jni libraries - please set the JAVA_HOME environment variable ")
         endif ()

@@ -190,6 +190,7 @@ namespace barch {
                while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
                    auto tshards = this->get_shards();
                    repl::distribute();
+                   flush_insert_buffer();
                    for (auto s : tshards) {
                        s->maintenance();
                        if (exiting) break;
@@ -203,6 +204,7 @@ namespace barch {
         });
     }
     key_space::~key_space() {
+        flush_insert_buffer();
         exiting = true;
         thread_control.signal(1);
         thread_exit.wait();
@@ -236,10 +238,12 @@ namespace barch {
     }
 
     size_t key_space::get_shard_index(art::value_type key) {
+        flush_insert_buffer();
         return get_shard_index(key.chars(), key.size);
     }
 
     size_t key_space::get_shard_index(const char* key, size_t key_len) {
+        flush_insert_buffer();
         if (get_shard_count() == 1) {
             return 0;
         }
@@ -256,6 +260,7 @@ namespace barch {
     }
 
     size_t key_space::get_shard_index(ValkeyModuleString **argv) {
+        flush_insert_buffer();
         size_t nlen = 0;
         const char *n = ValkeyModule_StringPtrLen(argv[1], &nlen);
         if (key_ok(n, nlen) != 0) {
@@ -265,10 +270,12 @@ namespace barch {
     }
 
     shard_ptr key_space::get(ValkeyModuleString **argv) {
+        flush_insert_buffer();
         return get(get_shard_index(argv));
     }
 
     shard_ptr key_space::get(art::value_type key) {
+        flush_insert_buffer();
         return get(get_shard_index(key.chars(), key.size));
     }
 
@@ -281,12 +288,14 @@ namespace barch {
     };
 
     const heap::vector<shard_ptr>& key_space::get_shards() {
+        flush_insert_buffer();
         return shards;
     };
     void key_space::merge(merge_options options) {
         merge(source(), options);
     }
     void key_space::each_shard(std::function<void(shard_ptr)> f) {
+        flush_insert_buffer();
         for (auto& s: shards) {
             f(s);
         }
@@ -294,14 +303,65 @@ namespace barch {
     size_t key_space::get_shard_count() const {
         return shards.size();
     }
+
+    void key_space::flush_insert_buffer() {
+        if (flushing || key_buffer.empty()) return;
+        flushing = true;
+        heap::vector<std::pair<std::string,std::string>> smap;
+
+        {
+            std::unique_lock<std::mutex> l(lock);
+            smap.swap(key_buffer);
+
+        }
+        auto spc = this;
+        if (spc->get_shard_count() == 1) {
+            size_t z = 0;
+            auto t = spc->get(z);
+            storage_release r(t);
+            for (const auto &i:smap) {
+                auto fc = [&](const art::node_ptr &) -> void {};
+                auto k = conversion::as_composite(i.first);
+                auto v = art::value_type{i.second};
+                t->opt_insert({},k.get_value(),v,true,fc);
+            }
+            smap.clear();
+        }
+
+        for (const auto& i:smap) {
+            auto fc = [&](const art::node_ptr &) -> void {};
+            auto k = conversion::as_composite(i.first);
+            auto v = art::value_type{i.second};
+            auto t = spc->get(k.get_value());
+            storage_release r(t);
+            t->opt_insert({},k.get_value(),v,true,fc);
+        }
+
+        flushing = false;
+    }
+
+    void key_space::buffer_insert(const std::string &key, const std::string &value) {
+        size_t bufs = 0;
+        {
+            std::unique_lock<std::mutex> l(lock);
+            key_buffer.emplace_back(key,value);
+            bufs = key_buffer.size();
+        }
+        if (bufs > 160000) {
+            flush_insert_buffer();
+        }
+    }
+
     void key_space::merge(key_space_ptr into, merge_options options) {
         if (!into) return;
+        flush_insert_buffer();
         for (auto &d : shards) {
             auto sn = d->get_shard_number();
             d->merge(into->get(sn),options);
         }
     }
     void key_space::depends(const key_space_ptr& source) {
+        flush_insert_buffer();
         this->src = source;
         auto current = source;
         while (current && current.get() != this) {

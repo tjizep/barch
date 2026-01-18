@@ -292,11 +292,13 @@ public:
 };
 
 class KeyValue : public Caller {
+
 public:
     KeyValue();
     KeyValue(std::string keys_space);
     KeyValue(const std::string& host, int port);
     KeyValue(const std::string& host, int port, const std::string& keys_space);
+    void flush();
     long long getShards() const ;
     bool getOrdered() const ;
     std::vector<Value> range(const std::string &start, const std::string &end, long long limit = -1);
@@ -305,6 +307,7 @@ public:
     Value seti(long long key, long long value) ;
     Value set(const std::string &key, long long value);
     Value set(const std::string &key, double value);
+    bool put(const std::string &key, const std::string& value);
     std::string get(const std::string &key) const;
     Value vget(const std::string &key) const;
     Value incr(const std::string& key, double by);

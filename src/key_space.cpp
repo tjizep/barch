@@ -315,15 +315,18 @@ namespace barch {
 
         }
         auto spc = this;
+        art::key_options spec;
+        spec.set_hashed(!opt_ordered_keys);
         if (spc->get_shard_count() == 1) {
             size_t z = 0;
             auto t = spc->get(z);
+
             storage_release r(t);
             for (const auto &i:smap) {
                 auto fc = [&](const art::node_ptr &) -> void {};
                 auto k = conversion::as_composite(i.first);
                 auto v = art::value_type{i.second};
-                t->opt_insert({},k.get_value(),v,true,fc);
+                t->opt_insert(spec,k.get_value(),v,true,fc);
             }
             smap.clear();
         }
@@ -334,7 +337,7 @@ namespace barch {
             auto v = art::value_type{i.second};
             auto t = spc->get(k.get_value());
             storage_release r(t);
-            t->opt_insert({},k.get_value(),v,true,fc);
+            t->opt_insert(spec,k.get_value(),v,true,fc);
         }
 
         flushing = false;

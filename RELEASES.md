@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-18
+# Release v0.4.3.3b 2025-01-19
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -37,6 +37,7 @@
 6. fix string decoding (v0.4.3.3b 2025-01-12)
 7. fix `APPEND` and `PREPEND` functions (v0.4.3.3b 2025-01-12)
 8. fix `INCR` and `INCRBY` edge cases, incl rollover/under (v0.4.3.3b 2025-01-13)
+9. fix ordered flag (v0.4.3.3b 2025-01-19)
 
 # Release v0.4.3.2b 2025-01-05
 

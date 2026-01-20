@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(barch VERSION 0.4.3 LANGUAGES CXX)
+project(barch VERSION 0.5.0 LANGUAGES CXX)
 enable_testing()
 set(TARGETS barch lbarch)
 # Get the current git commit hash for versioning purposes
@@ -306,7 +306,19 @@ if (ADD_SWIG)
             target_link_libraries(barchjni PRIVATE fmt::fmt)
             target_link_libraries(barchjni PRIVATE libzstd_static)
             # after the installation we should run below if maven is available
-            # mvn install:install-file -Dfile=barchj.jar -DgroupId=org.barch -DartifactId=barch -Dversion=${PROJECT_VERSION} -Dpackaging=jar
+            #
+            find_program(MAVEN_EXE NAMES mvn)
+            if (MAVEN_EXE)
+                add_custom_command(
+                        TARGET barchjni
+                        POST_BUILD
+                        COMMAND mvn install:install-file -Dfile=barchj.jar -DgroupId=org.barch -DartifactId=barch -Dversion=${PROJECT_VERSION} -Dpackaging=jar
+                        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+                        COMMENT "installing barchj.jar using mvn at org.barch:barch:${PROJECT_VERSION}"
+                        VERBATIM
+                )
+
+            endif ()
         else ()
             message("Did not find Java and Jni libraries - please set the JAVA_HOME environment variable ")
         endif ()

@@ -16,7 +16,7 @@ void setConfiguration(const std::string& name, const std::string& value) {
 }
 
 void testKv() {
-#if 0
+#if 1
     auto spc = barch::get_keyspace("test");
     barch::std_log("test","shard count",spc->get_shard_count());
     size_t z = 0;

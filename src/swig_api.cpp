@@ -38,6 +38,7 @@ void testKv() {
 }
 
 void setRoute(int shard, const std::string& host, int port) {
+
     std::vector<std::string_view> params = {"ADDROUTE", std::to_string(shard), host, std::to_string(port)};
     rpc_caller sc;
     int r = sc.call(params, ADDROUTE);
@@ -196,6 +197,7 @@ List::List(const std::string &host, int port) {
 }
 
 long long List::push(const std::string &key, const std::vector<std::string> &items) {
+    std::unique_lock l(lock);
     params = {"LPUSH", key};
     params.insert(params.end(), items.begin(), items.end());
     barch::repl::call(params);
@@ -207,6 +209,7 @@ long long List::push(const std::string &key, const std::vector<std::string> &ite
 
 }
 long long List::len(const std::string &key) {
+    std::unique_lock l(lock);
     params = {"LLEN", key};
 
     int r = sc.call(params, LLEN);
@@ -217,25 +220,30 @@ long long List::len(const std::string &key) {
 
 }
 Value List::brpop(const std::string &key, double timeout) {
+    std::unique_lock l(lock);
     params = {"BRPOP", key, std::to_string(timeout)};
     return sc.callv(params, BRPOP);
 }
 Value List::blpop(const std::string &key, double timeout) {
+    std::unique_lock l(lock);
     params = {"BLPOP", key, std::to_string(timeout)};
     return sc.callv(params, BLPOP);
 }
 long List::pop(const std::string &key, long long count) {
+    std::unique_lock l(lock);
     params = {"LPOP", key, std::to_string(count)};
     barch::repl::call(params);
     return sc.callv(params, LPOP).i();
 }
 
 std::string List::back(const std::string &key) {
+    std::unique_lock l(lock);
     params = {"LBACK", key};
     return  sc.callv(params, LBACK).s();
 }
 
 std::string List::front(const std::string &key) {
+    std::unique_lock l(lock);
     params = {"LFRONT", key};
     return sc.callv(params, LFRONT).s();
 }
@@ -270,61 +278,70 @@ bool KeyValue::put(const std::string &key, const std::string& value) {
     return true;
 }
 Value KeyValue::set(const std::string &key, const std::string &value) {
-    //sc.kspace()->buffer_insert(key, value);
+    std::unique_lock l(lock);
     params = {"SET", key, value};
     barch::repl::call(params);
     return sc.callv(params, SET);
-    //return true;
 }
 
 Value KeyValue::seti(long long key, long long value) {
+    std::unique_lock l(lock);
     params = {"SET", Value{key}.s(), Value{value}.s()};
     barch::repl::call(params);
     return sc.callv(params, SET) == "OK";
 }
 
 Value KeyValue::set(const std::string &key, long long value) {
+    std::unique_lock l(lock);
     params = {"SET", key, Variable{value}.s()};
     barch::repl::call(params);
     return sc.callv(params, SET)=="OK";
 }
 Value KeyValue::set(const std::string &key, double value) {
+    std::unique_lock l(lock);
     params = {"SET", key, Variable{value}.s()};
     barch::repl::call(params);
     return sc.callv(params, SET) == "OK";
 }
 std::string KeyValue::get(const std::string &key) const {
+    std::unique_lock l(lock);
     params = {"GET", key};
     return  sc.callv(params, ::GET).s();
 }
 
 Value KeyValue::vget(const std::string &key) const {
+    std::unique_lock l(lock);
     params = {"GET", key};
     return sc.callv(params, ::GET);
 }
 
 Value KeyValue::erase(const std::string &key) {
+    std::unique_lock l(lock);
     params = {"REM", key};
     barch::repl::call(params);
     return sc.callv(params, ::REM);
 }
 bool KeyValue::exists(const std::string &key) {
+    std::unique_lock l(lock);
     params = {"EXISTS", key};
     return sc.callv(params, ::EXISTS).b(); // may be too short
 }
 bool KeyValue::append(const std::string& key, const std::string& value) {
+    std::unique_lock l(lock);
     params = {"APPEND", key, value};
     barch::repl::call(params);
     return sc.callv(params, ::APPEND) == "OK";
 }
 
 bool KeyValue::clear() {
+    std::unique_lock l(lock);
     params = {"CLEAR"};
     barch::repl::call(params);
     return sc.callv(params, ::CLEAR) == "OK";
 }
 
 bool KeyValue::expire(const std::string &key, long long sec, const std::string& flag) {
+    std::unique_lock l(lock);
     if (flag.empty()) {
         params = {"EXPIRE", key, std::to_string(sec)};
     }else
@@ -338,6 +355,7 @@ bool KeyValue::expire(const std::string &key, long long sec, const std::string& 
 }
 
 long long KeyValue::ttl(const std::string &key) {
+    std::unique_lock l(lock);
     params = {"TTL", key};
 
     int r = sc.call(params, ::TTL);
@@ -348,31 +366,37 @@ long long KeyValue::ttl(const std::string &key) {
 }
 
 Value KeyValue::min() const {
+    std::unique_lock l(lock);
     params = {"MIN"};
 
     return sc.callv(params, ::MIN);
 }
 Value KeyValue::max() const {
+    std::unique_lock l(lock);
     params = {"MAX"};
     return sc.callv(params, ::MAX);
 }
 
 Value KeyValue::incr(const std::string& key, double by) {
+    std::unique_lock l(lock);
     params = {"INCRBY",key, Value((long long)by).s()};
     barch::repl::call(params);
     return sc.callv(params, ::INCRBY);
 }
 
 Value KeyValue::decr(const std::string& key, double by) {
+    std::unique_lock l(lock);
     params = {"DECRBY", key, Value((long long)by).s()};
     barch::repl::call(params);
     return sc.callv(params, ::DECRBY);
 }
 Value KeyValue::decr(const std::string& key) {
+    std::unique_lock l(lock);
     return decr(key, 1ll);
 }
 
 Value KeyValue::incr(const std::string& key, long long by) {
+    std::unique_lock l(lock);
     params = {"INCRBY",key, Value(by).s()};
     barch::repl::call(params);
     return sc.callv(params, ::INCRBY);
@@ -382,17 +406,20 @@ Value KeyValue::incr(const std::string& key) {
 }
 
 Value KeyValue::decr(const std::string& key, long long by) {
+    std::unique_lock l(lock);
     params = {"DECRBY", key, Value{by}.s()};
     barch::repl::call(params);
     return sc.callv(params, ::DECRBY);
 
 }
 long long KeyValue::count(const std::string &start, const std::string &end) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"COUNT", start, end} ;
     return sc.callv(params, ::COUNT).i();
 }
 std::vector<Value> KeyValue::range(const std::string &start, const std::string &end, long long limit) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"RANGE", start, end, std::to_string(limit)} ;
     int r = sc.call(params, ::RANGE);
@@ -406,6 +433,7 @@ std::vector<Value> KeyValue::range(const std::string &start, const std::string &
 }
 
 std::vector<Value> KeyValue::glob(const std::string &glob, long long max_) const {
+    std::unique_lock l(lock);
     result.clear();
 
     if ( max_ > 0) {
@@ -424,28 +452,33 @@ std::vector<Value> KeyValue::glob(const std::string &glob, long long max_) const
     return result;
 }
 size_t KeyValue::globCount(const std::string& glob) const {
+    std::unique_lock l(lock);
     params = {"KEYS", glob, "COUNT"};
 
     return sc.callv(params, ::KEYS).i();
 
 }
 Value KeyValue::lowerBound(const std::string& key) const {
+    std::unique_lock l(lock);
     params = {"LB", key};
     return  sc.callv(params, ::LB);
 }
 
 Value KeyValue::upperBound(const std::string& key) const {
+    std::unique_lock l(lock);
     params = {"UB", key};
 
     return sc.callv(params, ::UB, "");
 }
 
 long long KeyValue::size() const {
+    std::unique_lock l(lock);
     std::vector<std::string_view> params = {"SIZE"};
     return sc.callv(params, ::SIZE, 0).i();
 }
 
 void load() {
+
     std::vector<std::string_view> params = {"LOAD"};
     rpc_caller sc;
     int r = sc.call(params, ::LOAD);
@@ -552,6 +585,7 @@ Caller::Caller(const std::string& host, int port) {
     sc.host = barch::repl::create(host,port);
 }
 bool Caller::use(const std::string& key_space) {
+    std::unique_lock l(lock);
     params = {"USE",key_space};
     return sc.callv(params, ::USE) == "OK";
 }
@@ -562,11 +596,13 @@ bool Caller::getOrdered() const {
     return sc.kspace()->opt_ordered_keys;
 }
 bool Caller::setOrdered(bool ordered) {
+    std::unique_lock l(lock);
     params = {"SPACES", "OPTIONS", "SET", "ORDERED", ordered?"ON":"OFF"};
     return sc.callv(params, ::SPACES) == "OK";
 }
 
 std::vector<Value> Caller::call(const std::string &method, const std::vector<Value> &args) {
+    std::unique_lock l(lock);
     std::string cn = std::string{params[0]};
     auto ic = barch_functions->find(cn);
     if (ic == barch_functions->end()) {
@@ -598,6 +634,7 @@ HashSet::HashSet(const std::string &host, int port) {
 }
 
 void HashSet::set(const std::string &k, const std::vector<std::string>& members) {
+    std::unique_lock l(lock);
     params = {"HSET", k};
     params.insert(params.end(), members.begin(), members.end());
     barch::repl::call(params);
@@ -608,10 +645,12 @@ void HashSet::set(const std::string &k, const std::vector<std::string>& members)
 
 }
 Value HashSet::get(const std::string &k, const std::string &member) {
+    std::unique_lock l(lock);
     params = {"HGET", k, member};
     return sc.callv(params, ::HGET);
 }
 std::vector<Value> HashSet::mget(const std::string& k, const std::vector<std::string> &fields) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HMGET", k};
     params.insert(params.end(), fields.begin(), fields.end());
@@ -625,6 +664,7 @@ std::vector<Value> HashSet::mget(const std::string& k, const std::vector<std::st
 }
 
 std::vector<Value> HashSet::getall(const std::string& k) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HGETALL", k};
     sc.call(params, ::HGETALL);
@@ -634,6 +674,7 @@ std::vector<Value> HashSet::getall(const std::string& k) {
     return result;
 }
 std::vector<Value> HashSet::expiretime(const std::string &k, const std::vector<std::string> &fields) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HEXPIRETIME", k, "FIELDS", Value{(long long)fields.size()}.s()};
 
@@ -645,6 +686,7 @@ std::vector<Value> HashSet::expiretime(const std::string &k, const std::vector<s
     return result;
 }
 Value HashSet::exists(const std::string &k, const std::string &member) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HEXISTS", k, member};
     sc.call(params, ::HEXISTS);
@@ -654,6 +696,7 @@ Value HashSet::exists(const std::string &k, const std::string &member) {
 }
 
 Value HashSet::remove(const std::string &k, const std::vector<std::string> &member) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HDEL", k};
     params.insert(params.end(), member.begin(), member.end());
@@ -664,6 +707,7 @@ Value HashSet::remove(const std::string &k, const std::vector<std::string> &memb
 }
 
 Value HashSet::getdel(const std::string &k, const std::vector<std::string> &member) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HGETDEL", k , "FIELDS", std::to_string(member.size())};
     params.insert(params.end(), member.begin(), member.end());
@@ -673,6 +717,7 @@ Value HashSet::getdel(const std::string &k, const std::vector<std::string> &memb
     return result[0];
 }
 std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::string> &member) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HTTL", k , "FIELDS", std::to_string(member.size())};
     params.insert(params.end(), member.begin(), member.end());
@@ -682,6 +727,7 @@ std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::str
 }
 // k+args+fields
 std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::string> &args, const std::vector<std::string> &fields) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HEXPIRE", k};
     params.insert(params.end(), args.begin(), args.end());
@@ -694,6 +740,7 @@ std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::
     return result;
 }
 std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const std::string &flags, const std::vector<std::string> &fields) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HEXPIREAT", k, std::to_string(exp), flags,"FIELDS", std::to_string(fields.size())};
     params.insert(params.end(), fields.begin(), fields.end());
@@ -702,6 +749,7 @@ std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const 
     return result;
 }
 Value HashSet::incrby(const std::string &k, const std::string& field, long long by) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"HINCRBY", k, field, std::to_string(by)};
     barch::repl::call(params);
@@ -719,6 +767,7 @@ OrderedSet::OrderedSet(const std::string &host, int port) {
 }
 
 Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flags, const std::vector<std::string>& members) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZADD", k};
     params.insert(params.end(), flags.begin(), flags.end());
@@ -730,6 +779,7 @@ Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flag
 }
 
 std::vector<Value> OrderedSet::range(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZRANGE", k, std::to_string(start), std::to_string(stop)};
     params.insert(params.end(), flags.begin(), flags.end());
@@ -739,6 +789,7 @@ std::vector<Value> OrderedSet::range(const std::string &k, double start, double 
     return result;
 }
 std::vector<Value> OrderedSet::revrange(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZREVRANGE", k, std::to_string(start), std::to_string(stop)};
     params.insert(params.end(), flags.begin(), flags.end());
@@ -749,6 +800,7 @@ std::vector<Value> OrderedSet::revrange(const std::string &k, double start, doub
 }
 
 Value OrderedSet::card(const std::string &k) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZCARD", k};
     sc.call(params, ::ZCARD);
@@ -757,6 +809,7 @@ Value OrderedSet::card(const std::string &k) {
 }
 
 Value OrderedSet::popmin(const std::string &k) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZPOPMIN", k};
     sc.call(params, ::ZPOPMIN);
@@ -765,6 +818,7 @@ Value OrderedSet::popmin(const std::string &k) {
 }
 
 Value OrderedSet::popmax(const std::string &k) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZPOPMAX", k};
     sc.call(params, ::ZPOPMAX);
@@ -773,6 +827,7 @@ Value OrderedSet::popmax(const std::string &k) {
 }
 
 Value OrderedSet::rank(const std::string &k, double lower, double upper) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZFASTRANK", k, std::to_string(lower), std::to_string(upper)};
     sc.call(params, ::ZFASTRANK);
@@ -781,6 +836,7 @@ Value OrderedSet::rank(const std::string &k, double lower, double upper) {
 }
 
 Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& members) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZREM", k};
     params.insert(params.end(), members.begin(), members.end());
@@ -790,6 +846,7 @@ Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& m
     return sc.results[0];
 }
 std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZDIFF", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
@@ -800,6 +857,7 @@ std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const 
 }
 
 Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::string>& keys) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZDIFFSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
@@ -809,6 +867,7 @@ Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::s
 }
 
 Value OrderedSet::incrby(const std::string &key, double val, const std::string &field) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZINCRBY", key, std::to_string(val), field};
     barch::repl::call(params);
@@ -818,6 +877,7 @@ Value OrderedSet::incrby(const std::string &key, double val, const std::string &
 }
 
 std::vector<Value> OrderedSet::inter(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZINTER", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
@@ -828,6 +888,7 @@ std::vector<Value> OrderedSet::inter(const std::vector<std::string>& keys, const
 }
 
 Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::string>& keys) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZINTERSTORE", destkey, std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
@@ -838,6 +899,7 @@ Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::
 }
 
 Value OrderedSet::intercard(const std::vector<std::string>& keys) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZINTERCARD", std::to_string(keys.size())};
     params.insert(params.end(), keys.begin(), keys.end());
@@ -848,6 +910,7 @@ Value OrderedSet::intercard(const std::vector<std::string>& keys) {
 }
 
 Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower, const std::string& upper) {
+    std::unique_lock l(lock);
     result.clear();
     params = {"ZREMRANGEBYLEX", key, lower, upper};
     barch::repl::call(params);

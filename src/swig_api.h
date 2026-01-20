@@ -275,6 +275,7 @@ protected:
     mutable std::vector<std::string> params {};
     mutable std::vector<Value> result{};
     mutable rpc_caller sc{};
+    mutable std::mutex lock{};
     std::shared_ptr<function_map> barch_functions = functions_by_name();
 };
 

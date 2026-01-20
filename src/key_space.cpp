@@ -320,7 +320,6 @@ namespace barch {
         if (spc->get_shard_count() == 1) {
             size_t z = 0;
             auto t = spc->get(z);
-
             storage_release r(t);
             for (const auto &i:smap) {
                 auto fc = [&](const art::node_ptr &) -> void {};
@@ -350,7 +349,7 @@ namespace barch {
             key_buffer.emplace_back(key,value);
             bufs = key_buffer.size();
         }
-        if (bufs > 256) {
+        if (bufs > 16) {
             flush_insert_buffer();
         }
     }

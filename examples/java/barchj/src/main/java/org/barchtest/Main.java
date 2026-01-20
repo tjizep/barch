@@ -30,15 +30,16 @@ public class Main {
 
         }
         KeyValue kv = new KeyValue("test");
-        System.out.println("ordered:"+kv.getOrdered());
+        System.out.println("ordered: "+kv.getOrdered());
+        System.out.println("shards: "+kv.getShards());
         System.out.println("current size:"+kv.size());
         kv.clear();
         long t = System.currentTimeMillis();
         List<Thread> list = new ArrayList<>();
-        int threads = 4;
+        int threads = 2;
         if (threads == 1) {
             for (int j = 0; j < 1000000; j++) {
-                String v = Integer.toString(j);
+                String v = Double.toString(10*(j+Math.random()));
                 kv.put(v, "D" + v);
             }
         }else {
@@ -49,7 +50,7 @@ public class Main {
                             KeyValue kvt = new KeyValue("test");
                             int start = finalI * 1000000;
                             for (int j = start; j < start + 1000000; j++) {
-                                String v = Integer.toString(j);
+                                String v = Double.toString(10*(j + Math.random())) ;
                                 kvt.put(v, "D" + v);
                             }
                         });
@@ -60,11 +61,11 @@ public class Main {
             }
         }
 
-        System.out.println("time:"+(System.currentTimeMillis()-t));
-        System.out.println("min key:" + kv.min().s());
-        System.out.println("max key:" + kv.max().s());
-        System.out.println("size:" + kv.size() + " 100:" + kv.get("100"));
-        System.out.println("count: 100 to 10000000:" + kv.count("100","10000000"));
+        System.out.println("time: "+(System.currentTimeMillis()-t));
+        System.out.println("min key: " + kv.min().s());
+        System.out.println("max key: " + kv.max().s());
+        System.out.println("size: " + kv.size() + " 100:" + kv.get("100"));
+        System.out.println("count: 100.0 to 10000000.0:" + kv.count("100.0","10000000.0"));
         System.out.println("ok");
 
         barchJNI.saveAll();

@@ -1,4 +1,4 @@
-# Release v0.4.3.3b 2025-01-19
+# Release v0.5.0b 2025-01-21
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -27,6 +27,7 @@
 13. add luajit build support interfaces are suitable of for openresty and nginx (v0.4.3.3b 2025-01-17)
 14. add java build and tests (v0.4.3.3b 2025-01-18)
 15. multi thread buffer opt using KeyValue::put (v0.4.3.3b 2025-01-18) 
+16. improve java example (v0.5.0b 2025-01-21)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
@@ -38,6 +39,8 @@
 7. fix `APPEND` and `PREPEND` functions (v0.4.3.3b 2025-01-12)
 8. fix `INCR` and `INCRBY` edge cases, incl rollover/under (v0.4.3.3b 2025-01-13)
 9. fix ordered flag (v0.4.3.3b 2025-01-19)
+10. fix ordered flag (v0.4.3.3b 2025-01-19)
+11. fix 0 after key (usually not a problem unless memory init is switched off) (v0.5.0b 2025-01-21)
 
 # Release v0.4.3.2b 2025-01-05
 

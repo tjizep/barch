@@ -292,10 +292,6 @@ if (ADD_SWIG)
             swig_add_library(barchjni LANGUAGE java OUTPUT_DIR org/barch SOURCES src/barch.i ${SOURCES})
             set_property(TARGET barchjni PROPERTY SWIG_COMPILE_OPTIONS -package org.barch)
             target_link_libraries(barchjni PRIVATE ${Java_LIBRARIES})
-            add_jar(barchj
-                    SOURCES
-                    ${CMAKE_BINARY_DIR}/org/barch/barchJNI.java
-            )
             set(BARCHJNI_TEST ON)
             if (USE_LIBURING)
                 target_link_libraries(barchjni PRIVATE ${LIBURING_LIB_PATH})
@@ -309,6 +305,17 @@ if (ADD_SWIG)
             #
             find_program(MAVEN_EXE NAMES mvn)
             if (MAVEN_EXE)
+                add_jar(barchj
+                        SOURCES
+                        ${CMAKE_BINARY_DIR}/org/barch/barchJNI.java
+                )
+
+                add_custom_command(
+                        TARGET barchjni POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} --build . --target barchj
+                        COMMENT "Triggering JAR build after JNI generation"
+                )
+
                 add_custom_command(
                         TARGET barchjni
                         POST_BUILD

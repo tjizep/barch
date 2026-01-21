@@ -688,9 +688,8 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
 
 
 bool barch::shard::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    std::string tk;
-    value_type key = s_filter_key(tk,unfiltered_key);
-    if (opt_rpc_insert(options, key, value, update, fc)) {
+
+    if (opt_rpc_insert(options, unfiltered_key, value, update, fc)) {
         return true;
     }
     return false;
@@ -912,6 +911,7 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
         }
         return n;
     }
+
     auto r = art_search(this, key);
     if (r.null()) {
         if (dependencies) {

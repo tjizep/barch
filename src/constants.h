@@ -15,7 +15,7 @@ enum {
     initial_node_ptr_size = 4, // must be a power of twp
     reserved_address_base = 120000,
     iterate_workers = 4,
-    test_memory = 0,
+    test_memory = 1,
     fl_test_memory = 0,
     initialize_memory = 1, // currently this should always be one - if the program needs to work
     storage_version = 10,

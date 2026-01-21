@@ -4,22 +4,18 @@ import org.barch.KeyValue;
 import org.barch.barchJNI;
 
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.io.IOException;
+import java.util.*;
 
 import static org.barch.barchJNI.clearAll;
 
 public class Main {
     static{
-        String path = "/home/teejip/Desktop/barch/cmake-build-release/";
-        System.out.println(path);
-        //System.setProperty("java.library.path",path);
         System.loadLibrary("barchjni");
     }
-    static void main() throws InterruptedException {
-
+    static void main() throws InterruptedException, IOException {
+        final int count = 1000000;
+        var strings = RandomStrings.generateStrings(count);
         KeyValue conf = new KeyValue("configuration");
         if (conf.size() == 0) {
             System.out.println("creating configuration");
@@ -34,22 +30,45 @@ public class Main {
         System.out.println("shards: "+kv.getShards());
         System.out.println("current size:"+kv.size());
         kv.clear();
+
+        var m = new TreeMap<String,String>();
+        //System.in.read();
         long t = System.currentTimeMillis();
         List<Thread> list = new ArrayList<>();
-        int threads = 2;
+        int threads = 1;
         if (threads == 1) {
-            for (int j = 0; j < 1000000; j++) {
-                String v = Double.toString(10*(j+Math.random()));
+
+            for (int j = 0; j < count; j++) {
+                String v = strings[j];
                 kv.put(v, "D" + v);
             }
+            System.out.println("time for barch: "+(System.currentTimeMillis()-t));
+            var mk = kv.min().s();
+            var xk = kv.max().s();
+            System.out.println("min key: " + mk);
+            System.out.println("max key: " + xk);
+            System.out.println("count: "+mk+"to "+xk+":" + kv.count(mk,xk));
+
+            var rnd = (int)(Math.random()*count);
+            System.out.println("size: " + kv.size() + "("+rnd+") ["+strings[rnd]+"]:" + kv.get(strings[rnd]));
+            t = System.currentTimeMillis();
+            for (int j = 0; j < count; j++) {
+                String v = strings[j];
+                m.put(v, "D" + v);
+            }
+            System.out.println("time for tree: "+(System.currentTimeMillis()-t));
+            System.out.println("min key: " + m.firstKey());
+            System.out.println("max key: " + m.lastKey());
+            System.out.println("size tree: " + m.size() + "("+rnd+") ["+strings[rnd]+"]:" + m.get(strings[rnd]));
+
         }else {
             for (int i = 0; i < threads; i++) {
                 int finalI = i;
                 Thread vThread = Thread.ofVirtual()
                         .start(() -> {
                             KeyValue kvt = new KeyValue("test");
-                            int start = finalI * 1000000;
-                            for (int j = start; j < start + 1000000; j++) {
+                            int start = finalI * count;
+                            for (int j = start; j < start + count; j++) {
                                 String v = Double.toString(10*(j + Math.random())) ;
                                 kvt.put(v, "D" + v);
                             }
@@ -61,14 +80,9 @@ public class Main {
             }
         }
 
-        System.out.println("time: "+(System.currentTimeMillis()-t));
-        System.out.println("min key: " + kv.min().s());
-        System.out.println("max key: " + kv.max().s());
-        System.out.println("size: " + kv.size() + " 100:" + kv.get("100"));
-        System.out.println("count: 100.0 to 10000000.0:" + kv.count("100.0","10000000.0"));
         System.out.println("ok");
-
-        barchJNI.saveAll();
+        kv.clear();
+        //barchJNI.saveAll();
 
     }
 }

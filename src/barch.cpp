@@ -721,7 +721,7 @@ int GET(caller& call, const arg_t& argv) {
         return call.push_null();
     }
     read_lock release(t);
-    art::node_ptr r = t->search(ckey);
+    auto r = t->search(ckey);
     if (r.null()) {
         return call.push_null();
     } else {
@@ -1318,6 +1318,7 @@ int SIZE(caller& call, const arg_t& argv) {
         storage_release release(t);
         size += (int64_t) t->get_size();
     }
+    size += call.kspace()->hash_buf_size();
     return call.push_ll(size);
 }
 int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

@@ -14,7 +14,8 @@ public class Main {
         System.loadLibrary("barchjni");
     }
     static void main() throws InterruptedException, IOException {
-        final int count = 1000000;
+        final int count = 80000000;
+        final boolean doTree = false;
         var strings = RandomStrings.generateStrings(count,8);
         KeyValue conf = new KeyValue("configuration");
         if (conf.size() == 0) {
@@ -51,16 +52,17 @@ public class Main {
 
             var rnd = (int)(Math.random()*count);
             System.out.println("size: " + kv.size() + " check key #("+rnd+") ["+strings[rnd]+"]:" + kv.get(strings[rnd]));
-            t = System.currentTimeMillis();
-            for (int j = 0; j < count; j++) {
-                String v = strings[j];
-                m.put(v, "D" + v);
+            if(doTree) {
+                t = System.currentTimeMillis();
+                for (int j = 0; j < count; j++) {
+                    String v = strings[j];
+                    m.put(v, "D" + v);
+                }
+                System.out.println("time for tree: " + (System.currentTimeMillis() - t));
+                System.out.println("min key: " + m.firstKey());
+                System.out.println("max key: " + m.lastKey());
+                System.out.println("size tree: " + m.size() + " check key #(" + rnd + ") [" + strings[rnd] + "]:" + m.get(strings[rnd]));
             }
-            System.out.println("time for tree: "+(System.currentTimeMillis()-t));
-            System.out.println("min key: " + m.firstKey());
-            System.out.println("max key: " + m.lastKey());
-            System.out.println("size tree: " + m.size() + " check key #("+rnd+") ["+strings[rnd]+"]:" + m.get(strings[rnd]));
-
         }else {
             for (int i = 0; i < threads; i++) {
                 int finalI = i;

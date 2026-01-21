@@ -688,7 +688,6 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
 
 
 bool barch::shard::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-
     if (opt_rpc_insert(options, unfiltered_key, value, update, fc)) {
         return true;
     }

@@ -1528,13 +1528,9 @@ art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
     if (!key.bytes) {
         throw_exception<std::runtime_error>("key is NULL");
     }
-#if 0
-    for (size_t i = 0; i < key.size-1; ++i) {
-        if (key.bytes[i] == 0) {
-            throw_exception<std::runtime_error>("key contains null byte");
-        }
+    if (memchr(key.bytes, 0, key.size-1)) {
+        throw_exception<std::runtime_error>("key contains a null interior byte");
     }
-#endif
     if (key.bytes[key.size - 1] != 0) {
         temp_key = {key.chars(), key.size};// copy the data so that we don't cause potential buffer overflow
         return  {temp_key.data(),temp_key.size()+1}; // include the null term

@@ -156,13 +156,13 @@ namespace art {
         node_ptr_storage ptr;
         switch (nt) {
             case node_4:
-                return ptr.emplace<node4_8>()->create(alloc).expand_pointers(c);
+                return ptr.emplace<node4_4>()->create(alloc).expand_pointers(c);
             case node_16:
-                return ptr.emplace<node16_8>()->create(alloc).expand_pointers(c);
+                return ptr.emplace<node16_4>()->create(alloc).expand_pointers(c);
             case node_48:
-                return ptr.emplace<node48_8>()->create(alloc).expand_pointers(c);
+                return ptr.emplace<node48_4>()->create(alloc).expand_pointers(c);
             case node_256:
-                return ptr.emplace<node256_8>()->create(alloc).expand_pointers(c);
+                return ptr.emplace<node256_4>()->create(alloc).expand_pointers(c);
             default:
                 throw std::runtime_error("Unknown node type");
         }

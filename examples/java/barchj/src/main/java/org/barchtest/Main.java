@@ -15,7 +15,7 @@ public class Main {
     }
     static void main() throws InterruptedException, IOException {
         final int count = 1000000;
-        var strings = RandomStrings.generateStrings(count);
+        var strings = RandomStrings.generateStrings(count,8);
         KeyValue conf = new KeyValue("configuration");
         if (conf.size() == 0) {
             System.out.println("creating configuration");
@@ -47,10 +47,10 @@ public class Main {
             var xk = kv.max().s();
             System.out.println("min key: " + mk);
             System.out.println("max key: " + xk);
-            System.out.println("count: "+mk+"to "+xk+":" + kv.count(mk,xk));
+            System.out.println("count: "+mk+" to "+xk+":" + kv.count(mk,xk));
 
             var rnd = (int)(Math.random()*count);
-            System.out.println("size: " + kv.size() + "("+rnd+") ["+strings[rnd]+"]:" + kv.get(strings[rnd]));
+            System.out.println("size: " + kv.size() + " check key #("+rnd+") ["+strings[rnd]+"]:" + kv.get(strings[rnd]));
             t = System.currentTimeMillis();
             for (int j = 0; j < count; j++) {
                 String v = strings[j];
@@ -59,7 +59,7 @@ public class Main {
             System.out.println("time for tree: "+(System.currentTimeMillis()-t));
             System.out.println("min key: " + m.firstKey());
             System.out.println("max key: " + m.lastKey());
-            System.out.println("size tree: " + m.size() + "("+rnd+") ["+strings[rnd]+"]:" + m.get(strings[rnd]));
+            System.out.println("size tree: " + m.size() + " check key #("+rnd+") ["+strings[rnd]+"]:" + m.get(strings[rnd]));
 
         }else {
             for (int i = 0; i < threads; i++) {

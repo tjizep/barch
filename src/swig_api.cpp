@@ -526,6 +526,7 @@ statistics_values stats() {
     r.bytes_interior = t.bytes_interior;
     r.exceptions_raised = t.exceptions_raised;
     r.heap_bytes_allocated = t.heap_bytes_allocated;
+    r.vmm_bytes_allocated = t.vmm_bytes_allocated;
     r.keys_evicted = t.keys_evicted;
     r.last_vacuum_time = t.last_vacuum_time;
     r.leaf_nodes = t.leaf_nodes;
@@ -538,6 +539,7 @@ statistics_values stats() {
     r.value_bytes_compressed = t.value_bytes_compressed;
     r.pages_evicted = t.pages_evicted;
     r.pages_defragged = t.pages_defragged;
+    r.vmm_pages_defragged = t.vmm_pages_defragged;
     r.pages_evicted = t.pages_evicted;
     r.vacuums_performed = t.vacuums_performed;
     r.maintenance_cycles = t.maintenance_cycles;
@@ -545,6 +547,7 @@ statistics_values stats() {
     r.local_calls = t.local_calls;
     r.max_spin = t.max_spin;
     r.logical_allocated = t.logical_allocated;
+    r.bytes_in_free_lists = t.bytes_in_free_lists;
     r.oom_avoided_inserts = t.oom_avoided_inserts;
     r.keys_found = t.keys_found;
     r.new_keys_added = t.new_keys_added;
@@ -597,7 +600,18 @@ bool Caller::getOrdered() const {
 }
 bool Caller::setOrdered(bool ordered) {
     std::unique_lock l(lock);
-    params = {"SPACES", "OPTIONS", "SET", "ORDERED", ordered?"ON":"OFF"};
+    params = {"SPACES", "OPTION", "SET", "ORDERED", ordered?"ON":"OFF"};
+    return sc.callv(params, ::SPACES) == "OK";
+}
+bool Caller::reload() {
+    std::unique_lock l(lock);
+    params = {"RELOAD"};
+    return sc.callv(params, ::RELOAD) == "OK";
+}
+
+bool Caller::setLru(std::string lru) {
+    std::unique_lock l(lock);
+    params = {"SPACES", "OPTION", "SET", "LRU", lru};
     return sc.callv(params, ::SPACES) == "OK";
 }
 

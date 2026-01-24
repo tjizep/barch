@@ -59,27 +59,25 @@ struct rpc_caller : caller {
         return results[0];
     }
     [[nodiscard]] int wrong_arity()  override {
-        errors.emplace_back("Wrong Arity");
+        errors.emplace_back(Variable{::error{"Wrong Arity"}});
         return 0;
     }
     [[nodiscard]] int syntax_error() override {
-        errors.emplace_back("Syntax Error");
+        errors.emplace_back(Variable{::error{"Syntax Error"}});
         return 0;
     }
     [[nodiscard]] int error() const override {
         return -1;
     }
     [[nodiscard]] int push_error(const char * e) override {
-        errors.emplace_back(e);
+        errors.emplace_back(Variable{::error{e}});
         return 0;
     }
     int key_check_error(art::value_type k) override {
         if (k.empty()) {
-            errors.emplace_back("Key should not be empty");
-        }else {
-            errors.emplace_back("Unspecified key error");
+            return this->push_error("Key should not be empty");
         }
-        return 0;
+        return this->push_error("Unspecified key error");
     }
     int push_null() override {
         results.emplace_back(nullptr);
@@ -274,12 +272,12 @@ struct rpc_caller : caller {
             cr.call_error = f(*this, args);
         }catch (const std::exception& e) {
             ++statistics::exceptions_raised;
-            errors.emplace_back(e.what());
+            errors.emplace_back(Variable{::error{e.what()}});
             cr.call_error = -1;
         }
         if (cr.call_error != 0) {
             if (errors.empty())
-                errors.emplace_back("call failed");
+                errors.emplace_back(Variable{::error{"call failed"}});
             return cr.call_error;
         }
         if (!errors.empty()) {
@@ -379,7 +377,7 @@ struct rpc_caller : caller {
             int e = this->call(cmd.args, cmd.call);
             // analyze results
             if (e != 0) {
-                buffered_results.emplace_back(push_error(errors[0].c_str()));
+                buffered_results.emplace_back(errors[0]);
             } else {
                 if (results.empty()) {
                     buffered_results.emplace_back(nullptr);

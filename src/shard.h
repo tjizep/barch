@@ -197,10 +197,13 @@ namespace barch {
         void run_defrag() override;
 
         bool save(bool stats) override;
+        bool _save(bool stats);
+        bool _load(bool stats);
 
         bool send(std::ostream& out) override;
 
         bool load(bool stats) override;
+        bool reload() override;
 
         void load_bloom() override;
 
@@ -213,10 +216,12 @@ namespace barch {
         void rollback() override;
 
         void clear() override;
+        void _clear();
 
         bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) override;
 
         bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) override;
+        bool hash_erase(logical_address ad) override;
         bool tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) override;
 
         bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) override;
@@ -241,6 +246,7 @@ namespace barch {
         art::node_ptr lower_bound(art::value_type key) override;
         art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) override;
         shard_ptr sources() override;
+        uint64_t bytes_in_free_list() override;
         void depends(const std::shared_ptr<abstract_shard> & source) override;
         void release(const std::shared_ptr<abstract_shard> & source) override;
         void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  override ;

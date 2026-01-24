@@ -50,6 +50,6 @@ inline size_t alloc_pad(size_t size) {
         }
         return r;
     }
-return size;
+    return size;
 }
 #endif //CONSTANTS_H

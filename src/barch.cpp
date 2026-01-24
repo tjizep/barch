@@ -1313,7 +1313,7 @@ int SIZE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     auto size = 0ll;
-    auto arts = call.kspace()->get_shards();
+    auto &arts = call.kspace()->get_shards();
     for (auto &t:arts) {
         storage_release release(t);
         size += (int64_t) t->get_size();
@@ -1335,6 +1335,7 @@ int SAVE(caller& call, const arg_t& argv) {
     size_t errors = save(call);
     return errors ? call.push_error("some shards not saved"): call.push_simple("OK");
 }
+
 
 int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
     vk_caller call;
@@ -1362,6 +1363,25 @@ int LOAD(caller& call, const arg_t& argv) {
             loader.join();
     }
     return errors>0 ? call.push_error("some shards did not load") : call.push_simple("OK");
+}
+int RELOAD(caller& call, const arg_t& argv) {
+
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    std::vector<std::thread> loaders;
+    size_t errors = 0;
+    auto ks = call.kspace();
+    loaders.resize(ks->get_shard_count());
+    for (const auto& shard : ks->get_shards()) {
+        loaders[shard->get_shard_number()] = std::thread([&errors,shard]() {
+            shard->reload();
+        });
+    }
+    for (auto &loader : loaders) {
+        if (loader.joinable())
+            loader.join();
+    }
+    return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
 }
 int START(caller& call, const arg_t& argv) {
     if (argv.size() > 4)
@@ -1604,6 +1624,7 @@ int STATS(caller& call, const arg_t& argv) {
 
     call.start_array();
     call.push_values({"heap_bytes_allocated", get_total_memory()});
+    call.push_values({"vmm_bytes_allocated", heap::vmm_allocated});
     call.push_values({"value_bytes_compressed",as.value_bytes_compressed});
     call.push_values({ "last_vacuum_time", as.last_vacuum_time});
     call.push_values({ "vacuum_count", as.vacuums_performed});
@@ -1619,12 +1640,14 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({ "pages_evicted", as.pages_evicted});
     call.push_values({ "keys_evicted", as.keys_evicted});
     call.push_values({ "pages_defragged", as.pages_defragged});
+    call.push_values({ "vmm_pages_defragged", as.vmm_pages_defragged});
     call.push_values({ "exceptions_raised", as.exceptions_raised});
     call.push_values({ "maintenance_cycles", as.maintenance_cycles});
     call.push_values({ "shards", as.shards});
     call.push_values({ "local_calls", as.local_calls});
     call.push_values({ "max_spin", as.max_spin});
     call.push_values({"logical_allocated", as.logical_allocated});
+    call.push_values({"bytes_in_free_lists", as.bytes_in_free_lists});
     call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
     call.push_values({"keys_found", as.keys_found});
     call.end_array(0);

@@ -74,6 +74,7 @@ struct statistics_values {
     long long bytes_allocated {};
     long long bytes_interior {};
     long long heap_bytes_allocated {};
+    long long vmm_bytes_allocated {};
     long long value_bytes_compressed {};
     long long vacuums_performed {};
     long long last_vacuum_time {};
@@ -81,12 +82,14 @@ struct statistics_values {
     long long pages_evicted {};
     long long keys_evicted {};
     long long pages_defragged {};
+    long long vmm_pages_defragged {};
     long long exceptions_raised {};
     long long maintenance_cycles {};
     long long shards {};
     long long local_calls {};
     long long max_spin {};
     long long logical_allocated {};
+    long long bytes_in_free_lists {};
     long long oom_avoided_inserts {};
     long long keys_found {};
     long long new_keys_added {};
@@ -268,8 +271,10 @@ public:
     Caller(const std::string& host, int port);
     bool use(const std::string& keyspace);
     bool setOrdered(bool ordered);
+    bool setLru(std::string lru); // ON, OFF, VOLATILE
     long long getShardCount() const ;
     bool getOrdered() const ;
+    bool reload();
     std::vector<Value> call(const std::string &method, const std::vector<Value> &args);
 protected:
     mutable std::vector<std::string> params {};

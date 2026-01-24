@@ -308,6 +308,7 @@ if (ADD_SWIG)
                 add_jar(barchj
                         SOURCES
                         ${CMAKE_BINARY_DIR}/org/barch/barchJNI.java
+                        ${CMAKE_BINARY_DIR}/org/barch/barch.java
                 )
 
                 add_custom_command(

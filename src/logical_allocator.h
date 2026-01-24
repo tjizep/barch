@@ -94,7 +94,15 @@ struct free_bin {
         size_t page{};
         size_t size{};
     };
+    ~free_bin() {
 
+    }
+    void clear() {
+        heap::vector<free_page> e{};
+        pages.swap(e);
+        heap::vector<uint32_t> pi;
+        page_index.swap(pi);
+    }
     [[nodiscard]] page_max_t page_max() const {
         size_t sz = 0, pmax = 0;
         for (auto &p: pages) {
@@ -125,7 +133,15 @@ struct free_bin {
     [[nodiscard]] bool available() const {
         return !empty();
     }
-
+    void each(const std::function<void (size_t, uint32_t, uint32_t)>& f) const {
+        for (auto& page: pages) {
+            if (!page.empty()) {
+                for (auto o: page.offsets) {
+                    f(page.page, size, o);
+                }
+            }
+        }
+    }
     void get_addresses(heap::vector<size_t>& r,size_t page) {
         if (page < page_index.size()) {
             size_t at = page_index.at(page);
@@ -153,6 +169,7 @@ struct free_bin {
         if (bytes < r) {
             abort_with("invalid free size");
         }
+
         bytes -= r;
         return r;
     }
@@ -174,6 +191,7 @@ struct free_bin {
 
         pages[page].push(address.offset());
         bytes += s;
+
     }
 
     logical_address pop(unsigned s) {
@@ -202,22 +220,27 @@ struct free_bin {
             abort_with("invalid free size");
         }
         bytes -= s;
+
         return address;
     }
 };
 struct free_list {
     abstract_leaf_pair * alloc = nullptr;
-    size_t added = 0;
+    uint64_t added_ = 0;
     size_t min_bin = LPageSize;
     size_t max_bin = 0;
     address_set addresses{};
     heap::std_vector<free_bin> free_bins{};
+    heap::vector<size_t> tobe{};
+    heap::unordered_set<size_t> available_bins{};
     //heap::vector<free_bin> free_bins{};
+    free_list(free_list&& other) = delete;
+    free_list &operator=(free_list&& other) = delete;
     free_list(const free_list& other) = default;
     free_list& operator=(const free_list& other) {
         if (this == &other) return *this;
         alloc = other.alloc;
-        added = other.added;
+        added_ = other.added_;
         min_bin = other.min_bin;
         max_bin = other.max_bin;
         available_bins = other.available_bins;
@@ -228,8 +251,23 @@ struct free_list {
     free_list(abstract_leaf_pair* alloc): alloc(alloc) {
 
     }
+    [[nodiscard]] uint64_t get_added() const {
+        return added_;
+    }
+
+    void remove_added(uint64_t by) {
+        if (by > added_) {
+            abort_with("invalid allocation size");
+        }
+        added_ -= by;
+        statistics::bytes_in_free_lists -= by;
+    }
+    void add_added(uint64_t by) {
+        added_ += by;
+        statistics::bytes_in_free_lists += by;
+    }
     void clear() {
-        added = 0;
+        remove_added(get_added());
         addresses.clear();
         max_bin = 0;
         min_bin = LPageSize;
@@ -268,19 +306,16 @@ struct free_list {
         min_bin = std::min(min_bin, (size_t) size);
         max_bin = std::max(max_bin, (size_t) size);
 
-        added += size;
+        add_added(size);
     }
 
     void add(logical_address address, unsigned size) {
         inner_add(address, size);
     }
 
-    heap::vector<size_t> tobe{};
-    heap::vector<size_t> unavailer{};
-    heap::unordered_set<size_t> available_bins{};
 
     void erase(size_t page) {
-
+        heap::vector<size_t> unavailer{};
         unavailer.clear();
         //for (size_t b = min_bin; b <= max_bin; ++b) {
         for (size_t b: available_bins){
@@ -298,13 +333,11 @@ struct free_list {
             }
             unsigned r = f.erase(page);
 
-            if (added >= r) {
-                added -= r;
-            } else {
-                abort_with("unbalanced pointer size");
-            }
+            remove_added(r);
+
             if (f.empty()) {
                 // opportunistic
+                f.clear();
                 unavailer.push_back(b);
             }
         }
@@ -317,16 +350,14 @@ struct free_list {
         if (size >= free_bins.size()) {
             return logical_address{0,alloc};
         }
-        if (!added) return logical_address{0,alloc};
+        if (!get_added()) return logical_address{0,alloc};
 
         logical_address r = free_bins[size].pop(size);
         if (free_bins[size].empty()) {
+            free_bins[size].clear();
             available_bins.erase(size);
         }
         if (!r.null()) {
-            if (added < size) {
-                abort_with("trying to free too many bytes");
-            }
             if (fl_test_memory == 1) {
                 auto& tap = r.get_ap<abstract_leaf_pair>();
                 if (&tap != this->alloc) {
@@ -338,10 +369,15 @@ struct free_list {
 
                 addresses.erase(r.address());
             }
-            added -= size;
+            remove_added(size);
         }
 
         return r;
+    }
+    void each(const std::function<void (size_t, uint32_t, uint32_t)>& f) const {
+        for (size_t b: available_bins) {
+            free_bins[b].each(f);
+        }
     }
 };
 
@@ -379,11 +415,7 @@ private:
     address_set erased{}; // for runtime use after free tests
     size_t last_created_page{};
     uint8_t *last_page_ptr{};
-    logical_allocator &operator=(const logical_allocator &t) {
-        if (this == &t) return *this;
-        return *this;
-    };
-
+    logical_allocator &operator=(const logical_allocator &t) = delete;
 
     // arena virtualization start
     storage &retrieve_page(size_t page, bool modify = false) {
@@ -573,7 +605,9 @@ public:
     [[nodiscard]] uint64_t get_allocated() const {
         return allocated;
     }
-
+    void shrinkLast() {
+        main.shrinkLast();
+    }
     void free(logical_address at, size_t sz) {
         sz = pad(sz);
         size_t size = sz + test_memory;
@@ -654,7 +688,7 @@ public:
     }
 
     float fragmentation_ratio() const {
-        return (float) fragmentation / (float(allocated) + 0.0001f);
+        return (float) emancipated.get_added() / (float(allocated) + 0.0001f);
     }
 
     // TODO: this function may cause to much latency when the arena is large
@@ -670,6 +704,12 @@ public:
             }
         }
         return pages;
+    }
+    float page_fragmentation() const {
+        return main.fragmentation();
+    }
+    size_t top_page() const {
+        return main.top_page();
     }
 
     size_t get_page_count() const {
@@ -739,6 +779,7 @@ public:
             }
             at.second.fragmentation -= size;
             invalid(r);
+
             auto *data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0) {
                 barch::std_log("failure for",main.name,r.address(), r.page(), r.offset());
@@ -881,6 +922,7 @@ public:
             writep(of, ticker);
             writep(of, allocated);
             writep(of, fragmentation);
+            write_emancipated(of);
             extra1(of);
         };
 
@@ -895,7 +937,54 @@ public:
         std::string fname = main.name+filename;
         return std::remove(fname.c_str())==0;
     }
-
+    void write_emancipated(std::ostream& of) const {
+        uint64_t written = 0, skipped = 0;
+        address_set duplicates;
+        emancipated.each([&]( size_t page, uint32_t size, uint32_t offset ) {
+            logical_address at{page,offset,emancipated.alloc};
+            if (!duplicates.contains(at.address())) { // it seems some items are added multiple times
+                writep(of, page);
+                writep(of, offset);
+                writep(of, size);
+                ++written;
+                duplicates.insert(at.address());
+            }else {
+                ++skipped;
+            }
+        });
+        writep(of, (size_t)0);
+        writep(of, (uint32_t)0);
+        writep(of, (uint32_t)0);
+        writep(of, written);
+        if (skipped)
+            barch::std_log("skipped duplicate entries",skipped);
+    }
+    void read_emancipated(std::istream& in) {
+        size_t page;
+        uint32_t sz;
+        uint32_t o;
+        uint64_t read = 0,written = 0;
+        if (!erased.empty()) {
+            barch::std_log("erased should be empty");
+        }
+        do {
+            readp(in, page);
+            readp(in, o);
+            readp(in, sz);
+            if (sz != 0) {
+                ++read;
+                logical_address at{page,o,emancipated.alloc};
+                emancipated.add(at,sz);
+                if (test_memory == 1) {
+                    erased.insert(at);
+                }
+            }
+        }while (sz != 0);
+        readp(in, written);
+        if (written != read) {
+            abort_with("invalid data file");
+        }
+    }
     bool send_extra(const arena::hash_arena &copy, std::ostream &out,
                     const std::function<void(std::ostream &of)> &extra1) const {
         auto writer = [&](std::ostream &of) -> void {
@@ -913,6 +1002,7 @@ public:
             writep(of, ticker);
             writep(of, allocated);
             writep(of, fragmentation);
+            write_emancipated(of);
             extra1(of);
         };
 
@@ -943,6 +1033,7 @@ public:
             readp(in, allocated);
             readp(in, fragmentation);
             last_page_allocated = 0;
+            read_emancipated(in);
             extra1(in);
         };
         try {
@@ -1009,7 +1100,8 @@ public:
         fragmentation = 0;
 
         last_vacuum_millis = std::chrono::high_resolution_clock::now();;
-        emancipated = {ap};
+        emancipated.clear();
+
         fragmented = {};
         erased = {}; // for runtime use after free tests
         last_created_page = {};
@@ -1026,6 +1118,9 @@ public:
 
     [[nodiscard]] size_t get_bytes_allocated() const {
         return main.get_bytes_allocated();
+    }
+    [[nodiscard]] size_t get_bytes_in_free_list() const {
+        return emancipated.get_added();
     }
 };
 
@@ -1053,6 +1148,12 @@ struct alloc_pair : public abstract_leaf_pair{
     const logical_allocator& get_leaves() const {
         return leaves;
     }
+
+    void shrink() {
+        leaves.shrinkLast();
+        nodes.shrinkLast();
+    }
+
     virtual ~alloc_pair() = default;
 
 };

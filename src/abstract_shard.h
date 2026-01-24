@@ -89,6 +89,7 @@ namespace barch {
         virtual uint64_t get_hash_size() const = 0;
         virtual void maintenance() = 0;
         virtual void load_bloom() = 0;
+        virtual uint64_t bytes_in_free_list() = 0;
         /**
          * register a pull source on this shard/tree
          * currently non-existing hosts will also be added (they can come online later)
@@ -109,6 +110,8 @@ namespace barch {
 
         virtual bool load(bool stats) = 0;
 
+        virtual bool reload() = 0;
+
         virtual bool retrieve(std::istream& in) = 0;
 
         virtual void begin() = 0;
@@ -122,6 +125,7 @@ namespace barch {
         virtual bool insert(const art::key_options& options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) = 0;
 
         virtual bool hash_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) = 0;
+        virtual bool hash_erase(logical_address lad) = 0;
         virtual bool tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) = 0;
 
         virtual bool opt_rpc_insert(const art::key_options& options, art::value_type unfiltered_key, art::value_type value, bool update, const art::NodeResult &fc) = 0;

@@ -16,13 +16,18 @@ namespace statistics {
     extern std::atomic<uint64_t> pages_evicted;
     extern std::atomic<uint64_t> keys_evicted;
     extern std::atomic<uint64_t> pages_defragged;
+    extern std::atomic<uint64_t> vmm_pages_defragged;
     extern std::atomic<uint64_t> exceptions_raised;
     extern std::atomic<uint64_t> max_leaf_size;
-    extern std::atomic<uint64_t> logical_allocated;
     extern std::atomic<uint64_t> oom_avoided_inserts;
     extern std::atomic<uint64_t> keys_found;
     extern std::atomic<uint64_t> new_keys_added;
     extern std::atomic<uint64_t> keys_replaced;
+    /**
+     * allocation stats
+     */
+    extern std::atomic<uint64_t> logical_allocated;
+    extern std::atomic<uint64_t> bytes_in_free_lists;
     /**
     * internal stats
     */

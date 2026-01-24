@@ -1,21 +1,36 @@
 package org.barchtest;
 
 import org.barch.KeyValue;
-import org.barch.barchJNI;
+import org.barch.barch;
+import org.barch.barch;
+import org.barch.statistics_values;
 
 
 import java.io.IOException;
 import java.util.*;
 
-import static org.barch.barchJNI.clearAll;
+import static org.barch.barch.clearAll;
 
 public class Main {
     static{
         System.loadLibrary("barchjni");
     }
+    static void printStats(KeyValue kv){
+        var stats = barch.stats();
+        System.out.println("heap bytes allocated:"+stats.getHeap_bytes_allocated());
+        System.out.println("vmm bytes allocated:"+stats.getVmm_bytes_allocated());
+        System.out.println("logical bytes bytes in free lists:"+stats.getBytes_in_free_lists());
+        System.out.println("logical bytes allocated:"+stats.getLogical_allocated());
+        System.out.println("vmm pages defragged:"+stats.getVmm_pages_defragged());
+        System.out.println("keys evicted:"+stats.getKeys_evicted());
+        System.out.println("test size:"+kv.size());
+
+    }
     static void main() throws InterruptedException, IOException {
-        final int count = 80000000;
+        final int count = 8000000;
         final boolean doTree = false;
+        final int threads = 1;
+
         var strings = RandomStrings.generateStrings(count,8);
         KeyValue conf = new KeyValue("configuration");
         if (conf.size() == 0) {
@@ -36,7 +51,7 @@ public class Main {
         //System.in.read();
         long t = System.currentTimeMillis();
         List<Thread> list = new ArrayList<>();
-        int threads = 1;
+
         if (threads == 1) {
 
             for (int j = 0; j < count; j++) {
@@ -52,6 +67,21 @@ public class Main {
 
             var rnd = (int)(Math.random()*count);
             System.out.println("size: " + kv.size() + " check key #("+rnd+") ["+strings[rnd]+"]:" + kv.get(strings[rnd]));
+
+            barch.setConfiguration("max_memory_bytes","2000000");
+            kv.setLru("ON");
+            for (int i = 0; i < 100; i++) {
+                printStats(kv);
+                var stats = barch.stats();
+                Thread.sleep(1000);
+                kv.reload();
+                if (stats.getLogical_allocated() < 1800000){
+                    //System.out.println("reloading");
+
+                    //break;
+                }
+            }
+
             if(doTree) {
                 t = System.currentTimeMillis();
                 for (int j = 0; j < count; j++) {
@@ -62,6 +92,7 @@ public class Main {
                 System.out.println("min key: " + m.firstKey());
                 System.out.println("max key: " + m.lastKey());
                 System.out.println("size tree: " + m.size() + " check key #(" + rnd + ") [" + strings[rnd] + "]:" + m.get(strings[rnd]));
+
             }
         }else {
             for (int i = 0; i < threads; i++) {

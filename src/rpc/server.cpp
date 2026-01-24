@@ -531,6 +531,11 @@ namespace barch {
             void distribute() {
 
                 if (exit) return;
+                {
+                    std::lock_guard l(m);
+                    if (destinations.empty()) return;
+                    if (buffer.empty()) return;
+                }
                 heap::vector<std::vector<std::string>> todo;
                 heap::string_map<std::shared_ptr<rpc>> active;
                 {

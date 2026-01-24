@@ -113,6 +113,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         (*r)["PUBLISH"] = {::PUBLISH,{"write","connection"}};
         (*r)["PULL"] = {::PULL,{"write","dangerous"}};
         (*r)["LOAD"] = {::LOAD,{"write","dangerous"}};
+        (*r)["RELOAD"] = {::RELOAD,{"write","dangerous"}};
         (*r)["CONFIG"] = {::CONFIG,{"write","read","config"}};
 
         (*r)["LBACK"] = {::LBACK,{"write","list","data"}};

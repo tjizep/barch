@@ -1,4 +1,4 @@
-# Release v0.5.0b 2025-01-21
+# Release v0.5.0b 2025-01-24
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -28,6 +28,7 @@
 14. add java build and tests (v0.4.3.3b 2025-01-18)
 15. multi thread buffer opt using KeyValue::put (v0.4.3.3b 2025-01-18) 
 16. improve java example (v0.5.0b 2025-01-21)
+17. improve memory defragmentation (v0.5.0b 2025-01-24)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)

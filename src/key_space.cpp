@@ -186,16 +186,17 @@ namespace barch {
         tmaintain = std::thread([&]() -> void {
 
             try {
+                auto tshards = this->get_shards();
 
-               while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
-                   auto tshards = this->get_shards();
+                while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
+                   tshards = this->get_shards();
                    repl::distribute();
                    for (auto s : tshards) {
                        s->maintenance();
                        if (exiting) break;
                    }
 
-               }
+                }
             }catch (std::exception& e){
                barch::std_err("shard maintenance thread error:",e.what());
             }

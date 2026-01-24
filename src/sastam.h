@@ -37,6 +37,7 @@ namespace heap {
     double get_physical_memory_ratio();
 
     extern std::atomic<uint64_t> allocated;
+    extern std::atomic<uint64_t> vmm_allocated;
 
     void *allocate(size_t size);
 

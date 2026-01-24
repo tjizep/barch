@@ -73,7 +73,7 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
     uint64_t completed = write_version ? (int)storage_version : 0;
     size_t size = hidden_arena.size();
     writep(out, completed);
-    writep(out, max_address_accessed);
+    writep(out, last_allocated_page());
     writep(out, last_allocated);
     writep(out, free_pages);
     writep(out, top);
@@ -84,6 +84,9 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
     }
     size_t record_pos = 0;
     iterate_arena([&](size_t page, const size_t &) {
+        if (free_address_list.contains(page)) {
+            abort_with("free page accounting error");
+        }
         const storage& s = *(const storage*)get_page_data({page, page_size - sizeof(storage), nullptr},false);
         append(out, page, s, get_page_data({page, 0, nullptr},false));
         ++record_pos;
@@ -134,6 +137,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
         return false;
     }
     readp(in, arena.last_allocated);
+    // TODO: the free page list is never recovered - although the count is correct
     readp(in, arena.free_pages);
     readp(in, arena.top);
     extra(in);
@@ -141,13 +145,15 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
 
     size = 0;
     readp(in, size);
-
+    // TODO: the free page list is never recovered
+    bool oom = false;
     for (size_t i = 0; i < size; i++) {
         storage s{};
         size_t page = 0;
-        if (arena.is_check_mem() && (get_total_memory() > barch::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)) {
-            barch::log(std::runtime_error("module or server out of memory"),__FILE__,__LINE__);
-            return false;
+        if (arena.is_check_mem() && (statistics::logical_allocated > barch::get_max_module_memory() || heap::get_physical_memory_ratio() > 0.99)) {
+            //arena.clear();
+            //return false;
+            oom = true;
         }
         uint32_t bsize = 0;
 
@@ -193,9 +199,13 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
         barch::log(std::runtime_error("data could not be accessed"),__FILE__,__LINE__);
         return false;
     }
+    arena.reconcile_free_list();
     if (log_loading_messages == 1) {
         barch::std_log("loaded [",size,"] pages");
         barch::log("complete reading from stream" );
+        if (oom) {
+            barch::std_log("loading module or server out of memory");
+        }
     }
     return true;
 }

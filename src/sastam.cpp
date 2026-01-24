@@ -33,6 +33,7 @@ enum {
 
 static size_t check_size = (heap_checks != 1) ? 0 : sizeof(uint32_t);
 std::atomic<uint64_t> heap::allocated;
+std::atomic<uint64_t> heap::vmm_allocated;
 
 static uint32_t get_ptr_val(const void *v) {
     const auto *ptr = (const uint8_t *) v;
@@ -50,7 +51,6 @@ uint64_t heap::random_range(uint64_t lower, uint64_t upper) {
 
 void *heap::allocate(size_t size) {
     if (!size) return nullptr;
-
     void *r = nullptr;
     if (use_malloc == 1) {
         r = malloc(size + padding + check_size);

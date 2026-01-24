@@ -113,6 +113,7 @@ extern "C"{
     int PUBLISH(caller& call, const arg_t& argv);
     int PULL(caller& call, const arg_t& argv);
     int LOAD(caller& call, const arg_t& argv);
+    int RELOAD(caller& call, const arg_t& argv);
     int START(caller& call, const arg_t& argv);
     int STOP(caller& call, const arg_t& argv);
     int RETRIEVE(caller& call, const arg_t& argv);

@@ -34,6 +34,7 @@ struct art_statistics {
     int64_t bytes_allocated {};
     int64_t bytes_interior {};
     int64_t heap_bytes_allocated {};
+    int64_t vmm_bytes_allocated {};
     int64_t value_bytes_compressed {};
     int64_t vacuums_performed {};
     int64_t last_vacuum_time {};
@@ -41,12 +42,14 @@ struct art_statistics {
     int64_t pages_evicted {};
     int64_t keys_evicted {};
     int64_t pages_defragged {};
+    int64_t vmm_pages_defragged {};
     int64_t exceptions_raised {};
     int64_t maintenance_cycles {};
     int64_t shards {};
     int64_t local_calls {};
     int64_t max_spin {};
     int64_t logical_allocated {};
+    int64_t bytes_in_free_lists {};
     int64_t oom_avoided_inserts {};
     int64_t keys_found {};
     int64_t new_keys_added {};

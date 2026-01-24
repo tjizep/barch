@@ -50,8 +50,10 @@ uint64_t art_evict_lru(barch::shard_ptr t) {
 #endif
 
 art_statistics barch::get_statistics() {
+
     art_statistics as{};
     as.heap_bytes_allocated = (int64_t) heap::allocated;
+    as.vmm_bytes_allocated = (int64_t) heap::vmm_allocated;
     as.leaf_nodes = (int64_t) statistics::leaf_nodes;
     as.node4_nodes = (int64_t) statistics::n4_nodes;
     as.node16_nodes = (int64_t) statistics::n16_nodes;
@@ -73,12 +75,14 @@ art_statistics barch::get_statistics() {
     as.pages_evicted = (int64_t) statistics::pages_evicted;
     as.keys_evicted = (int64_t) statistics::keys_evicted;
     as.pages_defragged = (int64_t) statistics::pages_defragged;
+    as.vmm_pages_defragged = (int64_t) statistics::vmm_pages_defragged;
     as.exceptions_raised = (int64_t) statistics::exceptions_raised;
     as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
     as.shards = (int64_t) statistics::shards;
     as.local_calls = (int64_t) statistics::local_calls;
     as.local_calls = (int64_t) statistics::max_spin;
     as.logical_allocated = (int64_t) statistics::logical_allocated;
+    as.bytes_in_free_lists = (int64_t) statistics::bytes_in_free_lists;
     as.oom_avoided_inserts = (int64_t) statistics::oom_avoided_inserts;
     as.keys_found = (int64_t) statistics::keys_found;
     as.new_keys_added = (int64_t) statistics::new_keys_added;
@@ -296,6 +300,7 @@ void barch::shard::read_extra(std::istream &in) {
 }
 void barch::shard::write_extra(std::ostream &of) {
     uint32_t extra = 1;
+
     writep(of, extra);
     uint8_t ordered = opt_ordered_keys ? 1 : 0;
     writep(of, ordered);
@@ -303,8 +308,7 @@ void barch::shard::write_extra(std::ostream &of) {
 }
 
 
-bool barch::shard::save(bool stats) {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+bool barch::shard::_save(bool stats) {
     auto *t = this;
     if (nodes.get_main().get_bytes_allocated()==0) return true;
     bool saved = false;
@@ -330,12 +334,11 @@ bool barch::shard::save(bool stats) {
 
     };
 
-    auto st = std::chrono::high_resolution_clock::now();
+
     //transaction tx(this); // stabilize main while saving
     //arena::hash_arena leaves{get_leaves().get_name()};
     //arena::hash_arena nodes{get_nodes().get_name()};
     {
-        write_lock release(this->latch); // only lock during partial copy
         tsize = t->size;
         troot = t->root;
         saved = true;
@@ -350,12 +353,20 @@ bool barch::shard::save(bool stats) {
             return false;
         }
     }
-
+    return true;
+}
+bool barch::shard::save(bool stats) {
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    auto st = std::chrono::high_resolution_clock::now();
+    {
+        write_lock release(this->latch); // only lock during partial copy
+        _save(stats);
+    }
     auto current = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
     if (log_saving_messages == 1)
-        std_log("saved barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+        std_log("saved barch db:", this->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
             "seconds");
     return true;
 }
@@ -411,58 +422,73 @@ bool barch::shard::send(std::ostream& unused(out)) {
 
     return true;
 }
+bool barch::shard::reload() {
+    try {
+        write_lock release(this->latch);
+        _save(true);
+        _clear();
+        _load(true);
+        return true;
+    }catch (std::exception &e) {
+        std_log("could not load",e.what());
+        return false;
+    }
+}
+bool barch::shard::_load(bool) {
+    h.clear();
+    auto *t = this;
+    logical_address root{nullptr};
+    bool is_leaf = false;
+    // save stats in the leaf storage
+    auto load_stats_and_root = [&](std::istream &in) {
+        uint32_t w_stats = 0;
+        readp(in, w_stats);
+        if (w_stats != 0) {
+            stream_to_stats(in);
+        }
+        readp(in, root);
+        readp(in, is_leaf);
+        readp(in, t->size);
+        read_extra(in);
 
+    };
+    auto st = std::chrono::high_resolution_clock::now();
+
+    if (!get_nodes().load_extra(EXT, [&](std::istream &) {
+    })) {
+        return false;
+    }
+    if (!get_leaves().load_extra(EXT, load_stats_and_root)) {
+        return false;
+    }
+    root = logical_address{root.address(), this};// translate root to the now
+    if (is_leaf) {
+
+        t->root = node_ptr{root};
+    } else {
+        t->root = resolve_read_node(root);
+    }
+    page_modifications::inc_all_tickers();
+    load_hash();
+    auto now = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
+    const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
+
+    if (log_loading_messages == 1) {
+        std_log("Done loading BARCH Shard, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
+
+        std_log("loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds");
+        std_log("db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb");
+    }
+    return true;
+}
 bool barch::shard::load(bool) {
 
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
         write_lock release(this->latch);
-        h.clear();
-        auto *t = this;
-        logical_address root{nullptr};
-        bool is_leaf = false;
-        // save stats in the leaf storage
-        auto load_stats_and_root = [&](std::istream &in) {
-            uint32_t w_stats = 0;
-            readp(in, w_stats);
-            if (w_stats != 0) {
-                stream_to_stats(in);
-            }
-            readp(in, root);
-            readp(in, is_leaf);
-            readp(in, t->size);
-            read_extra(in);
-
-        };
-        auto st = std::chrono::high_resolution_clock::now();
-
-        if (!get_nodes().load_extra(EXT, [&](std::istream &) {
-        })) {
-            return false;
-        }
-        if (!get_leaves().load_extra(EXT, load_stats_and_root)) {
-            return false;
-        }
-        root = logical_address{root.address(), this};// translate root to the now
-        if (is_leaf) {
-
-            t->root = node_ptr{root};
-        } else {
-            t->root = resolve_read_node(root);
-        }
-        page_modifications::inc_all_tickers();
-        load_hash();
-        auto now = std::chrono::high_resolution_clock::now();
-        const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
-        const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-
-        if (log_loading_messages == 1) {
-            std_log("Done loading BARCH Shard, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
-
-            std_log("loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds");
-            std_log("db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb");
-        }
+        _load(true);
     }catch (std::exception &e) {
         std_log("could not load",e.what());
         return false;
@@ -572,9 +598,7 @@ void barch::shard::load_bloom() {
     });
 
 }
-void barch::shard::clear() {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
-    storage_release release(this->shared_from_this());
+void barch::shard::_clear() {
     root = {nullptr};
     size = 0;
     transacted = false;
@@ -601,12 +625,18 @@ void barch::shard::clear() {
     statistics::keys_replaced = 0;
     statistics::logical_allocated = 0;
 }
+void barch::shard::clear() {
+    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    storage_release release(this->shared_from_this());
+    _clear();
+
+}
 
 bool barch::shard::insert(value_type key, value_type value, bool update, const NodeResult &fc) {
     return this->opt_insert({}, key, value, update, fc);
 }
 bool barch::shard::insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (get_total_memory() > get_max_module_memory()) {
+    if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
         return false;
@@ -625,8 +655,19 @@ bool barch::shard::tree_insert(const art::key_options &options, art::value_type 
     //add_bloom(key);
     return art_insert(this, options, key, value, update, fc);
 }
+
+bool barch::shard::hash_erase(logical_address lad) {
+    if (&lad.get_ap<alloc_pair>() != &this->get_ap()) {
+        abort_with("invalid address pointer");
+    }
+    size_t s = h.size();
+    h.erase(lad);
+    free_node(lad);
+    return h.size() == s - 1;
+}
+
 bool barch::shard::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
-    if (get_total_memory() > get_max_module_memory()) {
+    if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
         return false;
@@ -667,7 +708,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
 }
 
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (get_total_memory() > get_max_module_memory()) {
+    if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
         return false;
@@ -866,6 +907,9 @@ bool barch::shard::remove(value_type key) {
 }
 barch::shard_ptr barch::shard::sources() {
     return dependencies;
+}
+uint64_t barch::shard::bytes_in_free_list() {
+    return get_nodes().get_bytes_in_free_list() + get_leaves().get_bytes_in_free_list();
 }
 void barch::shard::depends(const std::shared_ptr<abstract_shard> & source) {
 
@@ -1072,67 +1116,91 @@ void barch::shard::load_hash() {
 }
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those
- * then adds them back again
+ * then adds them back again. it will also attemtp to move keys out of the way so that the vm page can
+ * be shrunk (if possible)
  * this function isn't supposed to run a lot
  */
-void barch::shard::run_defrag() {
+static void erase_page(const barch::shard_ptr& shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
+    page_iterator(page.first, page.second, [shard,page](const leaf *l, uint32_t pos) {
+        if (l->deleted()) return;
+        size_t c1 = shard->get_size();
+        if (l->is_hashed()) {
+            logical_address lad{page.second,pos,&shard->get_ap()};
+            shard->hash_erase(lad);
+        }else {
+            shard->evict(l);
+            if (c1 - 1 != shard->get_size()) {
+                abort_with("key does not exist anymore");
+            }
+        }
+    });
+}
+static void defrag_page(const barch::shard_ptr& shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
+    key_options options;
     auto fc = [](const node_ptr & unused(n)) -> void {
     };
+    page_iterator(page.first, page.second, [&fc,&options,shard](const leaf *l, uint32_t ) {
+        if (l->deleted()) return;
+        if (l->is_hashed()) {
+            options.set_expiry(l->expiry_ms());
+            options.set_volatile(l->is_volatile());
+            shard->hash_insert(options, l->get_key(), l->get_value(),true,fc);
+            return;
+        }
+        size_t c1 = shard->get_tree_size();
+        options.set_expiry(l->expiry_ms());
+        options.set_volatile(l->is_volatile());
+        shard->tree_insert(options, l->get_key(), l->get_value(), true, fc);
+        if (c1 + 1 != shard->get_tree_size()) {
+            abort_with("key not added");
+        }
+        --statistics::insert_ops;
+        --statistics::new_keys_added;
+
+    });
+
+    ++statistics::pages_defragged;
+}
+void barch::shard::run_defrag() {
+    if (this->get_size() == 0) return;
+
     auto &lc = get_leaves();
 
+    {
+        write_lock releaser(this->latch);
+        auto page_frag = lc.top_page();
+        if (page_frag) {
 
+            // for some reason we have to not do this while a transaction is active
+            if (transacted) return; // try later
+            auto page = lc.get_page_buffer(page_frag);
+            erase_page(this->shared_from_this(), page);
+            this->shrink();
+            defrag_page(this->shared_from_this(), page);
+            ++statistics::vmm_pages_defragged;
+        }else {
+            this->shrink();
+        }
+    }
+
+    auto logical_frag = lc.fragmentation_ratio();
     try {
-        if (lc.fragmentation_ratio() > 1) //get_min_fragmentation_ratio())
+
+        if (logical_frag > 0.3) //get_min_fragmentation_ratio())
         {
             heap::vector<size_t> fl;
             {
                 write_lock releaser(this->latch);
                 fl = lc.create_fragmentation_list(get_max_defrag_page_count());
             }
-            key_options options;
+
             for (auto p: fl) {
                 write_lock releaser(this->latch);
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) return; // try later
                 auto page = lc.get_page_buffer(p);
-
-                page_iterator(page.first, page.second, [this,p](const leaf *l, uint32_t pos) {
-                    if (l->deleted()) return;
-                    size_t c1 = this->size;
-                    if (l->is_hashed()) {
-                        logical_address lad{p,pos,this};
-                        h.erase(lad);
-                        free_node(lad);
-                    }else {
-                        this->evict(l);
-                        if (c1 - 1 != this->size) {
-                            abort_with("key does not exist anymore");
-                        }
-
-                    }
-
-                });
-
-                page_iterator(page.first, page.second, [&fc,&options,this](const leaf *l, uint32_t ) {
-                    if (l->deleted()) return;
-                    if (l->is_hashed()) {
-                        options.set_expiry(l->expiry_ms());
-                        options.set_volatile(l->is_volatile());
-                        hash_insert(options, l->get_key(), l->get_value(),true,fc);
-                        return;
-                    }
-                    size_t c1 = this->size;
-                    options.set_expiry(l->expiry_ms());
-                    options.set_volatile(l->is_volatile());
-                    art_insert(this, options, l->get_key(), l->get_value(), true, fc);
-                    if (c1 + 1 != this->size) {
-                        abort_with("key not added");
-                    }
-                    --statistics::insert_ops;
-                    --statistics::new_keys_added;
-
-                });
-                ++statistics::pages_defragged;
+                erase_page(this->shared_from_this(), page);
+                defrag_page(this->shared_from_this(), page);
             }
         }
         ++statistics::vacuums_performed;
@@ -1140,7 +1208,6 @@ void barch::shard::run_defrag() {
         ++statistics::exceptions_raised;
     }
 
-    //std::this_thread::sleep_for(std::chrono::milliseconds(40)); // chill a little we've worked hard
 }
 static uint64_t calc_mem_threshold() {
     auto mm = barch::get_max_module_memory() ;
@@ -1150,7 +1217,7 @@ static uint64_t calc_mem_threshold() {
 void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
 
-    if (get_total_memory() < calc_mem_threshold()) return;
+    if (statistics::logical_allocated < calc_mem_threshold()) return;
 
     auto page = src();
     page_iterator(page.first, page.second, [fupdate](const barch::leaf *l, uint32_t) {
@@ -1174,13 +1241,13 @@ void abstract_eviction(barch::shard *t,
 }
 
 void abstract_lru_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (get_total_memory() < calc_mem_threshold()) return;
+    if (statistics::logical_allocated < calc_mem_threshold()) return;
     write_lock release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
 void abstract_random_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
-    if (get_total_memory() < calc_mem_threshold()) return;
+    if (statistics::logical_allocated < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_page_num();
@@ -1188,11 +1255,12 @@ void abstract_random_eviction(barch::shard *t, const std::function<bool(const ba
     std::uniform_int_distribution<size_t> dist(1, page_num);
     size_t random_page = dist(gen);
     abstract_eviction(t, predicate, [&lc, random_page]() { return lc.get_page_buffer(random_page); });
+
 }
 
 // used during sweep lru keys for the `stochastic` lru eviction
 void abstract_random_update(barch::shard *t, const std::function<void(const barch::leaf *l)> &updater) {
-    if (get_total_memory() < calc_mem_threshold()) return;
+    if (statistics::logical_allocated < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
     auto page_num = lc.max_page_num();

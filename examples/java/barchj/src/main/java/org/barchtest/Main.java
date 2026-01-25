@@ -2,14 +2,8 @@ package org.barchtest;
 
 import org.barch.KeyValue;
 import org.barch.barch;
-import org.barch.barch;
-import org.barch.statistics_values;
-
-
 import java.io.IOException;
 import java.util.*;
-
-import static org.barch.barch.clearAll;
 
 public class Main {
     static{
@@ -27,7 +21,7 @@ public class Main {
 
     }
     static void main() throws InterruptedException, IOException {
-        final int count = 8000000;
+        final int count = 800000;
         final boolean doTree = false;
         final int threads = 1;
 
@@ -56,7 +50,7 @@ public class Main {
 
             for (int j = 0; j < count; j++) {
                 String v = strings[j];
-                kv.put(v, "D" + v);
+                kv.put(v, "D" + v + v);
             }
             System.out.println("time for barch: "+(System.currentTimeMillis()-t));
             var mk = kv.min().s();
@@ -74,11 +68,11 @@ public class Main {
                 printStats(kv);
                 var stats = barch.stats();
                 Thread.sleep(1000);
-                kv.reload();
-                if (stats.getLogical_allocated() < 1800000){
-                    //System.out.println("reloading");
-
-                    //break;
+                if (stats.getLogical_allocated() < 1000000){
+                    System.out.println("reloading");
+                    kv.reload();
+                    printStats(kv);
+                    break;
                 }
             }
 
@@ -86,7 +80,7 @@ public class Main {
                 t = System.currentTimeMillis();
                 for (int j = 0; j < count; j++) {
                     String v = strings[j];
-                    m.put(v, "D" + v);
+                    m.put(v, "D" + v + v);
                 }
                 System.out.println("time for tree: " + (System.currentTimeMillis() - t));
                 System.out.println("min key: " + m.firstKey());

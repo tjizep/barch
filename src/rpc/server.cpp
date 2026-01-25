@@ -660,30 +660,40 @@ namespace barch {
             }
             return true;
         }
-        static heap::vector<route> routes;
+        static std::mutex& route_lock() {
+            static std::mutex rl;
+            return rl;
+        }
+        static heap::vector<route>& get_routes() {
+            static heap::vector<route> routes;
+            return routes;
+        }
+        static void resize_routes(size_t shard) {
+            if (get_routes().size() <= shard)
+                get_routes().resize(std::max<size_t>(shard + 1, barch::get_shard_count().size()));
+        }
         void set_route(size_t shard, const route& destination) {
-            if (routes.empty()) routes.resize(barch::get_shard_count().size());
-            if (shard >= routes.size()) {
-                barch::std_err("invalid shard",shard, routes.size());
+            std::unique_lock rl(route_lock());
+            resize_routes(shard);
+            if (shard >= get_routes().size()) {
+                barch::std_err("invalid shard",shard, get_routes().size());
                 return;
             }
-            routes[shard] = destination;
+            get_routes()[shard] = destination;
         }
         void clear_route(size_t shard) {
-            if (routes.empty()) routes.resize(barch::get_shard_count().size());
-            if (shard >= routes.size()) {
-                barch::std_err("invalid shard",shard, routes.size());
+            std::unique_lock rl(route_lock());
+            resize_routes(shard);
+            if (shard >= get_routes().size()) {
+                barch::std_err("invalid shard",shard, get_routes().size());
                 return;
             }
-            routes[shard] = {};
+            get_routes()[shard] = {};
         }
         route get_route(size_t shard) {
-            if (routes.empty()) routes.resize(barch::get_shard_count().size());
-            if (shard >= routes.size()) {
-                barch::std_err("invalid shard",shard, routes.size());
-                return {};
-            }
-            return routes[shard];
+            std::unique_lock rl(route_lock());
+            resize_routes(shard);
+            return get_routes()[shard];
         }
     }
 }

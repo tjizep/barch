@@ -16,6 +16,7 @@
 #include "sastam.h"
 
 namespace arena {
+    typedef std::unordered_set<size_t> address_set;
     struct base_hash_arena {
         bool opt_use_vmmap = barch::get_use_vmm_memory();
 
@@ -30,7 +31,7 @@ namespace arena {
             , allocator_type> hash_type;
 
         hash_type hidden_arena{};
-        heap::unordered_set<size_t> free_address_list{};
+        address_set free_address_list{};
         heap::std_vector<size_t> buffered_free{};
         size_t top = max_top;
         size_t free_pages = top;
@@ -146,20 +147,21 @@ namespace arena {
         }
         size_t top_page() const {
             if (free_address_list.empty()) return 0;
-
-            if (hidden_arena.contains(last_allocated_page())) return last_allocated_page();
+            auto lap = last_allocated_page();
+            if (hidden_arena.contains(lap)) {
+                return lap;
+            }
             return 0;
         }
         heap::vector<size_t> shrinkLast() {
 
             heap::vector<size_t> r;
 
-            if (free_address_list.empty()) return r;
             if (!opt_use_vmmap) {
                 return r;
             }
             size_t last_page = last_allocated_page();
-            while (free_address_list.contains(last_page)) {
+            while (!hidden_arena.contains(last_page)) {
                 if (last_page * page_size > page_data_size) {
                     abort_with("invalid max address accessed");
                 }
@@ -231,7 +233,7 @@ namespace arena {
         void clear() {
             rollback();
             hidden_arena = hash_type{};
-            free_address_list = heap::unordered_set<size_t>{};
+            free_address_list = address_set{};
             buffered_free = heap::std_vector<size_t>{};
             top = max_top;
             free_pages = top;

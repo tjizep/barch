@@ -17,6 +17,7 @@ std::atomic<uint64_t> statistics::pages_evicted = 0;
 std::atomic<uint64_t> statistics::keys_evicted = 0;
 std::atomic<uint64_t> statistics::pages_defragged = 0;
 std::atomic<uint64_t> statistics::vmm_pages_defragged = 0;
+std::atomic<uint64_t> statistics::vmm_pages_popped = 0;
 std::atomic<uint64_t> statistics::exceptions_raised = 0;
 std::atomic<uint64_t> statistics::maintenance_cycles = 0;
 std::atomic<uint64_t> statistics::shards = 0;

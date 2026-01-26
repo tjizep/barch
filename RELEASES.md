@@ -1,4 +1,4 @@
-# Release v0.5.0b 2025-01-25
+# Release v0.5.0b 2025-01-26
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -29,7 +29,7 @@
 15. multi thread buffer opt using KeyValue::put (v0.4.3.3b 2025-01-18) 
 16. improve java example (v0.5.0b 2025-01-21)
 17. improve memory defragmentation (v0.5.0b 2025-01-24)
-18. 2x improve memory defragmentation (v0.5.0b 2025-01-25)
+18. 2x improve memory defragmentation (v0.5.0b 2025-01-26)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)
@@ -44,6 +44,7 @@
 10. fix ordered flag (v0.4.3.3b 2025-01-19)
 11. fix 0 after key (usually not a problem unless memory init is switched off) (v0.5.0b 2025-01-21)
 12. fix race condition leading to double free (v0.5.0b 2025-01-25)
+13. fix save when hash table is used (v0.5.0b 2025-01-26)
 
 # Release v0.4.3.2b 2025-01-05
 

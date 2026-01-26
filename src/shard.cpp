@@ -76,6 +76,7 @@ art_statistics barch::get_statistics() {
     as.keys_evicted = (int64_t) statistics::keys_evicted;
     as.pages_defragged = (int64_t) statistics::pages_defragged;
     as.vmm_pages_defragged = (int64_t) statistics::vmm_pages_defragged;
+    as.vmm_pages_popped = (int64_t) statistics::vmm_pages_popped;
     as.exceptions_raised = (int64_t) statistics::exceptions_raised;
     as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
     as.shards = (int64_t) statistics::shards;
@@ -310,7 +311,7 @@ void barch::shard::write_extra(std::ostream &of) {
 
 bool barch::shard::_save(bool stats) {
     auto *t = this;
-    if (nodes.get_main().get_bytes_allocated()==0) return true;
+    if ((nodes.get_main().get_bytes_allocated()+leaves.get_main().get_bytes_allocated())==0) return true;
     bool saved = false;
     node_ptr troot;
     size_t tsize;
@@ -1116,22 +1117,22 @@ void barch::shard::load_hash() {
 }
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those
- * then adds them back again. it will also attemtp to move keys out of the way so that the vm page can
+ * then adds them back again. it will also attempt to move keys out of the way so that the vm page can
  * be shrunk (if possible)
  * this function isn't supposed to run a lot
  */
 static void erase_page(const barch::shard_ptr& shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
-    page_iterator(page.first, page.second, [shard,page](const leaf *l, uint32_t pos) {
+    page_iterator(page.first, page.second, [shard,page](const leaf *l, uint32_t unused(pos)) {
         if (l->deleted()) return;
+        bool hashed = l->is_hashed();
         size_t c1 = shard->get_size();
-        if (l->is_hashed()) {
-            logical_address lad{page.second,pos,&shard->get_ap()};
-            shard->hash_erase(lad);
-        }else {
-            shard->evict(l);
-            if (c1 - 1 != shard->get_size()) {
-                abort_with("key does not exist anymore");
-            }
+        shard->evict(l);
+        if (c1 - 1 != shard->get_size()) {
+            if (hashed)
+                barch::std_err("hashed key not found");
+            else
+                barch::std_err("ordered key not found");
+            abort_with("key not marked as deleted but it was not found");
         }
     });
 }
@@ -1168,16 +1169,16 @@ void barch::shard::run_defrag() {
 
     {
         write_lock releaser(this->latch);
-        auto page_frag = lc.top_page();
-        if (page_frag) {
+        auto page_frag = lc.get_max_accessible_page(); //lc.max_allocated_page_num();
+        if (page_frag && lc.is_page_allocated(page_frag)) {
 
             // for some reason we have to not do this while a transaction is active
             if (transacted) return; // try later
-            auto page = lc.get_page_buffer(page_frag);
-            erase_page(this->shared_from_this(), page);
+            //auto page = lc.get_page_buffer(page_frag);
+            //erase_page(this->shared_from_this(), page);
             this->shrink();
-            defrag_page(this->shared_from_this(), page);
-            ++statistics::vmm_pages_defragged;
+            //defrag_page(this->shared_from_this(), page);
+            //++statistics::vmm_pages_defragged;
         }else {
             this->shrink();
         }
@@ -1250,7 +1251,7 @@ void abstract_random_eviction(barch::shard *t, const std::function<bool(const ba
     if (statistics::logical_allocated < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
-    auto page_num = lc.max_page_num();
+    auto page_num = lc.max_allocated_page_num();
 
     std::uniform_int_distribution<size_t> dist(1, page_num);
     size_t random_page = dist(gen);
@@ -1263,7 +1264,7 @@ void abstract_random_update(barch::shard *t, const std::function<void(const barc
     if (statistics::logical_allocated < calc_mem_threshold()) return;
     storage_release release(t->shared_from_this());
     auto &lc = t->get_leaves();
-    auto page_num = lc.max_page_num();
+    auto page_num = lc.max_allocated_page_num();
 
     std::uniform_int_distribution<size_t> dist(1, page_num);
     size_t random_page = dist(gen);

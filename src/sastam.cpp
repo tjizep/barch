@@ -3,6 +3,8 @@
 //
 #include "../external/include/valkeymodule.h"
 #include "sastam.h"
+
+#include <iostream>
 #include <sys/types.h>
 #include <sys/sysinfo.h>
 #include "logger.h"
@@ -143,8 +145,17 @@ double heap::get_physical_memory_ratio() {
     }
     return r;
 }
-
+#include <execinfo.h>
 void abort_with(const char *message) __THROW {
-    barch::std_abort("There's a bug and we cannot continue - last reason [", message, "]");
+
+    void* buffer[10];
+    int size = backtrace(buffer, 10);
+    char** symbols = backtrace_symbols(buffer, size);
+    barch::std_err("There's a bug and we cannot continue - last reason [", message, "]");
+    if (symbols) {
+        for (int s = 0; s < size; ++s) {
+            barch::std_err(symbols[s]);
+        }
+    }
     abort();
 }

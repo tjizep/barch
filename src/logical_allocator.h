@@ -129,6 +129,16 @@ struct free_bin {
             }
         }
     }
+    template<typename  TF>
+    void cget(size_t page, const TF &&f) const {
+        if (page < page_index.size()) {
+            size_t at = page_index.at(page);
+            if (at != 0) {
+                auto &p = pages.at(at - 1);
+                f(p);
+            }
+        }
+    }
 
     [[nodiscard]] bool available() const {
         return !empty();
@@ -141,6 +151,17 @@ struct free_bin {
                 }
             }
         }
+    }
+    void each(size_t page, const std::function<void (size_t, uint32_t, uint32_t)>& f) const {
+        cget(page, [&](const free_page &p) -> void {
+            if (p.page != page) {
+                abort_with("page does not match");
+            }
+            for (auto o: p.offsets) {
+                f(p.page, size, o);
+            }
+        });
+
     }
     void get_addresses(heap::vector<size_t>& r,size_t page) {
         if (page < page_index.size()) {
@@ -379,9 +400,19 @@ struct free_list {
             free_bins[b].each(f);
         }
     }
+    void each(size_t page, const std::function<void (size_t, uint32_t, uint32_t)>& f) const {
+        for (size_t b: available_bins) {
+            free_bins[b].each(page, f);
+        }
+    }
 };
 
-
+// the clock allocator that logically skips every null-base pages
+// it uses an accounting scheme to transact clock allocations without
+// paying for them.
+// further it handles fragmentation information and other allocation meta data for
+// optimization space use.
+// it also emits page modification notifications
 struct logical_allocator {
 
     logical_allocator(abstract_leaf_pair* ap,std::string name): ap(ap), main(std::move(name)), emancipated(ap) {}
@@ -389,7 +420,6 @@ struct logical_allocator {
     logical_allocator(const logical_allocator &) = delete;
 
     ~logical_allocator() = default;
-
 
 private:
 
@@ -421,9 +451,8 @@ private:
     storage &retrieve_page(size_t page, bool modify = false) {
 
         if (modify) {
-            //main.modify(page);
-            page_modifications::inc_ticker(page);
-            return *(storage*)main.get_page_data({page,LPageSize,ap}, modify); //main.modify(page);
+            page_modifications::inc_ticker(page); // inform virtual pointers things changed here
+            return *(storage*)main.get_page_data({page,LPageSize,ap}, modify);
         }
         return *(storage*)main.get_page_data({page,LPageSize,ap}, modify);
     }
@@ -501,33 +530,30 @@ private:
     }
 
 
-    std::pair<size_t, storage &> allocate_page_at(size_t at, size_t) //unused(ps = SS)
-    {
+    std::pair<size_t, storage &> allocate_page_at(size_t at, size_t) {
         auto &page = retrieve_page(at);
-        if (initialize_memory == 1) {
-        }
-
         return {at, page};
     }
-
-    std::pair<size_t, storage &> expand_over_null_base(size_t ps = LPageSize) {
-        auto at = allocate();
-        if (is_null_base(at)) {
+    // this function looks like it should be in another class - but it handles the allocation clock
+    std::pair<size_t, storage &> alloc_with_clock(size_t ps) {
+        auto at = allocate(); // tell the accountants you want budget to get a page
+        if (is_null_base(at)) { // skip the null bases and make another allocation (that we don't pay for physically)
             at = allocate();
         }
         last_page_allocated = at;
-        static_assert((size_t)LPageSize<(size_t)page_size);
-        static_assert((size_t)LPageSize==(size_t)(page_size - sizeof(storage)));
-        main.get_alloc_page_data({at,0,ap}, page_size);
+        main.get_alloc_page_data({at,0,ap}, page_size); // tell the engineers to make a page at the specified position
         return allocate_page_at(at, ps);
     }
 
     std::pair<size_t, storage &> create_if_required(size_t size) {
+        static_assert((size_t)LPageSize<(size_t)page_size);
+        static_assert((size_t)LPageSize==(size_t)(page_size - sizeof(storage)));
+
         if (size > LPageSize) {
-            return expand_over_null_base(size);
+            return alloc_with_clock(size);
         }
         if (last_page_allocated == 0) {
-            return expand_over_null_base();
+            return alloc_with_clock(LPageSize);
         }
 
         auto &last = retrieve_page(last_page_allocated, true);
@@ -535,7 +561,7 @@ private:
             abort();
         }
         if (last.write_position + size >= LPageSize) {
-            return expand_over_null_base();
+            return alloc_with_clock(LPageSize);
         }
         return {last_page_allocated, last};
     }
@@ -665,6 +691,12 @@ public:
             }
             fragmentation -= t.fragmentation;
             t.clear();
+            if (test_memory == 1) {
+                emancipated.each(at.page(),[&](size_t p, uint32_t unused(s), uint32_t o) {
+                    logical_address la(p,o,ap);
+                    erased.erase(la.address());
+                });
+            }
             emancipated.erase(at.page());
             free_page(at.page());
 
@@ -708,18 +740,20 @@ public:
     float page_fragmentation() const {
         return main.fragmentation();
     }
-    size_t top_page() const {
-        return main.top_page();
-    }
 
     size_t get_page_count() const {
         return main.page_count();
     }
 
-    size_t max_page_num() const {
-        return main.max_page_num();
+    size_t max_allocated_page_num() const {
+        return main.max_allocated_page_num();
     }
-
+    size_t get_max_accessible_page() const {
+        return main.get_max_accessible_page();
+    }
+    bool is_page_allocated(size_t page) {
+        return !main.is_free(page);
+    }
     std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer(size_t at) const {
         return get_page_buffer_inner(at);
     }

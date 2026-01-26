@@ -16,6 +16,7 @@ public class Main {
         System.out.println("logical bytes bytes in free lists:"+stats.getBytes_in_free_lists());
         System.out.println("logical bytes allocated:"+stats.getLogical_allocated());
         System.out.println("vmm pages defragged:"+stats.getVmm_pages_defragged());
+        System.out.println("vmm pages popped:"+stats.getVmm_pages_popped());
         System.out.println("keys evicted:"+stats.getKeys_evicted());
         System.out.println("test size:"+kv.size());
 

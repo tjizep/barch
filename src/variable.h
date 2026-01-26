@@ -181,8 +181,9 @@ public:
             case var_string:
                 return conversion::to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
             case var_null:
+                return 1;
             case var_error:
-                return 0;
+                return -1;
             default:
                 abort_with("invalid type");
         }
@@ -200,8 +201,9 @@ public:
             case var_string:
                 return conversion::to_e<uint64_t>(bulk_vt(std::get<std::string>(*this)));
             case var_null:
-            case var_error:
                 return 0;
+            case var_error:
+                return -1;
             default:
                 abort_with("invalid type");
         }

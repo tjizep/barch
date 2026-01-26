@@ -540,6 +540,7 @@ statistics_values stats() {
     r.pages_evicted = t.pages_evicted;
     r.pages_defragged = t.pages_defragged;
     r.vmm_pages_defragged = t.vmm_pages_defragged;
+    r.vmm_pages_popped = t.vmm_pages_popped;
     r.pages_evicted = t.pages_evicted;
     r.vacuums_performed = t.vacuums_performed;
     r.maintenance_cycles = t.maintenance_cycles;
@@ -607,6 +608,11 @@ bool Caller::reload() {
     std::unique_lock l(lock);
     params = {"RELOAD"};
     return sc.callv(params, ::RELOAD) == "OK";
+}
+bool Caller::save() {
+    std::unique_lock l(lock);
+    params = {"SAVE"};
+    return sc.callv(params, ::SAVE) == "OK";
 }
 
 bool Caller::setLru(std::string lru) {

@@ -83,6 +83,7 @@ struct statistics_values {
     long long keys_evicted {};
     long long pages_defragged {};
     long long vmm_pages_defragged {};
+    long long vmm_pages_popped {};
     long long exceptions_raised {};
     long long maintenance_cycles {};
     long long shards {};
@@ -275,6 +276,7 @@ public:
     long long getShardCount() const ;
     bool getOrdered() const ;
     bool reload();
+    bool save();
     std::vector<Value> call(const std::string &method, const std::vector<Value> &args);
 protected:
     mutable std::vector<std::string> params {};

@@ -43,6 +43,7 @@ struct art_statistics {
     int64_t keys_evicted {};
     int64_t pages_defragged {};
     int64_t vmm_pages_defragged {};
+    int64_t vmm_pages_popped {};
     int64_t exceptions_raised {};
     int64_t maintenance_cycles {};
     int64_t shards {};

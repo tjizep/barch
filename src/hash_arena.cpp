@@ -73,7 +73,7 @@ bool arena::base_hash_arena::send(std::ostream &out, const std::function<void(st
     uint64_t completed = write_version ? (int)storage_version : 0;
     size_t size = hidden_arena.size();
     writep(out, completed);
-    writep(out, last_allocated_page());
+    writep(out, max_accessible_page());
     writep(out, last_allocated);
     writep(out, free_pages);
     writep(out, top);
@@ -131,7 +131,8 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
 
         return false;
     }
-    readp(in, arena.max_address_accessed);
+    size_t max_address_accessed;
+    readp(in, max_address_accessed);
     if (in.fail()) {
         barch::log(std::runtime_error("data could not be accessed"),__FILE__,__LINE__);
         return false;
@@ -158,7 +159,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
         uint32_t bsize = 0;
 
         readp(in, page);
-        if (page > arena.max_address_accessed) {
+        if (page > max_address_accessed) {
             barch::std_err("invalid page");
             return false;
         }
@@ -187,6 +188,7 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
         uint8_t* data = arena.get_alloc_page_data({page, 0, nullptr}, bsize);
         readp(in, data, bsize);
         arena.hidden_arena[page] = page;
+        arena.max_allocated_page = std::max<size_t>(arena.max_allocated_page, page);
         if (in.fail()) {
             barch::log(std::runtime_error("file could not be accessed"),__FILE__,__LINE__);
             return false;

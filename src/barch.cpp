@@ -1641,6 +1641,7 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({ "keys_evicted", as.keys_evicted});
     call.push_values({ "pages_defragged", as.pages_defragged});
     call.push_values({ "vmm_pages_defragged", as.vmm_pages_defragged});
+    call.push_values({ "vmm_pages_popped", as.vmm_pages_popped});
     call.push_values({ "exceptions_raised", as.exceptions_raised});
     call.push_values({ "maintenance_cycles", as.maintenance_cycles});
     call.push_values({ "shards", as.shards});

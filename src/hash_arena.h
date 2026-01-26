@@ -35,8 +35,8 @@ namespace arena {
         heap::std_vector<size_t> buffered_free{};
         size_t top = max_top;
         size_t free_pages = top;
+        size_t max_allocated_page = 0;
         size_t last_allocated = 0;
-        size_t max_address_accessed = 0;
         uint8_t *page_data{nullptr};
         size_t cow_size{0};
         mutable uint8_t *cow{nullptr};
@@ -48,7 +48,8 @@ namespace arena {
 
         void reconcile_free_list() {
             free_address_list.clear();
-            for (size_t p = 1; p <= max_address_accessed; ++p) {
+            if (empty()) return;
+            for (size_t p = 1; p <= max_accessible_page(); ++p) {
                 if (!hidden_arena.contains(p)) {
                     free_address_list.insert(p);
                 }
@@ -66,8 +67,7 @@ namespace arena {
                 throw std::runtime_error("no free pages available");
             }
             hidden_arena[at] = {};
-            // max_address_accessed = std::max(max_address_accessed, at);
-            // The current working free address list isnt updated
+            max_allocated_page = std::max<size_t>(at, max_allocated_page);
             --free_pages;
         }
 
@@ -89,8 +89,8 @@ namespace arena {
                 buffered_free = std::move(other.buffered_free);
                 top = other.top;
                 free_pages = other.free_pages;
+                max_allocated_page = other.max_allocated_page;
                 last_allocated = other.last_allocated;
-                max_address_accessed = other.max_address_accessed;
                 page_data = other.page_data;
                 page_data_size = other.page_data_size;
                 modified = std::move(other.modified);
@@ -121,7 +121,7 @@ namespace arena {
                 }
                 top = other.top;
                 free_pages = other.free_pages;
-                max_address_accessed = other.max_address_accessed;
+                max_allocated_page = other.max_allocated_page;
                 hidden_arena = other.hidden_arena;
                 free_address_list = other.free_address_list;
             }
@@ -139,45 +139,44 @@ namespace arena {
             if (!hasize) return free_address_list.size();
             return (float) free_address_list.size() / (float)hasize;
         }
-        size_t last_allocated_page() const {
+        bool empty() const {
+            return page_data == nullptr;
+        }
+        size_t max_accessible_page() const {
             if (page_data_size % page_size != 0) {
-                abort_with("page size mismatch");
+                abort_with("page data size mismatch");
             }
             return (page_data_size / page_size) - 1;
         }
-        size_t top_page() const {
-            if (free_address_list.empty()) return 0;
-            auto lap = last_allocated_page();
-            if (hidden_arena.contains(lap)) {
-                return lap;
-            }
-            return 0;
-        }
-        heap::vector<size_t> shrinkLast() {
+        // function attempts to pop the last page if possible
+        heap::vector<size_t> pop_last() {
 
             heap::vector<size_t> r;
 
             if (!opt_use_vmmap) {
                 return r;
             }
-            size_t last_page = last_allocated_page();
-            while (!hidden_arena.contains(last_page)) {
+            if (!page_data_size) {
+                return r;
+            }
+
+            size_t last_page = max_accessible_page();
+            if (hidden_arena.contains(last_page)) {
+                return r;
+            }
+            --last_page;
+            if (free_address_list.contains(last_page)) {
                 if (last_page * page_size > page_data_size) {
                     abort_with("invalid max address accessed");
                 }
                 auto new_size = page_data_size - physical_page_size;
                 if (!new_size) {
-                    break;
+                    return r;
                 }
-                if (hidden_arena.contains(last_page)) {
-                    abort_with("page is both free and not free");
-                }
+
                 page_data = (uint8_t*) mremap(page_data, page_data_size, new_size, MREMAP_MAYMOVE);
                 if (page_data == MAP_FAILED) {
                     abort_with("failed to allocate virtual page data");
-                }
-                if (new_size > page_data_size) {
-                    //memset(page_data + page_data_size, 0, new_size - page_data_size);
                 }
 
                 heap::allocated -=  physical_page_size ;
@@ -186,7 +185,8 @@ namespace arena {
                 page_modifications::inc_all_tickers();
                 r.push_back(last_page);
                 free_address_list.erase(last_page);
-                last_page = last_allocated_page();
+                last_page = max_accessible_page();
+                ++statistics::vmm_pages_popped;
             }
             return r;
         }
@@ -197,7 +197,7 @@ namespace arena {
             if (use_vmm) {
                 opt_use_vmmap = true;
                 if (page_data) {
-                    size_t new_page_data_size = (last_allocated_page() + 1) * physical_page_size;
+                    size_t new_page_data_size = (max_accessible_page() + 1) * physical_page_size;
                     auto old_data = page_data;
                     auto old_page_data_size = page_data_size;
                     page_data = nullptr;
@@ -213,7 +213,7 @@ namespace arena {
             } else {
                 if (page_data) {
                     size_t old_page_data_size = page_data_size;
-                    size_t new_page_data_size = (last_allocated_page() + 1) * physical_page_size;
+                    size_t new_page_data_size = (max_accessible_page() + 1) * physical_page_size;
                     auto npd = (uint8_t *) realloc(nullptr, new_page_data_size);
                     memcpy(npd, page_data, new_page_data_size);
                     heap::allocated += new_page_data_size;
@@ -238,7 +238,6 @@ namespace arena {
             top = max_top;
             free_pages = top;
             last_allocated = 0;
-            max_address_accessed = 0;
             if (!borrowed) {
                 if (page_data != nullptr) {
                     if (opt_use_vmmap) {
@@ -266,7 +265,6 @@ namespace arena {
             top = other.top;
             free_pages = other.free_pages;
             last_allocated = other.last_allocated;
-            max_address_accessed = other.max_address_accessed;
             page_data = other.page_data;
             page_data_size = other.page_data_size;
             borrowed = true;
@@ -277,7 +275,10 @@ namespace arena {
         [[nodiscard]] size_t page_count_no_source() const {
             return hidden_arena.size();
         }
-        [[nodiscard]] size_t max_page_num() const {
+        [[nodiscard]] size_t max_allocated_page_num() const {
+            return max_allocated_page;
+        }
+        [[nodiscard]] size_t find_max_allocated_page_num() const {
             size_t pmax = 0;
             for (auto &[at,str]: hidden_arena) {
                 pmax = std::max(pmax, at);
@@ -302,12 +303,16 @@ namespace arena {
             }
 
             hidden_arena.erase(pi);
+            if (at == max_allocated_page) {
+                max_allocated_page = find_max_allocated_page_num();
+            }
             ++free_pages;
             free_address_list.insert(at);
         }
 
         [[nodiscard]] bool is_free_no_source(size_t at) const {
-            return !hidden_arena.contains(at);
+            bool contained = hidden_arena.contains(at);
+            return !contained;
         }
 
         [[nodiscard]] bool is_free(size_t at) const {
@@ -321,7 +326,7 @@ namespace arena {
         [[nodiscard]] bool has_free() const {
             return has_free_no_source();
         }
-
+        // creates allocation index entry but does not physically allocate space
         size_t allocate() {
             if (!has_free()) {
                 throw std::runtime_error("no free pages available");
@@ -435,8 +440,8 @@ namespace arena {
             return page_data_size;
         }
 
-        [[nodiscard]] size_t get_max_address_accessed() const {
-            return last_allocated_page();
+        [[nodiscard]] size_t get_max_accessible_page() const {
+            return max_accessible_page();
         }
 
         void set_source(base_hash_arena *) {
@@ -526,6 +531,7 @@ namespace arena {
                 heap::allocated += page_data_size;
                 heap::vmm_allocated += page_data_size;
             }
+
             return false;
         }
 
@@ -623,9 +629,6 @@ namespace arena {
             cow = nullptr;
             cow_size = 0;
         }
-        bool empty() const {
-            return page_data_size == 0;
-        }
         void set_check_mem(bool check) {
             opt_check_mem = check;
         }
@@ -653,17 +656,15 @@ namespace arena {
         hash_arena& operator=(const hash_arena &) = default;
         explicit hash_arena(std::string name) : name(std::move(name)) {}
         // arena virtualization functions
-        [[nodiscard]] size_t top_page() const {
-            return main.top_page();
-        }
+
         [[nodiscard]] float fragmentation() const {
             return main.fragmentation_ratio();
         }
         [[nodiscard]] size_t page_count() const {
             return main.page_count();
         }
-        [[nodiscard]] size_t max_page_num() const {
-            return main.max_page_num();
+        [[nodiscard]] size_t max_allocated_page_num() const {
+            return main.max_allocated_page_num();
         }
 
         [[nodiscard]] size_t max_logical_address() const {
@@ -685,7 +686,7 @@ namespace arena {
             return main.reusable_free_pages();
         }
         heap::vector<size_t> shrinkLast() {
-            return main.shrinkLast();
+            return main.pop_last();
         }
         size_t allocate() {
             return main.allocate();
@@ -723,8 +724,8 @@ namespace arena {
             main.iterate_arena(iter);
         }
 
-        [[nodiscard]] size_t get_max_address_accessed() const {
-            return main.get_max_address_accessed();
+        [[nodiscard]] size_t get_max_accessible_page() const {
+            return main.get_max_accessible_page();
         }
 
         void begin() {
@@ -776,7 +777,7 @@ namespace arena {
             if (main.opt_use_vmmap) {
                 return main.get_bytes_allocated();
             }
-            return main.get_max_address_accessed();
+            return main.get_max_accessible_page();
         }
         bool empty() const {
             return main.empty();

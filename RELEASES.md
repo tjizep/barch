@@ -46,6 +46,8 @@
 11. fix 0 after key (usually not a problem unless memory init is switched off) (v0.5.0b 2025-01-21)
 12. fix race condition leading to double free (v0.5.0b 2025-01-25)
 13. fix save when hash table is used (v0.5.0b 2025-01-26)
+14. fix write lock timeouts to be less dangerous (v0.5.0b 2025-01-27)
+15. fix error translation (v0.5.0b 2025-01-27)
 
 # Release v0.4.3.2b 2025-01-05
 

@@ -192,7 +192,11 @@ namespace barch {
                    tshards = this->get_shards();
                    repl::distribute();
                    for (auto s : tshards) {
-                       s->maintenance();
+                       try {
+                           s->maintenance();
+                       }catch (std::exception& e) {
+                           barch::std_err("exception in maintenance:",e.what());
+                       }
                        if (exiting) break;
                    }
 

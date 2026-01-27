@@ -48,7 +48,7 @@ struct rpc_caller : caller {
     }
     Variable retval(int r, Variable def) {
         if (!errors.empty()) {
-            return errors[0];
+            return ::error{errors[0]};
         }
         if (r != ok()) {
             return Variable{::error{"there was an error"}};
@@ -59,11 +59,11 @@ struct rpc_caller : caller {
         return results[0];
     }
     [[nodiscard]] int wrong_arity()  override {
-        errors.emplace_back(Variable{::error{"Wrong Arity"}});
+        errors.emplace_back("Wrong Arity");
         return 0;
     }
     [[nodiscard]] int syntax_error() override {
-        errors.emplace_back(Variable{::error{"Syntax Error"}});
+        errors.emplace_back("Syntax Error");
         return 0;
     }
     [[nodiscard]] int error() const override {
@@ -272,12 +272,12 @@ struct rpc_caller : caller {
             cr.call_error = f(*this, args);
         }catch (const std::exception& e) {
             ++statistics::exceptions_raised;
-            errors.emplace_back(Variable{::error{e.what()}});
+            errors.emplace_back(e.what());
             cr.call_error = -1;
         }
         if (cr.call_error != 0) {
             if (errors.empty())
-                errors.emplace_back(Variable{::error{"call failed"}});
+                errors.emplace_back("call failed");
             return cr.call_error;
         }
         if (!errors.empty()) {

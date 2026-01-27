@@ -122,7 +122,7 @@ int reply_variable(ValkeyModuleCtx *ctx, const Variable var) {
         case var_null:
             return ValkeyModule_ReplyWithNull(ctx);
         case var_error:
-            return ValkeyModule_ReplyWithError(ctx, std::get<error>(var).name.c_str());
+            return ValkeyModule_ReplyWithError(ctx, std::get<error>(var).what());
         default:
             return ValkeyModule_ReplyWithNull(ctx);
     }

@@ -23,6 +23,18 @@ enum {
     var_max = 7,
 };
 struct error {
+    error(const std::string n) : name(n){}
+    error(const error&)=default;
+    error(error&&)=default;
+    error& operator=(const error&)=default;
+    error& operator=( error&&)=default;
+    const char * what() const {
+        return name.c_str();
+    }
+    size_t size() const {
+        return name.size();
+    }
+private:
     std::string name;
 };
 typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error> variable_t;
@@ -56,7 +68,9 @@ public:
         variable_t::operator=(m);
     }
     Variable(const art::value_type & v) : variable_t(::as_variable(v)){}
+
     Variable& operator=(const Variable&) = default;
+
     [[nodiscard]] bool isBoolean() const {
         return index() == var_bool;
     }
@@ -120,7 +134,7 @@ public:
             case var_null:
                 return {};
             case var_error:
-                return std::get<error>(*this).name;
+                return std::get<error>(*this).what();
             default:
                 abort_with("invalid type");
         }
@@ -178,7 +192,7 @@ public:
                 return std::get<uint64_t>(*this);
             case var_double:
                 return std::get<double>(*this);
-            case var_string:
+            case var_string: // not this can throw an error
                 return conversion::to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
             case var_null:
                 return 1;
@@ -356,7 +370,7 @@ inline void writep(std::ostream& os, const Variable& v) {
             break;
         case var_error: {
             auto e = *std::get_if<error>(&v);
-            std::string s = e.name;
+            std::string s = e.what();
             writep(os, (uint32_t)s.size());
             writep(os, s.data(), s.size());
         }

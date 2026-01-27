@@ -76,7 +76,7 @@ namespace redis {
     template<typename TS>
     inline void rwrite(TS& io, const error& v) {
         writep(io,'-');
-        writep(io, v.name.data(), v.name.size());
+        writep(io, v.what(), v.size());
         writep(io, CRLF);
     }
     template<typename TS>

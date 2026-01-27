@@ -10,9 +10,6 @@
 #include "conversion.h"
 #include "value_type.h"
 
-namespace art {
-    unsigned key_type_size(value_type key);
-}
 
 int key_ok(const char *k, size_t klen);
 

@@ -14,23 +14,6 @@ static size_t encoded_str_len(const char* str, size_t len) {
     return i;
 }
 
-unsigned art::key_type_size(value_type key) {
-    switch (key.bytes[0]) {
-        case tdouble:
-            return numeric_key_size;
-        case tfloat:
-            return num32_key_size;
-        case tinteger:
-            return numeric_key_size;
-        case tshort:
-            return num32_key_size;
-        case tstring:
-            return strnlen(key.chars() + 1, key.length()) + 2;
-        default:
-            abort_with("unsupported key type");
-    }
-}
-
 int key_ok(const char *k, size_t klen) {
     if (k == nullptr)
         return -1;

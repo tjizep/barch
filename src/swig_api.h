@@ -333,7 +333,10 @@ public:
     Value lowerBound(const std::string& key) const ;
 
     Value min() const ;
+    Value firstKey() const ;
+
     Value max() const ;
+    Value lastKey() const ;
     Value upperBound(const std::string& key) const ;
     long long size() const ;
     bool clear();

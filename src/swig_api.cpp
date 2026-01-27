@@ -371,7 +371,18 @@ Value KeyValue::min() const {
 
     return sc.callv(params, ::MIN);
 }
+Value KeyValue::firstKey() const {
+    std::unique_lock l(lock);
+    params = {"MIN"};
+
+    return sc.callv(params, ::MIN);
+}
 Value KeyValue::max() const {
+    std::unique_lock l(lock);
+    params = {"MAX"};
+    return sc.callv(params, ::MAX);
+}
+Value KeyValue::lastKey() const {
     std::unique_lock l(lock);
     params = {"MAX"};
     return sc.callv(params, ::MAX);

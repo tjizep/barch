@@ -217,7 +217,7 @@ bool arena::base_hash_arena::load(const std::string &filename, const std::functi
     base_hash_arena anew_one;
     anew_one.set_check_mem(this->is_check_mem());
     if (arena_read(anew_one, extra, filename)) {
-        *this = anew_one; // only update if successful
+        *this = std::move(anew_one); // only update if successful
         return true;
     }
     return false;
@@ -225,7 +225,7 @@ bool arena::base_hash_arena::load(const std::string &filename, const std::functi
 bool arena::base_hash_arena::retrieve(std::istream &in, const std::function<void(std::istream &)> &extra) {
     base_hash_arena anew_one;
     if (arena_retrieve(anew_one, in, extra)) {
-        *this = anew_one; // only update if successful
+        *this = std::move(anew_one); // only update if successful
         return true;
     }
     return false;

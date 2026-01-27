@@ -1,4 +1,4 @@
-# Release v0.5.0b 2025-01-26
+# Release v0.5.0b 2025-01-27
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -30,6 +30,7 @@
 16. improve java example (v0.5.0b 2025-01-21)
 17. improve memory defragmentation (v0.5.0b 2025-01-24)
 18. 2x improve memory defragmentation (v0.5.0b 2025-01-26)
+19. improve load speed and memory use  (v0.5.0b 2025-01-27)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)

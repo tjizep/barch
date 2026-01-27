@@ -70,7 +70,7 @@ struct rpc_caller : caller {
         return -1;
     }
     [[nodiscard]] int push_error(const char * e) override {
-        errors.emplace_back(Variable{::error{e}});
+        errors.emplace_back(e);
         return 0;
     }
     int key_check_error(art::value_type k) override {

@@ -5,6 +5,9 @@ import org.barch.barch;
 import java.io.IOException;
 import java.util.*;
 
+/**
+ * an example of using barch with various performance parameters and their impact
+ */
 public class Main {
     static{
         System.loadLibrary("barchjni");
@@ -21,21 +24,38 @@ public class Main {
         System.out.println("test size:"+kv.size());
 
     }
+    static void lruTest(KeyValue kv) throws InterruptedException {
+        barch.setConfiguration("max_memory_bytes","2000000");
+        kv.setLru("ON");
+        for (int i = 0; i < 100; i++) {
+            printStats(kv);
+            var stats = barch.stats();
+            Thread.sleep(1000);
+            if (stats.getLogical_allocated() < 1000000){
+                System.out.println("reloading");
+                kv.reload();
+                printStats(kv);
+                break;
+            }
+        }
+
+    }
     static void main() throws InterruptedException, IOException {
-        final int count = 800000;
+        final int ordered = 0;
+        final int threads = 4;
+        final int count = 1000000/threads;
+        final boolean lru = false;
         final boolean doTree = false;
-        final int threads = 1;
 
         var strings = RandomStrings.generateStrings(count,8);
         KeyValue conf = new KeyValue("configuration");
-        if (conf.size() == 0) {
-            System.out.println("creating configuration");
-            conf.set("test.ordered", "1");
-            conf.set("test.shards", "1"); // more shards is more concurrency, but only for writes, reads are concurrent- but this is single threaded
-        }else {
-            System.out.println("configuration already exists");
-
-        }
+        System.out.println("creating configuration");
+        conf.set("test.ordered", ""+ordered);
+        if (threads > 1) // increase write concurrency - reads are already concurrent
+            conf.set("test.shards", "32"); // more shards is more concurrency, at the expense of range perf in ordered mode
+        else if (ordered == 0) // the hashtable perf is better with shards even if its single threaded
+            conf.set("test.shards", "16");
+        else conf.set("test.shards", "1");
         KeyValue kv = new KeyValue("test");
         System.out.println("ordered: "+kv.getOrdered());
         System.out.println("shards: "+kv.getShards());
@@ -43,7 +63,6 @@ public class Main {
         kv.clear();
 
         var m = new TreeMap<String,String>();
-        //System.in.read();
         long t = System.currentTimeMillis();
         List<Thread> list = new ArrayList<>();
 
@@ -63,19 +82,6 @@ public class Main {
             var rnd = (int)(Math.random()*count);
             System.out.println("size: " + kv.size() + " check key #("+rnd+") ["+strings[rnd]+"]:" + kv.get(strings[rnd]));
 
-            barch.setConfiguration("max_memory_bytes","2000000");
-            kv.setLru("ON");
-            for (int i = 0; i < 100; i++) {
-                printStats(kv);
-                var stats = barch.stats();
-                Thread.sleep(1000);
-                if (stats.getLogical_allocated() < 1000000){
-                    System.out.println("reloading");
-                    kv.reload();
-                    printStats(kv);
-                    break;
-                }
-            }
 
             if(doTree) {
                 t = System.currentTimeMillis();
@@ -106,8 +112,11 @@ public class Main {
             for (Thread vThread : list) {
                 vThread.join();
             }
-        }
+            System.out.println("Threads time for barch: "+(System.currentTimeMillis()-t));
+            System.out.println("Size: "+kv.size());
 
+        }
+        if (lru) lruTest(kv);
         System.out.println("ok");
         kv.clear();
         //barchJNI.saveAll();

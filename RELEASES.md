@@ -1,4 +1,4 @@
-# Release v0.5.0b 2025-01-27
+# Release v0.5.0b 2025-01-28
 
 ## New Features
 1. improve conversions (v0.4.3.3b 2025-01-05)
@@ -32,6 +32,7 @@
 18. 2x improve memory defragmentation (v0.5.0b 2025-01-26)
 19. improve load speed and memory use  (v0.5.0b 2025-01-27)
 20. add firstKey (min) and lastKey (max) functions  (v0.5.0b 2025-01-27)
+21. improve java example to show various performance parameters and their impact (v0.5.0b 2025-01-28)
 
 ## Fixes
 1. fix conversions (v0.4.3.3b 2025-01-05)

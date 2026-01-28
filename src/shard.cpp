@@ -712,6 +712,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
     if (statistics::logical_allocated > get_max_module_memory()) {
         // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
+        throw_exception<std::runtime_error>("could not add key because of low memory");
         return false;
     }
 
@@ -730,10 +731,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
 
 
 bool barch::shard::opt_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (opt_rpc_insert(options, unfiltered_key, value, update, fc)) {
-        return true;
-    }
-    return false;
+    return opt_rpc_insert(options, unfiltered_key, value, update, fc);
 }
 
 bool barch::shard::insert(value_type key, value_type value, bool update) {

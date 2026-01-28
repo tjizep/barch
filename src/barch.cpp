@@ -528,7 +528,7 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
     art::key_spec spec;
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-
+    long long r = v.size;
     auto converted = conversion::as_composite(k);
     auto t = call.kspace()->get(converted.get_value());
     storage_release release(t);
@@ -543,6 +543,8 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
         if (leaf->is_compressed()) {
             ov = dictionary::decompress(ov);
         }
+        r += ov.size;
+
         // threadsafe, non-re-entrant, faster
         thread_local heap::vector<uint8_t> s;
         s.clear();
@@ -563,6 +565,7 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
         }
         if (converted.get_value().size + v.size > maximum_allocation_size) {
             return call.push_error("Maximum allocation size exceeded");
+
         }
 
         t->opt_insert( opts, converted.get_value(), v, true, fc);
@@ -570,10 +573,13 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
     }else {
         art::key_options options;
 
-        t->opt_insert(options, converted.get_value(), v, true, fc);
+        if (!t->opt_insert(options, converted.get_value(), v, true, fc)) {
+            return call.push_error("key value not added");
+        }
+
 
     }
-    return call.push_simple("OK");
+    return call.push_ll(r);
 }
 int APPEND(caller& call, const arg_t& argv) {
     return _APPEND(call, argv, false);

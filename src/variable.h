@@ -195,9 +195,9 @@ public:
             case var_string: // not this can throw an error
                 return conversion::to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
             case var_null:
-                return 1;
+                return 0;
             case var_error:
-                return -1;
+                return 0;
             default:
                 abort_with("invalid type");
         }
@@ -217,7 +217,7 @@ public:
             case var_null:
                 return 0;
             case var_error:
-                return -1;
+                return 0;
             default:
                 abort_with("invalid type");
         }

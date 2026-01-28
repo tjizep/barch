@@ -340,7 +340,8 @@ public:
     Value upperBound(const std::string& key) const ;
     long long size() const ;
     bool clear();
-    bool append(const std::string& key, const std::string& value);
+    long long append(const std::string& key, const std::string& value);
+    long long prepend(const std::string& key, const std::string& value);
 };
 
 /**

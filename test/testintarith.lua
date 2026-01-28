@@ -2,7 +2,8 @@ local vk
 vk = redis
 
 vk.call('B.SET','a',0)
-
+assert(vk.call('B.APPEND','dd','d')==1)
+assert(vk.call('B.APPEND','dd','d')==2)
 assert(vk.call('B.INCR','a')==1)
 assert(vk.call('B.DECR','a')==0)
 vk.call('B.SET','b',-0)

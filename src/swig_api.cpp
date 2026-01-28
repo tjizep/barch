@@ -326,11 +326,19 @@ bool KeyValue::exists(const std::string &key) {
     params = {"EXISTS", key};
     return sc.callv(params, ::EXISTS).b(); // may be too short
 }
-bool KeyValue::append(const std::string& key, const std::string& value) {
+
+long long KeyValue::append(const std::string& key, const std::string& value) {
     std::unique_lock l(lock);
     params = {"APPEND", key, value};
     barch::repl::call(params);
-    return sc.callv(params, ::APPEND) == "OK";
+    return sc.callv(params, ::APPEND).i();
+}
+
+long long KeyValue::prepend(const std::string& key, const std::string& value) {
+    std::unique_lock l(lock);
+    params = {"PREPEND", key, value};
+    barch::repl::call(params);
+    return sc.callv(params, ::PREPEND).i();
 }
 
 bool KeyValue::clear() {

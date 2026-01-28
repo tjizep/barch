@@ -38,7 +38,18 @@ public class Main {
                 break;
             }
         }
-
+    }
+    static void appendTest(){
+        KeyValue kv = new KeyValue("apptest");
+        kv.clear();
+        for (long l = 0; l < 300000;++l){
+            long ap = kv.append("a","a");
+            if (ap==0){
+                System.out.println("append failed at:"+l);
+                return;
+            }
+        }
+        System.out.println("append ok");
     }
     static void main() throws InterruptedException, IOException {
         final int ordered = 0;
@@ -48,6 +59,7 @@ public class Main {
         final int count = 10000000/threads;
         final boolean lru = false;
         final boolean doTree = false;
+        appendTest();
         int shards = ordered==1?ordered_shards:unordered_shards;
         var strings = RandomStrings.generateStrings(count,8);
         KeyValue conf = new KeyValue("configuration");

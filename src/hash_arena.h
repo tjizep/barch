@@ -583,7 +583,9 @@ namespace arena {
 
             return page_data + page_pos + r.offset();
         }
-
+        [[nodiscard]] bool is_from(const uint8_t* add) const {
+            return add > page_data && add < (page_data+page_data_size);
+        }
         [[nodiscard]] uint8_t *get_page_data(logical_address r, bool) const {
             size_t page_pos = r.page() * physical_page_size;
             size_t offset = r.offset();
@@ -781,6 +783,9 @@ namespace arena {
         }
         bool empty() const {
             return main.empty();
+        }
+        [[nodiscard]] bool is_from(const uint8_t* add) const {
+            return main.is_from(add);
         }
     };
 }

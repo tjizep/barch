@@ -18,7 +18,7 @@ enum {
     test_memory = 1,
     fl_test_memory = 0,
     initialize_memory = 1, // currently this should always be one - if the program needs to work
-    storage_version = 10,
+    storage_version = page_size + 10 + test_memory,
     ticker_size = 16,
     numeric_key_size = 12,
     num32_key_size = 6,

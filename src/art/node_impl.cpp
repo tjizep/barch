@@ -26,35 +26,23 @@ namespace art {
     //
     // TODO: this function's interface can lend itself to crashes when used with parameter pointers which
     // are sourced from a tree leaf allocator. currently the solution is to allocate and copy these params
-    // which could be deleterious to performance, because they rely on the system allocator.
+    // which could be deleterious to performance.
     //
 
-    struct tleaf2 {
-        heap::vector<uint8_t> sk {};
-        heap::vector<uint8_t> sv {}; // for short params this is ok
-
-        value_type copy_key(const value_type& key) {
-            sk.clear();
-            sk.insert(sk.begin(), key.bytes, key.bytes + key.size);
-            return {sk.data(), sk.size()};
-        }
-        value_type copy_value(const value_type& val) {
-            sv.clear();
-            sv.insert(sv.begin(), val.bytes, val.bytes + val.size);
-            return {sv.data(), sv.size()};
-        }
-    };
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, key_options options) {
         return make_leaf(alloc, key, v, options.get_expiry(), options.is_volatile(), options.is_compressed());
     }
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile, bool is_compressed ) {
         unsigned val_len = v.size;
         unsigned key_len = key.length();
-        thread_local tleaf2 temp;
-        key = temp.copy_key(key);
-        v = temp.copy_value(v);
+        auto &leaves = alloc.get_leaves();
+        // copying is slow - so check if the address may get reallocated
+        if (leaves.is_from(v.bytes)||leaves.is_from(key.bytes)) {
+            key = alloc.copy_key(key);
+            v = alloc.copy_value(v);
+        }
         size_t leaf_size = leaf::make_size(key_len,val_len,ttl,is_volatile);
-        // NB the + 1 is for a hidden 0 byte contained in the key not reflected by length()
+        // NB the + 1 is for a hidden 0 byte ay the end of the key not reflected by length()
         logical_address logical{&alloc};
         auto ldata = alloc.get_leaves().new_address(logical, leaf_size);
         auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile, is_compressed);

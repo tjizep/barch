@@ -1,3 +1,8 @@
+# Release v0.5.1b 2025-01-28
+
+## New Features
+1. reduce internal write latency by 10% (v0.5.1b 2025-01-28)
+
 # Release v0.5.0b 2025-01-28
 
 ## New Features

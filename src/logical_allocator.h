@@ -23,6 +23,7 @@
 #include "storage.h"
 #include "hash_arena.h"
 #include "page_modifications.h"
+#include "value_type.h"
 
 typedef uint32_t PageSizeType;
 typedef heap::unordered_set<size_t> address_set;
@@ -777,7 +778,9 @@ public:
         uint8_t *d = basic_resolve(at, true);
         return (T *) d;
     }
-
+    [[nodiscard]] bool is_from(const uint8_t* add) const {
+        return main.is_from(add);
+    }
     logical_address new_address(size_t sz) {
         logical_address r{ap};
         new_address(r, sz);
@@ -1165,7 +1168,18 @@ struct alloc_pair : public abstract_leaf_pair{
     heap::shared_mutex latch{};
     bool is_debug = false;
     std::string name{};
-
+    std::string tk{};
+    std::string tv{};
+    art::value_type copy_key(const art::value_type& key) {
+        tk.clear();
+        tk.insert(tk.begin(), key.bytes, key.bytes + key.size);
+        return {tk.data(), tk.size()};
+    }
+    art::value_type copy_value(const art::value_type& val) {
+        tv.clear();
+        tv.insert(tv.begin(), val.bytes, val.bytes + val.size);
+        return {tv.data(), tv.size()};
+    }
     logical_allocator nodes{this,"nodes"};
     logical_allocator leaves{this,"leaves"};
     explicit alloc_pair(size_t shard_number) : shard_number(shard_number), nodes(this,"nodes_"+std::to_string(shard_number)),leaves(this,"leaves_"+std::to_string(shard_number)) {}

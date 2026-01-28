@@ -42,20 +42,22 @@ public class Main {
     }
     static void main() throws InterruptedException, IOException {
         final int ordered = 0;
-        final int threads = 4;
-        final int count = 1000000/threads;
+        final int threads = 3;
+        final int unordered_shards = 32;
+        final int ordered_shards = 32;
+        final int count = 10000000/threads;
         final boolean lru = false;
         final boolean doTree = false;
-
+        int shards = ordered==1?ordered_shards:unordered_shards;
         var strings = RandomStrings.generateStrings(count,8);
         KeyValue conf = new KeyValue("configuration");
         System.out.println("creating configuration");
-        conf.set("test.ordered", ""+ordered);
+        conf.set("test.ordered", ordered);
         if (threads > 1) // increase write concurrency - reads are already concurrent
-            conf.set("test.shards", "32"); // more shards is more concurrency, at the expense of range perf in ordered mode
+            conf.set("test.shards", shards); // more shards is more concurrency, at the expense of range perf in ordered mode
         else if (ordered == 0) // the hashtable perf is better with shards even if its single threaded
-            conf.set("test.shards", "16");
-        else conf.set("test.shards", "1");
+            conf.set("test.shards", shards);
+        else conf.set("test.shards", 1);
         KeyValue kv = new KeyValue("test");
         System.out.println("ordered: "+kv.getOrdered());
         System.out.println("shards: "+kv.getShards());

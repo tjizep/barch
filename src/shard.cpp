@@ -676,15 +676,20 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
     ++inserts;
     ++statistics::insert_ops;
     set_hash_query_context(key);
-    auto i = h.find(key);
-    if (i != h.end()) {
+        ++statistics::new_keys_added;
+    node_ptr l = this->make_leaf(key, value, options);
+    l.l()->set_hashed();
+    if (!h.insert(l)) {
         if (update) {
+            auto i = h.find(key);
+            if (i == h.end()) {
+                return false;
+            }
             auto n = i->node(this);
             leaf *dl = n.l();
             fc(n);
             if (art::is_leaf_direct_replacement(dl, value, options))
             {
-
                 dl->set_value(value);
                 dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
                 options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
@@ -694,17 +699,15 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
             }
             node_ptr old = logical_address{i->addr,this};
             h.erase(i);
+            h.insert_unique(l);
             old.free_from_storage();
             ++statistics::keys_replaced;
         }else {
+            l.free_from_storage();
             return false;
         }
-    }else {
-        ++statistics::new_keys_added;
     }
-    node_ptr l = this->make_leaf(key, value, options);
-    l.l()->set_hashed();
-    h.insert_unique(l);
+    ++statistics::new_keys_added;
     return true;
 }
 

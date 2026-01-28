@@ -42,7 +42,7 @@ public class Main {
     }
     static void main() throws InterruptedException, IOException {
         final int ordered = 0;
-        final int threads = 3;
+        final int threads = 1;
         final int unordered_shards = 32;
         final int ordered_shards = 32;
         final int count = 10000000/threads;

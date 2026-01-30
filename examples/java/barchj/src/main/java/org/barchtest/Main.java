@@ -59,7 +59,7 @@ public class Main {
         final int count = 10000000/threads;
         final boolean lru = false;
         final boolean doTree = false;
-        appendTest();
+
         int shards = ordered==1?ordered_shards:unordered_shards;
         var strings = RandomStrings.generateStrings(count,8);
         KeyValue conf = new KeyValue("configuration");
@@ -73,7 +73,7 @@ public class Main {
         KeyValue kv = new KeyValue("test");
         System.out.println("ordered: "+kv.getOrdered());
         System.out.println("shards: "+kv.getShards());
-        System.out.println("current size:"+kv.size());
+        System.out.println("current size: "+kv.size());
         kv.clear();
 
         var m = new TreeMap<String,String>();

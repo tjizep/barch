@@ -256,14 +256,14 @@ namespace barch {
             }
 
             start_accept();
-            pool.start([this](size_t tid) -> void{
-
-                asio::dispatch(io ,[this,tid]() {
-
-                    barch::std_log(use_ssl ? "TLS/SSL":"TCP","connections accepted on",description,"using thread",tid);
+            pool.start([this,&ep](size_t tid) -> void{
+                auto addr = address_off(ep);
+                auto prot_name = proto_name(ep);
+                asio::dispatch(io ,[this,tid,addr,prot_name]() {
+                    std_log(use_ssl ? "TLS/SSL":prot_name,"connections accepted on",addr,"using thread",tid);
                 });
                 io.run();
-                barch::std_log("server stopped on", description,"using thread",tid);
+                std_log(prot_name,"server stopped on", addr,"using thread",tid);
             });
             work_pool.start([this](size_t tid) -> void{
                 workers.run();

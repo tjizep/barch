@@ -77,6 +77,9 @@ struct rpc_caller : caller {
         if (k.empty()) {
             return this->push_error("Key should not be empty");
         }
+        if (strnlen(k.chars(), k.size) < k.size) {
+            return this->push_error("No keys with embedded nulls");
+        }
         return this->push_error("Unspecified key error");
     }
     int push_null() override {

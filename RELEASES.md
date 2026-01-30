@@ -1,9 +1,10 @@
-# Release v0.5.1b 2025-01-28
+# Release v0.5.1b 2025-01-29
 
 ## New Features
 1. reduce internal write latency by 10% (v0.5.1b 2025-01-28)
 2. make app/pre-pend work like redis (v0.5.1b 2025-01-28)
 3. let errors map to 0 for integers in swig interfaces, like bools (v0.5.1b 2025-01-28)
+4. display better connection info (v0.5.1b 2025-01-30)
 
 # Release v0.5.0b 2025-01-28
 

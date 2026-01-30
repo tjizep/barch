@@ -11,6 +11,7 @@
 #include "netstat.h"
 #include "vector_stream.h"
 #include "constants.h"
+#include "rpc/proto_info.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
     template<typename TSock>
@@ -79,30 +80,13 @@ namespace barch {
                 "tot-cmds=" + std::to_string(calls_recv) + "\n";
             return r;
         }
-        static std::string remote_address_of(const tcp::socket& sock) {
-            auto rep = sock.lowest_layer().remote_endpoint();
-            return rep.address().to_string() +":"+ std::to_string(rep.port());
-        }
-        static std::string local_address_of(const tcp::socket& sock) {
-            auto rep = sock.lowest_layer().local_endpoint();
-            return rep.address().to_string() + +":"+ std::to_string(rep.port());
-        }
 
-        static std::string remote_address_of(const asio::basic_stream_socket<asio::local::stream_protocol>& sock) {
-            auto rep = sock.lowest_layer().remote_endpoint();
-            return rep.path();
-        }
-
-        static std::string local_address_of(const asio::basic_stream_socket<asio::local::stream_protocol>& sock) {
-            auto rep = sock.lowest_layer().remote_endpoint();
-            return rep.path();
-        }
         template<typename  LowestLType>
         std::string get_info_t(const LowestLType& sock) const {
 
 
-            std::string laddress = local_address_of(sock);
-            std::string raddress = remote_address_of(sock);
+            std::string laddress = local_address_off(sock);
+            std::string raddress = remote_address_off(sock);
             return get_info_l(laddress, raddress);
         }
 

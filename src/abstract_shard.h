@@ -68,13 +68,6 @@ namespace barch {
 
         }
         void lock_unique() {
-            if (get_latch().try_lock()) {
-                return;
-            }
-            if (saving) {
-                // TODO: this can currently cause corruption but optimistic locking is important
-                //throw_exception<std::runtime_error>("cannot write lock while saving (because it may block to long)");
-            }
             if (!get_latch().try_lock_for(std::chrono::milliseconds(lock_to_ms))) {
                 throw_exception<std::runtime_error>("write lock wait time exceeded");
             }

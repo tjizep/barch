@@ -139,7 +139,7 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
         }
         if (do_set) {
             r |= call.push_ll(1);
-            return art::make_leaf(t->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile());
+            return art::make_leaf(t->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile(), l->is_compressed());
         } else {
             r |= call.push_ll( 0);
         }

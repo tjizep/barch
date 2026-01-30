@@ -69,6 +69,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         (*r)["MSET"] = {::MSET,{"write","keys","data"}};
         (*r)["ADD"] = {::ADD,{"write","keys","data"}};
         (*r)["GET"] = {::GET,{"read","keys","data"}};
+        (*r)["LENGTH"] = {::LENGTH,{"read","keys","data"}};
         (*r)["MGET"] = {::MGET,{"read","keys","data"}};
         (*r)["MIN"] = {::MIN,{"read","keys","data"}};
         (*r)["MAX"] = {::MAX,{"read","keys","data"}};

@@ -82,6 +82,7 @@ extern "C"{
     int MSET(caller& call, const arg_t& argv);
     int ADD(caller& call, const arg_t& argv);
     int GET(caller& call, const arg_t& argv);
+    int LENGTH(caller& call, const arg_t& argv);
     int MGET(caller& call, const arg_t& argv);
     int MIN(caller& call, const arg_t& argv);
     int MAX(caller& call, const arg_t& );

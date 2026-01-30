@@ -17,15 +17,23 @@ class OvertureEncoder(json.JSONEncoder):
             return obj.wkt
         return super().default(obj)
 def remove_accents(input_str):
-    # Normalize the string to a decomposed form (NFKD)
-    # This separates base characters from their diacritics
-    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    """
+    Removes accent characters from a string and converts them to their base characters.
 
-    # Filter out all combining characters (the diacritics)
-    # unicodedata.combining(c) returns True if the character is a diacritic
-    only_base_chars = "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+    Args:
+        input_str: The string to process.
 
-    return only_base_chars
+    Returns:
+        The string with accents removed.
+    """
+    # Normalize the string to the 'NFD' form (Normalization Form D), which decomposes
+    # accented characters into their base character and a separate accent mark.
+    nfd_str = unicodedata.normalize('NFD', input_str)
+
+    # Encode to 'ascii' and ignore characters it can't encode (the accent marks).
+    # Then decode back to a string.
+    base_chars_str = nfd_str.encode('ascii', 'ignore').decode('utf-8')
+    return base_chars_str.replace("\0","")
 def filter_street(sn):
     s = f"{sn}"
     if s.find("_") != -1:
@@ -121,12 +129,13 @@ for batch in reader:
             if not overflow:
                 overflow = 0
                 overflows.set(f"{street}","0")
-
-            if not streets.append(f"{street} {overflow}", f",{counter}"):
-                print("Street overflow",street)
+            streetkey = f"{street} {overflow}"
+            if not streets.append(streetkey, f",{counter}"):
+                print(f"Street overflow {street} overflow before:{overflow} at {counter}")
                 overflow = overflows.incr(f"{street}", 1).s()
+                print(f"Street overflow {street} overflow now:{overflow} at {counter}")
+                streets.append(f"{street} {overflow}", f",{counter}")
 
-            streets.append(f"{street} {overflow}", f",{counter}")
             postcodes.incr(f"{row.postcode}",1) # postcode index forward
             pcode_street.incr(f"{row.postcode} {street}",1) # postcode index street
             street_province.incr(f"{street} *{prov.upper()}")

@@ -896,7 +896,7 @@ namespace art {
      */
 
     void free_node(node_ptr n);
-
+    node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, key_options options);
     node_ptr make_leaf(alloc_pair& alloc, value_type key, value_type v, leaf::ExpiryType ttl = 0, bool is_volatile = false, bool is_compressed = false);
     node_ptr make_leaf_at(uint8_t * key_store, logical_address addr, value_type key, value_type v, leaf::ExpiryType ttl, bool is_volatile, bool is_compressed );
 

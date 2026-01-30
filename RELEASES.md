@@ -1,10 +1,18 @@
-# Release v0.5.1b 2025-01-29
+# Release v0.5.1b 2025-01-30
 
 ## New Features
+
 1. reduce internal write latency by 10% (v0.5.1b 2025-01-28)
 2. make app/pre-pend work like redis (v0.5.1b 2025-01-28)
 3. let errors map to 0 for integers in swig interfaces, like bools (v0.5.1b 2025-01-28)
 4. display better connection info (v0.5.1b 2025-01-30)
+5. add `LENGTH` function `LENGTH a` will return the length in bytes of the value of key `a` or `(nil)` if it does not exist(v0.5.1b 2025-01-30)
+
+## Fixes
+
+1. compression on pre/ap-pend never actually compressed (for better or worse) (v0.5.1b 2025-01-30)
+2. compression flag was not always stored which may lead to data errors (v0.5.1b 2025-01-30)
+2. compression flag was cleared by defrag (v0.5.1b 2025-01-30)
 
 # Release v0.5.0b 2025-01-28
 

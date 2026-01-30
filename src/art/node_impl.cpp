@@ -37,7 +37,7 @@ namespace art {
         unsigned key_len = key.length();
         auto &leaves = alloc.get_leaves();
         // copying is slow - so check if the address may get reallocated
-        if (leaves.is_from(v.bytes)||leaves.is_from(key.bytes)) {
+        if (leaves.is_from(v.bytes) || leaves.is_from(key.bytes)) {
             key = alloc.copy_key(key);
             v = alloc.copy_value(v);
         }

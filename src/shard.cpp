@@ -299,7 +299,7 @@ void barch::shard::read_extra(std::istream &in) {
         readp(in, x); // bytes from some future version
     }
 }
-void barch::shard::write_extra(std::ostream &of) {
+void barch::shard::write_extra(std::ostream &of) const {
     uint32_t extra = 1;
 
     writep(of, extra);
@@ -309,7 +309,7 @@ void barch::shard::write_extra(std::ostream &of) {
 }
 
 
-bool barch::shard::_save(bool stats) {
+bool barch::shard::_save(bool stats) const {
     auto *t = this;
     if ((nodes.get_main().get_bytes_allocated()+leaves.get_main().get_bytes_allocated())==0) return true;
     bool saved = false;
@@ -357,11 +357,14 @@ bool barch::shard::_save(bool stats) {
     return true;
 }
 bool barch::shard::save(bool stats) {
-    std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
+    bool success = false;
+
+    saving = true;
     auto st = std::chrono::high_resolution_clock::now();
     {
-        write_lock release(this->latch); // only lock during partial copy
-        _save(stats);
+        read_lock release(this->shared_from_this()); // only lock during partial copy
+        success = _save(stats);
     }
     auto current = std::chrono::high_resolution_clock::now();
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
@@ -369,7 +372,8 @@ bool barch::shard::save(bool stats) {
     if (log_saving_messages == 1)
         std_log("saved barch db:", this->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
             "seconds");
-    return true;
+    saving = false;
+    return success;
 }
 bool barch::shard::send(std::ostream& unused(out)) {
 #ifdef _TEST_COVERED_
@@ -604,11 +608,11 @@ void barch::shard::_clear() {
     size = 0;
     transacted = false;
     tomb_stones = 0;
-    shard::blocked_sessions.clear();
-    shard::mods = 0;
-    shard::saf_get_ops = 0;
-    shard::saf_keys_found = 0;
-    shard::queue_size = 0;
+    blocked_sessions.clear();
+    mods = 0;
+    saf_get_ops = 0;
+    saf_keys_found = 0;
+    queue_size = 0;
     create_bloom(has_static_bloom_filter()); // resets the bloom
     get_leaves().clear();
     get_nodes().clear();
@@ -688,6 +692,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
                 dl->set_value(value);
                 dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
                 options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
+                dl->set_compressed(options.is_compressed());
                 last_leaf_added = n;
                 ++statistics::keys_replaced;
                 return false;
@@ -1143,13 +1148,17 @@ static void defrag_page(const barch::shard_ptr& shard, const std::pair<heap::buf
         if (l->is_hashed()) {
             options.set_expiry(l->expiry_ms());
             options.set_volatile(l->is_volatile());
+            options.set_compressed(l->is_compressed());
             shard->hash_insert(options, l->get_key(), l->get_value(),true,fc);
             return;
         }
         size_t c1 = shard->get_tree_size();
         options.set_expiry(l->expiry_ms());
         options.set_volatile(l->is_volatile());
-        shard->tree_insert(options, l->get_key(), l->get_value(), true, fc);
+        options.set_compressed(l->is_compressed());
+        auto v = l->get_value();
+        // TODO: one day add compression here
+        shard->tree_insert(options, l->get_key(), v, true, fc);
         if (c1 + 1 != shard->get_tree_size()) {
             abort_with("key not added");
         }
@@ -1167,19 +1176,7 @@ void barch::shard::run_defrag() {
 
     {
         write_lock releaser(this->latch);
-        auto page_frag = lc.get_max_accessible_page(); //lc.max_allocated_page_num();
-        if (page_frag && lc.is_page_allocated(page_frag)) {
-
-            // for some reason we have to not do this while a transaction is active
-            if (transacted) return; // try later
-            //auto page = lc.get_page_buffer(page_frag);
-            //erase_page(this->shared_from_this(), page);
-            this->shrink();
-            //defrag_page(this->shared_from_this(), page);
-            //++statistics::vmm_pages_defragged;
-        }else {
-            this->shrink();
-        }
+        this->shrink();
     }
 
     auto logical_frag = lc.fragmentation_ratio();

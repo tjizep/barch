@@ -21,9 +21,9 @@ int key_ok(const char *k, size_t klen) {
     if (klen == 0)
         return -1;
 
-    if (strnlen(k, klen) < klen) {
-        return -1;
-    }
+    //if (strnlen(k, klen) < klen) {
+    //    return -1;
+    //}
     return 0;
 }
 int key_ok(art::value_type v) {
@@ -37,9 +37,9 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
     if (klen == 0)
         return ValkeyModule_ReplyWithError(ctx, "No empty keys");
 
-    if (strnlen(k, klen) < klen) {
-        return ValkeyModule_ReplyWithError(ctx, "No keys with embedded nulls");
-    }
+    //if (strnlen(k, klen) < klen) {
+    //    return ValkeyModule_ReplyWithError(ctx, "No keys with embedded nulls");
+    //}
 
     return ValkeyModule_ReplyWithError(ctx, "Unspecified key error");
 }

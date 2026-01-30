@@ -58,6 +58,7 @@ namespace barch {
         bool opt_evict_volatile_ttl = barch::get_evict_volatile_ttl();
         bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
+        bool saving = false;
         uint64_t lock_to_ms = 1*1000*60;
 
         void lock_shared() {
@@ -67,6 +68,13 @@ namespace barch {
 
         }
         void lock_unique() {
+            if (get_latch().try_lock()) {
+                return;
+            }
+            if (saving) {
+                // TODO: this can currently cause corruption but optimistic locking is important
+                //throw_exception<std::runtime_error>("cannot write lock while saving (because it may block to long)");
+            }
             if (!get_latch().try_lock_for(std::chrono::milliseconds(lock_to_ms))) {
                 throw_exception<std::runtime_error>("write lock wait time exceeded");
             }
@@ -219,6 +227,8 @@ struct storage_release {
     barch::shard_ptr sources_locked{};
     bool lock = true;
 
+    bool is_locked = false;
+
     storage_release() = delete;
     storage_release(const storage_release&) = delete;
     storage_release(storage_release&&) = default;
@@ -233,13 +243,16 @@ struct storage_release {
             s->lock_shared();
             s = s->sources();
         }
-        t->lock_unique();
+
+        t->lock_unique(); // this can throw
+        is_locked = true;
 
     }
     ~storage_release() {
         if (!t) return;
         if (!lock) return;
-        t->unlock_unique();
+        if (is_locked)
+            t->unlock_unique();
         // TODO: this may cause deadlock we've got to at least test
         auto s = sources_locked;
         while (s) {

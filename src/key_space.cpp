@@ -303,20 +303,20 @@ namespace barch {
         return 0;
     }
 
-    void key_space::buffer_insert(const std::string &key, const std::string &value) {
-#if 0
-        hash_buf[key] = value;
-#else
-        auto fc = [&](const art::node_ptr &) -> void {};
-        auto k = conversion::as_composite(key);
-        auto v = art::value_type{value};
-        auto t = this->get(v);
-        key_options spec;
-        spec.set_hashed(!opt_ordered_keys);
-        storage_release r(t);
-        t->opt_insert(spec,k.get_value(),v,true,fc);
-#endif
-
+    bool key_space::buffer_insert(const std::string &key, const std::string &value) {
+        try {
+            auto fc = [&](const art::node_ptr &) -> void {};
+            auto k = conversion::as_composite(key);
+            auto v = art::value_type{value};
+            auto t = this->get(v);
+            key_options spec;
+            spec.set_hashed(!opt_ordered_keys);
+            storage_release r(t);
+            t->opt_insert(spec,k.get_value(),v,true,fc);
+            return true;
+        }catch (std::exception& ) {
+            return false;
+        }
     }
 
     void key_space::merge(key_space_ptr into, merge_options options) {

@@ -1026,13 +1026,17 @@ static art::node_ptr handle_leaf_replacement(
         {
             dl->set_value(value);
             dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
+            dl->set_compressed(options.is_compressed());
             options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
             t->last_leaf_added = n; // tje
         }
         else
         {
             // create a new leaf to carry the new value
-            ref = t->tree_make_leaf(key, value, options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(), dl->is_volatile(), dl->is_compressed());
+            ref = t->tree_make_leaf(key, value,
+                options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry(),
+                options.is_volatile(),
+                options.is_compressed());
             t->last_leaf_added = ref;
             ++statistics::leaf_nodes_replaced;
             return n; // the old val (n) will be removed by caller
@@ -1104,7 +1108,7 @@ static art::node_ptr recursive_insert(
         }
 
         // Create a new node and a new leaf
-        art::node_ptr new_leaf = make_leaf(*t, key, value);
+        art::node_ptr new_leaf = make_leaf(*t, key, value, options);
         t->last_leaf_added = new_leaf;
         auto new_node = t->alloc_node_ptr(initial_node_ptr_size, art::initial_node, {n, new_leaf});
         // pass children to get opt. ptr size

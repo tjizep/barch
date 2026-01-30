@@ -274,8 +274,7 @@ KeyValue::KeyValue(const std::string& host, int port, const std::string& keys_sp
     Caller::use(keys_space);
 }
 bool KeyValue::put(const std::string &key, const std::string& value) {
-    sc.kspace()->buffer_insert(key, value);
-    return true;
+    return sc.kspace()->buffer_insert(key, value);
 }
 Value KeyValue::set(const std::string &key, const std::string &value) {
     std::unique_lock l(lock);

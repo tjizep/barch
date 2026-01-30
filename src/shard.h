@@ -89,7 +89,7 @@ namespace barch {
         mutable uint64_t saf_get_ops{};
 
         bool remove_from_unordered_set(value_type key);
-        void write_extra(std::ostream& of);
+        void write_extra(std::ostream& of) const ;
         void read_extra(std::istream& of);
         shard_ptr dependencies;
         uint64_t deletes{};
@@ -115,7 +115,6 @@ namespace barch {
         uint64_t save_size = 0;
         vector_stream save_stats{};
         std::shared_mutex save_load_mutex{};
-
 
         std::atomic<size_t> queue_size{};
         std::chrono::high_resolution_clock::time_point start_save_time {};
@@ -197,7 +196,7 @@ namespace barch {
         void run_defrag() override;
 
         bool save(bool stats) override;
-        bool _save(bool stats);
+        bool _save(bool stats) const;
         bool _load(bool stats);
 
         bool send(std::ostream& out) override;

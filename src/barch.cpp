@@ -541,9 +541,9 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
 
         auto ov = leaf->get_value();
         if (leaf->is_compressed()) {
-            ov = dictionary::decompress(ov);
+            ov = dictionary::decompress(ov); // the decompression may fail (perhaps panic because format is broken)
         }
-        r += ov.size;
+        r += ov.size;// the decompressed length is used
 
         // threadsafe, non-re-entrant, faster
         thread_local heap::vector<uint8_t> s;
@@ -555,7 +555,8 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
             s.insert(s.end(), ov.begin(), ov.end());
             s.insert(s.end(), v.begin(), v.end());
         }
-        const auto& compressed = dictionary::compress(v);
+#if 0 // compression on append can get really slow - so we leave it
+        const auto& compressed = dictionary::compress({s.data(),s.size()});
         if (!compressed.empty()) {
             statistics::value_bytes_compressed += compressed.size;
             opts.set_compressed(true);
@@ -563,9 +564,12 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
         }else {
             v = {s.data(),s.size()};
         }
+#else
+        v = {s.data(),s.size()};
+#endif
+
         if (converted.get_value().size + v.size > maximum_allocation_size) {
             return call.push_error("Maximum allocation size exceeded");
-
         }
 
         t->opt_insert( opts, converted.get_value(), v, true, fc);
@@ -743,6 +747,43 @@ int GET(caller& call, const arg_t& argv) {
     }
 }
 
+/**
+ * return the LENGTH of a key
+ * @param call
+ * @param argv
+ * @return 0 if all is ok
+ */
+int LENGTH(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+    auto ckey = converted.get_value();
+    auto t = call.kspace()->get(ckey);
+    auto src = t->sources();
+
+    if (!src && t->has_static_bloom_filter() && !t->is_bloom(ckey)) {
+        return call.push_null();
+    }
+    read_lock release(t);
+    auto r = t->search(ckey);
+    if (r.null()) {
+        return call.push_null();
+    } else {
+        if (r.cl()->is_tomb()) {
+            return call.push_null();
+        }
+        auto cl = r.const_leaf();
+        auto vt = cl->get_value();
+        if (cl->is_compressed()) {
+            vt = dictionary::decompress(vt);
+        }
+        return call.push_ll(vt.size);
+    }
+}
+
 int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, GET);
@@ -845,7 +886,10 @@ int EXPIRE(caller& call, const arg_t& argv) {
         if (art::now() + spec.ttl == 0) {
             barch::std_log("why");
         }
-        return art::make_leaf(t->get_ap(), l->get_key(), l->get_value(),  art::now() + spec.ttl, l->is_volatile());
+        return art::make_leaf(t->get_ap(), l->get_key(),
+            l->get_value(),
+            art::now() + spec.ttl, l->is_volatile(),
+            l->is_compressed());
     };
     if (t->update(l->get_key(),updater))
         return call.push_ll(1);

@@ -16,7 +16,7 @@ extern std::shared_mutex &get_lock();
  * context management
  */
 //typedef std::unique_lock<std::shared_mutex> storage_release;
-typedef std::shared_lock<std::shared_mutex> read_release;
+//typedef std::shared_lock<std::shared_mutex> read_release;
 
 /**
  * global statistics

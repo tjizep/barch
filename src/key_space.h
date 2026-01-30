@@ -50,7 +50,7 @@ namespace barch {
         void merge(merge_options options);
         void each_shard(std::function<void(shard_ptr)> f);
         [[nodiscard]] size_t get_shard_count() const;
-        void buffer_insert(const std::string& key, const std::string& value);
+        bool buffer_insert(const std::string& key, const std::string& value);
         size_t hash_buf_size() const ;
     };
     typedef key_space::key_space_ptr key_space_ptr;

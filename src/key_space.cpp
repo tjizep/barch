@@ -73,17 +73,27 @@ namespace barch {
     }
 
     void all_shards(const std::function<void(const barch::shard_ptr&)>& cb ) {
-        std::unique_lock l(ksp().lock);
-        for (auto &ks : ksp().spaces) {
-            for (auto &shard_ : ks.second->get_shards()) {
+
+        heap::map<std::string, key_space_ptr> spaces;
+        {
+            std::unique_lock l(ksp().lock);
+            spaces = ksp().spaces;
+        }
+        for (auto &ks : spaces) {
+            auto shards = ks.second->get_shards();
+            for (auto &shard_ : shards) {
                 cb(shard_);
             }
         }
     }
 
     void all_spaces(const std::function<void(const std::string& name, const barch::key_space_ptr&)>& cb ) {
-        std::unique_lock l(ksp().lock);
-        for (auto &ks : ksp().spaces) {
+        heap::map<std::string, key_space_ptr> spaces;
+        {
+            std::unique_lock l(ksp().lock);
+            spaces = ksp().spaces;
+        }
+        for (auto ks : spaces) {
             auto un = undecorate(ks.first);
             if (un.empty()) un = "(default)";
             cb(un, ks.second);

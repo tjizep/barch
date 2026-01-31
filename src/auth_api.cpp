@@ -32,7 +32,7 @@ static void init_auth(barch::shard_ptr auth) {
         cats.emplace("data",true);
         cats.emplace("all",true);
         {
-            write_lock write(auth->get_latch());
+            unique_latch write(auth->get_latch());
             add_cats(auth,"default","empty",cats);
         }
         auth->save(false);
@@ -159,7 +159,7 @@ extern "C"
             return 0;
         }
         if (spec.del) {
-            write_lock write(a->get_latch());
+            unique_latch write(a->get_latch());
             std::string key = user_cats(spec.user);
             barch::iterator cat_data(a,key);
             heap::vector<art::value_type> to_del;
@@ -191,7 +191,7 @@ extern "C"
 
         spec.cat.emplace("data",true); // always add the data right
         spec.cat.emplace("auth",true); // always add the data right
-        write_lock write(a->get_latch());
+        unique_latch write(a->get_latch());
         add_cats(a,spec.user,spec.secret,spec.cat);
         return call.push_simple("OK");
     }

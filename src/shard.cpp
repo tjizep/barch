@@ -77,6 +77,9 @@ art_statistics barch::get_statistics() {
     as.pages_defragged = (int64_t) statistics::pages_defragged;
     as.vmm_pages_defragged = (int64_t) statistics::vmm_pages_defragged;
     as.vmm_pages_popped = (int64_t) statistics::vmm_pages_popped;
+    as.read_locks_active = (int64_t) statistics::read_locks_active;
+    as.write_locks_active = (int64_t) statistics::write_locks_active;
+
     as.exceptions_raised = (int64_t) statistics::exceptions_raised;
     as.maintenance_cycles = (int64_t) statistics::maintenance_cycles;
     as.shards = (int64_t) statistics::shards;
@@ -359,11 +362,11 @@ bool barch::shard::_save(bool stats) const {
 bool barch::shard::save(bool stats) {
     //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     bool success = false;
-
+    std::unique_lock guard(save_load_mutex);
     saving = true;
     auto st = std::chrono::high_resolution_clock::now();
     {
-        read_lock release(this->shared_from_this()); // only lock during partial copy
+        shared_latch release(this->latch); // only lock during partial copy
         success = _save(stats);
     }
     auto current = std::chrono::high_resolution_clock::now();
@@ -373,6 +376,9 @@ bool barch::shard::save(bool stats) {
         std_log("saved barch db:", this->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
             "seconds");
     saving = false;
+
+    start_save_time = std::chrono::high_resolution_clock::now();
+    mods = get_modifications();
     return success;
 }
 bool barch::shard::send(std::ostream& unused(out)) {
@@ -429,7 +435,7 @@ bool barch::shard::send(std::ostream& unused(out)) {
 }
 bool barch::shard::reload() {
     try {
-        write_lock release(this->latch);
+        unique_latch release(this->latch);
         _save(true);
         _clear();
         _load(true);
@@ -492,7 +498,7 @@ bool barch::shard::load(bool) {
     //
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     try {
-        write_lock release(this->latch);
+        unique_latch release(this->latch);
         _load(true);
     }catch (std::exception &e) {
         std_log("could not load",e.what());
@@ -1175,7 +1181,7 @@ void barch::shard::run_defrag() {
     auto &lc = get_leaves();
 
     {
-        write_lock releaser(this->latch);
+        unique_latch releaser(this->latch);
         this->shrink();
     }
 
@@ -1186,12 +1192,12 @@ void barch::shard::run_defrag() {
         {
             heap::vector<size_t> fl;
             {
-                write_lock releaser(this->latch);
+                unique_latch releaser(this->latch);
                 fl = lc.create_fragmentation_list(get_max_defrag_page_count());
             }
 
             for (auto p: fl) {
-                write_lock releaser(this->latch);
+                unique_latch releaser(this->latch);
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) return; // try later
                 auto page = lc.get_page_buffer(p);
@@ -1238,7 +1244,7 @@ void abstract_eviction(barch::shard *t,
 
 void abstract_lru_eviction(barch::shard *t, const std::function<bool(const barch::leaf *l)> &predicate) {
     if (statistics::logical_allocated < calc_mem_threshold()) return;
-    write_lock release(t->latch);
+    unique_latch release(t->latch);
     auto &lc = t->get_leaves();
     abstract_eviction(t, predicate, [&lc]() { return lc.get_lru_page(); });
 }
@@ -1352,7 +1358,7 @@ void barch::shard::maintenance() {
             run_defrag(); // periodic
         }
         if (saf_keys_found) {
-            write_lock l(this->latch);
+            unique_latch l(this->latch);
             statistics::keys_found += saf_keys_found;
             saf_keys_found = 0;
             statistics::get_ops += saf_get_ops;
@@ -1362,12 +1368,12 @@ void barch::shard::maintenance() {
         if (millis(currtime, start_save_time) > get_save_interval()
             || get_modifications() - mods > get_max_modifications_before_save()
         ) {
-            //if (get_modifications() - mods > 0) {
-            this->save(with_stats);
+            if (get_modifications() - mods > 0) {
 
-            start_save_time = std::chrono::high_resolution_clock::now();
-            mods = get_modifications();
-            //}
+                std_log("saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time));
+                this->save(with_stats);
+
+            }
         }
     }catch (std::exception& e) {
         barch::std_err(e.what());

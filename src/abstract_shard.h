@@ -234,22 +234,27 @@ struct storage_release {
         // TODO: this may cause deadlock
         while (s) {
             s->lock_shared();
+            ++statistics::read_locks_active;
             s = s->sources();
         }
 
         t->lock_unique(); // this can throw
         is_locked = true;
+        ++statistics::write_locks_active;
 
     }
     ~storage_release() {
         if (!t) return;
         if (!lock) return;
-        if (is_locked)
+        if (is_locked) {
             t->unlock_unique();
+            --statistics::write_locks_active;
+        }
         // TODO: this may cause deadlock we've got to at least test
         auto s = sources_locked;
         while (s) {
             s->unlock_shared();
+            --statistics::read_locks_active;
             s = s->sources();
         }
     }
@@ -288,20 +293,23 @@ struct read_lock {
         // TODO: this may cause deadlock
         while (s) {
             s->lock_shared();
+            ++statistics::read_locks_active;
             s = s->sources();
         }
         t->lock_shared();
+        ++statistics::read_locks_active;
     }
 
     ~read_lock() {
         if (!t) return;
         if (!lock) return;
         t->unlock_shared();
-
+        --statistics::read_locks_active;
         // TODO: this may cause deadlock we've got to at least test
         auto s = sources_locked;
         while (s) {
             s->unlock_shared();
+            --statistics::read_locks_active;
             s = s->sources();
         }
     }

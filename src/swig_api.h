@@ -84,6 +84,8 @@ struct statistics_values {
     long long pages_defragged {};
     long long vmm_pages_defragged {};
     long long vmm_pages_popped {};
+    long long read_locks_active {};
+    long long write_locks_active {};
     long long exceptions_raised {};
     long long maintenance_cycles {};
     long long shards {};

@@ -9,14 +9,9 @@
 #include "../keyspec.h"
 #include "../value_type.h"
 #include "../rpc/server.h"
-typedef std::unique_lock<heap::shared_mutex> write_lock;
-extern std::shared_mutex &get_lock();
+#include "counted_locks.h"
 
-/**
- * context management
- */
-//typedef std::unique_lock<std::shared_mutex> storage_release;
-//typedef std::shared_lock<std::shared_mutex> read_release;
+extern std::shared_mutex &get_lock();
 
 /**
  * global statistics
@@ -44,6 +39,9 @@ struct art_statistics {
     int64_t pages_defragged {};
     int64_t vmm_pages_defragged {};
     int64_t vmm_pages_popped {};
+    int64_t read_locks_active{};
+    int64_t write_locks_active{};
+
     int64_t exceptions_raised {};
     int64_t maintenance_cycles {};
     int64_t shards {};

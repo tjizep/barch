@@ -65,6 +65,12 @@ namespace statistics {
     extern std::atomic<uint64_t> queue_processed;
 
     /**
+     *Lock stats
+     */
+    extern std::atomic<uint64_t> read_locks_active;
+    extern std::atomic<uint64_t> write_locks_active;
+
+    /**
      * replication + network stats
      */
     namespace repl {

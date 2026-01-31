@@ -129,7 +129,9 @@ for batch in reader:
             if not overflow:
                 overflow = 0
                 overflows.set(f"{street}","0")
+
             streetkey = f"{street} {overflow}"
+
             if not streets.append(streetkey, f",{counter}"):
                 print(f"Street overflow {street} overflow before:{overflow} at {counter}")
                 overflow = overflows.incr(f"{street}", 1).s()
@@ -142,7 +144,7 @@ for batch in reader:
             # provinces.incr(f"{prov}",1) # province index
             # cities.incr(f"{row.city}",1) # city index
             cnt.incr("records", 1)
-            if int(cnt.get("records")) % 2000000 == 0:
+            if int(cnt.get("records")) % 4000000 == 0:
                 print(json_val)
                 print("saving...")
                 barch.saveAll()

@@ -65,7 +65,8 @@ Checkout and build on (currently linux only) with gcc 10 or above...
       sudo apt install maven
       ```
 4. OPTIONAL: install openresty for barchlua (luajit) - 
-   Follow instructions for openresty at https://openresty.org/en/linux-packages.html#ubuntu 
+
+    - Follow instructions for openresty at https://openresty.org/en/linux-packages.html#ubuntu 
     - after building barch for lua should be located in the /var/lib/lua/5.1/barch.so
     - To install:
       ```
@@ -77,16 +78,15 @@ Checkout and build on (currently linux only) with gcc 10 or above...
 
 6. FINALLY: 
    - Build with cmake (barchj and lbarch will be built if the environments from above is detected)
-         
-   - 
+
       ```
       cmake -B build -DTEST_OD=ON
       cmake --build build --target barch --parallel 
       cmake --build build --target lbarch --parallel
       ```
      
-      Test: `ctest`
-      start `valkey-server valkey.conf --loadmodule {src code location}/build/_barch.so`
+   - Test: `ctest`
+   - start `valkey-server valkey.conf --loadmodule {src code location}/build/_barch.so`
 
    - install barch for lua
      (In build directory) 

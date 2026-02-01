@@ -1,4 +1,4 @@
-# Release v0.5.1b 2026-02-01
+# Release v0.5.2b 2026-02-01
 
 ## New Features
 
@@ -16,9 +16,9 @@
 2. compression flag was not always stored which may lead to data errors (v0.5.1b 2026-01-30)
 3. compression flag was cleared by defrag (v0.5.1b 2026-01-30)
 4. use venv for python install and tests (v0.5.1b 2026-02-01)
-5. improve build instructions for `README.md` file (v0.5.1b 2026-02-01)
-6. improve build messages to confirm what has been built (v0.5.1b 2026-02-01)
-7. fix dates in `RELEASES.md` (v0.5.1b 2026-02-01)
+5. improve build instructions for `README.md` file (v0.5.2b 2026-02-01)
+6. improve build messages to confirm what has been built (v0.5.2b 2026-02-01)
+7. fix dates in `RELEASES.md` (v0.5.2b 2026-02-01)
 
 # Release v0.5.0b 2026-01-28
 

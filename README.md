@@ -25,6 +25,7 @@ An embedded server can also be quickly synchronized with a standalone server usi
 ### [Some Benchmarks](https://tjizep.github.io/barch/BENCHMARKS)
 
 # Features
+
 1. Ordered: minimum, lower-bound and maximum operations are constant time
 2. Low memory footprint: Half that of standard hash map while providing similar single threaded latency 
    - Also see [Compression](https://tjizep.github.io/barch/COMPRESSION)
@@ -32,6 +33,7 @@ An embedded server can also be quickly synchronized with a standalone server usi
 4. Scalability: All reads are concurrent and scales linearly with core count
 
 # Use Cases
+
 1. [Fast Ranged Queries, Prefix Queries and Aggregates](https://tjizep.github.io/barch/USECASE)
 2. Prefix-cache for fast loading of hints  
 3. Z-Order/Morton code range queries for quick spatial bounds checking
@@ -76,20 +78,21 @@ Checkout and build on (currently linux only) with gcc 10 or above...
 6. FINALLY: 
    - Build with cmake (barchj and lbarch will be built if the environments from above is detected)
          
-- 
-   ```
-   cmake -B build -DTEST_OD=ON
-   cmake --build build --target barch --parallel 
-   cmake --build build --target lbarch --parallel
-   ```
+   - 
+      ```
+      cmake -B build -DTEST_OD=ON
+      cmake --build build --target barch --parallel 
+      cmake --build build --target lbarch --parallel
+      ```
      
-   Test: `ctest`
-   start `valkey-server valkey.conf --loadmodule {src code location}/build/_barch.so`
+      Test: `ctest`
+      start `valkey-server valkey.conf --loadmodule {src code location}/build/_barch.so`
 
-  - install barch for lua
-    ```
-     sudo cmake --install . --component barchlua 
-    ```
+   - install barch for lua
+     (In build directory) 
+     ```
+      sudo cmake --install . --component barchlua 
+     ```
 Or alternatively [Via Docker image](https://tjizep.github.io/barch/DOCKER)
 
 # Docs

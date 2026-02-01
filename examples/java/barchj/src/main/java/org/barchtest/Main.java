@@ -51,7 +51,8 @@ public class Main {
         }
         System.out.println("append ok");
     }
-    static void main() throws InterruptedException, IOException {
+
+    public static void main(String[] args) throws InterruptedException, IOException {
         final int ordered = 0;
         final int threads = 1;
         final int unordered_shards = 32;

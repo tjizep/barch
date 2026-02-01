@@ -8,14 +8,14 @@
 4. display better connection info (v0.5.1b 2026-01-30)
 5. add `LENGTH` function `LENGTH a` will return the length in bytes of the value of key `a` or `(nil)` if it does not exist(v0.5.1b 2026-01-30)
 6. improve saving logic and add active lock statistics (v0.5.1b 2026-01-31)
-7. reads dont block while saving (v0.5.1b 2026-01-31)
+7. reads don't block while saving anymore (v0.5.1b 2026-01-31)
 
 ## Fixes
 
 1. compression on pre/ap-pend never actually compressed (for better or worse) (v0.5.1b 2026-01-30)
 2. compression flag was not always stored which may lead to data errors (v0.5.1b 2026-01-30)
 3. compression flag was cleared by defrag (v0.5.1b 2026-01-30)
-4. add `--break-system-packages` to python install tests (v0.5.1b 2026-02-01)
+4. use venv for python install and tests (v0.5.1b 2026-02-01)
 5. improve build instructions for `README.md` file (v0.5.1b 2026-02-01)
 6. improve build messages to confirm what has been built (v0.5.1b 2026-02-01)
 7. fix dates in `RELEASES.md` (v0.5.1b 2026-02-01)

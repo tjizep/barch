@@ -97,7 +97,7 @@ endif ()
 # include boost for all targets
 #include_directories(${Boost_INCLUDE_DIRS})
 
-set(PYTHON3_EXEC /usr/bin/python3)
+set(PYTHON3_EXEC venv/bin/python3)
 
 set(TEST_BUILD_DIR build)
 
@@ -487,12 +487,20 @@ else()
     if (PYBARCH_TEST)
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
 
+        add_test(NAME TestInstallVENV
+                COMMAND "python3" -m venv ./venv
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestInstallRedisPy
-                COMMAND "pip3" install redis --break-system-packages
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+                COMMAND "venv/bin/pip" install redis
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestInstallRequestsPy
+                COMMAND "venv/bin/pip" install requests
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchInstallPy
-                COMMAND "pip3" install . --break-system-packages
+                COMMAND "venv/bin/pip" install .
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPy
@@ -516,7 +524,7 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchList
-                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listtest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                COMMAND ${CMAKE_BINARY_DIR}/${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listtest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
                 WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestBarchRPC
@@ -524,7 +532,7 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchSimpleClusterRPC
-                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/routetest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                COMMAND ${CMAKE_BINARY_DIR}/${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/routetest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
                 WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestRespClientLocal

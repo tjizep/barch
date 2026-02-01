@@ -1,26 +1,30 @@
-# Release v0.5.1b 2025-01-31
+# Release v0.5.1b 2026-02-01
 
 ## New Features
 
-1. reduce internal write latency by 10% (v0.5.1b 2025-01-28)
-2. make app/pre-pend work like redis (v0.5.1b 2025-01-28)
-3. let errors map to 0 for integers in swig interfaces, like bools (v0.5.1b 2025-01-28)
-4. display better connection info (v0.5.1b 2025-01-30)
-5. add `LENGTH` function `LENGTH a` will return the length in bytes of the value of key `a` or `(nil)` if it does not exist(v0.5.1b 2025-01-30)
-6. improve saving logic and add active lock statistics (v0.5.1b 2025-01-31)
-7. reads dont block while saving (v0.5.1b 2025-01-31)
+1. reduce internal write latency by 10% (v0.5.1b 2026-01-28)
+2. make app/pre-pend work like redis (v0.5.1b 2026-01-28)
+3. let errors map to 0 for integers in swig interfaces, like bools (v0.5.1b 2026-01-28)
+4. display better connection info (v0.5.1b 2026-01-30)
+5. add `LENGTH` function `LENGTH a` will return the length in bytes of the value of key `a` or `(nil)` if it does not exist(v0.5.1b 2026-01-30)
+6. improve saving logic and add active lock statistics (v0.5.1b 2026-01-31)
+7. reads dont block while saving (v0.5.1b 2026-01-31)
 
 ## Fixes
 
-1. compression on pre/ap-pend never actually compressed (for better or worse) (v0.5.1b 2025-01-30)
-2. compression flag was not always stored which may lead to data errors (v0.5.1b 2025-01-30)
-3. compression flag was cleared by defrag (v0.5.1b 2025-01-30)
+1. compression on pre/ap-pend never actually compressed (for better or worse) (v0.5.1b 2026-01-30)
+2. compression flag was not always stored which may lead to data errors (v0.5.1b 2026-01-30)
+3. compression flag was cleared by defrag (v0.5.1b 2026-01-30)
+4. add `--break-system-packages` to python install tests (v0.5.1b 2026-02-01)
+5. improve build instructions for `README.md` file (v0.5.1b 2026-02-01)
+6. improve build messages to confirm what has been built (v0.5.1b 2026-02-01)
+7. fix dates in `RELEASES.md` (v0.5.1b 2026-02-01)
 
-# Release v0.5.0b 2025-01-28
+# Release v0.5.0b 2026-01-28
 
 ## New Features
-1. improve conversions (v0.4.3.3b 2025-01-05)
-2. add per key space configuration in the `configuration` key space (v0.4.3.3b 2025-01-06)
+1. improve conversions (v0.4.3.3b 2026-01-05)
+2. add per key space configuration in the `configuration` key space (v0.4.3.3b 2026-01-06)
    currently only `shards` or shard count is configurable
    ```redis
       SELECT configuration
@@ -30,61 +34,61 @@
       SELECT configuration
       GET mys.shards
    ```
-3. add python/hints example (v0.4.3.3b 2025-01-06)
-4. add multi key operations (v0.4.3.3b 2025-01-08)
+3. add python/hints example (v0.4.3.3b 2026-01-06)
+4. add multi key operations (v0.4.3.3b 2026-01-08)
    `SET "123 abc"` will create a key composed of a number and a string
    `SET "word 12"` can for instance be used to store a text index entry uniquely
-5. add `ordered` to per space configuration (v0.4.3.3b 2025-01-10)
-6. improve allocation (v0.4.3.3b 2025-01-10)
-7. add large geo coding example (v0.4.3.3b 2025-01-12)
-8. add standalone RESP server in python example - with messages passed using lbpop (v0.4.3.3b 2025-01-12)
-9. rework replication (v0.4.3.3b 2025-01-13)
-10. performance improvements (v0.4.3.3b 2025-01-14)
-11. example improvements (v0.4.3.3b 2025-01-14)
-12. add local socket support, just start with unix socket (i.e. `/tmp/barch') on port 0 (v0.4.3.3b 2025-01-17)
-13. add luajit build support interfaces are suitable of for openresty and nginx (v0.4.3.3b 2025-01-17)
-14. add java build and tests (v0.4.3.3b 2025-01-18)
-15. multi thread buffer opt using KeyValue::put (v0.4.3.3b 2025-01-18) 
-16. improve java example (v0.5.0b 2025-01-21)
-17. improve memory defragmentation (v0.5.0b 2025-01-24)
-18. 2x improve memory defragmentation (v0.5.0b 2025-01-26)
-19. improve load speed and memory use  (v0.5.0b 2025-01-27)
-20. add firstKey (min) and lastKey (max) functions  (v0.5.0b 2025-01-27)
-21. improve java example to show various performance parameters and their impact (v0.5.0b 2025-01-28)
+5. add `ordered` to per space configuration (v0.4.3.3b 2026-01-10)
+6. improve allocation (v0.4.3.3b 2026-01-10)
+7. add large geo coding example (v0.4.3.3b 2026-01-12)
+8. add standalone RESP server in python example - with messages passed using lbpop (v0.4.3.3b 2026-01-12)
+9. rework replication (v0.4.3.3b 2026-01-13)
+10. performance improvements (v0.4.3.3b 2026-01-14)
+11. example improvements (v0.4.3.3b 2026-01-14)
+12. add local socket support, just start with unix socket (i.e. `/tmp/barch') on port 0 (v0.4.3.3b 2026-01-17)
+13. add luajit build support interfaces are suitable of for openresty and nginx (v0.4.3.3b 2026-01-17)
+14. add java build and tests (v0.4.3.3b 2026-01-18)
+15. multi thread buffer opt using KeyValue::put (v0.4.3.3b 2026-01-18) 
+16. improve java example (v0.5.0b 2026-01-21)
+17. improve memory defragmentation (v0.5.0b 2026-01-24)
+18. 2x improve memory defragmentation (v0.5.0b 2026-01-26)
+19. improve load speed and memory use  (v0.5.0b 2026-01-27)
+20. add firstKey (min) and lastKey (max) functions  (v0.5.0b 2026-01-27)
+21. improve java example to show various performance parameters and their impact (v0.5.0b 2026-01-28)
 
 ## Fixes
-1. fix conversions (v0.4.3.3b 2025-01-05)
-2. fix bloom filter bug when dependency is active (v0.4.3.3b 2025-01-06)
-3. fix conversion bugs (v0.4.3.3b 2025-01-09)
-4. fix multi key operations (v0.4.3.3b 2025-01-10)
-5. fix string trimming (v0.4.3.3b 2025-01-10)
-6. fix string decoding (v0.4.3.3b 2025-01-12)
-7. fix `APPEND` and `PREPEND` functions (v0.4.3.3b 2025-01-12)
-8. fix `INCR` and `INCRBY` edge cases, incl rollover/under (v0.4.3.3b 2025-01-13)
-9. fix ordered flag (v0.4.3.3b 2025-01-19)
-10. fix ordered flag (v0.4.3.3b 2025-01-19)
-11. fix 0 after key (usually not a problem unless memory init is switched off) (v0.5.0b 2025-01-21)
-12. fix race condition leading to double free (v0.5.0b 2025-01-25)
-13. fix save when hash table is used (v0.5.0b 2025-01-26)
-14. fix write lock timeouts to be less dangerous (v0.5.0b 2025-01-27)
-15. fix error translation (v0.5.0b 2025-01-27)
+1. fix conversions (v0.4.3.3b 2026-01-05)
+2. fix bloom filter bug when dependency is active (v0.4.3.3b 2026-01-06)
+3. fix conversion bugs (v0.4.3.3b 2026-01-09)
+4. fix multi key operations (v0.4.3.3b 2026-01-10)
+5. fix string trimming (v0.4.3.3b 2026-01-10)
+6. fix string decoding (v0.4.3.3b 2026-01-12)
+7. fix `APPEND` and `PREPEND` functions (v0.4.3.3b 2026-01-12)
+8. fix `INCR` and `INCRBY` edge cases, incl rollover/under (v0.4.3.3b 2026-01-13)
+9. fix ordered flag (v0.4.3.3b 2026-01-19)
+10. fix ordered flag (v0.4.3.3b 2026-01-19)
+11. fix 0 after key (usually not a problem unless memory init is switched off) (v0.5.0b 2026-01-21)
+12. fix race condition leading to double free (v0.5.0b 2026-01-25)
+13. fix save when hash table is used (v0.5.0b 2026-01-26)
+14. fix write lock timeouts to be less dangerous (v0.5.0b 2026-01-27)
+15. fix error translation (v0.5.0b 2026-01-27)
 
-# Release v0.4.3.2b 2025-01-05
+# Release v0.4.3.2b 2026-01-05
 
 ## New Features
-1. make replication shard count agnostic (v0.4.3.0b 2025-12-28)
-2. add debug replication mode (v0.4.3.0b 2025-12-28)
-3. Improve parser speed on micro-benchmarks (v0.4.3.2b 2025-01-02)
-4. calculate default max memory to be 3/4 of physical memory (Release v0.4.3.2b 2025-01-05)
+1. make replication shard count agnostic (v0.4.3.0b 2026-12-28)
+2. add debug replication mode (v0.4.3.0b 2026-12-28)
+3. Improve parser speed on micro-benchmarks (v0.4.3.2b 2026-01-02)
+4. calculate default max memory to be 3/4 of physical memory (Release v0.4.3.2b 2026-01-05)
 
 ## Fixes
-1. fix string push along with `CLIENT INFO` (v0.4.3.0b 2025-12-29)
-2. hash test did not test hash (v0.4.3.0b 2025-12-29)
-3. remove unused code (v0.4.3.1b 2025-12-30)
-4. fix incr/decr for doubles (v0.4.3.1b 2025-12-30)
-5. fix memcpy/buffer overflow bug (v0.4.3.2b 2025-12-31)
+1. fix string push along with `CLIENT INFO` (v0.4.3.0b 2026-12-29)
+2. hash test did not test hash (v0.4.3.0b 2026-12-29)
+3. remove unused code (v0.4.3.1b 2026-12-30)
+4. fix incr/decr for doubles (v0.4.3.1b 2026-12-30)
+5. fix memcpy/buffer overflow bug (v0.4.3.2b 2026-12-31)
 
-# Release v0.4.2.6b 2025-12-23
+# Release v0.4.2.6b 2026-12-23
 
 ## New Features
 1. Autodetect the appropriate shard count for the current platform

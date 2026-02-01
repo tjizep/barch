@@ -39,17 +39,58 @@ An embedded server can also be quickly synchronized with a standalone server usi
 5. Many small key value pairs in small footprint with minimal overhead
 6. Constant time access priority queue
 
-# Installation
+# Installation and Running
 
-1. Checkout and build on (linux only) with gcc 10 or above
+Note: BARCH builds to multiple shared libraries for different environments.
+
+Checkout and build on (currently linux only) with gcc 10 or above...
+
+1. Install python development tools
+      ```
+      sudo apt update && sudo apt upgrade -y
+      sudo apt install -y build-essential make curl ca-certificates libssl-dev libffi-dev
+      sudo apt install -y python3-pip python3-venv python3-full
+      sudo apt install cmake
+      ```
+2. REQUIRED: install swig (to generate luajit, python and java bindings)
+      ```
+      sudo apt install swig
+      ```
+3. OPTIONAL: install jdk and maven - for barchjni, barchj and running java examples.
+   Examples for java are located in examples/java/barchj.
+      ```
+      sudo apt install default-jdk
+      sudo apt install maven
+      ```
+4. OPTIONAL: install openresty for barchlua (luajit) - 
+   Follow instructions for openresty at https://openresty.org/en/linux-packages.html#ubuntu 
+    - after building barch for lua should be located in the /var/lib/lua/5.1/barch.so
+    - To install:
+      ```
+      sudo cmake --install . --component barchlua
+      ```
+5. NOTES:
+   - The build will download valkey sources and build lbarch which is the barch valkey runtime for the `B.*` api's.
+   - Barch can run without valkey as a python library in which case you can connect to the barch resp port of your choice using redis-cli or valkey-cli. See the examples/flask/server.py for more information on how to do this.
+
+6. FINALLY: 
+   - Build with cmake (barchj and lbarch will be built if the environments from above is detected)
+         
+- 
    ```
-   cmake -B build -DTEST_OD=ON` -  add `-DCMAKE_BUILD_TYPE=Debug  #for debug modes
-   cmake --build build --target barch --parallel #builds `_barch.so  #with python dependencies
-   cmake --build build --target lbarch --parallel #builds `liblbarch.so #without python dependencies
+   cmake -B build -DTEST_OD=ON
+   cmake --build build --target barch --parallel 
+   cmake --build build --target lbarch --parallel
    ```
+     
    Test: `ctest`
-   start `valkey-server valkey.conf --loadmodule {[src code]/build/_barch.so}`
-2. [Via Docker image](https://tjizep.github.io/barch/DOCKER)
+   start `valkey-server valkey.conf --loadmodule {src code location}/build/_barch.so`
+
+  - install barch for lua
+    ```
+     sudo cmake --install . --component barchlua 
+    ```
+Or alternatively [Via Docker image](https://tjizep.github.io/barch/DOCKER)
 
 # Docs
 1. [Documentation for API's](https://tjizep.github.io/barch/APIS)

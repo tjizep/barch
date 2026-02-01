@@ -257,7 +257,8 @@ if (ADD_SWIG)
         find_package(LuaJIT)
         # for luajit, lua and openresty
         if (${LuaJIT_FOUND})
-            message("Found LuaJIT generating a binding")
+            message("Found LuaJIT - generating a binding")
+            message("LuaJIT barchlua - will be installed to ${CMAKE_INSTALL_PREFIX}/lib/lua/5.1")
             include_directories(${LUAJIT_INCLUDE_DIR})
             swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${SOURCES})
             target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
@@ -285,7 +286,7 @@ if (ADD_SWIG)
         include(UseJava)
         set_property(SOURCE src/barch.i PROPERTY CPLUSPLUS ON)
         if (${JNI_FOUND})
-
+            message("Found Java - generating a binding")
             message("Java includes:${JNI_INCLUDE_DIRS}")
             message("Java libraries:${JNI_LIBRARIES} '${Java_LIBRARIES}'")
             include_directories(${JNI_INCLUDE_DIRS})
@@ -334,6 +335,7 @@ if (ADD_SWIG)
         message("Java JNI off")
     endif ()
     if (${Python3_FOUND})
+        message("Found Python - generating a binding")
         message("Python includes:${Python3_INCLUDE_DIRS}")
         message("Python libraries:${Python3_LIBRARIES} '${PYTHON_LIBRARIES}'")
 
@@ -486,11 +488,11 @@ else()
         message("Python test: WORKING_DIRECTORY ${CMAKE_BINARY_DIR}")
 
         add_test(NAME TestInstallRedisPy
-                COMMAND "pip3" install redis
+                COMMAND "pip3" install redis --break-system-packages
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
         add_test(NAME TestBarchInstallPy
-                COMMAND "pip3" install .
+                COMMAND "pip3" install . --break-system-packages
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchPy

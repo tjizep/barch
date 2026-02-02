@@ -137,6 +137,6 @@ int glob::stringmatchlen_impl(const char *pattern,
 
 int glob::stringmatchlen(art::value_type pattern, art::value_type string, int nocase) {
     int skipLongerMatches = 0;
-    return stringmatchlen_impl(pattern.chars(), pattern.size, string.chars(), string.length(), nocase,
+    return stringmatchlen_impl(pattern.chars(), pattern.size, string.chars(), string.size, nocase,
                                &skipLongerMatches, 0);
 }

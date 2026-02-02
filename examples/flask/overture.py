@@ -1,3 +1,7 @@
+# requirements
+# pip install overturemaps
+# pip install h3
+# pip install geopandas
 import overturemaps
 from overturemaps import core
 import json

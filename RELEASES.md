@@ -1,8 +1,9 @@
-# Release v0.5.3b 2026-02-01
+# Release v0.5.3b 2026-02-02
 
 ## New Features
 
 1. `EXISTS` function also uses static bloom filter when available (v0.5.3b 2026-02-01)
+2. `KEYS` command work with rendered composites and numerical keys as well (v0.5.3b 2026-02-02)
 
 # Release v0.5.2b 2026-02-01
 

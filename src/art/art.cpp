@@ -1590,6 +1590,7 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                 auto i = page.begin();
                 auto e = i + size;
                 uint64_t misses = 0;
+                std::string tmp;
                 while (i != e) {
                     const leaf *l = (const leaf *) i;
                     if (l->key_len() > size) {
@@ -1600,10 +1601,6 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                             return false;
                         }
 
-                        if (!value && tstring != *l->key()) // glob on string keys only
-                        {
-                            return true;
-                        }
                         value_type td;
                         if (value) {
                             td = l->get_value();
@@ -1611,7 +1608,14 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                                 td = dictionary::decompress(td);
                             }
                         }else {
-                            td = l->get_clean_key();
+
+                            if (tstring == *l->key())
+                            {
+                                td = l->get_clean_key();
+                            }else {
+                                tmp = encoded_key_as_string(l->get_key());
+                                td = tmp;
+                            }
                         }
                         if (1 == glob::stringmatchlen(pattern, td, 0)) {
                             if (!cb(*l)) {

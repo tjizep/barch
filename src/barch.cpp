@@ -569,7 +569,7 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
 #endif
 
         if (converted.get_value().size + v.size > maximum_allocation_size) {
-            return call.push_error("Maximum allocation size exceeded");
+            return call.push_int(0);
         }
 
         t->opt_insert( opts, converted.get_value(), v, true, fc);
@@ -825,10 +825,15 @@ int EXISTS(caller& call, const arg_t& argv) {
             return call.key_check_error(k);
         auto converted = conversion::as_composite(k);
         auto t = call.kspace()->get(converted.get_value());
-        read_lock release(t);
-        art::node_ptr r = t->search(converted.get_value());
-        if (r.null()) {
+        auto src = t->sources();
+        if (!src && t->has_static_bloom_filter() && !t->is_bloom(converted.get_value())) {
             return call.push_bool(false);
+        } else {
+            read_lock release(t);
+            art::node_ptr r = t->search(converted.get_value());
+            if (r.null()) {
+                return call.push_bool(false);
+            }
         }
     }
     return call.push_bool(true);

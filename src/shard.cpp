@@ -647,19 +647,7 @@ bool barch::shard::insert(value_type key, value_type value, bool update, const N
     return this->opt_insert({}, key, value, update, fc);
 }
 bool barch::shard::insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
-    if (statistics::logical_allocated > get_max_module_memory()) {
-        // do not add data if memory limit is reached
-        ++statistics::oom_avoided_inserts;
-        return false;
-    }
-    value_type key = filter_key(unfiltered_key);
-    auto before = this->get_size();
-    if (opt_ordered_keys) {
-        tree_insert(options, key, value, update, fc);
-    }else {
-        hash_insert(options, key, value, update, fc);
-    }
-    return this->get_size() > before;
+    return opt_rpc_insert(options, unfiltered_key, value, update, fc);
 }
 bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
     ++inserts;
@@ -749,6 +737,12 @@ bool barch::shard::insert(value_type key, value_type value, bool update) {
     return this->opt_insert({},key, value, update, [](const node_ptr &) {}) ;
 }
 bool barch::shard::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
+    if (statistics::logical_allocated > get_max_module_memory()) {
+        // do not add data if memory limit is reached
+        ++statistics::oom_avoided_inserts;
+        throw_exception<std::runtime_error>("could not update key because of low memory");
+        return false;
+    }
     auto key = filter_key(unfiltered_key);
     auto repl_updateresult = [&](const node_ptr &leaf) {
         auto value = updater(leaf);

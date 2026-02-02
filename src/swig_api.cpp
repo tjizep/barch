@@ -287,20 +287,20 @@ Value KeyValue::seti(long long key, long long value) {
     std::unique_lock l(lock);
     params = {"SET", Value{key}.s(), Value{value}.s()};
     barch::repl::call(params);
-    return sc.callv(params, SET) == "OK";
+    return sc.callv(params, SET);
 }
 
 Value KeyValue::set(const std::string &key, long long value) {
     std::unique_lock l(lock);
     params = {"SET", key, Variable{value}.s()};
     barch::repl::call(params);
-    return sc.callv(params, SET)=="OK";
+    return sc.callv(params, SET);
 }
 Value KeyValue::set(const std::string &key, double value) {
     std::unique_lock l(lock);
     params = {"SET", key, Variable{value}.s()};
     barch::repl::call(params);
-    return sc.callv(params, SET) == "OK";
+    return sc.callv(params, SET);
 }
 std::string KeyValue::get(const std::string &key) const {
     std::unique_lock l(lock);
@@ -330,7 +330,7 @@ long long KeyValue::append(const std::string& key, const std::string& value) {
     std::unique_lock l(lock);
     params = {"APPEND", key, value};
     barch::repl::call(params);
-    return sc.callv(params, ::APPEND).i();
+    return sc.callv(params, ::APPEND).i();// errors convert to 0
 }
 
 long long KeyValue::prepend(const std::string& key, const std::string& value) {

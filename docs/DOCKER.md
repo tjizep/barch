@@ -3,7 +3,7 @@
 Run below to expose an example flask application to see the API's in action
 ```
 sudo docker ps -a -q | sudo xargs docker stop 
-sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.4.2.6b
+sudo docker run --ulimit memlock=-1 --network=host teejip/barch:v0.5.2b
 
 ```
 binaries are located under `/home/barch/setup` within the docker image

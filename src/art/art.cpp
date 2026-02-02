@@ -1524,7 +1524,7 @@ int art_iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *d
 #endif
 art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
     if (key.size > maximum_allocation_size) {
-        throw_exception<std::runtime_error>("value too large");
+        throw_exception<std::runtime_error>("key too large");
     }
     if (key.size <= 1) {
         throw_exception<std::runtime_error>("key too short");

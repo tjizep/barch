@@ -36,7 +36,6 @@ int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {
 
     if (klen == 0)
         return ValkeyModule_ReplyWithError(ctx, "No empty keys");
-
     //if (strnlen(k, klen) < klen) {
     //    return ValkeyModule_ReplyWithError(ctx, "No keys with embedded nulls");
     //}

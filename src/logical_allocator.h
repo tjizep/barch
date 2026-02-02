@@ -419,6 +419,7 @@ struct logical_allocator {
     logical_allocator(abstract_leaf_pair* ap,std::string name): ap(ap), main(std::move(name)), emancipated(ap) {}
 
     logical_allocator(const logical_allocator &) = delete;
+    logical_allocator &operator=(const logical_allocator &t) = delete;
 
     ~logical_allocator() = default;
 
@@ -446,7 +447,6 @@ private:
     address_set erased{}; // for runtime use after free tests
     size_t last_created_page{};
     uint8_t *last_page_ptr{};
-    logical_allocator &operator=(const logical_allocator &t) = delete;
 
     // arena virtualization start
     storage &retrieve_page(size_t page, bool modify = false) {
@@ -970,7 +970,7 @@ public:
 
         return save_extra(main, filename, extra1);
     }
-    bool delete_files(const std::string &filename) {
+    bool delete_files(const std::string &filename) const {
         std::string fname = main.name+filename;
         return std::remove(fname.c_str())==0;
     }
@@ -994,7 +994,7 @@ public:
         writep(of, (uint32_t)0);
         writep(of, written);
         if (skipped)
-            barch::std_log("skipped duplicate entries",skipped);
+            barch::std_err("skipped duplicate entries",skipped);
     }
     void read_emancipated(std::istream& in) {
         size_t page;
@@ -1002,7 +1002,7 @@ public:
         uint32_t o;
         uint64_t read = 0,written = 0;
         if (!erased.empty()) {
-            barch::std_log("erased should be empty");
+            barch::std_err("erased should be empty");
         }
         do {
             readp(in, page);
@@ -1019,7 +1019,7 @@ public:
         }while (sz != 0);
         readp(in, written);
         if (written != read) {
-            abort_with("invalid data file");
+            abort_with("invalid free space data");
         }
     }
     bool send_extra(const arena::hash_arena &copy, std::ostream &out,

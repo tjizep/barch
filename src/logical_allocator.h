@@ -947,10 +947,7 @@ public:
                         }
                         if (wp) {
                             stop = !found_page(wp, page, pdata);
-                            //return;
                         }
-                        //auto pb = get_page_buffer(page);
-                        //stop = !found_page(pb.second, page, pb.first);
                     }
                 });
             });

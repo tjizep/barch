@@ -923,8 +923,8 @@ public:
         std::atomic<bool> stop = false;
         arena::hash_type arena;
         {
-            // copy arena under lock
-            std::lock_guard guard(latch);
+            // copy arena under read lock
+            std::shared_lock guard(latch);
             arena = main.get_arena(); // the arena is a relatively small object which does not take long to copy
         }
 
@@ -938,8 +938,8 @@ public:
                         unsigned wp = 0;
                         heap::buffer<uint8_t> pdata;
                         {
-                            // copy under lock
-                            std::lock_guard guard(latch);
+                            // copy under read lock
+                            std::shared_lock guard(latch);
                             if (!is_free(page)) {
                                 wp = retrieve_page(page).write_position;
                                 pdata = heap::buffer{get_page_data({page,0,this->ap}), wp};

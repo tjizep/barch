@@ -151,6 +151,16 @@ namespace barch {
         virtual art::node_ptr search(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) = 0;
+
+        /**
+         * searces glob patterns on the underlying shards using a special thread pool for this long running task
+         * does not need to be locked
+         * searches both hash and tree data
+         * @param spec for max count
+         * @param pattern glob pattern
+         * @param value for searching values instead of keys
+         * @param cb callback when matching data is found
+         */
         virtual void glob(const art::keys_spec &spec, art::value_type pattern, bool value, const std::function<bool(const art::leaf &)> &cb)  = 0;
         virtual shard_ptr sources() = 0;
         virtual void depends(const std::shared_ptr<abstract_shard> & source) = 0;

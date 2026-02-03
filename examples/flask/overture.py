@@ -1,7 +1,9 @@
 # requirements
-# pip install overturemaps
-# pip install h3
-# pip install geopandas
+# python -m venc venv
+# venv/bin/pip install overturemaps
+# venv/bin/pip install h3
+# venv/bin/pip install geopandas
+
 import overturemaps
 from overturemaps import core
 import json
@@ -57,7 +59,7 @@ conf = barch.KeyValue("configuration")
 conf.set("streets.shards","1")
 conf.set("overflows.ordered","0")
 conf.set("overflows.shards","1")
-conf.set("spatial_data.shards","1")
+conf.set("spatial_data.shards","16")
 conf.set("counters.ordered","0")
 conf.set("counters.shards","1")
 conf.set("postcodes.shards","1")
@@ -78,7 +80,7 @@ cities =  barch.KeyValue("cities")
 tokey = barch.KeyValue("tokey")
 
 
-assert spc.getShards() == 1
+assert spc.getShards() == 16
 assert streets.getShards() == 1
 cnt = barch.KeyValue("counters")
 cnt.set("records","0")

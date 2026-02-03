@@ -141,12 +141,13 @@ namespace barch {
             call_context(const rpc_caller& caller, barch_function f,std::vector<redis::string_param_t> params ): caller(caller), f(std::move(f)), params(std::move(params)) {}
             rpc_caller caller{};
             barch_function f{};
+            vector_stream stream{}; // the stream buffer needs to stau alive while the call completes
             std::vector<redis::string_param_t> params{};
         };
 
-        std::vector<std::shared_ptr<call_context>> asynch_calls;
+
         template<typename Stream>
-        void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params) {
+        void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,std::vector<std::shared_ptr<call_context>> &asynch_calls) {
             std::string cn{ params[0]};
 
             auto colon = cn.find_last_of(':');
@@ -197,64 +198,60 @@ namespace barch {
             }
             if (should_reset_space)
                 caller.set_kspace(old_spc); // return to old value
-
         }
 
-        void do_read()
-        {
-                auto self(this->shared_from_this());
-                socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                    [this, self](std::error_code ec, std::size_t length)
-                {
+        std::vector<std::shared_ptr<call_context>> asynch_calls; // the async call context needs to stay alive while calls complete
+        void do_read() {
+            auto self(this->shared_from_this());
+            socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
+                [this, self](std::error_code ec, std::size_t length)
+            {
 
-                    if (!ec){
-                        bytes_recv += length;
-                        parser.add_data(data_, length);
-                        size_t run_count = 0;
-                        try {
+                if (!ec){
+                    bytes_recv += length;
+                    parser.add_data(data_, length);
 
-                            stream.clear();
-                            // collect the call results into the "stream" buffer
-                            // then write the buffer UNLESS
-                            // there where asynch calls - those calls
-                            while (parser.remaining() > 0) {
-                                auto &params = parser.read_new_request();
-                                if (!params.empty()) {
-                                    ++calls_recv;
-                                    run_params(stream, params);
-                                    ++run_count;
-                                }else {
-                                    break;
-                                }
+                    try {
+
+                        stream.clear();
+                        asynch_calls.clear();
+                        // collect the call results into the "stream" buffer
+                        // then write the buffer UNLESS
+                        // there where asynch calls - those calls
+                        while (parser.remaining() > 0) {
+                            auto &params = parser.read_new_request();
+                            if (!params.empty()) {
+                                ++calls_recv;
+                                run_params(stream, params, asynch_calls);
+                            }else {
+                                break;
                             }
-
-                            if (caller.has_blocks()) {
-                                start_block_to();
-                                add_caller_blocks();
-                            }else  {
-
-                                do_write(stream);
-                                do_read();
-                            }
-                            // any asynch calls are not blocking this call for long
-                            for (auto ctx: asynch_calls) {
-                                // all data will be kept alive while "workers" are busy
-                                asio::post(workers,[self, ctx]() {
-                                    vector_stream stream{};
-                                    int32_t r = ctx->caller.call(ctx->params,ctx->f);
-                                    write_result<vector_stream>(ctx->caller, stream, r);
-                                    self->do_write(stream);
-                                });
-                            }
-                            asynch_calls.clear();
-                        }catch (std::exception& e) {
-                            barch::std_err("error", e.what());
                         }
-                    }else {
-                        //if (ec.category())
-                         //barch::std_err(ec.message().c_str());
+                        for (auto ctx: asynch_calls) {
+                            // all data will be kept alive while "workers" are busy
+                            asio::post(workers,[this, self, ctx]() {
+                                int32_t r = ctx->caller.call(ctx->params,ctx->f);
+                                write_result<vector_stream>(ctx->caller, ctx->stream, r);
+                                do_write(ctx->stream);
+                                do_read();
+                            });
+                        }
+                        if (caller.has_blocks()) {
+                            start_block_to();
+                            add_caller_blocks();
+                        }else{
+                            do_write(stream);
+                            do_read();
+                        }
+
+                    }catch (std::exception& e) {
+                        barch::std_err("error", e.what());
                     }
-                });
+                }else {
+                    //if (ec.category())
+                     //barch::std_err(ec.message().c_str());
+                }
+            });
         }
 
         void start_block_to() {

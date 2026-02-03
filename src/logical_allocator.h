@@ -490,6 +490,14 @@ private:
         main.iterate_arena(iter);
     }
 
+    void iterate_arena(const arena::hash_type& arena, const std::function<void(size_t, size_t)> &iter) const {
+        main.iterate_arena(arena, iter);
+    }
+
+    const arena::hash_type& get_arena() const {
+        return main.get_arena();
+    }
+
     void iterate_arena(const std::function<void(size_t, const size_t &)> &iter) const {
         main.iterate_arena(iter);
     }
@@ -908,18 +916,28 @@ public:
             found_page(pb.second, page, pb.first);
         });
     }
+    // this function locks (but only a small time)  and doesnt require further locking outside
     void iterate_pages(heap::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
         opt_iterate_workers = barch::get_iteration_worker_count();
         std::vector<std::thread> workers{opt_iterate_workers};
         std::atomic<bool> stop = false;
+        arena::hash_type arena;
+        {
+            // copy arena under lock
+            std::lock_guard guard(latch);
+            arena = main.get_arena(); // the arena is a relatively small object which does not take long to copy
+        }
+
         for (unsigned iwork = 0; iwork < opt_iterate_workers; iwork++) {
-            workers[iwork] = std::thread([this,&latch,iwork,&found_page,&stop]() {
-                iterate_arena([&](size_t page, size_t &) -> void {
+            workers[iwork] = std::thread([this,&arena,&latch,iwork,&found_page,&stop]() {
+                // safely iterate over arena
+                iterate_arena(arena, [&]( size_t page, size_t) -> void {
                     if (stop) return;
                     if (is_null_base(page)) return;
                     if (page % opt_iterate_workers == iwork) {
                         unsigned wp = 0;
-                        heap::buffer<uint8_t> pdata; {
+                        heap::buffer<uint8_t> pdata;
+                        {
                             // copy under lock
                             std::lock_guard guard(latch);
                             if (!is_free(page)) {
@@ -929,11 +947,10 @@ public:
                         }
                         if (wp) {
                             stop = !found_page(wp, page, pdata);
-                            return;
+                            //return;
                         }
-
-                        auto pb = get_page_buffer(page);
-                        stop = !found_page(pb.second, page, pb.first);
+                        //auto pb = get_page_buffer(page);
+                        //stop = !found_page(pb.second, page, pb.first);
                     }
                 });
             });

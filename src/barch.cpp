@@ -301,6 +301,8 @@ int KEYS(caller& call, const arg_t& argv) {
     std::atomic<int64_t> replies = 0;
     auto cpat = argv[1];
     art::value_type pattern = cpat;
+    // this operation does not need to lock since pages are copied onto a working page
+    // before glob is processed (leaves are only valid within the callback since memory is reused)
     if (spec.count) {
         auto ks = call.kspace();
         for (const auto& shard : ks->get_shards()) {

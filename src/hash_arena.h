@@ -17,18 +17,17 @@
 
 namespace arena {
     typedef std::unordered_set<size_t> address_set;
-    struct base_hash_arena {
-        bool opt_use_vmmap = barch::get_use_vmm_memory();
-
-    protected:
-        typedef heap::allocator<std::pair<size_t, size_t> > allocator_type;
-
-        typedef ankerl::unordered_dense::map<
+    typedef heap::allocator<std::pair<size_t, size_t> > allocator_type;
+    typedef ankerl::unordered_dense::map<
             size_t
             , size_t
             , ankerl::unordered_dense::hash<size_t>
             , std::equal_to<size_t>
             , allocator_type> hash_type;
+    struct base_hash_arena {
+        bool opt_use_vmmap = barch::get_use_vmm_memory();
+
+    protected:
 
         hash_type hidden_arena{};
         address_set free_address_list{};
@@ -428,6 +427,12 @@ namespace arena {
             }
         }
 
+        void iterate_arena(const hash_type& arena, const std::function<void(size_t,  size_t)> &iter) const {
+            for (auto &[at,str]: arena) {
+                iter(at, str);
+            }
+        }
+
         void iterate_arena(const std::function<void(size_t, const size_t &)> &iter) const {
             for (auto &[at,str]: hidden_arena) {
                 if (free_address_list.contains(at)) {
@@ -435,6 +440,9 @@ namespace arena {
                 }
                 iter(at, str);
             }
+        }
+        [[nodiscard]] const hash_type &get_arena() const {
+            return hidden_arena;
         }
         [[nodiscard]] size_t get_bytes_allocated() const {
             return page_data_size;
@@ -718,8 +726,15 @@ namespace arena {
             main.iterate_arena(iter);
         }
 
+        void iterate_arena(const hash_type& arena, const std::function<void(size_t, size_t)> &iter) const {
+            main.iterate_arena(arena, iter);
+        }
+
         void iterate_arena(const std::function<void(size_t, size_t &)> &iter) {
             main.iterate_arena(iter);
+        }
+        const hash_type& get_arena() const {
+            return main.get_arena();
         }
 
         void iterate_arena(const std::function<void(size_t, const size_t &)> &iter) const {

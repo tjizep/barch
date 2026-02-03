@@ -942,6 +942,10 @@ art::node_ptr barch::shard::lower_bound(art::trace_list &trace, art::value_type 
 }
 
 void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  {
+
+    if (dependencies) {
+        dependencies->glob(spec, pattern, value, cb);
+    }
     art::glob(this, spec, pattern, value, cb);
 }
 

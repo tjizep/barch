@@ -4,6 +4,8 @@
 
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
+#include <utility>
+
 #include "abstract_session.h"
 #include "asio_includes.h"
 #include "redis_parser.h"
@@ -25,8 +27,8 @@ namespace barch {
         resp_session& operator=(const resp_session&) = delete;
 
         template<typename sock_T>
-                resp_session(sock_T socket, asio::io_context &workers)
-                    : socket_(std::move(socket)), timer( socket_.get_executor()), workers(workers)
+        resp_session(sock_T socket, asio::io_context &workers)
+        : socket_(std::move(socket)), timer( socket_.get_executor()), workers(workers)
         {
             caller.info_fun = [this]() -> std::string {
                 return get_info(socket_);
@@ -124,7 +126,7 @@ namespace barch {
             return true;
         }
         template<typename Stream>
-        void write_result(rpc_caller& local_caller, Stream& local_stream, int32_t r) {
+        static void write_result(rpc_caller& local_caller, Stream& local_stream, int32_t r) {
             if (r < 0) {
                 if (!local_caller.errors.empty())
                     redis::rwrite(local_stream, error{local_caller.errors[0]});
@@ -134,6 +136,15 @@ namespace barch {
                 redis::rwrite(local_stream, local_caller.results);
             }
         }
+
+        struct call_context {
+            call_context(const rpc_caller& caller, barch_function f,std::vector<redis::string_param_t> params ): caller(caller), f(std::move(f)), params(std::move(params)) {}
+            rpc_caller caller{};
+            barch_function f{};
+            std::vector<redis::string_param_t> params{};
+        };
+
+        std::vector<std::shared_ptr<call_context>> asynch_calls;
         template<typename Stream>
         void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params) {
             std::string cn{ params[0]};
@@ -172,9 +183,14 @@ namespace barch {
                     if (ic->second.is_write() && ic->second.is_data()) {
                         repl::call(params);
                     }
-                    int32_t r = caller.call(params,f);
-                    if (!caller.has_blocks())
-                        write_result<Stream>(caller, ostream, r);
+                    if (ic->second.is_asynch) {
+                        // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
+                        asynch_calls.emplace_back(std::make_shared<call_context>(caller,f,params));
+                    }else {
+                        int32_t r = caller.call(params,f);
+                        if (!caller.has_blocks())
+                            write_result<Stream>(caller, ostream, r);
+                    }
                 }
             }catch (std::exception& e) {
                 redis::rwrite(ostream, error{e.what()});
@@ -198,6 +214,9 @@ namespace barch {
                         try {
 
                             stream.clear();
+                            // collect the call results into the "stream" buffer
+                            // then write the buffer UNLESS
+                            // there where asynch calls - those calls
                             while (parser.remaining() > 0) {
                                 auto &params = parser.read_new_request();
                                 if (!params.empty()) {
@@ -208,15 +227,26 @@ namespace barch {
                                     break;
                                 }
                             }
+
                             if (caller.has_blocks()) {
                                 start_block_to();
                                 add_caller_blocks();
                             }else  {
 
-                                //if (run_count > 0)
                                 do_write(stream);
                                 do_read();
                             }
+                            // any asynch calls are not blocking this call for long
+                            for (auto ctx: asynch_calls) {
+                                // all data will be kept alive while "workers" are busy
+                                asio::post(workers,[self, ctx]() {
+                                    vector_stream stream{};
+                                    int32_t r = ctx->caller.call(ctx->params,ctx->f);
+                                    write_result<vector_stream>(ctx->caller, stream, r);
+                                    self->do_write(stream);
+                                });
+                            }
+                            asynch_calls.clear();
                         }catch (std::exception& e) {
                             barch::std_err("error", e.what());
                         }
@@ -255,16 +285,16 @@ namespace barch {
             do_write(stream);
             do_read();
         }
-        void do_write(vector_stream& local_stream) {
+        void do_write(const vector_stream& local_stream) {
             auto self(this->shared_from_this());
             if (local_stream.empty()) return;
 
             asio::async_write(socket_, asio::buffer(local_stream.buf),
                 [this, self](std::error_code ec, std::size_t length){
                     if (!ec){
-                            net_stat stat;
-                            stream_write_ctr += length;
-                            bytes_sent += length;
+                        net_stat stat;
+                        stream_write_ctr += length;
+                        bytes_sent += length;
                     }else {
                         //art::std_err("error", ec.message(), ec.value());
                     }
@@ -286,6 +316,7 @@ namespace barch {
 
         time_t_timer timer;
         asio::io_context& workers;
+
     };
 //    typedef std::shared_ptr<resp_session<tcp::socket>> resp_session_ptr;
 }

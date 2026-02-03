@@ -38,6 +38,7 @@ struct rpc_caller : caller {
     void create(const std::string& h, uint_least16_t port) {
         this->host = barch::repl::create(h,port);
     }
+    rpc_caller(const rpc_caller& caller) = default;
     rpc_caller() {
         update_routes();
         std::vector<std::string_view> auth = {"AUTH","default","empty"};

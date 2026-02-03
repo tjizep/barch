@@ -8,10 +8,10 @@ else: #if its not tcp it's local unix domain sockets
     port = 0
     interface = "/tmp/lbarch"
 
-barch.start("/tmp/lbarch", 0)
+barch.start(interface, port)
 listen = barch.KeyValue()
 print ("Started Barch server waiting for 'exit' on 'message'"
-       " 'SET message exit' (on /tmp/lbarch)")
+       f" 'SET message exit' (on {interface}:{port}")
 
 msg = "start"
 listen.set("message",msg)

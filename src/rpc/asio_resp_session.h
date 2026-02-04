@@ -144,10 +144,10 @@ namespace barch {
             vector_stream stream{}; // the stream buffer needs to stau alive while the call completes
             std::vector<redis::string_param_t> params{};
         };
-
+        typedef std::shared_ptr<call_context> call_context_ptr;
 
         template<typename Stream>
-        void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,std::vector<std::shared_ptr<call_context>> &asynch_calls) {
+        void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,heap::vector<call_context_ptr> &asynch_calls) {
             std::string cn{ params[0]};
 
             auto colon = cn.find_last_of(':');
@@ -184,9 +184,17 @@ namespace barch {
                     if (ic->second.is_write() && ic->second.is_data()) {
                         repl::call(params);
                     }
-                    if (ic->second.is_asynch) {
+                    // once one call is asynch all calls in this batch must be asynch to preserve order
+                    if (ic->second.is_asynch || !asynch_calls.empty()) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
-                        asynch_calls.emplace_back(std::make_shared<call_context>(caller,f,params));
+                        if (!stream.empty()) {
+                            call_context_ptr ctx = std::make_shared<call_context>(caller,f,params);
+                            ctx->stream = std::move(stream); // move the current stream - it should be empty after the move
+                            asynch_calls.push_back(ctx);
+                        }else {
+                            asynch_calls.emplace_back(std::make_shared<call_context>(caller,f,params));
+                        }
+
                     }else {
                         int32_t r = caller.call(params,f);
                         if (!caller.has_blocks())
@@ -198,9 +206,9 @@ namespace barch {
             }
             if (should_reset_space)
                 caller.set_kspace(old_spc); // return to old value
-        }
 
-        std::vector<std::shared_ptr<call_context>> asynch_calls; // the async call context needs to stay alive while calls complete
+        }
+        // the async call context needs to stay alive while calls complete
         void do_read() {
             auto self(this->shared_from_this());
             socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
@@ -214,10 +222,8 @@ namespace barch {
                     try {
 
                         stream.clear();
-                        asynch_calls.clear();
+                        heap::vector<call_context_ptr> asynch_calls;
                         // collect the call results into the "stream" buffer
-                        // then write the buffer UNLESS
-                        // there where asynch calls - those calls
                         while (parser.remaining() > 0) {
                             auto &params = parser.read_new_request();
                             if (!params.empty()) {
@@ -232,7 +238,7 @@ namespace barch {
                             asio::post(workers,[this, self, ctx]() {
                                 int32_t r = ctx->caller.call(ctx->params,ctx->f);
                                 write_result<vector_stream>(ctx->caller, ctx->stream, r);
-                                do_write(ctx->stream);
+                                do_write(ctx);
                                 do_read();
                             });
                         }
@@ -288,6 +294,22 @@ namespace barch {
 
             asio::async_write(socket_, asio::buffer(local_stream.buf),
                 [this, self](std::error_code ec, std::size_t length){
+                    if (!ec){
+                        net_stat stat;
+                        stream_write_ctr += length;
+                        bytes_sent += length;
+                    }else {
+                        //art::std_err("error", ec.message(), ec.value());
+                    }
+                });
+        }
+        // write a ctx and preserve its lifetime
+        void do_write(call_context_ptr ctx) {
+            auto self(this->shared_from_this());
+            if (ctx->stream.empty()) return;
+
+            asio::async_write(socket_, asio::buffer(ctx->stream.buf),
+                [this, self, ctx](std::error_code ec, std::size_t length){
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;

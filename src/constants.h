@@ -45,7 +45,7 @@ inline size_t alloc_pad(size_t size) {
     size_t smod = size % logical_allocation_padding;
     if (size > min_logical_allocation_for_pad && smod !=0) {
         size_t r = size + (logical_allocation_padding - smod);
-        if ((r % logical_allocation_padding) !=0 || r < size ) {
+        if ((r % logical_allocation_padding) != 0 || r < size ) {
             abort();
         }
         return r;

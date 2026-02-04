@@ -1,4 +1,4 @@
-# Release v0.5.4b 2026-02-03
+# Release v0.5.4b 2026-02-04
 
 ## New Features
 
@@ -6,6 +6,7 @@
 2. `KEYS` command work with rendered composites and numerical keys as well (v0.5.3b 2026-02-02)
 3. improve thread safety for page iterations (v0.5.4b 2026-02-03)
 4. honor dependant source for glob and other scanning operations (v0.5.4b 2026-02-03)
+5. `KEYS` and `VALUES` wont block or force short lived operations to buffer or block (v0.5.4b 2026-02-04)
 
 # Release v0.5.2b 2026-02-01
 

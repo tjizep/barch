@@ -105,7 +105,10 @@ if (CMAKE_BUILD_TYPE STREQUAL "Release")
 
 else ()
     set(TEST_BUILD_DIR ${CMAKE_BUILD_TYPE})
+
 endif ()
+
+message("The TEST_BUILD_DIR is ${TEST_BUILD_DIR}")
 
 include(FetchContent)
 include(ExternalProject)

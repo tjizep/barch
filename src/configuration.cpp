@@ -267,7 +267,7 @@ static int ApplyMaxMemoryBytes(ValkeyModuleCtx *unused(ctx), void *unused(priv),
 
 static ValkeyModuleString *GetMaxRESPConnections(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
-    return ValkeyModule_CreateString(nullptr, state().max_memory_bytes.c_str(), state().max_memory_bytes.length());;
+    return ValkeyModule_CreateString(nullptr, state().max_resp_connections.c_str(), state().max_resp_connections.length());;
 }
 
 static int SetMaxRESPConnections(const std::string& test_max_resp_connections) {
@@ -926,8 +926,8 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", std::to_string(def).c_str(), VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxMemoryRatio, SetMaxMemoryBytes, ApplyMaxMemoryBytes, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_resp_connections", std::to_string(def).c_str(), VALKEYMODULE_CONFIG_DEFAULT,
-                                             GetMaxRESPConnections, SetMaxRESPConnections, nullptr, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_resp_connections", "2000", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetMaxRESPConnections, SetMaxRESPConnections, ApplyMaxRESPConnections, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);

@@ -6,6 +6,89 @@
 #include <ctype.h>
 #include <iostream>
 #include <ostream>
+// if there's only asterisks in the glob (a very common pattern)
+static int asterisk_impl(const char *pattern,
+                              int patternLen,
+                              const char *string,
+                              int stringLen,
+                              int nocase,
+                              int *skipLongerMatches,
+                              int nesting) {
+    /* Protection against abusive patterns. */
+    if (nesting > 1000) return 0;
+
+    while (patternLen && stringLen) {
+        switch (pattern[0]) {
+            case '*':
+                while (patternLen && pattern[1] == '*') { // TODO: ?BUG?  assumes pattern[1] exists if patternLen == 1
+                    pattern++;
+                    patternLen--;
+                }
+                if (patternLen == 1) return 1; /* match */
+                if (nesting == 0 && patternLen > 4){
+                    auto asterisk = (const char *)memchr(pattern+1, '*', patternLen-1);
+                    if (    !asterisk //
+                        || (asterisk - pattern) > 3 // or its at least a few characters away
+                    ) {
+                        auto str = (const char *)memchr(string, pattern[1], stringLen); // we would really like to choose the least frequent char in the pattern
+                        if (!str) {
+                            return 0;
+                        }
+                        // TODO: further opts are possible
+                        stringLen -= (str - string); // we can now quickly advance the string pointer
+                        string = str;
+                    }
+                }
+                while (stringLen) {
+                    if (asterisk_impl(pattern + 1, patternLen - 1, string, stringLen, nocase, skipLongerMatches,
+                                            nesting + 1))
+                        return 1; /* match */
+                    if (*skipLongerMatches) return 0; /* no match */
+                    string++;
+                    stringLen--;
+
+
+                }
+            /* There was no match for the rest of the pattern starting
+             * from anywhere in the rest of the string. If there were
+             * any '*' earlier in the pattern, we can terminate the
+             * search early without trying to match them to longer
+             * substrings. This is because a longer match for the
+             * earlier part of the pattern would require the rest of the
+             * pattern to match starting later in the string, and we
+             * have just determined that there is no match for the rest
+             * of the pattern starting from anywhere in the current
+             * string. */
+                *skipLongerMatches = 1;
+                return 0; /* no match */
+                break;
+            //case '?':
+            //    string++;
+            //    stringLen--;
+            //    break;
+            default:
+                if (!nocase) {
+                    if (pattern[0] != string[0]) return 0; /* no match */
+                } else {
+                    if (tolower((int) pattern[0]) != tolower((int) string[0])) return 0; /* no match */
+                }
+                string++;
+                stringLen--;
+                break;
+        }
+        pattern++;
+        patternLen--;
+        if (stringLen == 0) {
+            while (*pattern == '*') {
+                pattern++;
+                patternLen--;
+            }
+            break;
+        }
+    }
+    if (patternLen == 0 && stringLen == 0) return 1;
+    return 0;
+}
 
 int glob::stringmatchlen_impl(const char *pattern,
                               int patternLen,
@@ -134,9 +217,26 @@ int glob::stringmatchlen_impl(const char *pattern,
     if (patternLen == 0 && stringLen == 0) return 1;
     return 0;
 }
-
+static bool star_only(art::value_type patter) {
+    for (unsigned i = 0; i < patter.size; i++) {
+        switch (patter.bytes[i]) {
+            case '*':
+                continue;
+            case '?':
+            case '\\':
+            case '[':
+            // case ']': ?
+                return false;
+        }
+    }
+    return true;
+}
 int glob::stringmatchlen(art::value_type pattern, art::value_type string, int nocase) {
     int skipLongerMatches = 0;
+    if (star_only(pattern))
+        return asterisk_impl(pattern.chars(), pattern.size, string.chars(), string.size, nocase,
+                               &skipLongerMatches, 0);
+
     return stringmatchlen_impl(pattern.chars(), pattern.size, string.chars(), string.size, nocase,
                                &skipLongerMatches, 0);
 }

@@ -37,6 +37,7 @@ struct config_state {
     std::string min_compressed_size{};
     std::string eviction_type{"none"};
     std::string max_memory_bytes{};
+    std::string max_resp_connections{"2000"};
     std::string min_fragmentation_ratio{};
     std::string pre_evict_thresh{};
     std::string max_defrag_page_count{};
@@ -258,7 +259,45 @@ static int SetMaxMemoryBytes(const char *unused_arg, ValkeyModuleString *val, vo
     std::string test_max_memory_bytes = ValkeyModule_StringPtrLen(val, nullptr);
     return SetMaxMemoryBytes(test_max_memory_bytes);
 }
-static int ApplyMaxMemoryRatio(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+static int ApplyMaxMemoryBytes(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
+
+static ValkeyModuleString *GetMaxRESPConnections(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().max_memory_bytes.c_str(), state().max_memory_bytes.length());;
+}
+
+static int SetMaxRESPConnections(const std::string& test_max_resp_connections) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_max_resp_connections, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().max_resp_connections = test_max_resp_connections;
+    char *notn = nullptr;
+    const char *str = state().max_resp_connections.c_str();
+    const char *end = str + state().max_resp_connections.length();
+
+    uint64_t n_max_resp_connections = std::strtoll(str, &notn, 10);
+    if (notn == nullptr || notn != end) {
+        return VALKEYMODULE_ERR;
+    }
+    if (n_max_resp_connections < 2 || n_max_resp_connections > 1600000) {
+        return VALKEYMODULE_ERR;
+    }
+    config().max_resp_connections = n_max_resp_connections;
+    return VALKEYMODULE_OK;
+}
+
+static int SetMaxRESPConnections(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string test = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMaxRESPConnections(test);
+}
+static int ApplyMaxRESPConnections(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     return VALKEYMODULE_OK;
 }
 
@@ -419,6 +458,7 @@ static ValkeyModuleString *GetTlsPemCertificateChainFile(const char *unused_arg,
 static int SetTlsPemCertificateChainFile(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     std::string test_val = val;
+    // TODO: check access
     state().tls_pem_certificate_chain_file = test_val;
     config().tls_pem_certificate_chain_file = test_val;
     return VALKEYMODULE_OK;
@@ -445,6 +485,7 @@ static ValkeyModuleString *GetTlsPrivateKeyFile(const char *unused_arg, void *un
 static int SetTlsPrivateKeyFile(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     std::string test_val = val;
+    // TODO: check access
     state().tls_private_key_file = test_val;
     config().tls_private_key_file = test_val;
     return VALKEYMODULE_OK;
@@ -473,6 +514,7 @@ static ValkeyModuleString *GetTlsTmpDhFile(const char *unused_arg, void *unused_
 static int SetTlsTmpDhFile(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
     std::string test_val = val;
+    // TODO: check access
     state().tls_tmp_dh_file = test_val;
     config().tls_tmp_dh_file = test_val;
     return VALKEYMODULE_OK;
@@ -531,6 +573,9 @@ static int SetIterationWorkerCount(const std::string& test_iteration_worker_coun
     state().iteration_worker_count = test_iteration_worker_count;
     char *ep = nullptr;
     config().iteration_worker_count = std::strtoll(test_iteration_worker_count.c_str(), &ep, 10);
+    if (config().iteration_worker_count <= 0) {
+        config().iteration_worker_count = 1;
+    }
     return VALKEYMODULE_OK;
 }
 static int SetIterationWorkerCount(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -879,7 +924,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     auto def = physical;// - physical / 4ull;
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_memory_bytes", std::to_string(def).c_str(), VALKEYMODULE_CONFIG_DEFAULT,
-                                             GetMaxMemoryRatio, SetMaxMemoryBytes, ApplyMaxMemoryRatio, nullptr);
+                                             GetMaxMemoryRatio, SetMaxMemoryBytes, ApplyMaxMemoryBytes, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_resp_connections", std::to_string(def).c_str(), VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetMaxRESPConnections, SetMaxRESPConnections, nullptr, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "min_fragmentation_ratio", "0.5", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMinFragmentation, SetMinFragmentation, ApplyMinFragmentation, nullptr);
@@ -1050,30 +1098,37 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyMinCompressedSize(nullptr, nullptr, nullptr);
         }
         return r;
-    } else {
-        return VALKEYMODULE_ERR;
-    }
-    if (name == "tls_pem_certificate_chain_file") {
+    } else if (name == "max_resp_connections") {
+        auto r = SetMaxRESPConnections(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyMaxRESPConnections(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "tls_pem_certificate_chain_file") {
         auto r = SetTlsPemCertificateChainFile(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyTlsPemCertificateChainFile(nullptr, nullptr, nullptr);
         }
         return r;
-    }
-    if (name == "tls_private_key_file") {
+    }else if (name == "tls_private_key_file") {
         auto r = SetTlsPrivateKeyFile(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyTlsPrivateKeyFile(nullptr, nullptr, nullptr);
         }
         return r;
-    };
-    if (name == "tls_tmp_dh_file") {
+    }else if (name == "tls_tmp_dh_file") {
         auto r = SetTlsTmpDhFile(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyTlsTmpDhFile(nullptr, nullptr, nullptr);
         }
         return r;
+    }else {
+        return VALKEYMODULE_ERR;
     }
+
+
+
+
 }
 
 bool barch::get_compression_enabled() {
@@ -1165,6 +1220,10 @@ uint64_t barch::get_maintenance_poll_delay() {
 uint64_t barch::get_max_defrag_page_count() {
     std::lock_guard lock(state().config_mutex);
     return config().max_defrag_page_count;
+}
+uint64_t barch::get_max_resp_connections() {
+    std::lock_guard lock(state().config_mutex);
+    return config().max_resp_connections;
 }
 
 unsigned barch::get_iteration_worker_count() {

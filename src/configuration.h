@@ -32,6 +32,7 @@ namespace barch {
         uint64_t rpc_write_to_s{30};
         uint64_t internal_shards{std::thread::hardware_concurrency()*4+3};
         uint64_t server_port{14000};
+        uint64_t max_resp_connections{2000};
         std::string server_binding{"0.0.0.0"};
 
         std::string tls_pem_certificate_chain_file{"server.crt"};
@@ -76,6 +77,8 @@ namespace barch {
     uint64_t get_max_modifications_before_save();
 
     uint64_t get_max_defrag_page_count();
+
+    uint64_t get_max_resp_connections();
 
     unsigned get_iteration_worker_count();
 

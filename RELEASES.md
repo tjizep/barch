@@ -1,3 +1,13 @@
+# Release v0.5.5b 2026-02-04
+
+1. add `max_resp_connections` variable to limit RESP connection count (v0.5.5b 2026-02-04) 
+2. Improve `KEYS` and `VALUES` performance (v0.5.5b 2026-02-04)
+
+# Fixes
+1. SSL Config files not configurable (v0.5.5b 2026-02-04)
+
+## New Features
+
 # Release v0.5.4b 2026-02-04
 
 ## New Features

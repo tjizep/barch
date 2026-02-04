@@ -116,8 +116,13 @@ namespace barch {
         }
         void handle_ssl(tcp::endpoint &ep) {
             auto ssl = ssl_stream(std::move(ep), ssl_context);
-            auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
-            session->start_ssl();
+            if (statistics::repl::redis_sessions > get_max_resp_connections()) {
+                std_err("Too many resp sessions/connections",statistics::repl::redis_sessions.load());
+            }else {
+                auto session = std::make_shared<resp_session<ssl_stream>>(std::move(ssl),workers);
+                session->start_ssl();
+            }
+
         }
         template<typename UnknT>
         void handle_ssl(UnknT&) {
@@ -169,7 +174,10 @@ namespace barch {
                 endpoint.read_some(asio::buffer(cs,1));
                 stream_read_ctr += 1;
                 if (cs[0]) {
-
+                        if (statistics::repl::redis_sessions > get_max_resp_connections()) {
+                            std_err("Too many resp sessions/connections",statistics::repl::redis_sessions.load());
+                            return;
+                        }
                         auto unit = this->get_asio_unit();
                         typename Proto::socket socket (unit->io);
                         handle_assign(socket, endpoint);

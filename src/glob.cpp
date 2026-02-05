@@ -27,9 +27,16 @@ static int asterisk_impl(const char *pattern,
                 if (patternLen == 1) return 1; /* match */
                 if (nesting == 0 && patternLen > 4){
                     auto asterisk = (const char *)memchr(pattern+1, '*', patternLen-1);
-                    if (    !asterisk //
-                        || (asterisk - pattern) > 3 // or its at least a few characters away
+                    auto q = memchr(pattern+1, '?', patternLen-1);
+                    auto slash = memchr(pattern+1, '\\', patternLen-1);
+                    if (!q && !slash &&
+                        (
+                            !asterisk // there'r no further asterisks
+                            || (asterisk - pattern) > 3
+                        ) // or its at least a few characters away
                     ) {
+                        _memchr_section:
+                        // this method works but its weakness is that pattern[1] can be a very frequent character
                         auto str = (const char *)memchr(string, pattern[1], stringLen); // we would really like to choose the least frequent char in the pattern
                         if (!str) {
                             return 0;
@@ -37,6 +44,12 @@ static int asterisk_impl(const char *pattern,
                         // TODO: further opts are possible
                         stringLen -= (str - string); // we can now quickly advance the string pointer
                         string = str;
+                        if (stringLen > 3 && pattern[2] != string[1]) { // pattern len > 4 and asterisk - patterm > 3
+                            // we can try again
+                            string++;
+                            stringLen--;
+                            goto _memchr_section; // this opt adds a few percentage points
+                        }
                     }
                 }
                 while (stringLen) {
@@ -62,10 +75,17 @@ static int asterisk_impl(const char *pattern,
                 *skipLongerMatches = 1;
                 return 0; /* no match */
                 break;
-            //case '?':
-            //    string++;
-            //    stringLen--;
-            //    break;
+
+            case '?': // TODO: this is slow
+                string++;
+                stringLen--;
+                break;
+            case '\\':
+                if (patternLen >= 2) {
+                    pattern++;
+                    patternLen--;
+                }
+                /* fall through */
             default:
                 if (!nocase) {
                     if (pattern[0] != string[0]) return 0; /* no match */
@@ -129,7 +149,7 @@ int glob::stringmatchlen_impl(const char *pattern,
                 *skipLongerMatches = 1;
                 return 0; /* no match */
                 break;
-            case '?':
+            case '?': // this is slow
                 string++;
                 stringLen--;
                 break;
@@ -221,12 +241,14 @@ static bool star_only(art::value_type patter) {
     for (unsigned i = 0; i < patter.size; i++) {
         switch (patter.bytes[i]) {
             case '*':
-                continue;
             case '?':
             case '\\':
+                continue;
             case '[':
             // case ']': ?
                 return false;
+            default:
+                continue;
         }
     }
     return true;
@@ -235,7 +257,7 @@ int glob::stringmatchlen(art::value_type pattern, art::value_type string, int no
     int skipLongerMatches = 0;
     if (star_only(pattern))
         return asterisk_impl(pattern.chars(), pattern.size, string.chars(), string.size, nocase,
-                               &skipLongerMatches, 0);
+                              &skipLongerMatches, 0);
 
     return stringmatchlen_impl(pattern.chars(), pattern.size, string.chars(), string.size, nocase,
                                &skipLongerMatches, 0);

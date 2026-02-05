@@ -18,7 +18,7 @@
         <dependency>
             <groupId>org.barch</groupId>
             <artifactId>barch</artifactId>
-            <version>0.5.2</version>
+            <version>0.5.5</version>
         </dependency>
     </dependencies>
     <build>

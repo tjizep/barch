@@ -954,7 +954,7 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetIterationWorkerCount, SetIterationWorkerCount,
                                              ApplyIterationWorkerCount, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "36000", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "save_interval", "60000", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetSaveInterval, SetSaveInterval,
                                              ApplySaveInterval, nullptr);
 

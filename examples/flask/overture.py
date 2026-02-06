@@ -124,11 +124,10 @@ for batch in reader:
                 row_dict['geometry'] = row_dict['geometry'].wkt # Convert to text (WKT)
 
             json_val = json.dumps(row_dict, cls=OvertureEncoder)
-            #print(json_val)
             counter = cnt.get("records")
             key = f"{h3_index} {counter}"
             tokey.set(f"{counter}", key)
-            spc.set(key , json_val) # add spatial data
+            spc.set(key , json_val.upper()) # add spatial data
             # add street text index
 
             overflow = overflows.get(f"{street}")

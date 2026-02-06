@@ -27,9 +27,12 @@ static int asterisk_impl(const char *pattern,
                 if (patternLen == 1) return 1; /* match */
                 if (nesting == 0 && patternLen > 4){
                     auto asterisk = (const char *)memchr(pattern+1, '*', patternLen-1);
-                    auto q = memchr(pattern+1, '?', patternLen-1);
+                    while (pattern[1]=='?' && patternLen > 4) {
+                        ++pattern;
+                        patternLen--;
+                    }
                     auto slash = memchr(pattern+1, '\\', patternLen-1);
-                    if (!q && !slash &&
+                    if (!slash && pattern[1] != '?' &&
                         (
                             !asterisk // there'r no further asterisks
                             || (asterisk - pattern) > 3
@@ -44,7 +47,7 @@ static int asterisk_impl(const char *pattern,
                         // TODO: further opts are possible
                         stringLen -= (str - string); // we can now quickly advance the string pointer
                         string = str;
-                        if (stringLen > 3 && pattern[2] != string[1]) { // pattern len > 4 and asterisk - patterm > 3
+                        if (stringLen > 3 && pattern[2] != '?' && pattern[2] != string[1]) { // pattern len > 4 and asterisk - patterm > 3
                             // we can try again
                             string++;
                             stringLen--;
@@ -59,8 +62,6 @@ static int asterisk_impl(const char *pattern,
                     if (*skipLongerMatches) return 0; /* no match */
                     string++;
                     stringLen--;
-
-
                 }
             /* There was no match for the rest of the pattern starting
              * from anywhere in the rest of the string. If there were

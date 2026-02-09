@@ -33,46 +33,46 @@ struct config_state {
     barch::configuration_record record;
     // these values are kept for reflection
 
-    std::string compression_type{"none"};
-    std::string min_compressed_size{};
-    std::string eviction_type{"none"};
-    std::string max_memory_bytes{};
-    std::string max_resp_connections{"2000"};
-    std::string min_fragmentation_ratio{};
-    std::string pre_evict_thresh{};
-    std::string max_defrag_page_count{};
-    std::string iteration_worker_count{};
-    std::string maintenance_poll_delay{};
-    std::string active_defrag{};
-    std::string log_page_access_trace{};
-    std::string save_interval{};
-    std::string max_modifications_before_save{};
-    std::string use_vmm_mem{};
-    std::string external_host{};
-    std::string bind_interface{"0.0.0.0"};
-    std::string listen_port{};
-    std::string rpc_max_buffer{};
-    std::string rpc_client_max_wait_ms{};
-    std::string jump_factor{};
-    std::string ordered_keys{};
-    std::string server_port{};
-    std::string server_binding{};
-    std::string static_bloom_filter{};
-    std::vector<std::string> valid_evictions = {
+    heap::string compression_type{"none"};
+    heap::string min_compressed_size{};
+    heap::string eviction_type{"none"};
+    heap::string max_memory_bytes{};
+    heap::string max_resp_connections{"2000"};
+    heap::string min_fragmentation_ratio{};
+    heap::string pre_evict_thresh{};
+    heap::string max_defrag_page_count{};
+    heap::string iteration_worker_count{};
+    heap::string maintenance_poll_delay{};
+    heap::string active_defrag{};
+    heap::string log_page_access_trace{};
+    heap::string save_interval{};
+    heap::string max_modifications_before_save{};
+    heap::string use_vmm_mem{};
+    heap::string external_host{};
+    heap::string bind_interface{"0.0.0.0"};
+    heap::string listen_port{};
+    heap::string rpc_max_buffer{};
+    heap::string rpc_client_max_wait_ms{};
+    heap::string jump_factor{};
+    heap::string ordered_keys{};
+    heap::string server_port{};
+    heap::string server_binding{};
+    heap::string static_bloom_filter{};
+    heap::vector<std::string> valid_evictions = {
         "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "none", "no", "nil", "null"
     };
-    std::vector<std::string> valid_on_off = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
+    heap::vector<std::string> valid_on_off = {"on", "true", "off", "yes", "no", "null", "nil", "false"};
 
-    std::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
-    std::vector<std::string> valid_use_vmm_mem = valid_on_off;
-    std::vector<std::string> valid_defrag = valid_on_off;
+    heap::vector<std::string> valid_compression = {"zstd", "none", "off", "no", "null", "nil"};
+    heap::vector<std::string> valid_use_vmm_mem = valid_on_off;
+    heap::vector<std::string> valid_defrag = valid_on_off;
     // we want alloc tests but the db has to be created with alloc tests in the first place
-    std::vector<std::string> valid_alloc_tests = valid_on_off;
-    std::vector<std::string> valid_ordered_keys = valid_on_off;
+    heap::vector<std::string> valid_alloc_tests = valid_on_off;
+    heap::vector<std::string> valid_ordered_keys = valid_on_off;
 
-    std::string tls_pem_certificate_chain_file{};
-    std::string tls_private_key_file{};
-    std::string tls_tmp_dh_file{};
+    heap::string tls_pem_certificate_chain_file{};
+    heap::string tls_private_key_file{};
+    heap::string tls_tmp_dh_file{};
 
 };
 
@@ -371,7 +371,7 @@ static int SetStaticBloomFilter(const std::string& valu) {
     }
 
     state().static_bloom_filter = val;
-    config().static_bloom_filter = is_on(state().static_bloom_filter);
+    config().static_bloom_filter = is_on(state().static_bloom_filter.c_str());
 
     return VALKEYMODULE_OK;
 }
@@ -689,7 +689,7 @@ static int SetMinFragmentation(const std::string& val) {
     }
 
     state().min_fragmentation_ratio = val;
-    config().min_fragmentation_ratio = std::stof(state().min_fragmentation_ratio);
+    config().min_fragmentation_ratio = std::stof(state().min_fragmentation_ratio.c_str());
     return VALKEYMODULE_OK;
 }
 
@@ -718,7 +718,7 @@ static int SetPreEvictThresh(const std::string& val) {
         return VALKEYMODULE_ERR;
     }
     state().pre_evict_thresh = val;
-    config().pre_evict_thresh = std::stof(state().pre_evict_thresh);
+    config().pre_evict_thresh = std::stof(state().pre_evict_thresh.c_str());
     return VALKEYMODULE_OK;
 }
 
@@ -744,7 +744,7 @@ static int SetMinCompressedSize(const std::string& val) {
         return VALKEYMODULE_ERR;
     }
     state().min_compressed_size = val;
-    config().min_compressed_size = std::stoull(state().min_compressed_size);
+    config().min_compressed_size = std::stoull(state().min_compressed_size.c_str());
     return VALKEYMODULE_OK;
 }
 
@@ -971,7 +971,7 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetUseVMMemory, SetUseVMMemory,
                                              ApplyUseVMMemory, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "static_bloom_filter", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "static_bloom_filter", "no", VALKEYMODULE_CONFIG_DEFAULT,
                                          GetStaticBloomFilter, SetStaticBloomFilter,
                                          ApplyStaticBloomFilter, nullptr);
 
@@ -1196,7 +1196,7 @@ bool barch::get_evict_volatile_ttl() {
 
 std::string barch::get_eviction_policy() {
     //std::lock_guard lock(state().config_mutex);
-    return state().eviction_type;
+    return state().eviction_type.c_str();
 }
 
 bool barch::get_static_bloom_filter() {
@@ -1281,13 +1281,17 @@ uint64_t barch::get_server_port() {
 
 static std::vector<size_t> init_shard_sizes() {
     std::vector<size_t> r;
-    for (size_t s = 0; s < barch::get_internal_shards();++s) {
+
+    auto shards = barch::get_internal_shards();
+
+    for (size_t s = 0; s < shards;++s) {
         r.push_back(s);
     }
     return r;
 }
-static std::vector<size_t> shards = init_shard_sizes();
+
 const std::vector<size_t>& barch::get_shard_count() {
+    static std::vector<size_t> shards = init_shard_sizes();
     return shards;
 }
 namespace barch{

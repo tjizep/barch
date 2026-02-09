@@ -1979,7 +1979,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     }
     if (barch::get_server_port() > 0)
         barch::server::start("0.0.0.0",barch::get_server_port(), false);
-    barch::set_configuration_value("static_bloom_filter", barch::get_static_bloom_filter() ? "on":"off");
+
     return VALKEYMODULE_OK;
 }
 

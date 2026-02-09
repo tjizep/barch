@@ -233,4 +233,4 @@ int test() {
     return 0;
 }
 
-static int t = test();
+//static int t = test();

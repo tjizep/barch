@@ -6,7 +6,7 @@
 #define BARCH_ASIO_INCLUDES_H
 // IO_URING doesnt seem to work as a speedup
 //#define ASIO_HAS_IO_URING
-#//define ASIO_DISABLE_EPOLL
+//#define ASIO_DISABLE_EPOLL
 #include "moodycamel/blockingconcurrentqueue.h"
 //#include <asio/ip/tcp.hpp>
 #include <asio.hpp>

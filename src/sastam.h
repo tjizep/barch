@@ -160,6 +160,9 @@ namespace heap {
         [[nodiscard]] size_t size() const {
             return count;
         }
+        [[nodiscard]] size_t length() const {
+            return count;
+        }
 
         void emplace(size_t start, size_t cnt, const T *src) {
             if (!src) return;
@@ -330,6 +333,10 @@ namespace heap {
 
             clear();
             return tmp;
+        }
+
+        const T* c_str() const {
+            return ptr;
         }
 
         void clear() {
@@ -676,7 +683,7 @@ namespace heap {
             return hash;
         }
     };
-
+    typedef std::basic_string<char, std::char_traits<char>, allocator<char>> string;
     template<typename K, typename V >
     using map = ankerl::unordered_dense::map
     <     K

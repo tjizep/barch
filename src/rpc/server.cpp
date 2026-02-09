@@ -316,6 +316,7 @@ namespace barch {
     void handle_start(typename Proto::endpoint ep, bool ssl, std::shared_ptr<server_context<Proto>>& s) {
         s = nullptr;
         try {
+            barch::set_configuration_value("static_bloom_filter", barch::get_static_bloom_filter() ? "on":"off");
             s = std::make_shared<server_context<Proto>>(ep, ssl);
         }catch (std::exception& e) {
             barch::std_err("failed to start server", e.what());

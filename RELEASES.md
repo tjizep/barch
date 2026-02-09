@@ -1,4 +1,12 @@
+# Release v0.5.6b 2026-02-09
+
+## New Features
+
+1. Further improvements in glob performance (v0.5.6b 2026-02-09)
+
 # Release v0.5.5b 2026-02-06
+
+## New Features
 
 1. add `max_resp_connections` variable to limit RESP connection count (v0.5.5b 2026-02-04) 
 2. Improve `KEYS` and `VALUES` performance (v0.5.5b 2026-02-04)

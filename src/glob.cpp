@@ -7,6 +7,15 @@
 #include <iostream>
 #include <ostream>
 // if there's only asterisks in the glob (a very common pattern)
+template<int N>
+inline bool no_token(const char* pattern) {
+    for (int i = 0; i < N; i++) {
+        if (pattern[i] == '\\'|| pattern[i] == '?'|| pattern[i] == '*') {
+            return false;
+        }
+    }
+    return true;
+}
 static int asterisk_impl(const char *pattern,
                               int patternLen,
                               const char *string,
@@ -29,29 +38,39 @@ static int asterisk_impl(const char *pattern,
                     auto asterisk = (const char *)memchr(pattern+1, '*', patternLen-1);
                     while (pattern[1]=='?' && patternLen > 4) {
                         ++pattern;
-                        patternLen--;
+                        --patternLen;
                     }
                     auto slash = memchr(pattern+1, '\\', patternLen-1);
-                    if (!slash && pattern[1] != '?' &&
+                    if (!slash) {
+                        if (patternLen > 4 && no_token<4>(pattern+1)) { // were hoping the 4 chars is enough to find a unique sequence far away
+                            auto str = (const char *)memmem(string, stringLen, pattern+1, 4); // we would really like to choose the least frequent char in the pattern
+                            if (!str) {
+                                return 0;
+                            }
+                            stringLen -= (str - string); // we can now quickly advance the string pointer
+                            string = str;
+                        }else
+                        if (pattern[1] != '?' &&
                         (
                             !asterisk // there'r no further asterisks
                             || (asterisk - pattern) > 3
                         ) // or its at least a few characters away
-                    ) {
-                        _memchr_section:
-                        // this method works but its weakness is that pattern[1] can be a very frequent character
-                        auto str = (const char *)memchr(string, pattern[1], stringLen); // we would really like to choose the least frequent char in the pattern
-                        if (!str) {
-                            return 0;
-                        }
-                        // TODO: further opts are possible
-                        stringLen -= (str - string); // we can now quickly advance the string pointer
-                        string = str;
-                        if (stringLen > 3 && pattern[2] != '?' && pattern[2] != string[1]) { // pattern len > 4 and asterisk - patterm > 3
-                            // we can try again
-                            string++;
-                            stringLen--;
-                            goto _memchr_section; // this opt adds a few percentage points
+                        ) {
+                            _memchr_section:
+                            // this method works but its weakness is that pattern[1] can be a very frequent character
+                            auto str = (const char *)memchr(string, pattern[1], stringLen); // we would really like to choose the least frequent char in the pattern
+                            if (!str) {
+                                return 0;
+                            }
+                            // TODO: further opts are possible
+                            stringLen -= (str - string); // we can now quickly advance the string pointer
+                            string = str;
+                            if (stringLen > 3 && pattern[2] != '?' && pattern[2] != string[1]) { // pattern len > 4 and asterisk - patterm > 3
+                                // we can try again
+                                string++;
+                                stringLen--;
+                                goto _memchr_section; // this opt adds a few percentage points
+                            }
                         }
                     }
                 }

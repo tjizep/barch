@@ -1368,7 +1368,7 @@ void barch::shard::maintenance() {
         ) {
             if (get_modifications() - mods > 0) {
 
-                std_log("saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time));
+                //std_log("saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time));
                 this->save(with_stats);
 
             }

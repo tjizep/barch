@@ -25,23 +25,10 @@ struct barch_info {
     barch_info(const barch_function& call, const std::initializer_list<const char *>& cats, bool asynch = false) : call(call), is_asynch(asynch) {
         set_cats(cats);
     }
-    barch_info(const barch_info& binfo) {
-        call = binfo.call;
-        calls = (uint64_t)binfo.calls;
-        cats = binfo.cats;
-        wr = binfo.wr;
-        dp = binfo.dp;
-        is_asynch = binfo.is_asynch;
-    }
-    barch_info& operator=(const barch_info& binfo) {
-        call = binfo.call;
-        calls = (uint64_t)binfo.calls;
-        cats = binfo.cats;
-        dp = binfo.dp;
-        wr = binfo.wr;
-        is_asynch = binfo.is_asynch;
-        return *this;
-    }
+    barch_info(const barch_info& binfo) = default;
+    barch_info& operator=(const barch_info& binfo) = default;
+    barch_info& operator=(barch_info&& binfo) = default;
+    barch_info(barch_info&& binfo) = delete;
     bool is_data() const {
         return cats[dp];
     }
@@ -50,7 +37,7 @@ struct barch_info {
     }
     barch_function call{};
     heap::vector<bool> cats{};
-    std::atomic<uint64_t> calls {0};
+    uint64_t calls {0};
     bool is_asynch{false};
     int dp = 0;
     int wr = 0;

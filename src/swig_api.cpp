@@ -138,7 +138,7 @@ long long calls(const std::string& name) {
     auto barch_functions = functions_by_name();
     auto f = barch_functions->find(name);
     if (f!=barch_functions->end()) {
-        return f->second.calls.load();
+        return f->second.calls;
     }
     return 0;
 }

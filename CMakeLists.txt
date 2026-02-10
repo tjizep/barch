@@ -47,7 +47,7 @@ if (NOT TEST_OD)
     set(TEST_OD ON)
 endif ()
 if (NOT USE_LIBURING)
-    set(USE_LIBURING ON)
+    set(USE_LIBURING OFF)
 endif ()
 if (NOT USE_OPENSSL)
     set(USE_OPENSSL ON)
@@ -85,7 +85,7 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG
-        "-g3 -fno-omit-frame-pointer")
+        "-g3 -fno-omit-frame-pointer -mno-avx512f")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
         "-O2 -g -fno-omit-frame-pointer")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO

@@ -1,8 +1,9 @@
-# Release v0.5.6b 2026-02-09
+# Release v0.5.6b 2026-02-10
 
 ## New Features
 
 1. Further improvements in glob performance (v0.5.6b 2026-02-09)
+2. modify builds to produce valgrind compatible code (debug only) (v0.5.6b 2026-02-10)
 
 # Release v0.5.5b 2026-02-06
 

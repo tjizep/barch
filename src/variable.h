@@ -37,7 +37,10 @@ struct error {
 private:
     std::string name;
 };
+
+// 0 - var_bool, 1 - var_int64, 2 - var_uint64, 3 - var_double, 4 - var_string, 5 - var_null, 6 - var_error
 typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error> variable_t;
+
 namespace conversion {
     extern bool to(art::value_type v, double &d);
     extern bool to(art::value_type v, float &f);

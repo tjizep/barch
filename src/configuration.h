@@ -121,6 +121,7 @@ namespace barch {
 
     uint64_t get_rpc_max_client_wait_ms();
     uint64_t get_server_port();
+    std::string get_server_binding();
     std::chrono::seconds get_rpc_connect_to_s();
     std::chrono::seconds get_rpc_read_to_s() ;
     std::chrono::seconds get_rpc_write_to_s() ;

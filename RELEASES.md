@@ -4,6 +4,8 @@
 
 1. Further improvements in glob performance (v0.5.6b 2026-02-09)
 2. modify builds to produce valgrind compatible code (debug only) (v0.5.6b 2026-02-10)
+3. ability to restart server to listen on new port while running by changing port or interface via
+  `CONFIG SET server_binding` or `server_port`
 
 # Release v0.5.5b 2026-02-06
 

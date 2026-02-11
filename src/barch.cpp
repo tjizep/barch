@@ -1977,8 +1977,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ks == nullptr) {
         return VALKEYMODULE_ERR;
     }
-    if (barch::get_server_port() > 0)
-        barch::server::start("0.0.0.0",barch::get_server_port(), false);
+    if (!barch::get_server_binding().empty())
+        barch::server::start(barch::get_server_binding(),barch::get_server_port(), false);
 
     return VALKEYMODULE_OK;
 }

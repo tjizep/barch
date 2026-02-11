@@ -27,6 +27,8 @@ static bool is_float(const std::string& buffer) {
     return true;
 }
 
+
+
 struct config_state {
     config_state() = default;
     std::recursive_mutex config_mutex{};
@@ -83,6 +85,33 @@ static config_state& state() {
 static barch::configuration_record& config() {
     return state().record;
 }
+struct restarter {
+    std::thread restart_thread;
+    void do_restart() {
+        if (restart_thread.joinable()) {
+            restart_thread.join();
+        }
+        restart_thread = std::thread([] {
+            std::lock_guard lock(state().config_mutex);
+
+            try {
+                barch::server::stop();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!config().server_binding.empty() || config().server_port > 100)
+                    barch::server::start(config().server_binding,config().server_port, false);
+            }catch (std::exception &e) {
+                barch::std_err("could not restart server");
+            }
+        });
+    }
+    ~restarter() {
+        if (restart_thread.joinable()) {
+            restart_thread.join();
+        }
+    }
+};
+static restarter restart;
+
 template<typename VT>
 bool check_type(const std::string &et, const VT &valid) {
     return std::any_of(valid.begin(), valid.end(), [&et](const std::string &val) {
@@ -175,7 +204,7 @@ static int ApplyRPCClientMaxWait(ValkeyModuleCtx *unused(ctx), void *unused(priv
 // ===========================================================================================================
 static ValkeyModuleString *GetServerPort(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
-    return ValkeyModule_CreateString(nullptr, state().max_memory_bytes.c_str(), state().max_memory_bytes.length());;
+    return ValkeyModule_CreateString(nullptr, state().server_port.c_str(), state().server_port.length());;
 }
 
 static int SetServerPort(const std::string& test_server_port) {
@@ -206,8 +235,35 @@ static int SetServerPort(const char *unused_arg, ValkeyModuleString *val, void *
     return SetServerPort(test_server_port);
 }
 static int ApplyServerPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
-    barch::server::stop();
-    barch::server::start(config().server_binding,config().server_port, false);
+    restart.do_restart();
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString *GetServerBinding(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().server_binding.c_str(), state().server_binding.length());;
+}
+
+static int SetServerBinding(const std::string& test_server_binding) {
+    std::lock_guard lock(state().config_mutex);
+    //if (test_server_binding.empty()) return VALKEYMODULE_ERR;
+    state().server_binding = test_server_binding;
+    if (test_server_binding.find_first_of("//") != std::string::npos) {
+        state().server_port = "0";
+        config().server_port = 0;
+    }
+    config().server_binding = test_server_binding;
+    return VALKEYMODULE_OK;
+}
+
+static int SetServerBinding(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    std::string test = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetServerBinding(test);
+}
+
+static int ApplyServerBinding(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    restart.do_restart();
     return VALKEYMODULE_OK;
 }
 
@@ -999,6 +1055,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                      GetServerPort, SetServerPort,
                                                      ApplyServerPort, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "server_binding", "0.0.0.0", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetServerBinding, SetServerBinding,
+                                                     ApplyServerBinding, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "tls_pem_certificate_chain_file", "server.crt", VALKEYMODULE_CONFIG_DEFAULT,
                                                          GetTlsPemCertificateChainFile, SetTlsPemCertificateChainFile,
                                                          ApplyTlsPemCertificateChainFile, nullptr);
@@ -1090,6 +1150,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         auto r = SetServerPort(val);
         if (r == VALKEYMODULE_OK) {
             return ApplyServerPort(nullptr, nullptr, nullptr);
+        }
+        return r;
+    }else if (name == "server_binding") {
+        auto r = SetServerBinding(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyServerBinding(nullptr, nullptr, nullptr);
         }
         return r;
     }else if (name == "min_compressed_size") {
@@ -1278,6 +1344,12 @@ uint64_t barch::get_server_port() {
     std::lock_guard lock(state().config_mutex);
     return config().server_port;
 }
+
+std::string barch::get_server_binding() {
+    std::lock_guard lock(state().config_mutex);
+    return config().server_binding;
+}
+
 
 static std::vector<size_t> init_shard_sizes() {
     std::vector<size_t> r;

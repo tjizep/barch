@@ -10,6 +10,7 @@
 #include "keys.h"
 #include "swig_api.h"
 #include "thread_pool.h"
+#include "rpc/restarter.h"
 /* cdict --
  *
  * This module implements a volatile key-value store on top of the
@@ -1440,6 +1441,7 @@ int RELOAD(caller& call, const arg_t& argv) {
     }
     return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
 }
+    static restarter restart;
 int START(caller& call, const arg_t& argv) {
     if (argv.size() > 4)
         return call.wrong_arity();
@@ -1449,7 +1451,7 @@ int START(caller& call, const arg_t& argv) {
     auto interface = argv[1];
     auto port = argv[2];
     bool ssl = argv.size() == 4 && argv[3] == "SSL";
-    barch::server::start(interface.chars(), atoi(port.chars()), ssl);
+    restart.do_restart(interface.chars(),atoi(port.chars()), ssl);
     return call.push_simple("OK");
 }
 int PUBLISH(caller& call, const arg_t& argv) {

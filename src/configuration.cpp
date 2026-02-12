@@ -10,7 +10,7 @@
 #include "art/art.h"
 #include "module.h"
 #include "rpc/server.h"
-
+#include "rpc/restarter.h"
 #define unused_arg
 static bool is_on(const std::string& val) {
     return (val == "on" || val == "true" || val == "yes");
@@ -85,31 +85,6 @@ static config_state& state() {
 static barch::configuration_record& config() {
     return state().record;
 }
-struct restarter {
-    std::thread restart_thread;
-    void do_restart() {
-        if (restart_thread.joinable()) {
-            restart_thread.join();
-        }
-        restart_thread = std::thread([] {
-            std::lock_guard lock(state().config_mutex);
-
-            try {
-                barch::server::stop();
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                if (!config().server_binding.empty() || config().server_port > 100)
-                    barch::server::start(config().server_binding,config().server_port, false);
-            }catch (std::exception &e) {
-                barch::std_err("could not restart server");
-            }
-        });
-    }
-    ~restarter() {
-        if (restart_thread.joinable()) {
-            restart_thread.join();
-        }
-    }
-};
 static restarter restart;
 
 template<typename VT>
@@ -235,7 +210,7 @@ static int SetServerPort(const char *unused_arg, ValkeyModuleString *val, void *
     return SetServerPort(test_server_port);
 }
 static int ApplyServerPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
-    restart.do_restart();
+    restart.do_restart(config().server_binding,config().server_port,false);
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -263,7 +238,7 @@ static int SetServerBinding(const char *unused_arg, ValkeyModuleString *val, voi
 }
 
 static int ApplyServerBinding(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
-    restart.do_restart();
+    restart.do_restart(config().server_binding,config().server_port,false);
     return VALKEYMODULE_OK;
 }
 

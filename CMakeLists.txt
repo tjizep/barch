@@ -371,7 +371,8 @@ else ()
 
 endif ()
 
-add_library(lbarch SHARED ${SOURCES})
+add_library(lbarch SHARED ${SOURCES}
+        src/rpc/restarter.h)
 
 set(TEST_SOURCE_PATH ${CMAKE_SOURCE_DIR}/test)
 set(TEST_BUILD_PATH ${TEST_SOURCE_PATH}/${TEST_BUILD_DIR})

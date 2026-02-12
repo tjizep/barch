@@ -7,7 +7,7 @@
 
 struct restarter {
     std::thread restart_thread;
-    void do_restart(std::string interface, int port, bool ssl) {
+    void asynch_restart(std::string interface, int port, bool ssl) {
         if (restart_thread.joinable()) {
             restart_thread.join();
         }
@@ -22,6 +22,12 @@ struct restarter {
                 barch::std_err("could not restart server",e.what());
             }
         });
+    }
+    void inline_restart(std::string interface, int port, bool ssl) {
+        barch::server::stop();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!interface.empty() || port > 100)
+            barch::server::start(interface,port, ssl);
     }
     ~restarter() {
         if (restart_thread.joinable()) {

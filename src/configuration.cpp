@@ -210,7 +210,7 @@ static int SetServerPort(const char *unused_arg, ValkeyModuleString *val, void *
     return SetServerPort(test_server_port);
 }
 static int ApplyServerPort(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
-    restart.do_restart(config().server_binding,config().server_port,false);
+    restart.asynch_restart(config().server_binding,config().server_port,false);
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -238,7 +238,7 @@ static int SetServerBinding(const char *unused_arg, ValkeyModuleString *val, voi
 }
 
 static int ApplyServerBinding(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
-    restart.do_restart(config().server_binding,config().server_port,false);
+    restart.asynch_restart(config().server_binding,config().server_port,false);
     return VALKEYMODULE_OK;
 }
 

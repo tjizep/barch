@@ -1441,17 +1441,25 @@ int RELOAD(caller& call, const arg_t& argv) {
     }
     return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
 }
-    static restarter restart;
+static restarter restart;
 int START(caller& call, const arg_t& argv) {
-    if (argv.size() > 4)
+    if (argv.size() > 5)
         return call.wrong_arity();
     if (argv.size() == 4 && argv[3] != "SSL") {
         return call.push_error("invalid argument");
+    }
+    if (argv.size() == 5 && argv[4] != "ASYNCH") {
+        return call.push_error("invalid argument");
     };
     auto interface = argv[1];
-    auto port = argv[2];
+    auto port = conversion::as_variable(argv[2]).ui();
     bool ssl = argv.size() == 4 && argv[3] == "SSL";
-    restart.do_restart(interface.chars(),atoi(port.chars()), ssl);
+    bool async = argv.size() == 5 && argv[4] == "ASYNCH";
+
+    if (async)
+        restart.asynch_restart(interface.chars(), port, ssl);
+    else
+        restart.inline_restart(interface.chars(), port, ssl);
     return call.push_simple("OK");
 }
 int PUBLISH(caller& call, const arg_t& argv) {

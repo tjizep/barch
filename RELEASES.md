@@ -6,7 +6,8 @@
 2. modify builds to produce valgrind compatible code (debug only) (v0.5.6b 2026-02-10)
 3. ability to restart server to listen on new port while running by changing port or interface via
   `CONFIG SET server_binding` or `server_port`
-4. allow `START` function to restart server on the fly (v0.5.6b 2026-02-11)
+4. add `ASYNCH` option to `START` function to restart server on the fly without causing deadlock errors 
+   - downside is that server may not be started when function exits (v0.5.6b 2026-02-11)
 
 # Release v0.5.5b 2026-02-06
 

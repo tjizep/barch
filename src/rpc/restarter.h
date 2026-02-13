@@ -23,6 +23,18 @@ struct restarter {
             }
         });
     }
+    void asynch_stop() {
+        if (restart_thread.joinable()) {
+            restart_thread.join();
+        }
+        restart_thread = std::thread( []{
+            try {
+                barch::server::stop();
+            }catch (std::exception &e) {
+                barch::std_err("could not restart server",e.what());
+            }
+        });
+    }
     void inline_restart(std::string interface, int port, bool ssl) {
         barch::server::stop();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -124,7 +124,9 @@ struct vk_caller : caller {
     [[nodiscard]] int ok() const override {
         return VALKEYMODULE_OK;
     }
-
+    [[nodiscard]] bool is_remote() const override {
+        return false;
+    }
     [[nodiscard]] int wrong_arity() override {
         check_ctx();
         ++call_counter;

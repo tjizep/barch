@@ -1455,7 +1455,7 @@ int START(caller& call, const arg_t& argv) {
     auto port = conversion::as_variable(argv[2]).ui();
     bool ssl = argv.size() == 4 && argv[3] == "SSL";
     bool async = argv.size() == 5 && argv[4] == "ASYNCH";
-
+    if (call.is_remote()) async = true;
     if (async)
         restart.asynch_restart(interface.chars(), port, ssl);
     else
@@ -1485,7 +1485,12 @@ int STOP(caller& call, const arg_t& ) {
     if (call.get_context() == ctx_resp) {
         return call.push_error("Cannot stop server");
     }
-    barch::server::stop();
+    if (call.is_remote()) {
+        restart.asynch_stop();
+    }else {
+        barch::server::stop();
+    }
+
     return call.push_simple("OK");
 }
 int PING(caller& call, const arg_t& argv) {

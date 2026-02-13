@@ -34,6 +34,7 @@ struct rpc_caller : caller {
     uint64_t block_to_ms = 0;
     heap::vector<Variable> buffered_results{};
     heap::vector<std::string> buffered_errors{};
+    bool remote {true};
 
     void create(const std::string& h, uint_least16_t port) {
         this->host = barch::repl::create(h,port);
@@ -58,6 +59,9 @@ struct rpc_caller : caller {
             return def;
         }
         return results[0];
+    }
+    [[nodiscard]] bool is_remote() const override {
+        return remote;
     }
     [[nodiscard]] int wrong_arity()  override {
         errors.emplace_back("Wrong Arity");

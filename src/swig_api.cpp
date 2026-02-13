@@ -81,6 +81,7 @@ void load(const std::string &host, int port) {
 void start(const std::string &host, const std::string& port) {
     std::vector<std::string_view> params = {"START", host, port};
     rpc_caller sc;
+    sc.remote = false; // causes inline restart
     int r = sc.call(params, START);
     if (r == 0) {
         barch::std_log("started server on", host, port);
@@ -95,6 +96,7 @@ void start(int port) {
 void stop() {
     std::vector<std::string_view> params = {"STOP"};
     rpc_caller sc;
+    sc.remote = false; // causes inline stop
     int r = sc.call(params, STOP);
     if (r == 0) {
         barch::std_log("stopped server");
@@ -604,8 +606,11 @@ configuration_values config() {
     return r;
 }
 
-Caller::Caller(){}
+Caller::Caller() {
+    sc.remote = false;
+}
 Caller::Caller(const std::string& host, int port) {
+    sc.remote = false;
     sc.host = barch::repl::create(host,port);
 }
 bool Caller::use(const std::string& key_space) {

@@ -39,6 +39,8 @@ struct caller {
     [[nodiscard]] int get_context() const {
         return this->ctx;
     }
+
+    [[nodiscard]] virtual bool is_remote() const = 0;
     [[nodiscard]] virtual int wrong_arity() = 0;
     [[nodiscard]] virtual int syntax_error() = 0;
     [[nodiscard]] virtual int error() const = 0;

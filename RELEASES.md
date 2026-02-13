@@ -1,4 +1,4 @@
-# Release v0.5.6b 2026-02-12
+# Release v0.5.6b 2026-02-13
 
 ## New Features
 
@@ -10,7 +10,7 @@
    - downside is that server may not be started when function exits (v0.5.6b 2026-02-11)
 
 ## Fixes
-1. Make `STOP` asynch only when called from a remote interface that runs through the internal server (v0.5.6b 2026-02-12)
+1. Make `STOP` asynch only when called from a remote interface that runs through the internal server (v0.5.6b 2026-02-13)
 
 # Release v0.5.5b 2026-02-06
 

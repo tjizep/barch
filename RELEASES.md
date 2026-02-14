@@ -1,4 +1,4 @@
-# Release v0.5.6b 2026-02-13
+# Release v0.5.6b 2026-02-14
 
 ## New Features
 
@@ -11,6 +11,8 @@
 
 ## Fixes
 1. Make `STOP` asynch only when called from a remote interface that runs through the internal server (v0.5.6b 2026-02-13)
+2. fix release build optimizations 10% improvement (v0.5.6b 2026-02-14)
+3. fix minor arg issue with `START` (v0.5.6b 2026-02-14)
 
 # Release v0.5.5b 2026-02-06
 

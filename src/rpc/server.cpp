@@ -130,6 +130,8 @@ namespace barch {
         }
         static void handle_assign(tcp::socket& socket, tcp::socket& endpoint) {
             socket.assign(tcp::v4(),endpoint.release());
+            int flag = 1;
+            setsockopt(socket.lowest_layer().native_handle(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
         }
         static void handle_assign(asio::local::stream_protocol::socket& socket, asio::local::stream_protocol::socket& endpoint) {
             socket.assign(asio::local::stream_protocol(), endpoint.release());

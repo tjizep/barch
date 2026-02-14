@@ -29,7 +29,7 @@ namespace oh {
         typedef heap::unordered_set<K, H, key_compare> H2;
 
         struct data {
-            float max_leakage = 0.15f;
+            float max_leakage = 0.01f;
             float max_load_factor = 0.75f;
             float max_rehash_multiplier = 16; // a large multiplier is ok
             // because the hash itself is small relative to the data it indexes
@@ -40,8 +40,6 @@ namespace oh {
                 H2 t;
                 h2 = H2(t.begin(), t.end(), size_t(0), hash, eq);
             }
-            size_t rehash_multiplier = 4;
-            // (size_t) (max_leakage * keys.size()
             size_t size{};
             std::vector<bool> has{};
             heap::vector<key_type> keys{};

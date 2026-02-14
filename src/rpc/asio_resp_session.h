@@ -337,6 +337,5 @@ namespace barch {
         asio::io_context& workers;
 
     };
-//    typedef std::shared_ptr<resp_session<tcp::socket>> resp_session_ptr;
 }
 #endif //BARCH_ASIO_RESP_SESISON_H

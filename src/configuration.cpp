@@ -1030,7 +1030,7 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                      GetServerPort, SetServerPort,
                                                      ApplyServerPort, nullptr);
 
-    ret |= ValkeyModule_RegisterStringConfig(ctx, "server_binding", "0.0.0.0", VALKEYMODULE_CONFIG_DEFAULT,
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "server_binding", "127.0.0.1", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetServerBinding, SetServerBinding,
                                                      ApplyServerBinding, nullptr);
 

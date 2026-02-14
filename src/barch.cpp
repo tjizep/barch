@@ -1443,9 +1443,9 @@ int RELOAD(caller& call, const arg_t& argv) {
 }
 static restarter restart;
 int START(caller& call, const arg_t& argv) {
-    if (argv.size() > 5)
+    if (argv.size() > 5 || argv.size() < 3)
         return call.wrong_arity();
-    if (argv.size() == 4 && argv[3] != "SSL") {
+    if (argv.size() >= 4 && argv[3] != "SSL") {
         return call.push_error("invalid argument");
     }
     if (argv.size() == 5 && argv[4] != "ASYNCH") {

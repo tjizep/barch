@@ -3,6 +3,8 @@
 //
 
 #include "info_api.h"
+
+#include "barch_apis.h"
 #include "caller.h"
 #include "conversion.h"
 #include "module.h"
@@ -11,12 +13,14 @@
 #include "asio/detail/chrono.hpp"
 #include "version.h"
 auto start_time = std::chrono::high_resolution_clock::now();
-auto now() {
-    return std::chrono::high_resolution_clock::now();
-}
+
 template <typename T>
 std::string tos(const T& in) {
     return std::to_string(in);
+}
+static double roundn(double value, int n) {
+    double p10 = std::pow(10.0, n);
+    return std::round(value * p10) / p10;
 }
 extern "C"{
 int INFO(caller& call, const arg_t& argv) {
@@ -47,6 +51,49 @@ int INFO(caller& call, const arg_t& argv) {
 
         call.push_vt(response);
         return 0;
+    }
+    std::string text;
+    auto lower = [](std::string &text, const std::string& s) -> std::string {
+        text = s;
+        std::transform(text.begin(), text.end(), text.begin(), ::tolower);
+        return text;
+    };
+    if ((argv.size() == 2 || argv.size() == 3) && lower(text, argv[1].to_string()) == "commandstats") {
+
+        auto functions = functions_by_name();
+        std::string result = "";
+        auto make_line = [&result, lower](const function_map::value_type& f) {
+            std::string text;
+            if (f.second.calls > 0) { // for verbosity AND div-zero
+                auto micros = (double)f.second.total_nanos/1000.0f;
+                std::string line = "cmdstat_";
+                line += lower(text, f.first);
+                line += ":";
+                line += "calls=";
+                line += std::to_string(f.second.calls);
+                line += ",";
+                line += "usec=";
+                line += conversion::as_variable(roundn(micros,4)).s();
+                line += ",";
+                line += "avg_usec=";
+                line += conversion::as_variable(roundn(roundn(micros/f.second.calls,4), 4)).s();
+                line += "\n";
+                result += line;
+            }
+        };
+        if (argv.size() == 3) {
+            auto f = functions->find(argv[2].to_string());
+            if (f == functions->end()) {
+                return call.push_error("function not found");
+            }else {
+                make_line(*f);
+            }
+        }else {
+            for (auto f : *functions) {
+                make_line(f);
+            }
+        }
+        return call.push_vt(result);
     }
     if (argv.size() == 2 && argv[1] == "SERVER") {
         auto n = now();

@@ -13,6 +13,7 @@
 #include "netstat.h"
 #include "vector_stream.h"
 #include "constants.h"
+#include "time_conversion.h"
 #include "rpc/proto_info.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
@@ -138,11 +139,12 @@ namespace barch {
         }
 
         struct call_context {
-            call_context(const rpc_caller& caller, barch_function f,std::vector<redis::string_param_t> params ): caller(caller), f(std::move(f)), params(std::move(params)) {}
+            call_context(const rpc_caller& caller, barch_function f,std::vector<redis::string_param_t> params, const std::string &cn ): caller(caller), f(std::move(f)), params(std::move(params)), cn(cn) {}
             rpc_caller caller{};
             barch_function f{};
             vector_stream stream{}; // the stream buffer needs to stau alive while the call completes
             std::vector<redis::string_param_t> params{};
+            std::string cn;
         };
         typedef std::shared_ptr<call_context> call_context_ptr;
 
@@ -165,17 +167,17 @@ namespace barch {
                     }
                 }
 
-                auto bf = barch_functions; // take a snapshot
+
                 if (prev_cn != cn) {
-                    ic = bf->find(cn);
+                    ic = barch_functions->find(cn);
                     prev_cn = cn;
-                    if (ic != bf->end() &&
+                    if (ic != barch_functions->end() &&
                         !is_authorized(ic->second.cats,caller.get_acl())) {
                         redis::rwrite(ostream, error{"not authorized"});
                         return ;
                     }
                 }
-                if (ic == bf->end()) {
+                if (ic == barch_functions->end()) {
                     redis::rwrite(ostream, error{"unknown command"});
                 } else {
                     // TODO: ic->second.is_asynch
@@ -188,17 +190,19 @@ namespace barch {
                     if (ic->second.is_asynch || !asynch_calls.empty()) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
                         if (!stream.empty()) {
-                            call_context_ptr ctx = std::make_shared<call_context>(caller,f,params);
+                            call_context_ptr ctx = std::make_shared<call_context>(caller,f,params,cn);
                             ctx->stream = std::move(stream); // move the current stream - it should be empty after the move
                             asynch_calls.push_back(ctx);
                         }else {
-                            asynch_calls.emplace_back(std::make_shared<call_context>(caller,f,params));
+                            asynch_calls.emplace_back(std::make_shared<call_context>(caller,f,params,cn));
                         }
 
                     }else {
+                        auto current = now();
                         int32_t r = caller.call(params,f);
                         if (!caller.has_blocks())
                             write_result<Stream>(caller, ostream, r);
+                        ic->second.total_nanos += nanos(current);
                     }
                 }
             }catch (std::exception& e) {
@@ -236,8 +240,15 @@ namespace barch {
                         for (auto ctx: asynch_calls) {
                             // all data will be kept alive while "workers" are busy
                             asio::post(workers,[this, self, ctx]() {
-                                int32_t r = ctx->caller.call(ctx->params,ctx->f);
+                                auto ic = barch_functions->find(ctx->cn);
+                                if (ic == barch_functions->end()) {
+                                    return;
+                                }
+                                auto current = now();
+                                int32_t r = ctx->caller.call(ctx->params,ic->second.call);
                                 write_result<vector_stream>(ctx->caller, ctx->stream, r);
+                                ic->second.total_nanos += nanos(current);
+
                                 do_write(ctx);
                                 do_read();
                             });
@@ -335,6 +346,7 @@ namespace barch {
 
         time_t_timer timer;
         asio::io_context& workers;
+        std::shared_ptr<function_map> barch_functions = functions_by_name(); // take a snapshot
 
     };
 }

@@ -41,6 +41,7 @@ struct barch_info {
     bool is_asynch{false};
     int dp = 0;
     int wr = 0;
+    uint64_t total_nanos{};
 };
 typedef heap::string_map<barch_info> function_map;
 extern "C"{

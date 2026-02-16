@@ -89,7 +89,7 @@ set(CMAKE_CXX_FLAGS_DEBUG
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO
         "-O2 -g -fno-omit-frame-pointer")
 set(CMAKE_CXX_FLAGS_RELEASE
-        "-O3 -Ofast -funroll-all-loops -frename-registers -flto")
+        "-O3 -funroll-all-loops -frename-registers -flto")
 
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     message("Using debuggable optimizations")

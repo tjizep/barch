@@ -5,6 +5,9 @@
 #ifndef BARCH_TIME_CONVERTSION_H
 #define BARCH_TIME_CONVERTSION_H
 #include <chrono>
+inline decltype(std::chrono::high_resolution_clock::now())  now() {
+    return std::chrono::high_resolution_clock::now();
+}
 template<typename T>
 static uint64_t millis(std::chrono::time_point<T> a, std::chrono::time_point<T> b) {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(a - b);
@@ -14,6 +17,12 @@ static uint64_t millis(std::chrono::time_point<T> a, std::chrono::time_point<T> 
 template<typename T>
 static uint64_t micros(std::chrono::time_point<T> a, std::chrono::time_point<T> b) {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(a - b);
+    uint64_t count = duration.count();
+    return count;
+}
+template<typename T>
+static uint64_t nanos(std::chrono::time_point<T> a, std::chrono::time_point<T> b) {
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(a - b);
     uint64_t count = duration.count();
     return count;
 }
@@ -43,6 +52,14 @@ static uint64_t days(std::chrono::time_point<T> a, std::chrono::time_point<T> b)
 }
 template<typename T>
 static uint64_t millis(std::chrono::time_point<T> a) {
-    return millis(std::chrono::high_resolution_clock::now(), a);
+    return millis(now(), a);
+}
+template<typename T>
+static uint64_t micros(std::chrono::time_point<T> a) {
+    return micros(now(), a);
+}
+template<typename T>
+static uint64_t nanos(std::chrono::time_point<T> a) {
+    return nanos(now(), a);
 }
 #endif //BARCH_TIME_CONVERTSION_H

@@ -17,6 +17,7 @@ for cnt in range(1,5):
     r.execute_command("INFO SERVER")
     r.execute_command("INFO SHARD 0")
     r.execute_command("INFO SHARD k")
+    r.execute_command("INFO commandstats")
     r.execute_command("CONFIG SET rpc_max_buffer 64k")
     r.execute_command("CONFIG SET rpc_max_buffer 1m")
     r.execute_command("CONFIG SET rpc_max_buffer 1g")

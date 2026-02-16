@@ -109,7 +109,7 @@ for batch in reader:
 
         lon = row.geometry.x
         lat = row.geometry.y
-        if filter_street(row.street):
+        if filter_street(row.street) or not f"{row.country}".upper() == "CA":
             ignored =ignored+1
         else:
             prov = 'NONE'

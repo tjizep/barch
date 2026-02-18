@@ -62,6 +62,7 @@ namespace barch {
             }
            return k.hash(*q);
         }
+
     };
     struct hk_eq{
         hk_eq() = default;
@@ -75,6 +76,7 @@ namespace barch {
             }
             return l.get_key(*q) == r.get_key(*q);
         }
+        using is_avalanching = void; // for ankerl hash
     };
     struct shard : public abstract_shard, public art::tree{
     public:

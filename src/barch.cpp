@@ -403,6 +403,7 @@ int SET(caller& call,const arg_t& argv) {
 
     auto k = argv[1];
     auto v = argv[2];
+
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
@@ -430,6 +431,7 @@ int SET(caller& call,const arg_t& argv) {
         opts.set_compressed(true);
         v = compressed;
     }
+
     storage_release l(t);
     t->opt_insert(opts, key, v, true, fc);
 
@@ -734,6 +736,7 @@ int GET(caller& call, const arg_t& argv) {
         return call.push_null();
     }
     read_lock release(t);
+
     auto r = t->search(ckey);
     if (r.null()) {
         return call.push_null();

@@ -150,6 +150,7 @@ namespace barch {
 
         template<typename Stream>
         void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,heap::vector<call_context_ptr> &asynch_calls) {
+
             std::string cn{ params[0]};
 
             auto colon = cn.find_last_of(':');
@@ -180,12 +181,13 @@ namespace barch {
                 if (ic == barch_functions->end()) {
                     redis::rwrite(ostream, error{"unknown command"});
                 } else {
-                    // TODO: ic->second.is_asynch
                     auto &f = ic->second.call;
                     ++ic->second.calls;
                     if (ic->second.is_write() && ic->second.is_data()) {
                         repl::call(params);
                     }
+
+
                     // once one call is asynch all calls in this batch must be asynch to preserve order
                     if (ic->second.is_asynch || !asynch_calls.empty()) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
@@ -198,11 +200,23 @@ namespace barch {
                         }
 
                     }else {
-                        auto current = now();
+#ifdef _DO_SPEED_TEST_ // use this to possibly debug speed and latency issues
+                        caller.args.clear();
+                        caller.results.clear();
+                        caller.errors.clear();
+                        for (const auto& s : params) {
+                            caller.args.push_back(s);
+                        }
+                        f(caller, caller.args);
+                        redis::rwrite(ostream,"OK");
+#else
+                        // auto current = now(); // remove this for now since it has a measurable impact on performance
                         int32_t r = caller.call(params,f);
                         if (!caller.has_blocks())
                             write_result<Stream>(caller, ostream, r);
-                        ic->second.total_nanos += nanos(current);
+                        //ic->second.total_nanos += nanos(current);
+#endif
+
                     }
                 }
             }catch (std::exception& e) {

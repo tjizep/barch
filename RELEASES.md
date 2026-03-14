@@ -18,6 +18,7 @@
 4. fix overflow hash accidentally modified (v0.5.6b 2026-02-15)
 5. Remove -Ofast release build parameter it may cause issues with floats (v0.5.6b 2026-02-16)
 6. fix lock type in `EXPIRE` (v0.5.6b 2026-03-14)
+7. fix lock type in `LB` and `UB` (v0.5.6b 2026-03-14)
 
 # Release v0.5.5b 2026-02-06
 

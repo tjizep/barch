@@ -1036,10 +1036,9 @@ int LB(caller& call, const arg_t& argv) {
 
     auto converted = conversion::as_composite(k);
     art::value_type the_lb;
-    for (const auto& shard : call.kspace()->get_shards()) {
-        auto t = shard;
-        t->get_latch().lock();
-    }
+    auto ks = call.kspace();
+    ks_shared kss(ks->source());
+    ks_shared ksl(ks);
     for (const auto& shard : call.kspace()->get_shards()) {
         auto t = shard;
         if (!t->get_tree_size()) continue;
@@ -1056,9 +1055,6 @@ int LB(caller& call, const arg_t& argv) {
         ok = call.push_null();
     } else {
         ok = call.push_encoded_key(the_lb);
-    }
-    for (const auto& shard : call.kspace()->get_shards()) {
-        shard->get_latch().unlock();
     }
     return ok;
 
@@ -1083,7 +1079,9 @@ int UB(caller& call, const arg_t& argv) {
 
     auto converted = conversion::as_composite(k);
     art::value_type the_lb;
-    ks_unique ulock(call.kspace());
+    auto ks = call.kspace();
+    ks_shared kss(ks->source());
+    ks_shared ksl(ks);
     for (const auto& t : call.kspace()->get_shards()) {
         if (!t->get_tree_size()) continue;
         auto key = converted.get_value();

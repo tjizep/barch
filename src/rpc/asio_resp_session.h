@@ -138,18 +138,18 @@ namespace barch {
             }
         }
 
-        struct call_context {
-            call_context(const rpc_caller& caller, barch_function f,std::vector<redis::string_param_t> params, const std::string &cn ): caller(caller), f(std::move(f)), params(std::move(params)), cn(cn) {}
+        struct asynch_call_context {
+            asynch_call_context(const rpc_caller& caller, barch_function f,std::vector<redis::string_param_t> params, const std::string &cn ): caller(caller), f(std::move(f)), params(std::move(params)), cn(cn) {}
             rpc_caller caller{};
             barch_function f{};
             vector_stream stream{}; // the stream buffer needs to stau alive while the call completes
             std::vector<redis::string_param_t> params{};
             std::string cn;
         };
-        typedef std::shared_ptr<call_context> call_context_ptr;
+        typedef std::shared_ptr<asynch_call_context> asynch_call_context_ptr;
 
         template<typename Stream>
-        void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,heap::vector<call_context_ptr> &asynch_calls) {
+        void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,heap::vector<asynch_call_context_ptr> &asynch_calls) {
 
             std::string cn{ params[0]};
 
@@ -192,30 +192,22 @@ namespace barch {
                     if (ic->second.is_asynch || !asynch_calls.empty()) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
                         if (!stream.empty()) {
-                            call_context_ptr ctx = std::make_shared<call_context>(caller,f,params,cn);
+                            asynch_call_context_ptr ctx = std::make_shared<asynch_call_context>(caller,f,params,cn);
                             ctx->stream = std::move(stream); // move the current stream - it should be empty after the move
                             asynch_calls.push_back(ctx);
                         }else {
-                            asynch_calls.emplace_back(std::make_shared<call_context>(caller,f,params,cn));
+                            asynch_calls.emplace_back(std::make_shared<asynch_call_context>(caller,f,params,cn));
                         }
 
                     }else {
-#ifdef _DO_SPEED_TEST_ // use this to possibly debug speed and latency issues
-                        caller.args.clear();
-                        caller.results.clear();
-                        caller.errors.clear();
-                        for (const auto& s : params) {
-                            caller.args.push_back(s);
-                        }
-                        f(caller, caller.args);
-                        redis::rwrite(ostream,"OK");
-#else
+
                         // auto current = now(); // remove this for now since it has a measurable impact on performance
+
                         int32_t r = caller.call(params,f);
                         if (!caller.has_blocks())
                             write_result<Stream>(caller, ostream, r);
+
                         //ic->second.total_nanos += nanos(current);
-#endif
 
                     }
                 }
@@ -240,7 +232,7 @@ namespace barch {
                     try {
 
                         stream.clear();
-                        heap::vector<call_context_ptr> asynch_calls;
+                        heap::vector<asynch_call_context_ptr> asynch_calls;
                         // collect the call results into the "stream" buffer
                         while (parser.remaining() > 0) {
                             auto &params = parser.read_new_request();
@@ -329,7 +321,7 @@ namespace barch {
                 });
         }
         // write a ctx and preserve its lifetime
-        void do_write(call_context_ptr ctx) {
+        void do_write(asynch_call_context_ptr ctx) {
             auto self(this->shared_from_this());
             if (ctx->stream.empty()) return;
 

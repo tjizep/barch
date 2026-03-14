@@ -246,7 +246,6 @@ namespace barch {
         if (r == nullptr) {
             abort_with("shard not found");
         }
-        r->set_thread_ap();
         return r;
     }
 

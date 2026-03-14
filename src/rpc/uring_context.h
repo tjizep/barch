@@ -308,9 +308,8 @@ public:
                 auto f = std::move(req->f);
                 req->f = nullptr;
 
-                art::value_type v = req->data.sub(0, cqe->res);
-
                 if constexpr (uring_config::DEBUG) {
+                    art::value_type v = req->data.sub(0, cqe->res);
                     std::string s = std::regex_replace(v.to_string(), std::regex("[\r\n]"), ".");
                     barch::std_log(req->type == u_read ? "read" : "write", s.substr(0, 64));
                 }

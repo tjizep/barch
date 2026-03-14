@@ -243,8 +243,6 @@ void barch::shard::set_hash_query_context(value_type k) {
 void barch::shard::set_hash_query_context(value_type k) const {
     query_key = k;
 }
-void barch::shard::set_thread_ap() {
-}
 
 void barch::shard::remove_leaf(const logical_address& )  {
 }

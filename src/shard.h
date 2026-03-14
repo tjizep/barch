@@ -104,7 +104,6 @@ namespace barch {
         }
         void set_hash_query_context(value_type q);
         void set_hash_query_context(value_type q) const ;
-        void set_thread_ap();
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {
             return h.size();

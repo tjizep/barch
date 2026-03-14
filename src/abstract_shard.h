@@ -83,7 +83,6 @@ namespace barch {
         virtual ~abstract_shard() = default;
         virtual bool remove_leaf_from_uset(art::value_type key) = 0;
         virtual heap::shared_mutex& get_latch() = 0;
-        virtual void set_thread_ap() = 0;
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;
         virtual uint64_t get_size() const = 0;

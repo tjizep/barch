@@ -858,7 +858,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     auto converted = conversion::as_composite(k);
     auto t = call.kspace()->get(converted.get_value());
-    read_lock release(t);
+    storage_release release(t);
 
     art::node_ptr r = t->search(converted.get_value());
     if (r.null()) {

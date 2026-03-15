@@ -1,4 +1,4 @@
-# Release v0.5.6b 2026-03-14
+# Release v0.5.6b 2026-03-15
 
 ## New Features
 
@@ -8,7 +8,7 @@
   `CONFIG SET server_binding` or `server_port`
 4. add `ASYNCH` option to `START` function to restart server on the fly without causing deadlock errors 
    - downside is that server may not be started when function exits (v0.5.6b 2026-02-11)
-5. Add some of the `INFO commandstats' as well as per command stats `INFO commandstats [Command]` like
+5. Add some of the `INFO commandstats` as well as per command stats `INFO commandstats [Command]` like
    `INFO commandstats GET` for instance (v0.5.6b 2026-02-16)
 
 ## Fixes
@@ -19,6 +19,7 @@
 5. Remove -Ofast release build parameter it may cause issues with floats (v0.5.6b 2026-02-16)
 6. fix lock type in `EXPIRE` (v0.5.6b 2026-03-14)
 7. fix lock type in `LB` and `UB` (v0.5.6b 2026-03-14)
+8. fix update release doc
 
 # Release v0.5.5b 2026-02-06
 

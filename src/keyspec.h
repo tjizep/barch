@@ -60,7 +60,7 @@ namespace art {
                 ++syntax_error;
                 return empty;
             }
-            auto val = argv[at];
+           auto val = argv[at];
             if (val.empty()) {
                 return empty;
             }
@@ -104,7 +104,7 @@ namespace art {
             return val;
         }
 
-        int has_enum(const std::initializer_list<const char *> &names, int at) {
+        int has_enum(const std::initializer_list<const char *> &names, int at) const {
             const char *token = toc(at);
             int ctr = 0;
             auto l1 = std::tolower(*token);
@@ -124,7 +124,7 @@ namespace art {
             const char *it = toc(at);
             return  (1 == glob::stringmatchlen({pat},{it}, true));
         }
-        int match(const std::initializer_list<const char *> &names, int at) {
+        int match(const std::initializer_list<const char *> &names, int at) const {
             const char *token = toc(at);
             int ctr = 0;
             for (const char *name: names) {

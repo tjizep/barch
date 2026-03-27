@@ -1,3 +1,10 @@
+# Release v0.5.7b 2026-03-27
+
+## New Features
+
+1. Show port on startup for tcp and ssl connections (v0.5.7b 2026-03-27)
+2. Align some structs to cache lines (v0.5.7b 2026-03-27)
+
 # Release v0.5.6b 2026-03-15
 
 ## New Features
@@ -19,7 +26,7 @@
 5. Remove -Ofast release build parameter it may cause issues with floats (v0.5.6b 2026-02-16)
 6. fix lock type in `EXPIRE` (v0.5.6b 2026-03-14)
 7. fix lock type in `LB` and `UB` (v0.5.6b 2026-03-14)
-8. fix update release doc
+8. fix update release doc (v0.5.6b 2026-03-14)
 
 # Release v0.5.5b 2026-02-06
 

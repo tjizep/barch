@@ -78,7 +78,8 @@ namespace barch {
         }
         using is_avalanching = void; // for ankerl hash
     };
-    struct shard : public abstract_shard, public art::tree{
+    // there's a chance of false sharing so we align them on cache page boundaries
+    struct alignas(64) shard : public abstract_shard, public art::tree{
     public:
     private:
         const std::string EXT = ".dat";
@@ -166,7 +167,7 @@ namespace barch {
         }
         shard& operator=(const shard&) = delete;
 
-        virtual ~shard() override;
+        ~shard() override;
 
         void load_hash();
         void clear_hash() ;
@@ -178,8 +179,8 @@ namespace barch {
             return latch;
         }
         art::value_type filter_key(value_type key) const override;
-        node_ptr make_leaf(value_type key, value_type v, key_options opts );
-        art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile, bool is_compressed ) ;
+        node_ptr make_leaf(value_type key, value_type v, key_options opts ) override;
+        art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile, bool is_compressed ) override;
 
         /**
          * register a pull source on this shard/tree
@@ -256,7 +257,7 @@ namespace barch {
         const alloc_pair& get_ap() const override {
             return *this;
         };
-        size_t get_shard_number() const {
+        size_t get_shard_number() const override {
             return this->shard_number;
         }
         uint64_t get_tree_size() const override{

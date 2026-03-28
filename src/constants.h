@@ -39,7 +39,7 @@ enum {
     log_saving_messages = 0,
     resp_pool_factor = 50,
     tcp_accept_pool_factor = 50,
-    con_alignment = 64//std::hardware_destructive_interference_size
+    con_alignment = 64 //std::hardware_destructive_interference_size
 };
 inline size_t alloc_pad(size_t size) {
 

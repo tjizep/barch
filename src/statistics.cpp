@@ -1,10 +1,10 @@
 #include "statistics.h"
-#include <new>
+#include "constants.h"
 /**
  * size stats
  */
 
-constexpr auto Alignment = std::hardware_destructive_interference_size;
+constexpr size_t Alignment = con_alignment; //std::hardware_destructive_interference_size;
 alignas(Alignment) std::atomic<uint64_t> statistics::n4_nodes = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::n16_nodes = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::n48_nodes = 0;

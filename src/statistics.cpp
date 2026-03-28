@@ -1,5 +1,5 @@
 #include "statistics.h"
-
+#include <new>
 /**
  * size stats
  */

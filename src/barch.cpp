@@ -729,13 +729,13 @@ int GET(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     auto converted = conversion::as_composite(k);
     auto ckey = converted.get_value();
-    auto t = call.kspace()->get(ckey);
+    auto t = call.kspace()->get_ref(ckey);
     auto src = t->sources();
 
     if (!src && t->has_static_bloom_filter() && !t->is_bloom(ckey)) {
         return call.push_null();
     }
-    read_lock release(t);
+    ref_read_lock release(t);
 
     auto r = t->search(ckey);
     if (r.null()) {

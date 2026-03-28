@@ -78,8 +78,8 @@ namespace barch {
         }
         using is_avalanching = void; // for ankerl hash
     };
-    // there's a chance of false sharing so we align them on cache page boundaries
-    struct alignas(64) shard : public abstract_shard, public art::tree{
+    // there's a chance of false sharing so we align them on cache page boundaries alignas(con_alignment)
+    struct shard : public abstract_shard, public art::tree{
     public:
     private:
         const std::string EXT = ".dat";

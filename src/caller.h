@@ -76,6 +76,7 @@ struct caller {
     [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
     virtual barch::key_space_ptr& kspace() = 0;
+    virtual barch::key_space_ref ks_ref() = 0;
     virtual void set_kspace(const barch::key_space_ptr& ks) = 0;
     virtual void use(const std::string& name) = 0;
     virtual void transfer_rpc_blocks(const barch::abstract_session_ptr& ) {};

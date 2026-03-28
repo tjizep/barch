@@ -237,6 +237,17 @@ namespace barch {
         }
         return shard;
     }
+    shard_ref key_space::get_ref(size_t shard) {
+        if (shards.empty()) {
+            abort_with("shard configuration is empty");
+        }
+        auto r = shards[shard % shards.size()].get();
+        if (r == nullptr) {
+            abort_with("shard not found");
+        }
+        return r;
+    }
+
 
     std::shared_ptr<abstract_shard> key_space::get(size_t shard) {
         if (shards.empty()) {
@@ -285,7 +296,12 @@ namespace barch {
     shard_ptr key_space::get(art::value_type key) {
         return get(get_shard_index(key.chars(), key.size));
     }
-
+    shard_ref key_space::get_ref(art::value_type key) {
+        return get_ref(get_shard_index(key.chars(), key.size));
+    }
+    shard_ref key_space::get_ref(ValkeyModuleString **argv) {
+        return get_ref(get_shard_index(argv));
+    }
 
     [[nodiscard]] std::string key_space::get_name() const {
         return name;

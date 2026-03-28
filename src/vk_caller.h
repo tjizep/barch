@@ -212,6 +212,9 @@ struct vk_caller : caller {
     barch::key_space_ptr &kspace() override {
         return ks;
     }
+    barch::key_space_ref ks_ref() override {
+        return ks.get();
+    }
     void set_kspace(const barch::key_space_ptr& kspace) override{
         this->ks = kspace;
     }

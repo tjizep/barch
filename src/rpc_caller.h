@@ -324,6 +324,13 @@ struct rpc_caller : caller {
         }
         return ks;
     }
+    barch::key_space_ref ks_ref() override {
+        if (!ks ) {
+            throw_exception<std::runtime_error>("key space not set");
+        }
+        return ks.get();
+    }
+
     void set_kspace(const barch::key_space_ptr& kspace) override{
         if (ks != kspace) {
             this->ks = kspace;

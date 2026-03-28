@@ -116,16 +116,18 @@ conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool 
     int64_t i;
     double d;
 
-    if (!noint) {
-        if (to_i64({v,vlen},i)) {
-            return comparable_key(i);
+    if (fast_float::is_integer(*v) || *v=='+' || *v=='-') {
+        if (!noint) {
+            if (to_i64({v,vlen},i)) {
+                return comparable_key(i);
+            }
+
         }
+        auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
 
-    }
-    auto fanswer = fast_float::from_chars(v, v + vlen, d); // TODO: not sure if its strict enough, well see
-
-    if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen) {
-        return comparable_key(d);
+        if (fanswer.ec == std::errc() && fanswer.ptr == v + vlen) {
+            return comparable_key(d);
+        }
     }
     return {v, vlen + 1};
 }

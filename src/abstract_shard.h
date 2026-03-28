@@ -6,6 +6,8 @@
 #define BARCH_ABSTRACT_SHARD_H
 #include <memory>
 #include <shared_mutex>
+
+//#include "key_space.h"
 #include "art/art.h"
 #include "art/key_options.h"
 #include "merge_options.h"
@@ -15,6 +17,8 @@ namespace barch {
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
     public:
         typedef std::shared_ptr<abstract_shard> shard_ptr;
+        typedef abstract_shard* shard_ref;
+
         typedef std::vector<bool> bloom_t;
         bloom_t bloom{};
         void add_bloom(art::value_type key) {
@@ -204,6 +208,7 @@ namespace barch {
         virtual void call_unblock(const std::string& key) = 0;
     };
     typedef abstract_shard::shard_ptr shard_ptr;
+    typedef abstract_shard::shard_ref shard_ref;
     /**
      * gets per module per node type statistics for all art_node* types
      * @return art_statistics
@@ -225,7 +230,7 @@ namespace barch {
 
 
 struct storage_release {
-    barch::shard_ptr  t{};
+    barch::shard_ptr t{};
     barch::shard_ptr sources_locked{};
     bool lock = true;
 
@@ -269,33 +274,35 @@ struct storage_release {
     }
 };
 typedef storage_release storage_write_lock;
-struct read_lock {
-    barch::shard_ptr t{};
+
+template<typename ShardRef>
+struct read_lock_t {
+    ShardRef t{};
     barch::shard_ptr sources_locked{};
     bool lock = true;
     void clear() {
         t = nullptr;
         sources_locked = nullptr;
     }
-    read_lock() = default;
-    read_lock(const read_lock&) = delete;
-    read_lock(read_lock&& r)  noexcept {
+    read_lock_t() = default;
+    read_lock_t(const read_lock_t&) = delete;
+    read_lock_t(read_lock_t&& r)  noexcept {
         t = r.t;
         sources_locked = r.sources_locked;
         r.clear();
         lock = r.lock;
 
     };
-    read_lock& operator=(read_lock&& r)  noexcept {
+    read_lock_t& operator=(read_lock_t&& r)  noexcept {
         t = r.t;
         lock = r.lock;
         sources_locked = r.sources_locked;
         r.clear();
         return *this;
     }
-    read_lock& operator=(const read_lock&) = delete;
+    read_lock_t& operator=(const read_lock_t&) = delete;
 
-    explicit read_lock(const barch::shard_ptr& t, bool lock = true) : t(t), lock(lock) {
+    explicit read_lock_t(const ShardRef& t, bool lock = true) : t(t), lock(lock) {
         if (!lock) return;
         sources_locked = t->sources();
         auto s = sources_locked;
@@ -309,7 +316,7 @@ struct read_lock {
         ++statistics::read_locks_active;
     }
 
-    ~read_lock() {
+    ~read_lock_t() {
         if (!t) return;
         if (!lock) return;
         t->unlock_shared();
@@ -323,7 +330,8 @@ struct read_lock {
         }
     }
 };
-
+typedef read_lock_t<barch::shard_ptr> read_lock;
+typedef read_lock_t<barch::shard_ref> ref_read_lock;
 /**
 * evict a lru page
 */

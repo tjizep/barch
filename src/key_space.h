@@ -14,10 +14,11 @@ namespace barch {
     class key_space {
     public:
         typedef std::shared_ptr<key_space> key_space_ptr;
+        typedef key_space* key_space_ref;
         bool opt_ordered_keys = barch::get_ordered_keys();
         size_t opt_shard_count = barch::get_shard_count().size();
     private:
-        heap::vector<shard_ptr> shards{};
+        heap::vector<barch::shard_ptr> shards{};
         decltype(std::chrono::high_resolution_clock::now) start_time;
         std::string name{};
         key_space_ptr src;
@@ -37,6 +38,9 @@ namespace barch {
         shard_ptr get(size_t shard);
         shard_ptr get(art::value_type key);
         shard_ptr get(ValkeyModuleString **argv) ;
+        shard_ref get_ref(size_t shard);
+        shard_ref get_ref(art::value_type key);
+        shard_ref get_ref(ValkeyModuleString **argv) ;
         [[nodiscard]] std::string get_name() const;
         [[nodiscard]] std::string get_canonical_name() const;
         const heap::vector<shard_ptr>& get_shards() ;
@@ -54,6 +58,7 @@ namespace barch {
         size_t hash_buf_size() const ;
     };
     typedef key_space::key_space_ptr key_space_ptr;
+    typedef key_space::key_space_ref key_space_ref;
     const std::string& get_ks_pattern_error();
     bool is_keyspace(const std::string& name_);
     bool check_ks_name(const std::string& name_);

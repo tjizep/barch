@@ -1174,7 +1174,9 @@ int KSPACE(caller& call, const arg_t& argv) {
     if (parser.is_depends) {
         auto source = barch::get_keyspace(parser.source);
         auto dependent = barch::get_keyspace(parser.dependant);
-
+        if (dependent->get_shard_count() != source->get_shard_count()) {
+            return call.push_error("source and dependant shard counts do not match");
+        }
         ks_shared shl(source);
         ks_unique ul(dependent);
         dependent->depends(source);

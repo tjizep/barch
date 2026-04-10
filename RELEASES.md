@@ -1,10 +1,12 @@
-# Release v0.5.7b 2026-03-29
+# Release v0.5.7b 2026-04-10
 
 ## New Features
 
 1. Show port on startup for tcp and ssl connections (v0.5.7b 2026-03-27)
 2. Align some structs to cache lines (v0.5.7b 2026-03-27)
 3. performance improvements 3-7% overall by reducing CPU use (v0.5.7b 2026-03-28)
+4. further perf improvements, about 3% in parser and asynch io (v0.5.7b 2026-04-10)
+   - async perf by adding session close thread and reducing shared pointer atomic increments
 
 ## Fixes
 1. Add shard count check for `SPACES DEPENDS dest ON src` command (v0.5.7b 2026-03-29)

@@ -154,10 +154,11 @@ namespace barch {
             std::string cn{ params[0]};
 
             auto colon = cn.find_last_of(':');
-            auto old_spc = caller.kspace();
+            key_space_ptr old_spc;
             bool should_reset_space = false;
             try {
                 if (colon != std::string::npos && colon < cn.size()-1) {
+                    old_spc = caller.kspace();
                     std::string space = cn.substr(0,colon);
                     cn = cn.substr(colon+1);
 
@@ -220,9 +221,8 @@ namespace barch {
         }
         // the async call context needs to stay alive while calls complete
         void do_read() {
-            auto self(this->shared_from_this());
             socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                [this, self](std::error_code ec, std::size_t length)
+                [this](std::error_code ec, std::size_t length)// NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
             {
 
                 if (!ec){
@@ -245,7 +245,7 @@ namespace barch {
                         }
                         for (auto ctx: asynch_calls) {
                             // all data will be kept alive while "workers" are busy
-                            asio::post(workers,[this, self, ctx]() {
+                            asio::post(workers,[this, ctx]() { // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
                                 auto ic = barch_functions->find(ctx->cn);
                                 if (ic == barch_functions->end()) {
                                     return;
@@ -306,11 +306,11 @@ namespace barch {
             do_read();
         }
         void do_write(const vector_stream& local_stream) {
-            auto self(this->shared_from_this());
+
             if (local_stream.empty()) return;
 
             asio::async_write(socket_, asio::buffer(local_stream.buf),
-                [this, self](std::error_code ec, std::size_t length){
+                [this](std::error_code ec, std::size_t length){ // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;
@@ -322,11 +322,10 @@ namespace barch {
         }
         // write a ctx and preserve its lifetime
         void do_write(asynch_call_context_ptr ctx) {
-            auto self(this->shared_from_this());
             if (ctx->stream.empty()) return;
 
             asio::async_write(socket_, asio::buffer(ctx->stream.buf),
-                [this, self, ctx](std::error_code ec, std::size_t length){
+                [this, ctx](std::error_code ec, std::size_t length){ // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;
@@ -336,8 +335,9 @@ namespace barch {
                     }
                 });
         }
-
+    public:
         TSock socket_;
+    private:
         char data_[rpc_io_buffer_size];
         redis::redis_parser parser{};
         rpc_caller caller{};

@@ -11,11 +11,15 @@
 #include "art/art.h"
 #include "art/key_options.h"
 #include "merge_options.h"
+#include "shared_mutex.h"
 #include "rpc/abstract_session.h"
+#include "shared_mutex.h"
 
 namespace barch {
+
     class abstract_shard : public std::enable_shared_from_this<abstract_shard>{
     public:
+
         typedef std::shared_ptr<abstract_shard> shard_ptr;
         typedef abstract_shard* shard_ref;
 
@@ -86,7 +90,7 @@ namespace barch {
 
         virtual ~abstract_shard() = default;
         virtual bool remove_leaf_from_uset(art::value_type key) = 0;
-        virtual heap::shared_mutex& get_latch() = 0;
+        virtual barch::latch_t& get_latch() = 0;
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;
         virtual uint64_t get_size() const = 0;
@@ -339,32 +343,24 @@ uint64_t art_evict_lru(barch::shard_ptr t);
 template<typename SFun>
 size_t shard_thread_processor(size_t count, SFun && sfun ) {
     std::vector<std::thread> loaders;
-    loaders.resize(std::max<size_t>(1, std::thread::hardware_concurrency()/2));
-    size_t shard_num = 0;
-
-    size_t remaining_shards = count;
-    while (remaining_shards > 0) {
-        size_t active_shards = std::min<size_t>(remaining_shards,loaders.size());
-        for (size_t l = 0; l < active_shards; ++l) {
-            loaders[l] = std::thread([shard_num, sfun]() {
-                sfun(shard_num);
-            });
-
-            ++shard_num;
-        }
-        size_t iterations = 0;
-        for (auto &loader : loaders) {
-            if (loader.joinable())
-                loader.join();
-            --active_shards;
-            --remaining_shards;
-            ++iterations;
-            if (active_shards == 0) {
-                break;
+    const size_t max_loader_threads = 1; //std::thread::hardware_concurrency()/2;
+    for (size_t shard_num = 0; shard_num < count; ++shard_num) {
+        //loaders.emplace_back( std::thread([shard_num, sfun]() {
+            sfun(shard_num);
+            //rh_shared::release_thread();
+        //}));
+        if (loaders.size() > max_loader_threads) {
+            for (auto &t : loaders) {
+                if (t.joinable()) t.join();
             }
-
+            loaders.clear();
         }
+
+
     }
-    return shard_num;
+    for (auto &t : loaders) {
+        if (t.joinable()) t.join();
+    }
+    return count;
 }
 #endif //BARCH_ABSTRACT_SHARD_H

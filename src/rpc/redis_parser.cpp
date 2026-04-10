@@ -29,13 +29,22 @@ namespace redis {
      *
      * Returns false otherwise.
     */
-    bool redis_parser::buffer_get_valid_item(art::value_type &item) {
+    bool redis_parser::buffer_get_valid_item(art::value_type &item, ptrdiff_t hint) {
         if (buffer_size - buffer_start < 2) {
             item.size = buffer_size - buffer_start;
             return false;
         }
-        item.size = 2;
         ptrdiff_t end = buffer_size - buffer_start + 1;
+        if (hint > 0 && hint < end) { // first check hint so that we can avoid large scans
+            if (item.bytes[hint] == '\r' &&
+                item.bytes[hint + 1] == '\n') {
+                item.size = hint + 2;
+                buffer_start += hint + 2;
+                ++parameters_processed;
+                return true;
+            }
+        }
+        item.size = 2;
 
         for (ptrdiff_t i = 2; i < end; i++) {
             const auto* d = (const uint8_t*) memchr(&item.bytes[i-2],'\r',end);
@@ -68,9 +77,18 @@ namespace redis {
         return std::max(buffer_size, buffer_start) - buffer_start; //buffer.size();
     }
     std::string_view redis_parser::read_next_item() {
-        //item.clear();
         auto item = art::value_type{full_buffer.data() + buffer_start, 0};
         if(!buffer_get_valid_item(item)) {
+            if (item.size > redis_max_item_len) {
+                throw_exception<std::domain_error>("item exceeds maximum length");
+            }
+            return std::string_view{};
+        }
+        return std::string_view{item.chars(),item.size};
+    }
+    std::string_view redis_parser::read_next_item(ptrdiff_t hint) {
+        auto item = art::value_type{full_buffer.data() + buffer_start, 0};
+        if(!buffer_get_valid_item(item, hint)) {
             if (item.size > redis_max_item_len) {
                 throw_exception<std::domain_error>("item exceeds maximum length");
             }
@@ -217,7 +235,7 @@ namespace redis {
                     break;
                 case state_bstr_size: {
                     // Read the bulk string
-                    bstr_item = read_next_item();
+                    bstr_item = read_next_item(bstr_size); // TODO: this could be more efficient if we have a length hint and check if the \r\n exists at that point (instead of scanning the entire string)
                     if (bstr_item.empty()) {
                         return empty;
                     }

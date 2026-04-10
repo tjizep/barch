@@ -16,6 +16,7 @@
 #include <vector>
 #include <ankerl/unordered_dense.h>
 #include <jg/dense_hash_map.hpp>
+#include "shared_mutex.h"
 #define unused_arg
 #define unused(x)
 
@@ -26,12 +27,16 @@
 #        define LIKELY(x) (x)   // NOLINT(cppcoreguidelines-macro-usage)
 #        define UNLIKELY(x) (x) // NOLINT(cppcoreguidelines-macro-usage)
 #    endif
-
+namespace barch {
+    //typedef rh_shared::shared_mutex latch_t;
+    typedef std::shared_timed_mutex latch_t;
+}
 namespace heap {
 
     uint64_t random_range(uint64_t lower, uint64_t upper);
 
     typedef std::shared_timed_mutex shared_mutex;
+    ;
     uint64_t get_physical_memory_bytes();
 
     double get_physical_memory_ratio();

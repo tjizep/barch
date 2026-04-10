@@ -42,7 +42,7 @@ struct counted_shared_latch {
     }
 };
 
-typedef counted_unique_latch<heap::shared_mutex> unique_latch;
-typedef counted_shared_latch<heap::shared_mutex> shared_latch;
+typedef counted_unique_latch<barch::latch_t> unique_latch;
+typedef counted_shared_latch<barch::latch_t> shared_latch;
 
 #endif //BARCH_COUNTED_LOCKS_H

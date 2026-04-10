@@ -70,12 +70,78 @@ namespace barch {
         std::atomic<size_t> threads_started = 0;
         std::atomic<size_t> resp_distributor{};
         std::atomic<size_t> asio_resp_distributor{};
+        std::mutex session_latch;
         bool use_ssl = false;
+        const bool use_uring = false;
+        typedef asio::local::stream_protocol uds;
+        std::vector<std::shared_ptr<resp_session<tcp::socket>>> tcp_sessions;
+        std::vector<std::shared_ptr<resp_session<uds::socket>>> uds_sessions;
+        moodycamel::LightweightSemaphore collector_control{};
+        moodycamel::LightweightSemaphore collector_exit{};
+        heap::unordered_set<size_t> open_pos_tcp;
+        heap::unordered_set<size_t> open_pos_uds;
+        std::thread session_collector;
+        // must be called in mutext
+        template<typename Sock_T>
+        void register_(
+            const std::shared_ptr<resp_session<Sock_T>>& session, // the session which must be registered
+            heap::unordered_set<size_t>& open, //open positions
+            std::vector<std::shared_ptr<resp_session<Sock_T>>> &sessions // array of sessions to register into
+            ) {
+            std::lock_guard lock(session_latch);
 
+            if (open.empty()) {
+                sessions.push_back(session);
+            }else {
+                size_t at = *open.begin();
+                open.erase(at);
+                sessions.at(at) = session;
+            }
+        }
+        void register_session(const std::shared_ptr<resp_session<tcp::socket>>& session) {
+            register_(session, open_pos_tcp, tcp_sessions);
+        }
+        void register_session(const std::shared_ptr<resp_session<uds::socket>>& session) {
+            register_(session,open_pos_uds, uds_sessions);
+        }
         std::shared_ptr<asio_work_unit> get_asio_unit() {
             size_t r = (asio_resp_distributor % asio_resp_ios.size());
-            asio_resp_distributor++;
+            ++asio_resp_distributor;
             return asio_resp_ios[r];
+        }
+        template<typename Sock_T>
+        void collect_sessions(heap::unordered_set<size_t>& open_pos, std::vector<std::shared_ptr<resp_session<Sock_T>>> &sessions) {
+            std::lock_guard lock(session_latch); // TODO: this can block new connections
+            size_t pos = 0;
+            for (auto &s : sessions) {
+                if (s) {
+
+                    auto fd =  s->socket_.lowest_layer().native_handle();
+                    char buffer[8];
+                    if (recv(fd, buffer, 1, MSG_PEEK | MSG_DONTWAIT) == 0) {
+                        if (open_pos.contains(pos)) {
+                            std_err("position already taken - possible memory leak",pos);
+                        }
+                        open_pos.insert(pos);
+                        s = nullptr;
+                    }
+                }
+                ++pos;
+            }
+
+
+        }
+        void start_session_collector() {
+
+            session_collector = std::thread([this]() {
+                std_log("starting session collector thread");
+                while (!this->collector_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
+                    collect_sessions<tcp::socket>(open_pos_tcp,tcp_sessions);
+                    collect_sessions<uds::socket>(open_pos_uds,uds_sessions);
+                }
+                std_log("ending session collector thread");
+                collector_exit.signal(1);
+            });
         }
 
         void stop() {
@@ -107,10 +173,16 @@ namespace barch {
             }catch (std::exception& e) {
                 barch::std_err("failed to workers service", e.what());
             }
+
             work_pool.stop();
             pool.stop();
 
             asio_resp_pool.stop();
+            collector_control.signal(1);
+            collector_exit.wait();
+            if (session_collector.joinable())
+                session_collector.join();
+
             //port = 0;
             started = false;
         }
@@ -138,7 +210,7 @@ namespace barch {
         }
 
         template<typename UnkProto>
-        static void handle_assign(typename UnkProto::socket& socket, typename UnkProto::socket& endpoint) {
+        static void handle_assign(UnkProto::socket& , UnkProto::socket&) {
 
         }
 
@@ -168,7 +240,9 @@ namespace barch {
 
 
         void start() {}
-        bool use_uring = false;
+
+
+
         void process_data(Proto::socket& endpoint) {
             try {
                 char cs[1] ;
@@ -176,15 +250,17 @@ namespace barch {
                 endpoint.read_some(asio::buffer(cs,1));
                 stream_read_ctr += 1;
                 if (cs[0]) {
-                        if (statistics::repl::redis_sessions > get_max_resp_connections()) {
-                            std_err("Too many resp sessions/connections",statistics::repl::redis_sessions.load());
-                            return;
-                        }
-                        auto unit = this->get_asio_unit();
-                        typename Proto::socket socket (unit->io);
-                        handle_assign(socket, endpoint);
-                        auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(socket),workers, cs[0]);
-                        session->start();
+                    if (statistics::repl::redis_sessions > get_max_resp_connections()) {
+                        std_err("Too many resp sessions/connections",statistics::repl::redis_sessions.load());
+                        return;
+                    }
+                    auto unit = this->get_asio_unit();
+                    typename Proto::socket socket (unit->io);
+                    handle_assign(socket, endpoint);
+                    auto session = std::make_shared<resp_session<typename Proto::socket>>(std::move(socket),workers, cs[0]);
+                    register_session(session);
+
+                    session->start();
 
                     return;
                 }
@@ -252,6 +328,7 @@ namespace barch {
         ,   ssl_context(asio::ssl::context::tlsv13)
         ,   use_ssl(ssl) {
 
+            start_session_collector();
             if (use_ssl) {
                 ssl_context.set_options(
                 asio::ssl::context::default_workarounds

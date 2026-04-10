@@ -14,7 +14,6 @@
 #include <functional>
 #include <list>
 #include <logger.h>
-#include <unordered_set>
 
 #include "ioutil.h"
 #include "configuration.h"
@@ -917,7 +916,7 @@ public:
         });
     }
     // this function locks (but only a small time)  and doesnt require further locking outside
-    void iterate_pages(heap::shared_mutex& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
+    void iterate_pages(barch::latch_t& latch, const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
         opt_iterate_workers = barch::get_iteration_worker_count();
         std::vector<std::thread> workers{opt_iterate_workers};
         std::atomic<bool> stop = false;
@@ -1179,7 +1178,8 @@ struct alloc_pair : public abstract_leaf_pair{
 
 
     size_t shard_number{};
-    heap::shared_mutex latch{};
+    barch::latch_t latch{};
+
     bool is_debug = false;
     std::string name{};
     std::string tk{};

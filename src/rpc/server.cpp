@@ -211,7 +211,7 @@ namespace barch {
 
         template<typename UnkProto>
         static void handle_assign(UnkProto::socket& , UnkProto::socket&) {
-
+            std_err("cannot assign unknown socket type");
         }
 
         void start_accept() {

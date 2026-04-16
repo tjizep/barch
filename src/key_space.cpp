@@ -11,7 +11,7 @@
 #include "swig_api.h"
 #include "thread_pool.h"
 #include "rpc/server.h"
-
+#include "a5hash.h"
 namespace barch {
     struct key_spaces {
         key_spaces() {
@@ -263,14 +263,29 @@ namespace barch {
     size_t key_space::get_shard_index(art::value_type key) {
         return get_shard_index(key.chars(), key.size);
     }
-
+#if 0
+    static uint64_t hash_fun(const char *str, size_t size) {
+        uint64_t hash = 5381;
+        int c;
+        for (size_t s = 0; s < size; s++) {
+            c = str[s];
+            hash = ((hash << 5) + hash) + c; // hash * 33 + c
+        }
+        return hash;
+    }
+#else
+    static uint64_t hash_fun(const char *str, size_t size) {
+        //return ankerl::unordered_dense::detail::wyhash::hash(str, size);
+        return a5hash(str,size,0);
+    }
+#endif
     size_t key_space::get_shard_index(const char* key, size_t key_len) {
         if (get_shard_count() == 1) {
             return 0;
         }
         auto shard_key = art::value_type{key,key_len};
 
-        uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(shard_key.chars(), shard_key.size);
+        uint64_t hash = hash_fun(shard_key.chars(), shard_key.size);//
 
         size_t hshard = hash % get_shard_count();
         return hshard;

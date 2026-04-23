@@ -1,4 +1,4 @@
-# Release v0.5.7b 2026-04-16
+# Release v0.5.7b 2026-04-23
 
 ## New Features
 
@@ -9,6 +9,7 @@
    - async perf by adding session close thread and reducing shared pointer atomic increments
 5. use a5 hash for shard selection (v0.5.7b 2026-04-16)
 6. increase shard count (v0.5.7b 2026-04-16)
+7. Add more explanatory README.md to examples for the overture python example (Release v0.5.7b 2026-04-23)
 
 ## Fixes
 1. Add shard count check for `SPACES DEPENDS dest ON src` command (v0.5.7b 2026-03-29)

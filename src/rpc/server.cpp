@@ -238,10 +238,7 @@ namespace barch {
             }
         }
 
-
         void start() {}
-
-
 
         void process_data(Proto::socket& endpoint) {
             try {

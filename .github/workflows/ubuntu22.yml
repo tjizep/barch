@@ -13,7 +13,7 @@ jobs:
   ubuntu-build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Use cmake
         run: |
           set -xe
@@ -26,18 +26,18 @@ jobs:
           cmake --build build --target lbarch --parallel
           ( cd build ; ctest --output-on-failure )
       - name: Log in to Docker Hub
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@b798ed8388581f6f002541048b6458ca2c4ba442
+        uses: docker/metadata-action@4f5b5234679dfa19837d4942067c97d7df43b7b3
         with:
           images: teejip/barch
       - name: Build and push Docker image
         id: push
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f
         with:
           context: .
           file: ./Dockerfile
@@ -60,14 +60,14 @@ jobs:
           cp RUNPY.md release_py_dist/README.md
           tar -czvf barch-py-ubuntu22-x86_64.tar.gz -C release_py_dist _barch.so setup.py barch.py README.md
       - name: Ubuntu 22.04 Python x86_64 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: barch-py-ubuntu22-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Ubuntu 22.02 Valkey x86_64 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: barch-valkey-module-ubuntu22-x86_64.tar.gz

@@ -173,14 +173,17 @@ namespace barch {
         void clear_hash() ;
         bool remove_leaf_from_uset(value_type key) override;
         node_ptr from_unordered_set(value_type key) const;
-
+        node_ptr first() const final ; // can return nullptr
+        size_t page(size_t page, heap::buffer<uint8_t>&)const final; // can return nullptr
+        size_t next_page(size_t page ) const final; // can return nullptr
+        node_ptr first(size_t start_page) const;
         bool publish(std::string host, int port) override;
         barch::latch_t& get_latch() override {
             return latch;
         }
-        art::value_type filter_key(value_type key) const override;
-        node_ptr make_leaf(value_type key, value_type v, key_options opts ) override;
-        art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile, bool is_compressed ) override;
+        art::value_type filter_key(value_type key) const final;
+        node_ptr make_leaf(value_type key, value_type v, key_options opts ) final;
+        art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile, bool is_compressed ) final;
 
         /**
          * register a pull source on this shard/tree
@@ -193,78 +196,78 @@ namespace barch {
          * @return true if host and port combo does not exist
          */
 
-        bool pull(std::string host, int port) override;
+        bool pull(std::string host, int port) final;
 
-        void run_defrag() override;
+        void run_defrag() final;
 
-        bool save(bool stats) override;
+        bool save(bool stats) final;
         bool _save(bool stats) const;
         bool _load(bool stats);
 
-        bool send(std::ostream& out) override;
+        bool send(std::ostream& out) final;
 
-        bool load(bool stats) override;
-        bool reload() override;
+        bool load(bool stats) final;
+        bool reload() final;
 
-        void load_bloom() override;
+        void load_bloom() final;
 
-        bool retrieve(std::istream& in) override;
+        bool retrieve(std::istream& in) final;
 
-        void begin() override;
+        void begin() final;
 
-        void commit() override;
+        void commit() final;
 
-        void rollback() override;
+        void rollback() final;
 
-        void clear() override;
+        void clear() final;
         void _clear();
 
-        bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) override;
+        bool insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) final;
 
-        bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) override;
-        bool hash_erase(logical_address ad) override;
-        bool tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) override;
+        bool hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) final;
+        bool hash_erase(logical_address ad) final;
+        bool tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) final;
 
-        bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) override;
-        bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) override;
+        bool opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) final;
+        bool opt_insert(const key_options& options, value_type key, value_type value, bool update, const NodeResult &fc) final;
 
-        bool insert(value_type key, value_type value, bool update, const NodeResult &fc) override;
-        bool insert(value_type key, value_type value, bool update) override;
-        bool evict(value_type key) override;
-        bool evict(const leaf* l) override;
-        bool remove(value_type key, const NodeResult &fc) override;
-        bool tree_remove(value_type key, const NodeResult &fc) override;
-        bool remove(value_type key) override;
-        void merge(const shard_ptr& to, merge_options options) override;
-        void merge(merge_options options) override;
+        bool insert(value_type key, value_type value, bool update, const NodeResult &fc) final;
+        bool insert(value_type key, value_type value, bool update) final;
+        bool evict(value_type key) final;
+        bool evict(const leaf* l) final;
+        bool remove(value_type key, const NodeResult &fc) final;
+        bool tree_remove(value_type key, const NodeResult &fc) final;
+        bool remove(value_type key) final;
+        void merge(const shard_ptr& to, merge_options options) final;
+        void merge(merge_options options) final;
         /**
          * find a key. if the key does not exist pull sources will be queried for the key
          * if the key is no-were a null is returned
          * @param key any valid value
          * @return not null key if it exists (incl. pull sources)
          */
-        node_ptr search(value_type key) override;
-        art::node_ptr lower_bound(art::value_type key) override;
-        art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) override;
-        shard_ptr sources() override;
-        uint64_t bytes_in_free_list() override;
-        void depends(const std::shared_ptr<abstract_shard> & source) override;
-        void release(const std::shared_ptr<abstract_shard> & source) override;
-        void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  override ;
-        alloc_pair& get_ap() override {
+        node_ptr search(value_type key) final;
+        art::node_ptr lower_bound(art::value_type key) final;
+        art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) final;
+        shard_ptr sources() final;
+        uint64_t bytes_in_free_list() final;
+        void depends(const std::shared_ptr<abstract_shard> & source) final;
+        void release(const std::shared_ptr<abstract_shard> & source) final;
+        void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  final ;
+        alloc_pair& get_ap() final {
             return *this;
         };
-        const alloc_pair& get_ap() const override {
+        const alloc_pair& get_ap() const final {
             return *this;
         };
-        size_t get_shard_number() const override {
+        size_t get_shard_number() const final {
             return this->shard_number;
         }
-        uint64_t get_tree_size() const override{
+        uint64_t get_tree_size() const final{
             uint64_t dep_size = 0; //dependencies ? dependencies->get_tree_size() : 0;
             return this->size + dep_size;
         }
-        uint64_t get_size() const override {
+        uint64_t get_size() const final {
             uint64_t src_size = 0;
             auto src = dependencies;
             if (src) {
@@ -276,26 +279,26 @@ namespace barch {
             }
             return  total - this->tomb_stones;
         };
-        uint64_t get_hash_size() const override{
+        uint64_t get_hash_size() const final{
             uint64_t dep_size = 0;//dependencies ? dependencies->get_hash_size() : 0;
             return h.size() + dep_size;
         };
-        art::node_ptr tree_minimum() const override;
-        art::node_ptr tree_maximum() const override;
-        art::node_ptr get_last_leaf_added() const override {
+        art::node_ptr tree_minimum() const final;
+        art::node_ptr tree_maximum() const final;
+        art::node_ptr get_last_leaf_added() const final {
             return last_leaf_added;
         };
-        void maintenance() override;
-        int range(art::value_type key, art::value_type key_end, CallBack cb, void *data) override;
+        void maintenance() final;
+        int range(art::value_type key, art::value_type key_end, CallBack cb, void *data) final;
 
-        int range(art::value_type key, art::value_type key_end, LeafCallBack cb) override;
+        int range(art::value_type key, art::value_type key_end, LeafCallBack cb) final;
 
-        bool update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) override;
+        bool update(value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater) final;
 
-        void queue_consume() override;
+        void queue_consume() final;
 
         std::unordered_map<std::string, heap::vector<barch::abstract_session_ptr>> blocked_sessions;
-        void add_rpc_blocks(const heap::vector<std::string>& keys, const barch::abstract_session_ptr& ptr) override {
+        void add_rpc_blocks(const heap::vector<std::string>& keys, const barch::abstract_session_ptr& ptr) final {
             for (auto& k: keys) {
                 add_rpc_block(k,ptr);;
             }
@@ -312,7 +315,7 @@ namespace barch {
                 }
             }
         }
-        void add_rpc_block(const std::string& key, const abstract_session_ptr& ptr) override{
+        void add_rpc_block(const std::string& key, const abstract_session_ptr& ptr) final{
             auto i = blocked_sessions.find(key);
             if (i != blocked_sessions.end()) {
                 i->second.emplace_back(ptr);
@@ -321,16 +324,16 @@ namespace barch {
             }
         }
 
-        void erase_rpc_blocks(const heap::vector<std::string>& keys, const barch::abstract_session_ptr& ptr) override {
+        void erase_rpc_blocks(const heap::vector<std::string>& keys, const barch::abstract_session_ptr& ptr) final {
             for (auto& k: keys) {
                 unblock_key_(k, ptr);
             }
         }
-        void erase_rpc_block(const std::string& key, const abstract_session_ptr& ptr) override {
+        void erase_rpc_block(const std::string& key, const abstract_session_ptr& ptr) final {
             unblock_key_(key, ptr);
         }
 
-        void call_unblock(const std::string& k) override {
+        void call_unblock(const std::string& k) final {
             heap::vector<barch::abstract_session_ptr> sessions;
             auto i = blocked_sessions.find(k);
             if (i != blocked_sessions.end()) {

@@ -38,7 +38,7 @@ namespace art {
         std::string value;
         int parse_options() {
             clear_error();
-            int spos = 1; // the pattern is the first one
+            unsigned spos = 1; // the pattern is the first one
             if (has("EXIST", spos)) {
                 is_exist = true;
                 ++spos;

@@ -1,4 +1,4 @@
-# Release v0.5.7b 2026-04-23
+# Release v0.5.7b 2026-05-05
 
 ## New Features
 
@@ -10,6 +10,8 @@
 5. use a5 hash for shard selection (v0.5.7b 2026-04-16)
 6. increase shard count (v0.5.7b 2026-04-16)
 7. Add more explanatory README.md to examples for the overture python example (Release v0.5.7b 2026-04-23)
+8. Add `SCAN` function with `COUNT` and `MATCH` parameters (v0.5.7b 2026-05-05)
+9. Add nested array support (v0.5.7b 2026-05-05)
 
 ## Fixes
 1. Add shard count check for `SPACES DEPENDS dest ON src` command (v0.5.7b 2026-03-29)

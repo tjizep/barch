@@ -22,6 +22,7 @@ struct rpc_caller : caller {
     size_t valid_routes{};
     std::string r{};
     heap::vector<Variable> results{};
+    heap::vector<heap::vector<wrapped_variable_t>> temp{};
     heap::vector<std::string> errors{};
     heap::vector<bool> acl{get_all_acl()};
     arg_t args{};
@@ -60,6 +61,15 @@ struct rpc_caller : caller {
         }
         return results[0];
     }
+    [[nodiscard]] size_t results_count() const final {
+        if (temp.empty())
+            return results.size();
+        return temp.back().size();
+    };
+    [[nodiscard]] size_t errors_count() const final {
+        return errors.size();
+    }
+
     [[nodiscard]] bool is_remote() const override {
         return remote;
     }
@@ -88,96 +98,179 @@ struct rpc_caller : caller {
         return this->push_error("Unspecified key error");
     }
     int push_null() override {
-        results.emplace_back(nullptr);
+        emplace_impl(nullptr);
         return 0;
     }
     [[nodiscard]] int ok() const override {
         return 0;
     }
     int push_bool(bool value) override {
-        results.emplace_back(value);
+        emplace_impl(value);
         return 0;
     }
     int push_ll(int64_t l) override {
-        results.emplace_back(l);
+        emplace_impl(l);
         return 0;
     }
     int push_int(long long l) override {
-        results.emplace_back(l);
+        emplace_impl(l);
         return 0;
     }
     int push_int(unsigned long long l) override {
-        results.emplace_back(l);
+        emplace_impl(l);
         return 0;
     }
     int push_int(int64_t l) override {
-        results.emplace_back(l);
+        emplace_impl(l);
         return 0;
     }
     int push_int(uint64_t l) override {
-        results.emplace_back(l);
+        emplace_impl(l);
         return 0;
     }
     int push_int(int32_t l) override {
-        results.emplace_back((int64_t)l);
+        emplace_impl((int64_t)l);
         return 0;
     }
     int push_int(uint32_t l) override {
-        results.emplace_back((uint64_t)l);
+        emplace_impl((uint64_t)l);
+        return 0;
+    }
+    template<typename IT>
+    int set_int_impl(size_t at, IT l) {
+        if (!temp.empty()) {
+            if (at >= temp.back().size()) return this->error();
+            temp.back()[at] = l;
+            return this->ok();
+        }
+        if (at >= results.size()) return this->error();
+        results[at] = l;
+        return this->ok();
+    }
+    int set_int(size_t at, long long l) final {
+       return set_int_impl(at, l);
+    }
+    int set_int(size_t at, unsigned long long l)  final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, int64_t l)  final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, uint64_t l)  final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, int32_t l)   final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, uint32_t l)   final {
+        return set_int_impl(at, (int64_t)l);
+    }
+    template<typename T>
+    int to_array_impl(T&into, size_t from) {
+        heap::vector<wrapped_variable_t> arr;
+        for (size_t at = from; at < into.size(); ++at) {
+            arr.emplace_back(into.at(at));
+        }
+        into.resize(from + 1);
+        into[from] = arr;
+        return ok();
+    }
+    int to_array(size_t from) final {
+        if (!temp.empty()) {
+            return to_array_impl(temp.back(), from);
+        }else {
+            return to_array_impl(results, from);
+        }
+    }
+    template<typename T>
+    void emplace_impl(const T& val) {
+        if (!temp.empty()) {
+            temp.back().emplace_back(val);
+        }else {
+            results.emplace_back(val);
+        }
+    }
+    int push_double(double l) override {
+        emplace_impl(l);
         return 0;
     }
 
-    int push_double(double l) override {
-        results.emplace_back(l);
-        return 0;
+    template<typename T>
+    void push_vt_impl(T& into, art::value_type v, bool dollar = false) {
+        into.emplace_back(std::string{});
+        auto& s = std::get<std::string>((variable_t&)into.back()); // values are currently always a string
+        if (dollar) s.push_back('$');
+        s.insert(s.end(), v.begin(), v.end());
+
     }
 
     int push_vt(art::value_type v) override {
-        results.emplace_back(std::string{});
-        auto& s = std::get<std::string>(results.back()); // values are currently always a string
-        s.push_back('$');
-        s.insert(s.end(), v.begin(), v.end());
+        if (!temp.empty())
+            push_vt_impl(temp.back(), v, true);
+        else
+            push_vt_impl(results, v, true);
         return 0;
     }
 
     int push_simple(art::value_type v) override {
-        results.emplace_back(std::string{}); // values are currently always a string
-        auto& s = std::get<std::string>(results.back()); // values are currently always a string
-        s.insert(s.end(), v.begin(), v.end());
+        if (!temp.empty())
+            push_vt_impl(temp.back(), v, false);
+        else
+            push_vt_impl(results, v, false);
         return 0;
     }
+
     int push_simple(const char * v) override {
-        results.emplace_back(v);
+        emplace_impl(v);
         return 0;
     }
     int push_simple(const std::string& v) override {
-        results.emplace_back(v);
+        emplace_impl(v);
         return 0;
     }
 
     int start_array() override {
-        //results.emplace_back("start_array");
+        temp.emplace_back();
         return 0;
     }
     int end_array(size_t ) override {
-        //results.emplace_back("end_array");
+        if (temp.empty()) return this->error();
+
+        auto b = temp.back();
+        temp.pop_back();
+        if (!b.empty()) {
+            if (!temp.empty()) temp.back().emplace_back(b);
+            else {
+                for (auto &e :b) {
+                    results.emplace_back(e);
+                }
+            }
+        }
         return 0;
     }
     int push_encoded_key(art::value_type key) override {
-        results.emplace_back(encoded_key_as_variant(key));
+        emplace_impl(encoded_key_as_variant(key));
         return 0;
     }
     int push_string(const std::string& v) override {
 
-        results.emplace_back(v);
+        emplace_impl(v);
         return 0;
     }
     int push_values(const std::initializer_list<Variable>& keys) override {
         for (auto &k : keys) {
-            results.emplace_back(k);
+            emplace_impl(k);
         }
         return 0;
     };
+    int push(const Variable & v) final {
+        if (!temp.empty()) {
+            temp.back().emplace_back(v);
+            return ok();
+        }
+        results.emplace_back(v);
+        return ok();
+    }
     std::string convert(const std::string& v) {
         return v;
     }
@@ -187,13 +280,20 @@ struct rpc_caller : caller {
     std::string convert(const art::value_type& v) {
         return {v.chars(),v.size};
     }
-    size_t pop_back(size_t n) override {
+    template<typename T>
+    size_t pop_back_impl(T& a, size_t n ) {
         size_t popped = 0;
-        while (!results.empty() && popped < n) {
-            results.pop_back();
+        while (!a.empty() && popped < n) {
+            a.pop_back();
             ++popped;
         }
         return popped;
+    }
+    size_t pop_back(size_t n) override {
+        if (!temp.empty()) {
+            return pop_back_impl(temp.back(), n);
+        }
+        return pop_back_impl(results, n);
     };
     [[nodiscard]] size_t stack() const override {
         return results.size();
@@ -261,6 +361,7 @@ struct rpc_caller : caller {
         args.clear();
         errors.clear();
         results.clear();
+        temp.clear();
         auto cr = call_route(params);
         if (cr.net_error == 0) {
             return cr.call_error;

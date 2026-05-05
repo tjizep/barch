@@ -136,6 +136,17 @@ namespace redis {
             case var_null:
                 rwrite(io, nullptr);
                 break;
+            case var_array: {
+                const auto &a = std::get<heap::vector<wrapped_variable_t>>(v);
+                writep(io, '*');
+                std::string size = std::to_string(a.size());
+                writep(io, size.data(), size.size());
+                writep(io, CRLF);
+                for (const auto& el: a) {
+                    rwrite(io, el);
+                }
+            }
+                break;
             case var_error:
                 rwrite(io, *std::get_if<error>(&v));
                 break;

@@ -448,8 +448,22 @@ namespace arena {
             return page_data_size;
         }
 
-        [[nodiscard]] size_t get_max_accessible_page() const {
+        [[nodiscard]] uint64_t get_max_accessible_page() const {
             return max_accessible_page();
+        }
+
+        size_t first_page() const {
+            return next_page(0);
+        }
+
+        size_t next_page(size_t start) const {
+            if (hidden_arena.empty()) return 0;
+            for (size_t to = start+1; to <= max_allocated_page; ++to) {
+                if (!is_free(to) && !logical_address::is_null_base(to)) {
+                    return to;
+                }
+            }
+            return 0;
         }
 
         void set_source(base_hash_arena *) {
@@ -741,7 +755,15 @@ namespace arena {
             main.iterate_arena(iter);
         }
 
-        [[nodiscard]] size_t get_max_accessible_page() const {
+        size_t first_page() const {
+            return main.first_page();
+        }
+
+        size_t next_page(size_t start) const {
+            return main.next_page(start);
+        }
+
+        [[nodiscard]] uint64_t get_max_accessible_page() const {
             return main.get_max_accessible_page();
         }
 

@@ -29,12 +29,13 @@ struct logical_address {
         }
     }
 
-    logical_address(size_t p, size_t o, abstract_alloc_pair * alloc) :alloc(alloc){
+    logical_address(size_t p, size_t o, const abstract_alloc_pair * alloc) :alloc((abstract_alloc_pair *)alloc){
         if (alloc && alloc->sentinel != 1<<24) {
             abort_with("invalid allocator pair");
         }
         from_page_offset(p, o);
     }
+
 
     logical_address &operator =(nullptr_t) {
         index = 0;

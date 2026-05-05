@@ -13,6 +13,7 @@ struct vk_caller : caller {
     ValkeyModuleCtx *ctx = nullptr;
     barch::key_space_ptr ks = get_default_ks();
     size_t call_counter{};
+    size_t errors_counter{};
     std::string user{"default"};
     heap::vector<bool> acl{};
     [[nodiscard]] const std::string& get_user() const override  {
@@ -38,6 +39,12 @@ struct vk_caller : caller {
         ++call_counter;
         return ValkeyModule_ReplyWithBool(ctx, val ? 1 : 0);
     }
+    [[nodiscard]] size_t results_count() const override {
+        return call_counter;
+    }
+    [[nodiscard]] size_t errors_count() const override {
+        return errors_counter;
+    }
 
     int push_vt(art::value_type v) override {
         check_ctx();
@@ -45,7 +52,9 @@ struct vk_caller : caller {
         return ValkeyModule_ReplyWithString(ctx, ValkeyModule_CreateString(ctx,v.chars(),v.size));
         //return ValkeyModule_ReplyWithStringBuffer(ctx, v.chars(), v.size);
     }
-
+    int push(const Variable & v) final {
+        return push_variable(v);
+    }
     int start_array() override {
         check_ctx();
         call_counter = 0;
@@ -93,7 +102,33 @@ struct vk_caller : caller {
         ++call_counter;
         return ValkeyModule_ReplyWithLongLong(ctx,l);
     };
+    template<typename IT>
+    int set_int_impl(size_t unused(at), IT unused(l)) {
+        return this->ok();
+    }
+    int set_int(size_t at, long long l) final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, unsigned long long l)  final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, int64_t l)  final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, uint64_t l)  final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, int32_t l)   final {
+        return set_int_impl(at, l);
+    }
+    int set_int(size_t at, uint32_t l)   final {
+        return set_int_impl(at, l);
+    }
+    int to_array(size_t unused(at)) final {
+        check_ctx();
 
+        return 0;
+    }
     int push_double(double l) override {
         check_ctx();
         ++call_counter;
@@ -130,18 +165,21 @@ struct vk_caller : caller {
     [[nodiscard]] int wrong_arity() override {
         check_ctx();
         ++call_counter;
+        ++errors_counter;
         return ValkeyModule_WrongArity(ctx);
     }
 
     [[nodiscard]] int syntax_error() override {
         check_ctx();
         ++call_counter;
+        ++errors_counter;
         return ValkeyModule_ReplyWithError(ctx,"syntax error");
     }
 
     [[nodiscard]] int push_error(const char * e)  override {
         check_ctx();
         ++call_counter;
+        ++errors_counter;
         return ValkeyModule_ReplyWithError(ctx,e);
     };
 

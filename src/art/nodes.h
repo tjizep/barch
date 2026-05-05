@@ -903,4 +903,7 @@ namespace art {
     node_ptr alloc_8_node_ptr(alloc_pair& alloc, unsigned nt);
 
     void free_leaf_node(art::node_ptr n);
+    // page iterator callbacks
+    extern void page_iterator_ptr(const uint8_t* page_data, unsigned size, std::function<bool(const leaf *, uint32_t pos)> cb, unsigned from = 0) ;
+    extern void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<bool(const leaf *, uint32_t pos)> cb) ;
 }

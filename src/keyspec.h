@@ -4,6 +4,7 @@
 
 #ifndef SET_H
 #define SET_H
+//#include "conversion.h"
 #include "value_type.h"
 extern "C" {
     #include "../external/include/valkeymodule.h"
@@ -15,6 +16,7 @@ extern "C" {
 #include <initializer_list>
 #include "sastam.h"
 #include "glob.h"
+
 namespace barch {
     extern bool check_ks_name(const std::string& name_);
 }
@@ -30,12 +32,12 @@ namespace art {
     struct base_key_spec {
         arg_t argv{};
         static std::regex integer;
-        int argc = 0;
-        int r = 0;
+        unsigned argc = 0;
+        unsigned r = 0;
         char empty[2] = {0x00, 0x00};
         mutable std::string s{};
         mutable int syntax_error = 0;
-        int is_parse_error(int spos) const {
+        unsigned is_parse_error(unsigned spos) const {
             return (syntax_error == 0 && spos + 1 == argc) ? 0 : -1;
         }
         void clear_error() {
@@ -44,7 +46,7 @@ namespace art {
         base_key_spec() = default;
         base_key_spec(const arg_t& argv):argv(argv),argc(argv.size()){};
 
-        const std::string &tos(int at) const {
+        const std::string &tos(unsigned at) const {
             s.clear();
             if (at >= argc) {
                 ++syntax_error;
@@ -55,7 +57,7 @@ namespace art {
             return s;
         }
 
-        const char *toc(int at) const {
+        const char *toc(unsigned at) const {
             if (at >= argc) {
                 ++syntax_error;
                 return empty;
@@ -67,7 +69,7 @@ namespace art {
             return val.chars();
         }
 
-        std::string &tos(int at) {
+        std::string &tos(unsigned at) {
             s.clear();
             if (at >= argc) {
                 ++syntax_error;
@@ -82,7 +84,7 @@ namespace art {
             return s;
         }
 
-        bool is_integer(int at) {
+        bool is_integer(unsigned at) {
             if (at >= argc) return false;
 
             auto &scheck = tos(at);
@@ -90,7 +92,7 @@ namespace art {
         }
 
         // integer
-        int64_t tol(int at) const {
+        int64_t tol(unsigned at) const {
             if (at >= argc) {
                 ++syntax_error;
                 return 0;
@@ -100,13 +102,24 @@ namespace art {
                 ++syntax_error;
                 return 0;
             }
-            auto val = std::stoll(scheck);
-            return val;
+            return std::stoll(scheck);
+        }
+        uint64_t toul(unsigned at) const {
+            if (at >= argc) {
+                ++syntax_error;
+                return 0;
+            }
+            auto &scheck = tos(at);
+            if (!std::regex_match(scheck, integer)) {
+                ++syntax_error;
+                return 0;
+            }
+            return std::stoull(scheck);
         }
 
-        int has_enum(const std::initializer_list<const char *> &names, int at) const {
+        size_t has_enum(const std::initializer_list<const char *> &names, unsigned at) const {
             const char *token = toc(at);
-            int ctr = 0;
+            size_t ctr = 0;
             auto l1 = std::tolower(*token);
             for (const char *name: names) {
                 if (l1 == std::tolower(*name)) {
@@ -119,14 +132,17 @@ namespace art {
 
             return ctr;
         }
-        bool match(const char* pat, int at) const {
+        size_t has_one(const std::initializer_list<const char *> &names, unsigned at) const {
+            return has_enum(names, at) < names.size();
+        }
+        bool match(const char* pat, unsigned at) const {
             if (at >= argc) return false;
             const char *it = toc(at);
             return  (1 == glob::stringmatchlen({pat},{it}, true));
         }
-        int match(const std::initializer_list<const char *> &names, int at) const {
+        unsigned match(const std::initializer_list<const char *> &names, unsigned at) const {
             const char *token = toc(at);
-            int ctr = 0;
+            unsigned ctr = 0;
             for (const char *name: names) {
                 if (1 == glob::stringmatchlen({name},{token}, true)){
                     return ctr;
@@ -135,7 +151,7 @@ namespace art {
             }
             return ctr;
         }
-        bool has(const char *what, int at) const {
+        bool has(const char *what, unsigned at) const {
             if (at >= argc) return false;
 
             const char *it = toc(at);
@@ -169,7 +185,7 @@ namespace art {
                 none = true;
                 return VALKEYMODULE_OK;
             }
-            int spos = 3; // the keys are one and two
+            unsigned spos = 3; // the keys are one and two
             get = has("get", spos);
             if (get) ++spos;
 
@@ -248,7 +264,7 @@ namespace art {
 
         int parse_options() {
 
-            int spos = 2; // the keys at one
+            unsigned spos = 2; // the keys at one
             if (!is_integer(spos))
                 return VALKEYMODULE_ERR;
 
@@ -288,7 +304,7 @@ namespace art {
         int64_t max_count{std::numeric_limits<int64_t>::max()};
 
         int parse_keys_options() {
-            int spos = 2; // the pattern is the first one
+            unsigned spos = 2; // the pattern is the first one
             if (argc < 3) {
                 return VALKEYMODULE_OK;
             }
@@ -325,10 +341,10 @@ namespace art {
         int64_t which_flag{4};
         int64_t fields{0};
         int64_t seconds{0};
-        int fields_start{0};
+        unsigned fields_start{0};
 
         int parse_options() {
-            int spos = 2; // the pattern is the first one
+            unsigned spos = 2; // the pattern is the first one
             if (argc < 3) {
                 return VALKEYMODULE_OK;
             }
@@ -391,10 +407,10 @@ namespace art {
         int64_t which_flag{5};
         int64_t fields{0};
         int64_t time_val{0};
-        int fields_start{0};
+        unsigned fields_start{0};
 
         int parse_options() {
-            int spos = 2; // the hash name is the first one
+            unsigned spos = 2; // the hash name is the first one
             if (argc < 3) {
                 return VALKEYMODULE_OK;
             }
@@ -452,10 +468,10 @@ namespace art {
 
         int64_t fields{0};
         int64_t time_val{0};
-        int fields_start{0};
+        unsigned fields_start{0};
 
         int parse_options() {
-            int spos = 2; // the hash name is the first one
+            unsigned spos = 2; // the hash name is the first one
             if (argc < 3) {
                 return VALKEYMODULE_OK;
             }
@@ -497,10 +513,10 @@ namespace art {
         int64_t which_flag_n{3};
         int64_t which_flag_g{3};
 
-        int fields_start{0};
+        unsigned fields_start{0};
 
         int parse_options() {
-            int spos = 2; // the key is the first one
+            unsigned spos = 2; // the key is the first one
             if (argc < 3) {
                 return VALKEYMODULE_ERR;
             }
@@ -534,7 +550,7 @@ namespace art {
                 ++spos;
             }
             while (true) {
-                int lfi_ch = has_enum({"ch", "lfi"}, spos);
+                unsigned lfi_ch = has_enum({"ch", "lfi"}, spos);
                 if (lfi_ch == 0) {
                     CH = true;
                     spos++;
@@ -583,7 +599,7 @@ namespace art {
         bool has_withscores{false};
         aggregate_index aggr{agg_none};
 
-        aggregate_index map_aggr(int ix) {
+        aggregate_index map_aggr(unsigned ix) {
             switch (ix) {
                 case 0:
                     return sum;
@@ -596,7 +612,7 @@ namespace art {
         }
 
         int parse_options() {
-            int spos = 1; // the key is the first one
+            unsigned spos = 1; // the key is the first one
             if (argc < 4) {
                 return VALKEYMODULE_ERR;
             }
@@ -619,7 +635,7 @@ namespace art {
                 return VALKEYMODULE_OK;
             }
             do {
-                int which = has_enum({"weights", "aggregate", "withscores"}, spos);
+                unsigned which = has_enum({"weights", "aggregate", "withscores"}, spos);
                 switch (which) {
                     case weights:
                         ++spos;
@@ -689,7 +705,7 @@ namespace art {
         int64_t count{0};
 
         int parse_options() {
-            int spos = 1; // the key is the first one
+            unsigned spos = 1; // the key is the first one
             if (argc < 4) {
                 return VALKEYMODULE_ERR;
             }
@@ -707,7 +723,7 @@ namespace art {
             }
 
             do {
-                int which = has_enum({"byscore", "bylex", "rev", "limit", "withscores"}, spos);
+                unsigned which = has_enum({"byscore", "bylex", "rev", "limit", "withscores"}, spos);
                 switch (which) {
                     case byscore:
                         ++spos;
@@ -784,7 +800,7 @@ namespace art {
         std::string secret{};
         heap::string_set filters{};
         heap::string_map<bool> cat{};
-        int parse_set(int spos) {
+        unsigned parse_set(unsigned spos) {
 
             user = tos(spos++);
             if (!has("on",spos++)) {
@@ -792,7 +808,7 @@ namespace art {
             }
 
             while (argc != spos) {
-                int filter = match({"~*","+*","-*",">*"},spos);
+                unsigned filter = match({"~*","+*","-*",">*"},spos);
                 const char * value = toc(spos++);
                 if (*value == 0x00) {
                     return VALKEYMODULE_ERR;
@@ -817,7 +833,7 @@ namespace art {
             }
             return VALKEYMODULE_OK;
         }
-        int parse_get(int spos) {
+        unsigned parse_get(unsigned spos) {
 
             user = tos(++spos);
 
@@ -826,11 +842,11 @@ namespace art {
 
         int parse_options() {
 
-            int spos = 1; // the command is the first one
+            unsigned spos = 1; // the command is the first one
             if (argc < 3) {
                 return VALKEYMODULE_ERR;
             }
-            int which = has_enum({"setuser", "getuser", "del", "users", "reset", "help", "count"}, spos);
+            unsigned which = has_enum({"setuser", "getuser", "del", "users", "reset", "help", "count"}, spos);
             switch (which) {
                 case cmd_set:
                     set = true;
@@ -860,5 +876,64 @@ namespace art {
         }
     };
 
+    struct scan_spec : base_key_spec {
+        scan_spec &operator=(ValkeyModuleString **) = delete;
+
+        scan_spec &operator=(const scan_spec &) = delete;
+
+        scan_spec(const scan_spec &) = delete;
+
+        scan_spec(const arg_t& argv) : base_key_spec(argv) {
+        }
+
+        unsigned fields_start{0};
+        uint64_t scan_id{0};
+        uint64_t count{128};
+        std::string glob_expr{};
+        std::string type_expr{};
+        bool is_count{false};
+        bool is_match{false};
+        bool is_type{false};
+        int parse_options() {
+            unsigned spos = 1; // the command is the first one
+
+            scan_id = toul(spos++);
+            if (syntax_error) {
+                return VALKEYMODULE_ERR;
+            }
+
+            if (has_one({"match","m"},spos)) {
+                ++spos;
+                is_match = true;
+                glob_expr = tos(spos++);
+                if (syntax_error) {
+                    return VALKEYMODULE_ERR;
+                }
+            }
+
+            if (has_one({"count","c"},spos)) {
+                ++spos;
+                is_count = true;
+                count = toul(spos++);
+                if (syntax_error) {
+                    return VALKEYMODULE_ERR;
+                }
+            }
+
+            if (has_one({"type","t"},spos)) {
+                ++spos;
+                is_type = true;
+                type_expr = tos(spos++);
+                if (syntax_error) {
+                    return VALKEYMODULE_ERR;
+                }
+            }
+
+            if (argv.size() > spos) {
+                return VALKEYMODULE_ERR;
+            }
+            return VALKEYMODULE_OK;
+        }
+    };
 };
 #endif //SET_H

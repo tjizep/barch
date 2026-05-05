@@ -201,6 +201,8 @@ namespace barch {
                 while (!this->thread_control.wait((int64_t)get_maintenance_poll_delay()*1000ll)) {
                    tshards = this->get_shards();
                    repl::distribute();
+                    ++statistics::maintenance_cycles;
+
                    for (auto s : tshards) {
                        try {
                            s->maintenance();

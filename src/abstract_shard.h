@@ -179,6 +179,9 @@ namespace barch {
         virtual art::node_ptr make_leaf(art::value_type key, art::value_type v, art::leaf::ExpiryType ttl , bool is_volatile , bool is_compressed ) = 0;
         virtual art::value_type filter_key(art::value_type) const = 0;
         virtual art::node_ptr get_root() const = 0;
+        virtual art::node_ptr first() const = 0 ; // can return nullptr
+        virtual size_t page(size_t page, heap::buffer<uint8_t>&) const = 0;
+        virtual size_t next_page(size_t page ) const = 0;
         virtual int range(art::value_type key, art::value_type key_end, art::CallBack cb, void *data) = 0;
         virtual int range(art::value_type key, art::value_type key_end, art::LeafCallBack cb) = 0;
         virtual bool update(art::value_type key, const std::function<art::node_ptr(const art::node_ptr &leaf)> &updater) = 0;
@@ -189,6 +192,7 @@ namespace barch {
         virtual size_t get_queue_size() const = 0;
         virtual size_t inc_queue_size() = 0;
         virtual size_t dec_queue_size() = 0;
+
         // blocking functions
         // this function MUST be pre-locked by the caller using this shards latch
         // add multiple rpc blocks (or callbacks) (called by session in asynch thread)
@@ -343,12 +347,11 @@ uint64_t art_evict_lru(barch::shard_ptr t);
 template<typename SFun>
 size_t shard_thread_processor(size_t count, SFun && sfun ) {
     std::vector<std::thread> loaders;
-    const size_t max_loader_threads = 1; //std::thread::hardware_concurrency()/2;
+    const size_t max_loader_threads = std::thread::hardware_concurrency()/2;
     for (size_t shard_num = 0; shard_num < count; ++shard_num) {
-        //loaders.emplace_back( std::thread([shard_num, sfun]() {
+        loaders.emplace_back( std::thread([shard_num, sfun]() {
             sfun(shard_num);
-            //rh_shared::release_thread();
-        //}));
+        }));
         if (loaders.size() > max_loader_threads) {
             for (auto &t : loaders) {
                 if (t.joinable()) t.join();

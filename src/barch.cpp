@@ -2,6 +2,8 @@
 // Created by me on 11/9/24.
 //
 
+#include <ranges>
+
 #include "auth_api.h"
 #include "barch_apis.h"
 #include "art/iterator.h"
@@ -406,7 +408,6 @@ int SET(caller& call,const arg_t& argv) {
 
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-
     auto sp = call.kspace();
     auto converted = conversion::as_composite(k);
     auto key = converted.get_value();
@@ -753,6 +754,99 @@ int GET(caller& call, const arg_t& argv) {
     }
 }
 
+static void push_page(caller& call, const art::scan_spec &spec, caller::iteration_ptr iteration) {
+    if (iteration->pos < iteration->bytes && iteration->page > 0) {
+        if (spec.is_match) {
+            std::string tmp;
+            art::page_iterator_ptr(iteration->buffer.data(), iteration->bytes, [&](const art::leaf *l, uint32_t unused(pos)) -> bool {
+                if (l->is_tomb()||l->expired()) return true;
+                art::value_type td;
+                if (art::tstring == *l->key())
+                {
+                    td = l->get_clean_key();
+                }else {
+                    tmp = encoded_key_as_string(l->get_key());
+                    td = tmp;
+                }
+
+                if (1 == glob::stringmatchlen(spec.glob_expr, td, 0)) {
+                    call.push_encoded_key(l->get_key());// it throws so it's ok
+                }
+                iteration->pos = l->next_leaf();
+                if (call.results_count() >= spec.count) {
+                    return false;
+                }
+                return true;
+             },iteration->pos);
+        }else {
+            art::page_iterator_ptr(iteration->buffer.data(), iteration->bytes, [&](const art::leaf *l, uint32_t unused(pos)) -> bool {
+                if (l->is_tomb()||l->expired()) return true;
+                call.push_encoded_key(l->get_key()); // it throws so it's ok
+                iteration->pos = l->next_leaf();
+                if (call.results_count() >= spec.count) {
+                    return false;
+                }
+                return true;
+            },iteration->pos);
+        }
+    }
+}
+
+/* B.SCAN <key>
+ *
+ * Return the next key in semi-allocation order, or a null reply if the key
+ * is not defined or its the last key. */
+int SCAN(caller& call, const arg_t& argv) {
+    art::scan_spec spec(argv);
+    if (spec.parse_options() != call.ok()) {
+        return call.syntax_error();
+    }
+    // TODO: we need to eventually get rid of the iteration - it will only get removed if the iteration completes or when the connection closes
+    auto id = spec.scan_id;
+    auto iteration = call.get_iteration(id);
+    if (!iteration) {
+        iteration = call.create_iteration();
+    }
+    call.push_int(iteration->id);
+    call.start_array();
+    auto sn = iteration->shard;
+    for (; sn < call.kspace()->get_shard_count(); ++sn) {
+        auto t = call.kspace()->get(sn);
+        if (t->get_size() == 0) {
+            iteration->page = 0;
+            continue;
+        }
+
+        read_lock release(t);
+        iteration->shard = sn;
+
+        do {
+            if (iteration->bytes == 0) {
+                iteration->bytes = t->page(iteration->page, iteration->buffer);
+            }
+            push_page(call, spec, iteration);
+            if (call.results_count() >= spec.count) {
+                // todo: if we're exactly on max_count and there are no more pages then there will be one additional call
+                call.end_array(1);
+                return call.ok();
+            }
+            iteration->page = t->next_page(iteration->page);
+            iteration->pos = 0;
+            iteration->bytes = 0;
+        } while (iteration->page > 0);
+    }
+    if (sn == call.kspace()->get_shard_count()) {
+        call.erase_iteration(iteration->id);
+        call.end_array(1);
+        call.set_int(0, 0);
+        return call.ok();
+    }
+    return call.ok();
+}
+int cmd_SCAN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    thread_local vk_caller call; // there's only one thread in redis/valkey
+    return call.vk_call(ctx, argv, argc, SCAN);
+}
 /**
  * return the LENGTH of a key
  * @param call

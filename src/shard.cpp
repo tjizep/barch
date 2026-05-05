@@ -15,7 +15,6 @@ static std::mt19937 gen(rd());
 
 
 using namespace art;
-void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<void(const barch::leaf *, uint32_t pos)> cb);
 #ifdef _TESTED_
 uint64_t art_evict_lru(barch::shard_ptr t) {
     try {
@@ -270,6 +269,48 @@ art::node_ptr barch::shard::from_unordered_set(value_type key) const {
     }
     return nullptr;
 }
+node_ptr barch::shard::first(size_t start_page) const {
+    auto &lc = get_leaves();
+    auto fp = start_page;
+
+    node_ptr the_first = nullptr;
+    if (fp){
+        while (the_first.null()) {
+            auto p = lc.get_page_ptr(fp);
+            page_iterator_ptr(p.first, p.second, [fp, &the_first, this](const leaf *l, uint32_t pos) {
+                if (l->is_tomb()) {
+                }else {
+                    logical_address ap{fp, pos, this};
+                    the_first = ap;
+                }
+                return true;
+            });
+            fp = lc.next_page(fp);
+        }
+
+    }
+    return the_first;
+}
+node_ptr barch::shard::first() const {
+    auto &lc = get_leaves();
+    return first(lc.first_page());
+}; // can return nullptr
+size_t barch::shard::next_page(size_t page ) const {
+    auto &lc = get_leaves();
+    return lc.next_page(page);
+}
+size_t barch::shard::page(size_t page, heap::buffer<uint8_t>& buffer) const{
+    auto &lc = get_leaves();
+    if (page) {
+        if (!lc.is_page_allocated(page)) {
+            return 0;
+        }
+        auto p = lc.get_page_ptr(page);
+        buffer = heap::buffer<uint8_t>{p.first, p.second};
+        return p.second;
+    }
+    return 0;
+}; // can return nullptr
 
 bool barch::shard::remove_from_unordered_set(value_type key) {
     set_hash_query_context(key);
@@ -601,8 +642,9 @@ void barch::shard::load_bloom() {
     auto &lc = get_leaves();
     lc.iterate_pages([this](size_t s, size_t unused(page), auto& data) {
         page_iterator(data, s, [this](const leaf *l, uint32_t unused(pos)) {
-            if (l->deleted() || l->is_tomb()) return;
+            if (l->deleted() || l->is_tomb()) return true;
             add_bloom(l->get_key());
+            return true;
         });
     });
 
@@ -1034,27 +1076,6 @@ barch::shard::~shard() {
 
 }
 
-#include "configuration.h"
-#include <functional>
-
-void page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<void(const barch::leaf *, uint32_t pos)> cb) {
-    if (!size) return;
-
-    auto e = page_data.begin() + size;
-    size_t deleted = 0;
-    size_t pos = 0;
-    for (auto i = page_data.begin(); i < e;) {
-        const barch::leaf *l = (barch::leaf *) i;
-        if (l->deleted()) {
-            deleted++;
-        } else {
-            cb(l,pos);
-        }
-        pos += l->next_leaf();
-        i += l->next_leaf();
-
-    }
-}
 void barch::shard::merge(merge_options options) {
     merge(dependencies,options);
 }
@@ -1064,10 +1085,9 @@ void barch::shard::merge(const shard_ptr& to, merge_options options) {
 
     lc.iterate_pages([&to, options](size_t s, size_t , auto& data) {
         page_iterator(data, s, [&](const leaf *l, uint32_t ) {
-            if (l->deleted()) return;
             if (l->is_tomb()) {
                 to->remove(l->get_key());
-                return;
+                return true;
             }
             auto opts = l->options();
             auto v = l->get_value();
@@ -1085,6 +1105,7 @@ void barch::shard::merge(const shard_ptr& to, merge_options options) {
                 }
             }
             to->insert(opts, l->get_key() ,l->get_value(), true, [](node_ptr){});
+            return true;
         });
     });
 }
@@ -1094,7 +1115,7 @@ void barch::shard::load_hash() {
 
     lc.iterate_pages([this,&encountered](size_t s, size_t page, auto& data) {
         page_iterator(data, s, [page,this,&encountered](const leaf *l, uint32_t pos) {
-            if (l->deleted()) return;
+
             if (l->is_tomb()) {
                 ++tomb_stones;
             }else {
@@ -1108,6 +1129,7 @@ void barch::shard::load_hash() {
                 h.insert_unique(lad); // only possible because we know all keys are unique or should be at least
                 ++encountered;
             }
+            return true;
         });
     });
 
@@ -1128,7 +1150,6 @@ void barch::shard::load_hash() {
  */
 static void erase_page(const barch::shard_ptr& shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
     page_iterator(page.first, page.second, [shard,page](const leaf *l, uint32_t unused(pos)) {
-        if (l->deleted()) return;
         bool hashed = l->is_hashed();
         size_t c1 = shard->get_size();
         shard->evict(l);
@@ -1139,6 +1160,7 @@ static void erase_page(const barch::shard_ptr& shard, const std::pair<heap::buff
                 barch::std_err("ordered key not found");
             abort_with("key not marked as deleted but it was not found");
         }
+        return true;
     });
 }
 static void defrag_page(const barch::shard_ptr& shard, const std::pair<heap::buffer<uint8_t>, size_t>& page) {
@@ -1146,13 +1168,12 @@ static void defrag_page(const barch::shard_ptr& shard, const std::pair<heap::buf
     auto fc = [](const node_ptr & unused(n)) -> void {
     };
     page_iterator(page.first, page.second, [&fc,&options,shard](const leaf *l, uint32_t ) {
-        if (l->deleted()) return;
         if (l->is_hashed()) {
             options.set_expiry(l->expiry_ms());
             options.set_volatile(l->is_volatile());
             options.set_compressed(l->is_compressed());
             shard->hash_insert(options, l->get_key(), l->get_value(),true,fc);
-            return;
+            return true;
         }
         size_t c1 = shard->get_tree_size();
         options.set_expiry(l->expiry_ms());
@@ -1166,7 +1187,7 @@ static void defrag_page(const barch::shard_ptr& shard, const std::pair<heap::buf
         }
         --statistics::insert_ops;
         --statistics::new_keys_added;
-
+        return true;
     });
 
     ++statistics::pages_defragged;
@@ -1222,6 +1243,7 @@ void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
         if (!l->deleted()) {
             fupdate(l);
         }
+        return true;
     });
 
 }
@@ -1374,6 +1396,4 @@ void barch::shard::maintenance() {
     }catch (std::exception& e) {
         barch::std_err(e.what());
     }
-    ++statistics::maintenance_cycles;
-
 }

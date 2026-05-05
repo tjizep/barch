@@ -500,6 +500,8 @@ private:
     void iterate_arena(const std::function<void(size_t, const size_t &)> &iter) const {
         main.iterate_arena(iter);
     }
+
+
     uint8_t* get_page_data(logical_address at) {
         if (at.offset() > LPageSize) {
             abort_with("offset too large");
@@ -627,6 +629,15 @@ private:
         valid({at, 0, ap});
 
         return {heap::buffer{get_page_data({at,0, ap}), t.write_position}, t.write_position};
+    }
+    std::pair<const uint8_t*, size_t> get_page_ptr_inner(size_t at) const {
+        if (is_null_base(at)) return {};
+        if (!has_page(at)) return {};
+        auto &t = retrieve_page(at);
+        if (t.empty()) return {};
+        valid({at, 0, ap});
+
+        return {get_page_data({at,0, ap}), t.write_position};
     }
 
 public:
@@ -759,13 +770,15 @@ public:
     size_t get_max_accessible_page() const {
         return main.get_max_accessible_page();
     }
-    bool is_page_allocated(size_t page) {
+    bool is_page_allocated(size_t page) const {
         return !main.is_free(page);
     }
     std::pair<heap::buffer<uint8_t>, size_t> get_page_buffer(size_t at) const {
         return get_page_buffer_inner(at);
     }
-
+    std::pair<const uint8_t*, size_t> get_page_ptr(size_t at) const {
+        return get_page_ptr_inner(at);
+    }
     std::pair<heap::buffer<uint8_t>, size_t> get_lru_page() {
         return {{}, 0};
     }
@@ -1171,6 +1184,14 @@ public:
     }
     [[nodiscard]] size_t get_bytes_in_free_list() const {
         return emancipated.get_added();
+    }
+
+    size_t first_page() const {
+        return main.first_page();
+    }
+
+    size_t next_page(size_t start) const {
+        return main.next_page(start);
     }
 };
 

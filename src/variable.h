@@ -20,7 +20,8 @@ enum {
     var_string = 4,
     var_null = 5,
     var_error = 6,
-    var_max = 7,
+    var_array = 7,
+    var_max = 8,
 };
 struct error {
     error(const std::string n) : name(n){}
@@ -37,9 +38,25 @@ struct error {
 private:
     std::string name;
 };
-
+struct wrapped_variable_t;
 // 0 - var_bool, 1 - var_int64, 2 - var_uint64, 3 - var_double, 4 - var_string, 5 - var_null, 6 - var_error
-typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error> variable_t;
+typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error, heap::vector<wrapped_variable_t>> variable_t;
+
+struct wrapped_variable_t{
+    variable_t var;
+    wrapped_variable_t() = default;
+    wrapped_variable_t(const variable_t& v) : var(v){}
+    wrapped_variable_t& operator=(const variable_t& v) {
+        var = v;
+        return *this;
+    }
+    operator variable_t&() {
+        return var;
+    }
+    operator const variable_t&() const {
+        return var;
+    }
+};
 
 namespace conversion {
     extern bool to(art::value_type v, double &d);
@@ -133,6 +150,21 @@ public:
                 }
                 return s;
             }
+            case var_array: {
+                const auto &a = std::get< heap::vector<wrapped_variable_t>>(*this);
+                std::string s;
+                bool first = true;
+                for (const auto& el: a) {
+                    const Variable & v = el;
+                    if (first) {
+                        first = false;
+                    }else {
+                        s += ",";
+                    }
+                    s += v.to_string();
+                }
+                return s;
+            }
 
             case var_null:
                 return {};
@@ -155,6 +187,8 @@ public:
                 return std::get<double>(*this);
             case var_string:
                 return conversion::to_e<double>(bulk_str(std::get<std::string>(*this)));
+            case var_array:
+                //return 0.0f;// TODO: maybe accumulate IDK
             case var_null:
                 return 0.0f;
             case var_error:
@@ -176,8 +210,8 @@ public:
                 return std::get<double>(*this) == 0.0f;
             case var_string:
                 return conversion::to_e<int>(bulk_str(std::get<std::string>(*this))) > 0;
+            case var_array:
             case var_null:
-                return false;
             case var_error:
                 return false;
             default:
@@ -197,8 +231,8 @@ public:
                 return std::get<double>(*this);
             case var_string: // not this can throw an error
                 return conversion::to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
+            case var_array:
             case var_null:
-                return 0;
             case var_error:
                 return 0;
             default:
@@ -217,8 +251,8 @@ public:
                 return std::get<double>(*this);
             case var_string:
                 return conversion::to_e<uint64_t>(bulk_vt(std::get<std::string>(*this)));
+            case var_array:
             case var_null:
-                return 0;
             case var_error:
                 return 0;
             default:
@@ -238,6 +272,7 @@ public:
                 return std::get<double>(*this) < std::get<double>(other);
             case var_string:
                 return std::get<std::string>(*this) < std::get<std::string>(other);
+            case var_array:
             case var_null:
             case var_error:
                 return false;
@@ -273,6 +308,7 @@ public:
             case var_uint64: return "unsigned";
             case var_double: return "double";
             case var_string: return "string";
+            case var_array: return "array";
             case var_null: return "null";
             case var_error: return "error";
             default:
@@ -368,6 +404,13 @@ inline void writep(std::ostream& os, const Variable& v) {
             writep(os, (uint32_t)s.size());
             writep(os, s.data(), s.size());
         }
+        case var_array: {
+            const auto &a = std::get< heap::vector<wrapped_variable_t>>(v);
+            for (const auto& el: a) {
+                auto pv = reinterpret_cast<const variable_t *>(&el);
+                writep(os, *pv);
+            }
+        }
             break;
         case var_null:
             break;
@@ -418,6 +461,8 @@ inline void readp(std::istream& is, Variable& v) {
         case var_null:
             v = nullptr;
             break;
+        case var_array:
+            throw_exception<std::runtime_error>("cannot deserialize array types");
         case var_error:
             readp(is, l);
             s.resize(l);

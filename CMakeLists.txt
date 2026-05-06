@@ -572,6 +572,10 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/compresstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestScan
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/scantest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
     endif ()
 endif ()
 

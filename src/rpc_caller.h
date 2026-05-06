@@ -259,16 +259,16 @@ struct rpc_caller : caller {
         emplace_impl(encoded_key_as_variant(key));
         return 0;
     }
-    int set_string(size_t at, const std::string& value) final {
 
-        return set_impl(at, value);
+    int set_string(size_t at, const std::string& value) final {
+        return set_impl(at, "$"+value);
     }
 
     int push_string(const std::string& v) override {
-
-        emplace_impl(v);
+        emplace_impl("$"+v);
         return 0;
     }
+
     int push_values(const std::initializer_list<Variable>& keys) override {
         for (auto &k : keys) {
             emplace_impl(k);

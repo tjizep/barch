@@ -33,7 +33,7 @@ struct iteration {
     size_t pos{};
     size_t bytes{};
     size_t id{};
-    heap::buffer<uint8_t> buffer{};
+    heap::vector<uint8_t> buffer{};
 
 };
 struct caller {
@@ -107,6 +107,7 @@ public:
     virtual int end_array(size_t length) = 0;
     virtual int push_encoded_key(art::value_type key) = 0;
     virtual int push_string(const std::string& value) = 0;
+    virtual int set_string(size_t at, const std::string& value) = 0;
     virtual int push_values(const std::initializer_list<Variable>& keys) = 0;
     [[nodiscard]] virtual std::string get_info() const = 0;
     virtual void start_call_buffer() = 0;

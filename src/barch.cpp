@@ -758,7 +758,7 @@ static void push_page(caller& call, const art::scan_spec &spec, caller::iteratio
     if (iteration->pos < iteration->bytes && iteration->page > 0) {
         if (spec.is_match) {
             std::string tmp;
-            art::page_iterator_ptr(iteration->buffer.data(), iteration->bytes, [&](const art::leaf *l, uint32_t unused(pos)) -> bool {
+            art::page_iterator_ptr(iteration->buffer.data(), iteration->buffer.size(), [&](const art::leaf *l, uint32_t pos) -> bool {
                 if (l->is_tomb()||l->expired()) return true;
                 art::value_type td;
                 if (art::tstring == *l->key())
@@ -772,17 +772,17 @@ static void push_page(caller& call, const art::scan_spec &spec, caller::iteratio
                 if (1 == glob::stringmatchlen(spec.glob_expr, td, 0)) {
                     call.push_encoded_key(l->get_key());// it throws so it's ok
                 }
-                iteration->pos = l->next_leaf();
+                iteration->pos = pos + l->next_leaf();
                 if (call.results_count() >= spec.count) {
                     return false;
                 }
                 return true;
              },iteration->pos);
         }else {
-            art::page_iterator_ptr(iteration->buffer.data(), iteration->bytes, [&](const art::leaf *l, uint32_t unused(pos)) -> bool {
+            art::page_iterator_ptr(iteration->buffer.data(), iteration->buffer.size(), [&](const art::leaf *l, uint32_t pos) -> bool {
                 if (l->is_tomb()||l->expired()) return true;
                 call.push_encoded_key(l->get_key()); // it throws so it's ok
-                iteration->pos = l->next_leaf();
+                iteration->pos = pos + l->next_leaf();
                 if (call.results_count() >= spec.count) {
                     return false;
                 }
@@ -807,7 +807,7 @@ int SCAN(caller& call, const arg_t& argv) {
     if (!iteration) {
         iteration = call.create_iteration();
     }
-    call.push_int(iteration->id);
+    call.push_string(std::to_string(iteration->id));
     call.start_array();
     auto sn = iteration->shard;
     for (; sn < call.kspace()->get_shard_count(); ++sn) {
@@ -823,6 +823,7 @@ int SCAN(caller& call, const arg_t& argv) {
         do {
             if (iteration->bytes == 0) {
                 iteration->bytes = t->page(iteration->page, iteration->buffer);
+                iteration->pos = 0;
             }
             push_page(call, spec, iteration);
             if (call.results_count() >= spec.count) {
@@ -833,12 +834,13 @@ int SCAN(caller& call, const arg_t& argv) {
             iteration->page = t->next_page(iteration->page);
             iteration->pos = 0;
             iteration->bytes = 0;
+            iteration->buffer.clear();
         } while (iteration->page > 0);
     }
     if (sn == call.kspace()->get_shard_count()) {
         call.erase_iteration(iteration->id);
         call.end_array(1);
-        call.set_int(0, 0);
+        call.set_string(0, "0");
         return call.ok();
     }
     return call.ok();

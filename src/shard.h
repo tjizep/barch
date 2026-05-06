@@ -174,7 +174,7 @@ namespace barch {
         bool remove_leaf_from_uset(value_type key) override;
         node_ptr from_unordered_set(value_type key) const;
         node_ptr first() const final ; // can return nullptr
-        size_t page(size_t page, heap::buffer<uint8_t>&)const final; // can return nullptr
+        size_t page(size_t page, heap::vector<uint8_t>&)const final; // can return nullptr
         size_t next_page(size_t page ) const final; // can return nullptr
         node_ptr first(size_t start_page) const;
         bool publish(std::string host, int port) override;

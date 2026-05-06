@@ -205,13 +205,13 @@ unsigned art::node::check_prefix(const unsigned char *key, unsigned key_len, uns
 #include "configuration.h"
 #include <functional>
 #include "nodes.h"
-static void page_iterator_ptr_(const uint8_t* page_data, unsigned size, std::function<bool(const art::leaf *, uint32_t pos)> cb) {
+static void page_iterator_ptr_(const uint8_t* page_data, unsigned size, unsigned from, std::function<bool(const art::leaf *, uint32_t pos)> cb) {
     if (!size) return;
 
     auto e = page_data + size;
     size_t deleted = 0;
-    size_t pos = 0;
-    for (auto i = page_data; i < e;) {
+    size_t pos = from;
+    for (auto i = page_data+from; i < e;) {
         const art::leaf *l = (art::leaf *) i;
         if (l->deleted()) {
             deleted++;
@@ -226,7 +226,7 @@ static void page_iterator_ptr_(const uint8_t* page_data, unsigned size, std::fun
 }
 void art::page_iterator_ptr(const uint8_t* page_data, unsigned size, std::function<bool(const leaf *, uint32_t pos)> cb, unsigned from) {
     if (from >= size ) return;
-    page_iterator_ptr_(page_data + from, size - from, cb);
+    page_iterator_ptr_(page_data, size, from, cb);
 }
 void art::page_iterator(const heap::buffer<uint8_t> &page_data, unsigned size, std::function<bool(const leaf *, uint32_t pos)> cb) {
     return page_iterator_ptr(page_data.data(), size, std::move(cb));

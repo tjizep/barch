@@ -137,33 +137,36 @@ struct rpc_caller : caller {
         return 0;
     }
     template<typename IT>
-    int set_int_impl(size_t at, IT l) {
+    int set_impl(size_t at, IT l) {
         if (!temp.empty()) {
             if (at >= temp.back().size()) return this->error();
             temp.back()[at] = l;
             return this->ok();
         }
-        if (at >= results.size()) return this->error();
+        if (at >= results.size()) {
+            throw_exception<std::runtime_error>("set index out of range");
+            return this->error();
+        }
         results[at] = l;
         return this->ok();
     }
     int set_int(size_t at, long long l) final {
-       return set_int_impl(at, l);
+       return set_impl(at, l);
     }
     int set_int(size_t at, unsigned long long l)  final {
-        return set_int_impl(at, l);
+        return set_impl(at, l);
     }
     int set_int(size_t at, int64_t l)  final {
-        return set_int_impl(at, l);
+        return set_impl(at, l);
     }
     int set_int(size_t at, uint64_t l)  final {
-        return set_int_impl(at, l);
+        return set_impl(at, l);
     }
     int set_int(size_t at, int32_t l)   final {
-        return set_int_impl(at, l);
+        return set_impl(at, l);
     }
     int set_int(size_t at, uint32_t l)   final {
-        return set_int_impl(at, (int64_t)l);
+        return set_impl(at, (int64_t)l);
     }
     template<typename T>
     int to_array_impl(T&into, size_t from) {
@@ -241,8 +244,12 @@ struct rpc_caller : caller {
         if (!b.empty()) {
             if (!temp.empty()) temp.back().emplace_back(b);
             else {
-                for (auto &e :b) {
-                    results.emplace_back(e);
+                if (results.empty()) {
+                    for (auto &e :b) {
+                        results.emplace_back(e);
+                    }
+                }else {
+                    results.emplace_back(b);
                 }
             }
         }
@@ -252,6 +259,11 @@ struct rpc_caller : caller {
         emplace_impl(encoded_key_as_variant(key));
         return 0;
     }
+    int set_string(size_t at, const std::string& value) final {
+
+        return set_impl(at, value);
+    }
+
     int push_string(const std::string& v) override {
 
         emplace_impl(v);

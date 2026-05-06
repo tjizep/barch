@@ -299,14 +299,15 @@ size_t barch::shard::next_page(size_t page ) const {
     auto &lc = get_leaves();
     return lc.next_page(page);
 }
-size_t barch::shard::page(size_t page, heap::buffer<uint8_t>& buffer) const{
+size_t barch::shard::page(size_t page, heap::vector<uint8_t>& buffer) const{
     auto &lc = get_leaves();
     if (page) {
         if (!lc.is_page_allocated(page)) {
             return 0;
         }
         auto p = lc.get_page_ptr(page);
-        buffer = heap::buffer<uint8_t>{p.first, p.second};
+        buffer.clear();
+        buffer.insert(buffer.begin(), p.first, p.first + p.second);
         return p.second;
     }
     return 0;

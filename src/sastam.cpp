@@ -147,9 +147,9 @@ double heap::get_physical_memory_ratio() {
 }
 #include <execinfo.h>
 void abort_with(const char *message) __THROW {
-
-    void* buffer[10];
-    int size = backtrace(buffer, 10);
+    const size_t COUNT = 10;
+    void* buffer[COUNT];
+    int size = backtrace(buffer, COUNT);
     char** symbols = backtrace_symbols(buffer, size);
     barch::std_err("There's a bug and we cannot continue - last reason [", message, "]");
     if (symbols) {

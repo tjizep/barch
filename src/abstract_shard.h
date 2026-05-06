@@ -180,7 +180,7 @@ namespace barch {
         virtual art::value_type filter_key(art::value_type) const = 0;
         virtual art::node_ptr get_root() const = 0;
         virtual art::node_ptr first() const = 0 ; // can return nullptr
-        virtual size_t page(size_t page, heap::buffer<uint8_t>&) const = 0;
+        virtual size_t page(size_t page, heap::vector<uint8_t>&) const = 0;
         virtual size_t next_page(size_t page ) const = 0;
         virtual int range(art::value_type key, art::value_type key_end, art::CallBack cb, void *data) = 0;
         virtual int range(art::value_type key, art::value_type key_end, art::LeafCallBack cb) = 0;

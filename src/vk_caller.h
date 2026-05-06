@@ -148,7 +148,10 @@ struct vk_caller : caller {
         reply_variable(ctx, {value});
         return 0;
     }
-
+    int set_string(size_t unused(at), const std::string& unused(value)) final {
+        // TODO: cannot set string yet
+        return error(); // set_impl(at, value);
+    }
     int push_encoded_key(art::value_type key) override {
         check_ctx();
         ++call_counter;

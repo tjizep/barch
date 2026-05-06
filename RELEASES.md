@@ -1,4 +1,4 @@
-# Release v0.5.7b 2026-05-05
+# Release v0.5.7b 2026-05-06
 
 ## New Features
 
@@ -16,6 +16,7 @@
 ## Fixes
 1. Add shard count check for `SPACES DEPENDS dest ON src` command (v0.5.7b 2026-03-29)
 2. Fix `maintenance_cycles` counter to increment only when all shards have been processed (v0.5.7b 2026-05-05)
+3. Fix `SCAN` iterator offset bug (v0.5.7b 2026-05-06)
 
 # Release v0.5.6b 2026-03-15
 

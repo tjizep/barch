@@ -241,18 +241,18 @@ struct rpc_caller : caller {
 
         auto b = temp.back();
         temp.pop_back();
-        if (!b.empty()) {
-            if (!temp.empty()) temp.back().emplace_back(b);
-            else {
-                if (results.empty()) {
-                    for (auto &e :b) {
-                        results.emplace_back(e);
-                    }
-                }else {
-                    results.emplace_back(b);
+        //if (!b.empty()) {
+        if (!temp.empty()) temp.back().emplace_back(b);
+        else {
+            if (results.empty()) {
+                for (auto &e :b) {
+                    results.emplace_back(e);
                 }
+            }else {
+                results.emplace_back(b);
             }
         }
+
         return 0;
     }
     int push_encoded_key(art::value_type key) override {

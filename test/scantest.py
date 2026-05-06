@@ -16,7 +16,7 @@ def test():
         if i%1000 == 0:
             print(barch.size(),i)
     count = 0
-    for key in r.scan_iter("KEY:*"):
+    for key in r.scan_iter("KEY:*",count=10):# maxk is divisible by 10 on purpose
         print(key,count)
         count += 1
     print(count)

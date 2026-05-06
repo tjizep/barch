@@ -839,8 +839,10 @@ int SCAN(caller& call, const arg_t& argv) {
     }
     if (sn == call.kspace()->get_shard_count()) {
         call.erase_iteration(iteration->id);
+
         call.end_array(1);
         call.set_string(0, "0");
+
         return call.ok();
     }
     return call.ok();

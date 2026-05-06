@@ -33,6 +33,7 @@ struct iteration {
     size_t pos{};
     size_t bytes{};
     size_t id{};
+    bool is_source = false;
     heap::vector<uint8_t> buffer{};
 
 };

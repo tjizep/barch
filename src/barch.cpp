@@ -810,10 +810,14 @@ int SCAN(caller& call, const arg_t& argv) {
     call.push_string(std::to_string(iteration->id));
     call.start_array();
     auto sn = iteration->shard;
-    for (; sn < call.kspace()->get_shard_count(); ++sn) {
+    for (; sn < call.kspace()->get_shard_count();) {
         auto t = call.kspace()->get(sn);
+        if (iteration->is_source) {
+            t = t->sources();
+        }
         if (t->get_size() == 0) {
             iteration->page = 0;
+            ++sn;
             continue;
         }
 
@@ -831,11 +835,24 @@ int SCAN(caller& call, const arg_t& argv) {
                 call.end_array(1);
                 return call.ok();
             }
+
             iteration->page = t->next_page(iteration->page);
+
             iteration->pos = 0;
             iteration->bytes = 0;
             iteration->buffer.clear();
         } while (iteration->page > 0);
+
+        if (iteration->page > 0 && t->sources() && !iteration->is_source) {
+            iteration->page = 0;
+            iteration->pos = 0;
+            iteration->bytes = 0;
+            iteration->buffer.clear();
+            iteration->is_source = true;
+        }else {
+            ++sn;
+        }
+
     }
     if (sn == call.kspace()->get_shard_count()) {
         call.erase_iteration(iteration->id);

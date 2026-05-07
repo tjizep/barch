@@ -2,6 +2,7 @@
 import barch
 import redis
 import time
+import random
 
 MAXK = 20000
 
@@ -17,6 +18,12 @@ def test():
             print(barch.size(),i)
     count = 0
     for key in r.scan_iter("KEY:*",count=10):# maxk is divisible by 10 on purpose
+        print(key,count)
+        count += 1
+    print(count)
+    assert count == MAXK
+    count = 0
+    for key in r.scan_iter("KEY:*",count=random.randint(1,243)):# maxk is divisible by 10 on purpose
         print(key,count)
         count += 1
     print(count)

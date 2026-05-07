@@ -23,7 +23,7 @@ def test():
     print(count)
     assert count == MAXK
     count = 0
-    for key in r.scan_iter("KEY:*",count=random.randint(1,243)):# maxk is divisible by 10 on purpose
+    for key in r.scan_iter("KEY:*",count=random.randint(1,243)):
         print(key,count)
         count += 1
     print(count)

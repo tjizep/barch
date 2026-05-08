@@ -754,7 +754,9 @@ int GET(caller& call, const arg_t& argv) {
     }
 }
 
-static void push_page(caller& call, const art::scan_spec &spec, caller::iteration_ptr iteration) {
+static void push_page(caller& call, const barch::shard_ptr& shard, const art::scan_spec &spec, caller::iteration_ptr iteration) {
+    barch::shard_ptr src = shard->sources();
+    read_lock release(src);
     if (iteration->pos < iteration->bytes && iteration->page > 0) {
         if (spec.is_match) {
             std::string tmp;
@@ -770,7 +772,14 @@ static void push_page(caller& call, const art::scan_spec &spec, caller::iteratio
                 }
 
                 if (1 == glob::stringmatchlen(spec.glob_expr, td, 0)) {
-                    call.push_encoded_key(l->get_key());// it throws so it's ok
+                    if (src) {
+                        if (src->search(l->get_key()).null()) {
+                            call.push_encoded_key(l->get_key());
+                        }
+                    }else {
+                        call.push_encoded_key(l->get_key());// it throws so it's ok
+                    }
+
                 }
                 iteration->pos = pos + l->next_leaf();
                 if (call.results_count() >= spec.count) {
@@ -781,6 +790,13 @@ static void push_page(caller& call, const art::scan_spec &spec, caller::iteratio
         }else {
             art::page_iterator_ptr(iteration->buffer.data(), iteration->buffer.size(), [&](const art::leaf *l, uint32_t pos) -> bool {
                 if (l->is_tomb()||l->expired()) return true;
+                if (src) {
+                    if (src->search(l->get_key()).null()) {
+                        call.push_encoded_key(l->get_key());
+                    }
+                }else {
+                    call.push_encoded_key(l->get_key());// it throws so it's ok
+                }
                 call.push_encoded_key(l->get_key()); // it throws so it's ok
                 iteration->pos = pos + l->next_leaf();
                 if (call.results_count() >= spec.count) {
@@ -806,60 +822,53 @@ int SCAN(caller& call, const arg_t& argv) {
     auto iteration = call.get_iteration(id);
     if (!iteration) {
         iteration = call.create_iteration();
+        for (size_t i = 0; i < call.kspace()->get_shard_count(); ++i) {
+            auto s = call.kspace()->get(i);
+            iteration->shards.push_back(s);
+            if (s->sources()) {
+                iteration->shards.push_back(s->sources());
+            }
+        }
+
     }
     call.push_string(std::to_string(iteration->id));
     call.start_array();
-    auto sn = iteration->shard;
-    for (; sn < call.kspace()->get_shard_count();) {
-        auto t = call.kspace()->get(sn);
-        if (iteration->is_source) {
-            t = t->sources();
-        }
+    for (; !iteration->shards.empty();) {
+        auto t = iteration->shards.back();
+
         if (t->get_size() == 0) {
             iteration->page = 0;
-            ++sn;
+            iteration->shards.pop_back();
             continue;
         }
 
-        read_lock release(t);
-        iteration->shard = sn;
-
+        iteration->shard = t->get_shard_number();
         do {
             if (iteration->bytes == 0) {
+                iteration->buffer.clear();
+                read_lock release(t);
                 iteration->bytes = t->page(iteration->page, iteration->buffer);
                 iteration->pos = 0;
             }
-            push_page(call, spec, iteration);
+            push_page(call, t, spec, iteration);
             if (call.results_count() >= spec.count) {
                 // todo: if we're exactly on max_count and there are no more pages then there will be one additional call
                 call.end_array(1);
                 return call.ok();
             }
-
             iteration->page = t->next_page(iteration->page);
-
             iteration->pos = 0;
             iteration->bytes = 0;
             iteration->buffer.clear();
         } while (iteration->page > 0);
 
-        if (iteration->page > 0 && t->sources() && !iteration->is_source) {
-            iteration->page = 0;
-            iteration->pos = 0;
-            iteration->bytes = 0;
-            iteration->buffer.clear();
-            iteration->is_source = true;
-        }else {
-            ++sn;
-        }
-
+        iteration->shards.pop_back();
     }
-    if (sn == call.kspace()->get_shard_count()) {
-        call.erase_iteration(iteration->id);
 
+    if (iteration->shards.empty()) {
+        call.erase_iteration(iteration->id);
         call.end_array(1);
         call.set_string(0, "0");
-
         return call.ok();
     }
     return call.ok();

@@ -93,6 +93,7 @@ namespace barch {
         virtual barch::latch_t& get_latch() = 0;
         virtual bool publish(std::string host, int port) = 0;
         virtual uint64_t get_tree_size() const = 0;
+        // get_size() should be thread safe
         virtual uint64_t get_size() const = 0;
         virtual uint64_t get_hash_size() const = 0;
         virtual void maintenance() = 0;
@@ -312,6 +313,7 @@ struct read_lock_t {
 
     explicit read_lock_t(const ShardRef& t, bool lock = true) : t(t), lock(lock) {
         if (!lock) return;
+        if (!t) return;
         sources_locked = t->sources();
         auto s = sources_locked;
         // TODO: this may cause deadlock

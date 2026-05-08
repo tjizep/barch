@@ -33,7 +33,7 @@ struct iteration {
     size_t pos{};
     size_t bytes{};
     size_t id{};
-    bool is_source = false;
+    heap::vector<barch::shard_ptr> shards;
     heap::vector<uint8_t> buffer{};
 
 };
@@ -49,6 +49,7 @@ public:
         auto iter = std::make_shared<iteration>();
         iter->id = ++iteration_id;
         iterations[iter->id] = iter;
+
         return iter;
     }
     iteration_ptr get_iteration(size_t id) {

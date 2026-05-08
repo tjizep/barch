@@ -1,4 +1,4 @@
-# Release v0.5.7b 2026-05-06
+# Release v0.5.7b 2026-05-08
 
 ## New Features
 
@@ -12,7 +12,8 @@
 7. Add more explanatory README.md to examples for the overture python example (Release v0.5.7b 2026-04-23)
 8. Add `SCAN` function with `COUNT` and `MATCH` parameters (v0.5.7b 2026-05-05)
 9. Add nested array support (v0.5.7b 2026-05-05)
-10. Add alt source support to `SCAN` (v0.5.7b 2026-05-06)
+10. Add alt source support to `SCAN` (v0.5.7b 2026-05-08)
+11. improve scan algorithm (v0.5.7b 2026-05-08)
 
 ## Fixes
 1. Add shard count check for `SPACES DEPENDS dest ON src` command (v0.5.7b 2026-03-29)

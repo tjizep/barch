@@ -306,8 +306,8 @@ size_t barch::shard::page(size_t page, heap::vector<uint8_t>& buffer) const{
             return 0;
         }
         auto p = lc.get_page_ptr(page);
-        buffer.clear();
-        buffer.insert(buffer.begin(), p.first, p.first + p.second);
+        // append to the buffer
+        buffer.insert(buffer.end(), p.first, p.first + p.second);
         return p.second;
     }
     return 0;

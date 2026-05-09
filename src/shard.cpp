@@ -990,6 +990,18 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, c
     art::glob(this, spec, pattern, value, cb);
 }
 
+bool barch::shard::is_present(value_type unfiltered_key) {
+    value_type key = this->filter_key(unfiltered_key);
+    if (!opt_ordered_keys) {
+        auto n = from_unordered_set(key);
+        return !n.null();
+    }
+
+    auto r = art_search(this, key);
+    return !r.null();
+}
+
+
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
     value_type key = this->filter_key(unfiltered_key);
 

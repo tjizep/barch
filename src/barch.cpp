@@ -755,8 +755,32 @@ int GET(caller& call, const arg_t& argv) {
 }
 
 static void push_page(caller& call, const barch::shard_ptr& shard, const art::scan_spec &spec, caller::iteration_ptr iteration) {
+    if (!shard) throw_exception<std::runtime_error>("null shard");
+
     barch::shard_ptr src = shard->sources();
-    read_lock release(src);
+    barch::shard_ptr dest = iteration->space->get(shard->get_shard_number());
+    bool is_source =  shard == dest->sources();
+    read_lock release(is_source ? dest : nullptr);
+    if (is_source && !dest) throw_exception<std::runtime_error>("push_key: dest not found");
+
+    auto push_key = [&](const art::leaf* l) {
+        if (is_source) {
+            if (!dest->is_present(l->get_key())) {
+                call.push_encoded_key(l->get_key());
+            }
+        }else {
+            call.push_encoded_key(l->get_key());// it throws so it's ok
+        }
+    };
+
+    auto update_iter = [&](const art::leaf* l, uint32_t pos) {
+        iteration->pos = pos + l->next_leaf();
+        if (call.results_count() >= spec.count) {
+            return false;
+        }
+        return true;
+    };
+
     if (iteration->pos < iteration->bytes && iteration->page > 0) {
         if (spec.is_match) {
             std::string tmp;
@@ -772,37 +796,15 @@ static void push_page(caller& call, const barch::shard_ptr& shard, const art::sc
                 }
 
                 if (1 == glob::stringmatchlen(spec.glob_expr, td, 0)) {
-                    if (src) {
-                        if (src->search(l->get_key()).null()) {
-                            call.push_encoded_key(l->get_key());
-                        }
-                    }else {
-                        call.push_encoded_key(l->get_key());// it throws so it's ok
-                    }
-
+                    push_key(l);
                 }
-                iteration->pos = pos + l->next_leaf();
-                if (call.results_count() >= spec.count) {
-                    return false;
-                }
-                return true;
+                return update_iter(l, pos);
              },iteration->pos);
         }else {
             art::page_iterator_ptr(iteration->buffer.data(), iteration->buffer.size(), [&](const art::leaf *l, uint32_t pos) -> bool {
                 if (l->is_tomb()||l->expired()) return true;
-                if (src) {
-                    if (src->search(l->get_key()).null()) {
-                        call.push_encoded_key(l->get_key());
-                    }
-                }else {
-                    call.push_encoded_key(l->get_key());// it throws so it's ok
-                }
-                call.push_encoded_key(l->get_key()); // it throws so it's ok
-                iteration->pos = pos + l->next_leaf();
-                if (call.results_count() >= spec.count) {
-                    return false;
-                }
-                return true;
+                push_key(l);
+                return update_iter(l, pos);
             },iteration->pos);
         }
     }
@@ -821,13 +823,19 @@ int SCAN(caller& call, const arg_t& argv) {
     auto id = spec.scan_id;
     auto iteration = call.get_iteration(id);
     if (!iteration) {
+
         iteration = call.create_iteration();
-        for (size_t i = 0; i < call.kspace()->get_shard_count(); ++i) {
-            auto s = call.kspace()->get(i);
+        auto space = call.kspace();
+        iteration->space = space;
+        for (size_t i = 0; i < space->get_shard_count(); ++i) {
+            auto s = space->get(i);
             iteration->shards.push_back(s);
             if (s->sources()) {
                 iteration->shards.push_back(s->sources());
             }
+        }
+        if (space->source() && iteration->shards.size() != 2*space->get_shard_count()) {
+            return call.push_error("invalid shard count");
         }
 
     }

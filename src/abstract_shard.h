@@ -99,6 +99,7 @@ namespace barch {
         virtual void maintenance() = 0;
         virtual void load_bloom() = 0;
         virtual uint64_t bytes_in_free_list() = 0;
+
         /**
          * register a pull source on this shard/tree
          * currently non-existing hosts will also be added (they can come online later)
@@ -157,6 +158,7 @@ namespace barch {
          * @return not null key if it exists (incl. pull sources)
          */
         virtual art::node_ptr search(art::value_type key) = 0;
+        virtual bool is_present(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) = 0;
 

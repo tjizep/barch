@@ -33,6 +33,7 @@ struct iteration {
     size_t pos{};
     size_t bytes{};
     size_t id{};
+    barch::key_space_ptr space{};
     heap::vector<barch::shard_ptr> shards;
     heap::vector<uint8_t> buffer{};
 

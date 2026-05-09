@@ -247,6 +247,7 @@ namespace barch {
          * @return not null key if it exists (incl. pull sources)
          */
         node_ptr search(value_type key) final;
+        bool is_present(value_type key) final;
         art::node_ptr lower_bound(art::value_type key) final;
         art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) final;
         shard_ptr sources() final;

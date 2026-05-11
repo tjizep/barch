@@ -113,4 +113,69 @@ See [Configuration](https://tjizep.github.io/barch/DOCKER) docs
 1. Valkey v. 8.0+
 2. any python 3.10 program
 
+# BARCH specific API's implemented
+```
+MIN                        MAX
+SIZE                       SAVE
+PUBLISH                    LB, FIRST  
+START                      STOP   
+RETRIEVE                   LOAD  
+ADDROUTE                   ROUTE
+REMROUTE                   OPS
+STATS                      UB, NEXT
+COUNT                      SPACE
+USE                        VALUES
+```
+
+# Other VALKEY API's implemented (Mostly Key Value + TTL)
+```
+AUTH                       ACL
+SET                        KEYS
+INCR                       INCRBY
+UINCRBY                    UDECRBY
+DECR                       DECRBY
+MSET                       DEL
+GET                        MGET
+REM                        FLUSHDB/FLUSHALL                   
+PING                       TTL
+EXPIRE                     EXISTS
+DBSIZE                     MULTI
+EXEC                       CLIENT INFO
+INFO                       APPEND
+KEYS                       VALUES
+SELECT                     SCAN
+
+```
+## Hash Set API's Implemented
+```
+HSET                       HEXPIREAT
+HEXPIRE                    HMGET
+HINCRBY                    HINCRBYFLOAT
+HDEL                       HGETDEL
+HTTL                       HGET
+HLEN                       HEXPIRETIME
+HGETALL                    HKEYS
+HEXISTS
+```
+## Ordered Set API's Implemented
+```
+ZADD                       ZREM
+ZINCRBY                    ZRANGE
+ZCARD                      ZDIFF
+ZDIFFSTORE                 ZINTERSTORE
+ZINTERCARD                 ZINTER
+ZPOPMIN                    ZPOPMAX
+ZREVRANGE                  ZRANGEBYSCORE
+ZREVRANGEBYSCORE           ZREMRANGEBYLEX
+ZRANGEBYLEX                ZREVRANGEBYLEX
+ZRANK
+ 
+``` 
+# List API's Implemented
+```
+LLEN                        LPUSH
+LPOP                        BLPOP
+BRPOP                       LFRONT
+LBACK
+```
 

@@ -13,7 +13,7 @@ jobs:
   ubuntu-build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Use cmake
         run: |
           set -xe
@@ -39,14 +39,14 @@ jobs:
           cp RUNPY.md release_py_dist/README.md
           tar -czvf barch-py-ubuntu24-x86_64.tar.gz -C release_py_dist _barch.so setup.py barch.py README.md
       - name: Publish barch-py-ubuntu24-x86_64.tar.gz Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: barch-py-ubuntu24-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish barch-valkey-ubuntu24-x86_64.tar.gz Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: barch-valkey-module-ubuntu24-x86_64.tar.gz

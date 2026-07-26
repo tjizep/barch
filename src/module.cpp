@@ -17,3 +17,10 @@ barch::key_space_ptr& get_default_ks() {
 uint64_t get_total_memory() {
     return heap::allocated;
 }
+static std::atomic<uint64_t> startup_memory{0};
+void add_startup_memory(uint64_t bytes) {
+    startup_memory += bytes;
+}
+uint64_t get_startup_memory() {
+    return startup_memory;
+}

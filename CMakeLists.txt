@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(barch VERSION 0.5.7 LANGUAGES CXX)
+project(barch VERSION 0.5.8 LANGUAGES CXX)
 enable_testing()
 set(TARGETS barch lbarch)
 # Get the current git commit hash for versioning purposes
@@ -546,6 +546,10 @@ else()
 
         add_test(NAME TestRespClientLocal
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redispytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestRespInfoMemory
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redisinfotest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestMerge

@@ -8,6 +8,7 @@
 
 #include "shard.h"
 #include "keys.h"
+#include "module.h"
 #include "swig_api.h"
 #include "thread_pool.h"
 #include "rpc/server.h"
@@ -154,6 +155,8 @@ namespace barch {
 
     key_space::key_space(const std::string &name) :name(name) {
         if (shards.empty()) {
+            // everything allocated while this space is built counts towards startup memory
+            uint64_t memory_before = get_total_memory();
             decltype(shards) shards_out;
             if (name == "configuration" || name == "configuration_") {
                 opt_shard_count = 1;
@@ -187,7 +190,11 @@ namespace barch {
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             shards.swap(shards_out);
             barch::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s", shards_loaded);
-
+            // other threads allocate concurrently so only a growth is meaningful here
+            uint64_t memory_after = get_total_memory();
+            if (memory_after > memory_before) {
+                add_startup_memory(memory_after - memory_before);
+            }
         }
         start_maintain();
     }

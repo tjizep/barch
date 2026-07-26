@@ -340,6 +340,11 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 /* B.VALUES
 * i.e. VALUES *ZZZ* COUNT
 * match against all values using a glob pattern
+*
+* the pattern is matched against the values, but the reply is the keys that hold
+* them - VALUES 3 answers with the key whose value is "3", not with "3". this is
+* intended: it is the inverse lookup KEYS cannot do. COUNT replaces the reply with
+* the number of matches.
 * */
 int VALUES(caller& call, const arg_t& argv) {
 
@@ -790,6 +795,10 @@ static void push_page(caller& call, const barch::shard_ptr& shard, const art::sc
                 if (art::tstring == *l->key())
                 {
                     td = l->get_clean_key();
+                    // get_clean_key steps over the leading type byte but keeps the stored
+                    // length, so the trailing terminator is still on the end - leaving it
+                    // there stops any pattern anchored at the end of the key from matching
+                    if (td.size) --td.size;
                 }else {
                     tmp = encoded_key_as_string(l->get_key());
                     td = tmp;

@@ -59,8 +59,8 @@ Route getRoute(int shard) {
     std::vector<std::string_view> params = {"ROUTE", std::to_string(shard)};
     rpc_caller sc;
     int r = sc.call(params, ROUTE);
-    if (r == 0 && sc.results.size() == 2) {
-        return{sc.results[0], sc.results[1]};
+    if (r == 0 && sc.flat_size() == 2) {
+        return{sc.flat_at(0), sc.flat_at(1)};
     }
     return {};
 
@@ -150,7 +150,7 @@ unsigned long long size()  {
     rpc_caller sc;
     int r = sc.call(params, ::SIZE);
     if (r == 0) {
-        return sc.results.empty() ? 0 : sc.results[0].to_int64();
+        return sc.flat_empty() ? 0 : sc.flat_at(0).to_int64();
     }
     return 0;
 }
@@ -159,7 +159,7 @@ unsigned long long sizeAll()  {
     rpc_caller sc;
     int r = sc.call(params, ::SIZEALL);
     if (r == 0) {
-        return sc.results.empty() ? 0 : sc.results[0].to_int64();
+        return sc.flat_empty() ? 0 : sc.flat_at(0).to_int64();
     }
     return 0;
 }
@@ -207,7 +207,7 @@ long long List::push(const std::string &key, const std::vector<std::string> &ite
     if (r != 0) {
         barch::std_err("set failed", key);
     }
-    return sc.results.empty() ? 0 : sc.results[0].to_int64();
+    return sc.flat_empty() ? 0 : sc.flat_at(0).to_int64();
 
 }
 long long List::len(const std::string &key) {
@@ -218,7 +218,7 @@ long long List::len(const std::string &key) {
     if (r != 0) {
         barch::std_err("len failed", key);
     }
-    return sc.results.empty() ? 0 : sc.results[0].to_int64();
+    return sc.flat_empty() ? 0 : sc.flat_at(0).to_int64();
 
 }
 Value List::brpop(const std::string &key, double timeout) {
@@ -358,7 +358,7 @@ bool KeyValue::expire(const std::string &key, long long sec, const std::string& 
     barch::repl::call(params);
     int r = sc.call(params, ::EXPIRE);
     if (r == 0) {
-        return sc.results.empty() ? false: sc.results[0].i() == 1;
+        return sc.flat_empty() ? false: sc.flat_at(0).i() == 1;
     }
     return false;
 }
@@ -369,7 +369,7 @@ long long KeyValue::ttl(const std::string &key) {
 
     int r = sc.call(params, ::TTL);
     if (r == 0) {
-        return sc.results.empty() ? 0: sc.results[0].i();
+        return sc.flat_empty() ? 0: sc.flat_at(0).i();
     }
     return 0;
 }
@@ -444,9 +444,7 @@ std::vector<Value> KeyValue::range(const std::string &start, const std::string &
     params = {"RANGE", start, end, std::to_string(limit)} ;
     int r = sc.call(params, ::RANGE);
     if (r == 0) {
-        for (auto& v: sc.results) {
-            result.emplace_back(v);
-        }
+        sc.append_flat(result);
     }
 
     return result;
@@ -464,9 +462,7 @@ std::vector<Value> KeyValue::glob(const std::string &glob, long long max_) const
 
     int r = sc.call(params, ::KEYS);
     if (r == 0) {
-        for (auto& v: sc.results) {
-            result.emplace_back(v);
-        }
+        sc.append_flat(result);
     }
 
     return result;
@@ -667,7 +663,7 @@ std::vector<Value> Caller::call(const std::string &method, const std::vector<Val
     if (r != 0) {
         result.insert(result.end(), sc.errors.begin(), sc.errors.end());
     }else {
-        result.insert(result.end(), sc.results.begin(), sc.results.end());
+        sc.append_flat(result);
     }
     return result;
 }
@@ -703,7 +699,7 @@ std::vector<Value> HashSet::mget(const std::string& k, const std::vector<std::st
     if (r != 0) {
     }
 
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
 
     return result;
 }
@@ -714,7 +710,7 @@ std::vector<Value> HashSet::getall(const std::string& k) {
     params = {"HGETALL", k};
     sc.call(params, ::HGETALL);
 
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
 
     return result;
 }
@@ -726,7 +722,7 @@ std::vector<Value> HashSet::expiretime(const std::string &k, const std::vector<s
     params.insert(params.end(), fields.begin(), fields.end());
 
     sc.call(params, ::HEXPIRETIME);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
 
     return result;
 }
@@ -735,7 +731,7 @@ Value HashSet::exists(const std::string &k, const std::string &member) {
     result.clear();
     params = {"HEXISTS", k, member};
     sc.call(params, ::HEXISTS);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     if (result.empty()) return {nullptr};
     return result[0];
 }
@@ -746,7 +742,7 @@ Value HashSet::remove(const std::string &k, const std::vector<std::string> &memb
     params = {"HDEL", k};
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HDEL);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     if (result.empty()) return {nullptr};
     return result[0];
 }
@@ -757,7 +753,7 @@ Value HashSet::getdel(const std::string &k, const std::vector<std::string> &memb
     params = {"HGETDEL", k , "FIELDS", std::to_string(member.size())};
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HGETDEL);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     if (result.empty()) return {nullptr};
     return result[0];
 }
@@ -767,7 +763,7 @@ std::vector<Value> HashSet::ttl(const std::string &k, const std::vector<std::str
     params = {"HTTL", k , "FIELDS", std::to_string(member.size())};
     params.insert(params.end(), member.begin(), member.end());
     sc.call(params, ::HTTL);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     return result;
 }
 // k+args+fields
@@ -781,7 +777,7 @@ std::vector<Value> HashSet::expire(const std::string &k, const std::vector<std::
     params.insert(params.end(), fields.begin(), fields.end());
     barch::repl::call(params);
     sc.call(params, ::HEXPIRE);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     return result;
 }
 std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const std::string &flags, const std::vector<std::string> &fields) {
@@ -790,7 +786,7 @@ std::vector<Value> HashSet::expireat(const std::string &k, long long exp, const 
     params = {"HEXPIREAT", k, std::to_string(exp), flags,"FIELDS", std::to_string(fields.size())};
     params.insert(params.end(), fields.begin(), fields.end());
     sc.call(params, ::HEXPIREAT);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     return result;
 }
 Value HashSet::incrby(const std::string &k, const std::string& field, long long by) {
@@ -799,8 +795,8 @@ Value HashSet::incrby(const std::string &k, const std::string& field, long long 
     params = {"HINCRBY", k, field, std::to_string(by)};
     barch::repl::call(params);
     sc.call(params, ::HINCRBY);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 OrderedSet::OrderedSet() {
@@ -819,8 +815,8 @@ Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flag
     params.insert(params.end(), members.begin(), members.end());
     barch::repl::call(params);
     sc.call(params, ::ZADD);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 std::vector<Value> OrderedSet::range(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
@@ -829,8 +825,8 @@ std::vector<Value> OrderedSet::range(const std::string &k, double start, double 
     params = {"ZRANGE", k, std::to_string(start), std::to_string(stop)};
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZRANGE);
-    if (sc.results.empty()) return {nullptr};
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    if (sc.flat_empty()) return {nullptr};
+    sc.append_flat(result);
     return result;
 }
 std::vector<Value> OrderedSet::revrange(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
@@ -839,8 +835,8 @@ std::vector<Value> OrderedSet::revrange(const std::string &k, double start, doub
     params = {"ZREVRANGE", k, std::to_string(start), std::to_string(stop)};
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZREVRANGE);
-    if (sc.results.empty()) return {nullptr};
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    if (sc.flat_empty()) return {nullptr};
+    sc.append_flat(result);
     return result;
 }
 
@@ -849,8 +845,8 @@ Value OrderedSet::card(const std::string &k) {
     result.clear();
     params = {"ZCARD", k};
     sc.call(params, ::ZCARD);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 Value OrderedSet::popmin(const std::string &k) {
@@ -858,8 +854,8 @@ Value OrderedSet::popmin(const std::string &k) {
     result.clear();
     params = {"ZPOPMIN", k};
     sc.call(params, ::ZPOPMIN);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 Value OrderedSet::popmax(const std::string &k) {
@@ -867,8 +863,8 @@ Value OrderedSet::popmax(const std::string &k) {
     result.clear();
     params = {"ZPOPMAX", k};
     sc.call(params, ::ZPOPMAX);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 Value OrderedSet::rank(const std::string &k, double lower, double upper) {
@@ -876,8 +872,8 @@ Value OrderedSet::rank(const std::string &k, double lower, double upper) {
     result.clear();
     params = {"ZFASTRANK", k, std::to_string(lower), std::to_string(upper)};
     sc.call(params, ::ZFASTRANK);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& members) {
@@ -887,8 +883,8 @@ Value OrderedSet::remove(const std::string &k, const std::vector<std::string>& m
     params.insert(params.end(), members.begin(), members.end());
     barch::repl::call(params);
     sc.call(params, ::ZREM);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
     std::unique_lock l(lock);
@@ -897,7 +893,7 @@ std::vector<Value> OrderedSet::diff(const std::vector<std::string>& keys, const 
     params.insert(params.end(), keys.begin(), keys.end());
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZDIFF);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     return result;
 }
 
@@ -908,7 +904,7 @@ Value OrderedSet::diffstore(const std::string &destkey, const std::vector<std::s
     params.insert(params.end(), keys.begin(), keys.end());
     barch::repl::call(params);
     sc.call(params, ::ZDIFFSTORE);
-    return sc.results[0];
+    return sc.flat_at(0);
 }
 
 Value OrderedSet::incrby(const std::string &key, double val, const std::string &field) {
@@ -917,8 +913,8 @@ Value OrderedSet::incrby(const std::string &key, double val, const std::string &
     params = {"ZINCRBY", key, std::to_string(val), field};
     barch::repl::call(params);
     sc.call(params, ::ZINCRBY);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 std::vector<Value> OrderedSet::inter(const std::vector<std::string>& keys, const std::vector<std::string>& flags) {
@@ -928,7 +924,7 @@ std::vector<Value> OrderedSet::inter(const std::vector<std::string>& keys, const
     params.insert(params.end(), keys.begin(), keys.end());
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZINTER);
-    result.insert(result.end(), sc.results.begin(), sc.results.end());
+    sc.append_flat(result);
     return result;
 }
 
@@ -939,8 +935,8 @@ Value OrderedSet::interstore(const std::string &destkey, const std::vector<std::
     params.insert(params.end(), keys.begin(), keys.end());
     barch::repl::call(params);
     sc.call(params, ::ZINTERSTORE);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 Value OrderedSet::intercard(const std::vector<std::string>& keys) {
@@ -950,8 +946,8 @@ Value OrderedSet::intercard(const std::vector<std::string>& keys) {
     params.insert(params.end(), keys.begin(), keys.end());
     barch::repl::call(params);
     sc.call(params, ::ZINTERCARD);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }
 
 Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower, const std::string& upper) {
@@ -960,6 +956,6 @@ Value OrderedSet::remrangebylex(const std::string &key, const std::string& lower
     params = {"ZREMRANGEBYLEX", key, lower, upper};
     barch::repl::call(params);
     sc.call(params, ::ZREMRANGEBYLEX);
-    if (sc.results.empty()) return {nullptr};
-    return sc.results[0];
+    if (sc.flat_empty()) return {nullptr};
+    return sc.flat_at(0);
 }

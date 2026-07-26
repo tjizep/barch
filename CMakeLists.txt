@@ -548,6 +548,24 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redispytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the glob matcher only needs glob.cpp, so it gets a plain executable
+        add_executable(globdifftest test/globdifftest.cpp src/glob.cpp)
+        add_test(NAME TestGlobDifferential
+                COMMAND globdifftest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestGlobPerformance
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/globperftest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestReplyShape
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replyshapetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestScanGlob
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/scanglobtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestRespInfoMemory
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redisinfotest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

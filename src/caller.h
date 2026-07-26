@@ -108,6 +108,15 @@ public:
     }
     virtual int start_array() = 0;
     virtual int end_array(size_t length) = 0;
+    /**
+     * abandon an array started by start_array without contributing it to the reply,
+     * for a command that turns out to have nothing to say yet - a blocking pop about
+     * to register a block rather than answer. the default closes it instead, which is
+     * all a reply builder that cannot rewind is able to do.
+     */
+    virtual int discard_array() {
+        return end_array(0);
+    }
     virtual int push_encoded_key(art::value_type key) = 0;
     virtual int push_string(const std::string& value) = 0;
     virtual int set_string(size_t at, const std::string& value) = 0;

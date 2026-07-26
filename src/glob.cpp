@@ -16,6 +16,31 @@ inline bool no_token(const char* pattern) {
     }
     return true;
 }
+// the shortcuts below look for a literal run of the pattern inside the string. memchr
+// and memmem compare bytes, so when case folding is asked for they would skip over a
+// perfectly good match - these fold both sides first. the case sensitive path is left
+// on memchr/memmem so the common case costs nothing.
+static inline bool fold_eq(char a, char b, int nocase) {
+    if (!nocase) return a == b;
+    return tolower((unsigned char) a) == tolower((unsigned char) b);
+}
+static const char *fold_chr(const char *s, char c, size_t n, int nocase) {
+    if (!nocase) return (const char *) memchr(s, c, n);
+    for (size_t i = 0; i < n; i++) {
+        if (fold_eq(s[i], c, 1)) return s + i;
+    }
+    return nullptr;
+}
+static const char *fold_mem(const char *s, size_t n, const char *needle, size_t m, int nocase) {
+    if (!nocase) return (const char *) memmem(s, n, needle, m);
+    if (m > n) return nullptr;
+    for (size_t i = 0; i + m <= n; i++) {
+        size_t j = 0;
+        while (j < m && fold_eq(s[i + j], needle[j], 1)) j++;
+        if (j == m) return s + i;
+    }
+    return nullptr;
+}
 static int asterisk_impl(const char *pattern,
                               int patternLen,
                               const char *string,
@@ -29,21 +54,39 @@ static int asterisk_impl(const char *pattern,
     while (patternLen && stringLen) {
         switch (pattern[0]) {
             case '*':
-                while (patternLen && pattern[1] == '*') { // TODO: ?BUG?  assumes pattern[1] exists if patternLen == 1
+                while (patternLen > 1 && pattern[1] == '*') { // patternLen > 1 so pattern[1] is inside the pattern
                     pattern++;
                     patternLen--;
                 }
                 if (patternLen == 1) return 1; /* match */
                 if (nesting == 0 && patternLen > 4){
                     auto asterisk = (const char *)memchr(pattern+1, '*', patternLen-1);
-                    while (pattern[1]=='?' && patternLen > 4) {
+                    // '*?' means the same as '?*', so a '?' sitting just after the star
+                    // can be lifted out of the way - but only by consuming the character
+                    // it stands for, otherwise the minimum length it imposes is lost.
+                    // pattern[0] is left as a placeholder for the star: everything below
+                    // only ever looks at pattern+1.
+                    while (pattern[1]=='?' && patternLen > 4 && stringLen > 0) {
                         ++pattern;
                         --patternLen;
+                        ++string;
+                        --stringLen;
+                    }
+                    if (stringLen == 0) {
+                        // the '?'s took the rest of the string with them, so all that can
+                        // still match is a run of stars - the same tail the main loop applies
+                        const char *rest = pattern + 1;
+                        int restLen = patternLen - 1;
+                        while (restLen && *rest == '*') {
+                            ++rest;
+                            --restLen;
+                        }
+                        return restLen == 0;
                     }
                     auto slash = memchr(pattern+1, '\\', patternLen-1);
                     if (!slash) {
                         if (patternLen > 4 && no_token<4>(pattern+1)) { // were hoping the 4 chars is enough to find a unique sequence far away
-                            auto str = (const char *)memmem(string, stringLen, pattern+1, 4); // we would really like to choose the least frequent char in the pattern
+                            auto str = fold_mem(string, stringLen, pattern+1, 4, nocase); // we would really like to choose the least frequent char in the pattern
                             if (!str) {
                                 return 0;
                             }
@@ -58,14 +101,14 @@ static int asterisk_impl(const char *pattern,
                         ) {
                             _memchr_section:
                             // this method works but its weakness is that pattern[1] can be a very frequent character
-                            auto str = (const char *)memchr(string, pattern[1], stringLen); // we would really like to choose the least frequent char in the pattern
+                            auto str = fold_chr(string, pattern[1], stringLen, nocase); // we would really like to choose the least frequent char in the pattern
                             if (!str) {
                                 return 0;
                             }
                             // TODO: further opts are possible
                             stringLen -= (str - string); // we can now quickly advance the string pointer
                             string = str;
-                            if (stringLen > 3 && pattern[2] != '?' && pattern[2] != string[1]) { // pattern len > 4 and asterisk - patterm > 3
+                            if (stringLen > 3 && pattern[2] != '?' && !fold_eq(pattern[2], string[1], nocase)) { // pattern len > 4 and asterisk - patterm > 3
                                 // we can try again
                                 string++;
                                 stringLen--;
@@ -119,7 +162,7 @@ static int asterisk_impl(const char *pattern,
         pattern++;
         patternLen--;
         if (stringLen == 0) {
-            while (*pattern == '*') {
+            while (patternLen && *pattern == '*') { // the pattern can already be spent here
                 pattern++;
                 patternLen--;
             }
@@ -143,7 +186,7 @@ int glob::stringmatchlen_impl(const char *pattern,
     while (patternLen && stringLen) {
         switch (pattern[0]) {
             case '*':
-                while (patternLen && pattern[1] == '*') {
+                while (patternLen > 1 && pattern[1] == '*') { // patternLen > 1 so pattern[1] is inside the pattern
                     pattern++;
                     patternLen--;
                 }
@@ -247,7 +290,7 @@ int glob::stringmatchlen_impl(const char *pattern,
         pattern++;
         patternLen--;
         if (stringLen == 0) {
-            while (*pattern == '*') {
+            while (patternLen && *pattern == '*') { // the pattern can already be spent here
                 pattern++;
                 patternLen--;
             }

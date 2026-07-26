@@ -128,7 +128,13 @@ extern "C"{
             // todo: we can set the header directly but that change would not be replicated
             t->insert(key, header.as_value(), true);
         }
-        cc.end_array(0);
+        if (popped == 0) {
+            // nothing came off any of the keys, so there is no reply to give yet - the
+            // block callback below answers once a key is pushed, or the timeout does
+            cc.discard_array();
+        } else {
+            cc.end_array(0);
+        }
         if (!blocks.empty() && popped == 0) {
             cc.add_block(blocks, time_out,[tail](caller& call, const caller::keys_t& keys) {
                 // this gets called as soon as the key gets pushed

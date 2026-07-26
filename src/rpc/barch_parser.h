@@ -126,8 +126,10 @@ namespace barch {
                             ++statistics::repl::barch_requests;
                             r = caller.call(params,f);
                             replies.clear();
-                            for (auto &v: caller.results) {
-                                push_value(replies,v);
+                            // the barch protocol carries a flat list of values, so an
+                            // array reply is unwrapped here rather than sent nested
+                            for (size_t i = 0, n = caller.flat_size(); i < n; ++i) {
+                                push_value(replies,caller.flat_at(i));
                             }
                             for (auto &v: caller.errors) {
                                 push_value(replies,v);

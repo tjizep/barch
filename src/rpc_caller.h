@@ -61,6 +61,31 @@ struct rpc_caller : caller {
         }
         return results[0];
     }
+    // end_array keeps an array reply as one nested value so the writer does not have
+    // to guess the shape. the language bindings were written against the flat list
+    // that used to be spliced into results, so these hand them that same view.
+    [[nodiscard]] bool nested_result() const {
+        return results.size() == 1 && results[0].index() == var_array;
+    }
+    [[nodiscard]] const heap::vector<wrapped_variable_t>& nested_results() const {
+        return std::get<heap::vector<wrapped_variable_t>>((const variable_t&) results[0]);
+    }
+    [[nodiscard]] size_t flat_size() const {
+        return nested_result() ? nested_results().size() : results.size();
+    }
+    [[nodiscard]] bool flat_empty() const {
+        return flat_size() == 0;
+    }
+    [[nodiscard]] Variable flat_at(size_t i) const {
+        if (nested_result()) return Variable{nested_results()[i].var};
+        return results[i];
+    }
+    template<typename Out>
+    void append_flat(Out& out) const {
+        size_t n = flat_size();
+        for (size_t i = 0; i < n; ++i) out.emplace_back(flat_at(i));
+    }
+
     [[nodiscard]] size_t results_count() const final {
         if (temp.empty())
             return results.size();
@@ -241,18 +266,18 @@ struct rpc_caller : caller {
 
         auto b = temp.back();
         temp.pop_back();
-        //if (!b.empty()) {
+        // an array is always kept as one nested value. it used to be spliced into
+        // results when it was the whole reply, which threw away the fact that it was
+        // an array at all - the writer then had to guess from the element count and
+        // got it wrong for an array holding nothing or one thing
         if (!temp.empty()) temp.back().emplace_back(b);
-        else {
-            if (results.empty()) {
-                for (auto &e :b) {
-                    results.emplace_back(e);
-                }
-            }else {
-                results.emplace_back(b);
-            }
-        }
+        else results.emplace_back(b);
 
+        return 0;
+    }
+    int discard_array() override {
+        if (temp.empty()) return this->error();
+        temp.pop_back();
         return 0;
     }
     int push_encoded_key(art::value_type key) override {

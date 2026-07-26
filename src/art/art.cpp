@@ -1612,6 +1612,11 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                             if (tstring == *l->key())
                             {
                                 td = l->get_clean_key();
+                                // get_clean_key steps over the leading type byte but keeps
+                                // the stored length, so the trailing terminator is still on
+                                // the end - leaving it there stops any pattern anchored at
+                                // the end of the key from matching
+                                if (td.size) --td.size;
                             }else {
                                 tmp = encoded_key_as_string(l->get_key());
                                 td = tmp;

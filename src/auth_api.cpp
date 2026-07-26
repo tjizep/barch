@@ -153,7 +153,7 @@ extern "C"
                 call.push_values({"$" + k.sub(key.size()).pref(1).to_string(),v.to_string()} );
                 cat_data.next();
             }
-            call.end_array(0);
+            call.end_array();
             return 0;
         }
         if (spec.del) {

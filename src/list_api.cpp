@@ -133,7 +133,7 @@ extern "C"{
             // block callback below answers once a key is pushed, or the timeout does
             cc.discard_array();
         } else {
-            cc.end_array(0);
+            cc.end_array();
         }
         if (!blocks.empty() && popped == 0) {
             cc.add_block(blocks, time_out,[tail](caller& call, const caller::keys_t& keys) {

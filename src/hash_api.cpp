@@ -102,7 +102,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
         ++responses;
     }
     if (replies)
-        call.end_array(responses);
+        call.end_array();
     return call.ok();
 }
 
@@ -219,7 +219,7 @@ int HGETEX(caller& call, const arg_t &argv) {
                           }
                           return nullptr;
                       });
-    call.end_array(responses);
+    call.end_array();
     return r;
 }
 int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -418,7 +418,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
             ++responses;
         }
     }
-    call.end_array(responses);
+    call.end_array();
     return call.ok();
 }
 
@@ -555,7 +555,7 @@ int HGETALL(caller& call, const arg_t& argv) {
         responses += 2;
         ai.next();
     }
-    call.end_array(responses);
+    call.end_array();
 
     return call.ok();
 }
@@ -590,7 +590,7 @@ int HKEYS(caller& call, const arg_t& argv) {
     };
     t->range(search_start, search_end, table_iter, nullptr);
 
-    call.end_array(responses);
+    call.end_array();
     return call.ok();
 }
 int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

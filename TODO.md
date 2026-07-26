@@ -3,32 +3,11 @@
 Open questions and unverified assumptions left over from the glob / SCAN / reply
 shape work. Each one records what is uncertain and what would settle it.
 
-1. **Verify the flat-view substitution across every `swig_api.cpp` call site.**
-   `end_array` no longer splices an array reply into `results`, so all 49 sites in
-   `swig_api.cpp` were moved onto `rpc_caller::flat_size/flat_empty/flat_at/append_flat`
-   by mechanical substitution rather than by reading each one. The accessors are meant
-   to reproduce the previous flat list exactly, and the binding tests (`testbarch.py`,
-   `listtest.py`) pass, but they do not reach every site. `HGETEX`, `HQUERY`,
-   `HUPDATEEX` and the `Z*` commands have no binding-level coverage at all.
-   *Settle it by:* adding binding tests that call those commands through the Python
-   module and check the returned value counts, rather than inferring from the ones
-   that are covered.
+1. [Done] The swig_api.cpp flat view verified at every site [26-07-2026] Nr 8
 
-2. **Audit for other commands that depended on the old splat.**
-   `bpop` opened an array before knowing whether it could pop anything and relied on
-   the top level splat to discard it when empty; it now calls `discard_array()`. That
-   was found by `bstartest.py` failing, not by inspection, and nothing in the compiler
-   or the type system would have caught it. Any other command that calls
-   `start_array()` and then conditionally pushes nothing has the same latent problem.
-   *Settle it by:* walking the `start_array` callers (`barch.cpp`, `hash_api.cpp`,
-   `list_api.cpp`, `ordered_api.cpp`, `auth_api.cpp`) and checking each one that can
-   finish with an empty array, ideally with a test per command at zero results.
+2. [Done] Audit of the other commands that could open an empty array [26-07-2026] Nr 7
 
-3. **Decide what `end_array(size_t length)` is for.**
-   Both implementations ignore the argument, yet callers pass meaningful and
-   inconsistent values - `KEYS` passes the reply count, `SCAN` passes 1, `STATS`
-   passes 0. Either the parameter should be wired up or it should be removed, because
-   as it stands it reads as though it does something.
+3. [Done] The length parameter is gone from end_array [26-07-2026] Nr 6
 
 4. **Reconcile `rpc_caller` and `vk_caller` on the discarded array.**
    `discard_array()` genuinely rewinds for the RESP path but the base default just
@@ -55,13 +34,15 @@ shape work. Each one records what is uncertain and what would settle it.
 
 9. [Done] RESP3 support, so a default configured client connects [26-07-2026] Nr 4
 
-10. **The `HELLO AUTH` form is refused rather than supported.**
-   `HELLO 2 AUTH user pass` answers with an error telling the client to send `AUTH`
-   separately. barch's `AUTH` replies `OK` on success, and there is no way to run it
-   from inside `HELLO` without that `OK` landing in front of the handshake and
-   corrupting the reply. Low priority: the form is only reachable for a RESP2 client
-   that also has credentials, and such a client can send `AUTH` on its own.
-   *Settle it by:* splitting `auth_api.cpp`'s `AUTH` into a function that authenticates
-   and sets the ACL without replying, plus a thin command that adds the `OK`, then
-   calling the former from `HELLO`.
+10. [Done] HELLO AUTH runs the real AUTH and takes its OK back [26-07-2026] Nr 5
 
+11. **Four commands are declared and implemented but not reachable over RESP.**
+   `HGETEX` is commented out in `barch_apis.cpp`, `HQUERY`, `ZCOUNT` and `COMMAND`
+   were never added to the map, so all four answer `unknown command` to a client.
+   `HUPDATEEX` is not a command at all - it is a helper with a different signature
+   that `HGETEX` calls - so it belongs in neither place.
+   This is why the entry 2 audit could not reach them, and it overlaps with entry 1:
+   the same commands are the ones with no binding level coverage.
+   *Settle it by:* deciding for each whether it is meant to be a command. If it is,
+   register it and give it a test; if it is not, say so where the declaration is, so
+   the next person does not read an unregistered entry point as an oversight.

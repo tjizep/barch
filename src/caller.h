@@ -107,7 +107,7 @@ public:
         return 0;
     }
     virtual int start_array() = 0;
-    virtual int end_array(size_t length) = 0;
+    virtual int end_array() = 0;
     /**
      * a map and a set are arrays that carry their own RESP3 wire type. On a RESP2
      * connection they are written as a flat array, so the default just opens one and
@@ -116,14 +116,14 @@ public:
     virtual int start_map() {
         return start_array();
     }
-    virtual int end_map(size_t length) {
-        return end_array(length);
+    virtual int end_map() {
+        return end_array();
     }
     virtual int start_set() {
         return start_array();
     }
-    virtual int end_set(size_t length) {
-        return end_array(length);
+    virtual int end_set() {
+        return end_array();
     }
     /**
      * a verbatim string carries a format tag in RESP3 and is an ordinary bulk string
@@ -148,7 +148,17 @@ public:
      * all a reply builder that cannot rewind is able to do.
      */
     virtual int discard_array() {
-        return end_array(0);
+        return end_array();
+    }
+    /**
+     * take the value most recently pushed back off the reply. A command that runs
+     * another one needs to read its answer rather than let it through into the reply it
+     * is building - HELLO runs AUTH and must not ship AUTH's OK in front of the
+     * handshake. Answers false when there is nothing to take, which is also what a
+     * reply builder that cannot rewind always answers.
+     */
+    virtual bool pop_value(Variable& /*into*/) {
+        return false;
     }
     virtual int push_encoded_key(art::value_type key) = 0;
     virtual int push_string(const std::string& value) = 0;
@@ -196,7 +206,7 @@ public:
                     const Variable & v = el;
                     push_variable(v);
                 }
-                return end_array(1);
+                return end_array();
             }
             case var_null:
                 return push_null();

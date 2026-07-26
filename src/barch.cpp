@@ -201,7 +201,7 @@ int RANGE(caller& call, const arg_t& argv) {
         call.push_encoded_key(k);// TODO: replace this with streaming api to reduce memory
         if (--count == 0) break;
     }
-    call.end_array(0);
+    call.end_array();
 
     /* Cleanup. */
     return r;
@@ -222,9 +222,9 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * the reply is a map, which RESP3 sends as '%' and RESP2 flattens into an array - the
  * writer picks, so this reads the same either way.
  *
- * the AUTH option is not accepted: barch's AUTH replies OK on success, and there is
- * no way to run it from here without that OK landing in front of the handshake and
- * corrupting the reply. Clients with credentials should send AUTH as its own command.
+ * AUTH runs the ordinary AUTH command with its own argument list and then takes its
+ * OK back off the reply, so the handshake is all the client sees. A failure leaves an
+ * error queued, which the caller turns into a failed call on its own.
  */
 int HELLO(caller& call, const arg_t& argv) {
     unsigned at = 1;
@@ -238,15 +238,39 @@ int HELLO(caller& call, const arg_t& argv) {
         }
         ++at;
     }
+    art::value_type auth_user{}, auth_secret{};
+    bool authenticate = false;
     while (argv.size() > at) {
         if (argv[at] == "SETNAME" && argv.size() > at + 1) {
             at += 2; // accepted and ignored, the same as CLIENT SETINFO
             continue;
         }
-        if (argv[at] == "AUTH") {
-            return call.push_error("HELLO does not accept AUTH, send AUTH as its own command");
+        if (argv[at] == "AUTH" && argv.size() > at + 2) {
+            auth_user = argv[at + 1];
+            auth_secret = argv[at + 2];
+            authenticate = true;
+            at += 3;
+            continue;
         }
         return call.syntax_error();
+    }
+    if (authenticate) {
+        // AUTH takes its own argument list, with the command name back in front
+        arg_t auth_argv;
+        auth_argv.push_back("AUTH");
+        auth_argv.push_back(auth_user);
+        auth_argv.push_back(auth_secret);
+        ::AUTH(call, auth_argv);
+        if (call.errors_count() > 0) {
+            // AUTH already said why, and a queued error is enough to fail the call
+            return call.ok();
+        }
+        // AUTH answers OK by pushing it, so take it back rather than let it travel in
+        // front of the handshake
+        Variable answer;
+        if (call.pop_value(answer) && answer.to_string() != "OK") {
+            return call.push_error("authentication failed");
+        }
     }
     // the handshake itself goes out in the version just agreed, which is what a client
     // expects: it reads the reply with the parser it is about to switch to
@@ -267,8 +291,8 @@ int HELLO(caller& call, const arg_t& argv) {
     call.push_string("master");
     call.push_string("modules");
     call.start_array();
-    call.end_array(0);
-    call.end_map(0);
+    call.end_array();
+    call.end_map();
     return call.ok();
 }
 int cmd_HELLO(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -393,7 +417,7 @@ int KEYS(caller& call, const arg_t& argv) {
                 return true;
             });
         }
-        call.end_array(replies);
+        call.end_array();
     }
     return call.ok();
 }
@@ -447,7 +471,7 @@ int VALUES(caller& call, const arg_t& argv) {
                 return true;
             });
         }
-        call.end_array(replies);
+        call.end_array();
 
     }
     return call.ok();
@@ -934,7 +958,7 @@ int SCAN(caller& call, const arg_t& argv) {
             push_page(call, t, spec, iteration);
             if (call.results_count() >= spec.count) {
                 // todo: if we're exactly on max_count and there are no more pages then there will be one additional call
-                call.end_array(1);
+                call.end_array();
                 return call.ok();
             }
             iteration->page = t->next_page(iteration->page);
@@ -948,7 +972,7 @@ int SCAN(caller& call, const arg_t& argv) {
 
     if (iteration->shards.empty()) {
         call.erase_iteration(iteration->id);
-        call.end_array(1);
+        call.end_array();
         call.set_string(0, "0");
         return call.ok();
     }
@@ -1143,7 +1167,7 @@ int MGET(caller& call, const arg_t& argv) {
             ++responses;
         }
     }
-    call.end_array(responses);
+    call.end_array();
     return call.ok();
 }
 int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1561,7 +1585,7 @@ int SPACES(caller& call, const arg_t& argv) {
             }
             call.push_values({name,size});
         });
-        call.end_array(0);
+        call.end_array();
     }else {
         return KSPACE(call, argv);
     }
@@ -1933,7 +1957,7 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({"bytes_in_free_lists", as.bytes_in_free_lists});
     call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
     call.push_values({"keys_found", as.keys_found});
-    call.end_array(0);
+    call.end_array();
     return 0;
 }
 /* B.STATISTICS
@@ -1960,7 +1984,7 @@ int OPS(caller& call, const arg_t& argv) {
     call.push_values({"range_ops", as.range_ops});
     call.push_values({"set_ops", as.set_ops});
     call.push_values({"size_ops", as.size_ops});
-    call.end_array(0);
+    call.end_array();
     return 0;
 }
 
@@ -2030,7 +2054,7 @@ int COMMAND(caller& call, const arg_t& params) {
             call.push_simple(p.first.c_str());
             call.push_simple("function");
         }
-        call.end_array(0);
+        call.end_array();
         return call.push_simple("OK");
     }
     return call.push_error("unknown command");

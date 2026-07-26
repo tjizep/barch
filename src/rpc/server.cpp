@@ -809,7 +809,7 @@ extern "C"{
         call.start_array();
         call.push_simple(route.ip.c_str());
         call.push_ll(route.port);
-        call.end_array(0);
+        call.end_array();
 
         return 0;
     }
@@ -824,7 +824,7 @@ extern "C"{
         call.start_array();
         call.push_simple(route.ip.c_str());
         call.push_ll(route.port);
-        call.end_array(0);
+        call.end_array();
         return 0;
     }
 }

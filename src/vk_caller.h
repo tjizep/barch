@@ -61,7 +61,7 @@ struct vk_caller : caller {
         return ValkeyModule_ReplyWithArray(ctx,VALKEYMODULE_POSTPONED_LEN);
     }
 
-    int end_array(size_t) override {
+    int end_array() override {
         check_ctx();
         ValkeyModule_ReplySetArrayLength(ctx, (long long)call_counter);
         return 0;

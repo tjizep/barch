@@ -300,7 +300,7 @@ struct rpc_caller : caller {
 
         return 0;
     }
-    int end_array(size_t ) override {
+    int end_array() override {
         return close_aggregate(aggregate_array);
     }
     int discard_array() override {
@@ -313,14 +313,28 @@ struct rpc_caller : caller {
     int start_map() override {
         return start_array();
     }
-    int end_map(size_t) override {
+    int end_map() override {
         return close_aggregate(aggregate_map);
     }
     int start_set() override {
         return start_array();
     }
-    int end_set(size_t) override {
+    int end_set() override {
         return close_aggregate(aggregate_set);
+    }
+    bool pop_value(Variable& into) override {
+        // an aggregate under construction owns the tail, otherwise it is the reply itself
+        if (!temp.empty()) {
+            auto& top = temp.back();
+            if (top.empty()) return false;
+            into = Variable((const variable_t&) top.back());
+            top.pop_back();
+            return true;
+        }
+        if (results.empty()) return false;
+        into = results.back();
+        results.pop_back();
+        return true;
     }
     int push_verbatim(art::value_type v, const char* format = "txt") override {
         verbatim_t verbatim;

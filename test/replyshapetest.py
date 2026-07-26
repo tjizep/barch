@@ -103,6 +103,40 @@ assert popped == (b"shape:list", b"l") or popped == (b"shape:list", b"first"), \
 # nothing to pop and the block times out: a nil, not an empty array
 assert r.blpop(["shape:nolist"], 0.1) is None, "a timed out BLPOP should answer nil"
 
+# --- every array shaped command, asked for nothing -------------------------------
+# A command that opens an array and then pushes nothing has to answer an empty array.
+# It used to answer nil, because the empty array was spliced into an empty reply and
+# the writer could not tell the difference. bpop relied on exactly that to mean "no
+# answer yet", so it is worth holding every one of these down rather than assuming
+# bpop was the only place it mattered.
+r.execute_command("ZADD", "shape:zz", "1", "member")
+empty_cases = [
+    (["KEYS", "nomatch:*"], []),
+    (["VALUES", "nomatch:*"], []),
+    (["RANGE", "zzzz1", "zzzz2", "-1"], []),
+    (["HKEYS", "shape:nohash"], []),
+    (["ZRANGE", "shape:nozset", "0", "-1"], []),
+    (["ZRANGEBYSCORE", "shape:nozset", "-inf", "+inf"], []),
+    (["ZPOPMIN", "shape:nozset"], []),
+    (["ZPOPMAX", "shape:nozset"], []),
+    (["ZINTER", "2", "shape:nozset", "shape:zz"], []),
+]
+for cmd, expected in empty_cases:
+    got = raw(r, *cmd)
+    assert isinstance(got, list), \
+        f"{' '.join(cmd)} should answer an array when empty, got {type(got).__name__}: {got!r}"
+    assert got == expected, f"{' '.join(cmd)} gave {got!r}"
+
+# HGETALL is a map, so redis-py hands back a dict rather than a list
+assert raw(r, "HGETALL", "shape:nohash") == {}, "HGETALL of a missing key should be empty"
+# SCAN nests its array behind the cursor
+assert raw(r, "SCAN", "0", "MATCH", "nomatch:*")[1] == []
+# and the counting forms answer a number, not an array
+assert raw(r, "ZCARD", "shape:nozset") == 0
+assert raw(r, "ZINTERCARD", "2", "shape:nozset", "shape:zz") == 0
+assert raw(r, "VALUES", "nomatch:*", "COUNT") == 0
+r.execute_command("DEL", "shape:zz")
+
 # --- HELLO, the handshake a modern client opens with ---------------------------
 # barch speaks RESP2 only, so the handshake map comes back as a flat array of
 # alternating field and value, and protocol 3 is refused rather than half served.
@@ -185,5 +219,54 @@ for client in (r, r3):
     client.execute_command("DEL", "shape:z")
 
 r3.close()
+
+# --- HELLO AUTH -----------------------------------------------------------------
+# HELLO runs the ordinary AUTH and then takes its OK back off the reply, so what the
+# client sees is the handshake alone. "default"/"empty" is the pair rpc_caller itself
+# authenticates with when a session opens.
+def fresh(proto=2):
+    return redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=proto)
+
+
+ra = fresh(2)
+authed = raw(ra, "HELLO", "2", "AUTH", "default", "empty")
+assert isinstance(authed, list), f"HELLO AUTH should answer the handshake, got {authed!r}"
+# 7 pairs and nothing else: an AUTH OK travelling in front would make it 15
+assert len(authed) == 14, f"HELLO AUTH leaked an extra element into the reply: {authed!r}"
+assert as_text(authed[0]) == "server", f"handshake did not start where it should: {authed!r}"
+ra.close()
+
+# the options may be combined, and in either order
+ra = fresh(2)
+assert len(raw(ra, "HELLO", "2", "AUTH", "default", "empty", "SETNAME", "shapetest")) == 14
+ra.close()
+
+# a bad password fails the whole command - no handshake, just the error AUTH gave
+for user, secret in (("default", "wrongpassword"), ("nosuchuser", "empty")):
+    ra = fresh(2)
+    try:
+        raw(ra, "HELLO", "2", "AUTH", user, secret)
+        assert False, f"HELLO AUTH {user} {secret} should have failed"
+    except redis.exceptions.ResponseError as e:
+        assert "authentication failed" in str(e), f"unexpected error for {user}: {e}"
+    ra.close()
+
+# AUTH needs both a username and a password
+ra = fresh(2)
+try:
+    raw(ra, "HELLO", "2", "AUTH", "onlyone")
+    assert False, "HELLO AUTH with one argument should have been refused"
+except redis.exceptions.ResponseError:
+    pass
+ra.close()
+
+# and the whole point of it: a client configured with credentials connects on its own,
+# which is the handshake redis-py sends as HELLO <proto> AUTH <user> <pass>
+cred = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=3,
+                   username="default", password="empty")
+cred.set("shape:authed", "yes")
+assert cred.get("shape:authed") == b"yes", "a credentialled RESP3 client could not work"
+cred.close()
+
 barch.stop()
 print("complete reply shape test")

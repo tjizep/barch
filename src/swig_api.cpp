@@ -644,17 +644,19 @@ bool Caller::setLru(std::string lru) {
 
 std::vector<Value> Caller::call(const std::string &method, const std::vector<Value> &args) {
     std::unique_lock l(lock);
-    std::string cn = std::string{params[0]};
-    auto ic = barch_functions->find(cn);
+    // the command to run is the one just asked for. this used to read params[0], which
+    // still held whatever the previous call on this object left there - and on a freshly
+    // constructed one params is empty, so it read past the end and crashed
+    params = {method};
+    params.insert(params.end(), args.begin(), args.end());
+    auto ic = barch_functions->find(method);
     if (ic == barch_functions->end()) {
-        barch::std_err("invalid call", cn);
+        barch::std_err("invalid call", method);
         return {};
     }
     auto f = ic->second.call;
     ++ic->second.calls;
 
-    params = {method};
-    params.insert(params.end(), args.begin(), args.end());
     result.clear();
     if (ic->second.is_write()) {
         barch::repl::call(params);

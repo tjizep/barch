@@ -521,7 +521,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         }
     };
     if (!spec.REMOVE) {
-        call.end_array(replies);
+        call.end_array();
     } else {
         for (auto &r: removals) {
             remove_ordered(call, r.score_key, r.member_key);
@@ -750,9 +750,13 @@ static int ZOPER(
     if (replies == 0 && spec.aggr != art::zops_spec::agg_none) {
         return call.push_double(results_added > 0 ? aggr : 0.0f);
     }
-    if (store.empty()) {
-        call.end_array(replies);
-    } else {
+    // the same condition the array was opened under further up. it used to close on
+    // store.empty() alone, so an aggregating call with no destination would close an
+    // array it never opened - a no-op, since end_array does nothing with an empty
+    // stack, but it read as though the two were paired when they were not
+    if (spec.aggr == art::zops_spec::agg_none && store.empty()) {
+        call.end_array();
+    } else if (!store.empty()) {
         return call.push_ll(replies);
     }
 
@@ -863,7 +867,7 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
             break;
         };
     }
-    call.end_array(replies);
+    call.end_array();
     return call.ok();
 }
 int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -922,7 +926,7 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
             barch::std_log("Could not remove key");
         };
     }
-    call.end_array(replies);
+    call.end_array();
     return call.ok();
 }
 

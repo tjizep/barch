@@ -562,6 +562,10 @@ else()
                 COMMAND globdifftest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestBindings
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/bindingtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestGlobPerformance
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/globperftest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

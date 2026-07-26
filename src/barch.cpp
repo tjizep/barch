@@ -214,11 +214,13 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 /* HELLO [protover [SETNAME clientname]]
  *
- * the handshake a modern redis client sends when it opens a connection. barch speaks
- * RESP2 only - redis_parser.h has no map, set, double, big number, verbatim or push
- * type - so protocol 3 is refused with NOPROTO, which is what a RESP2 only server is
- * supposed to answer. The reply is the usual handshake fields as a flat array, which
- * is how RESP2 carries a map.
+ * the handshake a modern redis client sends when it opens a connection, and where the
+ * RESP version is settled. 2 and 3 are both served; anything else is refused with
+ * NOPROTO, the same as redis. The version sticks to the connection, so every reply
+ * that follows is written in whichever the client asked for.
+ *
+ * the reply is a map, which RESP3 sends as '%' and RESP2 flattens into an array - the
+ * writer picks, so this reads the same either way.
  *
  * the AUTH option is not accepted: barch's AUTH replies OK on success, and there is
  * no way to run it from here without that OK landing in front of the handshake and
@@ -226,13 +228,12 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  */
 int HELLO(caller& call, const arg_t& argv) {
     unsigned at = 1;
+    int64_t protover = call.get_protocol();
     if (argv.size() > at) {
-        int64_t protover = 0;
         if (!conversion::to_i64(argv[at], protover)) {
             return call.push_error("Protocol version is not an integer or out of range");
         }
-        if (protover != 2) {
-            // redis sends this for anything outside 2..3, and for 3 when it cannot serve it
+        if (protover < 2 || protover > 3) {
             return call.push_error("NOPROTO unsupported protocol version");
         }
         ++at;
@@ -247,14 +248,17 @@ int HELLO(caller& call, const arg_t& argv) {
         }
         return call.syntax_error();
     }
+    // the handshake itself goes out in the version just agreed, which is what a client
+    // expects: it reads the reply with the parser it is about to switch to
+    call.set_protocol((int) protover);
 
-    call.start_array();
+    call.start_map();
     call.push_string("server");
     call.push_string("redis"); // clients gate features on this, and INFO already says redis_version
     call.push_string("version");
     call.push_string(BARCH_PROJECT_VERSION);
     call.push_string("proto");
-    call.push_int((int64_t) 2);
+    call.push_int((int64_t) protover);
     call.push_string("id");
     call.push_int((int64_t) 0); // barch does not carry a per connection id
     call.push_string("mode");
@@ -264,7 +268,7 @@ int HELLO(caller& call, const arg_t& argv) {
     call.push_string("modules");
     call.start_array();
     call.end_array(0);
-    call.end_array(0);
+    call.end_map(0);
     return call.ok();
 }
 int cmd_HELLO(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

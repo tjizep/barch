@@ -97,3 +97,59 @@ Covered by the HELLO section of `replyshapetest.py`: field presence and pairing 
 both `HELLO` and `HELLO 2`, `proto` being 2, `modules` arriving as a nested empty
 array, `NOPROTO` for versions 3, 1 and 0, the non numeric error, `SETNAME` accepted
 and an unknown option rejected.
+
+O**Superseded in part by Nr 4.** RESP3 is now served, so `HELLO 3` negotiates instead
+of being refused and only versions outside 2..3 answer `NOPROTO`.
+
+## 4. RESP3 support, so a default configured client connects [26-07-2026]
+
+*Was `TODO.md` entry 9.*
+
+A client left on its own defaults asks for RESP3, and barch could only answer
+`NOPROTO`, so it failed to connect. Every test had to pass `protocol=2` to work
+around it. RESP3 is now served and the workaround is no longer load bearing.
+
+RESP3 is a superset: `+`, `-`, `:`, `$` and `*` mean the same in both versions, so
+only the shapes that gained a type of their own are switched on the negotiated
+version. A connection that never sends `HELLO 3` sees byte for byte what it always
+did.
+
+- `variable.h` gains `map_t`, `set_t` and `verbatim_t`, appended to `variable_t` so
+  the existing indices stay put, plus `var_map`, `var_set` and `var_verbatim`. A map
+  and a set carry the same elements an array does and exist only so the writer can
+  tell the three apart. `Variable::elements()` reaches into whichever of the three it
+  is, and the numeric and string accessors treat them as they already treated arrays.
+- `caller.h` gains `start_map`/`end_map`, `start_set`/`end_set`, `push_verbatim` and
+  the protocol accessors. Every one defaults to the RESP2 behaviour, so `vk_caller`
+  and any other builder that cannot tell the shapes apart stays correct without
+  changes.
+- `rpc_caller` closes an aggregate through one `close_aggregate(kind)` path shared by
+  array, map and set, and carries the negotiated version. The caller lives for the
+  life of the session, so the negotiation sticks for every command that follows.
+- `redis_parser.h` threads the version through `rwrite` and writes `%` for a map, `~`
+  for a set, `_` for null, `#t`/`#f` for a boolean, `,` for a double and `=` for a
+  verbatim string when the connection is on 3, and the RESP2 spelling of each when it
+  is not. A map counts pairs rather than elements, which is the one place the two
+  differ by more than a sigil.
+- `HELLO` accepts 2 and 3, sets the version before replying - a client reads the
+  handshake with the parser it is about to switch to - and answers with a map, which
+  the writer renders as `%` or as a flat array to suit.
+
+A real bug fell out of this. `rwrite(TS&, double)` did `rwrite(io, v.c_str())`, and
+`const char*` binds to the `bool` overload ahead of `std::string`, because a pointer
+to bool conversion is a standard conversion and beats a user defined one. Every
+double reply went out as `:1` whatever its value. Confirmed with a standalone
+overload resolution check against the same overload set rather than assumed.
+`ZINCRBY z 1.5 member` now answers 2.5 where it used to answer 1.
+
+Not implemented: `>` push, which needs pubsub barch does not have, and `(` big
+number, which nothing produces. The writer has no case for either.
+
+`HELLO AUTH` is still refused, carried forward as `TODO.md` entry 10.
+
+Covered by the RESP3 section of `replyshapetest.py` - handshake arriving as a map,
+arrays keeping shape and arity at every count, null reaching the client as `None`,
+booleans arriving as `True`/`False` rather than 1 and 0, and a double surviving the
+round trip on both protocols. `redispytest.py` now takes the version from
+`BARCH_TEST_RESP` and CTest runs it twice, so the whole command surface is exercised
+over RESP2 and RESP3.

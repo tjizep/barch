@@ -134,7 +134,7 @@ namespace barch {
                 else
                     redis::rwrite(local_stream, error{"null error"});
             } else {
-                redis::rwrite(local_stream, local_caller.results);
+                redis::rwrite(local_stream, local_caller.results, local_caller.get_protocol());
             }
         }
 

@@ -36,6 +36,9 @@ struct rpc_caller : caller {
     heap::vector<Variable> buffered_results{};
     heap::vector<std::string> buffered_errors{};
     bool remote {true};
+    // the RESP version this connection settled on with HELLO. the caller lives for the
+    // life of the session, so the negotiation sticks for every command that follows
+    int protocol {2};
 
     void create(const std::string& h, uint_least16_t port) {
         this->host = barch::repl::create(h,port);
@@ -261,24 +264,76 @@ struct rpc_caller : caller {
         temp.emplace_back();
         return 0;
     }
-    int end_array(size_t ) override {
+    enum aggregate_kind { aggregate_array, aggregate_map, aggregate_set };
+    /**
+     * close the aggregate on top of the stack into whichever value its kind calls for.
+     * it is always kept as one nested value: it used to be spliced into results when it
+     * was the whole reply, which threw away the fact that it was an aggregate at all -
+     * the writer then had to guess from the element count and got it wrong for one
+     * holding nothing or one thing.
+     */
+    int close_aggregate(aggregate_kind kind) {
         if (temp.empty()) return this->error();
 
         auto b = temp.back();
         temp.pop_back();
-        // an array is always kept as one nested value. it used to be spliced into
-        // results when it was the whole reply, which threw away the fact that it was
-        // an array at all - the writer then had to guess from the element count and
-        // got it wrong for an array holding nothing or one thing
-        if (!temp.empty()) temp.back().emplace_back(b);
-        else results.emplace_back(b);
+        variable_t closed;
+        switch (kind) {
+            case aggregate_map: {
+                map_t m;
+                m.items = b;
+                closed = m;
+                break;
+            }
+            case aggregate_set: {
+                set_t s;
+                s.items = b;
+                closed = s;
+                break;
+            }
+            default:
+                closed = b;
+                break;
+        }
+        if (!temp.empty()) temp.back().emplace_back(closed);
+        else results.emplace_back(closed);
 
         return 0;
+    }
+    int end_array(size_t ) override {
+        return close_aggregate(aggregate_array);
     }
     int discard_array() override {
         if (temp.empty()) return this->error();
         temp.pop_back();
         return 0;
+    }
+    // a map and a set are built exactly like an array and only differ in the value they
+    // are closed into, which is what tells the writer which RESP3 type to use
+    int start_map() override {
+        return start_array();
+    }
+    int end_map(size_t) override {
+        return close_aggregate(aggregate_map);
+    }
+    int start_set() override {
+        return start_array();
+    }
+    int end_set(size_t) override {
+        return close_aggregate(aggregate_set);
+    }
+    int push_verbatim(art::value_type v, const char* format = "txt") override {
+        verbatim_t verbatim;
+        verbatim.format = format;
+        verbatim.text.assign(v.chars(), v.size);
+        emplace_impl(verbatim);
+        return 0;
+    }
+    [[nodiscard]] int get_protocol() const override {
+        return protocol;
+    }
+    void set_protocol(int version) override {
+        protocol = version;
     }
     int push_encoded_key(art::value_type key) override {
         emplace_impl(encoded_key_as_variant(key));

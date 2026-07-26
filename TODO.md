@@ -53,21 +53,7 @@ shape work. Each one records what is uncertain and what would settle it.
    iteration completes or when the connection closes" points at a leak on abandoned
    scans. None of this has been looked at.
 
-9. **Real RESP3 support, so a default configured client can connect.**
-   `HELLO` now negotiates properly (entry 7, `DONE.md` Nr 3) but only ever agrees to
-   protocol 2. A client left on its own defaults asks for 3, gets `NOPROTO` and still
-   fails to connect - correctly and diagnostically now, rather than with
-   `unknown command`, but it fails. Every test passes `protocol=2` to work around it.
-   `redis_parser.h` emits only the RESP2 types: `+`, `-`, `:`, `$` and `*`. RESP3 adds
-   map `%`, set `~`, double `,`, boolean `#`, big number `(`, verbatim `=`, null `_`
-   and push `>`. The writer would need those, `Variable` would need to carry the
-   distinction between a map and a flat array so replies like `HELLO`, `CONFIG GET`
-   and `XPENDING` can be shaped per protocol, and the negotiated version would have to
-   be reachable from the reply path.
-   *Settle it by:* deciding whether barch wants RESP3 at all. Staying RESP2 only is a
-   defensible answer as long as it is documented, since the client can be configured
-   for it - but the default experience is a failed connection, which is a poor first
-   impression.
+9. [Done] RESP3 support, so a default configured client connects [26-07-2026] Nr 4
 
 10. **The `HELLO AUTH` form is refused rather than supported.**
    `HELLO 2 AUTH user pass` answers with an error telling the client to send `AUTH`

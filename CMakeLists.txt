@@ -548,6 +548,14 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redispytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the same command surface again over RESP3, so the protocol the writer picks
+        # is exercised both ways rather than only on the RESP2 path
+        add_test(NAME TestRespClientLocalRESP3
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/redispytest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestRespClientLocalRESP3 PROPERTIES
+                ENVIRONMENT "BARCH_TEST_RESP=3")
+
         # the glob matcher only needs glob.cpp, so it gets a plain executable
         add_executable(globdifftest test/globdifftest.cpp src/glob.cpp)
         add_test(NAME TestGlobDifferential

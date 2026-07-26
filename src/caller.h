@@ -109,6 +109,39 @@ public:
     virtual int start_array() = 0;
     virtual int end_array(size_t length) = 0;
     /**
+     * a map and a set are arrays that carry their own RESP3 wire type. On a RESP2
+     * connection they are written as a flat array, so the default just opens one and
+     * a reply builder that cannot tell them apart stays correct.
+     */
+    virtual int start_map() {
+        return start_array();
+    }
+    virtual int end_map(size_t length) {
+        return end_array(length);
+    }
+    virtual int start_set() {
+        return start_array();
+    }
+    virtual int end_set(size_t length) {
+        return end_array(length);
+    }
+    /**
+     * a verbatim string carries a format tag in RESP3 and is an ordinary bulk string
+     * in RESP2, which is what the default falls back to
+     */
+    virtual int push_verbatim(art::value_type v, const char* /*format*/ = "txt") {
+        return push_vt(v);
+    }
+    /**
+     * the RESP version this connection negotiated with HELLO. 2 unless it asked for 3,
+     * and always 2 where the protocol is not ours to choose, as in the valkey module.
+     */
+    [[nodiscard]] virtual int get_protocol() const {
+        return 2;
+    }
+    virtual void set_protocol(int) {
+    }
+    /**
      * abandon an array started by start_array without contributing it to the reply,
      * for a command that turns out to have nothing to say yet - a blocking pop about
      * to register a block rather than answer. the default closes it instead, which is

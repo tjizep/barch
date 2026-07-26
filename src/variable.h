@@ -12,6 +12,10 @@
 #include "value_type.h"
 #include "ioutil.h"
 
+// the first eight are the RESP2 shapes and their indices are relied on elsewhere, so
+// anything new is appended. the last three exist because RESP3 gives a map, a set and
+// a verbatim string their own wire types; RESP2 writes them as an array or a bulk
+// string, which is what they degrade to when the connection never asked for RESP3
 enum {
     var_bool = 0,
     var_int64 = 1,
@@ -21,7 +25,10 @@ enum {
     var_null = 5,
     var_error = 6,
     var_array = 7,
-    var_max = 8,
+    var_map = 8,
+    var_set = 9,
+    var_verbatim = 10,
+    var_max = 11,
 };
 struct error {
     error(const std::string n) : name(n){}
@@ -39,8 +46,23 @@ private:
     std::string name;
 };
 struct wrapped_variable_t;
+// a map and a set carry the same elements an array does - a map as alternating key
+// and value - so they wrap the vector instead of repeating it. they exist only so the
+// writer can tell the three apart and pick the right RESP3 type
+struct map_t {
+    heap::vector<wrapped_variable_t> items{};
+};
+struct set_t {
+    heap::vector<wrapped_variable_t> items{};
+};
+// RESP3 tags a verbatim string with a three letter format, "txt" or "mkd"
+struct verbatim_t {
+    std::string format{"txt"};
+    std::string text{};
+};
 // 0 - var_bool, 1 - var_int64, 2 - var_uint64, 3 - var_double, 4 - var_string, 5 - var_null, 6 - var_error
-typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error, heap::vector<wrapped_variable_t>> variable_t;
+typedef std::variant<bool, int64_t, uint64_t, double, std::string, nullptr_t, error, heap::vector<wrapped_variable_t>,
+                     map_t, set_t, verbatim_t> variable_t;
 
 struct wrapped_variable_t{
     variable_t var;
@@ -126,6 +148,22 @@ public:
          return {item.data(),item.size()};
      }
 
+    /**
+     * the elements of an array, a map or a set - the three share one representation and
+     * differ only in the wire type the writer gives them
+     */
+    [[nodiscard]] const heap::vector<wrapped_variable_t>& elements() const {
+        switch (index()) {
+            case var_map: return std::get<map_t>(*this).items;
+            case var_set: return std::get<set_t>(*this).items;
+            default: return std::get<heap::vector<wrapped_variable_t>>(*this);
+        }
+    }
+    [[nodiscard]] bool is_aggregate() const {
+        auto i = index();
+        return i == var_array || i == var_map || i == var_set;
+    }
+
     [[nodiscard]] std::string to_string() const {
         switch (index()) {
             case var_bool:
@@ -150,8 +188,10 @@ public:
                 }
                 return s;
             }
-            case var_array: {
-                const auto &a = std::get< heap::vector<wrapped_variable_t>>(*this);
+            case var_array:
+            case var_map:
+            case var_set: {
+                const auto &a = elements();
                 std::string s;
                 bool first = true;
                 for (const auto& el: a) {
@@ -165,6 +205,8 @@ public:
                 }
                 return s;
             }
+            case var_verbatim:
+                return std::get<verbatim_t>(*this).text;
 
             case var_null:
                 return {};
@@ -188,6 +230,8 @@ public:
             case var_string:
                 return conversion::to_e<double>(bulk_str(std::get<std::string>(*this)));
             case var_array:
+            case var_map:
+            case var_set:
                 //return 0.0f;// TODO: maybe accumulate IDK
             case var_null:
                 return 0.0f;
@@ -211,6 +255,8 @@ public:
             case var_string:
                 return conversion::to_e<int>(bulk_str(std::get<std::string>(*this))) > 0;
             case var_array:
+            case var_map:
+            case var_set:
             case var_null:
             case var_error:
                 return false;
@@ -232,6 +278,8 @@ public:
             case var_string: // not this can throw an error
                 return conversion::to_e<int64_t>(bulk_str(std::get<std::string>(*this)));
             case var_array:
+            case var_map:
+            case var_set:
             case var_null:
             case var_error:
                 return 0;
@@ -252,6 +300,8 @@ public:
             case var_string:
                 return conversion::to_e<uint64_t>(bulk_vt(std::get<std::string>(*this)));
             case var_array:
+            case var_map:
+            case var_set:
             case var_null:
             case var_error:
                 return 0;
@@ -273,6 +323,8 @@ public:
             case var_string:
                 return std::get<std::string>(*this) < std::get<std::string>(other);
             case var_array:
+            case var_map:
+            case var_set:
             case var_null:
             case var_error:
                 return false;

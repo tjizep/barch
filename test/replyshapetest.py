@@ -119,9 +119,10 @@ for cmd in (["HELLO"], ["HELLO", "2"]):
     # modules is a nested empty array, which is the one place the reply nests
     assert fields["modules"] == [], f"modules should be an empty array, got {fields['modules']!r}"
 
-# protocol 3 is refused with NOPROTO, which is what a RESP2 only server should say,
-# rather than the "unknown command" a missing HELLO used to produce
-for bad in ("3", "1", "0"):
+# only 2 and 3 exist, so anything outside that is NOPROTO. HELLO 3 is not sent on this
+# connection: it would switch the server side to RESP3 and leave this client reading
+# with the wrong parser - it is exercised on its own client further down
+for bad in ("1", "0", "4"):
     try:
         raw(r, "HELLO", bad)
         assert False, f"HELLO {bad} should have been refused"
@@ -143,5 +144,46 @@ except redis.exceptions.ResponseError:
     pass
 
 r.close()
+
+# --- the same server over RESP3 -------------------------------------------------
+# RESP3 is a superset, so the shapes above are unchanged; what differs is that a map
+# arrives as a map, and null, boolean and double have types of their own instead of
+# being carried as a bulk string or an integer.
+r3 = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=3)
+
+hello3 = raw(r3, "HELLO", "3")
+assert isinstance(hello3, dict), \
+    f"a RESP3 handshake should arrive as a map, got {type(hello3).__name__}: {hello3!r}"
+proto3 = hello3.get(b"proto", hello3.get("proto"))
+assert proto3 == 3, f"handshake should have agreed on RESP3, said {proto3!r}"
+
+# arrays keep their shape and arity at every count
+assert raw(r3, "KEYS", "nomatch:*") == []
+one3 = raw(r3, "KEYS", "solo:*")
+assert isinstance(one3, list) and [as_text(k) for k in one3] == ["solo:only"], \
+    f"KEYS with one match over RESP3 gave {one3!r}"
+# the blocking pop section above left shape:list behind, so this asks for containment
+# rather than an exact count and does not depend on what ran before it
+many3 = {as_text(k) for k in raw(r3, "KEYS", "shape:*")}
+assert {"shape:a", "shape:b"} <= many3, f"KEYS over RESP3 gave {many3!r}"
+
+# null is '_' rather than '$-1', and still reaches the client as None
+assert raw(r3, "GET", "nosuchkey") is None
+assert raw(r3, "GET", "shape:a") == b"1"
+
+# a boolean is '#t'/'#f' in RESP3, so it arrives as a bool rather than 1 or 0
+assert raw(r3, "SPACES", "OPTION", "GET", "ORDERED") is True
+assert raw(r3, "SPACES", "OPTION", "GET", "LRU") is False
+
+# a double is ',' in RESP3 and a bulk string in RESP2, and has to survive either way.
+# it used to go out as ':1' whatever its value, because the writer handed a const char*
+# to an overload set where it bound to bool ahead of std::string
+for client in (r, r3):
+    client.execute_command("ZADD", "shape:z", "1", "member")
+    assert client.execute_command("ZINCRBY", "shape:z", "1.5", "member") == 2.5, \
+        "a double reply did not survive the round trip"
+    client.execute_command("DEL", "shape:z")
+
+r3.close()
 barch.stop()
 print("complete reply shape test")

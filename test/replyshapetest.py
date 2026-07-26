@@ -127,6 +127,26 @@ for cmd, expected in empty_cases:
         f"{' '.join(cmd)} should answer an array when empty, got {type(got).__name__}: {got!r}"
     assert got == expected, f"{' '.join(cmd)} gave {got!r}"
 
+# ZCOUNT is registered for RESP and answers a number over a score range
+r.execute_command("ZADD", "shape:zc", "1", "a")
+r.execute_command("ZADD", "shape:zc", "5", "b")
+r.execute_command("ZADD", "shape:zc", "9", "c")
+assert raw(r, "ZCOUNT", "shape:zc", "0", "100") == 3, "ZCOUNT over the whole range"
+assert raw(r, "ZCOUNT", "shape:zc", "4", "6") == 1, "ZCOUNT over a narrower range"
+assert raw(r, "ZCOUNT", "shape:zc", "900", "1000") == 0, "ZCOUNT over an empty range"
+assert raw(r, "ZCOUNT", "shape:nozset", "0", "100") == 0, "ZCOUNT of a missing key"
+r.execute_command("DEL", "shape:zc")
+
+# these are implemented but deliberately not registered for RESP - see the notes in
+# barch_apis.cpp. Pinned so that registering one becomes a decision rather than an
+# accident, and so the absence does not get rediscovered as a bug
+for absent in (["HGETEX", "h", "FIELDS", "1", "f"], ["HQUERY", "h", "*"], ["COMMAND"]):
+    try:
+        raw(r, *absent)
+        assert False, f"{absent[0]} is registered now - if that is intended, update this test"
+    except redis.exceptions.ResponseError as e:
+        assert "unknown command" in str(e), f"{absent[0]} gave an unexpected error: {e}"
+
 # HGETALL is a map, so redis-py hands back a dict rather than a list
 assert raw(r, "HGETALL", "shape:nohash") == {}, "HGETALL of a missing key should be empty"
 # SCAN nests its array behind the cursor

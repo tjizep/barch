@@ -46,6 +46,8 @@ struct barch_info {
 typedef heap::string_map<barch_info> function_map;
 extern "C"{
     // Misc/sys
+    // not registered in functions_by_name: it serves the valkey module, where the
+    // server asks the module to describe itself, rather than RESP clients
     int COMMAND(caller& call,const arg_t& argv);
     int AUTH(caller& call,const arg_t& argv);
     int ACL(caller& call,const arg_t& argv);
@@ -132,6 +134,9 @@ extern "C"{
     int HSET(caller& cc, const arg_t& args);
     int HEXPIREAT(caller& call, const arg_t& args);
     int HEXPIRE(caller& call, const arg_t& args);
+    // HGETEX and HQUERY are implemented in hash_api.cpp but not registered for RESP -
+    // see the note in barch_apis.cpp. HUPDATEEX is not a command at all: it is the
+    // helper HGETEX drives, and takes arguments a barch_function does not have.
     //int HGETEX(caller& call, const arg_t &argv);
     int HMGET(caller& call, const arg_t& argv);
     int HINCRBY(caller& call, const arg_t &argv);
@@ -152,6 +157,7 @@ extern "C"{
     int ZINCRBY(caller& call, const arg_t& argv);
     int ZRANGE(caller& call, const arg_t& argv);
     int ZCARD(caller& call, const arg_t& argv);
+    int ZCOUNT(caller& call, const arg_t& argv);
     int ZDIFF(caller& call, const arg_t& argv);
     int ZDIFFSTORE(caller& call, const arg_t& argv);
     int ZINTERSTORE(caller& call, const arg_t& argv);

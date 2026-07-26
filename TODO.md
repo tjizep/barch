@@ -1,8 +1,4 @@
 # TODO
-
-Open questions and unverified assumptions left over from the glob / SCAN / reply
-shape work. Each one records what is uncertain and what would settle it.
-
 1. [Done] The swig_api.cpp flat view verified at every site [26-07-2026] Nr 8
 
 2. [Done] Audit of the other commands that could open an empty array [26-07-2026] Nr 7
@@ -17,25 +13,35 @@ shape work. Each one records what is uncertain and what would settle it.
 
 7. [Done] HELLO implemented for RESP2, protocol 3 refused with NOPROTO [26-07-2026] Nr 3
 
-8. **Threading and service queueing review of `SCAN`.**
-   Deliberately parked. `SCAN` keeps a per-connection iteration holding shard pointers
-   across calls, and `art::glob` serialises every `KEYS` behind a single
-   `glob_queue` mutex while iterating pages on worker threads. The `SCAN` comment
-   "we need to eventually get rid of the iteration - it will only get removed if the
-   iteration completes or when the connection closes" points at a leak on abandoned
-   scans. None of this has been looked at.
+8. [Done] SCAN threading and service queueing reviewed [26-07-2026] Nr 10
 
-9. [Done] RESP3 support, so a default configuredSo on number client connects [26-07-2026] Nr 4
+9. [Done] RESP3 support, so a default configured client connects [26-07-2026] Nr 4
 
 10. [Done] HELLO AUTH runs the real AUTH and takes its OK back [26-07-2026] Nr 5
 
-11. **Four commands are declared and implemented but not reachable over RESP.**
-   `HGETEX` is commented out in `barch_apis.cpp`, `HQUERY`, `ZCOUNT` and `COMMAND`
-   were never added to the map, so all four answer `unknown command` to a client.
-   `HUPDATEEX` is not a command at all - it is a helper with a different signature
-   that `HGETEX` calls - so it belongs in neither place.
-   This is why the entry 2 audit could not reach them, and it overlaps with entry 1:
-   the same commands are the ones with no binding level coverage.
-   *Settle it by:* deciding for each whether it is meant to be a command. If it is,
-   register it and give it a test; if it is not, say so where the declaration is, so
-   the next person does not read an unregistered entry point as an oversight.
+11. [Done] ZCOUNT registered, the other three documented as deliberate [26-07-2026] Nr 11
+
+12. **TestGlobPerformance hung for ~75s and then took the process down in CI.**
+   One pipeline run failed `TestGlobPerformance` with a SEGFAULT after the client timed
+   out. The reference pattern's `VALUES ... COUNT` call did not answer for about
+   seventy five seconds - the whole test took 81s and everything before that command
+   accounts for only a few - and the crash was reported after the python traceback, so
+   the process died tearing down rather than in the command itself.
+   Not reproduced. Ruled out locally: two cores via `taskset`; worker oversubscription
+   at 1, 4, 16 and 64 `iteration_worker_count` on two cores, which reaches 800ms and
+   not 75s; exiting while a glob is still running server side; and three consecutive
+   full runs. The same command takes ~230ms locally and CI's own scan overhead line
+   showed only a 4x general slowdown, so 75s is two orders of magnitude beyond slow.
+   The leading guess is memory pressure on the runner. CI runs this after 34 other
+   tests in the same directory, and the corpus is 110 MiB on top of whatever the arena
+   already holds - the run that failed never printed a memory line because there was
+   not one yet.
+   The test no longer hides it: `BARCH_PERF_ENTRIES` and `BARCH_PERF_TIMEOUT` size the
+   run, `used_memory`/`rss`/`peak` are printed after loading and after the baseline, and
+   the body is wrapped so `barch.stop()` always runs. A repeat now fails with a
+   diagnosable exit 1 and the memory numbers beside it rather than a bare SEGFAULT.
+   *Settle it by:* reading the memory lines from the next failure. If they are high,
+   lower `BARCH_PERF_ENTRIES` in the workflow. If they are not, the hang is real and
+   wants a stack from the server while it is stuck - the timeout now leaves it alive
+   long enough to attach.
+

@@ -328,3 +328,74 @@ thread block on `testkey1`, and only one value is ever pushed, so exactly one of
 wins and the other times out. The test allows `None` for either. Five consecutive runs
 all pass with the winner varying.
 
+## 10. SCAN threading and service queueing reviewed [26-07-2026]
+
+*Was `TODO.md` entry 8.*
+
+The entry raised three things. Two were real and are fixed; the third turned out to be
+deliberate.
+
+**The cursors a SCAN leaves behind.** `SCAN` keeps a per connection iteration holding
+shard pointers and a page buffer. One followed to the end drops itself, but an
+abandoned one stayed until the connection closed, with nothing reporting it and nothing
+capping it - which is what the `TODO` in `SCAN` was pointing at. Now:
+
+- `CLIENT INFO` reports `iters` and `iters-mem`, so a connection leaking cursors is
+  visible. `iteration_count()` and `iteration_memory()` on `caller` provide them, the
+  memory counting the page buffer, the shard pointers and the struct.
+- `max_scan_iterators` caps how many one connection may hold, default 128, registered
+  like every other variable so it can be changed at runtime. A `SCAN` that would exceed
+  it is refused with an error naming the way out.
+- `CLIENT CLEAR_ITERS` drops them and answers how many went, for a client that knows it
+  has abandoned scans and would rather not reconnect.
+
+While in `CLIENT INFO` the hardcoded `resp=2` was changed to report the negotiated
+version, which had been wrong for every RESP3 connection since Nr 4.
+
+**The single `glob_queue` mutex is intentional and stays.** It admits one glob at a
+time, and `logical_allocator::iterate_pages` spawns exactly
+`barch::get_iteration_worker_count()` threads to walk the pages - four by default, and
+tunable at runtime like anything else. Together they bound scan work at one glob times
+N threads however many clients ask for `KEYS` at once, which is what stops a scan
+swamping a multi threaded server. The comment above the mutex already said so. Nothing
+changed here; it is recorded because the entry read it as an unexamined bottleneck and
+it is not one.
+
+Covered by the cursor section of `scanglobtest.py`: the fields being present, abandoned
+scans accumulating, memory non zero while held, a completed scan adding nothing, the
+clear returning the right count and zeroing both, and the limit refusing the next cursor
+with a message that says how to recover.
+
+## 11. ZCOUNT registered, the other three documented as deliberate [26-07-2026]
+
+*Was `TODO.md` entry 11.*
+
+Four commands were implemented but answered `unknown command` over RESP, and nothing
+said whether that was a decision or an oversight.
+
+`ZCOUNT` is now a command: declared in `barch_apis.h` and registered in
+`barch_apis.cpp` as read/ordered/data. It needed one more thing than the entry
+suggested - its definition in `ordered_api.cpp` was the only one in that file without
+its own `extern "C"` line, so the declaration expected C linkage and the definition had
+C++ linkage. The module built and then failed to load with `undefined symbol: ZCOUNT`.
+That is consistent with it never having been exported before, and is why the link error
+only appeared once something referred to it.
+
+The other three stay unregistered, and now say so where someone will look:
+
+- `COMMAND` serves the valkey module, where the server asks the module to describe
+  itself. A RESP client that sends it gets `unknown command` and falls back, which is
+  what we want until there is a command table worth publishing.
+- `HGETEX` and `HQUERY` are implemented and reachable from the module side but have not
+  been settled over RESP. `HGETEX` in particular shares `HUPDATEEX`'s option parsing,
+  and `HUPDATEEX` is not a command at all - it is a helper taking extra arguments, so it
+  cannot go in the table as it stands.
+
+Notes to that effect sit next to the commented out registration in `barch_apis.cpp` and
+next to the declarations in `barch_apis.h`.
+
+`replyshapetest.py` covers `ZCOUNT` over a full range, a narrow one, an empty one and a
+missing key, and pins the other three as answering `unknown command` - so registering
+one of them becomes a deliberate change to this test rather than something that drifts
+in unnoticed.
+

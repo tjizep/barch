@@ -365,6 +365,7 @@ int cmd_ZINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 
 
+extern "C"
 int ZCOUNT(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();

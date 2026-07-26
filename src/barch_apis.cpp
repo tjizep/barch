@@ -104,6 +104,10 @@ std::shared_ptr<function_map>  functions_by_name() {
         (*r)["STATS"] = {::STATS,{"read","stats"}};
         (*r)["OPS"] = {OPS,{"read","stats"}};
         (*r)["INFO"] = {INFO,{"read","stats"}};
+        // COMMAND is deliberately not registered. It is implemented for the valkey
+        // module, where the server asks the module to describe itself; over RESP a
+        // client that sends COMMAND gets "unknown command" and falls back, which is
+        // what we want until there is a command table worth publishing.
         (*r)["CLIENT"] = {CLIENT,{"read","stats"}};
         (*r)["HELLO"] = {HELLO,{"connection"}};
 
@@ -136,6 +140,11 @@ std::shared_ptr<function_map>  functions_by_name() {
         (*r)["HSET"] = {::HSET,{"write","hash","data"}};
         (*r)["HEXPIREAT"] = {::HEXPIREAT,{"write","hash","data"}};
         (*r)["HEXPIRE"] = {::HEXPIRE,{"write","hash","data"}};
+        // HGETEX and HQUERY are deliberately not registered, not an oversight. Both
+        // are implemented and reachable from the valkey module side, but neither has
+        // been settled over RESP - HGETEX in particular shares HUPDATEEX's option
+        // parsing, which is not a barch_function at all but a helper taking extra
+        // arguments, so it cannot go in this table as it stands.
         //(*r)["HGETEX"] = ::HGETEX;
         (*r)["HMGET"] = {::HMGET,{"read","hash","data"}};
         (*r)["HINCRBY"] = {::HINCRBY,{"write","hash","data"}};
@@ -154,6 +163,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         (*r)["ZINCRBY"] = {::ZINCRBY,{"write","ordered","data"}};
         (*r)["ZRANGE"] = {::ZRANGE,{"write","ordered","data"}};
         (*r)["ZCARD"] = {::ZCARD,{"write","ordered","data"}};
+        (*r)["ZCOUNT"] = {::ZCOUNT,{"read","ordered","data"}};
         (*r)["ZDIFF"] = {::ZDIFF,{"write","ordered","data"}};
         (*r)["ZDIFFSTORE"] = {::ZDIFFSTORE,{"write","ordered","data"}};
         (*r)["ZINTERSTORE"] = {::ZINTERSTORE,{"write","ordered","data"}};

@@ -303,11 +303,6 @@ struct rpc_caller : caller {
     int end_array() override {
         return close_aggregate(aggregate_array);
     }
-    int discard_array() override {
-        if (temp.empty()) return this->error();
-        temp.pop_back();
-        return 0;
-    }
     // a map and a set are built exactly like an array and only differ in the value they
     // are closed into, which is what tells the writer which RESP3 type to use
     int start_map() override {

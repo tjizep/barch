@@ -142,15 +142,6 @@ public:
     virtual void set_protocol(int) {
     }
     /**
-     * abandon an array started by start_array without contributing it to the reply,
-     * for a command that turns out to have nothing to say yet - a blocking pop about
-     * to register a block rather than answer. the default closes it instead, which is
-     * all a reply builder that cannot rewind is able to do.
-     */
-    virtual int discard_array() {
-        return end_array();
-    }
-    /**
      * take the value most recently pushed back off the reply. A command that runs
      * another one needs to read its answer rather than let it through into the reply it
      * is building - HELLO runs AUTH and must not ship AUTH's OK in front of the

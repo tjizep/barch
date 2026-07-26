@@ -79,8 +79,16 @@ extern "C"{
         }
 
         uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
-        cc.start_array();
+        // the array is not opened until there is something to put in it. A blocking pop
+        // that finds nothing has no reply to give yet - the block callback answers later,
+        // or the timeout does - and opening one here would have to be taken back, which
+        // only the RESP builder can do. A reply builder that streams as it goes, as the
+        // valkey module one does, cannot rewind a postponed length array it has already
+        // begun, so it would send an empty one. Not starting it suits both.
         size_t popped = 0;
+        auto open_reply = [&]() {
+            if (popped == 0) cc.start_array();
+        };
         for (size_t ki = 1; ki < args.size() - 1; ++ki) {
             if (key_ok(args[ki]) != 0) {
                 return cc.push_error("invalid key");
@@ -106,6 +114,7 @@ extern "C"{
                 continue; // this condition is somewhat strange but a key is already registered for blocking
                 // we do not send a notification in this case
             }
+            open_reply(); // first thing to say, so the array starts here
             cc.push_encoded_key(value.cl()->get_key());
             if (tail) {
                 li.push(conversion::comparable_key(--end));
@@ -128,11 +137,7 @@ extern "C"{
             // todo: we can set the header directly but that change would not be replicated
             t->insert(key, header.as_value(), true);
         }
-        if (popped == 0) {
-            // nothing came off any of the keys, so there is no reply to give yet - the
-            // block callback below answers once a key is pushed, or the timeout does
-            cc.discard_array();
-        } else {
+        if (popped > 0) {
             cc.end_array();
         }
         if (!blocks.empty() && popped == 0) {

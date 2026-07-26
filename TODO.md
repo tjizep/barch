@@ -9,14 +9,7 @@ shape work. Each one records what is uncertain and what would settle it.
 
 3. [Done] The length parameter is gone from end_array [26-07-2026] Nr 6
 
-4. **Reconcile `rpc_caller` and `vk_caller` on the discarded array.**
-   `discard_array()` genuinely rewinds for the RESP path but the base default just
-   closes the array, which is all the valkey module path can do with a
-   `POSTPONED_LEN` reply. So a blocking pop that registers a block contributes nothing
-   on RESP and an empty array under valkey. That preserves the existing valkey
-   behaviour deliberately, but the two paths now differ.
-   *Settle it by:* deciding whether the valkey path should suppress the empty array
-   too, which probably means not starting the array until the outcome is known.
+4. [Done] rpc_caller and vk_caller reconciled on the discarded array [26-07-2026] Nr 9
 
 5. [Done] Out of bounds read in both glob matchers [26-07-2026] Nr 1
 
@@ -32,7 +25,7 @@ shape work. Each one records what is uncertain and what would settle it.
    iteration completes or when the connection closes" points at a leak on abandoned
    scans. None of this has been looked at.
 
-9. [Done] RESP3 support, so a default configured client connects [26-07-2026] Nr 4
+9. [Done] RESP3 support, so a default configuredSo on number client connects [26-07-2026] Nr 4
 
 10. [Done] HELLO AUTH runs the real AUTH and takes its OK back [26-07-2026] Nr 5
 

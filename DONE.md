@@ -294,3 +294,37 @@ test rather than "fixed" in the source:
 - `OrderedSet::revrange` takes its bounds ascending like `range`; only the order of
   the answer is reversed.
 
+## 9. rpc_caller and vk_caller reconciled on the discarded array [26-07-2026]
+
+*Was `TODO.md` entry 4.*
+
+`bpop` opened its array before knowing whether it could pop anything, and when it had
+to block it took the array back with `discard_array()`. That worked on the RESP path,
+where the reply is assembled in memory and can be rewound, but the base default could
+only close the array instead - a builder that streams as it goes, as the valkey module
+one does with `VALKEYMODULE_POSTPONED_LEN`, cannot unsend a header it has already
+written. So the same blocking pop contributed nothing on RESP and an empty array under
+valkey.
+
+Settled the way the entry suggested: do not open the array until there is something to
+put in it. `bpop` now opens it immediately before its first push, which is the only
+place anything is written, and closes it only if something was popped. Nothing is
+opened when the call goes on to register a block, so there is nothing to take back and
+both builders behave the same.
+
+`discard_array()` is gone from `caller` and `rpc_caller`. It had no other user, and
+leaving it would have been a trap: its base default is exactly the divergence this
+entry set out to remove, so the next caller to reach for it would have reintroduced
+the same split.
+
+The RESP side is covered by the blocking pop section of `replyshapetest.py` and by
+`bstartest.py`. The valkey module side is not exercised here - it needs a valkey
+server, which only the `TestStarter` sub project builds - so the claim for that path
+rests on `start_array` no longer being reached rather than on a test.
+
+One thing that looks like a change and is not: `bstartest.py` prints its `b` and `c`
+results in a different order from run to run. Both the main thread and the `ctest`
+thread block on `testkey1`, and only one value is ever pushed, so exactly one of them
+wins and the other times out. The test allows `None` for either. Five consecutive runs
+all pass with the winner varying.
+

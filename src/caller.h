@@ -63,6 +63,38 @@ public:
     void erase_iteration(size_t id) {
         iterations.erase(id);
     }
+    /**
+     * how many SCAN cursors this connection is holding open. One is added by a SCAN
+     * that does not finish and dropped again when it runs out of shards, so a client
+     * that abandons a scan half way leaves one behind until the connection closes.
+     */
+    [[nodiscard]] size_t iteration_count() const {
+        return iterations.size();
+    }
+    /**
+     * bytes held by those cursors. The page buffer is what actually costs anything -
+     * it holds a copy of the page being walked - and the shard list is one pointer per
+     * shard of the space being scanned.
+     */
+    [[nodiscard]] size_t iteration_memory() const {
+        size_t total = 0;
+        for (const auto& it : iterations) {
+            if (!it.second) continue;
+            total += sizeof(iteration);
+            total += it.second->buffer.capacity() * sizeof(uint8_t);
+            total += it.second->shards.capacity() * sizeof(barch::shard_ptr);
+        }
+        return total;
+    }
+    /**
+     * drop every cursor this connection holds, and say how many went. For a client that
+     * knows it has abandoned scans and would rather not wait for the connection to close.
+     */
+    size_t clear_iterations() {
+        size_t cleared = iterations.size();
+        iterations.clear();
+        return cleared;
+    }
     virtual ~caller() = default;
     int ctx{ctx_valkey};
 

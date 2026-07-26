@@ -43,6 +43,7 @@ struct config_state {
     heap::string min_fragmentation_ratio{};
     heap::string pre_evict_thresh{};
     heap::string max_defrag_page_count{};
+    heap::string max_scan_iterators{};
     heap::string iteration_worker_count{};
     heap::string maintenance_poll_delay{};
     heap::string active_defrag{};
@@ -110,7 +111,7 @@ static int SetRPCMaxBuffer(const std::string& test_rpc_max_buffer) {
     const char *str = state().rpc_max_buffer.c_str();
     const char *end = str + state().rpc_max_buffer.length();
 
-    uint64_t n_rpc_max_buffer = std::strtoll(str, &notn, 10);
+    uint64_t n_rpc_max_buffer = std::strtoull(str, &notn, 10);
     while (notn != nullptr && notn != end) {
         switch (*notn) {
             case 'k':
@@ -157,10 +158,12 @@ static int SetRPCClientMaxWait(const std::string& test_rpc_client_max_wait_ms) {
     std::lock_guard lock(state().config_mutex);
     state().rpc_client_max_wait_ms = test_rpc_client_max_wait_ms;
     char *notn = nullptr;
-    const char *str = state().rpc_max_buffer.c_str();
-    const char *end = str + state().rpc_max_buffer.length();
+    // this used to read state().rpc_max_buffer, so the wait was set from whatever that
+    // other variable happened to hold - zero on a server where it had never been set
+    const char *str = state().rpc_client_max_wait_ms.c_str();
+    const char *end = str + state().rpc_client_max_wait_ms.length();
 
-    uint64_t n_rpc_max_client_wait_ms = std::strtoll(str, &notn, 10);
+    uint64_t n_rpc_max_client_wait_ms = std::strtoull(str, &notn, 10);
     if (notn != nullptr && notn != end) {
         return VALKEYMODULE_ERR;
     }
@@ -193,7 +196,7 @@ static int SetServerPort(const std::string& test_server_port) {
     const char *str = state().server_port.c_str();
     const char *end = str + state().server_port.length();
 
-    uint64_t n_server_port = std::strtoll(str, &notn, 10);
+    uint64_t n_server_port = std::strtoull(str, &notn, 10);
     if (notn != nullptr && notn != end) {
         return VALKEYMODULE_ERR;
     }
@@ -261,7 +264,10 @@ static int SetMaxMemoryBytes(const std::string& test_max_memory_bytes) {
     const char *str = state().max_memory_bytes.c_str();
     const char *end = str + state().max_memory_bytes.length();
 
-    uint64_t n_max_memory_bytes = std::strtoll(str, &notn, 10);
+    // strtoull, not strtoll: the field is unsigned and its default is UINT64_MAX, so a
+    // signed parse saturated at INT64_MAX and reading the value back then setting it
+    // again silently halved the limit
+    uint64_t n_max_memory_bytes = std::strtoull(str, &notn, 10);
     while (notn != nullptr && notn != end) {
         switch (*notn) {
             case 'k':
@@ -312,7 +318,7 @@ static int SetMaxRESPConnections(const std::string& test_max_resp_connections) {
     const char *str = state().max_resp_connections.c_str();
     const char *end = str + state().max_resp_connections.length();
 
-    uint64_t n_max_resp_connections = std::strtoll(str, &notn, 10);
+    uint64_t n_max_resp_connections = std::strtoull(str, &notn, 10);
     if (notn == nullptr || notn != end) {
         return VALKEYMODULE_ERR;
     }
@@ -338,10 +344,12 @@ static ValkeyModuleString *GetUseVMMemory(const char *unused_arg, void *unused_a
     return ValkeyModule_CreateString(nullptr, state().use_vmm_mem.c_str(), state().use_vmm_mem.length());
 }
 
-static int SetUseVMMemory(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
-                          ValkeyModuleString **unused_arg) {
+// takes a plain string as well, so set_configuration_value can reach it - every other
+// variable has this overload and this one did not, which is why CONFIG SET could
+// register the variable but never change it
+static int SetUseVMMemory(const std::string& val) {
     std::lock_guard lock(state().config_mutex);
-    std::string test_use_vmm_memory = ValkeyModule_StringPtrLen(val, nullptr);
+    std::string test_use_vmm_memory = val;
     std::transform(test_use_vmm_memory.begin(), test_use_vmm_memory.end(), test_use_vmm_memory.begin(),
                    ::tolower);
 
@@ -351,6 +359,11 @@ static int SetUseVMMemory(const char *unused_arg, ValkeyModuleString *val, void 
     state().use_vmm_mem = test_use_vmm_memory;
     config().use_vmm_memory = (state().use_vmm_mem == "on" || state().use_vmm_mem == "true" || state().use_vmm_mem == "yes");
     return VALKEYMODULE_OK;
+}
+
+static int SetUseVMMemory(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                          ValkeyModuleString **unused_arg) {
+    return SetUseVMMemory(std::string{ValkeyModule_StringPtrLen(val, nullptr)});
 }
 
 static int ApplyUseVMMemory(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
@@ -563,6 +576,33 @@ static int ApplyTlsTmpDhFile(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
 }
 
 // ===========================================================================================================
+static ValkeyModuleString *GetMaxScanIterators(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().max_scan_iterators.c_str(), state().max_scan_iterators.length());
+}
+
+static int SetMaxScanIterators(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    std::string test_max_scan_iterators = val;
+    std::regex check("[0-9]+");
+    if (!std::regex_match(test_max_scan_iterators, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    state().max_scan_iterators = test_max_scan_iterators;
+    char *ep = nullptr;
+    config().max_scan_iterators = std::strtoull(test_max_scan_iterators.c_str(), &ep, 10);
+    return VALKEYMODULE_OK;
+}
+static int SetMaxScanIterators(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    std::string value = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetMaxScanIterators(value);
+}
+static int ApplyMaxScanIterators(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+// ===========================================================================================================
 static ValkeyModuleString *GetMaxDefragPageCount(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().max_defrag_page_count.c_str(), state().max_defrag_page_count.length());
@@ -577,7 +617,7 @@ static int SetMaxDefragPageCount(const std::string& val) {
     }
     state().max_defrag_page_count = test_max_defrag_page_count;
     char *ep = nullptr;
-    config().max_defrag_page_count = std::strtoll(test_max_defrag_page_count.c_str(), &ep, 10);
+    config().max_defrag_page_count = std::strtoull(test_max_defrag_page_count.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 static int SetMaxDefragPageCount(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -603,7 +643,7 @@ static int SetIterationWorkerCount(const std::string& test_iteration_worker_coun
     }
     state().iteration_worker_count = test_iteration_worker_count;
     char *ep = nullptr;
-    config().iteration_worker_count = std::strtoll(test_iteration_worker_count.c_str(), &ep, 10);
+    config().iteration_worker_count = std::strtoull(test_iteration_worker_count.c_str(), &ep, 10);
     if (config().iteration_worker_count <= 0) {
         config().iteration_worker_count = 1;
     }
@@ -632,7 +672,7 @@ static int SetSaveInterval(const std::string& test_save_interval) {
     }
     state().maintenance_poll_delay = test_save_interval;
     char *ep = nullptr;
-    config().save_interval = std::strtoll(test_save_interval.c_str(), &ep, 10);
+    config().save_interval = std::strtoull(test_save_interval.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 static int SetSaveInterval(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -661,7 +701,7 @@ static int SetMaxModificationsBeforeSave(const std::string& test_max_modificatio
     }
     state().maintenance_poll_delay = test_max_modifications_before_save;
     char *ep = nullptr;
-    config().max_modifications_before_save = std::strtoll(test_max_modifications_before_save.c_str(), &ep, 10);
+    config().max_modifications_before_save = std::strtoull(test_max_modifications_before_save.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 static int SetMaxModificationsBeforeSave(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -689,7 +729,7 @@ static int SetMaintenancePollDelay(const std::string& test_maintenance_poll_dela
     }
     state().maintenance_poll_delay = test_maintenance_poll_delay;
     char *ep = nullptr;
-    config().maintenance_poll_delay = std::strtoll(test_maintenance_poll_delay.c_str(), &ep, 10);
+    config().maintenance_poll_delay = std::strtoull(test_maintenance_poll_delay.c_str(), &ep, 10);
     return VALKEYMODULE_OK;
 }
 
@@ -749,7 +789,9 @@ static int SetPreEvictThresh(const std::string& val) {
         return VALKEYMODULE_ERR;
     }
     state().pre_evict_thresh = val;
-    config().pre_evict_thresh = std::stof(state().pre_evict_thresh.c_str());
+    // stod, not stof: the field is a double, and parsing it as a float first meant
+    // 0.85 came back as 0.8500000238418579
+    config().pre_evict_thresh = std::stod(state().pre_evict_thresh.c_str());
     return VALKEYMODULE_OK;
 }
 
@@ -973,6 +1015,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                              GetMaintenancePollDelay, SetMaintenancePollDelay,
                                              ApplyMaintenancePollDelay, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "max_scan_iterators", "128", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetMaxScanIterators, SetMaxScanIterators, ApplyMaxScanIterators,
+                                             nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "max_defrag_page_count", "10", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetMaxDefragPageCount, SetMaxDefragPageCount, ApplyMaxDefragPageCount,
                                              nullptr);
@@ -1083,12 +1129,16 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         return SetMaintenancePollDelay(val);
     } else if (name == "max_defrag_page_count") {
         return SetMaxDefragPageCount(val);
+    } else if (name == "max_scan_iterators") {
+        return SetMaxScanIterators(val);
     } else if (name == "save_interval") {
         return SetSaveInterval(val);
     } else if (name == "max_modifications_before_save") {
         return SetMaxModificationsBeforeSave(val);
     } else if (name == "external_host") {
         return SetExternalHost(val);
+    } else if (name == "use_vmm_mem") {
+        return SetUseVMMemory(val);
     } else if (name == "static_bloom_filter") {
         auto r = SetStaticBloomFilter(val);
         if ( VALKEYMODULE_OK == r) {
@@ -1258,6 +1308,11 @@ uint64_t barch::get_maintenance_poll_delay() {
     return config().maintenance_poll_delay;
 }
 
+uint64_t barch::get_max_scan_iterators() {
+    std::lock_guard lock(state().config_mutex);
+    return config().max_scan_iterators;
+}
+
 uint64_t barch::get_max_defrag_page_count() {
     std::lock_guard lock(state().config_mutex);
     return config().max_defrag_page_count;
@@ -1354,4 +1409,78 @@ namespace barch{
         std::lock_guard lock(state().config_mutex);
         return config().tls_tmp_dh_file;
     }
+}
+
+// ===========================================================================================================
+// Reflection for CONFIG GET.
+//
+// These read the live record rather than the state() reflection strings. Those strings
+// are only filled in when something sets the variable, so a variable still on its
+// default would read back empty. The two enum shaped ones are the exception: their
+// parsed form in the record is an int or a set of booleans, and their reflection string
+// carries a real default, so they are read from there.
+//
+// Every value produced here has to be something set_configuration_value will take back,
+// which is what lets a client round trip a variable it has read.
+static std::string cfg_bool(bool v) {
+    return v ? "on" : "off";
+}
+template<typename F>
+static std::string cfg_float(F v) {
+    // formatted at the width it is stored at - widening a float to a double first
+    // turns 0.6 into 0.6000000238418579
+    std::string s = fmt::format("{}", v);
+    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) {
+        s += ".0"; // is_float insists on seeing a decimal point
+    }
+    return s;
+}
+
+const std::vector<std::string>& barch::configuration_names() {
+    static const std::vector<std::string> names = {
+        "active_defrag", "compression", "eviction_policy", "external_host",
+        "iteration_worker_count", "listen_port", "log_page_access_trace",
+        "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
+        "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
+        "min_compressed_size", "min_fragmentation_ratio", "ordered_keys",
+        "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
+        "server_binding", "server_port", "static_bloom_filter",
+        "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
+        "use_vmm_mem"
+    };
+    return names;
+}
+
+bool barch::get_configuration_value(const std::string& name, std::string& value) {
+    std::lock_guard lock(state().config_mutex);
+    const auto& c = config();
+    if (name == "active_defrag")                    value = cfg_bool(c.active_defrag);
+    else if (name == "compression")                 value = state().compression_type.c_str();
+    else if (name == "eviction_policy")             value = state().eviction_type.c_str();
+    else if (name == "external_host")               value = c.external_host;
+    else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);
+    else if (name == "listen_port")                 value = std::to_string(c.listen_port);
+    else if (name == "log_page_access_trace")       value = cfg_bool(c.log_page_access_trace);
+    else if (name == "maintenance_poll_delay")      value = std::to_string(c.maintenance_poll_delay);
+    else if (name == "max_defrag_page_count")       value = std::to_string(c.max_defrag_page_count);
+    else if (name == "max_memory_bytes")            value = std::to_string(c.n_max_memory_bytes);
+    else if (name == "max_modifications_before_save") value = std::to_string(c.max_modifications_before_save);
+    else if (name == "max_resp_connections")        value = std::to_string(c.max_resp_connections);
+    else if (name == "max_scan_iterators")          value = std::to_string(c.max_scan_iterators);
+    else if (name == "min_compressed_size")         value = std::to_string(c.min_compressed_size);
+    else if (name == "min_fragmentation_ratio")     value = cfg_float(c.min_fragmentation_ratio);
+    else if (name == "ordered_keys")                value = cfg_bool(c.ordered_keys);
+    else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
+    else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);
+    else if (name == "rpc_max_buffer")              value = std::to_string(c.rpc_max_buffer);
+    else if (name == "save_interval")               value = std::to_string(c.save_interval);
+    else if (name == "server_binding")              value = c.server_binding;
+    else if (name == "server_port")                 value = std::to_string(c.server_port);
+    else if (name == "static_bloom_filter")         value = cfg_bool(c.static_bloom_filter);
+    else if (name == "tls_pem_certificate_chain_file") value = c.tls_pem_certificate_chain_file;
+    else if (name == "tls_private_key_file")        value = c.tls_private_key_file;
+    else if (name == "tls_tmp_dh_file")             value = c.tls_tmp_dh_file;
+    else if (name == "use_vmm_mem")                 value = cfg_bool(c.use_vmm_memory);
+    else return false;
+    return true;
 }

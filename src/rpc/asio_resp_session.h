@@ -77,7 +77,12 @@ namespace barch {
                 "multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=10 multi-mem=0 "+
                 "rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem="+std::to_string(rpc_io_buffer_size+parser.get_max_buffer_size())+" "+
                 "events=r cmd=client|info user="+caller.get_user()+" redir=-1 "+
-                "resp=2 lib-name= lib-ver= "+
+                "resp="+std::to_string(caller.get_protocol())+" lib-name= lib-ver= "+
+                // SCAN cursors this connection is holding, and what they cost. An
+                // abandoned scan keeps one alive until the connection closes, so a
+                // client that leaks them can see it here
+                "iters="+std::to_string(caller.iteration_count())+" "+
+                "iters-mem="+std::to_string(caller.iteration_memory())+" "+
                 "tot-net-in="+ std::to_string(bytes_recv)+ " " +
                 "tot-net-out=" + std::to_string(bytes_sent)+ " " +
                 "tot-cmds=" + std::to_string(calls_recv) + "\n";

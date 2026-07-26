@@ -1,3 +1,5 @@
+import re
+
 import redis
 import barch
 
@@ -129,6 +131,56 @@ for count in (1, 2, 7, 1000):
 
 # a pattern nothing can match still has to terminate and hand back an empty result
 assert scan_all(r, match="*qqqqqqqq*")[0] == []
+
+# --- the cursors a SCAN leaves behind ------------------------------------------
+# A SCAN that is followed to the end drops its own cursor. One that is abandoned part
+# way keeps it, along with the page buffer it holds, until the connection closes -
+# so a connection is only allowed so many, and can be told to let them go.
+def client_info(conn):
+    s = conn.execute_command("CLIENT", "INFO")
+    if isinstance(s, bytes):
+        s = s.decode()
+    return dict(re.findall(r"(\S+?)=(\S*)", s))
+
+
+base = client_info(r)
+assert "iters" in base and "iters-mem" in base, f"CLIENT INFO does not report cursors: {base}"
+assert r.execute_command("CLIENT", "CLEAR_ITERS") >= 0
+assert int(client_info(r)["iters"]) == 0, "cursors should start clear"
+assert int(client_info(r)["iters-mem"]) == 0, "no cursors means no memory held"
+
+# abandoning a scan leaves one behind, and it costs something
+for _ in range(5):
+    r.execute_command("SCAN", "0", "COUNT", "1")
+held = client_info(r)
+assert int(held["iters"]) == 5, f"5 abandoned scans should leave 5 cursors, left {held['iters']}"
+assert int(held["iters-mem"]) > 0, "an open cursor holds a page buffer, so it should cost something"
+
+# following one to the end adds nothing, because it drops its own
+before = int(client_info(r)["iters"])
+scan_all(r, count=1000)
+assert int(client_info(r)["iters"]) == before, \
+    "a scan followed to the end should drop its own cursor"
+
+# and they can be handed back
+cleared = r.execute_command("CLIENT", "CLEAR_ITERS")
+assert cleared == 5, f"CLIENT CLEAR_ITERS should have cleared 5, said {cleared}"
+assert int(client_info(r)["iters"]) == 0
+assert int(client_info(r)["iters-mem"]) == 0
+
+# the limit stops a connection accumulating them without end
+r.execute_command("CONFIG", "SET", "max_scan_iterators", "3")
+for _ in range(3):
+    r.execute_command("SCAN", "0", "COUNT", "1")
+try:
+    r.execute_command("SCAN", "0", "COUNT", "1")
+    assert False, "a fourth cursor should have been refused with max_scan_iterators at 3"
+except redis.exceptions.ResponseError as e:
+    assert "CLEAR_ITERS" in str(e), f"the refusal should say how to recover, said: {e}"
+# an existing cursor still works while at the limit - only new ones are refused
+assert r.execute_command("CLIENT", "CLEAR_ITERS") == 3
+r.execute_command("CONFIG", "SET", "max_scan_iterators", "128")
+r.execute_command("CLIENT", "CLEAR_ITERS")
 
 mismatches = []
 unchecked = []

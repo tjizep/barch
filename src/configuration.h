@@ -6,7 +6,9 @@
 #define CONFIGURATION_H
 #include "../external/include/valkeymodule.h"
 #include <limits>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "sastam.h"
 /**
@@ -23,6 +25,8 @@ namespace barch {
         uint64_t n_max_memory_bytes{std::numeric_limits<uint64_t>::max()};
         uint64_t maintenance_poll_delay{80};
         uint64_t max_defrag_page_count{8};
+        // how many SCAN cursors one connection may hold open at once
+        uint64_t max_scan_iterators{128};
         uint64_t save_interval{3000 * 1000};
         uint64_t max_modifications_before_save{10000000};
         uint64_t rpc_max_buffer{32768*4};
@@ -78,6 +82,8 @@ namespace barch {
 
     uint64_t get_max_defrag_page_count();
 
+    uint64_t get_max_scan_iterators();
+
     uint64_t get_max_resp_connections();
 
     unsigned get_iteration_worker_count();
@@ -128,6 +134,16 @@ namespace barch {
     bool get_use_minimum_threads();
     int set_configuration_value(ValkeyModuleString *name, ValkeyModuleString *value);
     int set_configuration_value(const std::string& name, const std::string &val);
+    /**
+     * the current value of a configuration variable as text. Read from the live record
+     * rather than the reflection strings, because those are only filled in once
+     * something has set them - a variable left at its default would read empty.
+     * The text is always in a form set_configuration_value accepts back.
+     * @return false when there is no such variable
+     */
+    bool get_configuration_value(const std::string& name, std::string& value);
+    /** every configuration variable name, in order */
+    const std::vector<std::string>& configuration_names();
 
     const std::vector<size_t>& get_shard_count();
 }

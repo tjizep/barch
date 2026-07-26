@@ -30,6 +30,7 @@ extern "C" {
 #include <shared_mutex>
 #include "conversion.h"
 #include "version.h"
+#include "glob.h"
 #include "art/art.h"
 #include "configuration.h"
 #include "keyspec.h"
@@ -311,6 +312,15 @@ int CLIENT(caller& call, const arg_t& arg_v) {
         if (arg_v.size() == 4) {
             return call.ok();
         }
+    }
+    if (arg_v[1] == "CLEAR_ITERS") {
+        if (arg_v.size() != 2) {
+            return call.wrong_arity();
+        }
+        // a SCAN that runs to the end drops its own cursor, but one that is abandoned
+        // part way through keeps it until the connection closes. this lets a client
+        // that knows it has abandoned some let them go without reconnecting.
+        return call.push_ll((int64_t) call.clear_iterations());
     }
     return call.syntax_error();
 }
@@ -916,11 +926,18 @@ int SCAN(caller& call, const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
     }
-    // TODO: we need to eventually get rid of the iteration - it will only get removed if the iteration completes or when the connection closes
+    // an iteration is dropped when the scan runs out of shards, so one that is followed
+    // to the end costs nothing. An abandoned one stays until the connection closes, and
+    // it holds a page buffer, so a connection is only allowed so many at a time -
+    // max_scan_iterators, which CLIENT INFO reports against as iters and iters-mem, and
+    // CLIENT CLEAR_ITERS lets a client reclaim
     auto id = spec.scan_id;
     auto iteration = call.get_iteration(id);
     if (!iteration) {
-
+        auto max_iterations = barch::get_max_scan_iterators();
+        if (max_iterations && call.iteration_count() >= max_iterations) {
+            return call.push_error("too many open SCAN cursors, finish one or use CLIENT CLEAR_ITERS");
+        }
         iteration = call.create_iteration();
         auto space = call.kspace();
         iteration->space = space;
@@ -2021,19 +2038,46 @@ int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
 }
 
 int CONFIG(caller& call, const arg_t& argv) {
-    if (argv.size() != 4)
+    if (argv.size() < 2)
         return call.wrong_arity();
     auto s = argv[1];
-    if (strncmp("set", s.chars(), s.size) == 0 || strncmp("SET", s.chars(), s.size) == 0) {
+    auto keyword_is = [&s](const char* lower, const char* upper) {
+        return strncmp(lower, s.chars(), s.size) == 0 || strncmp(upper, s.chars(), s.size) == 0;
+    };
+    if (keyword_is("set", "SET")) {
+        if (argv.size() != 4)
+            return call.wrong_arity();
         int r = barch::set_configuration_value(argv[2].chars(), argv[3].chars());
         if (r == 0) {
             return call.push_simple("OK");
         }
-
-    }else {
-        return call.push_error("only SET keyword currently supported");
+        return call.push_error("could not set configuration value");
     }
-    return call.push_error("could not set configuration value");
+    if (keyword_is("get", "GET")) {
+        // CONFIG GET <pattern> [<pattern> ...], as redis has it: each argument is a
+        // glob, and the reply is a map of every variable that matches any of them. The
+        // values are written in the form CONFIG SET takes back, so a client can read a
+        // variable, change it and put it back without knowing its type.
+        if (argv.size() < 3)
+            return call.wrong_arity();
+        std::string value;
+        call.start_map();
+        size_t matched = 0;
+        for (const auto& name : barch::configuration_names()) {
+            bool wanted = false;
+            for (unsigned at = 2; at < argv.size() && !wanted; ++at) {
+                wanted = (1 == glob::stringmatchlen(argv[at], name, 1));
+            }
+            if (!wanted) continue;
+            if (!barch::get_configuration_value(name, value)) continue;
+            call.push_string(name);
+            call.push_string(value);
+            ++matched;
+        }
+        call.end_map();
+        return call.ok();
+    }
+    return call.push_error("only the SET and GET keywords are supported");
 }
 /* B.CONFIG [SET|GET] <key> [<value>]
  *

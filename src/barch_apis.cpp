@@ -105,6 +105,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         (*r)["OPS"] = {OPS,{"read","stats"}};
         (*r)["INFO"] = {INFO,{"read","stats"}};
         (*r)["CLIENT"] = {CLIENT,{"read","stats"}};
+        (*r)["HELLO"] = {HELLO,{"connection"}};
 
         (*r)["MULTI"] = {MULTI,{"write"}};
         (*r)["EXEC"] = {EXEC,{"write"}};

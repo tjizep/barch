@@ -8,11 +8,11 @@ print(f'running {__file__}')
 exec(open(f"{os.path.dirname(os.path.realpath(__file__))}/test_data.py").read())
 
 barch.start("0.0.0.0", 15000)
-gr = redis.Redis(host="127.0.0.0", port=15000, db=0)
+gr = redis.Redis(host="127.0.0.0", port=15000, db=0, protocol=2)
 gr.config_set("compression", "zstd")
 gr.flushdb()
 def test(num):
-    r = redis.Redis(host="127.0.0.0", port=15000, db=0)
+    r = redis.Redis(host="127.0.0.0", port=15000, db=0, protocol=2)
     r.flushdb()
     tr = 512000
     for w in words:

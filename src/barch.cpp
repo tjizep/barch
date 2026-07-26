@@ -29,6 +29,7 @@ extern "C" {
 #include <cmath>
 #include <shared_mutex>
 #include "conversion.h"
+#include "version.h"
 #include "art/art.h"
 #include "configuration.h"
 #include "keyspec.h"
@@ -210,6 +211,65 @@ int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller caller;
 
     return caller.vk_call(ctx, argv, argc, ::RANGE);
+}
+/* HELLO [protover [SETNAME clientname]]
+ *
+ * the handshake a modern redis client sends when it opens a connection. barch speaks
+ * RESP2 only - redis_parser.h has no map, set, double, big number, verbatim or push
+ * type - so protocol 3 is refused with NOPROTO, which is what a RESP2 only server is
+ * supposed to answer. The reply is the usual handshake fields as a flat array, which
+ * is how RESP2 carries a map.
+ *
+ * the AUTH option is not accepted: barch's AUTH replies OK on success, and there is
+ * no way to run it from here without that OK landing in front of the handshake and
+ * corrupting the reply. Clients with credentials should send AUTH as its own command.
+ */
+int HELLO(caller& call, const arg_t& argv) {
+    unsigned at = 1;
+    if (argv.size() > at) {
+        int64_t protover = 0;
+        if (!conversion::to_i64(argv[at], protover)) {
+            return call.push_error("Protocol version is not an integer or out of range");
+        }
+        if (protover != 2) {
+            // redis sends this for anything outside 2..3, and for 3 when it cannot serve it
+            return call.push_error("NOPROTO unsupported protocol version");
+        }
+        ++at;
+    }
+    while (argv.size() > at) {
+        if (argv[at] == "SETNAME" && argv.size() > at + 1) {
+            at += 2; // accepted and ignored, the same as CLIENT SETINFO
+            continue;
+        }
+        if (argv[at] == "AUTH") {
+            return call.push_error("HELLO does not accept AUTH, send AUTH as its own command");
+        }
+        return call.syntax_error();
+    }
+
+    call.start_array();
+    call.push_string("server");
+    call.push_string("redis"); // clients gate features on this, and INFO already says redis_version
+    call.push_string("version");
+    call.push_string(BARCH_PROJECT_VERSION);
+    call.push_string("proto");
+    call.push_int((int64_t) 2);
+    call.push_string("id");
+    call.push_int((int64_t) 0); // barch does not carry a per connection id
+    call.push_string("mode");
+    call.push_string("standalone");
+    call.push_string("role");
+    call.push_string("master");
+    call.push_string("modules");
+    call.start_array();
+    call.end_array(0);
+    call.end_array(0);
+    return call.ok();
+}
+int cmd_HELLO(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HELLO);
 }
 int CLIENT(caller& call, const arg_t& arg_v) {
     if (arg_v.size()<=1) {

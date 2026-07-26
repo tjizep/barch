@@ -3,7 +3,7 @@ import barch
 import threading
 import time
 def btest(num):
-    r = redis.Redis("127.0.0.1", 11000, 0)
+    r = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
     time.sleep(.1)
     r.lpush("testkey","l2")
     time.sleep(.1)
@@ -11,12 +11,12 @@ def btest(num):
     time.sleep(.1)
     r.lpush("testkey2","l4")
 def ctest(num):
-    r = redis.Redis("127.0.0.1", 11000, 0)
+    r = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
     popped = r.blpop(["testkey1"],10)
     print ("c",popped)
     assert (popped == None or (popped[0] == b'testkey1' and popped[1] == b'l3'))
 def tloss(num):
-    r = redis.Redis("127.0.0.1", 11000, 0)
+    r = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
     time.sleep(1)
     for i in range(1,1000):
         r.lpush("testloss",f"l{i}")
@@ -28,7 +28,7 @@ barch.start("0.0.0.0", 11000)
 bt = threading.Thread(target=btest, args=(1,))
 ct = threading.Thread(target=ctest, args=(1,))
 
-rp = redis.Redis("127.0.0.1", 11000, 0)
+rp = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
 bt.start()
 ct.start()
 popped = rp.blpop(["testkey"],10)

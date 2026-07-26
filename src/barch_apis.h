@@ -51,6 +51,7 @@ extern "C"{
     int ACL(caller& call,const arg_t& argv);
     int INFO(caller& call, const arg_t& argv);
     int CLIENT(caller& call, const arg_t& arg_v);
+    int HELLO(caller& call, const arg_t& argv);
     int MULTI(caller& call, const arg_t& arg_v);
     int EXEC(caller& call, const arg_t& arg_v);
     // Keys

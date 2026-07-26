@@ -28,7 +28,7 @@ print("start reply shape test")
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)
 
-r = redis.Redis(host="127.0.0.1", port=PORT, db=0)
+r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 r.execute_command("CLEARALL")
 r.flushdb()
 
@@ -102,6 +102,45 @@ assert popped == (b"shape:list", b"l") or popped == (b"shape:list", b"first"), \
 
 # nothing to pop and the block times out: a nil, not an empty array
 assert r.blpop(["shape:nolist"], 0.1) is None, "a timed out BLPOP should answer nil"
+
+# --- HELLO, the handshake a modern client opens with ---------------------------
+# barch speaks RESP2 only, so the handshake map comes back as a flat array of
+# alternating field and value, and protocol 3 is refused rather than half served.
+for cmd in (["HELLO"], ["HELLO", "2"]):
+    hello = raw(r, *cmd)
+    assert isinstance(hello, list), f"{cmd} should answer with an array, got {hello!r}"
+    assert len(hello) % 2 == 0, f"{cmd} answered an odd number of elements: {hello!r}"
+    fields = {as_text(hello[i]): hello[i + 1] for i in range(0, len(hello), 2)}
+    for name in ("server", "version", "proto", "id", "mode", "role", "modules"):
+        assert name in fields, f"{cmd} handshake is missing {name}: {hello!r}"
+    assert fields["proto"] == 2, f"barch speaks RESP2, handshake said {fields['proto']!r}"
+    assert as_text(fields["server"]) == "redis"
+    assert as_text(fields["mode"]) == "standalone"
+    # modules is a nested empty array, which is the one place the reply nests
+    assert fields["modules"] == [], f"modules should be an empty array, got {fields['modules']!r}"
+
+# protocol 3 is refused with NOPROTO, which is what a RESP2 only server should say,
+# rather than the "unknown command" a missing HELLO used to produce
+for bad in ("3", "1", "0"):
+    try:
+        raw(r, "HELLO", bad)
+        assert False, f"HELLO {bad} should have been refused"
+    except redis.exceptions.ResponseError as e:
+        assert "NOPROTO" in str(e), f"HELLO {bad} gave the wrong error: {e}"
+
+try:
+    raw(r, "HELLO", "notanumber")
+    assert False, "HELLO with a non numeric version should have been refused"
+except redis.exceptions.ResponseError as e:
+    assert "not an integer" in str(e), f"HELLO notanumber gave the wrong error: {e}"
+
+# SETNAME is accepted and ignored, an unknown option is a syntax error
+assert isinstance(raw(r, "HELLO", "2", "SETNAME", "shapetest"), list)
+try:
+    raw(r, "HELLO", "2", "NOSUCHOPTION")
+    assert False, "an unknown HELLO option should have been refused"
+except redis.exceptions.ResponseError:
+    pass
 
 r.close()
 barch.stop()

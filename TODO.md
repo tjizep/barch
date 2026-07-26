@@ -43,10 +43,39 @@ shape work. Each one records what is uncertain and what would settle it.
 
 6. [Done] VALUES globs over values and answers with keys [26-07-2026] Nr 2
 
-7. **Threading and service queueing review of `SCAN`.**
+7. [Done] HELLO implemented for RESP2, protocol 3 refused with NOPROTO [26-07-2026] Nr 3
+
+8. **Threading and service queueing review of `SCAN`.**
    Deliberately parked. `SCAN` keeps a per-connection iteration holding shard pointers
    across calls, and `art::glob` serialises every `KEYS` behind a single
    `glob_queue` mutex while iterating pages on worker threads. The `SCAN` comment
    "we need to eventually get rid of the iteration - it will only get removed if the
    iteration completes or when the connection closes" points at a leak on abandoned
    scans. None of this has been looked at.
+
+9. **Real RESP3 support, so a default configured client can connect.**
+   `HELLO` now negotiates properly (entry 7, `DONE.md` Nr 3) but only ever agrees to
+   protocol 2. A client left on its own defaults asks for 3, gets `NOPROTO` and still
+   fails to connect - correctly and diagnostically now, rather than with
+   `unknown command`, but it fails. Every test passes `protocol=2` to work around it.
+   `redis_parser.h` emits only the RESP2 types: `+`, `-`, `:`, `$` and `*`. RESP3 adds
+   map `%`, set `~`, double `,`, boolean `#`, big number `(`, verbatim `=`, null `_`
+   and push `>`. The writer would need those, `Variable` would need to carry the
+   distinction between a map and a flat array so replies like `HELLO`, `CONFIG GET`
+   and `XPENDING` can be shaped per protocol, and the negotiated version would have to
+   be reachable from the reply path.
+   *Settle it by:* deciding whether barch wants RESP3 at all. Staying RESP2 only is a
+   defensible answer as long as it is documented, since the client can be configured
+   for it - but the default experience is a failed connection, which is a poor first
+   impression.
+
+10. **The `HELLO AUTH` form is refused rather than supported.**
+   `HELLO 2 AUTH user pass` answers with an error telling the client to send `AUTH`
+   separately. barch's `AUTH` replies `OK` on success, and there is no way to run it
+   from inside `HELLO` without that `OK` landing in front of the handshake and
+   corrupting the reply. Low priority: the form is only reachable for a RESP2 client
+   that also has credentials, and such a client can send `AUTH` on its own.
+   *Settle it by:* splitting `auth_api.cpp`'s `AUTH` into a function that authenticates
+   and sets the ACL without replying, plus a thin command that adds the `OK`, then
+   calling the former from `HELLO`.
+

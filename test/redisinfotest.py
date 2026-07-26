@@ -110,7 +110,7 @@ print("start redis info memory test")
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)
 
-r = redis.Redis(host="127.0.0.1", port=PORT, db=0)
+r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 r.execute_command("CLEARALL")
 
 fields = info_memory(r)

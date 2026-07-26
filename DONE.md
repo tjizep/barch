@@ -61,3 +61,39 @@ The behaviour was also missing from the command's own documentation: the block a
 `VALUES` in `barch.cpp` said "match against all values using a glob pattern" without
 mentioning that the reply is keys, which is the surprising half. That is now written
 down where someone reading the implementation will see it.
+
+## 3. HELLO implemented for RESP2, protocol 3 refused with NOPROTO [26-07-2026]
+
+*Was `TODO.md` entry 7.*
+
+`HELLO` did not exist, so barch answered `unknown command` to the handshake every
+modern redis client opens with. redis-py sends it whenever the protocol is not 2, and
+a newer release flipped `DEFAULT_RESP_VERSION` from 2 to 3, which is what broke CI:
+the failure was at connect, before any test command ran.
+
+`HELLO` now lives in `barch.cpp` and is registered in `barch_apis.cpp` under the
+`connection` category. It answers `HELLO` and `HELLO 2` with the usual handshake
+fields as a flat array, which is how RESP2 carries a map - `server`, `version`,
+`proto`, `id`, `mode`, `role` and an empty `modules` array. Anything outside protocol
+2 is refused with `NOPROTO unsupported protocol version`, and a non numeric version
+with `Protocol version is not an integer or out of range`, both matching redis's own
+wording. `SETNAME` is accepted and ignored, as `CLIENT SETINFO` already was.
+
+Two deliberate limits:
+
+- `AUTH` inside `HELLO` is refused rather than supported. barch's `AUTH` replies `OK`
+  on success and there is no way to run it from inside `HELLO` without that `OK`
+  landing in front of the handshake and corrupting the reply. Separating the
+  authentication from the reply would mean refactoring `auth_api.cpp`, which is out of
+  proportion to the benefit: the `HELLO AUTH` form is only reachable for a RESP2
+  client that also has credentials, and such a client can send `AUTH` as its own
+  command. Clients are told so in the error.
+- A RESP3 client still cannot connect. It now gets a correct, diagnostic `NOPROTO`
+  instead of `unknown command`, but the connection still fails, because redis-py
+  rejects a handshake whose `proto` does not match what it asked for. Closing that gap
+  needs real RESP3 in the writer and is carried forward as `TODO.md` entry 9.
+
+Covered by the HELLO section of `replyshapetest.py`: field presence and pairing at
+both `HELLO` and `HELLO 2`, `proto` being 2, `modules` arriving as a nested empty
+array, `NOPROTO` for versions 3, 1 and 0, the non numeric error, `SETNAME` accepted
+and an unknown option rejected.

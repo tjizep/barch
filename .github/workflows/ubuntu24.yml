@@ -22,6 +22,7 @@ jobs:
              -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
           cmake --build build --target barch --parallel
           cmake --build build --target lbarch --parallel
+          cmake --build build --target globdifftest --parallel
           ( cd build ; ctest --output-on-failure )
       - name: Prepare Release Artifacts
         run: |

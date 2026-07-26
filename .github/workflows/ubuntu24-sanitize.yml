@@ -28,6 +28,7 @@ jobs:
              -DCMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build --target barch --parallel
           cmake --build build --target lbarch --parallel
+          cmake --build build --target globdifftest --parallel
           ( cd build ; ctest --output-on-failure )
       - name: Generate Coverage Badge
         run: |

@@ -569,6 +569,24 @@ struct rpc_caller : caller {
     bool has_blocks() override {
         return !this->blocks.empty();
     }
+    /**
+     * take over the blocks another caller registered, and leave it with none.
+     *
+     * An asynchronous call runs against a copy of the session's caller, so a blocking
+     * command that lands in an asynchronous batch registers its blocks on that copy -
+     * which is thrown away with the context, leaving the command not blocking at all.
+     * They have to come back to the caller the session works with, because that is the
+     * one that answers when the block resolves.
+     *
+     * The key spaces already stamped on them are kept rather than restamped: they
+     * belong to the caller that made the blocks, which may have been on another space.
+     */
+    void adopt_blocks(rpc_caller& from) {
+        this->blocks = from.blocks;
+        this->block_to_ms = from.block_to_ms;
+        this->block_fun = from.block_fun;
+        from.clear_blocks();
+    }
     void clear_blocks() {
         this->blocks.clear();
     }

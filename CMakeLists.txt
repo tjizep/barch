@@ -562,6 +562,10 @@ else()
                 COMMAND globdifftest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestAsyncPipeline
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/asyncpipelinetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestConfig
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -573,6 +577,16 @@ else()
         add_test(NAME TestGlobPerformance
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/globperftest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # the same measurement over JSON shaped values, where a query starts with a
+        # quote or a colon and the shortcuts have nothing to skip. Run separately
+        # because loading a second corpus into a space that has been globbed over is
+        # presently far too slow - see TODO 13
+        add_test(NAME TestGlobPerformanceJson
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/globperftest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestGlobPerformanceJson PROPERTIES
+                ENVIRONMENT "BARCH_PERF_CORPUS=json")
 
         add_test(NAME TestReplyShape
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/replyshapetest.py

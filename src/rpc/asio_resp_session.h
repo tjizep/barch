@@ -109,9 +109,13 @@ namespace barch {
                     caller.call_blocks();
                     write_result(caller, stream, 0);
                     erase_blocks();
-                    do_write(stream);
-                    do_read();
-
+                    // the reply has to be out before anything else starts writing, so
+                    // the rest of an interrupted batch waits on this one completing
+                    auto out = std::make_shared<vector_stream>(std::move(stream));
+                    stream.clear();
+                    write_then(out, [this, self]() {
+                        resume_after_blocks();
+                    });
                 });
             }
         }
@@ -248,26 +252,22 @@ namespace barch {
                                 break;
                             }
                         }
-                        for (auto ctx: asynch_calls) {
-                            // all data will be kept alive while "workers" are busy
-                            asio::post(workers,[this, ctx]() { // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
-                                auto ic = barch_functions->find(ctx->cn);
-                                if (ic == barch_functions->end()) {
-                                    return;
-                                }
-                                auto current = now();
-                                int32_t r = ctx->caller.call(ctx->params,ic->second.call);
-                                write_result<vector_stream>(ctx->caller, ctx->stream, r);
-                                ic->second.total_nanos += nanos(current);
-
-                                do_write(ctx);
-                                do_read();
-                            });
-                        }
-                        if (caller.has_blocks()) {
+                        if (!asynch_calls.empty()) {
+                            // The batch owns this connection from here. Its calls run in
+                            // the order they were read, each reply is on the wire before
+                            // the next call starts, and the read chain is resumed once,
+                            // by the last of them. Resuming it here as well would leave
+                            // two async_read_some chains filling one data_ buffer and
+                            // driving one parser, which comes apart on the next sizeable
+                            // pipelined request - the connection then stops answering
+                            // and the client waits on a reply that never arrives.
+                            auto batch = std::make_shared<heap::vector<asynch_call_context_ptr>>(
+                                std::move(asynch_calls));
+                            run_asynch_batch(batch, 0);
+                        } else if (caller.has_blocks()) {
                             start_block_to();
                             add_caller_blocks();
-                        }else{
+                        } else {
                             do_write(stream);
                             do_read();
                         }
@@ -307,8 +307,12 @@ namespace barch {
             erase_blocks();
             caller.call_blocks();
             write_result(caller, stream, 0);
-            do_write(stream);
-            do_read();
+            auto self(this->shared_from_this());
+            auto out = std::make_shared<vector_stream>(std::move(stream));
+            stream.clear();
+            write_then(out, [this, self]() {
+                resume_after_blocks();
+            });
         }
         void do_write(const vector_stream& local_stream) {
 
@@ -323,6 +327,116 @@ namespace barch {
                     }else {
                         //art::std_err("error", ec.message(), ec.value());
                     }
+                });
+        }
+        typedef std::shared_ptr<heap::vector<asynch_call_context_ptr>> asynch_batch_ptr;
+        /**
+         * Run one batch of asynchronous calls, one at a time and in the order they were
+         * read. run_params has already made every call after the first asynchronous one
+         * asynchronous too, so this order is the request order and has to be kept.
+         *
+         * Each call runs on the worker pool, which is the point of the exercise - a long
+         * KEYS must not sit on a service thread. Only the socket work is serialised: the
+         * next call does not start until the previous reply has been written, so there is
+         * never more than one async_write outstanding on this socket, and reading only
+         * resumes once the batch is done.
+         */
+        void run_asynch_batch(asynch_batch_ptr batch, size_t at) {
+            if (at >= batch->size()) {
+                do_read(); // the one place the chain is resumed for an asynchronous batch
+                return;
+            }
+            asio::post(workers, [this, batch, at]() { // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
+                auto ctx = (*batch)[at];
+                auto fn = barch_functions->find(ctx->cn); // not `ic`: that is a member
+                if (fn != barch_functions->end()) {
+                    auto current = now();
+                    int32_t r = ctx->caller.call(ctx->params, fn->second.call);
+                    // a call that registered a block has no answer yet, exactly as on
+                    // the synchronous path - the reply is written when it resolves
+                    if (!ctx->caller.has_blocks())
+                        write_result<vector_stream>(ctx->caller, ctx->stream, r);
+                    fn->second.total_nanos += nanos(current);
+                }
+                bool blocked = ctx->caller.has_blocks();
+                // an unknown command leaves ctx->stream holding whatever synchronous
+                // output was carried into it, so it is written either way. Anything
+                // ahead of a blocking command in the batch belongs on the wire now,
+                // since its replies come before the one being waited for.
+                write_then(ctx, [this, batch, at, blocked]() {
+                    if (blocked) {
+                        suspend_for_blocks(batch, at);
+                    } else {
+                        run_asynch_batch(batch, at + 1);
+                    }
+                });
+            });
+        }
+        /**
+         * A batch that hits a blocking command stops there. The blocks are moved onto
+         * the session's caller, which is the one that answers when they resolve, and the
+         * read chain is left suspended - the same as a blocking command that arrives on
+         * its own. Where the batch had got to is remembered so the rest of it can run
+         * once the block is done, because the replies still owe the client their order.
+         */
+        void suspend_for_blocks(asynch_batch_ptr batch, size_t at) {
+            caller.adopt_blocks((*batch)[at]->caller);
+            pending_batch = batch;
+            pending_at = at;
+            start_block_to();
+            add_caller_blocks();
+            // deliberately no do_read(): the chain stays down until the block answers
+        }
+        /**
+         * carry on after a block has been answered and its reply written, either with
+         * the rest of the batch that was interrupted or by reading again
+         */
+        void resume_after_blocks() {
+            if (pending_batch) {
+                auto batch = pending_batch;
+                auto at = pending_at;
+                pending_batch.reset();
+                run_asynch_batch(batch, at + 1);
+                return;
+            }
+            do_read();
+        }
+        /**
+         * write a standalone buffer and carry on once it is out, keeping it alive in the
+         * meantime. Used where a reply has to be on the wire before the next call starts.
+         */
+        void write_then(std::shared_ptr<vector_stream> out, const std::function<void()>& then) {
+            if (out->empty()) {
+                then();
+                return;
+            }
+            asio::async_write(socket_, asio::buffer(out->buf),
+                [this, out, then](std::error_code ec, std::size_t length){
+                    if (!ec){
+                        net_stat stat;
+                        stream_write_ctr += length;
+                        bytes_sent += length;
+                    }
+                    then();
+                });
+        }
+        /**
+         * write a ctx, then carry on. The continuation runs on the completion, so the
+         * caller can be sure this write is finished before it starts another.
+         */
+        void write_then(asynch_call_context_ptr ctx, const std::function<void()>& then) {
+            if (ctx->stream.empty()) {
+                then();
+                return;
+            }
+            asio::async_write(socket_, asio::buffer(ctx->stream.buf),
+                [this, ctx, then](std::error_code ec, std::size_t length){
+                    if (!ec){
+                        net_stat stat;
+                        stream_write_ctr += length;
+                        bytes_sent += length;
+                    }
+                    then();
                 });
         }
         // write a ctx and preserve its lifetime
@@ -347,6 +461,10 @@ namespace barch {
         redis::redis_parser parser{};
         rpc_caller caller{};
         vector_stream stream{};
+        // an asynchronous batch that stopped on a blocking command, and how far it got.
+        // Set while the chain is suspended and cleared as it is picked back up.
+        asynch_batch_ptr pending_batch{};
+        size_t pending_at{0};
         std::string prev_cn{};
         function_map::iterator ic{};
         uint64_t id = ++client_id;

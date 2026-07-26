@@ -54,7 +54,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         if (!r->empty()) return r;
         (*r)["SET"] = {::SET,{"write","keys","data"}};
         (*r)["APPEND"] = {::APPEND,{"write","keys","data"}};
-        (*r)["PREPEND"] = {::PREPEND,{"write","keys","data"}};
+        (*r)["PREPEND"] = {::PREPEND,{"write","keys","data"}} ;
         (*r)["KEYS"] = {::KEYS,{"read","keys","data"}, true};
         (*r)["VALUES"] = {::VALUES,{"read","keys","data"}, true};
         (*r)["INCR"] = {::INCR,{"write","keys","data"}};

@@ -399,3 +399,58 @@ missing key, and pins the other three as answering `unknown command` - so regist
 one of them becomes a deliberate change to this test rather than something that drifts
 in unnoticed.
 
+## 12. The asynchronous call path started a second read chain [26-07-2026]
+
+*Was `TODO.md` entries 12 and 13.*
+
+A pipeline run failed `TestGlobPerformance` with a SEGFAULT after a `VALUES` call went
+seventy five seconds without answering. It looked like a hang, then like a memory
+pressure problem, then like a three thousand fold slowdown in writes. It was none of
+those.
+
+gdb during the stall showed every server thread idle - the asio pools parked in
+`scheduler::do_run_one`, the maintenance thread in its semaphore wait, nothing in
+`art::`, no lock held. The server log said why: `redis_parser::read_new_request`
+throwing `invalid array size` five times in the same millisecond on the session thread,
+at the instant the stall began. The parser had lost its place in the byte stream, the
+connection stopped answering, and the client waited at zero CPU on a reply that would
+never come.
+
+`KEYS` and `VALUES` are marked asynchronous so a long scan goes to the worker pool
+rather than occupying one of the few service threads. When a batch of requests
+contained one, `asio_resp_session.h` resumed reading from two places - the worker did
+it on completion and the io thread did it as well:
+
+```cpp
+for (auto ctx: asynch_calls) {
+    asio::post(workers,[this, ctx]() { ... do_write(ctx); do_read(); });
+}
+...
+do_write(stream);
+do_read();
+```
+
+`do_read()` has no guard: it posts `async_read_some` into the session's single `data_`
+buffer and feeds its single `parser`. So from the first asynchronous call onwards there
+were two read chains on one socket sharing one buffer and one parser. Each context was
+also posted independently, so several `async_write` calls could be outstanding on the
+same socket at once and their replies could leave in any order - `run_params` goes out
+of its way to make every call after the first asynchronous one asynchronous too "to
+preserve order", and that ordering was then lost on the way out.
+
+It survived small traffic and came apart on the next sizeable pipelined write, which is
+why the globs themselves looked fine and the load after them died. `KEYS` and `VALUES`
+were the only asynchronous commands, so a glob had to run before anything went wrong.
+
+Now a batch owns the connection while it runs. `run_asynch_batch` walks the contexts in
+the order they were read, each call on the worker pool, and `write_then` starts the next
+only once the previous reply is on the wire - so there is never more than one write
+outstanding, replies leave in request order, and the read chain is resumed exactly once,
+by the last of them. The latency isolation the asynchronous flag was added for is kept:
+the calls still run off the service threads, only the socket work is serialised.
+
+Verified both ways. With the old body restored the new `asyncpipelinetest.py` fails on
+the first round with `GET s:00000 answered b'v1'` and 18 parser errors in the log; with
+the fix it passes, and so does the reproducer that started this - a load after sixteen
+globs goes from 301.5s and ten parser errors to 0.0s and none.
+

@@ -154,6 +154,15 @@ int CLIENT(caller& call, const arg_t& arg_v) {
         std::string r = call.get_info();
         return call.push_string(r);
     }
+    if (arg_v[1] == "LIST") {
+        // no filters yet: redis also takes TYPE and ID, which need the session to carry
+        // more about itself than it does
+        if (arg_v.size() != 2) {
+            return call.wrong_arity();
+        }
+        barch::server::list_clients(call);
+        return call.ok();
+    }
     if (arg_v[1] == "SETINFO") {
         if (arg_v.size() == 4) {
             return call.ok();
@@ -537,7 +546,15 @@ int STOP(caller& call, const arg_t& ) {
 
     return call.push_simple("OK");
 }
-int PING(caller& call, const arg_t& argv) {
+/* RPING <host> <port>
+ *
+ * reach out to another barch and check it answers. This was called PING until the name
+ * was given back to redis's health check, which is what every client sends and what a
+ * connection pool sends before handing a connection out. The two are unrelated: this
+ * one opens a connection to somewhere else, over the binary replication protocol, and
+ * says nothing about the server being asked.
+ */
+int RPING(caller& call, const arg_t& argv) {
     if (argv.size() != 3)
         return call.wrong_arity();
     auto interface = argv[1];
@@ -548,6 +565,22 @@ int PING(caller& call, const arg_t& argv) {
         return call.push_error("could not ping");
     }
     return call.push_simple("OK");
+}
+
+/* PING [message]
+ *
+ * redis's health check. With no argument the reply is the simple string PONG; with one
+ * it is that message echoed back as a bulk string. More than one is an arity error, as
+ * in redis.
+ */
+int PING(caller& call, const arg_t& argv) {
+    if (argv.size() == 1) {
+        return call.push_simple("PONG");
+    }
+    if (argv.size() == 2) {
+        return call.push_vt(argv[1]);
+    }
+    return call.wrong_arity();
 }
 int RETRIEVE(caller& call, const arg_t& argv) {
 
@@ -586,6 +619,10 @@ int cmd_PULL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, LOAD);
+}
+int cmd_RPING(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, RPING);
 }
 int cmd_PING(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -838,7 +875,14 @@ int CONFIG(caller& call, const arg_t& argv) {
     if (keyword_is("set", "SET")) {
         if (argv.size() != 4)
             return call.wrong_arity();
-        int r = barch::set_configuration_value(argv[2].chars(), argv[3].chars());
+        std::string name = argv[2].chars(), why;
+        // a setting barch reports but cannot change says so, rather than failing with
+        // the same message as a value it could not parse
+        if (barch::is_read_only_configuration(name, why)) {
+            std::string msg = "cannot set '" + name + "': " + why;
+            return call.push_error(msg.c_str());
+        }
+        int r = barch::set_configuration_value(name, argv[3].chars());
         if (r == 0) {
             return call.push_simple("OK");
         }
@@ -854,21 +898,67 @@ int CONFIG(caller& call, const arg_t& argv) {
         std::string value;
         call.start_map();
         size_t matched = 0;
-        for (const auto& name : barch::configuration_names()) {
-            bool wanted = false;
-            for (unsigned at = 2; at < argv.size() && !wanted; ++at) {
-                wanted = (1 == glob::stringmatchlen(argv[at], name, 1));
+        // both barch's own names and the redis names it answers to, so a client that
+        // asks for maxmemory and one that asks for max_memory_bytes are both served,
+        // and CONFIG GET * shows the pair
+        auto emit_matching = [&](const std::vector<std::string>& names) {
+            for (const auto& name : names) {
+                bool wanted = false;
+                for (unsigned at = 2; at < argv.size() && !wanted; ++at) {
+                    wanted = (1 == glob::stringmatchlen(argv[at], name, 1));
+                }
+                if (!wanted) continue;
+                if (!barch::get_configuration_value(name, value)) continue;
+                call.push_string(name);
+                call.push_string(value);
+                ++matched;
             }
-            if (!wanted) continue;
-            if (!barch::get_configuration_value(name, value)) continue;
-            call.push_string(name);
-            call.push_string(value);
-            ++matched;
-        }
+        };
+        emit_matching(barch::configuration_names());
+        emit_matching(barch::redis_configuration_names());
         call.end_map();
         return call.ok();
     }
-    return call.push_error("only the SET and GET keywords are supported");
+    if (keyword_is("resetstat", "RESETSTAT")) {
+        if (argv.size() != 2)
+            return call.wrong_arity();
+        // the counters that count events, and the per command call counts INFO reports
+        // as commandstats. Gauges are left alone - see statistics::reset_statistics
+        statistics::reset_statistics();
+        for (auto& f : *functions_by_name()) {
+            f.second.calls = 0;
+            f.second.total_nanos = 0;
+        }
+        return call.push_simple("OK");
+    }
+    if (keyword_is("rewrite", "REWRITE")) {
+        if (argv.size() != 2)
+            return call.wrong_arity();
+        // barch has no configuration file of its own - it is configured through its
+        // host server's file and CONFIG SET - so there is nothing to write back. This
+        // is the same answer redis gives when it was started without one, which is
+        // what a client that handles the error already expects
+        return call.push_error("The server is running without a config file");
+    }
+    if (keyword_is("help", "HELP")) {
+        call.start_array();
+        call.push_simple("CONFIG <subcommand>");
+        call.push_simple("GET <pattern> [<pattern> ...]");
+        call.push_simple("    Return settings matching any glob pattern. Both barch's own");
+        call.push_simple("    names and the redis names they answer to are matched.");
+        call.push_simple("SET <parameter> <value>");
+        call.push_simple("    Set a parameter. Redis names are resolved to the barch setting");
+        call.push_simple("    they mean; ones barch reports but cannot change are refused.");
+        call.push_simple("RESETSTAT");
+        call.push_simple("    Reset the counters INFO reports. Gauges are left alone.");
+        call.push_simple("REWRITE");
+        call.push_simple("    Not supported: barch has no configuration file of its own.");
+        call.push_simple("HELP");
+        call.push_simple("    This text.");
+        call.end_array();
+        return call.ok();
+    }
+    return call.push_error("only the GET, SET, RESETSTAT, REWRITE and HELP keywords are supported");
 }
 /* B.CONFIG [SET|GET] <key> [<value>]
  *
@@ -931,6 +1021,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(STOP), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(RPING), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(PING), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)

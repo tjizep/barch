@@ -9,8 +9,19 @@ cmake_install.cmake
 install_manifest.txt
 compile_commands.json
 dump.rdb
-leaf_data.dat
-node_data.dat
+
+# the host server's append only file, written wherever it was started
+appendonlydir/
+appendonly.aof*
+
+# shard data, written at runtime into whatever directory the server was started in:
+# leaves_*/nodes_* one pair per shard, plus the compression dictionary and the auth
+# and configuration spaces. A default space is 347 shards, so a test run leaves
+# hundreds of these next to the binary. None of it is source - including the pair under
+# examples/flask, which is what running that example there left behind.
+# (supersedes the older leaf_data.dat / node_data.dat names)
+*.dat
+
 .ninja*
 .idea/*
 cmake-*

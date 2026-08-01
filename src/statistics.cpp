@@ -82,3 +82,56 @@ namespace statistics::repl {
     alignas(Alignment) std::atomic<uint64_t> routes_succeeded = 0;
 
 }
+void statistics::reset_statistics() {
+    // things that have happened - see the note in statistics.h for why the gauges are
+    // not in this list
+    value_bytes_compressed = 0;
+    pages_evicted = 0;
+    keys_evicted = 0;
+    pages_defragged = 0;
+    vmm_pages_defragged = 0;
+    vmm_pages_popped = 0;
+    exceptions_raised = 0;
+    oom_avoided_inserts = 0;
+    keys_found = 0;
+    new_keys_added = 0;
+    keys_replaced = 0;
+
+    vacuums_performed = 0;
+    leaf_nodes_replaced = 0;
+    maintenance_cycles = 0;
+    local_calls = 0;
+    max_spin = 0;
+
+    delete_ops = 0;
+    set_ops = 0;
+    iter_ops = 0;
+    iter_start_ops = 0;
+    iter_range_ops = 0;
+    range_ops = 0;
+    get_ops = 0;
+    lb_ops = 0;
+    size_ops = 0;
+    insert_ops = 0;
+    min_ops = 0;
+    max_ops = 0;
+    incr_ops = 0;
+    decr_ops = 0;
+    update_ops = 0;
+
+    queue_failures = 0;
+    queue_added = 0;
+    queue_processed = 0;
+
+    repl::key_find_recv = 0;
+    repl::bytes_recv = 0;
+    repl::bytes_sent = 0;
+    repl::instructions_failed = 0;
+    repl::insert_requests = 0;
+    repl::remove_requests = 0;
+    repl::find_requests = 0;
+    repl::barch_requests = 0;
+    repl::request_errors = 0;
+    repl::attempted_routes = 0;
+    repl::routes_succeeded = 0;
+}

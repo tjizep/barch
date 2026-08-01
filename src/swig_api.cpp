@@ -4,6 +4,10 @@
 
 #include "swig_api.h"
 #include "barch_apis.h"
+#include "keys_api.h"
+#include "list_api.h"
+#include "hash_api.h"
+#include "ordered_api.h"
 #include "keys.h"
 #include "caller.h"
 #include "module.h"
@@ -103,9 +107,9 @@ void stop() {
     }
 }
 void ping(const std::string &host, const std::string& port) {
-    std::vector<std::string_view> params = {"PING", host, port};
+    std::vector<std::string_view> params = {"RPING", host, port};
     rpc_caller sc;
-    int r = sc.call(params, PING);
+    int r = sc.call(params, RPING);
     if (r != 0) {
         barch::std_log("ping failed", host, port);
     }

@@ -131,6 +131,48 @@ namespace barch {
 
 
         }
+        /**
+         * append a CLIENT INFO style line for each open session in `sessions`.
+         * Called on a copy, never on the live vector - see append_client_lines.
+         */
+        template<typename Sock_T>
+        static void append_lines(std::string& out,
+                                 const std::vector<std::shared_ptr<resp_session<Sock_T>>>& sessions) {
+            for (const auto& s : sessions) {
+                if (!s) continue; // a slot the collector has already swept
+                try {
+                    if (!s->socket_.lowest_layer().is_open()) continue;
+                    out += s->get_info(s->socket_);
+                } catch (std::exception&) {
+                    // a peer can go away between the is_open test and reading its
+                    // endpoint, which asio reports by throwing. that connection is
+                    // leaving anyway, so drop its line rather than fail the command
+                }
+            }
+        }
+
+        /**
+         * one line per open session, in the format CLIENT INFO already produces.
+         *
+         * The session vectors are appended to by the accept path and nulled out by the
+         * collector, both under session_latch, so they are copied under the latch and
+         * walked outside it - holding it across the walk would block new connections
+         * for as long as the reply takes to build. Copying a vector of shared_ptr also
+         * keeps every session alive for the duration of the walk, which matters
+         * because building a line reads the socket.
+         */
+        void append_client_lines(std::string& out) {
+            std::vector<std::shared_ptr<resp_session<tcp::socket>>> tcp_copy;
+            std::vector<std::shared_ptr<resp_session<uds::socket>>> uds_copy;
+            {
+                std::lock_guard lock(session_latch);
+                tcp_copy = tcp_sessions;
+                uds_copy = uds_sessions;
+            }
+            append_lines(out, tcp_copy);
+            append_lines(out, uds_copy);
+        }
+
         void start_session_collector() {
 
             session_collector = std::thread([this]() {
@@ -423,6 +465,21 @@ namespace barch {
         std::unique_lock l(srv_mut());
         handle_stop(get_srv());
         handle_stop(get_srv_ssl());
+    }
+
+    void server::list_clients(caller& call) {
+        std::string out;
+        {
+            // srv_mut guards the server pointers themselves; each context takes its own
+            // session latch while it copies
+            std::unique_lock l(srv_mut());
+            if (auto s = get_srv()) s->append_client_lines(out);
+            if (auto s = get_srv_ssl()) s->append_client_lines(out);
+            if (auto s = get_srv_unix()) s->append_client_lines(out);
+        }
+        // redis answers CLIENT LIST with one bulk string, the lines separated by
+        // newlines, not with an array. get_info already terminates each line
+        call.push_string(out);
     }
     struct module_stopper {
         module_stopper() = default;

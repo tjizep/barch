@@ -13,6 +13,9 @@
 #include "variable.h"
 #include "source.h"
 #include "asio_includes.h"
+
+struct caller;
+
 namespace barch {
 
     typedef std::pair<std::string, size_t> host_id;
@@ -20,6 +23,11 @@ namespace barch {
     namespace server {
         extern void start(const std::string &interface, uint_least16_t port, bool ssl);
         extern void stop();
+        /**
+         * push one CLIENT INFO style line per open session, as CLIENT LIST. The session
+         * vectors live in here, so the walk does too - a caller never sees a session.
+         */
+        extern void list_clients(caller& call);
     };
     namespace repl {
         struct call_result {

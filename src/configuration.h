@@ -145,6 +145,28 @@ namespace barch {
     /** every configuration variable name, in order */
     const std::vector<std::string>& configuration_names();
 
+    /**
+     * The redis configuration names barch also answers to. Separate from
+     * configuration_names() so that list keeps meaning "barch's own settings" - CONFIG
+     * GET walks both.
+     */
+    const std::vector<std::string>& redis_configuration_names();
+
+    /**
+     * Resolve a redis configuration name. Returns false for a name that is not one of
+     * them, so a caller can tell "redis calls this something else" from "no such
+     * setting". get_configuration_value() already falls through to this, so most
+     * callers do not need it directly.
+     */
+    bool get_redis_configuration_value(const std::string& name, std::string& value);
+
+    /**
+     * True for a setting barch reports but cannot change - appendonly, because there is
+     * no append only file to turn on. `why` is filled in with a reason fit to send back
+     * to whoever asked, so a refusal says something more useful than that it failed.
+     */
+    bool is_read_only_configuration(const std::string& name, std::string& why);
+
     const std::vector<size_t>& get_shard_count();
 }
 #endif //CONFIGURATION_H

@@ -44,6 +44,11 @@ struct barch_info {
     uint64_t total_nanos{};
 };
 typedef heap::string_map<barch_info> function_map;
+
+/* The command declarations below are the ones that have not yet been given a
+ * {category}_api.h of their own - see TODO 22. Keys, lists, hashes, ordered sets and
+ * info now declare their own commands and register them from their own translation
+ * unit, through register_*_api(). */
 extern "C"{
     // Misc/sys
     // not registered in functions_by_name: it serves the valkey module, where the
@@ -51,39 +56,10 @@ extern "C"{
     int COMMAND(caller& call,const arg_t& argv);
     int AUTH(caller& call,const arg_t& argv);
     int ACL(caller& call,const arg_t& argv);
-    int INFO(caller& call, const arg_t& argv);
     int CLIENT(caller& call, const arg_t& arg_v);
     int HELLO(caller& call, const arg_t& argv);
     int MULTI(caller& call, const arg_t& arg_v);
     int EXEC(caller& call, const arg_t& arg_v);
-    // Keys
-    int SET(caller& call,const arg_t& argv);
-    int APPEND(caller& call,const arg_t& argv);
-    int PREPEND(caller& call,const arg_t& argv);
-    int KEYS(caller& call, const arg_t& argv);
-    int VALUES(caller& call, const arg_t& argv);
-    int INCR(caller& call, const arg_t& argv);
-    int INCRBY(caller& call, const arg_t& argv);
-    int UINCRBY(caller& call, const arg_t& argv);
-    int DECR(caller& call, const arg_t& argv);
-    int DECRBY(caller& call, const arg_t& argv);
-    int UDECRBY(caller& call, const arg_t& argv);
-    int EXISTS(caller& call, const arg_t& argv);
-    int EXPIRE(caller& call, const arg_t& argv);
-    int MSET(caller& call, const arg_t& argv);
-    int ADD(caller& call, const arg_t& argv);
-    int GET(caller& call, const arg_t& argv);
-    int SCAN(caller& call, const arg_t& argv);
-    int LENGTH(caller& call, const arg_t& argv);
-    int MGET(caller& call, const arg_t& argv);
-    int MIN(caller& call, const arg_t& argv);
-    int MAX(caller& call, const arg_t& );
-    int LB(caller& call, const arg_t& argv);
-    int UB(caller& call, const arg_t& argv);
-    int RANGE(caller& call, const arg_t& argv);
-    int COUNT(caller& call, const arg_t& argv);
-    int REM(caller& call, const arg_t& argv);
-    int TTL(caller& call, const arg_t& argv);
     // database
     int USE(caller& call, const arg_t& argv);
     int UNLOAD(caller& call, const arg_t& argv);
@@ -110,6 +86,8 @@ extern "C"{
     int START(caller& call, const arg_t& argv);
     int STOP(caller& call, const arg_t& argv);
     int RETRIEVE(caller& call, const arg_t& argv);
+    // reaches another barch over the replication protocol; PING is redis's health check
+    int RPING(caller& call, const arg_t& argv);
     int PING(caller& call, const arg_t& argv);
     // compression
     int TRAIN(caller& call, const arg_t& argv);
@@ -119,61 +97,6 @@ extern "C"{
 
     // config
     int CONFIG(caller& call, const arg_t& argv);
-
-    // Lists
-    int LBACK(caller& cc, const arg_t& args);
-    int LFRONT(caller& cc, const arg_t& args);
-    int LPUSH(caller& cc, const arg_t& args);
-    int RPUSH(caller& cc, const arg_t& args);
-    int LPOP(caller& cc, const arg_t& args);
-    int RPOP(caller& cc, const arg_t& args);
-    int LLEN(caller& cc, const arg_t& args);
-    int BLPOP(caller& cc, const arg_t& args);
-    int BRPOP(caller& cc, const arg_t& args);
-    // Hash Set
-    int HSET(caller& cc, const arg_t& args);
-    int HEXPIREAT(caller& call, const arg_t& args);
-    int HEXPIRE(caller& call, const arg_t& args);
-    // HGETEX and HQUERY are implemented in hash_api.cpp but not registered for RESP -
-    // see the note in barch_apis.cpp. HUPDATEEX is not a command at all: it is the
-    // helper HGETEX drives, and takes arguments a barch_function does not have.
-    //int HGETEX(caller& call, const arg_t &argv);
-    int HMGET(caller& call, const arg_t& argv);
-    int HINCRBY(caller& call, const arg_t &argv);
-    int HINCRBYFLOAT(caller& call, const arg_t &argv);
-    int HDEL(caller& call, const arg_t &argv);
-    int HGETDEL(caller& call, const arg_t &argv);
-    int HTTL(caller& call,const arg_t& argv);
-    int HGET(caller& call, const arg_t& argv);
-    int HLEN(caller& call, const arg_t& argv);
-    int HEXPIRETIME(caller& call, const arg_t& argv);
-    int HGETALL(caller& call, const arg_t& argv);
-    int HKEYS(caller& call, const arg_t& argv);
-    int HEXISTS(caller& call, const arg_t& argv);
-
-    // Ordered Set
-    int ZADD(caller& call, const arg_t &argv);
-    int ZREM(caller& call, const arg_t& argv);
-    int ZINCRBY(caller& call, const arg_t& argv);
-    int ZRANGE(caller& call, const arg_t& argv);
-    int ZCARD(caller& call, const arg_t& argv);
-    int ZCOUNT(caller& call, const arg_t& argv);
-    int ZDIFF(caller& call, const arg_t& argv);
-    int ZDIFFSTORE(caller& call, const arg_t& argv);
-    int ZINTERSTORE(caller& call, const arg_t& argv);
-    int ZINTERCARD(caller& call, const arg_t& argv);
-    int ZINTER(caller& call, const arg_t& argv);
-    int ZPOPMIN(caller& call, const arg_t& argv);
-    int ZPOPMAX(caller& call, const arg_t& argv);
-    int ZREVRANGE(caller& call, const arg_t& argv);
-    int ZRANGEBYSCORE(caller& call, const arg_t& argv);
-    int ZREVRANGEBYSCORE(caller& call, const arg_t& argv);
-    int ZREMRANGEBYLEX(caller& call, const arg_t& argv);
-    int ZRANGEBYLEX(caller& call, const arg_t& argv);
-    int ZREVRANGEBYLEX(caller& call, const arg_t& argv);
-    int ZRANK(caller& call, const arg_t& argv);
-    int ZFASTRANK(caller& call, const arg_t& argv);
-
 }
 
 extern std::shared_ptr<function_map> functions_by_name();

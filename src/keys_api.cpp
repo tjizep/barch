@@ -978,3 +978,38 @@ int add_keys_api(ValkeyModuleCtx *ctx) {
 
     return VALKEYMODULE_OK;
 }
+
+/* the key commands as a RESP client sees them. FIRST, NEXT and DEL are aliases kept
+ * for compatibility, and point at the same handlers as LB, UB and REM. */
+void register_keys_api(function_map& r) {
+    r["SET"] = {::SET,{"write","keys","data"}};
+    r["APPEND"] = {::APPEND,{"write","keys","data"}};
+    r["PREPEND"] = {::PREPEND,{"write","keys","data"}} ;
+    r["KEYS"] = {::KEYS,{"read","keys","data"}, true};
+    r["VALUES"] = {::VALUES,{"read","keys","data"}, true};
+    r["INCR"] = {::INCR,{"write","keys","data"}};
+    r["INCRBY"] = {::INCRBY,{"write","keys","data"}};
+    r["UINCRBY"] = {::UINCRBY,{"write","keys","data"}};
+    r["DECR"] = {::DECR,{"write","keys","data"}};
+    r["DECRBY"] = {::DECRBY,{"write","keys","data"}};
+    r["UDECRBY"] = {::UDECRBY,{"write","keys","data"}};
+    r["COUNT"] = {::COUNT,{"read","keys","data"}};
+    r["EXISTS"] = {::EXISTS,{"read","keys","data"}};
+    r["EXPIRE"] = {::EXPIRE,{"write","keys","data"}};
+    r["MSET"] = {::MSET,{"write","keys","data"}};
+    r["ADD"] = {::ADD,{"write","keys","data"}};
+    r["GET"] = {::GET,{"read","keys","data"}};
+    r["SCAN"] = {::SCAN,{"read","keys","data"}};
+    r["LENGTH"] = {::LENGTH,{"read","keys","data"}};
+    r["MGET"] = {::MGET,{"read","keys","data"}};
+    r["MIN"] = {::MIN,{"read","keys","data"}};
+    r["MAX"] = {::MAX,{"read","keys","data"}};
+    r["LB"] = {::LB,{"read","keys","data"}};
+    r["UB"] = {::UB,{"read","keys","data"}};
+    r["FIRST"] = r["LB"]; // alias
+    r["NEXT"] = r["UB"];
+    r["REM"] = {::REM,{"write","keys","data"}};
+    r["DEL"] = {::REM,{"write","keys","data"}};
+    r["RANGE"] = {::RANGE,{"read","keys","data"}, true};
+    r["TTL"] = {::TTL,{"read","keys","data"}};
+}

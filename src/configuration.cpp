@@ -6,6 +6,8 @@
 #include "configuration.h"
 #include "sharded_store.h"
 #include <cstdlib>
+#include <algorithm>
+#include <limits>
 #include <string>
 #include <regex>
 #include "art/art.h"
@@ -1100,8 +1102,161 @@ int barch::set_configuration_value(ValkeyModuleString *Name, ValkeyModuleString 
     std::string val = ValkeyModule_StringPtrLen(Value, nullptr);
     return set_configuration_value(name, val);
 }
+// ---- redis configuration names --------------------------------------------------
+//
+// Redis clients probe for settings by redis's names, and barch's own are different -
+// max_memory_bytes, not maxmemory. These map one onto the other where the meaning
+// genuinely matches, so a client can read, and in most cases write, a setting without
+// knowing barch's vocabulary.
+//
+// Three kinds appear here:
+//
+//  - an alias, where a redis name means exactly one barch variable and values are
+//    written the same way. GET and SET both work and pass straight through.
+//  - an alias needing a value translated, where the meaning matches but the spelling
+//    of a value does not: redis says noeviction where barch says none.
+//  - a fixed answer, where barch has no such setting but can say something true about
+//    it. appendonly is no because there is no append only file at all. These read, and
+//    refuse to be set, rather than accepting a write that would quietly do nothing.
+//
+// A redis name that is none of those is deliberately absent. CONFIG GET then returns
+// nothing for it, which is what redis does for a parameter it does not know, and is a
+// better answer than a plausible looking lie. `databases` is the one worth naming:
+// barch's key spaces are named rather than numbered and SELECT takes a name, so any
+// number here would mislead a client about what SELECT will accept.
+namespace {
+    struct redis_alias { const char* redis_name; const char* barch_name; };
+    const redis_alias redis_aliases[] = {
+        {"maxmemory",          "max_memory_bytes"},
+        {"maxmemory-policy",   "eviction_policy"},
+        {"maxclients",         "max_resp_connections"},
+        {"bind",               "server_binding"},
+        {"port",               "server_port"},
+        {"tls-cert-file",      "tls_pem_certificate_chain_file"},
+        {"tls-key-file",       "tls_private_key_file"},
+        {"tls-dh-params-file", "tls_tmp_dh_file"},
+    };
+    struct redis_fixed { const char* redis_name; const char* value; const char* why; };
+    const redis_fixed redis_fixed_values[] = {
+        {"appendonly",      "no", "there is no append only file"},
+        {"appendfsync",     "no", "there is no append only file"},
+        {"cluster-enabled", "no", "barch is not a cluster member"},
+        {"daemonize",       "no", "barch runs inside its host server"},
+        {"timeout",         "0",  "idle connections are not closed on a timer"},
+    };
+    /**
+     * Redis writes byte sizes with a unit, and its units are not barch's: redis reads
+     * 1k as 1000 and 1kb as 1024, where barch's parser takes a single letter and treats
+     * k as 1024. Passing the string through would therefore be wrong by about 5% for
+     * every value written the decimal way, and would not parse at all for the two
+     * letter forms. So a redis size is resolved to a plain byte count here, which both
+     * sides agree on. Returns false if it is not a size redis would accept either.
+     */
+    bool redis_bytes_to_plain(const std::string& v, std::string& plain) {
+        size_t at = 0;
+        while (at < v.size() && isdigit((unsigned char) v[at])) ++at;
+        if (at == 0) return false;
+        uint64_t n = std::strtoull(v.substr(0, at).c_str(), nullptr, 10);
+        std::string unit = v.substr(at);
+        std::transform(unit.begin(), unit.end(), unit.begin(), ::tolower);
+        uint64_t mul = 0;
+        if (unit.empty())      mul = 1;
+        else if (unit == "b")  mul = 1;
+        else if (unit == "k")  mul = 1000ull;
+        else if (unit == "kb") mul = 1024ull;
+        else if (unit == "m")  mul = 1000ull * 1000;
+        else if (unit == "mb") mul = 1024ull * 1024;
+        else if (unit == "g")  mul = 1000ull * 1000 * 1000;
+        else if (unit == "gb") mul = 1024ull * 1024 * 1024;
+        else return false;
+        if (mul != 1 && n > std::numeric_limits<uint64_t>::max() / mul) return false;
+        plain = std::to_string(n * mul);
+        return true;
+    }
+
+    // barch spells "do not evict" as none, and also accepts no/nil/null; redis spells
+    // it noeviction. Every other policy name is already the redis one
+    std::string policy_to_redis(const std::string& v) {
+        if (v == "none" || v == "no" || v == "nil" || v == "null") return "noeviction";
+        return v;
+    }
+    std::string policy_from_redis(const std::string& v) {
+        if (v == "noeviction") return "none";
+        return v;
+    }
+}
+
+const std::vector<std::string>& barch::redis_configuration_names() {
+    static const std::vector<std::string> names = []() {
+        std::vector<std::string> r;
+        for (const auto& a : redis_aliases) r.emplace_back(a.redis_name);
+        for (const auto& f : redis_fixed_values) r.emplace_back(f.redis_name);
+        r.emplace_back("save");
+        std::sort(r.begin(), r.end());
+        return r;
+    }();
+    return names;
+}
+
+bool barch::is_read_only_configuration(const std::string& name, std::string& why) {
+    for (const auto& f : redis_fixed_values) {
+        if (name == f.redis_name) { why = f.why; return true; }
+    }
+    if (name == "save") {
+        why = "redis allows several interval and change pairs and barch has room for "
+              "one - set save_interval and max_modifications_before_save instead";
+        return true;
+    }
+    return false;
+}
+
+bool barch::get_redis_configuration_value(const std::string& name, std::string& value) {
+    for (const auto& a : redis_aliases) {
+        if (name == a.redis_name) {
+            if (!get_configuration_value(a.barch_name, value)) return false;
+            if (name == "maxmemory-policy") value = policy_to_redis(value);
+            return true;
+        }
+    }
+    for (const auto& f : redis_fixed_values) {
+        if (name == f.redis_name) { value = f.value; return true; }
+    }
+    if (name == "save") {
+        // redis writes this as "<seconds> <changes>" pairs. barch has exactly one such
+        // pair: the interval it saves on, and the modification count that also triggers
+        // a save. It is read only because redis allows several pairs and barch has room
+        // for one, so a write could silently lose part of what was asked for
+        std::string interval, mods;
+        if (!get_configuration_value("save_interval", interval)) return false;
+        if (!get_configuration_value("max_modifications_before_save", mods)) return false;
+        value = std::to_string(std::strtoull(interval.c_str(), nullptr, 10) / 1000) + " " + mods;
+        return true;
+    }
+    return false;
+}
+
 int barch::set_configuration_value(const std::string& name, const std::string &val) {
     barch::std_log("setting", name, "to", val);
+
+    // a redis name is resolved to the barch variable it means before anything else
+    std::string why;
+    if (is_read_only_configuration(name, why)) {
+        barch::std_err("cannot set", name, "-", why);
+        return VALKEYMODULE_ERR;
+    }
+    for (const auto& a : redis_aliases) {
+        if (name == a.redis_name) {
+            if (name == "maxmemory-policy") {
+                return set_configuration_value(a.barch_name, policy_from_redis(val));
+            }
+            if (name == "maxmemory") {
+                std::string plain;
+                if (!redis_bytes_to_plain(val, plain)) return VALKEYMODULE_ERR;
+                return set_configuration_value(a.barch_name, plain);
+            }
+            return set_configuration_value(a.barch_name, val);
+        }
+    }
 
     if (name == "compression") {
         int r = SetCompressionType(val);
@@ -1451,7 +1606,7 @@ const std::vector<std::string>& barch::configuration_names() {
     return names;
 }
 
-bool barch::get_configuration_value(const std::string& name, std::string& value) {
+static bool get_native_configuration_value(const std::string& name, std::string& value) {
     std::lock_guard lock(state().config_mutex);
     const auto& c = config();
     if (name == "active_defrag")                    value = cfg_bool(c.active_defrag);
@@ -1483,4 +1638,9 @@ bool barch::get_configuration_value(const std::string& name, std::string& value)
     else if (name == "use_vmm_mem")                 value = cfg_bool(c.use_vmm_memory);
     else return false;
     return true;
+}
+
+bool barch::get_configuration_value(const std::string& name, std::string& value) {
+    if (get_native_configuration_value(name, value)) return true;
+    return get_redis_configuration_value(name, value);
 }

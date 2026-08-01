@@ -364,3 +364,16 @@ extern "C"{
         return cc.push_vt(front.const_leaf()->get_value());
     }
 }
+
+/* the list commands as a RESP client sees them */
+void register_list_api(function_map& r) {
+    r["LBACK"] = {::LBACK,{"write","list","data"}};
+    r["LFRONT"] = {::LFRONT,{"read","list","data"}};
+    r["LPUSH"] = {::LPUSH,{"write","list","data"}};
+    r["RPUSH"] = {::RPUSH,{"write","list","data"}};
+    r["RPOP"] = {::RPOP,{"write","list","data"}};
+    r["LPOP"] = {::LPOP,{"write","list","data"}};
+    r["BLPOP"] = {::BLPOP,{"write","list","data"}};
+    r["BRPOP"] = {::BRPOP,{"write","list","data"}};
+    r["LLEN"] = {::LLEN,{"read","list","data"}};
+}

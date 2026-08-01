@@ -27,6 +27,32 @@ EXPECTED = {
     "use_vmm_mem",
 }
 
+# the redis names barch also answers to, and the barch variable each one means. A
+# redis client probes for these rather than for barch's own spellings, so CONFIG GET
+# has to reach them and CONFIG SET has to resolve them to the variable underneath.
+REDIS_ALIASES = {
+    "maxmemory": "max_memory_bytes",
+    "maxmemory-policy": "eviction_policy",
+    "maxclients": "max_resp_connections",
+    "bind": "server_binding",
+    "port": "server_port",
+    "tls-cert-file": "tls_pem_certificate_chain_file",
+    "tls-key-file": "tls_private_key_file",
+    "tls-dh-params-file": "tls_tmp_dh_file",
+}
+
+# redis settings barch reports truthfully but has no way to change. They read, and
+# refuse to be set rather than accepting a write that would do nothing.
+REDIS_READ_ONLY = {"appendonly", "appendfsync", "cluster-enabled", "daemonize",
+                   "timeout", "save"}
+
+REDIS_NAMES = set(REDIS_ALIASES) | REDIS_READ_ONLY
+ALL_NAMES = EXPECTED | REDIS_NAMES
+
+# aliases whose barch variable is safe to write - the rest point at the listening
+# address, which NOT_WRITTEN already explains
+ALIASES_WRITTEN = {n: b for n, b in REDIS_ALIASES.items() if b not in {"server_port", "server_binding"}}
+
 # what to set each one to. Chosen inside the domain the setter will accept - a plain
 # "change it to something else" would be refused by the ones that validate a range or
 # an enum.
@@ -78,10 +104,10 @@ r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
 
 # --- CONFIG GET reaches every registered variable --------------------------------
 everything = config_get(r, "*")
-assert set(everything) == EXPECTED, (
+assert set(everything) == ALL_NAMES, (
     f"CONFIG GET * does not match the registered set.\n"
-    f"  missing: {sorted(EXPECTED - set(everything))}\n"
-    f"  extra:   {sorted(set(everything) - EXPECTED)}")
+    f"  missing: {sorted(ALL_NAMES - set(everything))}\n"
+    f"  extra:   {sorted(set(everything) - ALL_NAMES)}")
 for name, value in everything.items():
     assert value != "", f"{name} read back empty - the live record was not consulted"
 
@@ -137,17 +163,88 @@ if isinstance(raw, list):
 
 # an unsupported keyword is refused, and says what is supported
 try:
-    r.execute_command("CONFIG", "REWRITE")
-    assert False, "CONFIG REWRITE should have been refused"
+    r.execute_command("CONFIG", "FROBNICATE")
+    assert False, "an unknown CONFIG keyword should have been refused"
 except redis.exceptions.ResponseError as e:
     assert "SET" in str(e) and "GET" in str(e), f"the refusal should name the keywords, said: {e}"
+
+# --- the other subcommands --------------------------------------------------------
+# REWRITE is answered, but with the error redis gives when it was started without a
+# config file, which is barch's permanent situation - it has none of its own
+try:
+    r.execute_command("CONFIG", "REWRITE")
+    assert False, "CONFIG REWRITE should have said there is no config file"
+except redis.exceptions.ResponseError as e:
+    assert "config file" in str(e), f"REWRITE should say why, said: {e}"
+
+assert r.execute_command("CONFIG", "HELP"), "CONFIG HELP should answer something"
+
+# RESETSTAT clears the counters but must leave the gauges alone - a gauge is what the
+# server is holding right now, and several are decremented later, so zeroing one would
+# wrap it rather than reset it
+def stats(conn):
+    flat = conn.execute_command("STATS")
+    out = {}
+    for i in range(0, len(flat) - 1, 2):
+        k = flat[i].decode() if isinstance(flat[i], bytes) else str(flat[i])
+        out[k] = flat[i + 1]
+    return out
+
+for i in range(50):
+    r.execute_command("SET", f"cfgstat{i}", "v")
+before = stats(r)
+assert r.execute_command("CONFIG", "RESETSTAT") == b"OK"
+after = stats(r)
+assert int(after["leaf_nodes"]) == int(before["leaf_nodes"]), \
+    f"leaf_nodes is a gauge and should survive RESETSTAT: {before['leaf_nodes']} -> {after['leaf_nodes']}"
+assert int(after["vacuum_count"]) < int(before["vacuum_count"]) or int(before["vacuum_count"]) == 0, \
+    "vacuum_count is a counter and should have been reset"
+
+# --- the redis names -------------------------------------------------------------
+# each alias reads the same value as the barch variable it means
+for alias, barch_name in REDIS_ALIASES.items():
+    a = config_get(r, alias)[alias]
+    b = config_get(r, barch_name)[barch_name]
+    if alias == "maxmemory-policy":
+        # barch spells "do not evict" as none, redis as noeviction
+        b = "noeviction" if b in ("none", "no", "nil", "null") else b
+    assert a == b, f"{alias} read {a!r} but {barch_name} read {b!r}"
+
+# a write through the alias lands on the barch variable
+assert r.execute_command("CONFIG", "SET", "maxclients", "1234") == b"OK"
+assert config_get(r, "max_resp_connections")["max_resp_connections"] == "1234"
+assert config_get(r, "maxclients")["maxclients"] == "1234"
+
+# redis byte units, including the ones barch's own parser does not take. redis reads
+# k as 1000 and kb as 1024, so these are not interchangeable
+for written, expected in [("512mb", "536870912"), ("512m", "512000000"),
+                          ("1gb", "1073741824"), ("1k", "1000"), ("1kb", "1024")]:
+    assert r.execute_command("CONFIG", "SET", "maxmemory", written) == b"OK", \
+        f"CONFIG SET maxmemory {written} was refused"
+    got = config_get(r, "maxmemory")["maxmemory"]
+    assert got == expected, f"maxmemory {written} became {got}, expected {expected}"
+
+# the policy name translates both ways
+assert r.execute_command("CONFIG", "SET", "maxmemory-policy", "noeviction") == b"OK"
+assert config_get(r, "eviction_policy")["eviction_policy"] == "none"
+assert config_get(r, "maxmemory-policy")["maxmemory-policy"] == "noeviction"
+assert r.execute_command("CONFIG", "SET", "maxmemory-policy", "allkeys-lru") == b"OK"
+assert config_get(r, "maxmemory-policy")["maxmemory-policy"] == "allkeys-lru"
+
+# and the ones barch cannot change refuse, saying why rather than just failing
+for name in sorted(REDIS_READ_ONLY):
+    try:
+        r.execute_command("CONFIG", "SET", name, "yes")
+        assert False, f"CONFIG SET {name} should have been refused"
+    except redis.exceptions.ResponseError as e:
+        assert name in str(e), f"the refusal for {name} should name it, said: {e}"
 
 # --- and the same over RESP3, where the reply is a real map -----------------------
 r3 = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=3)
 resp3 = r3.execute_command("CONFIG", "GET", "*")
 assert isinstance(resp3, dict), \
     f"CONFIG GET over RESP3 should be a map, got {type(resp3).__name__}"
-assert {k.decode() for k in resp3} == EXPECTED
+assert {k.decode() for k in resp3} == ALL_NAMES
 r3.close()
 
 r.close()

@@ -1210,3 +1210,28 @@ int add_ordered_api(ValkeyModuleCtx *ctx) {
 
     return VALKEYMODULE_OK;
 }
+
+/* the ordered set commands as a RESP client sees them */
+void register_ordered_api(function_map& r) {
+    r["ZADD"] = {::ZADD,{"write","ordered","data"}};
+    r["ZREM"] = {::ZREM,{"write","ordered","data"}};
+    r["ZINCRBY"] = {::ZINCRBY,{"write","ordered","data"}};
+    r["ZRANGE"] = {::ZRANGE,{"write","ordered","data"}};
+    r["ZCARD"] = {::ZCARD,{"write","ordered","data"}};
+    r["ZCOUNT"] = {::ZCOUNT,{"read","ordered","data"}};
+    r["ZDIFF"] = {::ZDIFF,{"write","ordered","data"}};
+    r["ZDIFFSTORE"] = {::ZDIFFSTORE,{"write","ordered","data"}};
+    r["ZINTERSTORE"] = {::ZINTERSTORE,{"write","ordered","data"}};
+    r["ZINTERCARD"] = {::ZINTERCARD,{"write","ordered","data"}};
+    r["ZINTER"] = {::ZINTER,{"read","ordered","data"}};
+    r["ZPOPMIN"] = {::ZPOPMIN,{"write","ordered","data"}};
+    r["ZPOPMAX"] = {::ZPOPMAX,{"write","ordered","data"}};
+    r["ZREVRANGE"] = {::ZREVRANGE,{"read","ordered","data"}};
+    r["ZRANGEBYSCORE"] = {::ZRANGEBYSCORE,{"read","ordered","data"}};
+    r["ZREVRANGEBYSCORE"] = {::ZREVRANGEBYSCORE,{"read","ordered","data"}};
+    r["ZREMRANGEBYLEX"] = {::ZREMRANGEBYLEX,{"write","ordered","data"}};
+    r["ZRANGEBYLEX"] = {::ZRANGEBYLEX,{"read","ordered","data"}};
+    r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX,{"read","ordered","data"}};
+    r["ZRANK"] = {::ZRANK,{"read","ordered","data"}};
+    r["ZFASTRANK"] = {::ZFASTRANK,{"read","ordered","data"}};
+}

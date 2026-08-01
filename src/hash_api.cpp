@@ -690,3 +690,33 @@ int add_hash_api(ValkeyModuleCtx *ctx) {
 
     return VALKEYMODULE_OK;
 }
+
+/* the hash commands as a RESP client sees them.
+ *
+ * HGETEX and HQUERY are deliberately not registered, not an oversight. Both are
+ * implemented and reachable from the valkey module side, but neither has been settled
+ * over RESP - HGETEX in particular shares HUPDATEEX's option parsing, which is not a
+ * barch_function at all but a helper taking extra arguments, so it cannot go in this
+ * table as it stands. */
+void register_hash_api(function_map& r) {
+    r["HSET"] = {::HSET,{"write","hash","data"}};
+    r["HEXPIREAT"] = {::HEXPIREAT,{"write","hash","data"}};
+    // HEXPIRE is overloaded in this file - the command, and the three argument helper
+    // both HEXPIRE and HEXPIREAT are written in terms of. Only the command goes in the
+    // table, and now that the registration lives here both overloads are visible, so
+    // the one being taken has to be named
+    r["HEXPIRE"] = {static_cast<int(*)(caller&, const arg_t&)>(::HEXPIRE),{"write","hash","data"}};
+    //r["HGETEX"] = ::HGETEX;
+    r["HMGET"] = {::HMGET,{"read","hash","data"}};
+    r["HINCRBY"] = {::HINCRBY,{"write","hash","data"}};
+    r["HINCRBYFLOAT"] = {::HINCRBYFLOAT,{"write","hash","data"}};
+    r["HDEL"] = {::HDEL,{"write","hash","data"}};
+    r["HGETDEL"] = {::HGETDEL,{"write","hash","data"}};
+    r["HTTL"] = {::HTTL,{"read","hash","data"}};
+    r["HGET"] = {::HGET,{"read","hash","data"}};
+    r["HLEN"] = {::HLEN,{"read","hash","data"}};
+    r["HEXPIRETIME"] = {::HEXPIRETIME,{"write","hash","data"}};
+    r["HGETALL"] = {::HGETALL,{"read","hash","data"}};
+    r["HKEYS"] = {::HKEYS,{"read","hash","data"}};
+    r["HEXISTS"] = {::HEXISTS,{"read","hash","data"}};
+}

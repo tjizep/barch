@@ -90,6 +90,25 @@ namespace statistics {
         extern std::atomic<uint64_t> attempted_routes;
         extern std::atomic<uint64_t> routes_succeeded;
     }
+
+    /**
+     * zero the counters that count things that have happened, for CONFIG RESETSTAT.
+     *
+     * Only those. The gauges above are deliberately left alone, and the distinction is
+     * not cosmetic:
+     *
+     *  - node and leaf counts, logical_allocated, bytes_in_free_lists and shards
+     *    describe what the server is holding right now. Zeroing them would not reset a
+     *    statistic, it would make the server misreport its own state until the numbers
+     *    drifted back.
+     *  - read_locks_active, write_locks_active, redis_sessions, art_sessions,
+     *    push_connections_open and out_queue_size are incremented and later
+     *    decremented. Zeroing one while it is non zero means the matching decrements
+     *    wrap it to near UINT64_MAX, which is worse than merely wrong.
+     *  - last_vacuum_time is a timestamp and max_leaf_size is a property of the data,
+     *    not of activity.
+     */
+    void reset_statistics();
 }
 
 template<typename Ext>

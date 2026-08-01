@@ -815,3 +815,227 @@ with no lock at all. That is a cross space walk rather than a single space one, 
 belongs with the cross space question in TODO 20 rather than here.
 
 Measured: full suite green, 47 of 47.
+
+
+## 20. Command declarations and registrations moved to their own api files [01-08-2026]
+
+barch_apis.h declared every command in the system and barch_apis.cpp registered every
+one of them, so both files had to be edited to add a command anywhere, and neither said
+anything about which subsystem a command belonged to beyond a comment.
+
+Keys, lists, hashes, ordered sets and info now each declare their own commands in their
+own header and register them from their own translation unit through
+`register_*_api(function_map&)`, called from `functions_by_name()`. The five blocks of
+`(*r)["NAME"] = {...}` are gone from barch_apis.cpp, replaced by five calls. What is
+left there is the commands that have no category file yet - see TODO 22.
+
+barch_apis.h keeps the shared vocabulary that all of this is built from: barch_function,
+barch_info, the category map, function_map and functions_by_name(). The category
+headers include it, so the dependency runs one way.
+
+The naming distinguishes the two registrations that already existed and were easy to
+confuse: `add_*_api(ValkeyModuleCtx*)` registers commands with the valkey module, and
+`register_*_api(function_map&)` registers them for RESP. Lists have only the second,
+which is now stated in list_api.h rather than being apparent from an absence.
+
+Two things worth recording:
+
+**Moving a registration next to its implementation can create an ambiguity.**
+`r["HEXPIRE"] = {::HEXPIRE, ...}` compiled fine in barch_apis.cpp, where only the two
+argument command was declared. In hash_api.cpp both that and the three argument helper
+that HEXPIRE and HEXPIREAT are written in terms of are visible, so the name no longer
+resolves and needs a static_cast to the command's own signature. The old code was not
+wrong, it just could not see enough to be ambiguous.
+
+**The check that mattered was the command table, not the build.** A registration
+silently dropped in the move would compile and link perfectly and only show up as a
+command answering "unknown command" at runtime, which the suite might well not cover.
+Extracting the registered names from HEAD's barch_apis.cpp and from all six files after
+the move gave 112 both times, with nothing lost and nothing added.
+
+Also removed: an empty `class info_api {}` stub in info_api.h, which nothing referenced.
+
+Measured: full suite green, 47 of 47.
+
+
+## 21. CLIENT INFO emitted a stray $ in front of the id field [01-08-2026]
+
+Spotted while writing TODO 23, because CLIENT LIST would have to reuse the same line
+builder and would have inherited it.
+
+`get_info_l` in rpc/asio_resp_session.h built its reply starting `"$id="` where redis
+and valkey both start `id=`. The `$` was inside the payload, not RESP framing - the
+bulk string header is added by push_string afterwards - so a client saw a first field
+literally named `$id`.
+
+Confirmed rather than assumed, by running both servers side by side and comparing:
+
+    barch  : $id=1 addr=127.0.0.1:34340 laddr=127.0.0.1:14000 fd=10 ...
+    valkey : id=4 addr=127.0.0.1:57504 laddr=127.0.0.1:7777 fd=18 ...
+
+and again after the change, where barch's line begins `id=1` like valkey's.
+
+Why nothing caught it: the one test that reads CLIENT INFO parses with
+`re.findall(r"(\S+?)=(\S*)", s)`, which happily yields a key named `$id`, and then only
+asserts on the `iters` and `iters-mem` fields barch adds. A generic parser cannot tell a
+misnamed field from a valid one. A client looking up `id` - which is how you find a
+connection to CLIENT KILL - would have got nothing.
+
+`git log -S` dates it to 629ce22, release v0.4.3.0b, so it had been shipping for about
+seven months.
+
+One process note for next time. The first two attempts to verify the fix reported it
+still broken, both times because of my own command rather than the code: valkey rewrites
+its process title to `*:7777`, so `pkill -f "valkey-server --port 7777"` never matched
+the old process, which kept port 14000 and answered the query from the stale binary.
+Then `pkill -9 -f valkey-server` matched the shell running it and killed the test job.
+Match server processes with `pgrep -x`/`kill <pid>`, not a `-f` pattern that the killing
+command's own command line also contains.
+
+Measured: full suite green, 47 of 47.
+
+
+## 22. CLIENT LIST implemented [01-08-2026]
+
+CLIENT accepted only INFO, SETINFO and CLEAR_ITERS; LIST now joins them.
+
+The line format needed no work - `get_info_l` in rpc/asio_resp_session.h already emits
+the full redis field set for the calling connection, and DONE 21 fixed the stray `$` in
+front of the id that would otherwise have been copied into every line of the reply.
+What was missing was reach: the sessions live in `tcp_sessions` and `uds_sessions`
+inside `server_context` in rpc/server.cpp, and a `caller` only knows about itself.
+
+The walk stays behind the server boundary. `server::list_clients(caller&)` is declared
+in server.h with `caller` forward declared, and `server_context::append_client_lines`
+does the work, so no session object is ever handed out and the header does not have to
+expose `resp_session`.
+
+Locking: the session vectors are appended to by the accept path and nulled out by the
+collector thread, both under `session_latch`, so each vector is copied under the latch
+and walked outside it. Holding the latch across the walk would block new connections for
+as long as the reply takes to build. Copying a vector of `shared_ptr` has the second
+effect of keeping every session alive for the duration of the walk, which matters
+because building a line reads the socket's endpoints.
+
+Two ways a line can be wrong, both handled: a slot the collector has already swept holds
+a null, and a socket can be closed but not yet swept, so both are skipped. Beyond that,
+a peer can go away between the `is_open()` test and the endpoint read, and asio reports
+that by throwing - that connection is leaving anyway, so its line is dropped rather than
+failing the whole command.
+
+Verified against a real valkey rather than by inspection. With four idle connections
+held open plus the one asking, both servers answer identically: a bulk string (not an
+array), five lines, and three lines after closing two of them - so closed sessions are
+excluded rather than accumulating. Under churn, eight threads connecting and
+disconnecting in a loop against sixty concurrent CLIENT LIST calls, there were no errors
+and no reply that was not a bulk string, and the line count stayed at nine throughout
+rather than growing, which is what a leak of swept sessions would have looked like.
+
+Not implemented: redis also takes `CLIENT LIST TYPE normal|master|replica|pubsub` and
+`CLIENT LIST ID <id>...`. Both need the session to carry more about itself than it
+does, so the command rejects any argument for now. `cmd=client|info` and `fd=10` are
+still literals in the line builder - harmless for CLIENT INFO, wrong on every line of a
+LIST, and noted in TODO 23's replacement.
+
+Found while testing, unrelated and pre-existing: a bare `PING` answers "Wrong Arity",
+because barch's PING is the replication one. See TODO 25.
+
+Measured: full suite green, 47 of 47.
+
+
+## 23. Redis configuration names, and the other CONFIG subcommands [01-08-2026]
+
+CONFIG GET was already redis shaped - glob patterns, a map reply, values written the way
+CONFIG SET takes them back - but every name it knew was barch's own, so a client asking
+for `maxmemory` got an empty map. It now answers to redis's names as well, and
+RESETSTAT, REWRITE and HELP are implemented.
+
+The mapping is in configuration.cpp, not in the CONFIG command, so GET and SET both get
+it. Three kinds:
+
+  - **aliases**, where a redis name means exactly one barch variable: maxmemory,
+    maxmemory-policy, maxclients, bind, port and the three tls files.
+  - **aliases needing a value translated**. maxmemory-policy is the one - barch's
+    eviction_policy already uses redis's vocabulary for every policy except "do not
+    evict", which barch spells none and redis spells noeviction.
+  - **fixed answers**, where barch has no such setting but can say something true:
+    appendonly and appendfsync are no because there is no append only file at all,
+    cluster-enabled no, daemonize no, timeout 0. `save` is derived from save_interval
+    and max_modifications_before_save, which is exactly redis's "<seconds> <changes>".
+
+These refuse CONFIG SET rather than accepting a write that would do nothing, and say
+why: `cannot set 'appendonly': there is no append only file`. That needed
+is_read_only_configuration(name, why), because the existing int return could not tell a
+refusal apart from a value that failed to parse.
+
+`databases` is deliberately absent, and it is the interesting omission. Barch's key
+spaces are named rather than numbered and SELECT takes a name, so any number here would
+mislead a client about what SELECT accepts. An absent name reads as an empty map, which
+is what redis answers for a parameter it does not know - a better answer than a
+plausible looking lie.
+
+**The byte units were the real trap.** maxmemory looked like a pure alias and is not.
+Redis reads 1k as 1000 and 1kb as 1024; barch's parser takes a single letter and reads k
+as 1024. Passing the string through failed outright on the two letter forms - CONFIG SET
+maxmemory 512mb was rejected - and would have been silently wrong by about 5% on every
+value written the decimal way, which is the kind of thing that surfaces months later as
+a memory limit that was never what anybody set. A redis size is now resolved to a plain
+byte count before it reaches barch. Checked against a real valkey across 512mb, 512m,
+1gb, 1k and 1kb: identical on all five.
+
+RESETSTAT clears the counters and the per command call counts INFO reports as
+commandstats. It deliberately leaves the gauges alone, and that distinction is not
+cosmetic: node and leaf counts, logical_allocated and shards describe what the server
+holds right now, so zeroing them would make it misreport its own state; and
+read_locks_active, redis_sessions and the rest are incremented then decremented, so
+zeroing one mid flight wraps it to near UINT64_MAX. Verified: leaf_nodes held at 201
+across a reset while vacuum_count went 8673 to 0, and the data was untouched.
+
+REWRITE answers with the error redis gives when it was started without a config file,
+which is barch's permanent condition - it has none of its own, being configured through
+its host server. A client that already handles that error needs no new case.
+
+TestConfig caught this, which is the point of it: it asserts CONFIG GET * matches the
+registered set exactly, so a variable added on one side and not the other fails rather
+than being skipped. The redis names are a new category rather than drift, so the test
+now knows about both sets, still round trips only barch's own variables, and gained
+coverage for the alias behaviour, the byte units, the policy translation, the read only
+refusals, and RESETSTAT leaving gauges alone. Its old assertion that REWRITE is
+unsupported moved onto an unknown keyword instead.
+
+Found while testing, unrelated: bare `INFO` answers "not implemented" - see TODO 26.
+
+Measured: full suite green, 47 of 47.
+
+
+## 24. PING renamed to RPING and redis's PING added [01-08-2026]
+
+barch's PING took `PING <host> <port>` and reached out to another barch to check it
+answered. Redis's PING takes nothing and answers PONG, and is what every client sends
+as a health check and what a connection pool sends before handing a connection out - so
+a bare PING got "Wrong Arity", which is a poor first impression for a server claiming
+to speak RESP.
+
+The two are unrelated, not two spellings of one idea: one opens a connection to
+somewhere else and says nothing about the server being asked. So the replication one is
+now RPING, and PING is redis's - no argument gives the simple string PONG, one argument
+echoes it back as a bulk string, more is an arity error. Checked against a real valkey
+on all three.
+
+Three things made this cheap, and each was worth confirming rather than assuming:
+
+  - **replication does not send the string.** `temp_client::ping()` writes the binary
+    opcode `cmd_ping`, so nothing on the wire between barch nodes names the command,
+    and renaming it cannot break a running pair.
+  - **the valkey module side is namespaced.** Module commands are registered through
+    NAME(), which prefixes `B.`, so `B.PING` never collided with valkey's own PING and
+    `B.RPING` sits beside it.
+  - **the binding did not have to change its name.** swig's `ping(host, port)` is
+    unambiguous as it stands - it takes a host and a port - so it keeps its name and
+    only sends RPING instead. That is what left the eight test files that call
+    `barch.ping("127.0.0.1", PORT)` untouched.
+
+Categories differ slightly: RPING keeps `{"read","connection","data"}` and PING is
+`{"read","connection"}`, since answering PONG touches no data.
+
+Measured: full suite green, 47 of 47.

@@ -342,3 +342,8 @@ int INFO(caller& call, const arg_t& argv) {
     return call.push_error("not implemented");
 }
 }
+
+/* the info commands as a RESP client sees them */
+void register_info_api(function_map& r) {
+    r["INFO"] = {::INFO,{"read","stats"}};
+}

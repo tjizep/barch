@@ -37,6 +37,11 @@ extern "C" {
 #include "ioutil.h"
 #include "module.h"
 #include "hash_api.h"
+#include "connection_api.h"
+#include "keyspace_api.h"
+#include "repl_api.h"
+#include "config_api.h"
+#include "info_api.h"
 #include "keys_api.h"
 #include "sharded_store.h"
 #include "ordered_api.h"
@@ -45,1034 +50,109 @@ extern "C" {
 #include "keyspace_locks.h"
 #include "dictionary_compressor.h"
 
-static size_t save(caller& call) {
-    std::atomic<size_t> errors = 0;
-    barch::sharded_store store(call.kspace());
-    store.each_shard_parallel([&](const barch::shard_ptr& shard) {
-        if (!shard->save(true)) {
-            barch::std_err("could not save", shard->get_shard_number());
-            ++errors;
-        }
-    });
-    save_auth();
-    return errors;
-}
-static auto startTime = std::chrono::high_resolution_clock::now();
+
 extern "C" {
-/* HELLO [protover [SETNAME clientname]]
- *
- * the handshake a modern redis client sends when it opens a connection, and where the
- * RESP version is settled. 2 and 3 are both served; anything else is refused with
- * NOPROTO, the same as redis. The version sticks to the connection, so every reply
- * that follows is written in whichever the client asked for.
- *
- * the reply is a map, which RESP3 sends as '%' and RESP2 flattens into an array - the
- * writer picks, so this reads the same either way.
- *
- * AUTH runs the ordinary AUTH command with its own argument list and then takes its
- * OK back off the reply, so the handshake is all the client sees. A failure leaves an
- * error queued, which the caller turns into a failed call on its own.
- */
-int HELLO(caller& call, const arg_t& argv) {
-    unsigned at = 1;
-    int64_t protover = call.get_protocol();
-    if (argv.size() > at) {
-        if (!conversion::to_i64(argv[at], protover)) {
-            return call.push_error("Protocol version is not an integer or out of range");
-        }
-        if (protover < 2 || protover > 3) {
-            return call.push_error("NOPROTO unsupported protocol version");
-        }
-        ++at;
-    }
-    art::value_type auth_user{}, auth_secret{};
-    bool authenticate = false;
-    while (argv.size() > at) {
-        if (argv[at] == "SETNAME" && argv.size() > at + 1) {
-            at += 2; // accepted and ignored, the same as CLIENT SETINFO
-            continue;
-        }
-        if (argv[at] == "AUTH" && argv.size() > at + 2) {
-            auth_user = argv[at + 1];
-            auth_secret = argv[at + 2];
-            authenticate = true;
-            at += 3;
-            continue;
-        }
-        return call.syntax_error();
-    }
-    if (authenticate) {
-        // AUTH takes its own argument list, with the command name back in front
-        arg_t auth_argv;
-        auth_argv.push_back("AUTH");
-        auth_argv.push_back(auth_user);
-        auth_argv.push_back(auth_secret);
-        ::AUTH(call, auth_argv);
-        if (call.errors_count() > 0) {
-            // AUTH already said why, and a queued error is enough to fail the call
-            return call.ok();
-        }
-        // AUTH answers OK by pushing it, so take it back rather than let it travel in
-        // front of the handshake
-        Variable answer;
-        if (call.pop_value(answer) && answer.to_string() != "OK") {
-            return call.push_error("authentication failed");
-        }
-    }
-    // the handshake itself goes out in the version just agreed, which is what a client
-    // expects: it reads the reply with the parser it is about to switch to
-    call.set_protocol((int) protover);
-
-    call.start_map();
-    call.push_string("server");
-    call.push_string("redis"); // clients gate features on this, and INFO already says redis_version
-    call.push_string("version");
-    call.push_string(BARCH_PROJECT_VERSION);
-    call.push_string("proto");
-    call.push_int((int64_t) protover);
-    call.push_string("id");
-    call.push_int((int64_t) 0); // barch does not carry a per connection id
-    call.push_string("mode");
-    call.push_string("standalone");
-    call.push_string("role");
-    call.push_string("master");
-    call.push_string("modules");
-    call.start_array();
-    call.end_array();
-    call.end_map();
-    return call.ok();
-}
-int cmd_HELLO(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, HELLO);
-}
-int CLIENT(caller& call, const arg_t& arg_v) {
-    if (arg_v.size()<=1) {
-        return call.wrong_arity();
-    }
-    if (arg_v[1] == "INFO") {
-        std::string r = call.get_info();
-        return call.push_string(r);
-    }
-    if (arg_v[1] == "LIST") {
-        // no filters yet: redis also takes TYPE and ID, which need the session to carry
-        // more about itself than it does
-        if (arg_v.size() != 2) {
-            return call.wrong_arity();
-        }
-        barch::server::list_clients(call);
-        return call.ok();
-    }
-    if (arg_v[1] == "SETINFO") {
-        if (arg_v.size() == 4) {
-            return call.ok();
-        }
-    }
-    if (arg_v[1] == "CLEAR_ITERS") {
-        if (arg_v.size() != 2) {
-            return call.wrong_arity();
-        }
-        // a SCAN that runs to the end drops its own cursor, but one that is abandoned
-        // part way through keeps it until the connection closes. this lets a client
-        // that knows it has abandoned some let them go without reconnecting.
-        return call.push_ll((int64_t) call.clear_iterations());
-    }
-    return call.syntax_error();
-}
-int MULTI(caller& call, const arg_t& arg_v) {
-    if (arg_v.size()!=1) {
-        return call.wrong_arity();
-    }
-    call.start_call_buffer();
-    return call.ok();
-}
-int EXEC(caller& call, const arg_t& arg_v) {
-    if (arg_v.size()!=1) {
-        return call.wrong_arity();
-    }
-    call.finish_call_buffer();
-    return 0;
-}
-int TRAIN(caller& call, const arg_t& argv) {
-    std::string d;
-    for (size_t i = 1; i < argv.size(); ++i) {
-        d += argv[i].to_string();
-        d += " ";
-    }
-    return call.push_ll(dictionary::train(d));
-}
-int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
-    auto t = std::chrono::high_resolution_clock::now();
-    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - startTime);
-    return ValkeyModule_ReplyWithLongLong(ctx, d.count());
-}
-/* B.KSPACE
-    - Key space operators:
-    - `KSPACE DEPENDS {depend[e|a]nt key space} ON {source key space name} [STATIC]`
-      Let a key space depend on a list of one or more source key spaces (dependant missing keys are resolved in source)
-      keys are added to the dependent and not propagated to the source
-    - `KSPACE RELEASE {depend[e|a]nt key space} FROM {source key space name}`
-     release a source from a dependent
-    - `KSPACE DEPENDANTS {key space name}`
-     list the dependants
-    - `KSPACE DROP {key space name}`
-         list the dependants
-    - `KSPACE MERGE {depend[e|a]nt key space} [TO {source key space name}]`
-      Merge a dependent named key space to its sources or any other random key space
-    - `KSPACE OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
-    - `KSPACE OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
-    - `KSPACE OPTION [SET|GET] RANDOM [ON|OFF|VOLATILE]` sets the current key space to evict randomly
-    - `KSPACE EXIST {key space name} return `1` if space exists else `0`
- */
-int KSPACE(caller& call, const arg_t& argv) {
-    if (argv.size() < 3) {
-        return call.wrong_arity();
-    }
-
-    art::kspace_spec parser(argv);
-    if (parser.parse_options() != 0) {
-        return call.syntax_error();
-    }
-    if (parser.is_exist) {
-        return call.push_bool(barch::is_keyspace(parser.name));
-    }
-    if (parser.is_depends) {
-        auto source = barch::get_keyspace(parser.source);
-        auto dependent = barch::get_keyspace(parser.dependant);
-        if (dependent->get_shard_count() != source->get_shard_count()) {
-            return call.push_error("source and dependant shard counts do not match");
-        }
-        ks_shared shl(source);
-        ks_unique ul(dependent);
-        dependent->depends(source);
-        return call.push_simple("OK");
-    }
-
-    if (parser.is_dependants) {
-        auto dependent = barch::get_keyspace(parser.dependant); // this will throw if parameter is wrong
-        auto source = dependent->source();
-        if (source) {
-            return call.push_string(source->get_canonical_name());
-        }
-        return call.push_null();
-    }
-
-    if (parser.is_merge) {
-        if (parser.is_merge_default) {
-            merge_options opts;
-            opts.set_compressed(parser.is_merge_compress);
-            call.kspace()->merge(opts);
-            return call.push_simple("OK");
-        }
-        auto to = barch::get_keyspace(parser.source);
-        auto from = barch::get_keyspace(parser.dependant);
-        barch::key_space_ptr old = nullptr;
-        if (to == from->source()) {
-            old = to;
-            from->depends(nullptr);
-        }
-        ks_shared shl(from);
-        ks_unique ul(to);
-
-        from->merge(to, {});
-        if (old) {
-            from->depends(to);
-        }
-        return call.push_simple("OK");
-    }
-
-    if (parser.is_release) {
-        auto dependent = barch::get_keyspace(parser.dependant);
-        auto source = dependent->source();
-        if (!source || source->get_canonical_name() != parser.source) {
-            if (!parser.source.empty())
-                return call.push_error("Invalid source keyspace name");
-        }
-        ks_unique shl(dependent);
-        ks_shared ul(source);
-        dependent->depends(nullptr);
-        return call.push_simple("OK");
-    }
-    if (parser.is_drop) {
-        auto source = parser.source.empty() ? call.kspace() : barch::get_keyspace(parser.source);
-        ks_unique shl(source);
-        source->depends(nullptr);
-        barch::sharded_store dropped(source);
-        dropped.each_shard([](const barch::shard_ptr& shrd) {
-            shrd->opt_drop_on_release = true;
-        });
-        source = nullptr;
-        if (barch::unload_keyspace(parser.source))
-            return call.push_simple("OK");
-    }
-
-    if (parser.is_option && parser.is_get) {
-        auto spc = call.kspace();
-        ks_shared ul(spc);
-        if (parser.name == "ORDERED") {
-            barch::shard_ptr ptr = spc->get(0ul);
-            call.push_bool(ptr->opt_ordered_keys);
-            return 0;
-        }
-        if (parser.name == "LRU") {
-            barch::shard_ptr ptr = spc->get(0ul);
-            call.push_bool(ptr->opt_evict_all_keys_lru);
-            return 0;
-        }
-        if (parser.name == "RANDOM") {
-            barch::shard_ptr ptr = spc->get(0ul);
-            call.push_bool(ptr->opt_evict_all_keys_random);
-            return 0;
-        }
-        return call.push_simple("OK");
-    }
-
-    if (parser.is_option && parser.is_set) {
-        auto spc = call.kspace();
-        barch::sharded_store store(spc);
-        ks_unique ul(spc);
-        if (parser.name == "ORDERED") {
-            bool on = parser.value == "ON";
-            store.each_shard([on](const barch::shard_ptr& shrd) { shrd->opt_ordered_keys = on; });
-            return call.push_simple("OK");
-        }
-        if (parser.name == "LRU") {
-            bool on = parser.value == "ON";
-            bool evict_volatile = parser.value == "VOLATILE";
-            store.each_shard([on, evict_volatile](const barch::shard_ptr& shrd) {
-                shrd->opt_evict_all_keys_lru = on;
-                shrd->opt_evict_volatile_keys_lru = evict_volatile;
-            });
-            return call.push_simple("OK");
-        }
-        if (parser.name == "RANDOM") {
-            bool on = parser.value == "ON";
-            bool evict_volatile = parser.value == "VOLATILE";
-            store.each_shard([on, evict_volatile](const barch::shard_ptr& shrd) {
-                shrd->opt_evict_all_keys_random = on;
-                shrd->opt_evict_volatile_keys_random = evict_volatile;
-            });
-            return call.push_simple("OK");
-        }
-
-    }
-
-    return call.push_null();
-}
-
-int cmd_KSPACE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, KSPACE);
-}
-/* B.USE
- * @return OK.
- */
-int USE(caller& call, const arg_t& argv) {
-    if (argv.size() == 1) {
-        call.use("");
-        return call.push_simple("OK");
-    }
-    if (argv.size() != 2) {
-        return call.wrong_arity();
-    }
-    auto name = argv[1].to_string();
-    if (name == "0") {
-        call.use("");
-    }else {
-        call.use(name);
-    }
-    return call.push_simple("OK");
-}
-
-int cmd_USE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, USE);
-}
-
-int cmd_SELECT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, USE);
-}
-
-int UNLOAD(caller& call, const arg_t& argv) {
-    if (argv.size() == 1) {
-        barch::unload_keyspace("");
-        return call.push_simple("OK");
-    }
-    if (argv.size() != 2) {
-        return call.wrong_arity();
-    }
-    barch::unload_keyspace(argv[1].to_string());
-    return call.push_simple("OK");
-}
-int cmd_UNLOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, UNLOAD);
-}
-int KSPACE(caller& call, const arg_t& argv);
-int SPACES(caller& call, const arg_t& argv) {
-
-    if (argv.size() == 1) {
-        call.start_array();
-        barch::all_spaces([&call](const std::string& name, const barch::key_space_ptr& space) {
-            uint64_t size = 0;
-            barch::sharded_store store(space);
-            store.each_shard([&size](const barch::shard_ptr& s) { size += s->get_size(); });
-            call.push_values({name,size});
-        });
-        call.end_array();
-    }else {
-        return KSPACE(call, argv);
-    }
-    return call.ok();
-}
-int cmd_SPACES(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, SPACES);
-}
-/* B.SIZE
- * @return the size or o.k.a. key count.
- */
-int SIZE(caller& call, const arg_t& argv) {
-
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    auto size = 0ll;
-    barch::sharded_store store(call.kspace());
-    // get_size only reads counters, and read_lock still takes the source chain shared,
-    // which get_size recurses into
-    store.each_shard_read([&](const barch::shard_ptr& t) {
-        size += (int64_t) t->get_size();
-    });
-    size += call.kspace()->hash_buf_size();
-    return call.push_ll(size);
-}
-int cmd_SIZE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, SIZE);
-}
-/* B.SAVE
- * saves the data to files called leaf_data.dat and node_data.dat in the current directory
- * @return OK if successful
- */
-int SAVE(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    size_t errors = save(call);
-    return errors ? call.push_error("some shards not saved"): call.push_simple("OK");
-}
 
 
-int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, SAVE);
-}
-/* B.LOAD
- * loads and overwrites the data from files called leaf_data.dat and node_data.dat in the current directory
- * @return OK if successful
- */
-int LOAD(caller& call, const arg_t& argv) {
-
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    std::atomic<size_t> errors = 0;
-    barch::sharded_store store(call.kspace());
-    store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
-        if (!shard->load(true)) ++errors;
-    });
-    return errors>0 ? call.push_error("some shards did not load") : call.push_simple("OK");
-}
-int RELOAD(caller& call, const arg_t& argv) {
-
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    size_t errors = 0;
-    barch::sharded_store store(call.kspace());
-    store.each_shard_parallel([](const barch::shard_ptr& shard) {
-        shard->reload();
-    });
-    return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
-}
-static restarter restart;
-int START(caller& call, const arg_t& argv) {
-    if (argv.size() > 5 || argv.size() < 3)
-        return call.wrong_arity();
-    if (argv.size() >= 4 && argv[3] != "SSL") {
-        return call.push_error("invalid argument");
-    }
-    if (argv.size() == 5 && argv[4] != "ASYNCH") {
-        return call.push_error("invalid argument");
-    };
-    auto interface = argv[1];
-    auto port = conversion::as_variable(argv[2]).ui();
-    bool ssl = argv.size() == 4 && argv[3] == "SSL";
-    bool async = argv.size() == 5 && argv[4] == "ASYNCH";
-    if (call.is_remote()) async = true;
-    if (async)
-        restart.asynch_restart(interface.chars(), port, ssl);
-    else
-        restart.inline_restart(interface.chars(), port, ssl);
-    return call.push_simple("OK");
-}
-int PUBLISH(caller& call, const arg_t& argv) {
-    if (argv.size() != 3)
-        return call.wrong_arity();
-    Variable interface = argv[1];
-    Variable port = argv[2];
-    barch::repl::publish(interface.s(), port.i());
-    return call.push_simple("OK");
-}
-int PULL(caller& call, const arg_t& argv) {
-    if (argv.size() != 3)
-        return call.wrong_arity();
-    Variable interface = argv[1];
-    Variable port = argv[2];
-    auto ks = call.kspace();
-    barch::sharded_store store(call.kspace());
-    store.each_shard([&](const barch::shard_ptr& t) {
-        if (!t->pull(interface.s(), port.i())) {}
-    });
-    return call.push_simple("OK");
-}
-int STOP(caller& call, const arg_t& ) {
-    if (call.get_context() == ctx_resp) {
-        return call.push_error("Cannot stop server");
-    }
-    if (call.is_remote()) {
-        restart.asynch_stop();
-    }else {
-        barch::server::stop();
-    }
-
-    return call.push_simple("OK");
-}
-/* RPING <host> <port>
- *
- * reach out to another barch and check it answers. This was called PING until the name
- * was given back to redis's health check, which is what every client sends and what a
- * connection pool sends before handing a connection out. The two are unrelated: this
- * one opens a connection to somewhere else, over the binary replication protocol, and
- * says nothing about the server being asked.
- */
-int RPING(caller& call, const arg_t& argv) {
-    if (argv.size() != 3)
-        return call.wrong_arity();
-    auto interface = argv[1];
-    auto port = argv[2];
-    //barch::server::start(interface.chars(), atoi(port.chars()));
-    barch::repl::temp_client cli(interface.chars(), atoi(port.chars()), 0);
-    if (!cli.ping()) {
-        return call.push_error("could not ping");
-    }
-    return call.push_simple("OK");
-}
-
-/* PING [message]
- *
- * redis's health check. With no argument the reply is the simple string PONG; with one
- * it is that message echoed back as a bulk string. More than one is an arity error, as
- * in redis.
- */
-int PING(caller& call, const arg_t& argv) {
-    if (argv.size() == 1) {
-        return call.push_simple("PONG");
-    }
-    if (argv.size() == 2) {
-        return call.push_vt(argv[1]);
-    }
-    return call.wrong_arity();
-}
-int RETRIEVE(caller& call, const arg_t& argv) {
-
-    if (argv.size() != 3)
-        return call.wrong_arity();
-    Variable host = argv[1];
-    Variable port = argv[2];
-    // TODO: this cannot work anymore if the remote key space has a different shard count than the local
-    auto ks = call.kspace();
-    barch::sharded_store store(ks);
-    bool failed = false;
-    store.each_shard([&](const barch::shard_ptr& shard) {
-        if (failed) return;
-        barch::repl::temp_client cli(host.s(), port.i(), shard->get_shard_number());
-        if (!cli.load(ks->get_name(), shard->get_shard_number())) {
-            failed = true;
-            store.each_shard([](const barch::shard_ptr& s) { s->clear(); });
-        }
-    });
-    if (failed) {
-        return call.push_error("could not load shard - all shards cleared");
-    }
-    return call.push_simple("OK");
-}
-
-int cmd_PUBLISH(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, PUBLISH);
-}
-
-int cmd_PULL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, PULL);
-}
-
-int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, LOAD);
-}
-int cmd_RPING(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, RPING);
-}
-int cmd_PING(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, PING);
-}
-int cmd_RETRIEVE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, RETRIEVE);
-}
-int cmd_START(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, START);
-}
-int cmd_STOP(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, STOP);
-}
-
-int BEGIN(caller& call, const arg_t& argv) {
-
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& t) { t->begin(); });
-    return call.ok();
-}
-int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, BEGIN);
-}
-
-int COMMIT(caller& call, const arg_t& argv) {
-
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    auto ks = call.kspace();
-    barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& t) { t->commit(); });
-    return call.push_simple("OK");
-}
-int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, COMMIT);
-}
-int ROLLBACK(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& t) { t->rollback(); });
-    return call.push_simple("OK");
-}
-int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, ROLLBACK);
-}
-int CLEAR(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
-
-    barch::sharded_store store(call.kspace());
-    store.each_shard([](const barch::shard_ptr& shard) { shard->clear(); });
-
-    return call.push_simple("OK");
-}
-
-int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, CLEAR);
-}
-
-int CLEARALL(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    barch::all_shards([](auto& shard) {
-        shard->clear();
-    });
 
 
-    return call.push_simple("OK");
-}
-
-int cmd_CLEARALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, CLEAR);
-}
-int KSOPTIONS(caller& call, const arg_t& argv) {
-    if (argv.size() != 3)
-        return call.wrong_arity();
-    if (argv[1] == "SET") {
-        if (argv[2] == "UNORDERED") {
-            barch::sharded_store store(call.kspace());
-            store.each_shard([](const barch::shard_ptr& shard) { shard->opt_ordered_keys = false; });
-            return call.push_simple("OK");
-        }
-        if (argv[2] == "ORDERED") {
-            barch::sharded_store store(call.kspace());
-            store.each_shard([](const barch::shard_ptr& shard) { shard->opt_ordered_keys = true; });
-            return call.push_simple("OK");
-        }
-    }
 
 
-    return call.push_error("Unknown option");
-}
 
-int cmd_KSOPTIONS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, KSOPTIONS);
-}
 
-int SAVEALL(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    barch::all_shards([](auto& shard) {
-        shard->save(true);
-    });
 
-    return call.push_simple("OK");
-}
 
-int cmd_SIZEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, CLEAR);
-}
-int SIZEALL(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
 
-    uint64_t size = 0;
 
-    barch::all_shards([&](auto& shard) {
-        size += shard->get_size();
-    });
 
-    return call.push_int(size);
-}
 
-int cmd_SAVEALL(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, CLEAR);
-}
 
-int STATS(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
-    art_statistics as = barch::get_statistics();
 
-    call.start_array();
-    call.push_values({"heap_bytes_allocated", get_total_memory()});
-    call.push_values({"vmm_bytes_allocated", heap::vmm_allocated});
-    call.push_values({"value_bytes_compressed",as.value_bytes_compressed});
-    call.push_values({ "last_vacuum_time", as.last_vacuum_time});
-    call.push_values({ "vacuum_count", as.vacuums_performed});
-    call.push_values({ "bytes_addressable", as.bytes_allocated});
-    call.push_values({ "interior_bytes_addressable", as.bytes_interior});
-    call.push_values({ "leaf_nodes", as.leaf_nodes});
-    call.push_values({ "size_4_nodes", as.node4_nodes});
-    call.push_values({ "size_16_nodes", as.node16_nodes});
-    call.push_values({ "size_48_nodes", as.node48_nodes});
-    call.push_values({ "size_256_nodes", as.node256_nodes});
-    call.push_values({ "size_256_occupancy", as.node256_occupants});
-    call.push_values({ "leaf_nodes_replaced", as.leaf_nodes_replaced});
-    call.push_values({ "pages_evicted", as.pages_evicted});
-    call.push_values({ "keys_evicted", as.keys_evicted});
-    call.push_values({ "pages_defragged", as.pages_defragged});
-    call.push_values({ "vmm_pages_defragged", as.vmm_pages_defragged});
-    call.push_values({ "vmm_pages_popped", as.vmm_pages_popped});
-    call.push_values({ "read_locks_active", as.read_locks_active});
-    call.push_values({ "write_locks_active", as.write_locks_active});
-    call.push_values({ "exceptions_raised", as.exceptions_raised});
-    call.push_values({ "maintenance_cycles", as.maintenance_cycles});
-    call.push_values({ "shards", as.shards});
-    call.push_values({ "local_calls", as.local_calls});
-    call.push_values({ "max_spin", as.max_spin});
-    call.push_values({"logical_allocated", as.logical_allocated});
-    call.push_values({"bytes_in_free_lists", as.bytes_in_free_lists});
-    call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
-    call.push_values({"keys_found", as.keys_found});
-    call.end_array();
-    return 0;
-}
-/* B.STATISTICS
- *
- * get memory statistics. */
-int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, STATS);
-}
-int OPS(caller& call, const arg_t& argv) {
-    if (argv.size() != 1)
-        return call.wrong_arity();
 
-    art_ops_statistics as = barch::get_ops_statistics();
-    call.start_array();
-    call.push_values({"delete_ops", as.delete_ops});
-    call.push_values({"retrieve_ops", as.get_ops});
-    call.push_values({"insert_ops", as.insert_ops});
-    call.push_values({"iterations", as.iter_ops});
-    call.push_values({"range_iterations", as.iter_range_ops});
-    call.push_values({"lower_bound_ops", as.lb_ops});
-    call.push_values({"maximum_ops", as.max_ops});
-    call.push_values({"minimum_ops", as.min_ops});
-    call.push_values({"range_ops", as.range_ops});
-    call.push_values({"set_ops", as.set_ops});
-    call.push_values({"size_ops", as.size_ops});
-    call.end_array();
-    return 0;
-}
 
-/* B.OPS
- *
- * get data structure ops. */
-int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, OPS);
-}
 
-int cmd_VACUUM(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
 
-    if (argc != 1)
-        return ValkeyModule_WrongArity(ctx);
-    size_t result = 0;
-    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) result);
-}
 
-int HEAPBYTES(caller& call, const arg_t& argv) {
-    //compressed_release release;
-    if (argv.size() != 1)
-        return call.wrong_arity();;
-    auto vbytes = 0ll;
-    barch::sharded_store store(call.kspace());
-    // as SIZE: allocator byte counts are reads
-    store.each_shard_read([&](const barch::shard_ptr& s) {
-        vbytes += s->get_ap().get_nodes().get_bytes_allocated() + s->get_ap().get_leaves().get_bytes_allocated();
-    });
-    return call.push_ll( (int64_t) heap::allocated + vbytes);
-}
-int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, HEAPBYTES);
-}
 
-int CONFIG(caller& call, const arg_t& argv) {
-    if (argv.size() < 2)
-        return call.wrong_arity();
-    auto s = argv[1];
-    auto keyword_is = [&s](const char* lower, const char* upper) {
-        return strncmp(lower, s.chars(), s.size) == 0 || strncmp(upper, s.chars(), s.size) == 0;
-    };
-    if (keyword_is("set", "SET")) {
-        if (argv.size() != 4)
-            return call.wrong_arity();
-        std::string name = argv[2].chars(), why;
-        // a setting barch reports but cannot change says so, rather than failing with
-        // the same message as a value it could not parse
-        if (barch::is_read_only_configuration(name, why)) {
-            std::string msg = "cannot set '" + name + "': " + why;
-            return call.push_error(msg.c_str());
-        }
-        int r = barch::set_configuration_value(name, argv[3].chars());
-        if (r == 0) {
-            return call.push_simple("OK");
-        }
-        return call.push_error("could not set configuration value");
-    }
-    if (keyword_is("get", "GET")) {
-        // CONFIG GET <pattern> [<pattern> ...], as redis has it: each argument is a
-        // glob, and the reply is a map of every variable that matches any of them. The
-        // values are written in the form CONFIG SET takes back, so a client can read a
-        // variable, change it and put it back without knowing its type.
-        if (argv.size() < 3)
-            return call.wrong_arity();
-        std::string value;
-        call.start_map();
-        size_t matched = 0;
-        // both barch's own names and the redis names it answers to, so a client that
-        // asks for maxmemory and one that asks for max_memory_bytes are both served,
-        // and CONFIG GET * shows the pair
-        auto emit_matching = [&](const std::vector<std::string>& names) {
-            for (const auto& name : names) {
-                bool wanted = false;
-                for (unsigned at = 2; at < argv.size() && !wanted; ++at) {
-                    wanted = (1 == glob::stringmatchlen(argv[at], name, 1));
-                }
-                if (!wanted) continue;
-                if (!barch::get_configuration_value(name, value)) continue;
-                call.push_string(name);
-                call.push_string(value);
-                ++matched;
-            }
-        };
-        emit_matching(barch::configuration_names());
-        emit_matching(barch::redis_configuration_names());
-        call.end_map();
-        return call.ok();
-    }
-    if (keyword_is("resetstat", "RESETSTAT")) {
-        if (argv.size() != 2)
-            return call.wrong_arity();
-        // the counters that count events, and the per command call counts INFO reports
-        // as commandstats. Gauges are left alone - see statistics::reset_statistics
-        statistics::reset_statistics();
-        for (auto& f : *functions_by_name()) {
-            f.second.calls = 0;
-            f.second.total_nanos = 0;
-        }
-        return call.push_simple("OK");
-    }
-    if (keyword_is("rewrite", "REWRITE")) {
-        if (argv.size() != 2)
-            return call.wrong_arity();
-        // barch has no configuration file of its own - it is configured through its
-        // host server's file and CONFIG SET - so there is nothing to write back. This
-        // is the same answer redis gives when it was started without one, which is
-        // what a client that handles the error already expects
-        return call.push_error("The server is running without a config file");
-    }
-    if (keyword_is("help", "HELP")) {
-        call.start_array();
-        call.push_simple("CONFIG <subcommand>");
-        call.push_simple("GET <pattern> [<pattern> ...]");
-        call.push_simple("    Return settings matching any glob pattern. Both barch's own");
-        call.push_simple("    names and the redis names they answer to are matched.");
-        call.push_simple("SET <parameter> <value>");
-        call.push_simple("    Set a parameter. Redis names are resolved to the barch setting");
-        call.push_simple("    they mean; ones barch reports but cannot change are refused.");
-        call.push_simple("RESETSTAT");
-        call.push_simple("    Reset the counters INFO reports. Gauges are left alone.");
-        call.push_simple("REWRITE");
-        call.push_simple("    Not supported: barch has no configuration file of its own.");
-        call.push_simple("HELP");
-        call.push_simple("    This text.");
-        call.end_array();
-        return call.ok();
-    }
-    return call.push_error("only the GET, SET, RESETSTAT, REWRITE and HELP keywords are supported");
-}
-/* B.CONFIG [SET|GET] <key> [<value>]
- *
- * Set the specified key to the specified value. */
-int cmd_CONFIG(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, CONFIG);
-}
 
-int COMMAND(caller& call, const arg_t& params) {
-    if (params.size() < 2) {
-        return call.wrong_arity();
-    }
-    if (params[1] == "DOCS") {
-        std::vector<Variable> results;
-        call.start_array();
-        for (auto& p: *functions_by_name()) {
-            call.push_simple(p.first.c_str());
-            call.push_simple("function");
-        }
-        call.end_array();
-        return call.push_simple("OK");
-    }
-    return call.push_error("unknown command");
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /* This function must be present on each module. It is used in order to
  * register the commands into the server. */
 int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     if (ValkeyModule_Init(ctx, "B", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
-    if (ValkeyModule_CreateCommand(ctx, NAME(SELECT), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(USE), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(SIZE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(SIZEALL), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(STATS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(OPS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(MILLIS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(VACUUM), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(HEAPBYTES), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(START), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(STOP), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(RPING), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(PING), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(PUBLISH), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(PULL), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(RETRIEVE), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+    // every command is registered by its own category, which is also where it is
+    // declared and where its RESP registration lives
+    for (auto add : { add_keys_api, add_hash_api, add_ordered_api, add_connection_api,
+                      add_keyspace_api, add_repl_api, add_config_api, add_info_api }) {
+        if (add(ctx) != VALKEYMODULE_OK) {
             return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(CONFIG), "write", 1, 1, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(SAVE), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(LOAD), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(BEGIN), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(COMMIT), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(ROLLBACK), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(CLEAR), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(CLEARALL), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (ValkeyModule_CreateCommand(ctx, NAME(KSOPTIONS), "write", 0, 0, 0) == VALKEYMODULE_ERR)
-        return VALKEYMODULE_ERR;
-
-    if (add_keys_api(ctx) != VALKEYMODULE_OK) {
-        return VALKEYMODULE_ERR;
-    }
-    if (add_hash_api(ctx) != VALKEYMODULE_OK) {
-        return VALKEYMODULE_ERR;
-    }
-    if (add_ordered_api(ctx) != VALKEYMODULE_OK) {
-        return VALKEYMODULE_ERR;
+        }
     }
     Constants.init(ctx);
     // valkey should free this I hope

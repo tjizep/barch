@@ -45,59 +45,12 @@ struct barch_info {
 };
 typedef heap::string_map<barch_info> function_map;
 
-/* The command declarations below are the ones that have not yet been given a
- * {category}_api.h of their own - see TODO 22. Keys, lists, hashes, ordered sets and
- * info now declare their own commands and register them from their own translation
- * unit, through register_*_api(). */
-extern "C"{
-    // Misc/sys
-    // not registered in functions_by_name: it serves the valkey module, where the
-    // server asks the module to describe itself, rather than RESP clients
-    int COMMAND(caller& call,const arg_t& argv);
-    int AUTH(caller& call,const arg_t& argv);
-    int ACL(caller& call,const arg_t& argv);
-    int CLIENT(caller& call, const arg_t& arg_v);
-    int HELLO(caller& call, const arg_t& argv);
-    int MULTI(caller& call, const arg_t& arg_v);
-    int EXEC(caller& call, const arg_t& arg_v);
-    // database
-    int USE(caller& call, const arg_t& argv);
-    int UNLOAD(caller& call, const arg_t& argv);
-    int SPACES(caller& call, const arg_t& argv);
-    int KSPACE(caller& call, const arg_t& argv);
-    // size in current keyspace
-    int SIZE(caller& call, const arg_t& argv);
-    // total count in the entire db
-    int SIZEALL(caller& call, const arg_t& argv);
-    int SAVE(caller& call, const arg_t& argv);
-    int CLEAR(caller& call, const arg_t& argv);
-    // save and clear all key spaces
-    int CLEARALL(caller& call, const arg_t& argv);
-    int SAVEALL(caller& call, const arg_t& argv);
-    int KSOPTIONS(caller& call, const arg_t& argv);
-    // replication+cluster
-    int ADDROUTE(caller& call, const arg_t& argv);
-    int ROUTE(caller& call, const arg_t& argv);
-    int REMROUTE(caller& call, const arg_t& argv);
-    int PUBLISH(caller& call, const arg_t& argv);
-    int PULL(caller& call, const arg_t& argv);
-    int LOAD(caller& call, const arg_t& argv);
-    int RELOAD(caller& call, const arg_t& argv);
-    int START(caller& call, const arg_t& argv);
-    int STOP(caller& call, const arg_t& argv);
-    int RETRIEVE(caller& call, const arg_t& argv);
-    // reaches another barch over the replication protocol; PING is redis's health check
-    int RPING(caller& call, const arg_t& argv);
-    int PING(caller& call, const arg_t& argv);
-    // compression
-    int TRAIN(caller& call, const arg_t& argv);
-    // stats
-    int OPS(caller& call, const arg_t& argv);
-    int STATS(caller& call, const arg_t& argv);
-
-    // config
-    int CONFIG(caller& call, const arg_t& argv);
-}
+/*
+ * Every command now declares itself in its own {category}_api.h and registers itself
+ * from the matching .cpp, through register_*_api(). What is left here is the vocabulary
+ * they are all built from: the function signature, the category map that drives ACLs,
+ * and the table itself.
+ */
 
 extern std::shared_ptr<function_map> functions_by_name();
 #endif //BARCH_APIS_H

@@ -11,6 +11,7 @@
 #include "module.h"
 #include "rpc/server.h"
 #include "barch_apis.h"
+#include "connection_api.h"
 #include "sastam.h"
 #include "auth_api.h"
 #include "rpc/barch_functions.h"

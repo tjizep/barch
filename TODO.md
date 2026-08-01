@@ -48,26 +48,7 @@
 
 21. [Done] SIZE and HEAPBYTES relaxed to read locks [01-08-2026] Nr 19
 
-22. The commands still declared in barch_apis.h have no {category}_api.* of their own.
-    They fall into roughly five groups, and each wants the same treatment keys, lists,
-    hashes, ordered sets and info just had - a header declaring them, a
-    register_*_api(function_map&) in a matching .cpp, and their block deleted from
-    functions_by_name():
-
-      - connection/session: HELLO, CLIENT, MULTI, EXEC, PING, COMMAND
-      - key space/database: USE (SELECT), UNLOAD, SPACES, KSPACE, KSOPTIONS, SIZE
-        (DBSIZE), SIZEALL, CLEAR (FLUSHDB, FLUSHALL), CLEARALL, SAVE, SAVEALL
-      - replication/cluster: ADDROUTE, ROUTE, REMROUTE, PUBLISH, PULL, LOAD, RELOAD,
-        START, STOP, RETRIEVE
-      - stats: STATS, OPS  (these could join info_api, which already holds INFO)
-      - config and compression: CONFIG, TRAIN
-
-    Two things learned doing the first five that apply here. The implementations are
-    almost all in barch.cpp, so unlike the five just done this means moving code
-    between translation units, not only declarations. And moving a registration into
-    the same file as its implementation can make a name ambiguous that was not before,
-    because overloads that the old translation unit could not see become visible -
-    HEXPIRE needed a static_cast for exactly that reason.
+22. [Done] Every command moved into a {category}_api file [01-08-2026] Nr 25
 
 23. [Done] CLIENT LIST implemented [01-08-2026] Nr 22
 

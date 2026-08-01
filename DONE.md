@@ -1039,3 +1039,56 @@ Categories differ slightly: RPING keeps `{"read","connection","data"}` and PING 
 `{"read","connection"}`, since answering PONG touches no data.
 
 Measured: full suite green, 47 of 47.
+
+
+## 25. Every command moved into a {category}_api file [01-08-2026]
+
+The second half of entry 20. Keys, lists, hashes, ordered sets and info had already been
+given their own headers and register_*_api(); everything else was still declared in
+barch_apis.h and implemented in barch.cpp. Five new pairs finish it:
+
+  - **connection_api** - HELLO, CLIENT, MULTI, EXEC, PING, COMMAND
+  - **keyspace_api** - USE/SELECT, UNLOAD, SPACES, KSPACE, KSOPTIONS, SIZE/DBSIZE,
+    SIZEALL, SAVE, SAVEALL, CLEAR/FLUSHDB/FLUSHALL, CLEARALL, and the BEGIN/COMMIT/
+    ROLLBACK transaction markers
+  - **repl_api** - PUBLISH, PULL, LOAD, RELOAD, START, STOP, RETRIEVE, RPING, and
+    ADDROUTE/ROUTE/REMROUTE, which stay implemented in rpc/server.cpp where the routing
+    table is and are only declared and registered with the rest of their family
+  - **config_api** - CONFIG and TRAIN
+  - **auth_api** and **info_api**, which already existed, gained declarations and a
+    registration; STATS, OPS, HEAPBYTES and the VACUUM and MILLIS wrappers joined INFO
+
+barch.cpp is now 179 lines and holds the two module entry points and nothing else. Its
+OnLoad is a loop over the eight add_*_api functions rather than eighty lines of
+CreateCommand. barch_apis.h is 56 lines and declares no commands at all - what is left
+is the vocabulary they are built from: barch_function, barch_info, the category map that
+drives ACLs, and the table. functions_by_name() is ten calls.
+
+The name collision the entry predicted did turn up, and this time it was fixed the way
+it should be rather than with a cast. HEXPIRE is a command and also a three argument
+helper that both HEXPIRE and HEXPIREAT are written in terms of; once the registration
+moved into hash_api.cpp both were visible and `::HEXPIRE` stopped resolving. Entry 20
+reached for a static_cast. The helper is now INNER_HEXPIRE, so the exported name is
+unambiguous again and the cast is gone. That is the convention for this: the internal
+one gets the prefix, because it is the one nothing outside the file should be naming.
+
+Two things went wrong mechanically and are worth recording, because both were caught by
+checks rather than by the compiler:
+
+  - **the extern "C" block.** The generated files closed extern "C" around the
+    valkeymodule.h include and then emitted the command bodies outside it, which
+    compiles as a stray brace error rather than as a linkage problem - but had it
+    compiled, every command would have had C++ linkage and nothing would have resolved.
+  - **a doc comment was left behind.** The extractor took a preceding comment block by
+    walking back over lines starting with // or *, and KSPACE's block documents its
+    subcommands with lines starting with `-`. So it took only the closing `*/` and
+    stranded the rest in barch.cpp. Found by looking for a `*/` with no opener rather
+    than by trusting the build, since a dangling comment can silently swallow code.
+
+The check that actually matters for a move like this is not the build. A registration
+dropped in transit compiles and links perfectly and only shows up as a command answering
+"unknown command" at runtime. So both tables were compared against HEAD across every
+file: 112 RESP commands before and after, 86 valkey module commands before and after,
+nothing lost and nothing added.
+
+Measured: full suite green, 47 of 47.

@@ -14,6 +14,16 @@ dump.rdb
 appendonlydir/
 appendonly.aof*
 
+# the test helper's build directories. The top level CMakeLists configures and builds
+# test/${TEST_BUILD_DIR} itself, so everything in them is output - including the
+# TestStarter binary, which used to be committed and was rebuilt on every CI run,
+# leaving the working tree dirty
+test/build/
+test/Debug/
+test/Release/
+test/RelWithDebInfo/
+test/MinSizeRel/
+
 # shard data, written at runtime into whatever directory the server was started in:
 # leaves_*/nodes_* one pair per shard, plus the compression dictionary and the auth
 # and configuration spaces. A default space is 347 shards, so a test run leaves

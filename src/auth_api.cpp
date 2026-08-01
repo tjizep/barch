@@ -194,3 +194,9 @@ extern "C"
         return call.push_simple("OK");
     }
 }
+
+/* the auth commands as a RESP client sees them */
+void register_auth_api(function_map& r) {
+    r["AUTH"] = {::AUTH,{"auth"}};
+    r["ACL"] = {::ACL,{"write","acl"}};
+}

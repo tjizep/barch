@@ -3,6 +3,11 @@
 //
 
 #include "info_api.h"
+#include "module.h"
+#include "vk_caller.h"
+#include "sharded_store.h"
+#include "keyspace_locks.h"
+#include "swig_api.h"
 
 #include "barch_apis.h"
 #include "caller.h"
@@ -343,7 +348,136 @@ int INFO(caller& call, const arg_t& argv) {
 }
 }
 
-/* the info commands as a RESP client sees them */
+extern "C" {
+static auto startTime = std::chrono::high_resolution_clock::now();
+
+int STATS(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    art_statistics as = barch::get_statistics();
+
+    call.start_array();
+    call.push_values({"heap_bytes_allocated", get_total_memory()});
+    call.push_values({"vmm_bytes_allocated", heap::vmm_allocated});
+    call.push_values({"value_bytes_compressed",as.value_bytes_compressed});
+    call.push_values({ "last_vacuum_time", as.last_vacuum_time});
+    call.push_values({ "vacuum_count", as.vacuums_performed});
+    call.push_values({ "bytes_addressable", as.bytes_allocated});
+    call.push_values({ "interior_bytes_addressable", as.bytes_interior});
+    call.push_values({ "leaf_nodes", as.leaf_nodes});
+    call.push_values({ "size_4_nodes", as.node4_nodes});
+    call.push_values({ "size_16_nodes", as.node16_nodes});
+    call.push_values({ "size_48_nodes", as.node48_nodes});
+    call.push_values({ "size_256_nodes", as.node256_nodes});
+    call.push_values({ "size_256_occupancy", as.node256_occupants});
+    call.push_values({ "leaf_nodes_replaced", as.leaf_nodes_replaced});
+    call.push_values({ "pages_evicted", as.pages_evicted});
+    call.push_values({ "keys_evicted", as.keys_evicted});
+    call.push_values({ "pages_defragged", as.pages_defragged});
+    call.push_values({ "vmm_pages_defragged", as.vmm_pages_defragged});
+    call.push_values({ "vmm_pages_popped", as.vmm_pages_popped});
+    call.push_values({ "read_locks_active", as.read_locks_active});
+    call.push_values({ "write_locks_active", as.write_locks_active});
+    call.push_values({ "exceptions_raised", as.exceptions_raised});
+    call.push_values({ "maintenance_cycles", as.maintenance_cycles});
+    call.push_values({ "shards", as.shards});
+    call.push_values({ "local_calls", as.local_calls});
+    call.push_values({ "max_spin", as.max_spin});
+    call.push_values({"logical_allocated", as.logical_allocated});
+    call.push_values({"bytes_in_free_lists", as.bytes_in_free_lists});
+    call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
+    call.push_values({"keys_found", as.keys_found});
+    call.end_array();
+    return 0;
+}
+/* B.STATISTICS
+ *
+ * get memory statistics. */
+int cmd_STATS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, STATS);
+}
+int OPS(caller& call, const arg_t& argv) {
+    if (argv.size() != 1)
+        return call.wrong_arity();
+
+    art_ops_statistics as = barch::get_ops_statistics();
+    call.start_array();
+    call.push_values({"delete_ops", as.delete_ops});
+    call.push_values({"retrieve_ops", as.get_ops});
+    call.push_values({"insert_ops", as.insert_ops});
+    call.push_values({"iterations", as.iter_ops});
+    call.push_values({"range_iterations", as.iter_range_ops});
+    call.push_values({"lower_bound_ops", as.lb_ops});
+    call.push_values({"maximum_ops", as.max_ops});
+    call.push_values({"minimum_ops", as.min_ops});
+    call.push_values({"range_ops", as.range_ops});
+    call.push_values({"set_ops", as.set_ops});
+    call.push_values({"size_ops", as.size_ops});
+    call.end_array();
+    return 0;
+}
+/* B.OPS
+ *
+ * get data structure ops. */
+int cmd_OPS(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, OPS);
+}
+int HEAPBYTES(caller& call, const arg_t& argv) {
+    //compressed_release release;
+    if (argv.size() != 1)
+        return call.wrong_arity();;
+    auto vbytes = 0ll;
+    barch::sharded_store store(call.kspace());
+    // as SIZE: allocator byte counts are reads
+    store.each_shard_read([&](const barch::shard_ptr& s) {
+        vbytes += s->get_ap().get_nodes().get_bytes_allocated() + s->get_ap().get_leaves().get_bytes_allocated();
+    });
+    return call.push_ll( (int64_t) heap::allocated + vbytes);
+}
+int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HEAPBYTES);
+}
+int cmd_VACUUM(ValkeyModuleCtx *ctx, ValkeyModuleString **, int argc) {
+
+    if (argc != 1)
+        return ValkeyModule_WrongArity(ctx);
+    size_t result = 0;
+    return ValkeyModule_ReplyWithLongLong(ctx, (int64_t) result);
+}
+int cmd_MILLIS(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
+    auto t = std::chrono::high_resolution_clock::now();
+    const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(t - startTime);
+    return ValkeyModule_ReplyWithLongLong(ctx, d.count());
+}
+}
+
+int add_info_api(ValkeyModuleCtx *ctx) {
+    if (ValkeyModule_CreateCommand(ctx, NAME(STATS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(OPS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(MILLIS), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(VACUUM), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HEAPBYTES), "readonly", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    return VALKEYMODULE_OK;
+}
+
+/* what a RESP client can ask about the server itself. HEAPBYTES, VACUUM and MILLIS are
+ * registered with the valkey module above but not here - they have never been reachable
+ * over RESP, and that is left as it was. */
 void register_info_api(function_map& r) {
     r["INFO"] = {::INFO,{"read","stats"}};
+    r["STATS"] = {::STATS,{"read","stats"}};
+    r["OPS"] = {::OPS,{"read","stats"}};
 }

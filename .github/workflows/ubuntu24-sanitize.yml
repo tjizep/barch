@@ -36,10 +36,13 @@ jobs:
       - name: Commit and push coverage badge
         if: github.event_name == 'push'
         run: |
-          echo $PWD
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           cp coverage.svg docs/coverage.svg
-          git add coverage.svg
-          git add docs/coverage.svg
-          git diff --quiet && git diff --staged --quiet || (git commit -m "docs: update coverage badge" && git push)
+          git add coverage.svg docs/coverage.svg
+          # only the staged badge decides whether there is anything to commit. The
+          # previous condition also consulted `git diff --quiet`, which reports on the
+          # unstaged working tree - so anything the build left behind made it take the
+          # commit branch with nothing staged, and `git commit` then failed the job with
+          # "no changes added to commit"
+          git diff --staged --quiet || (git commit -m "docs: update coverage badge" && git push)

@@ -115,7 +115,7 @@ int HUPDATE(caller& call,const arg_t& argv, int fields_start,
     return HUPDATEEX(call, argv, fields_start, true, modify);
 }
 
-int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t)> &calc) {
+int INNER_HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t)> &calc) {
     if (argv.size() < 4)
         return call.wrong_arity();
     art::hexpire_spec ex_spec(argv);
@@ -156,7 +156,7 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
 
 extern "C"
 int HEXPIRE(caller& call, const arg_t& args) {
-    return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
+    return INNER_HEXPIRE(call, args, [](int64_t nr) -> int64_t {
             return art::now() + 1000 * nr;
         });
 }
@@ -165,7 +165,7 @@ int cmd_HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
 
     return call.vk_call(ctx, argv,argc, [](caller& call, const arg_t& args) {
-        return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
+        return INNER_HEXPIRE(call, args, [](int64_t nr) -> int64_t {
             return art::now() + 1000 * nr;
         });
     });
@@ -173,7 +173,7 @@ int cmd_HEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HEXPIREAT(caller& call, const arg_t& args) {
-    return HEXPIRE(call, args, [](int64_t nr) -> int64_t {
+    return INNER_HEXPIRE(call, args, [](int64_t nr) -> int64_t {
         return 1000 * nr;
     });
 }
@@ -701,11 +701,7 @@ int add_hash_api(ValkeyModuleCtx *ctx) {
 void register_hash_api(function_map& r) {
     r["HSET"] = {::HSET,{"write","hash","data"}};
     r["HEXPIREAT"] = {::HEXPIREAT,{"write","hash","data"}};
-    // HEXPIRE is overloaded in this file - the command, and the three argument helper
-    // both HEXPIRE and HEXPIREAT are written in terms of. Only the command goes in the
-    // table, and now that the registration lives here both overloads are visible, so
-    // the one being taken has to be named
-    r["HEXPIRE"] = {static_cast<int(*)(caller&, const arg_t&)>(::HEXPIRE),{"write","hash","data"}};
+    r["HEXPIRE"] = {::HEXPIRE,{"write","hash","data"}};
     //r["HGETEX"] = ::HGETEX;
     r["HMGET"] = {::HMGET,{"read","hash","data"}};
     r["HINCRBY"] = {::HINCRBY,{"write","hash","data"}};

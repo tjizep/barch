@@ -3,6 +3,7 @@
 //
 
 #include "list_api.h"
+#include "sharded_store.h"
 #include "value_type.h"
 #include "../external/include/valkeymodule.h"
 #include "art/art.h"
@@ -69,14 +70,11 @@ extern "C"{
             return cc.push_error("block already set");
         }
         caller::keys_t blocks;
-        ordered_lock<storage_release> locks;
-
         auto spc = cc.kspace();
-        if (args.size() > 3) {
-            locks.lock_space(spc);
-        }else {
-            locks.lock(spc->get(args[1]));
-        }
+        barch::sharded_store store(spc);
+        // a multi key pop has to hold every shard, a single key one only its own
+        auto locks = args.size() > 3 ? store.lock_space_write()
+                                     : store.lock_key_write(args[1]);
 
         uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
         // the array is not opened until there is something to put in it. A blocking pop
@@ -175,8 +173,8 @@ extern "C"{
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
-        auto t = cc.kspace()->get(args[1]);
-        storage_release release(t);
+        barch::sharded_store store(cc.kspace());
+        auto t = store.write_locked(args[1]);
         composite li;
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
@@ -241,8 +239,8 @@ extern "C"{
             return cc.push_null();
         }
         auto count = conversion::to_i64(conversion::as_variable(args[2]));
-        auto t = cc.kspace()->get(args[1]);
-        storage_release release(t);
+        barch::sharded_store store(cc.kspace());
+        auto t = store.write_locked(args[1]);
         composite li;
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
@@ -297,8 +295,8 @@ extern "C"{
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
-        auto t = cc.kspace()->get(args[1]);
-        storage_release release(t);
+        barch::sharded_store store(cc.kspace());
+        auto t = store.write_locked(args[1]);
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
         auto value = t->search(key);
@@ -320,8 +318,8 @@ extern "C"{
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
-        auto t = cc.kspace()->get(args[1]);
-        storage_release release(t);
+        barch::sharded_store store(cc.kspace());
+        auto t = store.write_locked(args[1]);
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
         auto value = t->search(key);
@@ -347,8 +345,8 @@ extern "C"{
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
-        auto t = cc.kspace()->get(args[1]);
-        storage_release release(t);
+        barch::sharded_store store(cc.kspace());
+        auto t = store.write_locked(args[1]);
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
         auto value = t->search(key);

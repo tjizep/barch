@@ -9,6 +9,7 @@
 #include <initializer_list>
 #include <utility>
 #include "key_space.h"
+#include "sharded_store.h"
 enum contexts {
     ctx_resp = 1,
     ctx_valkey,
@@ -27,27 +28,20 @@ struct block_data {
         return space->get(shard_index);
     }
 };
-struct iteration {
-    size_t shard{};
-    size_t page{};
-    size_t pos{};
-    size_t bytes{};
-    size_t id{};
-    barch::key_space_ptr space{};
-    heap::vector<barch::shard_ptr> shards;
-    heap::vector<uint8_t> buffer{};
-
-};
 struct caller {
     typedef heap::vector<block_data> keys_t;
-    typedef std::shared_ptr<iteration> iteration_ptr;
+    // the cursor itself is barch::scan_cursor, defined with the sharding layer: what a
+    // scan has got to is sharding state, and only sharded_store looks inside one. what
+    // is the connection's business, and stays here, is how long they live, how many are
+    // allowed, and what they cost
+    typedef barch::scan_cursor_ptr iteration_ptr;
     typedef heap::map<size_t,iteration_ptr> iterations_t;
 private:
     iterations_t iterations{};
     size_t iteration_id = 65535;
 public:
     iteration_ptr create_iteration() {
-        auto iter = std::make_shared<iteration>();
+        auto iter = std::make_shared<barch::scan_cursor>();
         iter->id = ++iteration_id;
         iterations[iter->id] = iter;
 
@@ -80,9 +74,7 @@ public:
         size_t total = 0;
         for (const auto& it : iterations) {
             if (!it.second) continue;
-            total += sizeof(iteration);
-            total += it.second->buffer.capacity() * sizeof(uint8_t);
-            total += it.second->shards.capacity() * sizeof(barch::shard_ptr);
+            total += it.second->memory();
         }
         return total;
     }

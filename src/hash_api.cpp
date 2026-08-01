@@ -11,6 +11,7 @@
 #include "module.h"
 #include "keys.h"
 #include "vk_caller.h"
+#include "sharded_store.h"
 #include "art/iterator.h"
 static thread_local composite query;
 extern "C"{
@@ -23,26 +24,27 @@ int HSET(caller& cc, const arg_t& args) {
     if (key_ok(args[1]) != 0) {
         return cc.push_null();
     }
-    auto t = cc.kspace()->get(args[1]);
-    storage_release release(t);
-    auto container = conversion::convert(args[1]);
+    barch::sharded_store store(cc.kspace());
+    store.with_container_write(args[1], [&](const barch::shard_ptr& t) {
+        auto container = conversion::convert(args[1]);
 
-    query.create({container});
-    for (size_t n = 2; n < args.size(); n += 2) {
+        query.create({container});
+        for (size_t n = 2; n < args.size(); n += 2) {
 
-        if (key_ok(args[n]) != 0) {
-            continue;
+            if (key_ok(args[n]) != 0) {
+                continue;
+            }
+
+            auto field = conversion::convert(args[n]);
+            query.push(field);
+            art::value_type key = query.create();
+            art::value_type val = args[n+1];
+
+            t->insert(key, val, true, fc);
+
+            query.pop_back();
         }
-
-        auto field = conversion::convert(args[n]);
-        query.push(field);
-        art::value_type key = query.create();
-        art::value_type val = args[n+1];
-
-        t->insert(key, val, true, fc);
-
-        query.pop_back();
-    }
+    });
     return cc.push_bool(updated);
 }
 }
@@ -68,41 +70,42 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
     if (key_ok(n) != 0) {
         return call.push_null();
     }
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
-    query.create({conversion::convert(n)});
-    if (replies)
-        call.start_array();
-    for (size_t n = fields_start; n < argv.size(); ++n) {
+    barch::sharded_store store(call.kspace());
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        query.create({conversion::convert(n)});
+        if (replies)
+            call.start_array();
+        for (size_t n = fields_start; n < argv.size(); ++n) {
 
-        auto k = argv[n];
+            auto k = argv[n];
 
-        if (key_ok(k) != 0) {
-            if (replies)
-                r |= call.push_null();
-            ++responses;
-            continue;
-        }
-
-
-        auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
-            if (leaf.null()) {
+            if (key_ok(k) != 0) {
                 if (replies)
-                    r |= call.push_ll(-2);
-            } else {
-                return modify(leaf);
+                    r |= call.push_null();
+                ++responses;
+                continue;
             }
-            return nullptr;
-        };
-        auto converted = conversion::convert(k);
-        query.push(converted);
-        art::value_type key = query.create();
-        t->update(key, updater);
-        query.pop_back();
-        ++responses;
-    }
-    if (replies)
-        call.end_array();
+
+
+            auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
+                if (leaf.null()) {
+                    if (replies)
+                        r |= call.push_ll(-2);
+                } else {
+                    return modify(leaf);
+                }
+                return nullptr;
+            };
+            auto converted = conversion::convert(k);
+            query.push(converted);
+            art::value_type key = query.create();
+            t->update(key, updater);
+            query.pop_back();
+            ++responses;
+        }
+        if (replies)
+            call.end_array();
+    });
     return call.ok();
 }
 
@@ -119,7 +122,10 @@ int HEXPIRE(caller& call, const arg_t& argv, const std::function<int64_t(int64_t
     if (ex_spec.parse_options() != VALKEYMODULE_OK) {
         return call.syntax_error();
     }
-    auto t = call.kspace()->get(argv[1]);
+    // HUPDATE below takes the container lock; this only needs the allocator of the
+    // shard the container lives on, to build the replacement leaf
+    barch::sharded_store store(call.kspace());
+    auto t = store.shard_for(argv[1]);
     int r = 0;
     auto updater = [&](const art::node_ptr &leaf) -> art::node_ptr {
         auto l = leaf.const_leaf();
@@ -185,6 +191,9 @@ int HGETEX(caller& call, const arg_t &argv) {
         return call.syntax_error();
     }
     long responses = 0;
+    // HUPDATEEX takes the container lock; this only needs the allocator of the shard
+    // the container lives on, to build the replacement leaf
+    barch::sharded_store store(call.kspace());
     call.start_array();
     r = r | HUPDATEEX(call, argv, spec.fields_start, false,
                       [&](const art::node_ptr &leaf) -> art::node_ptr {
@@ -215,7 +224,7 @@ int HGETEX(caller& call, const arg_t &argv) {
                           r |= call.push_vt(l->get_value());
                           ++responses;
                           if (do_set) {
-                              return art::make_leaf(call.kspace()->get(argv[1])->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile());
+                              return art::make_leaf(store.shard_for(argv[1])->get_ap(), l->get_key(), l->get_value(), ttl, l->is_volatile());
                           }
                           return nullptr;
                       });
@@ -292,26 +301,30 @@ int HDEL(caller& call, const arg_t &argv) {
         return call.push_null();
     }
 
-    auto t = call.kspace()->get(argv[1]);
-    query.create({conversion::convert(k)});
     auto del_report = [&](art::node_ptr) -> void {
         ++responses;
     };
-    for (size_t n = 2; n < argv.size(); ++n) {
-        size_t klen = 0;
-        auto k = argv[n];
+    // this used to re-route per member and take no lock at all, so the removes ran
+    // unsynchronised against readers. one route, one write lock, as HSET already did
+    barch::sharded_store store(call.kspace());
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        query.create({conversion::convert(k)});
+        for (size_t n = 2; n < argv.size(); ++n) {
+            size_t klen = 0;
+            auto k = argv[n];
 
-        if (key_ok(k) != 0) {
-            continue;
+            if (key_ok(k) != 0) {
+                continue;
+            }
+
+            auto converted = conversion::convert(k, klen);
+            query.push(converted);
+
+            art::value_type key = query.create();
+            t->remove(key, del_report);
+            query.pop_back();
         }
-
-        auto converted = conversion::convert(k, klen);
-        query.push(converted);
-
-        art::value_type key = query.create();
-        call.kspace()->get(argv[1])->remove(key, del_report);
-        query.pop_back();
-    }
+    });
     call.push_ll(responses);
     return call.ok();
 }
@@ -330,29 +343,31 @@ int HGETDEL(caller& call, const arg_t &argv) {
     if (key_ok(n) != 0) {
         return call.push_null();
     }
-    auto t = call.kspace()->get(argv[1]);
-
     if (argv[2] != "FIELDS") {
         return call.wrong_arity();
     }
-    query.create({conversion::convert(n)});
     auto del_report = [&](art::node_ptr) -> void {
         ++responses;
     };
-    for (size_t n = 3; n < argv.size(); ++n) {
-        auto k = argv[n];
+    // as HDEL: was re-routing per member with no lock held over the removes
+    barch::sharded_store store(call.kspace());
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        query.create({conversion::convert(n)});
+        for (size_t n = 3; n < argv.size(); ++n) {
+            auto k = argv[n];
 
-        if (key_ok(k) != 0) {
-            continue;
+            if (key_ok(k) != 0) {
+                continue;
+            }
+
+            auto converted = conversion::convert(k);
+            query.push(converted);
+
+            art::value_type key = query.create();
+            t->remove(key, del_report);
+            query.pop_back();
         }
-
-        auto converted = conversion::convert(k);
-        query.push(converted);
-
-        art::value_type key = query.create();
-        call.kspace()->get(argv[1])->remove(key, del_report);
-        query.pop_back();
-    }
+    });
     call.push_ll(responses);
     return call.ok();
 }
@@ -386,17 +401,20 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     if (key_ok(n) != 0) {
         return call.push_null();
     }
-    auto t = call.kspace()->get(n);
-    storage_release release(t);
+    barch::sharded_store store(call.kspace());
+    bool missing = false;
+    store.with_container_write(n, [&](const barch::shard_ptr& t) {
     art::value_type any_key = query.create({conversion::convert(n)});
     art::node_ptr lb = t->lower_bound(any_key);
     if (lb.null()) {
-        return call.push_null();
+        missing = true;
+        return;
     }
     if (lb.is_leaf) {
         // Check if the expanded path matches
         if (lb.const_leaf()->prefix(any_key) != 0) {
-            return call.push_null();
+            missing = true;
+            return;
         }
     }
     call.start_array();
@@ -419,7 +437,8 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
         }
     }
     call.end_array();
-    return call.ok();
+    });
+    return missing ? call.push_null() : call.ok();
 }
 
 int HGET_(caller& call, const arg_t& argv,
@@ -482,22 +501,22 @@ int HLEN(caller& call, const arg_t& argv) {
         return call.push_null();
     }
 
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
-    query.create({conversion::convert(n, nlen), art::ts_end});
-    auto search_end = query.end();
-    auto search_start = query.prefix(2);
-    auto table_key = query.prefix(2);
-    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
-        if (!key.starts_with(table_key.pref(1))) {
-            return -1;
-        }
-        ++responses;
+    barch::sharded_store store(call.kspace());
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        query.create({conversion::convert(n, nlen), art::ts_end});
+        auto search_end = query.end();
+        auto search_start = query.prefix(2);
+        auto table_key = query.prefix(2);
+        auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
+            if (!key.starts_with(table_key.pref(1))) {
+                return -1;
+            }
+            ++responses;
 
-        return 0;
-    };
-    t->range(search_start, search_end, table_iter, nullptr);
-
+            return 0;
+        };
+        t->range(search_start, search_end, table_iter, nullptr);
+    });
     return call.push_ll(responses);
 }
 int cmd_HLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -530,34 +549,36 @@ int HGETALL(caller& call, const arg_t& argv) {
     if (key_ok(n) != 0) {
         return call.push_null();
     }
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
-    art::value_type search_start = query.create({conversion::convert(n)},false);
+    barch::sharded_store store(call.kspace());
+    bool missing = false;
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        art::value_type search_start = query.create({conversion::convert(n)},false);
 
-    art::value_type table_key = search_start;
-    //bool exists = false;
-    art::iterator ai(t, search_start);
-    if (!ai.ok()) {
-        return call.push_null();
-    }
-    call.start_array();
-
-    while (ai.ok()) {
-        auto ik = ai.key();
-        if (!ik.starts_with(table_key)) break;
-        auto key = ai.key();
-        auto value = ai.value();
-        if (!key.starts_with(table_key)) {
-            return -1;
+        art::value_type table_key = search_start;
+        //bool exists = false;
+        art::iterator ai(t, search_start);
+        if (!ai.ok()) {
+            missing = true;
+            return;
         }
-        call.push_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
-        call.push_vt(value);
-        responses += 2;
-        ai.next();
-    }
-    call.end_array();
+        call.start_array();
 
-    return call.ok();
+        while (ai.ok()) {
+            auto ik = ai.key();
+            if (!ik.starts_with(table_key)) break;
+            auto key = ai.key();
+            auto value = ai.value();
+            if (!key.starts_with(table_key)) {
+                break;
+            }
+            call.push_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+            call.push_vt(value);
+            responses += 2;
+            ai.next();
+        }
+        call.end_array();
+    });
+    return missing ? call.push_null() : call.ok();
 }
 int cmd_HGETALL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -573,24 +594,25 @@ int HKEYS(caller& call, const arg_t& argv) {
     if (key_ok(n) != 0) {
         return call.push_null();
     };
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
-    art::value_type search_end = query.create({conversion::convert(n), art::ts_end});
-    art::value_type search_start = query.prefix(2);
-    art::value_type table_key = search_start;
-    call.start_array();
-    auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
-        if (!key.starts_with(search_start.pref(1))) {
-            return -1;
-        }
-        call.push_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
-        responses += 1;
+    barch::sharded_store store(call.kspace());
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        art::value_type search_end = query.create({conversion::convert(n), art::ts_end});
+        art::value_type search_start = query.prefix(2);
+        art::value_type table_key = search_start;
+        call.start_array();
+        auto table_iter = [&](void *, art::value_type key, art::value_type unused(value))-> int {
+            if (!key.starts_with(search_start.pref(1))) {
+                return -1;
+            }
+            call.push_encoded_key(art::value_type{key.bytes + table_key.size, key.size - table_key.size});
+            responses += 1;
 
-        return 0;
-    };
-    t->range(search_start, search_end, table_iter, nullptr);
+            return 0;
+        };
+        t->range(search_start, search_end, table_iter, nullptr);
 
-    call.end_array();
+        call.end_array();
+    });
     return call.ok();
 }
 int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

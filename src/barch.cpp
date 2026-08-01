@@ -38,6 +38,7 @@ extern "C" {
 #include "module.h"
 #include "hash_api.h"
 #include "keys_api.h"
+#include "sharded_store.h"
 #include "ordered_api.h"
 #include "caller.h"
 #include "spaces_spec.h"
@@ -46,11 +47,12 @@ extern "C" {
 
 static size_t save(caller& call) {
     std::atomic<size_t> errors = 0;
-    shard_thread_processor(call.kspace()->get_shard_count(),[&](size_t shard_num) {
-        if (!call.kspace()->get(shard_num)->save(true)) {
-                barch::std_err("could not save",shard_num);
-                ++errors;
-            }
+    barch::sharded_store store(call.kspace());
+    store.each_shard_parallel([&](const barch::shard_ptr& shard) {
+        if (!shard->save(true)) {
+            barch::std_err("could not save", shard->get_shard_number());
+            ++errors;
+        }
     });
     save_auth();
     return errors;
@@ -286,7 +288,8 @@ int KSPACE(caller& call, const arg_t& argv) {
         auto source = parser.source.empty() ? call.kspace() : barch::get_keyspace(parser.source);
         ks_unique shl(source);
         source->depends(nullptr);
-        source->each_shard([](barch::shard_ptr shrd) {
+        barch::sharded_store dropped(source);
+        dropped.each_shard([](const barch::shard_ptr& shrd) {
             shrd->opt_drop_on_release = true;
         });
         source = nullptr;
@@ -317,30 +320,29 @@ int KSPACE(caller& call, const arg_t& argv) {
 
     if (parser.is_option && parser.is_set) {
         auto spc = call.kspace();
+        barch::sharded_store store(spc);
         ks_unique ul(spc);
         if (parser.name == "ORDERED") {
             bool on = parser.value == "ON";
-            for (auto &shrd : spc->get_shards()) {
-                shrd->opt_ordered_keys = on;
-            }
+            store.each_shard([on](const barch::shard_ptr& shrd) { shrd->opt_ordered_keys = on; });
             return call.push_simple("OK");
         }
         if (parser.name == "LRU") {
             bool on = parser.value == "ON";
             bool evict_volatile = parser.value == "VOLATILE";
-            for (auto &shrd : spc->get_shards()) {
+            store.each_shard([on, evict_volatile](const barch::shard_ptr& shrd) {
                 shrd->opt_evict_all_keys_lru = on;
                 shrd->opt_evict_volatile_keys_lru = evict_volatile;
-            }
+            });
             return call.push_simple("OK");
         }
         if (parser.name == "RANDOM") {
             bool on = parser.value == "ON";
             bool evict_volatile = parser.value == "VOLATILE";
-            for (auto &shrd : spc->get_shards()) {
+            store.each_shard([on, evict_volatile](const barch::shard_ptr& shrd) {
                 shrd->opt_evict_all_keys_random = on;
                 shrd->opt_evict_volatile_keys_random = evict_volatile;
-            }
+            });
             return call.push_simple("OK");
         }
 
@@ -405,9 +407,8 @@ int SPACES(caller& call, const arg_t& argv) {
         call.start_array();
         barch::all_spaces([&call](const std::string& name, const barch::key_space_ptr& space) {
             uint64_t size = 0;
-            for (const auto& s: space->get_shards() ) {
-                size += s->get_size();
-            }
+            barch::sharded_store store(space);
+            store.each_shard([&size](const barch::shard_ptr& s) { size += s->get_size(); });
             call.push_values({name,size});
         });
         call.end_array();
@@ -428,11 +429,12 @@ int SIZE(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     auto size = 0ll;
-    auto &arts = call.kspace()->get_shards();
-    for (auto &t:arts) {
-        storage_release release(t);
+    barch::sharded_store store(call.kspace());
+    // get_size only reads counters, and read_lock still takes the source chain shared,
+    // which get_size recurses into
+    store.each_shard_read([&](const barch::shard_ptr& t) {
         size += (int64_t) t->get_size();
-    }
+    });
     size += call.kspace()->hash_buf_size();
     return call.push_ll(size);
 }
@@ -464,38 +466,22 @@ int LOAD(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    std::vector<std::thread> loaders;
-    size_t errors = 0;
-    auto ks = call.kspace();
-    loaders.resize(ks->get_shard_count());
-    for (const auto& shard : ks->get_shards()) {
-        loaders[shard->get_shard_number()] = std::thread([&errors,shard]() {
-            if (!shard->load(true)) ++errors;
-        });
-    }
-    for (auto &loader : loaders) {
-        if (loader.joinable())
-            loader.join();
-    }
+    std::atomic<size_t> errors = 0;
+    barch::sharded_store store(call.kspace());
+    store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
+        if (!shard->load(true)) ++errors;
+    });
     return errors>0 ? call.push_error("some shards did not load") : call.push_simple("OK");
 }
 int RELOAD(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    std::vector<std::thread> loaders;
     size_t errors = 0;
-    auto ks = call.kspace();
-    loaders.resize(ks->get_shard_count());
-    for (const auto& shard : ks->get_shards()) {
-        loaders[shard->get_shard_number()] = std::thread([&errors,shard]() {
-            shard->reload();
-        });
-    }
-    for (auto &loader : loaders) {
-        if (loader.joinable())
-            loader.join();
-    }
+    barch::sharded_store store(call.kspace());
+    store.each_shard_parallel([](const barch::shard_ptr& shard) {
+        shard->reload();
+    });
     return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
 }
 static restarter restart;
@@ -533,9 +519,10 @@ int PULL(caller& call, const arg_t& argv) {
     Variable interface = argv[1];
     Variable port = argv[2];
     auto ks = call.kspace();
-    for (const auto& t : call.kspace()->get_shards()) {
+    barch::sharded_store store(call.kspace());
+    store.each_shard([&](const barch::shard_ptr& t) {
         if (!t->pull(interface.s(), port.i())) {}
-    }
+    });
     return call.push_simple("OK");
 }
 int STOP(caller& call, const arg_t& ) {
@@ -570,17 +557,18 @@ int RETRIEVE(caller& call, const arg_t& argv) {
     Variable port = argv[2];
     // TODO: this cannot work anymore if the remote key space has a different shard count than the local
     auto ks = call.kspace();
-    for (const auto& shard : ks->get_shards()) {
+    barch::sharded_store store(ks);
+    bool failed = false;
+    store.each_shard([&](const barch::shard_ptr& shard) {
+        if (failed) return;
         barch::repl::temp_client cli(host.s(), port.i(), shard->get_shard_number());
         if (!cli.load(ks->get_name(), shard->get_shard_number())) {
-            if (shard > 0) {
-                 for (auto s : ks->get_shards()) {
-                    s->clear();
-                }
-            }
-
-            return call.push_error("could not load shard - all shards cleared");
+            failed = true;
+            store.each_shard([](const barch::shard_ptr& s) { s->clear(); });
         }
+    });
+    if (failed) {
+        return call.push_error("could not load shard - all shards cleared");
     }
     return call.push_simple("OK");
 }
@@ -620,9 +608,8 @@ int BEGIN(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    for (const auto& t : call.kspace()->get_shards()) {
-        t->begin();
-    }
+    barch::sharded_store store(call.kspace());
+    store.each_shard([](const barch::shard_ptr& t) { t->begin(); });
     return call.ok();
 }
 int cmd_BEGIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -635,9 +622,8 @@ int COMMIT(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
     auto ks = call.kspace();
-    for (const auto& t : call.kspace()->get_shards()) {
-        t->commit();
-    }
+    barch::sharded_store store(call.kspace());
+    store.each_shard([](const barch::shard_ptr& t) { t->commit(); });
     return call.push_simple("OK");
 }
 int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -647,9 +633,8 @@ int cmd_COMMIT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int ROLLBACK(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    for (const auto& t : call.kspace()->get_shards()) {
-        t->rollback();
-    }
+    barch::sharded_store store(call.kspace());
+    store.each_shard([](const barch::shard_ptr& t) { t->rollback(); });
     return call.push_simple("OK");
 }
 int cmd_ROLLBACK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -660,9 +645,8 @@ int CLEAR(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
 
-    for (const auto& shard : call.kspace()->get_shards()) {
-        shard->clear();
-    }
+    barch::sharded_store store(call.kspace());
+    store.each_shard([](const barch::shard_ptr& shard) { shard->clear(); });
 
     return call.push_simple("OK");
 }
@@ -692,15 +676,13 @@ int KSOPTIONS(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     if (argv[1] == "SET") {
         if (argv[2] == "UNORDERED") {
-            for (auto &shard : call.kspace()->get_shards()) {
-                shard->opt_ordered_keys = false;
-            }
+            barch::sharded_store store(call.kspace());
+            store.each_shard([](const barch::shard_ptr& shard) { shard->opt_ordered_keys = false; });
             return call.push_simple("OK");
         }
         if (argv[2] == "ORDERED") {
-            for (auto &shard : call.kspace()->get_shards()) {
-                shard->opt_ordered_keys = true;
-            }
+            barch::sharded_store store(call.kspace());
+            store.each_shard([](const barch::shard_ptr& shard) { shard->opt_ordered_keys = true; });
             return call.push_simple("OK");
         }
     }
@@ -834,10 +816,11 @@ int HEAPBYTES(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();;
     auto vbytes = 0ll;
-    for (const auto& s : call.kspace()->get_shards()) {
-        storage_release release(s);
+    barch::sharded_store store(call.kspace());
+    // as SIZE: allocator byte counts are reads
+    store.each_shard_read([&](const barch::shard_ptr& s) {
         vbytes += s->get_ap().get_nodes().get_bytes_allocated() + s->get_ap().get_leaves().get_bytes_allocated();
-    }
+    });
     return call.push_ll( (int64_t) heap::allocated + vbytes);
 }
 int cmd_HEAPBYTES(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {

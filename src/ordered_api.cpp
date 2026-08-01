@@ -3,6 +3,7 @@
 //
 
 #include "ordered_api.h"
+#include "sharded_store.h"
 #include "conversion.h"
 #include "art/art.h"
 #include "composite.h"
@@ -92,8 +93,11 @@ static void insert_ordered(caller& call, composite &score_key, composite &member
         abort_with("invalid key size");
     }
     shk = shk.sub(1,shk.size - 2);
-    auto t = call.kspace()->get(shk);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.shard_for(shk);
     //write_lock release(t->latch); // the shard should be latched
+    // try_lock, not a guard: the caller is expected to hold this shard already, and
+    // this only takes it when nobody else has
     bool locked = t->get_latch().try_lock();
     try {
         t->insert(sk, value, update);
@@ -117,7 +121,9 @@ static void remove_ordered(caller& call, composite &score_key, composite &member
         abort_with("invalid key size");
     }
     shk = shk.sub(1,shk.size - 2);
-    auto t = call.kspace()->get(shk);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.shard_for(shk);
+    // as add_ordered: the caller is expected to hold this shard already
     bool locked = t->get_latch().try_lock();
     //write_lock release(t->get_latch()); // the shard should be latched
     try {
@@ -156,8 +162,8 @@ int ZADD(caller& call, const arg_t &argv) {
         return call.push_null();
     }
 
-    auto t = call.kspace()->get(key);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(key);
 
     zspec.LFI = true;
     int64_t updated = 0;
@@ -239,8 +245,8 @@ int ZREM(caller& call, const arg_t& argv) {
     if (key_ok(key) != 0) {
         return call.push_null();
     }
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     auto container = conversion::convert(key);
     query q1, qmember;
     q1->create({container});
@@ -288,8 +294,8 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     if (key_ok(key) != 0) {
         return call.push_null();
     }
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     auto fcfk = [&](const art::node_ptr& ) -> void {
         ++updated;
     };
@@ -369,8 +375,8 @@ extern "C"
 int ZCOUNT(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     size_t nlen, minlen, maxlen;
     const char *n = argv[1].chars(); nlen = argv[1].size;
     const char *smin = argv[2].chars(); minlen = argv[2].size;
@@ -536,8 +542,8 @@ extern "C"
 int ZRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
@@ -554,8 +560,8 @@ extern "C"
 int ZCARD(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     auto n = argv[1];
 
     if (key_ok(n) != 0) {
@@ -642,8 +648,8 @@ static int ZOPER(
         aggr = std::numeric_limits<double>::max();
     }
     if (fk != spec.keys.end()) {
-        auto t = call.kspace()->get(*fk);
-        storage_release release(t);
+        barch::sharded_store kstore(call.kspace());
+        auto t = kstore.write_locked(*fk);
 
         query lq, uq;
         auto container = conversion::convert(*fk);
@@ -667,7 +673,7 @@ static int ZOPER(
                 auto check_set = conversion::convert(*ok);
                 auto check_tainer = tainerq->create({check_set});
                 auto check = checkq->create({check_set, conversion::comparable_key(number)});
-                art::iterator j(call.kspace()->get(*ok), check);
+                art::iterator j(kstore.shard_for(*ok), check);
                 bool found = false;
                 if (j.ok()) {
                     auto kf = j.key();
@@ -833,8 +839,8 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     long long count = 1;
     long long replies = 0;
     auto k = argv[1];
@@ -880,8 +886,8 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     long long count = 1;
     long long replies = 0;
     auto k = argv[1];
@@ -939,8 +945,8 @@ extern "C"
 int ZREVRANGE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
@@ -959,8 +965,8 @@ extern "C"
 int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
@@ -979,8 +985,8 @@ extern "C"
 int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
@@ -997,8 +1003,8 @@ extern "C"
 int ZREMRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
@@ -1017,8 +1023,8 @@ extern "C"
 int ZRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
@@ -1036,8 +1042,8 @@ extern "C"
 int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
@@ -1056,8 +1062,8 @@ int ZRANK(caller& call, const arg_t& argv) {
     if (argv.size() != 4) {
         return call.wrong_arity();
     }
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     auto c = argv[1];
     if (c.empty()) {
         return call.wrong_arity();
@@ -1098,8 +1104,8 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
     if (argv.size() != 4) {
         return call.wrong_arity();
     }
-    auto t = call.kspace()->get(argv[1]);
-    storage_release release(t);
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
     auto c = argv[1];
     if (c.empty()) {
         return call.wrong_arity();

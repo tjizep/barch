@@ -4,6 +4,7 @@
 
 #include "../external/include/valkeymodule.h"
 #include "configuration.h"
+#include "sharded_store.h"
 #include <cstdlib>
 #include <string>
 #include <regex>
@@ -847,11 +848,12 @@ static int SetOrderedKeys(std::string test_ordered_keys) {
     state().ordered_keys = test_ordered_keys;
     config().ordered_keys =
             state().ordered_keys == "on" || state().ordered_keys == "true" || state().ordered_keys == "yes";
-    for (auto s : get_default_ks()->get_shards()) {
+    barch::sharded_store store(get_default_ks());
+    store.each_shard([](const barch::shard_ptr& s) {
         if (!s)
             abort_with("invalid shard");
         s->opt_ordered_keys = config().ordered_keys;
-    }
+    });
     return VALKEYMODULE_OK;
 }
 static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
@@ -861,9 +863,8 @@ static int SetOrderedKeys(const char *unused_arg, ValkeyModuleString *val, void 
 }
 static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     get_default_ks()->opt_ordered_keys = config().ordered_keys;
-    for (auto s : get_default_ks()->get_shards()) {
-        s->opt_ordered_keys = config().ordered_keys;
-    }
+    barch::sharded_store store(get_default_ks());
+    store.each_shard([](const barch::shard_ptr& s) { s->opt_ordered_keys = config().ordered_keys; });
     return VALKEYMODULE_OK;
 }
 
@@ -971,9 +972,8 @@ static int SetEvictionType(const char *unused_arg, ValkeyModuleString *val, void
 static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
     std::lock_guard lock(state().config_mutex);
     bool lfu = (config().evict_volatile_lfu || config().evict_allkeys_lfu) ;
-    for (auto t : get_default_ks()->get_shards()) {
-        storage_release r(t);
-
+    barch::sharded_store store(get_default_ks());
+    store.each_shard_write([&](const barch::shard_ptr& t) {
         t->get_ap().get_nodes().set_opt_enable_lfu(lfu);
         t->get_ap().get_leaves().set_opt_enable_lfu(lfu);
         t->opt_evict_all_keys_lru = config().evict_allkeys_lru;
@@ -981,7 +981,7 @@ static int ApplyEvictionType(ValkeyModuleCtx *unused_arg, void *unused_arg, Valk
         t->opt_evict_all_keys_lfu = config().evict_allkeys_lfu;
         t->opt_evict_volatile_keys_lfu = config().evict_volatile_lfu;
         t->opt_evict_all_keys_random = config().evict_allkeys_random;
-    }
+    });
     return VALKEYMODULE_OK;
 }
 

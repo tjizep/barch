@@ -694,3 +694,124 @@ Measured: full suite green, 47 of 47.
 
 Still on the old idiom, see TODO 17 and 18: the other API files, and SCAN, whose cursor
 lives on the connection rather than in the store.
+
+
+## 17. Remaining API files converted onto the sharding layer [01-08-2026]
+
+hash_api, list_api, ordered_api, barch.cpp and configuration.cpp now go through
+`barch::sharded_store` as keys_api already did. What the layer needed on top of entry
+16 fell into three shapes, and the shapes are the interesting part.
+
+**Containers.** A hash, ordered set or list keeps every member on the shard that owns
+the container key, because a member key is a composite built from it. So these commands
+route once, by the container, and then do many member operations under one lock -
+exactly `with_key_write`, and now also spelled `with_container_write` so the invariant
+is named where it is relied on. One thing that had to be preserved carefully: routing
+uses the raw container bytes, not the composite, and if a converted site had started
+routing on the composite instead the members would have scattered to a different shard
+and the data would have been silently lost.
+
+**Held locks.** Several commands cannot take a callback scope, because the lock has to
+span a whole function with several exits - `bpop` registers a blocking callback before
+it returns. So the layer also hands out guards: `lock_key_write`, `lock_space_write`,
+and `write_locked(key)`, which returns the routed shard and a lock on it together and
+dereferences to the shard. That last one is what made the twenty ordered_api sites a
+two line change each with the bodies untouched, rather than twenty lambda wrappings
+with early returns to unpick. Given how entry 16 went, the safer mechanical route was
+worth choosing deliberately.
+
+**Whole space.** `each_shard`, `each_shard_write`, `each_shard_read` and
+`each_shard_parallel` cover the per shard lifecycle operations - begin/commit/rollback,
+clear, pull, load, save, and applying configuration. The lock is named at the call
+site, so the choice is visible rather than implied by which of three RAII types
+somebody happened to write.
+
+A real bug found on the way: **HDEL and HGETDEL took no lock at all.** Both re-routed
+per member - `call.kspace()->get(argv[1])->remove(key, del_report)` inside the loop -
+with no `storage_release` anywhere in the function, so the removes ran unsynchronised
+against concurrent readers, on a shard other commands were locking properly. Both now
+route once and hold a write lock, as HSET always did. This is the kind of thing the
+layer exists to stop: the lock was not forgotten so much as invisible, because nothing
+about `kspace()->get(k)->remove(...)` suggests a lock is missing.
+
+Two deliberate behaviour changes, both bounded:
+
+  - `each_shard_parallel` uses `shard_thread_processor`, the project's own bounded
+    helper, so LOAD and RELOAD no longer spawn one thread per shard. On a default space
+    that was 347 threads. SAVE already used it.
+  - `is_avalanching` moved in entry 14 is unrelated; nothing else changed shape.
+
+Not converted, and why: `swig_api.cpp` deliberately drives shard 0 for a benchmark, and
+key space administration locks two spaces at once, which a single space layer does not
+model - see TODO 20.
+
+Measured: full suite green, 47 of 47.
+
+## 18. SCAN cursor split between the connection and the store [01-08-2026]
+
+The question left open in entry 16 was where a scan cursor belongs, given it was a
+`struct iteration` living in caller.h while holding a key space pointer and a vector of
+shards. The answer turned out to be that the two halves belong in different places, and
+trying to put the whole thing in one was what made it awkward:
+
+  - **the lifetime is the connection's.** A scan spans commands, so something must hold
+    the cursor between them, and how many a connection may keep open, what they cost,
+    and when they are dropped is connection level accounting - `max_scan_iterators`,
+    CLIENT INFO's iters and iters-mem, CLIENT CLEAR_ITERS. `caller` still owns the
+    collection.
+  - **the content is sharding state.** Which shards remain, which page of the current
+    one, the copy of that page being walked, and the rule that a key from a pull source
+    is only emitted when the shard shadowing it has none of its own. Only the store
+    should know any of that.
+
+So `barch::scan_cursor` is defined with the layer, `caller` stores
+`shared_ptr<scan_cursor>` and never looks inside one, and `sharded_store::open_scan`
+and `sharded_store::scan` do the walking. `push_page`, which was a 60 line static in
+keys_api.cpp reaching into both the caller and the shards, is now `scan_page` inside
+the layer with no knowledge of replies at all - it takes a callback that returns false
+to stop.
+
+SCAN itself is now about thirty lines: get or create a cursor, enforce the per
+connection limit, walk, and drop the cursor when the walk reports it is finished. The
+cursor's own memory accounting moved onto `scan_cursor::memory()`, so caller's
+`iteration_memory` no longer has to know that a cursor contains a page buffer and a
+shard list.
+
+This was the first real exercise of the "may function in a stateful manner later"
+requirement from entry 16, and it is the shape that requirement was pointing at: state
+that outlives one call, held by whoever owns the session, interpreted only by the layer.
+
+Measured: full suite green, 47 of 47.
+
+
+## 19. SIZE and HEAPBYTES relaxed to read locks [01-08-2026]
+
+Carried over from entry 17, where the write locks were preserved on purpose so that the
+sharding conversion changed no locking. Changed here on its own.
+
+Both commands only read counters:
+
+  - `SIZE` sums `shard::get_size()`, which is const and adds `h.size()`, the tree size
+    and the source's size, then subtracts the tombstone count.
+  - `HEAPBYTES` sums `get_bytes_allocated()` off each allocator, also const.
+
+Neither writes anything, so `storage_release`'s unique lock was giving them exclusive
+access to shards they only ever looked at, and blocking every concurrent reader while
+they walked all 347 of them.
+
+The detail that makes this safe rather than merely plausible: `get_size()` recurses into
+`dependencies->get_size()`, so it reads the source chain as well as the shard, and a
+lock covering only the shard would not be enough. `read_lock` already walks
+`t->sources()` and takes each one shared before locking the shard itself - the same
+chain `storage_release` was locking shared, since it only upgraded the shard at the end.
+So the source coverage is unchanged and only the shard's own lock is weakened, which is
+exactly the intended change.
+
+`each_shard_write` now has a single caller left, `ApplyEvictionType`, which really does
+write shard options.
+
+Noted but not changed: `SIZEALL` reads the same counters through `barch::all_shards`
+with no lock at all. That is a cross space walk rather than a single space one, so it
+belongs with the cross space question in TODO 20 rather than here.
+
+Measured: full suite green, 47 of 47.

@@ -25,23 +25,25 @@
 
 13. [Done] Same defect as entry 12, diagnosed there [26-07-2026] Nr 12
 
+
 14. [Done] The filtered key borrowed a shared per thread buffer [01-08-2026] Nr 14
 
 15. [Done] The hash set looked keys up through a thread_local side channel [01-08-2026] Nr 13
 
 16. [Done] The lower bound trace was read back out of a thread_local [01-08-2026] Nr 15
 
-17. The sharding layer covers keys_api.cpp only. hash_api, list_api, ordered_api,
-    barch.cpp and configuration.cpp still route and lock at the call site, so two
-    idioms are live at once. Convert them onto barch::sharded_store, adding whatever
-    operations they need that keys did not (the ordered set and hash commands work on
-    a container key rather than a bare key, so they may want a container flavoured
-    accessor rather than the bare with_key_write escape hatch).
+17. [Done] Remaining API files converted onto the sharding layer [01-08-2026] Nr 17
 
-18. SCAN is the one keys command still holding shards directly, because its cursor
-    lives in caller::iteration_ptr, which belongs to the connection rather than to the
-    store. Moving it is the first real test of the stateful design: sharded_store would
-    have to own the cursor, which is what the class was shaped for. Settle whether the
-    cursor belongs to the store, to the caller, or to something new that owns both.
+18. [Done] SCAN cursor split between the connection and the store [01-08-2026] Nr 18
 
 19. [Done] Sharding layer defined and keys_api converted onto it [01-08-2026] Nr 16
+
+20. Key space administration - KSPACE DEPENDS / MERGE / RELEASE - locks two key spaces
+    at once, in a hand chosen order, and sharded_store models a single space. Decide
+    whether a cross space lock ordering belongs in the layer (a free function taking
+    two stores, say) or stays where it is. Nothing is known to be wrong today; the
+    concern is that the ordering rule that avoids deadlock is written out at each site
+    rather than in one place. `barch::all_shards`, which walks every space, is the
+    same question.
+
+21. [Done] SIZE and HEAPBYTES relaxed to read locks [01-08-2026] Nr 19

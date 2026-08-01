@@ -279,8 +279,8 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
         return call.key_check_error(k);
 
     auto converted = conversion::as_composite(k);
-    auto t = call.kspace()->get(converted.get_value());
-    storage_release release(t);
+    barch::sharded_store store(call.kspace());
+    auto t = store.write_locked(converted.get_value());
     int r = -1;
     double l = 0;
     auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
@@ -562,66 +562,6 @@ int GET(caller& call, const arg_t& argv) {
     });
     return found ? r : call.push_null();
 }
-static void push_page(caller& call, const barch::shard_ptr& shard, const art::scan_spec &spec, caller::iteration_ptr iteration) {
-    if (!shard) throw_exception<std::runtime_error>("null shard");
-
-    barch::shard_ptr src = shard->sources();
-    barch::shard_ptr dest = iteration->space->get(shard->get_shard_number());
-    bool is_source =  shard == dest->sources();
-    read_lock release(is_source ? dest : nullptr);
-    if (is_source && !dest) throw_exception<std::runtime_error>("push_key: dest not found");
-
-    auto push_key = [&](const art::leaf* l) {
-        if (is_source) {
-            if (!dest->is_present(l->get_key())) {
-                call.push_encoded_key(l->get_key());
-            }
-        }else {
-            call.push_encoded_key(l->get_key());// it throws so it's ok
-        }
-    };
-
-    auto update_iter = [&](const art::leaf* l, uint32_t pos) {
-        iteration->pos = pos + l->next_leaf();
-        if (call.results_count() >= spec.count) {
-            return false;
-        }
-        return true;
-    };
-
-    if (iteration->pos < iteration->bytes && iteration->page > 0) {
-        if (spec.is_match) {
-            std::string tmp;
-            art::page_iterator_ptr(iteration->buffer.data(), iteration->buffer.size(), [&](const art::leaf *l, uint32_t pos) -> bool {
-                if (l->is_tomb()||l->expired()) return true;
-                art::value_type td;
-                if (art::tstring == *l->key())
-                {
-                    td = l->get_clean_key();
-                    // get_clean_key steps over the leading type byte but keeps the stored
-                    // length, so the trailing terminator is still on the end - leaving it
-                    // there stops any pattern anchored at the end of the key from matching
-                    if (td.size) --td.size;
-                }else {
-                    tmp = encoded_key_as_string(l->get_key());
-                    td = tmp;
-                }
-
-                if (1 == glob::stringmatchlen(spec.glob_expr, td, 0)) {
-                    push_key(l);
-                }
-                return update_iter(l, pos);
-             },iteration->pos);
-        }else {
-            art::page_iterator_ptr(iteration->buffer.data(), iteration->buffer.size(), [&](const art::leaf *l, uint32_t pos) -> bool {
-                if (l->is_tomb()||l->expired()) return true;
-                push_key(l);
-                return update_iter(l, pos);
-            },iteration->pos);
-        }
-    }
-}
-
 /* B.SCAN <key>
  *
  * Return the next key in semi-allocation order, or a null reply if the key
@@ -631,72 +571,34 @@ int SCAN(caller& call, const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
     }
-    // an iteration is dropped when the scan runs out of shards, so one that is followed
-    // to the end costs nothing. An abandoned one stays until the connection closes, and
-    // it holds a page buffer, so a connection is only allowed so many at a time -
+    barch::sharded_store store(call.kspace());
+    // a cursor is dropped when the scan runs out of shards, so one that is followed to
+    // the end costs nothing. An abandoned one stays until the connection closes, and it
+    // holds a page buffer, so a connection is only allowed so many at a time -
     // max_scan_iterators, which CLIENT INFO reports against as iters and iters-mem, and
     // CLIENT CLEAR_ITERS lets a client reclaim
     auto id = spec.scan_id;
-    auto iteration = call.get_iteration(id);
-    if (!iteration) {
+    auto cursor = call.get_iteration(id);
+    if (!cursor) {
         auto max_iterations = barch::get_max_scan_iterators();
         if (max_iterations && call.iteration_count() >= max_iterations) {
             return call.push_error("too many open SCAN cursors, finish one or use CLIENT CLEAR_ITERS");
         }
-        iteration = call.create_iteration();
-        auto space = call.kspace();
-        iteration->space = space;
-        for (size_t i = 0; i < space->get_shard_count(); ++i) {
-            auto s = space->get(i);
-            iteration->shards.push_back(s);
-            if (s->sources()) {
-                iteration->shards.push_back(s->sources());
-            }
-        }
-        if (space->source() && iteration->shards.size() != 2*space->get_shard_count()) {
+        cursor = call.create_iteration();
+        if (!store.open_scan(*cursor)) {
             return call.push_error("invalid shard count");
         }
-
     }
-    call.push_string(std::to_string(iteration->id));
+    call.push_string(std::to_string(cursor->id));
     call.start_array();
-    for (; !iteration->shards.empty();) {
-        auto t = iteration->shards.back();
-
-        if (t->get_size() == 0) {
-            iteration->page = 0;
-            iteration->shards.pop_back();
-            continue;
-        }
-
-        iteration->shard = t->get_shard_number();
-        do {
-            if (iteration->bytes == 0) {
-                iteration->buffer.clear();
-                read_lock release(t);
-                iteration->bytes = t->page(iteration->page, iteration->buffer);
-                iteration->pos = 0;
-            }
-            push_page(call, t, spec, iteration);
-            if (call.results_count() >= spec.count) {
-                // todo: if we're exactly on max_count and there are no more pages then there will be one additional call
-                call.end_array();
-                return call.ok();
-            }
-            iteration->page = t->next_page(iteration->page);
-            iteration->pos = 0;
-            iteration->bytes = 0;
-            iteration->buffer.clear();
-        } while (iteration->page > 0);
-
-        iteration->shards.pop_back();
-    }
-
-    if (iteration->shards.empty()) {
-        call.erase_iteration(iteration->id);
-        call.end_array();
+    bool complete = store.scan(*cursor, spec, [&](art::value_type key) -> bool {
+        call.push_encoded_key(key); // it throws so it's ok
+        return call.results_count() < spec.count;
+    });
+    call.end_array();
+    if (complete) {
+        call.erase_iteration(cursor->id);
         call.set_string(0, "0");
-        return call.ok();
     }
     return call.ok();
 }

@@ -25,15 +25,8 @@
 
 13. [Done] Same defect as entry 12, diagnosed there [26-07-2026] Nr 12
 
-14. `tree_filter_key` hands back a `value_type` that points into a per thread
-    `temp_key` buffer, so a filtered key is only valid until the next call on that
-    thread. `shard::remove` holds one across `dependencies->search(key)`, which calls
-    the filter again. It is currently harmless because the first call already appended
-    the null terminator, so the second finds nothing to copy and leaves the buffer
-    alone - but that is an invariant nobody states and nothing checks. Settle it by
-    either documenting the invariant at `s_filter_key` and asserting it, or by giving
-    the three `filter_key` callers in shard.cpp their own local buffer via the
-    `s_filter_key(std::string&, value_type)` overload they already have available
-    (`opt_rpc_insert` already does exactly this).
+14. [Done] The filtered key borrowed a shared per thread buffer [01-08-2026] Nr 14
 
 15. [Done] The hash set looked keys up through a thread_local side channel [01-08-2026] Nr 13
+
+16. [Done] The lower bound trace was read back out of a thread_local [01-08-2026] Nr 15

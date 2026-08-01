@@ -93,6 +93,9 @@ namespace barch {
         hk_hash(query_pair& q):q(&q){}
         query_pair* q{};
         using is_transparent = void; // hash and eq agree, so heterogeneous lookup is allowed
+        // wyhash output is already avalanched, so tell ankerl not to re-mix it. this
+        // belonged on the hash, not on hk_eq where it was declared and never read
+        using is_avalanching = void;
         size_t operator()(const hashed_key& k) const {
             if (q == nullptr) {
                 abort_with("no query pair");
@@ -131,7 +134,6 @@ namespace barch {
             }
             return l.key == r.get_key(*q);
         }
-        using is_avalanching = void; // for ankerl hash
     };
     // there's a chance of false sharing so we align them on cache page boundaries alignas(con_alignment)
     struct shard : public abstract_shard, public art::tree{
@@ -234,7 +236,6 @@ namespace barch {
         barch::latch_t& get_latch() override {
             return latch;
         }
-        art::value_type filter_key(value_type key) const final;
         node_ptr make_leaf(value_type key, value_type v, key_options opts ) final;
         art::node_ptr make_leaf(value_type key, value_type v, leaf::ExpiryType ttl , bool is_volatile, bool is_compressed ) final;
 

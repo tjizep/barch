@@ -771,7 +771,10 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         throw_exception<std::runtime_error>("could not update key because of low memory");
         return false;
     }
-    auto key = filter_key(unfiltered_key);
+    // own the filtered bytes: the updater is caller supplied and the ordered path
+    // below re-enters the tree, either of which could otherwise reuse a shared buffer
+    std::string kbuf;
+    auto key = s_filter_key(kbuf, unfiltered_key);
     auto repl_updateresult = [&](const node_ptr &leaf) {
         auto value = updater(leaf);
         if (value.null()) {
@@ -839,7 +842,8 @@ bool barch::shard::evict(const leaf* l) {
 bool barch::shard::evict(value_type unfiltered_key) {
     size_t before = size;
 
-    auto key = filter_key(unfiltered_key);
+    std::string kbuf;
+    auto key = s_filter_key(kbuf, unfiltered_key);
     node_ptr old = from_unordered_set(key);
     if (!old.null()) {
         auto n = old;
@@ -867,7 +871,10 @@ bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     ++deletes;
     size_t before = size;
-    auto key = filter_key(unfiltered_key);
+    // this one matters most: key stays live across dependencies->search(key), which
+    // filters again, and is still used afterwards by h.erase and the tree paths
+    std::string kbuf;
+    auto key = s_filter_key(kbuf, unfiltered_key);
     node_ptr old = from_unordered_set(key);
     if (!old.null()) {
         if (dependencies) {
@@ -921,9 +928,6 @@ int barch::shard::range(art::value_type unused(key), art::value_type unused(key_
     //return art::range(this, key, key_end, cb);
     return -1;
 }
-art::value_type barch::shard::filter_key(value_type key) const {
-    return tree_filter_key(key);
-}
 node_ptr barch::shard::make_leaf(value_type key, value_type v, key_options opts ) {
     return tree_make_leaf(key, v, opts);
 }
@@ -976,7 +980,8 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, c
 }
 
 bool barch::shard::is_present(value_type unfiltered_key) {
-    value_type key = this->filter_key(unfiltered_key);
+    std::string kbuf;
+    value_type key = s_filter_key(kbuf, unfiltered_key);
     if (!opt_ordered_keys) {
         auto n = from_unordered_set(key);
         return !n.null();
@@ -988,7 +993,8 @@ bool barch::shard::is_present(value_type unfiltered_key) {
 
 
 art::node_ptr barch::shard::search(value_type unfiltered_key) {
-    value_type key = this->filter_key(unfiltered_key);
+    std::string kbuf;
+    value_type key = s_filter_key(kbuf, unfiltered_key);
 
     if (!opt_ordered_keys) {
         auto n = from_unordered_set(key);

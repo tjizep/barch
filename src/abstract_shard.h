@@ -180,7 +180,6 @@ namespace barch {
         virtual art::node_ptr get_last_leaf_added() const = 0;
         virtual art::node_ptr make_leaf(art::value_type key, art::value_type v, art::key_options opts) = 0;
         virtual art::node_ptr make_leaf(art::value_type key, art::value_type v, art::leaf::ExpiryType ttl , bool is_volatile , bool is_compressed ) = 0;
-        virtual art::value_type filter_key(art::value_type) const = 0;
         virtual art::node_ptr get_root() const = 0;
         virtual art::node_ptr first() const = 0 ; // can return nullptr
         virtual size_t page(size_t page, heap::vector<uint8_t>&) const = 0;

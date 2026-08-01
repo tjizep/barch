@@ -104,7 +104,6 @@ namespace art {
         node_ptr last_leaf_added{};
         uint64_t tomb_stones {};
         void update_trace(int direction);
-        value_type tree_filter_key(value_type key) const;
         void clear_trace() {
             if (opt_use_trace)
                 trace.clear();
@@ -250,16 +249,21 @@ namespace art {
      * @return the lower bound or NULL if there is no value not less than key
      */
 
+    /**
+     * find the lower bound, discarding the trace taken to get there. use this when
+     * only the leaf is wanted - the trace is not retained anywhere a caller can reach,
+     * deliberately, because a trace only describes the tree as it stood during this
+     * call and goes stale the moment anything else walks or modifies it.
+     */
     node_ptr lower_bound(const art::tree *t, value_type key);
-    node_ptr lower_bound(trace_list& trace, const art::tree *t, value_type key);
-
 
     /**
-     *  gets the thread local trace list for the last lb operation
-     *  it can be used to navigate from there
-     * @return the trace list for the last lb operation
+     * the same, but the caller supplies the trace and therefore owns it. use this
+     * whenever the trace is needed after the call - notably when it will be used to
+     * rewrite the path, as art::update does - so that its lifetime is visible and
+     * nothing else can refill it underneath.
      */
-    trace_list& get_tlb();
+    node_ptr lower_bound(trace_list& trace, const art::tree *t, value_type key);
 }
 
 /**
@@ -331,7 +335,19 @@ namespace art {
 
     /**
      * filter a key - may throw if key is malformed
-     * @param temp_key
+     *
+     * an art key carries its null terminator. if the caller's key already does, it is
+     * returned untouched and temp_key is not written; if it does not, the terminated
+     * copy is put in temp_key and the result points into it.
+     *
+     * so the result borrows from temp_key, and is only valid while temp_key is alive
+     * and unmodified. give every call its own buffer - usually a local, which costs
+     * nothing in the common case because a terminated key is never copied. sharing one
+     * buffer between calls is what makes a filtered key go stale underneath its holder,
+     * and a caller that holds one across anything re-entrant (a dependency lookup, a
+     * supplied callback) would then be reading someone else's key. see DONE 14.
+     *
+     * @param temp_key storage for the terminated copy, when one is needed
      * @param key
      * @return the reconditioned key that will be compatible with an art
      */

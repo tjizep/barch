@@ -517,5 +517,115 @@ Measured: no behaviour change intended and none seen - the 31 tests that run wit
 external valkey server all pass. The 16 that need one on 127.0.0.1:7777 fail the same
 way before and after, which was confirmed against a stashed tree.
 
-Not fixed, see TODO 14: `art::tree::tree_filter_key` returns a `value_type` pointing
-into a `thread_local std::string temp_key`, which is the same hazard one layer down.
+The same hazard one layer down, in `tree_filter_key`, is entry 14.
+
+
+## 14. The filtered key borrowed a shared per thread buffer [01-08-2026]
+
+Found while fixing entry 13, and it is the same shape: state that a value depends on,
+parked somewhere with a lifetime nobody declared.
+
+An art key has to carry its null terminator. `s_filter_key(std::string& temp_key,
+value_type key)` supplies one, and it is careful about it - if the key is already
+terminated it is returned untouched and no copy is made; only otherwise is a terminated
+copy written to `temp_key`, and the returned `value_type` then points into that buffer.
+The function itself is fine, and its buffer is a parameter precisely so the caller can
+decide where the storage lives.
+
+The convenience wrapper is what leaked. `art::tree::tree_filter_key` called it with a
+file scope `thread_local std::string temp_key`, so every filtered key on a thread
+pointed into one shared buffer. A filtered key was therefore valid only until the next
+`filter_key` anywhere on that thread. Nothing said so, and nothing checked.
+
+Six callers, of which `shard::remove` was actually exposed:
+
+    auto key = filter_key(unfiltered_key);
+    ...
+    auto dep = dependencies->search(key);   // filters again, same thread, same buffer
+    ...
+    h.erase(key_query{key});                // and key is still used here
+
+Why it had not bitten: `s_filter_key` only writes the buffer when it has to copy, and
+the first call had already produced a terminated key, so the second call took the early
+return and left the buffer alone. Correct, but by coincidence - it rests on an invariant
+about the *first* call that is nowhere stated, and any caller that filtered a different
+key in between would have broken it silently.
+
+Fixed by giving each caller its own buffer rather than by documenting the invariant.
+`opt_rpc_insert` already did exactly this with a local `std::string tk`, so this is the
+existing idiom, not a new one, and it is close to free: the common case is an already
+terminated key, where the local is never written and never allocates. The five other
+shard.cpp callers (`update`, `evict`, `remove`, `is_present`, `search`) and the
+`art::iterator` constructor now do the same.
+
+With no callers left, `tree_filter_key`, `shard::filter_key`, the pure virtual
+`abstract_shard::filter_key` and the `thread_local temp_key` are all gone. As with
+entry 13, deleting the convenient wrapper is what stops the hazard coming back: there
+is no longer an overload that hides where the storage came from, and `s_filter_key`'s
+one remaining form makes the caller name the buffer. The ownership rule is written out
+at its declaration.
+
+Also folded in here: `is_avalanching` was declared on `hk_eq`, where ankerl never reads
+it, instead of on `hk_hash`, where it suppresses a redundant re-mix of already
+avalanched wyhash output. Moved. This changes bucket layout, which is harmless because
+`h` is rebuilt from the leaves on load and no hash value is ever persisted.
+
+Measured: the full suite passes, 47 of 47. The 16 tests that need a valkey server were
+failing for an unrelated reason - a `dump.rdb` left in the build directory from April,
+written in RDB format version 80, which the valkey 8.1 the harness builds refuses with
+"Can't handle RDB format version 80", so the server exited before binding 7777 and
+every one of those tests reported the symptom as "connection refused". Moving the stale
+file aside was all that was needed; it is worth knowing that this failure presents as a
+port problem rather than as a load problem.
+
+
+## 15. The lower bound trace was read back out of a thread_local [01-08-2026]
+
+Third of the same family as entries 13 and 14, and the one with the worst failure mode.
+
+`art.cpp` kept a `thread_local art::trace_list tlb`, filled by `art_search` and by the
+one argument `art::lower_bound`. For those two it is legitimate: the trace describes the
+path walked to reach a leaf, they discard it as soon as they return, and per thread
+storage means concurrent readers under a shared lock do not collide while still reusing
+capacity on a very hot path.
+
+What broke the arrangement was `art::get_tlb()`, which handed the buffer back out. Only
+one caller used it, and it used it like an out parameter from the previous call:
+
+    art::node_ptr n = lower_bound(t, key);   // fills tlb
+    auto &trace = get_tlb();                 // aliases tlb
+    ...
+    node_ptr new_leaf = updater(n);          // caller supplied, may walk the tree
+    zip_update(trace.rbegin(), trace.rend(), new_leaf);
+
+`trace` is a reference into the shared buffer, taken before `updater` runs and used
+after it. `updater` comes from outside art - `shard::update` passes one through from its
+own caller. Any lookup inside it refills `tlb`, and `zip_update` then walks a trace
+belonging to a different key, rewriting parent pointers along a path that has nothing to
+do with the leaf being replaced. Entries 13 and 14 could return a wrong answer; this one
+corrupts the tree, and would surface later and far away.
+
+The tempting fix - move the buffer onto `art::tree`, where a trace member already exists
+- is the wrong direction. A `tree` is shared between threads, so readers that the
+thread_local currently keeps apart would start racing on it. The buffer wants to stay per
+thread; the read back is the part that has to go.
+
+So `art::update` now declares its own `trace_list` and uses the two argument
+`art::lower_bound(trace, t, key)` overload, which already existed for exactly this
+purpose. Its lifetime is a local, visible at the point of use, and nothing can refill it.
+`get_tlb` is deleted, the buffer is now `static thread_local scratch_trace` and private
+to art.cpp, and both overloads of `lower_bound` say in the header which one to reach for
+and why.
+
+Two details worth recording. The one argument `lower_bound` counts `statistics::lb_ops`
+and the two argument one does not, so `update` now counts it explicitly and the stat is
+unchanged. And `update` already had its own try/catch, so dropping the inner one costs
+nothing - an exception from the walk is still logged once and still returns false.
+
+Taken together, 13, 14 and 15 were the same mistake three times: a value whose backing
+store lived in a thread_local that something else was free to overwrite. The fix each
+time was not to document the rule but to delete the accessor that hid it, so the storage
+has to be named at the call site. Each removal turned every affected caller into a
+compile error until it was rewritten, which is what makes them stay fixed.
+
+Measured: full suite green, 47 of 47.

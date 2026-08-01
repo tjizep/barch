@@ -166,7 +166,12 @@ static bool extend_trace_max
  * the value pointer is returned.
  *
  */
-thread_local art::trace_list tlb{};
+/* scratch for the lower bound calls that throw their trace away. per thread, so
+ * concurrent readers under a shared lock do not collide, and reused so the hot path
+ * does not reallocate. it must stay private to this file: it is only safe because
+ * nothing here lets a trace escape the call that filled it. a caller that needs the
+ * trace afterwards passes its own - see art::lower_bound's two arg overload. */
+static thread_local art::trace_list scratch_trace{};
 static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key);
 art::node_ptr art_search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
@@ -175,8 +180,8 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
             abort_with("invalid root node");
         }
         art::node_ptr al ;
-        tlb.clear();
-        al = inner_lower_bound(tlb, t, key);
+        scratch_trace.clear();
+        al = inner_lower_bound(scratch_trace, t, key);
         if (!al.null() && al.const_leaf()->get_key() == key) {
             ++statistics::keys_found;
             return al;
@@ -212,9 +217,15 @@ bool art::update(tree *t, value_type key,
     const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     ++statistics::update_ops;
     try {
-        art::node_ptr n = lower_bound(t, key);
+        // the trace is owned here, not read back out of the shared scratch buffer.
+        // it has to survive updater(n) below, and updater is caller supplied - if it
+        // touches any key on this thread it would refill a shared buffer, and
+        // zip_update would then rewrite parent pointers along a trace belonging to
+        // someone else's key. that corrupts the tree rather than just answering wrong
+        trace_list trace;
+        ++statistics::lb_ops;
+        art::node_ptr n = lower_bound(trace, t, key);
         if (!n.is_leaf || n.const_leaf()->get_key() != key) return false;
-        auto &trace = get_tlb();
 
         if (n.is_leaf) {
             const art::leaf *l = n.const_leaf();
@@ -477,9 +488,6 @@ static bool decrement_trace(const art::node_ptr &root, art::trace_list &trace) {
     trace.back() = decrement_te(last);
     return extend_trace_max(root, trace);
 }
-art::trace_list& art::get_tlb() {
-    return tlb;
-}
 art::node_ptr art::lower_bound(trace_list& trace, const art::tree *t, art::value_type key) {
     return inner_lower_bound(trace, t, key);
 }
@@ -488,8 +496,8 @@ art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
     try {
         node_ptr al;
 
-        tlb.clear();
-        al = inner_lower_bound(tlb, t, key);
+        scratch_trace.clear();
+        al = inner_lower_bound(scratch_trace, t, key);
         if (!al.null()) {
             return al;
         }
@@ -630,7 +638,8 @@ art::iterator::iterator(barch::shard_ptr t, value_type unfiltered_key) : t(t) {
     ++statistics::lb_ops;
     try {
         if (!t) return;
-        value_type key = t->filter_key(unfiltered_key);
+        std::string kbuf;
+        value_type key = s_filter_key(kbuf, unfiltered_key);
         auto lb = t->lower_bound(tl, key); //inner_min_bound(tl, t, key);
         if (lb.null()) return;
         const art::leaf *al = lb.const_leaf();
@@ -1543,10 +1552,6 @@ art::value_type art::s_filter_key(std::string& temp_key, value_type key) {
 
     return key;
 }
-thread_local std::string temp_key{};
-art::value_type art::tree::tree_filter_key(value_type key) const {
-    return s_filter_key(temp_key, key);
-}
 
 void art::tree::update_trace(int direction) {
 #if 1
@@ -1701,6 +1706,5 @@ static void log_trace(const art::tree* t , const std::string& name, const art::t
     barch::std_log("=====-end tree trace-======");
 }
 void art::tree::log_trace() const {
-    ::log_trace(this, "tlb", tlb);
     ::log_trace(this, "trace", trace);
 }

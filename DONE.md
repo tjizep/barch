@@ -454,3 +454,68 @@ the first round with `GET s:00000 answered b'v1'` and 18 parser errors in the lo
 the fix it passes, and so does the reproducer that started this - a load after sixteen
 globs goes from 301.5s and ten parser errors to 0.0s and none.
 
+
+## 13. The hash set looked keys up through a thread_local side channel [01-08-2026]
+
+`barch::hashed_key` stores nothing but a 4 byte logical address; the key bytes live in
+the leaf at that address. That is what keeps the index small relative to the data it
+indexes, but it left no way to express "find the key with *these* bytes", because a
+`hashed_key` for a key that is not stored yet has no address to point at.
+
+The way out taken at the time was a sentinel. `hashed_key(value_type)` built an entry
+with `addr == 0`, the bytes were parked in a file scope `thread_local value_type
+query_key` by `set_hash_query_context`, and `hashed_key::get_key` returned `query_key`
+whenever `addr` was zero. Every lookup was therefore two statements that had to stay
+adjacent and in order:
+
+    set_hash_query_context(key);
+    auto i = h.find(key);
+
+The reason it was done that way is real and still holds: the obvious alternative is to
+materialise a temporary leaf so the query has an address, and that means allocating in
+the logical allocator. Read only queries run concurrently under a shared lock, so they
+cannot touch the allocator at all. The thread_local avoided the allocation.
+
+What it cost was safety. `query_key` is one variable per thread shared by every shard,
+so its lifetime is "until something else on this thread sets it". Anything that ran
+between the two statements above - a callback, an iteration, a `dependencies->search()`
+into another shard - would silently repoint the query, and the `find` would then be
+asking about the wrong bytes. Nothing enforced the pairing, and nothing would have
+diagnosed a violation: the lookup would just return the wrong answer, or no answer.
+`shard::remove` already had such an interleaving (`dependencies->search(key)` sits
+between the two), and only escaped because the dependency happened to be searched with
+the same bytes.
+
+The fix is the one art already uses. `art_search` carries the caller's key down the
+tree and stores nothing, so it has no such problem; the hash set can be given the same
+property by making a lookup a *different type* from a stored entry rather than a
+crippled instance of one:
+
+  - `barch::key_query` holds the caller's `value_type` plus the hash of those bytes,
+    taken once up front. It is never stored in the set, needs no address, and so never
+    needs the allocator.
+  - `hk_hash` and `hk_eq` gained overloads for it and declare `is_transparent`, which
+    is also what turns on ankerl's heterogeneous lookup for the overflow table.
+  - `oh::unordered_set`'s `find`, `erase` and `contains` are templated on the query
+    type, so both halves of the double hash accept it. The pointer overloads of
+    `erase`/`remove` are SFINAE'd out of the template, or they would lose overload
+    resolution to it.
+  - `set_hash_query_context`, `query_key` and `hashed_key(value_type)` are gone.
+
+Removing the implicit `hashed_key(value_type)` constructor is what makes this stick.
+It was the conversion that let `h.find(key)` compile while quietly depending on state
+set elsewhere; without it every one of the eight call sites became a compile error
+until it was rewritten as `h.find(key_query{key})`. A future call site that forgets
+cannot compile either.
+
+`hashed_key::get_key` still tolerates `addr == 0`, but now returns an empty
+`value_type` rather than borrowed state. Address zero is only ever what a slot vacated
+by `remove` holds, those slots are guarded by `has[]`, and an empty key matches nothing
+because a filtered key always carries its null terminator and so has size >= 1.
+
+Measured: no behaviour change intended and none seen - the 31 tests that run without an
+external valkey server all pass. The 16 that need one on 127.0.0.1:7777 fail the same
+way before and after, which was confirmed against a stashed tree.
+
+Not fixed, see TODO 14: `art::tree::tree_filter_key` returns a `value_type` pointing
+into a `thread_local std::string temp_key`, which is the same hazard one layer down.

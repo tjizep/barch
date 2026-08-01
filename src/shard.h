@@ -23,6 +23,21 @@ namespace barch {
         abstract_leaf_pair * leaves{};
         //value_type key{};
     };
+    /**
+     * the one hash function the set agrees on, over raw key bytes. both a stored
+     * hashed_key (which has to fetch its bytes through a leaf) and a key_query
+     * (which already holds them) must run this, or a lookup will land in the
+     * wrong bucket.
+     */
+    inline size_t hash_key_bytes(value_type key) {
+        return ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
+    }
+
+    /**
+     * what the hash set stores: an address, and nothing else. the key bytes live
+     * in the leaf at that address and are fetched on demand, which is what keeps
+     * the index small relative to the data it indexes.
+     */
     struct hashed_key {
         // we can reduce memory use by setting this to uint32_t
         // but max database size is reduced to 128 gb
@@ -32,7 +47,6 @@ namespace barch {
         hashed_key() = default;
         hashed_key(const hashed_key&) = default;
         hashed_key& operator=(const hashed_key&) = default;
-        hashed_key(value_type) ;
 
         [[nodiscard]] const leaf* get_leaf(const query_pair& q) const;
         [[nodiscard]] value_type get_key(const query_pair& q) const;
@@ -45,22 +59,48 @@ namespace barch {
 
 
         [[nodiscard]] size_t hash(const query_pair& q) const {
-            auto key = get_key(q);
-            size_t r = ankerl::unordered_dense::detail::wyhash::hash(key.chars(), key.size);
-            return r;
+            return hash_key_bytes(get_key(q));
         }
     };
+
+    /**
+     * what a lookup is made of. it is a distinct type from hashed_key on purpose:
+     * a query is the caller's own bytes, is never stored in the set, and never
+     * needs an address, so it never needs the logical allocator either. that is
+     * what lets read only queries run concurrently under a shared lock - the same
+     * property art::search has, where the search walks the tree carrying nothing
+     * but the caller's key.
+     *
+     * the hash is taken once, up front, because the set will ask for it on every
+     * probe and the bytes cannot move underneath it during a single lookup.
+     *
+     * it borrows the bytes, so it must not outlive them, and in particular must
+     * not be held across a call that can re-enter the shard.
+     */
+    struct key_query {
+        value_type key{};
+        size_t h{};
+        key_query() = default;
+        key_query(const key_query&) = default;
+        key_query& operator=(const key_query&) = default;
+        explicit key_query(value_type k) : key(k), h(hash_key_bytes(k)) {}
+    };
+
     struct hk_hash{
         hk_hash() = default;
         hk_hash& operator=(const hk_hash&) = default;
         hk_hash(const hk_hash&) = default;
         hk_hash(query_pair& q):q(&q){}
         query_pair* q{};
+        using is_transparent = void; // hash and eq agree, so heterogeneous lookup is allowed
         size_t operator()(const hashed_key& k) const {
             if (q == nullptr) {
                 abort_with("no query pair");
             }
            return k.hash(*q);
+        }
+        size_t operator()(const key_query& k) const {
+            return k.h;
         }
 
     };
@@ -70,11 +110,26 @@ namespace barch {
         hk_eq(const hk_eq&) = default;
         hk_eq(query_pair& q):q(&q){}
         query_pair* q{};
-        size_t operator()(const hashed_key& l,const hashed_key& r) const {
+        using is_transparent = void;
+        bool operator()(const hashed_key& l,const hashed_key& r) const {
             if (q == nullptr) {
                 abort_with("no query pair");
             }
             return l.get_key(*q) == r.get_key(*q);
+        }
+        // both orders, because ankerl compares (query, stored) and the open
+        // addressed part of oh::unordered_set compares (stored, query)
+        bool operator()(const hashed_key& l,const key_query& r) const {
+            if (q == nullptr) {
+                abort_with("no query pair");
+            }
+            return l.get_key(*q) == r.key;
+        }
+        bool operator()(const key_query& l,const hashed_key& r) const {
+            if (q == nullptr) {
+                abort_with("no query pair");
+            }
+            return l.key == r.get_key(*q);
         }
         using is_avalanching = void; // for ankerl hash
     };
@@ -103,8 +158,6 @@ namespace barch {
             ++saf_get_ops;
             ++saf_keys_found;
         }
-        void set_hash_query_context(value_type q);
-        void set_hash_query_context(value_type q) const ;
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {
             return h.size();

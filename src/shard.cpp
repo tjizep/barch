@@ -216,38 +216,28 @@ barch::hashed_key::hashed_key(const logical_address& la) {
 
 }
 
-barch::hashed_key::hashed_key(value_type) {
-}
-
 const barch::leaf* barch::hashed_key::get_leaf(const query_pair& q) const {
+    if (!addr) return nullptr;
     node_ptr n = logical_address{addr, q.leaves};
     return n.is_leaf ? n.const_leaf() : nullptr;
 }
-thread_local value_type query_key;
 value_type barch::hashed_key::get_key(const query_pair& q) const {
-    if (!addr) {
-        //throw_exception<std::invalid_argument>("the address for the query is empty");
-        return query_key;
-    }
-    return get_leaf(q)->get_key();
+    // address 0 is never a live leaf: it is what a slot vacated by remove() holds.
+    // those slots are guarded by has[], so this is only reached defensively - and an
+    // empty key compares equal to nothing, since a filtered key always carries its
+    // null terminator and so has size >= 1.
+    auto l = get_leaf(q);
+    return l ? l->get_key() : value_type{};
 }
 
 void barch::shard::clear_hash() {
     h.clear();
 }
 
-void barch::shard::set_hash_query_context(value_type k) {
-    query_key = k;
-}
-void barch::shard::set_hash_query_context(value_type k) const {
-    query_key = k;
-}
-
 void barch::shard::remove_leaf(const logical_address& )  {
 }
 bool barch::shard::remove_leaf_from_uset(value_type key) {
-    set_hash_query_context(key);
-    auto i = h.find(key);
+    auto i = h.find(key_query{key});
     if (i != h.end()) {
         node_ptr old{logical_address(i->addr,this)};
         h.erase(i);
@@ -260,8 +250,7 @@ bool barch::shard::remove_leaf_from_uset(value_type key) {
 }
 
 art::node_ptr barch::shard::from_unordered_set(value_type key) const {
-    set_hash_query_context(key);
-    auto i = h.find(key);
+    auto i = h.find(key_query{key});
     if (i != h.end()) {
 
         inc_keys_found();
@@ -314,8 +303,7 @@ size_t barch::shard::page(size_t page, heap::vector<uint8_t>& buffer) const{
 }; // can return nullptr
 
 bool barch::shard::remove_from_unordered_set(value_type key) {
-    set_hash_query_context(key);
-    return h.erase(key) > 0;
+    return h.erase(key_query{key}) > 0;
 }
 
 
@@ -714,8 +702,7 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
     }
     ++inserts;
     ++statistics::insert_ops;
-    set_hash_query_context(key);
-    auto i = h.find(key);
+    auto i = h.find(key_query{key});
     if (i != h.end()) {
         if (update) {
             auto n = i->node(this);
@@ -792,8 +779,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         }
         return value;
     };
-    set_hash_query_context(key);
-    auto i = h.find(key);
+    auto i = h.find(key_query{key});
     if (!opt_ordered_keys){
         if (i != h.end()) {
 
@@ -830,8 +816,7 @@ bool barch::shard::evict(const leaf* l) {
     if (l->deleted()) return false;
     size_t before = size;
     if (l->is_hashed()) {
-        set_hash_query_context(l->get_key());
-        auto i = h.find(l->get_key());
+        auto i = h.find(key_query{l->get_key()});
         if (i != h.end()) { // we don't need to de-count delete ops here
             auto n = i->node(this);
             erase_tomb(n.l());
@@ -861,7 +846,7 @@ bool barch::shard::evict(value_type unfiltered_key) {
         leaf *dl = n.l();
         if (dl->is_hashed()) {
             erase_tomb(dl);
-            h.erase(key);
+            h.erase(key_query{key});
             n.free_from_storage();
             return true;
         }
@@ -904,7 +889,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         if (dl->is_hashed()) {
             fc(n);
             erase_tomb(dl);
-            h.erase(key);
+            h.erase(key_query{key});
             n.free_from_storage();
 
             return true;

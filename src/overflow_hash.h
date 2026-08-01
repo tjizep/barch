@@ -5,6 +5,7 @@
 #ifndef BARCH_DOUBLE_HASH_H
 #define BARCH_DOUBLE_HASH_H
 #include <cstdint>
+#include <type_traits>
 #include <functional>
 #include <vector>
 #include <sastam.h>
@@ -140,7 +141,14 @@ namespace oh {
                     remove(*k);
                 }
             }
-            size_t remove(const key_type &k) {
+            /**
+             * Q is either key_type or any query type the hash and the comparator
+             * both understand - see find(). pointers are excluded so that the
+             * remove(const key_type*) overload above still wins for them: it is a
+             * better match than this template only once pointers are off the table.
+             */
+            template<typename Q, std::enable_if_t<!std::is_pointer_v<Q>, bool> = true>
+            size_t remove(const Q &k) {
                 if (keys.empty()) { return 0; }
                 size_t pos = hash(k);
                 for (size_t i = 0; i < PROBES; ++i) {
@@ -165,7 +173,14 @@ namespace oh {
                 }
                 return false;
             }
-            K* find(const key_type &k) {
+            /**
+             * heterogeneous lookup. Q may be key_type, or any query type that the
+             * hash and the comparator both accept - so a caller can look a key up
+             * by the bytes it already holds, without having to build (and therefore
+             * without having to allocate storage for) a key_type first.
+             */
+            template<typename Q>
+            K* find(const Q &k) {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
                 size_t s = keys.size();
@@ -182,7 +197,8 @@ namespace oh {
                 }
                 return nullptr;
             }
-            const K* find(const key_type &k) const {
+            template<typename Q>
+            const K* find(const Q &k) const {
                 if (keys.empty()) { return nullptr; }
                 size_t pos = hash(k);
                 size_t s = keys.size();
@@ -253,7 +269,8 @@ namespace oh {
                 // use the max_load_factor or max_ratio to determine rehash
                 return size >= max_load_factor*keys.size() || size*max_leakage <= h2.size();
             }
-            bool contains(const key_type &k) const {
+            template<typename Q>
+            bool contains(const Q &k) const {
                 return find(k) != nullptr;
             }
             void clear() {
@@ -267,7 +284,8 @@ namespace oh {
         void rehash(data& from, data& to) {
             from.rehash(to);
         }
-        void check(const key_type& unused(k)) const {
+        template<typename Q>
+        void check(const Q& unused(k)) const {
 
         }
     public:
@@ -316,12 +334,14 @@ namespace oh {
             return r;
         }
 
-        K* find(const key_type &k) {
+        template<typename Q>
+        K* find(const Q &k) {
             check(k);
             auto r = d_.find(k);
             return r;
         }
-        const K* find(const key_type &k) const {
+        template<typename Q>
+        const K* find(const Q &k) const {
             check(k);
             auto r = d_.find(k);
             return r;
@@ -337,7 +357,8 @@ namespace oh {
             return n - d_.get_size();
         }
 
-        size_t erase(const key_type &k) {
+        template<typename Q, std::enable_if_t<!std::is_pointer_v<Q>, bool> = true>
+        size_t erase(const Q &k) {
             check(k);
             auto n = d_.get_size();
             d_.remove(k);

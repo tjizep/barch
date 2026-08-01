@@ -14,6 +14,7 @@
 #include <shared_mutex>
 
 #include "keys_api.h"
+#include "sharded_store.h"
 #include "barch_apis.h"
 #include "sastam.h"
 #include "value_type.h"
@@ -45,14 +46,9 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     if (argv.size() < 2)
         return call.wrong_arity();
     auto k = argv[1];
-    auto converted = conversion::as_composite(k);
-    auto t = call.kspace()->get(converted.get_value());
-    storage_release release(t);
-
-    art::key_spec spec;
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-
+    auto converted = conversion::as_composite(k);
 
     int r = -1;
     IntT l = IntT();
@@ -66,13 +62,18 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
         }
         return val;
     };
-    if (!t->update(converted.get_value(), updater)) {
-        l += by;
-        Variable s = l;
-        auto fc = [&](const art::node_ptr &) -> void {};
-        t->opt_insert({},converted.get_value(), {s.s()}, true, fc);
-        r = 0;
-    }
+    // update-or-create: the miss and the insert that follows it must not race, so
+    // both run under one write lock on the owning shard
+    barch::sharded_store store(call.kspace());
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        if (!t->update(converted.get_value(), updater)) {
+            l += by;
+            Variable s = l;
+            auto fc = [&](const art::node_ptr &) -> void {};
+            t->opt_insert({},converted.get_value(), {s.s()}, true, fc);
+            r = 0;
+        }
+    });
     if (r == 0) {
         return call.push_int(l);
     } else {
@@ -80,19 +81,6 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     }
 }
 
-/**
- * create a merged iterator from the shard and it's sources
- * @param shard abstract_shard that has the dependencies
- * @param lower the lower bound to start the iterators at
- * @return a merge iterator with 1 or more iterators
- */
-art::merge_iterator make_merged(const barch::shard_ptr& shard, art::value_type lower) {
-    auto s  = shard->sources();
-
-    art::merge_iterator m({art::iterator(shard,lower),art::iterator(s,lower)});
-
-    return m;
-}
 extern "C" {
 /* B.RANGE <startkey> <endkey> <count>
 *
@@ -101,7 +89,6 @@ extern "C" {
 
 int RANGE(caller& call, const arg_t& argv) {
 
-    int r = 0;
     if (argv.size() < 3 || argv.size() > 4)
         return call.wrong_arity();
 
@@ -120,76 +107,15 @@ int RANGE(caller& call, const arg_t& argv) {
 
     auto c1 = conversion::as_composite(k1);
     auto c2 = conversion::as_composite(k2);
-    /* Reply with the matching items. */
 
-    auto ks = call.kspace();
-    ks_shared kss(ks->source());
-    ks_shared ksl(ks);
-    auto collect = [&]() -> heap::std_vector<art::value_type>{
-        int64_t striation_counter = 0;
-        heap::std_vector<art::value_type> usorted;
-        heap::vector<art::merge_iterator> iters;
-        heap::unordered_set<size_t> active; // set must be ordered
-        for (const auto& shard : ks->get_shards()) {
-            // iterate the 'striations'
-            auto t = shard;
-            auto i = make_merged(t,c1.get_value());
-            if (i.ok()) {
-                active.insert(t->get_shard_number());
-            }
-            iters.push_back(i);
-        }
-        art::value_type list_max;
-        while (!active.empty()) {
-            bool has_first = false; // key in striation
-            for (auto shard : active) {
-                auto& i = iters[shard];
-                if (i.current().cl()->is_tomb()) {
-                    if (!i.next()) {
-                        active.erase(shard);
-                    }
-                }else {
-                    auto k = i.key();
-                    if (k >= c1.get_value() && k < c2.get_value()) {
-
-                        if (k > list_max) {
-                            if (!has_first) {
-                                // this may or may not increment striation counter - it's an optimization to get correct results quicker
-                                striation_counter = std::max<int64_t>(usorted.size(), striation_counter);
-                                has_first = true;
-                            }
-                            list_max = k;
-                        }
-                        usorted.push_back(k);
-                        if (!i.next()) {
-                            active.erase(shard);
-                        }
-                    }else {
-                        active.erase(shard);
-                    }
-                }
-            }
-
-            if (count > 0 && striation_counter >= count) {
-                // we can return early because we are certain the list contains the globally first count entries
-                // although the list is at most count*shard_count large
-                break;
-            }
-            ++striation_counter;
-        }
-        return usorted;
-    };
-    auto sorted = collect();
-    std::sort(sorted.begin(), sorted.end()); // sort must happen inside the lock
+    barch::sharded_store store(call.kspace());
     call.start_array();
-    for (auto&k : sorted) {
-        call.push_encoded_key(k);// TODO: replace this with streaming api to reduce memory
-        if (--count == 0) break;
-    }
+    // TODO: replace this with streaming api to reduce memory
+    store.range(c1.get_value(), c2.get_value(), count, [&](art::value_type k) {
+        call.push_encoded_key(k);
+    });
     call.end_array();
-
-    /* Cleanup. */
-    return r;
+    return 0;
 }
 int cmd_RANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
@@ -209,33 +135,11 @@ int COUNT(caller& call, const arg_t& argv) {
         return call.key_check_error(k1);
     if (key_ok(k2) != 0)
         return call.key_check_error(k2);
-    long long count = 0;
+
     auto c1 = conversion::as_composite(k1);
     auto c2 = conversion::as_composite(k2);
-    auto space_cnt = [c1,c2](const barch::key_space_ptr& spce, size_t shard)-> long long {
-        if (!spce) return 0;
-        long long count = 0;
-        auto t = spce->get(shard);
-        read_lock release(t);
-
-        art::iterator i(t,c1.get_value());
-        art::iterator j(t,c2.get_value());
-        if (i.ok() && !j.ok()) {
-            j.last(); // last key in the range
-            ++count;
-        }
-        if (i.ok() && j.ok()) {
-            auto c = i.fast_distance(j) ;
-            count += c; // they're all unique ?
-        }
-        return count;
-    };
-    auto s = call.kspace();
-    for (const auto& shard : s->get_shards()) {
-        count += space_cnt(s, shard->get_shard_number());
-        count += space_cnt(s->source(), shard->get_shard_number());
-    }
-    return call.push_int(count);
+    barch::sharded_store store(call.kspace());
+    return call.push_int(store.count(c1.get_value(), c2.get_value()));
 }
 int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
@@ -248,7 +152,7 @@ int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 *
 * match against all keys using a glob pattern
 * */
-int KEYS(caller& call, const arg_t& argv) {
+static int glob_command(caller& call, const arg_t& argv, bool by_value) {
 
     if (argv.size() < 2 || argv.size() > 4)
         return call.wrong_arity();
@@ -259,36 +163,32 @@ int KEYS(caller& call, const arg_t& argv) {
     }
     std::mutex vklock{};
     std::atomic<int64_t> replies = 0;
-    auto cpat = argv[1];
-    art::value_type pattern = cpat;
-    // this operation does not need to lock since pages are copied onto a working page
-    // before glob is processed (leaves are only valid within the callback since memory is reused)
+    art::value_type pattern = argv[1];
+    barch::sharded_store store(call.kspace());
+
     if (spec.count) {
-        auto ks = call.kspace();
-        for (const auto& shard : ks->get_shards()) {
-            shard->glob(spec, pattern, false, [&](const art::leaf & unused(l)) -> bool {
-                ++replies;
-                return true;
-            });
-        }
+        store.glob(spec, pattern, by_value, [&](const art::leaf& unused(l)) -> bool {
+            ++replies;
+            return true;
+        });
         return call.push_ll(replies);
-    } else {
-        /* Reply with the matching items. */
-        call.start_array();
-        auto ks = call.kspace();
-        for (const auto& shard : ks->get_shards()) {
-            shard->glob(spec, pattern, false, [&](const art::leaf &l) -> bool {
-                std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
-                if (0 != call.push_encoded_key(l.get_key())) {
-                    return false;
-                };
-                ++replies;
-                return true;
-            });
-        }
-        call.end_array();
     }
+    /* Reply with the matching items. */
+    call.start_array();
+    store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
+        std::lock_guard lk(vklock); // worker threads call in here concurrently
+        if (0 != call.push_encoded_key(l.get_key())) {
+            return false;
+        }
+        ++replies;
+        return true;
+    });
+    call.end_array();
     return call.ok();
+}
+
+int KEYS(caller& call, const arg_t& argv) {
+    return glob_command(call, argv, false);
 }
 int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -304,46 +204,7 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 * the number of matches.
 * */
 int VALUES(caller& call, const arg_t& argv) {
-
-    if (argv.size() < 2 || argv.size() > 4)
-        return call.wrong_arity();
-
-    art::keys_spec spec(argv);
-    if (spec.parse_keys_options() != call.ok()) {
-        return call.wrong_arity();
-    }
-    std::mutex vklock{};
-    std::atomic<int64_t> replies = 0;
-    auto cpat = argv[1];
-    art::value_type pattern = cpat;
-    if (spec.count) {
-        auto ks = call.kspace();
-        for (const auto& shard : ks->get_shards()) {
-            shard->glob(spec, pattern, true, [&](const art::leaf & unused(l)) -> bool {
-                ++replies;
-                return true;
-            });
-        }
-        return call.push_ll(replies);
-    } else {
-        /* Reply with the matching items. */
-        call.start_array();
-
-        auto ks = call.kspace();
-        for (const auto& shard : ks->get_shards()) {
-                shard->glob(spec, pattern, true, [&](const art::leaf &l) -> bool {
-                std::lock_guard lk(vklock); // because there's worker threads concurrently calling here
-                if (0 != call.push_encoded_key(l.get_key())) {
-                    return false;
-                };
-                ++replies;
-                return true;
-            });
-        }
-        call.end_array();
-
-    }
-    return call.ok();
+    return glob_command(call, argv, true);
 }
 int cmd_VALUES(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -365,7 +226,6 @@ int SET(caller& call,const arg_t& argv) {
     auto sp = call.kspace();
     auto converted = conversion::as_composite(k);
     auto key = converted.get_value();
-    auto t = sp->get(key);
     art::key_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.syntax_error();
@@ -387,8 +247,8 @@ int SET(caller& call,const arg_t& argv) {
         v = compressed;
     }
 
-    storage_release l(t);
-    t->opt_insert(opts, key, v, true, fc);
+    barch::sharded_store store(sp);
+    store.insert(opts, key, v, true, fc);
 
     if (spec.get) {
         if (reply.size) {
@@ -490,10 +350,12 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
         return call.key_check_error(k);
     long long r = v.size;
     auto converted = conversion::as_composite(k);
-    auto t = call.kspace()->get(converted.get_value());
-    storage_release release(t);
     auto fc = [&](art::node_ptr) -> void {
     };
+    // read-modify-write on one key: the whole body holds a single write lock
+    int reply = call.ok();
+    barch::sharded_store store(call.kspace());
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
     auto n = t->search(converted.get_value());
     if (n.is_leaf) {
         auto leaf = n.const_leaf();
@@ -529,21 +391,25 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
 #endif
 
         if (converted.get_value().size + v.size > maximum_allocation_size) {
-            return call.push_int(0);
+            reply = call.push_int(0);
+            return;
         }
 
         t->opt_insert( opts, converted.get_value(), v, true, fc);
+        reply = call.push_ll(r);
 
     }else {
         art::key_options options;
 
         if (!t->opt_insert(options, converted.get_value(), v, true, fc)) {
-            return call.push_error("key value not added");
+            reply = call.push_error("key value not added");
+            return;
         }
-
+        reply = call.push_ll(r);
 
     }
-    return call.push_ll(r);
+    });
+    return reply;
 }
 int APPEND(caller& call, const arg_t& argv) {
     return _APPEND(call, argv, false);
@@ -619,6 +485,7 @@ int MSET(caller& call, const arg_t& argv) {
     if (argv.size() < 3)
         return call.wrong_arity();
     int r = call.ok();
+    barch::sharded_store store(call.kspace());
     for (size_t n = 1; n < argv.size(); n += 2) {
         auto k = argv[n];
         auto v = argv[n + 1];
@@ -632,9 +499,10 @@ int MSET(caller& call, const arg_t& argv) {
         art::key_spec spec; //(argv, argc);
         auto fc = [&](art::node_ptr) -> void {
         };
-        auto t = call.kspace()->get(converted.get_value());
-        storage_release release(t);
-        t->insert( spec, converted.get_value(), v, true, fc);
+        // one lock per key, as before: MSET has never been atomic across keys
+        store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+            t->insert( spec, converted.get_value(), v, true, fc);
+        });
 
     }
 
@@ -659,11 +527,10 @@ int ADD(caller& call, const arg_t& argv) {
     auto fc = [](art::node_ptr) -> void {
     };
     auto converted = conversion::as_composite(k);
-    auto t = call.kspace()->get(converted.get_value());
 
     art::key_spec spec(argv);
-    storage_release release(t);
-    t->insert(spec, converted.get_value(), v, false, fc);
+    barch::sharded_store store(call.kspace());
+    store.add(spec, converted.get_value(), v, fc);
 
     return call.push_simple("OK");
 }
@@ -683,31 +550,18 @@ int GET(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto converted = conversion::as_composite(k);
-    auto ckey = converted.get_value();
-    auto t = call.kspace()->get_ref(ckey);
-    auto src = t->sources();
-
-    if (!src && t->has_static_bloom_filter() && !t->is_bloom(ckey)) {
-        return call.push_null();
-    }
-    ref_read_lock release(t);
-
-    auto r = t->search(ckey);
-    if (r.null()) {
-        return call.push_null();
-    } else {
-        if (r.cl()->is_tomb()) {
-            return call.push_null();
-        }
-        auto cl = r.const_leaf();
+    barch::sharded_store store(call.kspace());
+    int r = call.ok();
+    bool found = store.search(converted.get_value(), [&](const art::node_ptr& n) {
+        auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
             vt = dictionary::decompress(vt);
         }
-        return call.push_vt(vt);
-    }
+        r = call.push_vt(vt);
+    });
+    return found ? r : call.push_null();
 }
-
 static void push_page(caller& call, const barch::shard_ptr& shard, const art::scan_spec &spec, caller::iteration_ptr iteration) {
     if (!shard) throw_exception<std::runtime_error>("null shard");
 
@@ -863,30 +717,18 @@ int LENGTH(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto converted = conversion::as_composite(k);
-    auto ckey = converted.get_value();
-    auto t = call.kspace()->get(ckey);
-    auto src = t->sources();
-
-    if (!src && t->has_static_bloom_filter() && !t->is_bloom(ckey)) {
-        return call.push_null();
-    }
-    read_lock release(t);
-    auto r = t->search(ckey);
-    if (r.null()) {
-        return call.push_null();
-    } else {
-        if (r.cl()->is_tomb()) {
-            return call.push_null();
-        }
-        auto cl = r.const_leaf();
+    barch::sharded_store store(call.kspace());
+    int r = call.ok();
+    bool found = store.search(converted.get_value(), [&](const art::node_ptr& n) {
+        auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
             vt = dictionary::decompress(vt);
         }
-        return call.push_ll(vt.size);
-    }
+        r = call.push_ll(vt.size);
+    });
+    return found ? r : call.push_null();
 }
-
 int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, GET);
@@ -899,20 +741,26 @@ int TTL(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto converted = conversion::as_composite(k);
-    auto t = call.kspace()->get(converted.get_value());
-    read_lock release(t);
-
-    art::node_ptr r = t->search(converted.get_value());
-    if (r.null()) {
-        return call.push_ll(-1);
-    }
-    auto l = r.const_leaf();
-    if (l->is_expiry()) {
-        long long e = (l->expiry_ms() - art::now())/1000;
-        return call.push_ll(e);
-    }
-
-    return call.push_ll(-2);
+    barch::sharded_store store(call.kspace());
+    int reply = call.ok();
+    bool answered = false;
+    // not store.search: that treats a tombstone as absent, and TTL has always
+    // reported one as -2 (present, no expiry). preserved rather than changed here
+    store.with_key_read(converted.get_value(), [&](const barch::shard_ptr& t) {
+        art::node_ptr r = t->search(converted.get_value());
+        if (r.null()) {
+            return;
+        }
+        answered = true;
+        auto l = r.const_leaf();
+        if (l->is_expiry()) {
+            long long e = (l->expiry_ms() - art::now())/1000;
+            reply = call.push_ll(e);
+        } else {
+            reply = call.push_ll(-2);
+        }
+    });
+    return answered ? reply : call.push_ll(-1);
 
 }
 int cmd_TTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -922,26 +770,18 @@ int cmd_TTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 int EXISTS(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
+    barch::sharded_store store(call.kspace());
     for (size_t i = 1; i < argv.size(); ++i) {
         auto k = argv[i];
         if (key_ok(k) != 0)
             return call.key_check_error(k);
         auto converted = conversion::as_composite(k);
-        auto t = call.kspace()->get(converted.get_value());
-        auto src = t->sources();
-        if (!src && t->has_static_bloom_filter() && !t->is_bloom(converted.get_value())) {
+        if (!store.exists(converted.get_value())) {
             return call.push_bool(false);
-        } else {
-            read_lock release(t);
-            art::node_ptr r = t->search(converted.get_value());
-            if (r.null()) {
-                return call.push_bool(false);
-            }
         }
     }
     return call.push_bool(true);
 }
-
 int cmd_EXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, EXISTS);
@@ -954,54 +794,49 @@ int EXPIRE(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     auto converted = conversion::as_composite(k);
-    auto t = call.kspace()->get(converted.get_value());
-    storage_release release(t);
-
-    art::node_ptr r = t->search(converted.get_value());
-    if (r.null()) {
-        return call.push_ll(-1);
-    }
-    art::key_expire_spec spec(argv);
-    if (spec.parse_options() != call.ok()) {
-        return call.syntax_error();
-    }
-
-    auto l = r.const_leaf();
-    if (spec.nx) {
-        if (l->is_expiry()) {
-            return call.push_ll(-1);
+    barch::sharded_store store(call.kspace());
+    int reply = call.ok();
+    bool answered = false;
+    // read, decide, then write: has to hold one lock across all three
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        art::node_ptr r = t->search(converted.get_value());
+        if (r.null()) {
+            return;
+        }
+        art::key_expire_spec spec(argv);
+        if (spec.parse_options() != call.ok()) {
+            answered = true;
+            reply = call.syntax_error();
+            return;
         }
 
-    } else if (spec.xx) {
-        if (!l->is_expiry()) {
-            return call.push_ll(-1);
+        auto l = r.const_leaf();
+        if (spec.nx) {
+            if (l->is_expiry()) return;
+        } else if (spec.xx) {
+            if (!l->is_expiry()) return;
+        } else if (spec.gt) {
+            if (spec.ttl + art::now() < l->expiry_ms()) return;
+        } else if (spec.lt) {
+            if (spec.ttl + art::now() > l->expiry_ms()) return;
         }
-
-    } else if (spec.gt) {
-        if (spec.ttl + art::now() < l->expiry_ms()) {
-            return call.push_ll(-1);
-        }
-    } else if (spec.lt) {
-        if (spec.ttl + art::now() > l->expiry_ms()) {
-            return call.push_ll(-1);
-        }
-    }
-    auto updater = [&t,spec](const art::node_ptr &leaf) -> art::node_ptr {
-        if (leaf.null()) {
-            return leaf;
-        }
-        auto l = leaf.const_leaf();
-        if (art::now() + spec.ttl == 0) {
-            barch::std_log("why");
-        }
-        return art::make_leaf(t->get_ap(), l->get_key(),
-            l->get_value(),
-            art::now() + spec.ttl, l->is_volatile(),
-            l->is_compressed());
-    };
-    if (t->update(l->get_key(),updater))
-        return call.push_ll(1);
-    return call.push_ll(-2);
+        auto updater = [&t,spec](const art::node_ptr &leaf) -> art::node_ptr {
+            if (leaf.null()) {
+                return leaf;
+            }
+            auto l = leaf.const_leaf();
+            if (art::now() + spec.ttl == 0) {
+                barch::std_log("why");
+            }
+            return art::make_leaf(t->get_ap(), l->get_key(),
+                l->get_value(),
+                art::now() + spec.ttl, l->is_volatile(),
+                l->is_compressed());
+        };
+        answered = true;
+        reply = t->update(l->get_key(), updater) ? call.push_ll(1) : call.push_ll(-2);
+    });
+    return answered ? reply : call.push_ll(-1);
 }
 int cmd_EXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1016,6 +851,7 @@ int MGET(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
     int responses = 0;
+    barch::sharded_store store(call.kspace());
     call.start_array();
     for (size_t arg = 1; arg < argv.size(); ++arg) {
         auto k = argv[arg];
@@ -1023,15 +859,17 @@ int MGET(caller& call, const arg_t& argv) {
             call.push_null();
         } else {
             auto converted = conversion::as_composite(k);
-            auto t = call.kspace()->get(converted.get_value());
-            storage_release release(t);
-            art::node_ptr r = t->search(converted.get_value());
-            if (r.null()) {
-                call.push_null();
-            } else {
-                auto vt = r.const_leaf()->get_value();
-                call.push_vt(vt);
-            }
+            // not store.search: MGET has never decompressed, nor skipped tombstones,
+            // the way GET does. left as it was rather than quietly aligned
+            store.with_key_read(converted.get_value(), [&](const barch::shard_ptr& t) {
+                art::node_ptr r = t->search(converted.get_value());
+                if (r.null()) {
+                    call.push_null();
+                } else {
+                    auto vt = r.const_leaf()->get_value();
+                    call.push_vt(vt);
+                }
+            });
             ++responses;
         }
     }
@@ -1046,32 +884,13 @@ int cmd_MGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  *
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
-static art::value_type min_fun(art::value_type the_min, art::node_ptr r) {
-    if (r.is_leaf && the_min.empty()) {
-        return r.const_leaf()->get_key();
-    }else if (r.is_leaf && r.const_leaf()->get_key() < the_min){
-        return r.const_leaf()->get_key();
-    }
-    return the_min;
-}
 int MIN(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    art::value_type the_min;
-    auto ks = call.kspace();
-    ks_shared kss(ks->source());
-    ks_shared ksl(ks);
-    for (const auto& shard : ks->get_shards()) {
-        auto t = shard;
-        art::node_ptr r = t->tree_minimum();
-        if (!t->get_tree_size()) continue;
-        the_min = min_fun(the_min, r);
-    }
+    barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (the_min.empty()) {
+    if (!store.minimum([&](art::value_type k) { ok = call.push_encoded_key(k); })) {
         ok = call.push_null();
-    } else {
-        ok = call.push_encoded_key(the_min);
     }
     return ok;
 }
@@ -1085,29 +904,10 @@ int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
  * Return the value of the specified key, or a null reply if the key
  * is not defined. */
 int MAX(caller& call, const arg_t& ) {
-    art::value_type the_max;
-    auto ks = call.kspace();
-    ks_shared kss(ks->source());
-    ks_shared ksl(ks);
-    for (const auto& shard : ks->get_shards()) {
-        auto t = shard;
-        if (!t->get_tree_size()) continue;
-        art::node_ptr r = t->tree_maximum();
-        if (!r.is_leaf) {
-            continue;
-        }
-        auto cur = r.const_leaf()->get_key();
-        if (the_max.empty()) {
-            the_max = cur;
-        }else if (r.is_leaf && the_max < cur){
-            the_max = cur;
-        }
-    }
+    barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (the_max.empty()) {
+    if (!store.maximum([&](art::value_type k) { ok = call.push_encoded_key(k); })) {
         ok = call.push_null();
-    } else {
-        ok = call.push_encoded_key(the_max);
     }
     return ok;
 }
@@ -1127,29 +927,12 @@ int LB(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
 
     auto converted = conversion::as_composite(k);
-    art::value_type the_lb;
-    auto ks = call.kspace();
-    ks_shared kss(ks->source());
-    ks_shared ksl(ks);
-    for (const auto& shard : call.kspace()->get_shards()) {
-        auto t = shard;
-        if (!t->get_tree_size()) continue;
-        art::node_ptr r = t->lower_bound(converted.get_value());
-        if (r.is_leaf && the_lb.empty()) {
-            the_lb = r.const_leaf()->get_key();
-
-        }else if (r.is_leaf && r.const_leaf()->get_key() < the_lb){
-            the_lb = r.const_leaf()->get_key();
-        }
-    }
+    barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (the_lb.empty()) {
+    if (!store.lower_bound(converted.get_value(), [&](art::value_type f) { ok = call.push_encoded_key(f); })) {
         ok = call.push_null();
-    } else {
-        ok = call.push_encoded_key(the_lb);
     }
     return ok;
-
 }
 int cmd_LB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1170,31 +953,12 @@ int UB(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
 
     auto converted = conversion::as_composite(k);
-    art::value_type the_lb;
-    auto ks = call.kspace();
-    ks_shared kss(ks->source());
-    ks_shared ksl(ks);
-    for (const auto& t : call.kspace()->get_shards()) {
-        if (!t->get_tree_size()) continue;
-        auto key = converted.get_value();
-        art::iterator ilb(t, key);
-        if (ilb.ok() && ilb.key() == key) {
-            ilb.next();
-        }
-        if (ilb.ok()) {
-            if (the_lb.empty() || ilb.key() < the_lb) {
-                the_lb = ilb.key();
-            }
-        }
-    }
+    barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (the_lb.empty()) {
+    if (!store.upper_bound(converted.get_value(), [&](art::value_type f) { ok = call.push_encoded_key(f); })) {
         ok = call.push_null();
-    } else {
-        ok = call.push_encoded_key(the_lb);
     }
     return ok;
-
 }
 int cmd_UB(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1223,9 +987,8 @@ int REM(caller& call, const arg_t& argv) {
         }
     };
 
-    auto t = call.kspace()->get(converted.get_value());
-    storage_release release(t);
-    t->remove(converted.get_value(), fc);
+    barch::sharded_store store(call.kspace());
+    store.remove(converted.get_value(), fc);
 
     return r;
 }

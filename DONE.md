@@ -629,3 +629,68 @@ has to be named at the call site. Each removal turned every affected caller into
 compile error until it was rewritten, which is what makes them stay fixed.
 
 Measured: full suite green, 47 of 47.
+
+
+## 16. Sharding layer defined and keys_api converted onto it [01-08-2026]
+
+Before this, every command that touched storage knew the key space was sharded. Three
+separate concerns were copied into each one:
+
+  - routing, `kspace()->get(key)`, at about 50 sites
+  - fan out and cross shard ordering, `for (shard : ks->get_shards())`, at about 38
+    sites, each re-deriving how to reduce a per shard answer to a global one
+  - locking, `storage_release` / `read_lock` / `ks_shared`, chosen by hand at each site
+
+`barch::sharded_store` in sharded_store.h/.cpp now owns all three, and is the only
+thing that knows a key space has shards. key_space keeps ownership and lifecycle; the
+store is a cheap value made per call over it.
+
+Shape, and why:
+
+  - `shard_for(key)` and `shards()` are virtual, and every other operation is composed
+    from those two. That is the whole answer to "may function in a stateful manner
+    later": a subclass that keeps a routing table for remote shards, or carries a
+    transaction, overrides two methods and inherits the rest.
+  - the ordered operations take a callback rather than returning a `value_type`.
+    This is forced, not stylistic. `MIN` used to hold `ks_shared` across its
+    `push_encoded_key`, because the key it found points into a leaf and the lock is
+    what keeps it alive. An operation that took the lock, found the key, released the
+    lock and returned the key would hand back a dangling pointer. The callback runs
+    inside the lock. The rule is written at the top of the header.
+  - locking is per operation and deliberately not uniform, because it already was not:
+    a point read locks one shard, an ordered reduction locks the whole space because it
+    reads every shard, `count` locks each shard in turn because it only measures a
+    distance and never hands a key back, and `glob` locks nothing at all because the
+    shards copy each page to a working buffer before matching. Unifying these would
+    have been wrong in both directions.
+  - `with_key_write` / `with_key_read` are the escape hatch for sequences that must
+    hold one lock across several steps: INCR's update-or-create, APPEND's
+    read-modify-write, EXPIRE's read-decide-write. They still route and lock inside the
+    layer; they just hand the shard out.
+
+keys_api.cpp lost 402 lines and gained 160. The clearest wins: KEYS and VALUES were
+near identical 40 line copies differing in one bool, and are now one shared body;
+MIN/MAX/LB/UB were four hand rolled reductions with four slightly different spellings
+of the same "smaller than what we have so far" comparison, and are now four one line
+calls.
+
+Deliberately not changed, and marked as such in comments at each site, because a
+refactor should not quietly alter behaviour:
+
+  - TTL treats a tombstone as present with no expiry (-2), where `search` would treat
+    it as absent (-1). Kept via `with_key_read`.
+  - MGET neither decompresses nor skips tombstones, both of which GET does. Kept.
+    These two look like real bugs and are worth settling separately.
+
+One bug was introduced and caught by the suite. Converting GET to
+`int r = call.push_null(); store.search(..., [&]{ r = call.push_vt(vt); });` reads as a
+default, but `push_null` is not a value - it writes a reply immediately, so a hit
+emitted two replies. TestBarchRPC failed on `k.get(str(i)) == str(i)` and a later test
+hung on the desynchronised stream. The same mistake was in LENGTH, TTL and EXPIRE. All
+four now compute into a `found`/`answered` flag and push exactly once on every path.
+Worth remembering: with this caller API a "default value" has to be a default *branch*.
+
+Measured: full suite green, 47 of 47.
+
+Still on the old idiom, see TODO 17 and 18: the other API files, and SCAN, whose cursor
+lives on the connection rather than in the store.

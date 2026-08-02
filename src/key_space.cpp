@@ -171,6 +171,17 @@ namespace barch {
                 auto ordered = kv.get(real+".ordered");
                 if (!ordered.empty())
                     opt_ordered_keys = ordered != "0";
+                auto ranged = kv.get(real+".range_sharded");
+                if (!ranged.empty())
+                    opt_range_sharded = ranged != "0";
+            }
+            if (opt_range_sharded && !opt_ordered_keys) {
+                // a range only means something where the keys are in order. Refused
+                // rather than quietly ignored, so that reading the option back tells
+                // the truth about what the space is doing
+                barch::err({"range sharding needs ordered keys - ignoring it for space",
+                            name});
+                opt_range_sharded = false;
             }
             opt_shard_count = std::max<size_t>(opt_shard_count, 1);
             shards_out.resize(opt_shard_count);

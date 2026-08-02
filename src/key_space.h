@@ -17,6 +17,21 @@ namespace barch {
         typedef key_space* key_space_ref;
         bool opt_ordered_keys = barch::get_ordered_keys();
         size_t opt_shard_count = barch::get_shard_count().size();
+        /**
+         * Route keys to shards by the range they fall in rather than by their hash, so
+         * that a shard holds a contiguous span of the key order. Off by default, set
+         * per key space through the configuration space as `<name>.range_sharded`, and
+         * never on for the default `node` space or for `configuration`.
+         *
+         * Only meaningful with opt_ordered_keys: an unordered space keeps its keys in a
+         * hash table, where a range means nothing. Asking for it on an unordered space
+         * is refused when the space is built rather than half honoured.
+         *
+         * Nothing reads this yet - the algorithm it is going to select is TODO 30. It
+         * exists now so that the option, its plumbing and its truthfulness can be
+         * settled separately from the sharding itself.
+         */
+        bool opt_range_sharded = false;
     private:
         heap::vector<barch::shard_ptr> shards{};
         decltype(std::chrono::high_resolution_clock::now) start_time;

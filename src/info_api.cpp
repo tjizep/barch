@@ -116,6 +116,9 @@ int INFO(caller& call, const arg_t& argv) {
         "number:"+tos(shard)+"\n"
         "index_physical:"+index+"\n"
         "index_logical:"+order+"\n"
+        // how a key reaches this shard rather than how it is held once here. A key
+        // space setting, reported per shard because this is where somebody looks
+        "sharding:"+std::string(ks->opt_range_sharded ? "range" : "hash")+"\n"
         "size:"+tos(s->get_size())+"\n"
         "bytes_allocated:"+tos(s->get_ap().get_leaves().get_bytes_allocated() + s->get_ap().get_nodes().get_bytes_allocated()) + "\n"
         "virtual_allocated:"+tos(s->get_ap().get_leaves().get_allocated() + s->get_ap().get_nodes().get_allocated()) + "\n";

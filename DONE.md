@@ -1298,3 +1298,47 @@ work. That is a compile time change rather than a correctness one, so it belongs
 TODO 29 and the rest of the compile time question, not here.
 
 Measured: full suite green, 48 of 48.
+
+
+## 30. The range sharding option, ahead of the algorithm [02-08-2026]
+
+`opt_range_sharded` on key_space, alongside opt_shard_count and opt_ordered_keys and set
+the same way: from the configuration space, as `<name>.range_sharded`, read once when
+the space is first built. Nothing routes by it yet - that is TODO 30. What exists is the
+option, its plumbing and its reporting, deliberately settled before the algorithm so
+that the two can be got right separately.
+
+Three things it had to respect:
+
+  - **not the default space.** node takes its settings from the server rather than from
+    the configuration space, and the constructor already skips node and configuration_
+    when reading per space options, so this falls out of where it was put rather than
+    needing a special case.
+  - **only where it means something.** A range is meaningless in a hash table, so a
+    space that asks for range sharding without ordered keys has the option dropped and
+    says so in the log. Dropped rather than half honoured, so that reading it back
+    describes what the space is actually doing - which is the whole point of a flag
+    nothing implements yet.
+  - **visible from both sides.** KeyValue::getRangeSharded() for the bindings, next to
+    getShards and getOrdered, and a `sharding: range|hash` line in INFO SHARD, which
+    reports a key space setting per shard because that is where somebody looks. The
+    test asserts the two agree with each other for every case, since two ways of asking
+    that can disagree is worse than one way.
+
+test/rangeshardtest.py covers the truth of it: an ordered space that asks gets it, an
+unordered one is refused, not asking leaves it off, explicitly off stays off, the node
+and configuration spaces are not configurable this way, INFO SHARD reports each case,
+and the space still stores and reads back keys whatever it says.
+
+Two things that cost time and are worth knowing:
+
+  - **a key space reads its options once, when it is first built.** Setting the
+    configuration after touching a space does nothing, because the space is cached for
+    the life of the process. Every case in the test uses a name of its own for that
+    reason.
+  - **ninja does not rebuild the SWIG wrapper when swig_api.h changes**, only when
+    barch.i does, so a new binding method silently does not exist until barch.i is
+    touched. The test failed with AttributeError on a method that was in the header and
+    in the built library.
+
+Measured: full suite green, 49 of 49.

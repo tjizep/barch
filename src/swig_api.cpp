@@ -272,6 +272,10 @@ bool KeyValue::getOrdered() const {
     return sc.kspace()->opt_ordered_keys;
 }
 
+bool KeyValue::getRangeSharded() const {
+    return sc.kspace()->opt_range_sharded;
+}
+
 KeyValue::KeyValue(std::string keys_space) {
     sc.set_kspace(barch::get_keyspace(keys_space));
 }

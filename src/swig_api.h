@@ -311,6 +311,12 @@ public:
     void flush();
     long long getShards() const ;
     bool getOrdered() const ;
+    /**
+     * whether this key space routes keys to shards by range rather than by hash. Set
+     * through the configuration space as `<name>.range_sharded`, and only honoured on a
+     * space that also has ordered keys
+     */
+    bool getRangeSharded() const ;
     std::vector<Value> range(const std::string &start, const std::string &end, long long limit = -1);
     long long count(const std::string &start, const std::string &end);
     Value set(const std::string &key, const std::string &value);

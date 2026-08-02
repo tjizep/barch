@@ -576,6 +576,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/envconfigtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the per key space range sharding option and its plumbing
+        add_test(NAME TestRangeShardConfig
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeshardtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestBindings
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/bindingtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

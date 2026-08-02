@@ -91,3 +91,39 @@
     rather than timing files one at a time as was done for the logger. That will also
     say whether precompiled headers or explicit instantiation would pay, which is a
     different answer from trimming includes.
+
+30. Implement the stateful ordered range sharding the opt_range_sharded option selects.
+    The option, its per key space plumbing and its reporting exist and are tested
+    (DONE 30); nothing reads it yet, so a space with it set is still hash sharded.
+
+    What it has to do: route a key to a shard by the range it falls in rather than by
+    its hash, so a shard holds a contiguous span of the key order. That is what makes it
+    stateful in the sense sharded_store was shaped for - a hash needs no state beyond the
+    shard count, a range needs the boundaries, and those have to be held somewhere,
+    consulted on every route, and kept when the space is saved and loaded.
+
+    The layer is ready for it: sharded_store::shard_for() and shards() are virtual and
+    every other operation is composed from those two, so a range routing subclass
+    overrides shard_for and inherits the rest.
+
+    The questions to settle before writing it, roughly in order:
+
+      - where the boundaries live. A key space member is the obvious place, but they
+        have to survive a restart, so they belong in whatever the space already
+        persists, and they have to be readable by every thread routing a key while
+        being rewritten by whatever rebalances them.
+      - how they are chosen initially. An empty space has no idea what its keys look
+        like. Splitting on first insert, sampling, or taking a hint from configuration
+        are all defensible and they behave very differently on a cold load.
+      - when and how they move. A range shard fills unevenly by nature, which is the
+        cost of the ordering it buys. Splitting a shard means moving keys between
+        shards, which is the first operation in barch that does that, and every reader
+        has to see one side or the other and never both or neither.
+      - what happens to the operations that assume any key can be on any shard.
+        sharded_store::range and the striation walk in particular do far less work when
+        the shards are ordered - a range can stop after the shards that overlap it -
+        and that is most of the point, so it is worth designing for rather than
+        retrofitting.
+      - whether a space can be converted after it has keys in it, or whether the option
+        is fixed when the space is created. Fixed is much simpler and probably right to
+        start with; the tests already assume nothing either way.

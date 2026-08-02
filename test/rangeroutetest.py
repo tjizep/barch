@@ -175,11 +175,11 @@ for i in range(0, KEYS, 7):
 reloaded = rng(r, "rs_route", key(0), "k~")
 assert reloaded == [key(i) for i in range(KEYS)], len(reloaded)
 
-# --- a bound that falls in a gap ------------------------------------------------------
-# routing names the shard whose span contains the key, but a span is a range of the key
-# order, not a promise that the shard holds anything inside it. Here it does: the hole is
-# wide, but once the sweep has rebalanced, the shard owning the middle of it still holds
-# keys on both sides, so the owning shard answers on its own
+# --- a bound that falls in a gap wide enough to empty a shard --------------------------
+# the case the ordered lower bound needs its second step for. Routing names the shard
+# whose span contains the key, but a span is a range of the key order, not a promise that
+# the shard holds anything inside it - so a hole this wide leaves the owning shard with no
+# answer, and the first key above the hole lives in some later shard entirely
 for i in range(5000, 10000):
     rs.erase(key(i))
 settle(r, "rs_route", SHARDS, KEYS - 5000)
@@ -188,9 +188,9 @@ assert rs.lowerBound(key(7000)) == key(10000), rs.lowerBound(key(7000))
 assert rs.lowerBound(key(4999)) == key(4999)
 assert rs.lowerBound(key(5000)) == key(10000)
 assert rs.upperBound(key(4999)) == key(10000)
-# above everything there is no answer at all. A miss is a null Value, not a falsy one -
-# the binding hands back a proxy object either way, so `not lowerBound(...)` is always
-# False and would assert nothing
+# and above everything there is no answer at all, however many shards are asked. A miss
+# is a null Value, not a falsy one - the binding hands back a proxy object either way, so
+# `not lowerBound(...)` is always False and would assert nothing
 assert rs.lowerBound("k99999999").isNull()
 assert rs.upperBound("k99999999").isNull()
 assert rs.max() == key(KEYS - 1)
@@ -199,13 +199,12 @@ assert rs.max() == key(KEYS - 1)
 across = rng(r, "rs_route", key(4998), key(10002))
 assert across == [key(4998), key(4999), key(10000), key(10001)], across
 
-# --- a gap that straddles a boundary --------------------------------------------------
-# the case above is answered by the shard that owns the key. This one cannot be, and that
-# is the point of it: two shards with the middle deleted leaves the lower shard holding
-# nothing at all above the hole, so the key that answers lives in a shard the routing
-# never named. A lower bound that asked only the shard it routed to would find nothing
-# here. Confirmed by mutation - the wide hole above still passes with that step removed,
-# this one does not
+# --- a hole that straddles a boundary --------------------------------------------------
+# the case above is answered by the owning shard alone: the hole sits inside one shard's
+# span and that shard holds keys on both sides of it. This one does not. Two shards and a
+# hole down the middle leaves the lower shard with nothing above the hole at all, so the
+# key that answers lives in a shard the routing never named - which is the whole reason
+# the ordered lower bound has a second step
 conf.set("rs_gap.ordered", "1")
 conf.set("rs_gap.shards", "2")
 conf.set("rs_gap.range_sharded", "1")
@@ -216,7 +215,8 @@ for i in range(20, 80):
     gap.erase(key(i))
 settle(r, "rs_gap", 2, 40)
 
-# every probe in the hole has the same answer, wherever the boundary ended up
+# every probe in the hole has the same answer, and the ones below wherever the boundary
+# ended up are the ones that ask a shard which cannot answer
 for i in range(20, 80):
     got = gap.lowerBound(key(i))
     assert got == key(80), "lowerBound(%s) in the hole gave %r" % (key(i), got)

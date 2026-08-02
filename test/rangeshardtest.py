@@ -1,8 +1,8 @@
 # The range sharding option: that it can be set per key space, that it is only honoured
 # where it means something, and that reading it back tells the truth.
 #
-# Nothing routes by range yet - see TODO 30. What is tested here is the option and its
-# plumbing, which is what exists.
+# What is tested here is the option and its plumbing. The routing it selects is tested in
+# rangeroutetest.py and the conversion of an existing space in rangeconverttest.py.
 #
 # A key space reads its options once, when it is first built, so every case below uses a
 # name of its own and sets the configuration before touching the space.

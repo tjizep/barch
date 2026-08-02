@@ -201,6 +201,9 @@ namespace barch {
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             shards.swap(shards_out);
             barch::log({"Loaded",shards.size(),"shards in", millis/1000.0f, "s", shards_loaded});
+            if (opt_range_sharded) {
+                build_range_index();
+            }
             // other threads allocate concurrently so only a growth is meaningful here
             uint64_t memory_after = get_total_memory();
             if (memory_after > memory_before) {
@@ -209,6 +212,41 @@ namespace barch {
         }
         start_maintain();
     }
+    /**
+     * The index is a function of the shards, so a load rebuilds it rather than reading
+     * it back - there is no index file, nothing to write atomically and nothing to find
+     * out of step with the data it describes.
+     *
+     * The rebuild only works if the shards are already an ordered partition, which they
+     * are if this space was range sharded the last time it was written. If it was hash
+     * sharded then every shard holds keys from all over the order, and routing by the
+     * boundaries of that would lose most of them. That case is repartitioned: nearly
+     * every key moves, which is why it happens once, at load, and says so in the log.
+     */
+    void key_space::build_range_index() {
+        if (rindex.rebuild(shards)) {
+            return;
+        }
+        uint64_t keys = 0;
+        for (auto& s : shards) keys += s->get_tree_size();
+        barch::log({"key space", name, "is range sharded but its", keys,
+                    "keys are not in shard order - repartitioning"});
+        auto start_time = std::chrono::high_resolution_clock::now();
+        size_t moved = rindex.repartition(shards);
+        auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::high_resolution_clock::now() - start_time).count();
+        if (rindex.rebuild(shards)) {
+            barch::log({"repartitioned", name, "moving", moved, "keys in",
+                        (double) millis / 1000.0, "s"});
+        } else {
+            // the space still works - every route lands somewhere - but it is not the
+            // ordered partition the option asked for, so say so rather than let the
+            // ordered operations quietly return partial answers
+            barch::err({"could not repartition key space", name,
+                        "- range routing will not find every key"});
+        }
+    }
+
     void key_space::start_maintain() {
         exiting = false;
         tmaintain = std::thread([&]() -> void {
@@ -220,6 +258,25 @@ namespace barch {
                    tshards = this->get_shards();
                    repl::distribute();
                     ++statistics::maintenance_cycles;
+
+                   if (opt_range_sharded) {
+                       // rebalancing lives here rather than on the insert path. Two
+                       // reasons, and the second is the one that matters: an insert that
+                       // has to move a block of keys is a latency spike a background
+                       // sweep does not have, and putting every write to the table on
+                       // one thread is what lets a router validate its route by simply
+                       // re-reading the table under the lock it just took.
+                       //
+                       // A sweep is bounded by how many pairs of shard locks it may
+                       // take, not by how much work is left, so it cannot hold up this
+                       // thread; what it does not finish, the next one continues
+                       try {
+                           rindex.sweep(tshards, get_range_shard_budget(),
+                                        get_range_shard_tolerance(), tshards.size() * 64);
+                       } catch (std::exception& e) {
+                           barch::err({"exception rebalancing range shards:", e.what()});
+                       }
+                   }
 
                    for (auto s : tshards) {
                        try {
@@ -305,10 +362,22 @@ namespace barch {
         }
         auto shard_key = art::value_type{key,key_len};
 
+        if (opt_range_sharded) {
+            // a binary search of at most shard_count boundaries, against a table that is
+            // replaced rather than mutated, so this takes no lock and never sees a half
+            // written one. It can still be overtaken by a rebalance - see route_moved
+            return rindex.route(shard_key);
+        }
+
         uint64_t hash = hash_fun(shard_key.chars(), shard_key.size);//
 
         size_t hshard = hash % get_shard_count();
         return hshard;
+    }
+
+    bool key_space::route_moved(art::value_type key, const shard_ptr& t) {
+        if (!opt_range_sharded || !t) return false;
+        return get_shard_index(key) != t->get_shard_number();
     }
 
     size_t key_space::get_shard_index(const std::string& key) {

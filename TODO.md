@@ -92,69 +92,35 @@
     say whether precompiled headers or explicit instantiation would pay, which is a
     different answer from trimming includes.
 
-30. Implement the stateful ordered range sharding the opt_range_sharded option selects.
-    The option and its plumbing exist and are tested (DONE 30); nothing routes by it.
+30. [Done] Ordered range sharding implemented [02-08-2026] Nr 31
 
-    A prototype settled the algorithm - test/rangeshard_prototype.cpp, on std::map, not
-    wired into the build. Run it before changing anything here. What it established:
+31. art::iterator's one argument form - the one that is meant to start at the first key
+    in a shard - walks nothing. It finds the tree minimum but never fills the trace list,
+    then reads last_node off the empty one. Nothing had noticed because every existing
+    caller uses the two argument form; found writing the range repartitioner, which now
+    seeds from the shard's own minimum instead (DONE 31). What is uncertain is only
+    whether to fix it or delete it: it has no callers, and a walk from the first key is
+    already expressible. Settle by checking whether the trace can be filled as cheaply as
+    lower_bound fills it, since if it cannot the two argument form is the honest one.
 
-      - **shed in both directions, not just upwards.** With upward only the last shard
-        is a sink: ascending inserts all route to it and it has nowhere to push, giving
-        16.00x imbalance on 16 shards - every key in one shard. Descending was fine,
-        which is what makes this easy to miss.
-      - **cascade with a budget per level, not one budget for the walk.** One shared
-        budget is spent entirely on the first hop, so the shard that just received those
-        keys is over and nothing relieves it until an insert lands there - which for
-        ascending never happens. 13.99x.
-      - **shed to meet the neighbour half way, not down to the threshold.** Shedding
-        everything above the threshold dumps a block into the neighbour and pushes the
-        whole cascade over at once. Cost was quadratic in shard count - 5.6, 24, 100,
-        502, 1007 moves per insert at 4, 8, 16, 32, 64 shards - and past 32 shards the
-        budget could not keep up and balance was lost (8.9x, then 21.4x). Moving
-        min(budget, (size - neighbour)/2) makes it linear: 1.1, 5.9, 12.3, 25.1, 50.5
-        at 4, 16, 32, 64, 128 shards, balance held at 1.25x throughout.
-      - **the threshold needs slack.** At exactly total/shard_count a shard is over the
-        moment it is one key above average, so it thrashes: 32 moves per insert on
-        random keys. At 1.25x it is 0.00.
+32. Range sharding and replication have not been put in the same room. A rebalance moves
+    a key between shards with tree_insert and tree_remove, which do not replicate, on the
+    reasoning that where a key physically lives is a local decision and a replica routes
+    by its own index built from its own shards. That is self consistent but untested, and
+    the question is whether a replica of a range sharded space converges on the same
+    partition or merely on the same contents - the second is fine, the first is not
+    required, and nothing currently checks which one happens. Settle with a repltest
+    variant over a range sharded space.
 
-    With all four: random 0.08 moves per insert, clustered 0.52, ascending and
-    descending about N/2.5, worst single insert bounded by roughly the shard count,
-    imbalance 1.25 to 1.31x, and the partition and index invariants hold throughout.
+33. A range sharded space with pull sources is not rebalanced at all - see DONE 31 for
+    why the sizes and minimums do not mean what the algorithm needs. It still routes,
+    so it works, but it never balances, and a space that silently does not do the thing
+    its option asks for is the situation the option was built to avoid. Either the
+    algorithm learns about tombstones and upstream keys, or the combination is refused
+    the way range sharding without ordered keys already is.
 
-    The one thing to know before choosing this over hash sharding: an append only
-    workload costs O(shard_count) moves per insert and there is no way around it. Every
-    new key lands at the top, so one key has to cross every boundary to keep the
-    partition balanced. That is the intrinsic price of an ordered partition with a fixed
-    shard count, and it is exactly the workload where hash sharding costs nothing. Range
-    sharding being opt in per key space is therefore right, and off by default is right.
-
-    Two things are settled that were open:
-
-      - **the index never has to be persisted.** It is nothing but the minimum key of
-        each shard above 0, so a load rebuilds it by asking each shard for its first
-        key, which an art finds walking down the left spine. The prototype rebuilds it
-        after every run and asserts it matches the one maintained incrementally, on all
-        four workloads. That removes a whole class of problem: no index file, nothing to
-        get out of step with the shards, and nothing to version.
-      - **the index is a sorted flat vector, not a map.** At most shard_count entries,
-        read on every route and written only by a rebalance, so the memmove on insert is
-        paid rarely and the binary search hits a couple of cache lines. 18% faster over
-        the whole prototype run - 13.5s to 11.1s at 64 shards and 200k keys - with
-        identical results.
-
-    Still to settle, and not answered by the prototype:
-
-      - how the index is read by every routing thread while a rebalance rewrites it. The
-        prototype is single threaded. A flat vector helps here too, since a whole new
-        one can be built and swapped in behind a pointer rather than mutated in place.
-      - what a move looks like against real shards. The prototype erases from one
-        std::map and inserts into another; barch has to do that across two locked
-        shards, with readers seeing one side or the other and never both or neither.
-      - whether rebalancing belongs on the insert path at all or on the maintenance
-        thread. The prototype does it inline, which is what bounds it, but 25 moves on
-        an insert is a latency spike a background sweep would not have.
-      - 12 of 64 shards were empty on random keys while still measuring balanced.
-        Harmless, but it says the boundaries settle in a way worth a look.
-      - sharded_store::range and the striation walk, which can stop after the shards
-        that overlap the range once shards are ordered. That is most of the point of
-        doing this and should be designed in rather than retrofitted.
+34. The rebalancer's budget and tolerance are constants in range_index.cpp - 64 keys per
+    lock pair and 1.25x. Both were chosen in the prototype and neither has been tuned
+    against a real workload. The budget in particular is the one that decides how long
+    two shards are held still at a time, so it trades rebalancing throughput against
+    tail latency, and 64 is a guess that happens to work.

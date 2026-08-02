@@ -1342,3 +1342,143 @@ Two things that cost time and are worth knowing:
     in the built library.
 
 Measured: full suite green, 49 of 49.
+
+## 31. Ordered range sharding implemented [02-08-2026]
+
+`opt_range_sharded` now selects something. A range sharded key space routes by
+`range_index` - a sorted flat vector of the minimum key of every shard above 0 - instead
+of by hash, and a sweep on the key space's maintenance thread moves keys between
+neighbouring shards to keep the partition even.
+
+The algorithm came from the prototype (DONE 30 / TODO 30) unchanged in its essentials:
+shed in both directions, cascade with a budget per level, shed only far enough to meet
+the neighbour half way, and give the threshold slack. What follows is what the real
+implementation had to settle on top of it, all of which the prototype could not answer
+because it is single threaded and its shards are `std::map`.
+
+**Routing and locking cannot be one step, and that is the whole problem.** There is
+always a gap between deciding which shard owns a key and holding the lock that stops it
+changing. Hash routing does not care - a key's shard is a pure function of the key.
+Range routing rebalances, so in that gap a boundary can move and leave the caller
+holding a lock on a shard the key no longer belongs to, which would insert a key where
+nothing will look for it or report a live key as absent.
+
+What closes it is one rule kept by the writers and one check made by the readers:
+
+  - a rebalance changes the table only while holding a write lock on *every shard whose
+    span is changing* - both of them, taken in shard order, with the new table published
+    before either lock is dropped;
+  - a router routes, takes its lock, and then routes again. Same answer means no
+    rebalance can move that key while the lock is held, because moving it needs the lock
+    the router is holding. A different answer means the boundary moved in between: drop
+    the lock and go again.
+
+That is `sharded_store::route_locked` and `key_space::route_moved`, and it costs one
+atomic load and a binary search per operation, which is why every point operation could
+be put on it rather than only the range sharded ones. The retry loop cannot spin: losing
+twice needs two rebalances of the same boundary, and those are bounded by the
+maintenance interval.
+
+**Rebalancing belongs on the maintenance thread, and the prototype was extended to prove
+it before it was written that way.** Strategy 5 in the prototype does no work on the
+insert path and sweeps every N inserts instead. Two things came out of it:
+
+  - it holds up - at 8 shards and sweeps 256 inserts apart, imbalance 1.26x and a peak
+    of 1.29x against 1.25x for the inline version, at the same moves per insert;
+  - but only if **the sweep's work is driven by the skew, not by a fixed pass count**. A
+    fixed four cascades per sweep quietly stops keeping up as sweeps get further apart:
+    at 1024 inserts between sweeps an ascending workload goes to 11.30x while the moves
+    per insert *falls* to 0.53, which is the signature of a rebalancer that has given up
+    rather than one that is working hard. Converging instead, with a cap on lock pairs
+    rather than on work, holds 1.26x out to 4096 inserts between sweeps.
+
+The other reason to put it there is not performance: it makes the maintenance thread the
+only writer of the table, which is what makes the read side above as cheap as it is.
+
+**The tolerance is a band, not a ceiling.** The first working version balanced 20000
+ascending keys over 8 shards to `[3134, 3133, 3123, 3122, 3113, 3095, 1280, 0]`. That is
+1.25x - balanced, by the definition it was given - with an eighth of the shards holding
+nothing. Six shards at exactly 1.25x the average leaves almost nothing for the rest, and
+the arithmetic works out. This is the "12 of 64 shards were empty while still measuring
+balanced" note in TODO 30, and it is not as harmless as it looked: those shards are
+capacity and concurrency that the space paid for and is not using.
+
+Two changes fixed it, both checked in the prototype first as strategy 6:
+
+  - a shard sheds when a neighbour is meaningfully smaller, not only when it is over the
+    threshold. A cascade gated on the threshold dies at the first shard under it and
+    never reaches the ones past it, which is exactly how the tail is left empty. The
+    half way rule stops the ungated cascade on its own: once neighbours are within a key
+    of each other there is nothing to take.
+  - the sweep is finished when no shard is above `tolerance * average` **and** none is
+    below `average / tolerance`.
+
+Measured in the prototype at 8 shards: empty shards go from 1 to 0 on every workload,
+random imbalance improves from 1.24x to 1.16x, and ascending costs 3.37 moves per insert
+against 2.72 - about 24% more work for the tail actually being used.
+
+**Turning the option on for a space that already has data has to repartition it.** The
+table is derived from the shards, never persisted, so a load rebuilds it by asking each
+shard for its first key. That only works if the shards are already an ordered partition.
+If the space was hash sharded when it was written, they are not, and routing by the
+boundaries of that finds almost nothing. So the load checks, and repartitions when it
+has to:
+
+  - boundaries from a sample - at most 4096 keys per shard, sorted, cut into quantiles.
+    An exact answer needs the whole key space in order, which is the thing we cannot
+    afford to build; every key still lands on the right side of whatever boundaries are
+    chosen, so the result is a correct partition either way, and the sweep polishes the
+    balance afterwards.
+  - then each shard is drained in batches bounded by bytes rather than keys, because
+    iterating a tree while removing from it is not safe and holding a copy of every
+    misplaced key at once would be the whole shard.
+
+5000 keys over 4 shards convert in 7ms, moving 3696 of them, and land on 1250 each.
+
+**What the ordered partition buys, which is the point of doing any of this.**
+`sharded_store::range` no longer walks every shard in striations, collects an unsorted
+list up to `limit * shard_count` long and sorts it. It starts at the shard that owns
+`lo`, walks shards in order, hands each key to the callback as it finds it and stops at
+the first key not below `hi`. Nothing is collected and nothing is sorted. `minimum`,
+`maximum`, `lower_bound`, `upper_bound` and `count` stop at the first shard that can
+answer instead of reducing over all of them. All of it is behind `ordered_shards()`,
+which is false for a space with a pull source: its keys are not all its own and the ones
+upstream are not part of the partition.
+
+Three smaller things that were decided rather than discovered:
+
+  - **a shard with pull sources is never rebalanced.** A delete against it leaves a
+    tombstone rather than removing anything, and a key it answers for may live upstream,
+    so neither its size nor its minimum means what the algorithm needs them to mean.
+  - **a move is not user traffic.** It reuses what the defragmenter does when it
+    reinserts a leaf into its own shard - carry expiry, volatile and compressed across
+    and `tree_insert` - and decrements the op counters afterwards, so a rebalance does
+    not show up as inserts and deletes nobody asked for. `range_shard_keys_moved` counts
+    them instead.
+  - **keys are canonicalised before they are compared.** Storage appends a null
+    terminator to a key that does not have one, so the same key reaches the router as
+    `abc` from a command and `abc\0` out of a leaf, and `abc` sorts below `abc\0`. Both
+    the boundaries and the key being routed drop a trailing null first. It is order
+    preserving because a key may not contain an interior null.
+
+Two things that cost time:
+
+  - **`art::iterator`'s one argument form walks nothing.** It finds the tree minimum but
+    never fills the trace list, then reads `last_node` off the empty one. Every existing
+    caller uses the two argument form, so nothing had noticed. Both walks here seed the
+    iterator from the shard's own minimum instead; the constructor itself is left alone
+    and is TODO 31.
+  - **shard sizes read one at a time do not add up while a sweep is running.** The test
+    asserted a total over 8 `INFO SHARD` calls with nothing holding the space still, and
+    a key moved between two of the reads is counted twice or not at all. It is the test
+    that was wrong, not the code, but it is worth knowing before reading those numbers:
+    they only settle once the sweep has nothing left to do.
+
+The one thing that has not changed since TODO 30, and that decides whether to use this
+at all: an append only workload costs O(shard_count) moves per insert and there is no
+way around it. Range sharding being opt in per key space, and off by default, is right.
+
+Measured: full suite green, 51 of 51, including two new tests - `rangeroutetest.py` for
+routing, balance, ordered reads, deletes and reload, and `rangeconverttest.py` for the
+hash to range conversion, which needs two processes because a key space reads its
+options once.

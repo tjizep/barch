@@ -47,7 +47,7 @@ namespace art {
         auto ldata = alloc.get_leaves().new_address(logical, leaf_size);
         auto *l = new(ldata) leaf(key_len, val_len, ttl, is_volatile, is_compressed);
         if (alloc.is_debug) {
-            barch::std_log("allocated leaf at", logical.address(),"size", leaf_size);
+            barch::log({"allocated leaf at", logical.address(),"size", leaf_size});
         }
         ++statistics::leaf_nodes;
         l->set_key(key);

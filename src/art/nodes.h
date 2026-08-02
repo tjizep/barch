@@ -524,7 +524,7 @@ namespace art {
             set_key_len(kl);
             set_val_len(vl);
             if (expiry && now() > expiry) {
-                //std_err("key already expired:");
+                //err({"key already expired:"});
             }
             if (expiry > 0) set_is_expiry();
             if (is_volatile) set_volatile();
@@ -729,11 +729,11 @@ namespace art {
                     abort_with("invalid key");
                 }
                 if ( k[0] == tinteger && key_len()+1 != numeric_key_size) {
-                    barch::std_err("invalid key (int) len",key_len());
+                    barch::err({"invalid key (int) len",key_len()});
                     abort_with("invalid key (int)");
                 }
                 if ( k[0] == tdouble && key_len()+1 != numeric_key_size) {
-                    barch::std_err("invalid key (double) len",key_len());
+                    barch::err({"invalid key (double) len",key_len()});
                     abort_with("invalid key (double)");
                 }
             }

@@ -49,7 +49,7 @@ struct rpc_caller : caller {
         update_routes();
         std::vector<std::string_view> auth = {"AUTH","default","empty"};
         if (this->call( auth,::AUTH) != 0) {
-            barch::std_err("could not authenticate `default`");
+            barch::err({"could not authenticate `default`"});
         }
 
     }
@@ -452,7 +452,7 @@ struct rpc_caller : caller {
     template<typename TC, typename VT>
     int call(const VT& params, TC&& f) {
         if (params.empty()) {
-            barch::std_err("invalid parameters");
+            barch::err({"invalid parameters"});
             return 0;
         }
         if (is_buffering() && (params[0] != "EXEC" || params[0] == "MULTI")) {

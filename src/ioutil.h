@@ -7,7 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include "constants.h"
-#include "logger.h"
+#include "lzr_log.h"
 #include <arpa/inet.h>
 #include "configuration.h"
 #include <experimental/type_traits>
@@ -69,7 +69,7 @@ static void incr_read_stat(const TStream& , size_t bytes) {
 template<typename OStream, typename T>
 static void writep(OStream &of, const T* data, size_t size) {
     write_expires(of);
-    if (log_streams==1) barch::std_log("writing",size,"bytes","at",(uint64_t)stream_write_ctr);
+    if (log_streams==1) barch::log({"writing",size,"bytes","at",(uint64_t)stream_write_ctr});
     of.write(reinterpret_cast<const char *>(data), size);
     if (of.fail()) {
         throw_exception<std::runtime_error>("write failed");
@@ -104,7 +104,7 @@ static void readp(IStream &in, T &data) {
     read_expires(in);
 
     in.read(reinterpret_cast<char *>(&data), sizeof(data));
-    if (log_streams==1) barch::std_log("reading",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_read_ctr);
+    if (log_streams==1) barch::log({"reading",sizeof(data),(uint64_t)data,"at",(uint64_t)stream_read_ctr});
     if (in.fail()) {
         throw_exception<std::runtime_error>("read failed");
     }
@@ -115,7 +115,7 @@ template<typename IStream, typename T>
 static void readp(IStream &in, T *data, size_t size) {
     read_expires(in);
     in.read(reinterpret_cast<char *>(data), size);
-    if (log_streams==1) barch::std_log("reading",size,"bytes","at",(uint64_t)stream_read_ctr);
+    if (log_streams==1) barch::log({"reading",size,"bytes","at",(uint64_t)stream_read_ctr});
     if (in.fail()) {
         throw_exception<std::runtime_error>("read failed");
     }

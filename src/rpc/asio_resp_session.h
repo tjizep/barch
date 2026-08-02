@@ -273,11 +273,11 @@ namespace barch {
                         }
 
                     }catch (std::exception& e) {
-                        barch::std_err("error", e.what());
+                        barch::err({"error", e.what()});
                     }
                 }else {
                     //if (ec.category())
-                     //barch::std_err(ec.message().c_str());
+                     //barch::err({ec.message().c_str()});
                 }
             });
         }
@@ -325,7 +325,7 @@ namespace barch {
                         stream_write_ctr += length;
                         bytes_sent += length;
                     }else {
-                        //art::std_err("error", ec.message(), ec.value());
+                        //art::err({"error", ec.message(), ec.value()});
                     }
                 });
         }
@@ -450,7 +450,7 @@ namespace barch {
                         stream_write_ctr += length;
                         bytes_sent += length;
                     }else {
-                        //art::std_err("error", ec.message(), ec.value());
+                        //art::err({"error", ec.message(), ec.value()});
                     }
                 });
         }

@@ -14,10 +14,13 @@
 #include <fmt/chrono.h>
 #include <fmt/color.h>
 #include <thread>
-static std::mutex& get_lock() {
+std::mutex& barch::log_mutex() {
     static std::mutex m;
     return m;
-};
+}
+static std::mutex& get_lock() {
+    return barch::log_mutex();
+}
 void barch::raw_start_log(bool err) {
     std::unique_lock lock(get_lock());
     size_t tid = gettid();

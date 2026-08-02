@@ -1,7 +1,7 @@
 #pragma once
 #include <atomic>
 #include <exception>
-#include "logger.h"
+#include "lzr_log.h"
 namespace statistics {
     /**
      * size stats
@@ -114,6 +114,6 @@ namespace statistics {
 template<typename Ext>
 [[ noreturn ]] static void throw_exception(const char *name) {
     ++statistics::exceptions_raised;
-    barch::std_err("exception", name);
+    barch::err({"exception", name});
     throw Ext(name);
 }

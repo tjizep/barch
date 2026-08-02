@@ -7,7 +7,7 @@
 #include <iostream>
 #include <sys/types.h>
 #include <sys/sysinfo.h>
-#include "logger.h"
+#include "lzr_log.h"
 #include <random>
 static long long physical_ram_cache = 0;
 
@@ -74,7 +74,7 @@ void *heap::allocate(size_t size) {
             //ValkeyModule_MallocSize(r);
         }
         //if (size > 8 && actual > size*1.2)
-        //    art::std_log((size_t)allocated,"allocated:",actual,"vs:",size,"requested");
+        //    art::log({(size_t)allocated,"allocated:",actual,"vs:",size,"requested"});
         allocated += actual;
     }
     return r;
@@ -117,7 +117,7 @@ void heap::free(void *ptr, size_t size) {
 
         allocated -= actual;
         //if (size > 8 && actual > size*1.2)
-        //    art::std_log((size_t)allocated,"freed:",actual,"vs:",size,"requested");
+        //    art::log({(size_t)allocated,"freed:",actual,"vs:",size,"requested"});
     }
 }
 
@@ -151,10 +151,10 @@ void abort_with(const char *message) __THROW {
     void* buffer[COUNT];
     int size = backtrace(buffer, COUNT);
     char** symbols = backtrace_symbols(buffer, size);
-    barch::std_err("There's a bug and we cannot continue - last reason [", message, "]");
+    barch::err({"There's a bug and we cannot continue - last reason [", message, "]"});
     if (symbols) {
         for (int s = 0; s < size; ++s) {
-            barch::std_err(symbols[s]);
+            barch::err({symbols[s]});
         }
     }
     abort();

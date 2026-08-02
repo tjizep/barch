@@ -146,6 +146,22 @@ namespace barch {
     const std::vector<std::string>& configuration_names();
 
     /**
+     * Take configuration from the environment. Every setting answers to BARCH_ followed
+     * by its name in upper case - max_memory_bytes is BARCH_MAX_MEMORY_BYTES - and the
+     * redis names work too, with hyphens written as underscores, so BARCH_MAXMEMORY and
+     * BARCH_MAXMEMORY_POLICY are both understood. Values are in the form CONFIG SET
+     * takes, so BARCH_MAX_MEMORY_BYTES=100m means what it looks like.
+     *
+     * Call this after whatever else configures the process, not before: as a valkey
+     * module that means after ValkeyModule_LoadConfigs, which applies a registered
+     * default to every setting the config file does not mention and would otherwise
+     * undo this.
+     *
+     * @return how many settings were taken from the environment
+     */
+    size_t apply_environment_configuration();
+
+    /**
      * The redis configuration names barch also answers to. Separate from
      * configuration_names() so that list keeps meaning "barch's own settings" - CONFIG
      * GET walks both.

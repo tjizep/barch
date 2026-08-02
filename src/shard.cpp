@@ -41,7 +41,7 @@ uint64_t art_evict_lru(barch::shard_ptr t) {
         ++statistics::pages_evicted;
         return page.second;
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -401,8 +401,8 @@ bool barch::shard::save(bool stats) {
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
     if (log_saving_messages == 1)
-        std_log("saved barch db:", this->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
-            "seconds");
+        log({"saved barch db:", this->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+            "seconds"});
     saving = false;
 
     start_save_time = std::chrono::high_resolution_clock::now();
@@ -455,8 +455,8 @@ bool barch::shard::send(std::ostream& unused(out)) {
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
 
-    std_log("sent barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
-            "seconds");
+    log({"sent barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+            "seconds"});
 #endif
 
     return true;
@@ -469,7 +469,7 @@ bool barch::shard::reload() {
         _load(true);
         return true;
     }catch (std::exception &e) {
-        std_log("could not load",e.what());
+        log({"could not load",e.what()});
         return false;
     }
 }
@@ -514,10 +514,10 @@ bool barch::shard::_load(bool) {
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
 
     if (log_loading_messages == 1) {
-        std_log("Done loading BARCH Shard, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]");
+        log({"Done loading BARCH Shard, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]"});
 
-        std_log("loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb");
+        log({"loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds"});
+        log({"db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb"});
     }
     return true;
 }
@@ -529,7 +529,7 @@ bool barch::shard::load(bool) {
         unique_latch release(this->latch);
         _load(true);
     }catch (std::exception &e) {
-        std_log("could not load",e.what());
+        log({"could not load",e.what()});
         return false;
     }
     return true;
@@ -579,12 +579,12 @@ bool barch::shard::retrieve(std::istream& unused(in)) {
         auto now = std::chrono::high_resolution_clock::now();
         const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
         const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        std_log("Done loading BARCH, keys loaded:", t->size, "");
+        log({"Done loading BARCH, keys loaded:", t->size, ""});
 
-        std_log("loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds");
-        std_log("db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb");
+        log({"loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds"});
+        log({"db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb"});
     }catch (std::exception &e) {
-        std_log("could not load",e.what());
+        log({"could not load",e.what()});
         return false;
     }
 #endif
@@ -1065,7 +1065,7 @@ uint64_t shard_size(barch::shard *s) {
             return 0;
         return s->get_size();
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -1144,7 +1144,7 @@ void barch::shard::load_hash() {
         opt_ordered_keys = false;
     }
     if (log_loading_messages == 1)
-        std_log("loaded hash [",lc.get_name(),"] keys:",h.size(),", bytes per key:",sizeof(hashed_key));
+        log({"loaded hash [",lc.get_name(),"] keys:",h.size(),", bytes per key:",sizeof(hashed_key)});
 }
 /**
  * "active" defragmentation: takes all the fragmented pages and removes the not deleted keys on those
@@ -1159,9 +1159,9 @@ static void erase_page(const barch::shard_ptr& shard, const std::pair<heap::buff
         shard->evict(l);
         if (c1 - 1 != shard->get_size()) {
             if (hashed)
-                barch::std_err("hashed key not found");
+                barch::err({"hashed key not found"});
             else
-                barch::std_err("ordered key not found");
+                barch::err({"ordered key not found"});
             abort_with("key not marked as deleted but it was not found");
         }
         return true;
@@ -1392,12 +1392,12 @@ void barch::shard::maintenance() {
         ) {
             if (get_modifications() - mods > 0) {
 
-                //std_log("saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time));
+                //log({"saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time)});
                 this->save(with_stats);
 
             }
         }
     }catch (std::exception& e) {
-        barch::std_err(e.what());
+        barch::err({e.what()});
     }
 }

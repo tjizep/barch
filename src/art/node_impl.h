@@ -477,7 +477,7 @@ namespace art {
                 {
                     if (test!=i)
                     {
-                        std_log("failed test?");
+                        log({"failed test?"});
                     }
                     trace_element te = {this, get_child(i - 1), i - 1,(uint8_t)uc};
                     return {te, (i == c)};

@@ -36,7 +36,7 @@ static void init_auth(barch::shard_ptr auth) {
             add_cats(auth,"default","empty",cats);
         }
         auth->save(false);
-        barch::std_log("Saved initial acl");
+        barch::log({"Saved initial acl"});
     }
 }
 

@@ -26,7 +26,7 @@ void setConfiguration(const std::string& name, const std::string& value) {
 void testKv() {
 #if 1
     auto spc = barch::get_keyspace("test");
-    barch::std_log("test","shard count",spc->get_shard_count());
+    barch::log({"test","shard count",spc->get_shard_count()});
     size_t z = 0;
     auto kv = spc->get(z);
 
@@ -51,7 +51,7 @@ void setRoute(int shard, const std::string& host, int port) {
     rpc_caller sc;
     int r = sc.call(params, ADDROUTE);
     if (r == 0) {
-        barch::std_log("add route", host, port);
+        barch::log({"add route", host, port});
     }
 }
 void removeRoute(int shard) {
@@ -59,7 +59,7 @@ void removeRoute(int shard) {
     rpc_caller sc;
     int r = sc.call(params, REMROUTE);
     if (r == 0) {
-        barch::std_log("removed route", shard);
+        barch::log({"removed route", shard});
     }
 }
 
@@ -80,7 +80,7 @@ void load(const std::string &host, const std::string& port) {
     rpc_caller sc;
     int r = sc.call(params, RETRIEVE);
     if (r == 0) {
-        barch::std_log("loaded all shards from", host, port);
+        barch::log({"loaded all shards from", host, port});
     }
 }
 void load(const std::string &host, int port) {
@@ -92,7 +92,7 @@ void start(const std::string &host, const std::string& port) {
     sc.remote = false; // causes inline restart
     int r = sc.call(params, START);
     if (r == 0) {
-        barch::std_log("started server on", host, port);
+        barch::log({"started server on", host, port});
     }
 }
 void start(const std::string &host, int port) {
@@ -107,7 +107,7 @@ void stop() {
     sc.remote = false; // causes inline stop
     int r = sc.call(params, STOP);
     if (r == 0) {
-        barch::std_log("stopped server");
+        barch::log({"stopped server"});
     }
 }
 void ping(const std::string &host, const std::string& port) {
@@ -115,7 +115,7 @@ void ping(const std::string &host, const std::string& port) {
     rpc_caller sc;
     int r = sc.call(params, RPING);
     if (r != 0) {
-        barch::std_log("ping failed", host, port);
+        barch::log({"ping failed", host, port});
     }
 }
 void ping(const std::string &host, int port) {
@@ -126,7 +126,7 @@ void publish(const std::string &ip, const std::string &port) {
     rpc_caller sc;
     int r = sc.call(params, PUBLISH);
     if (r != 0) {
-        barch::std_err("publish failed", ip, port);
+        barch::err({"publish failed", ip, port});
     }
 }
 void publish(const std::string &host, int port) {
@@ -138,7 +138,7 @@ void pull(const std::string &ip, const std::string &port) {
     rpc_caller sc;
     int r = sc.call(params, PULL);
     if (r != 0) {
-        barch::std_err("publish failed", ip, port);
+        barch::err({"publish failed", ip, port});
     }
 }
 void pull(const std::string &host, int port) {
@@ -213,7 +213,7 @@ long long List::push(const std::string &key, const std::vector<std::string> &ite
     barch::repl::call(params);
     int r = sc.call(params, LPUSH);
     if (r != 0) {
-        barch::std_err("set failed", key);
+        barch::err({"set failed", key});
     }
     return sc.flat_empty() ? 0 : sc.flat_at(0).to_int64();
 
@@ -224,7 +224,7 @@ long long List::len(const std::string &key) {
 
     int r = sc.call(params, LLEN);
     if (r != 0) {
-        barch::std_err("len failed", key);
+        barch::err({"len failed", key});
     }
     return sc.flat_empty() ? 0 : sc.flat_at(0).to_int64();
 
@@ -507,7 +507,7 @@ void load() {
     rpc_caller sc;
     int r = sc.call(params, ::LOAD);
     if (r != 0) {
-        barch::std_err("load failed");
+        barch::err({"load failed"});
     }
 }
 repl_statistics repl_stats() {
@@ -659,7 +659,7 @@ std::vector<Value> Caller::call(const std::string &method, const std::vector<Val
     params.insert(params.end(), args.begin(), args.end());
     auto ic = barch_functions->find(method);
     if (ic == barch_functions->end()) {
-        barch::std_err("invalid call", method);
+        barch::err({"invalid call", method});
         return {};
     }
     auto f = ic->second.call;
@@ -691,7 +691,7 @@ void HashSet::set(const std::string &k, const std::vector<std::string>& members)
     barch::repl::call(params);
     int r = sc.call(params, ::HSET);
     if (r != 0) {
-        barch::std_err("set failed");
+        barch::err({"set failed"});
     }
 
 }

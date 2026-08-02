@@ -94,12 +94,12 @@ void dictionary_compressor::train_dictionary() {
             total_sizes += s;
         }
         if (total_sizes != training_samples.size()) {
-            barch::std_err("sample sizes do match total");
+            barch::err({"sample sizes do match total"});
         }
         // Failed to train dictionary (e.g., not enough samples or entropy)
         // Reset to keep collecting? Or fail permanently? 
         // For this implementation, we'll clear and try again later.
-        barch::std_err("Error creating dictionary:", ZSTD_getErrorName(dictSize));
+        barch::err({"Error creating dictionary:", ZSTD_getErrorName(dictSize)});
         training_samples.clear();
         sample_sizes.clear();
         dictionary_data.clear();
@@ -121,7 +121,7 @@ art::value_type dictionary_compressor::decompress(art::value_type compressed_dat
     uint64_t rSize = ZSTD_getFrameContentSize(compressed_data.data(), compressed_data.size);
     
     if (ZSTD_isError(rSize)) {
-        barch::std_err("decompression frame error",ZSTD_getErrorName(rSize));
+        barch::err({"decompression frame error",ZSTD_getErrorName(rSize)});
         return {};
     }
     decompressed.resize(rSize);
@@ -136,7 +136,7 @@ art::value_type dictionary_compressor::decompress(art::value_type compressed_dat
     );
 
     if (ZSTD_isError(dSize)) {
-        barch::std_err("decompression error [",ZSTD_getErrorName(rSize),"]");
+        barch::err({"decompression error [",ZSTD_getErrorName(rSize),"]"});
         return {};
     }
 
@@ -227,10 +227,10 @@ void dictionary_compressor::load_dictionary(const std::string &name) {
     }
     create_from_dictionary(buff);
     if (!is_dictionary_ready()) {
-        barch::std_err("ZSTD Dictionary had a format error and could not be loaded from",std::filesystem::current_path().c_str(),"/",name);
+        barch::err({"ZSTD Dictionary had a format error and could not be loaded from",std::filesystem::current_path().c_str(),"/",name});
         abort_with("dictionary format error");
     }else {
-        barch::std_log("loaded zstd dictionary from",std::filesystem::current_path().c_str(),"/",name);
+        barch::log({"loaded zstd dictionary from",std::filesystem::current_path().c_str(),"/",name});
     }
 }
 

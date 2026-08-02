@@ -103,7 +103,7 @@ static void insert_ordered(caller& call, composite &score_key, composite &member
         t->insert(sk, value, update);
         t->insert(mk, sk, update);
     }catch (const std::exception& e) {
-        barch::std_err(e.what());
+        barch::err({e.what()});
     }
     if (locked) {
         t->get_latch().unlock();
@@ -130,7 +130,7 @@ static void remove_ordered(caller& call, composite &score_key, composite &member
         t->remove(sk);
         t->remove(mk);
     }catch (const std::exception& e) {
-        barch::std_err(e.what());
+        barch::err({e.what()});
     }
     if (locked) {
         t->get_latch().unlock();
@@ -774,7 +774,7 @@ int ZDIFF(caller& call, const arg_t& argv) {
     try {
         return ZOPER(call, argv, difference);
     } catch (std::exception &e) {
-        barch::log(e,__FILE__,__LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
     }
     return call.push_error("internal error");
 }
@@ -825,7 +825,7 @@ int ZINTER(caller& call, const arg_t& argv) {
     try {
         return ZOPER(call, argv, intersect);
     } catch (std::exception &e) {
-        barch::log(e,__FILE__,__LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
     }
     return call.push_error("internal error");
 }
@@ -930,7 +930,7 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
         replies += 2;
 
         if (!i.remove()) {
-            barch::std_log("Could not remove key");
+            barch::log({"Could not remove key"});
         };
     }
     call.end_array();

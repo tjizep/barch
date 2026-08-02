@@ -13,7 +13,7 @@
 #include <vector>
 #include <functional>
 #include <list>
-#include <logger.h>
+#include <lzr_log.h>
 
 #include "ioutil.h"
 #include "configuration.h"
@@ -578,15 +578,15 @@ private:
 
     uint8_t *basic_resolve(logical_address at, bool modify = false) {
         if (opt_page_trace) {
-            barch::std_log("page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read");
+            barch::log({"page trace [", main.name, "]:", at.address(), at.page(), at.offset(), "for",modify ? "write":"read"});
         }
         if (test_memory == 1) {
             if (!allocated) {
-                barch::std_err("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::err({"failure for",main.name,at.address(), at.page(), at.offset()});
                 abort_with("use after free - no data allocated ");
             }
             if (erased.contains(at.address())) {
-                barch::std_err("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::err({"failure for",main.name,at.address(), at.page(), at.offset()});
                 abort_with("use after free");
             }
         }
@@ -658,20 +658,20 @@ public:
         size_t size = sz + test_memory;
         uint8_t *d1 = (test_memory == 1) ? basic_resolve(at) : nullptr;
         if (allocated < size) {
-            barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+            barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
             abort_with("invalid allocation data");
         }
         if (this->opt_page_trace) {
-            barch::std_log("freeing from [",main.name,"] size", size,"at",at.address(),"allocated",allocated);
+            barch::log({"freeing from [",main.name,"] size", size,"at",at.address(),"allocated",allocated});
         }
 
         allocated -= size;
         if (at.address() == 0 || size == 0) {
-            barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+            barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
             abort_with("invalid address");
         }
         if (test_memory == 1 && d1[sz] != at.address() % 255) {
-            barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+            barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
             abort_with("memory address check failure");
         }
         if (test_memory == 1)
@@ -686,7 +686,7 @@ public:
         }
         if (test_memory) {
             if (erased.count(at.address())) {
-                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
                 abort_with("memory erased (double free)");
             }
             erased.insert(at.address());
@@ -696,7 +696,7 @@ public:
             auto tp = at.page();
 
             if (is_free(tp)) {
-                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
                 abort_with("freeing a free page");
             }
             if (last_page_allocated == tp) {
@@ -705,7 +705,7 @@ public:
             t.size = 0;
             //t.modifications = 0;
             if (fragmentation < t.fragmentation) {
-                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
                 abort_with("invalid fragmentation");
             }
             fragmentation -= t.fragmentation;
@@ -723,7 +723,7 @@ public:
             //free_pages.push_back(at.page());
 
             if (fragmentation < t.fragmentation) {
-                barch::std_log("failure for",main.name,at.address(), at.page(), at.offset());
+                barch::log({"failure for",main.name,at.address(), at.page(), at.offset()});
                 abort_with("invalid fragmentation");
             }
         } else {
@@ -831,7 +831,7 @@ public:
             // last_page_allocated should not be set here
             at.second.size++;
             //at.second.modifications++;
-            if (at.second.fragmentation < size) {barch::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+            if (at.second.fragmentation < size) {barch::log({"failure for",main.name,r.address(), r.page(), r.offset()});
                 abort_with(" no fragmentation?");
             }
             at.second.fragmentation -= size;
@@ -839,7 +839,7 @@ public:
 
             auto *data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0) {
-                barch::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+                barch::log({"failure for",main.name,r.address(), r.page(), r.offset()});
                 abort_with("address check failed");
             }
             if (test_memory == 1)
@@ -853,7 +853,7 @@ public:
             }
 
             if (this->opt_page_trace) {
-                barch::std_log("allocate size [",main.name,"]", size,"at",r.address(),"from freelist","allocated",allocated);
+                barch::log({"allocate size [",main.name,"]", size,"at",r.address(),"from freelist","allocated",allocated});
             }
             return pd;
         }
@@ -885,7 +885,7 @@ public:
         allocated += size;
         auto *data = (test_memory == 1) ? basic_resolve(ca) : nullptr;
         if (test_memory == 1 && data[sz] != ca.address() % 255) {
-            barch::std_log("failure for",main.name,r.address(), r.page(), r.offset());
+            barch::log({"failure for",main.name,r.address(), r.page(), r.offset()});
             abort_with("memory address check failure");
         }
 
@@ -893,7 +893,7 @@ public:
         statistics::logical_allocated += size;
         r = ca;
         if (this->opt_page_trace) {
-            barch::std_log("allocate size [",main.name,"]", size,"at",r.address(),"as new","allocated",allocated);
+            barch::log({"allocate size [",main.name,"]", size,"at",r.address(),"as new","allocated",allocated});
         }
 
         return rd;
@@ -1020,7 +1020,7 @@ public:
         writep(of, (uint32_t)0);
         writep(of, written);
         if (skipped)
-            barch::std_err("skipped duplicate entries",skipped);
+            barch::err({"skipped duplicate entries",skipped});
     }
     void read_emancipated(std::istream& in) {
         size_t page;
@@ -1028,7 +1028,7 @@ public:
         uint32_t o;
         uint64_t read = 0,written = 0;
         if (!erased.empty()) {
-            barch::std_err("erased should be empty");
+            barch::err({"erased should be empty"});
         }
         do {
             readp(in, page);
@@ -1103,7 +1103,7 @@ public:
             emancipated.clear();
             return main.load(main.name+filenname, reader);
         } catch (std::exception &e) {
-            barch::log(e,__FILE__,__LINE__);
+            barch::err({e.what(), __FILE__, __LINE__});
             ++statistics::exceptions_raised;
         }
 
@@ -1137,7 +1137,7 @@ public:
             emancipated.clear();
             return main.receive(in, reader);
         } catch (std::exception &e) {
-            barch::log(e,__FILE__,__LINE__);
+            barch::err({e.what(), __FILE__, __LINE__});
             ++statistics::exceptions_raised;
         }
 

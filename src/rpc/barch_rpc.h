@@ -217,7 +217,7 @@ namespace barch {
         {
             error = result_error;
             if (error) {
-                std_err("error (",result_error.value(),") writing ",result_n,"bytes to socket:",result_error.message());
+                err({"error (",result_error.value(),") writing ",result_n,"bytes to socket:",result_error.message()});
                 ++statistics::repl::request_errors;
             }else {
                 net_stat stat;
@@ -237,7 +237,7 @@ namespace barch {
                 error = {};
                 s.close();
             }catch (const std::system_error& e) {
-                std_err("error closing socket:",e.code().message(),e.code().value());
+                err({"error closing socket:",e.code().message(),e.code().value()});
                 return false;
             }
             return true;
@@ -277,7 +277,7 @@ namespace barch {
             {
                 error = result_error;
                 if (error) {
-                    std_err("error (",error.value(),") reading socket:[",error.message(),"]");
+                    err({"error (",error.value(),") reading socket:[",error.message(),"]"});
                     ++statistics::repl::request_errors;
                 }
             });
@@ -323,7 +323,7 @@ namespace barch {
                 writep(stream, message_count);
                 writep(stream, name_size);
                 if (buffers_size == 0) {
-                    std_err("invalid buffer size", buffers_size);
+                    err({"invalid buffer size", buffers_size});
                     return false;
                 }
                 writep(stream, buffers_size);

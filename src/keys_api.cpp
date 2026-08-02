@@ -29,7 +29,7 @@
 #include "configuration.h"
 #include "statistics.h"
 #include "dictionary_compressor.h"
-#include "logger.h"
+#include "lzr_log.h"
 #include "module.h"
 #include "caller.h"
 #include "vk_caller.h"
@@ -728,7 +728,7 @@ int EXPIRE(caller& call, const arg_t& argv) {
             }
             auto l = leaf.const_leaf();
             if (art::now() + spec.ttl == 0) {
-                barch::std_log("why");
+                barch::log({"why"});
             }
             return art::make_leaf(t->get_ap(), l->get_key(),
                 l->get_value(),

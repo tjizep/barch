@@ -47,7 +47,7 @@ static size_t save(caller& call) {
     barch::sharded_store store(call.kspace());
     store.each_shard_parallel([&](const barch::shard_ptr& shard) {
         if (!shard->save(true)) {
-            barch::std_err("could not save", shard->get_shard_number());
+            barch::err({"could not save", shard->get_shard_number()});
             ++errors;
         }
     });

@@ -1198,6 +1198,47 @@ const std::vector<std::string>& barch::redis_configuration_names() {
     return names;
 }
 
+/**
+ * The environment name a setting answers to: BARCH_ followed by its own name in upper
+ * case, with hyphens as underscores because an environment name cannot carry one. So
+ * max_memory_bytes reads BARCH_MAX_MEMORY_BYTES, and the redis name maxmemory-policy
+ * reads BARCH_MAXMEMORY_POLICY.
+ */
+static std::string environment_name_of(const std::string& name) {
+    std::string e = "BARCH_" + name;
+    std::transform(e.begin(), e.end(), e.begin(), ::toupper);
+    std::replace(e.begin(), e.end(), '-', '_');
+    return e;
+}
+
+size_t barch::apply_environment_configuration() {
+    size_t applied = 0;
+    auto from_env = [&applied](const std::string& name) {
+        auto env = environment_name_of(name);
+        const char* value = std::getenv(env.c_str());
+        if (value == nullptr) return;
+
+        std::string why;
+        if (is_read_only_configuration(name, why)) {
+            // say so rather than ignore it - somebody who exported it expects an effect
+            barch::err({"ignoring", env, "-", why});
+            return;
+        }
+        if (set_configuration_value(name, value) == VALKEYMODULE_OK) {
+            barch::log({"configured", name, "from", env});
+            ++applied;
+        } else {
+            barch::err({"could not apply", env, "=", value, "to", name});
+        }
+    };
+    // the redis names first and barch's own second, so that if a setting is exported
+    // under both - BARCH_MAXMEMORY and BARCH_MAX_MEMORY_BYTES - barch's own name is the
+    // one that lands, being the more specific of the two
+    for (const auto& name : redis_configuration_names()) from_env(name);
+    for (const auto& name : configuration_names()) from_env(name);
+    return applied;
+}
+
 bool barch::is_read_only_configuration(const std::string& name, std::string& why) {
     for (const auto& f : redis_fixed_values) {
         if (name == f.redis_name) { why = f.why; return true; }
@@ -1236,12 +1277,12 @@ bool barch::get_redis_configuration_value(const std::string& name, std::string& 
 }
 
 int barch::set_configuration_value(const std::string& name, const std::string &val) {
-    barch::std_log("setting", name, "to", val);
+    barch::log({"setting", name, "to", val});
 
     // a redis name is resolved to the barch variable it means before anything else
     std::string why;
     if (is_read_only_configuration(name, why)) {
-        barch::std_err("cannot set", name, "-", why);
+        barch::err({"cannot set", name, "-", why});
         return VALKEYMODULE_ERR;
     }
     for (const auto& a : redis_aliases) {

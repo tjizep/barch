@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "logger.h"
+#include "lzr_log.h"
 #include "sastam.h"
 #include "time_conversion.h"
 constexpr bool use_legacy = false;
@@ -53,7 +53,7 @@ void rh_shared::init_thread() {
     if (!s.get_released().empty()) {
         rh_shared::thread_id = *s.get_released().begin();
         if (use_logging)
-            barch::std_log("reusing thread id",thread_id);
+            barch::log({"reusing thread id",thread_id});
         s.get_active()[thread_id] = true;
         s.get_released().erase(rh_shared::thread_id);
         return;
@@ -70,7 +70,7 @@ void rh_shared::release_thread() {
 
     std::lock_guard ini(s.get_mutex() );
     if (use_logging)
-        barch::std_log("releasing thread id",thread_id);
+        barch::log({"releasing thread id",thread_id});
     s.get_active()[thread_id] = false;
     s.get_released().insert(rh_shared::thread_id);
     rh_shared::thread_id = -1;
@@ -92,7 +92,7 @@ bool rh_shared::shared_mutex::try_lock_shared_for(decltype(std::chrono::millisec
         unlock();
         tid = thread_id;
         if (use_logging)
-            barch::std_log("finished init (shared)",thread_id);
+            barch::log({"finished init (shared)",thread_id});
     }
     if (tid  < 0) {
         abort_with("thread not initialized");
@@ -103,7 +103,7 @@ bool rh_shared::shared_mutex::try_lock_shared_for(decltype(std::chrono::millisec
     // todo: maybe check for multiple entries
     int32_t test = 0;
     if (use_logging)
-        barch::std_log("lock shared",tid,thread_id);
+        barch::log({"lock shared",tid,thread_id});
     // try to set guard to 1
     while (!guards[tid].can.compare_exchange_strong(test, 1)) {
 
@@ -130,7 +130,7 @@ bool rh_shared::shared_mutex::try_lock_for(decltype(std::chrono::milliseconds(10
         lock();
         unlock();
         if (use_logging)
-            barch::std_log("finished init (unique)",thread_id);
+            barch::log({"finished init (unique)",thread_id});
         tid  = thread_id;
     }
     if (tid  < 0) {
@@ -145,7 +145,7 @@ bool rh_shared::shared_mutex::try_lock_for(decltype(std::chrono::milliseconds(10
         return false;
     }
     if (use_logging)
-        barch::std_log("lock unique",tid,thread_id);
+        barch::log({"lock unique",tid,thread_id});
     thread_set threads_entered{};
     const thread_set& active_threads = s.get_active(); // it's small
     uint32_t spins = 0;
@@ -167,7 +167,7 @@ bool rh_shared::shared_mutex::try_lock_for(decltype(std::chrono::milliseconds(10
         ++spins;
         if (spins>=1000) {
             if (use_logging)
-                barch::std_log("spins",spins,thread_id);
+                barch::log({"spins",spins,thread_id});
             //std::this_thread::sleep_for(std::chrono::microseconds(250));
         }
         if (!threads_reading) break;
@@ -194,13 +194,13 @@ void rh_shared::shared_mutex::unlock() {
     for (auto t = 0; t < max_threads; ++t) {
         if (active_threads[t]) { // TODO: if active threads where added since lock was called then theres a problem
             if (use_logging)
-                barch::std_log("unique reset",t);
+                barch::log({"unique reset",t});
             guards[t].can = 0;
         }
     }
     auto tid  = thread_id;
     if (use_logging)
-        barch::std_log("unlock unique",tid,thread_id);
+        barch::log({"unlock unique",tid,thread_id});
     if (guards[tid].can.load() != 0) {
         abort_with("writer not unlocked");
     }
@@ -226,7 +226,7 @@ void rh_shared::shared_mutex::unlock_shared() {
     }
     // todo: compare_exchange to check for correct state of 1
     if (use_logging)
-        barch::std_log("ulock shared",at,thread_id);
+        barch::log({"ulock shared",at,thread_id});
     guards[at].can = 0; // actually not there anymore
 
 }
@@ -255,7 +255,7 @@ static int test() {
             std::mt19937 gen(rd());
             std::uniform_int_distribution<uint64_t> dist(0, 9);
             sync_point.arrive_and_wait();
-            barch::std_log("starting rh test thread",i);
+            barch::log({"starting rh test thread",i});
             uint64_t local_read = 0,local_count = 0;
             auto tid = rh_shared::thread_id;
             for (int test = 0; test < max_iters; ++test) {
@@ -272,19 +272,19 @@ static int test() {
                     lock.unlock_shared();
                 }
             }
-            barch::std_log("ending rh thread",i,tid);
+            barch::log({"ending rh thread",i,tid});
             read_var += local_read;
             count_var += local_count;
             rh_shared::release_thread();
         });
     }
     for (auto& t : threads) if (t.joinable()) t.join();
-    barch::std_log("time:",millis(start),"ms");
-    barch::std_log("read var", read_var.load());
-    barch::std_log("count var", count_var.load());
-    barch::std_log("write var",write_var);
-    barch::std_log("test resource size",test_resource.size());
-    barch::std_log("total var", write_var+read_var.load());
+    barch::log({"time:",millis(start),"ms"});
+    barch::log({"read var", read_var.load()});
+    barch::log({"count var", count_var.load()});
+    barch::log({"write var",write_var});
+    barch::log({"test resource size",test_resource.size()});
+    barch::log({"total var", write_var+read_var.load()});
 
 
     return 0;

@@ -1092,3 +1092,209 @@ file: 112 RESP commands before and after, 86 valkey module commands before and a
 nothing lost and nothing added.
 
 Measured: full suite green, 47 of 47.
+
+
+## 26. Configuration from the environment [01-08-2026]
+
+Every setting can now be given on the environment: BARCH_ followed by its name in upper
+case, so `export BARCH_MAX_MEMORY_BYTES=100m` before starting the process configures it.
+The redis names work too, with hyphens written as underscores because an environment
+name cannot carry one - BARCH_MAXMEMORY and BARCH_MAXMEMORY_POLICY. Values are in the
+form CONFIG SET takes, which is what makes 100m and 256mb mean what they look like, and
+what makes the redis unit handling from entry 23 apply here for free.
+
+`barch::apply_environment_configuration()` walks the two name lists and calls
+set_configuration_value for each name that is exported. It reports what it took, and
+says so when it cannot: a setting barch reports but cannot change - BARCH_APPENDONLY -
+is refused with the reason rather than ignored, because somebody who exported it is
+expecting an effect. A value the setter will not take is refused the same way, and
+neither stops the rest from being applied.
+
+**Where it is called matters more than what it does.** For the valkey module it is the
+last thing in OnLoad, after ValkeyModule_LoadConfigs - never before. LoadConfigs applies
+a registered default to every setting the config file does not mention, so anything read
+from the environment earlier would be silently undone. That also settles the precedence
+question: the environment wins over valkey.conf, which is what somebody exporting a
+variable to configure a process expects.
+
+For the bindings it is a SWIG %init, so it runs when the module is imported and before
+the caller can do anything, leaving an explicit setConfiguration() as the last word. The
+%init is guarded to python and lua: Java has no module init for SWIG to attach it to,
+and an unguarded block emits code at file scope that does not compile. A Java caller
+uses setConfiguration().
+
+If a setting is exported under both its own name and a redis alias, barch's own name
+wins - the aliases are applied first and the native names second, the more specific of
+the two landing last.
+
+Two things cost time and are worth knowing about this repo:
+
+  - **the python module under test is the installed one.** `venv/bin/pip install .` is
+    itself a ctest step, so site-packages only refreshes when the suite runs. A manual
+    check straight after a build tests the previous build, which is exactly what it
+    looked like when the first attempt reported the environment having no effect.
+  - **`python -c` cannot import barch from the build directory.** With -c python puts
+    the working directory first on sys.path, and the build directory holds a barch.so
+    belonging to another target which shadows the real module - the import fails with
+    "does not define module export function (PyInit_barch)". Running a script file puts
+    that script's directory first instead. The new test writes its child to a temporary
+    directory for that reason; -P would also fix it but only on python 3.11 and later,
+    and ubuntu 22 in CI is older.
+
+test/envconfigtest.py covers it end to end, driving child processes with the environment
+set because the environment is read at import and this file's own import has already
+happened by the time it runs: barch's own names, a redis alias, a redis byte unit, the
+policy value translation, which name wins when both are exported, a read only setting
+being refused without stopping the rest, and a bad value leaving the default in place.
+
+Measured: full suite green, 48 of 48.
+
+
+## 27. A logging style that takes an initializer list [02-08-2026]
+
+lzr_log.h/.cpp add:
+
+    log({"loaded", count, "shards in", seconds, "s"});
+    warn({"timeout after", secs, "seconds"});
+    err({"could not save shard", shard_num});
+
+The functions are not templates and all the formatting is in lzr_log.cpp, which is the
+only translation unit that needs fmt. Output is identical to the old logger's for the
+same content, checked side by side; warn is a third level the old one did not have,
+tagged W where the others are M and E. Both loggers take the same mutex, so lines cannot
+interleave while call sites are still on the old one.
+
+**It went through two designs, and the difference between them is the whole story.**
+
+The first took `std::initializer_list<Variable>`, reusing the type the rest of barch
+carries values in. It worked, and it was *slower to compile than what it replaced*.
+Measured over a thousand log statements, call sites only, with the include cost
+subtracted:
+
+    old, std_log(a, b, c)                   +2.00s
+    new, log({a, b, c}) over Variable       +2.10s
+
+Trading fmt's make_format_args for std::variant's converting assignment is close to a
+wash: the variant does overload resolution across eleven alternatives on every
+instantiation. Naming the ordinary types on Variable so the variant machinery is skipped
+brought it to +1.75s - a 12% win, not the order of magnitude the idea deserved. And
+lzr_log.h had to include variable.h, which costs about 1.0s per translation unit on its
+own, so including the new logger was *more* expensive than including the old one.
+
+The second design drops Variable for a `log_value` defined in lzr_log.h: the six kinds a
+message can contain, a borrowed string_view rather than an owned string, and nothing
+else. It is built entirely from non-template constructors, so a call site instantiates
+nothing at all, and the header includes only <cstdint>, <initializer_list>, <string> and
+<string_view>. That changes the picture completely:
+
+    include logger.h                        +0.65s
+    include lzr_log.h                       +0.12s
+    logger.h  + 1000 std_log                 2.61s   (call sites +1.94s)
+    lzr_log.h + 1000 log                     0.71s   (call sites +0.58s)
+
+73% off the translation unit, with the call sites themselves about three times cheaper.
+So the original premise was right, and the reason the first attempt did not show it was
+that Variable brought its own template machinery and its own include cost.
+
+Two details worth recording:
+
+  - **a std::string needs a constructor of its own.** It reaches string_view through a
+    user defined conversion, and a second one to log_value is more than an implicit
+    conversion sequence will do, so log({some_std_string}) does not compile without it.
+    That is the only reason <string> is in the header, and it costs 0.06s of the 0.12s.
+    An art::value_type is not named at all: .to_view() at the call site keeps its
+    include out.
+  - **a stray pointer is now a compile error.** log_value(bool) would otherwise swallow
+    any pointer through the pointer to bool conversion and quietly log "true", so
+    pointers are deleted, with const char* binding to its own non-template constructor
+    ahead of the deleted template. The old logger would have printed an address.
+
+variable.h is untouched: the constructors added while the first design was being
+measured went back once the logger stopped using it. What they were fixing is real and
+is recorded as TODO 28.
+
+Measured: full suite green, 48 of 48.
+
+
+## 28. All logging converted to lzr_log [02-08-2026]
+
+196 std_log and std_err call sites across 35 files became log({...}) and err({...}), and
+another 30 barch::log(e, __FILE__, __LINE__) became err({e.what(), __FILE__, __LINE__}) -
+which is exactly what that wrapper did, so the output is unchanged. Checked against a
+running server: the startup lines read the same as before.
+
+logger.h is now included by one file, logger.cpp, plus keys.cpp for the streaming
+std_start/std_continue/std_end form that only its key dumper uses and that lzr_log does
+not have. Everything else, including statistics.h, moved to lzr_log.h.
+
+statistics.h was the one that mattered. It included logger.h for a single std_err inside
+throw_exception, and it is included nearly everywhere, so every translation unit in the
+project was paying for fmt's core, chrono, format and color headers to get one line.
+
+**The compile time result is much smaller than the isolated measurement suggested, and
+that is worth recording plainly.** A file that does nothing but log is 73% faster to
+compile. Real files are 2 to 6%:
+
+    src/shard.cpp          2.78s -> 2.61s
+    src/keys_api.cpp       2.79s -> 2.73s
+    src/configuration.cpp  2.81s -> 2.74s
+    src/rpc/server.cpp     4.05s -> 3.97s
+
+The logger was simply never the dominant cost in a file that also includes asio, the art
+headers and variable.h. Removing 0.65s of includes from a 2.8s translation unit is worth
+having and is not what the exercise felt like it was worth. TODO 29, variable.h at about
+1.0s on its own, is where the remaining time is.
+
+So the honest reason to keep this is the API and the smaller include graph, with the
+compile time as a real but modest bonus.
+
+Three things the conversion turned up:
+
+  - **a non const char\* is an exact match for the deleted pointer template**, where
+    const char\* only reaches its constructor through a qualification conversion, so it
+    needed naming too. Without it any char\* was a compile error rather than a log line.
+  - **logical_allocator.h included <logger.h> in angle brackets**, which a search for
+    the quoted form missed, so logger.h stayed in the include graph of every file that
+    touches the allocator until it was found by asking the compiler what it had actually
+    included rather than by grepping.
+  - **the second conversion pass double wrapped the first pass's work.** Rewriting
+    barch::log(args) to barch::log({args}) hit the barch::log({...}) calls the first
+    pass had already produced, giving log({{...}}) in 74 places. The compiler caught it,
+    but only because log_value cannot be built from an initializer list - had the type
+    been more permissive this would have compiled and logged nonsense.
+
+Left alone deliberately: err({std::runtime_error("...").what(), ...}) in hash_arena.cpp
+constructs an exception purely to read its message back, which the conversion made more
+visible but did not introduce. It is faithful to what was there.
+
+Measured: full suite green, 48 of 48.
+
+
+## 29. Variable would not take an unsigned type narrower than 64 bits [02-08-2026]
+
+`Variable v = some_uint32_t` did not compile. uint32_t converts without narrowing to
+both int64_t and uint64_t, so std::variant's converting constructor could not choose
+between them and rejected it outright - in a type whose whole job is to hold any value,
+and with uint32_t common in this codebase.
+
+Latent rather than live: nothing that fails to compile can be in the code, so this was a
+hole nobody had fallen into rather than a bug producing wrong answers. It surfaced while
+the logger was briefly built on Variable, and was left alone when the logger stopped
+using it, because at that point it was no longer part of that change.
+
+Three constructors, naming the unsigned types narrower than 64 bits and picking uint64_t,
+which is what they are. Only those three: every other arithmetic type already resolves,
+and leaving them to the template means nothing that compiled before changes which
+alternative it lands on. Verified across every arithmetic type, all seventeen now
+resolving to the alternative they should.
+
+bool is deliberately still not named. A Variable(bool) would swallow any pointer through
+the pointer to bool conversion and silently store true, where today that is a compile
+error - checked, and it still is.
+
+Not taken: the same technique applied to every arithmetic type measured about 12% off
+translation units that build a lot of Variables, when it was tried during the logger
+work. That is a compile time change rather than a correctness one, so it belongs with
+TODO 29 and the rest of the compile time question, not here.
+
+Measured: full suite green, 48 of 48.

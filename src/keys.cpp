@@ -3,6 +3,8 @@
 //
 
 #include "keys.h"
+// std_start/std_continue/std_end - the streaming form, which lzr_log does not have
+#include "logger.h"
 #include <cstdlib>
 #include "conversion.h"
 static size_t encoded_str_len(const char* str, size_t len) {

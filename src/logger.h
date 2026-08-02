@@ -8,6 +8,7 @@
 #include <exception>
 #include <array>
 #include <chrono>
+#include <mutex>
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Weffc++"
 #include <bits/this_thread_sleep.h>
@@ -18,6 +19,13 @@
 #pragma GCC diagnostic pop
 
 namespace barch {
+    /**
+     * The one lock every log line takes, wherever it was written from. lzr_log.cpp uses
+     * it too so that a line from the new logger cannot be cut in half by one from this
+     * one while call sites are being moved across.
+     */
+    extern std::mutex& log_mutex();
+
     extern void raw_start_log(bool err);
 
     extern void raw_end_log();

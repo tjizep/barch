@@ -87,7 +87,7 @@ struct thread_pool {
 
             int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpu_set_t), &cpuset);
             if (rc != 0) {
-                barch::std_err("Failed to pin thread ", core_id, " error: ", rc);
+                barch::err({"Failed to pin thread ", core_id, " error: ", rc});
             }
             core_id++;
         }
@@ -104,9 +104,9 @@ struct thread_pool {
             t = {};
         }
         if (stopped < pool.size()) {
-            barch::std_err("not all threads have stopped ",(size_t)stopped,"of",pool.size());
+            barch::err({"not all threads have stopped ",(size_t)stopped,"of",pool.size()});
         }else {
-            barch::std_err("all threads have stopped ",(size_t)stopped,"of",pool.size());
+            barch::err({"all threads have stopped ",(size_t)stopped,"of",pool.size()});
         }
         stopped = 0;
         started = false;

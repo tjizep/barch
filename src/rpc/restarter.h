@@ -19,7 +19,7 @@ struct restarter {
                 if (!interface.empty() || port > 100)
                     barch::server::start(interface,port, ssl);
             }catch (std::exception &e) {
-                barch::std_err("could not restart server",e.what());
+                barch::err({"could not restart server",e.what()});
             }
         });
     }
@@ -31,7 +31,7 @@ struct restarter {
             try {
                 barch::server::stop();
             }catch (std::exception &e) {
-                barch::std_err("could not restart server",e.what());
+                barch::err({"could not restart server",e.what()});
             }
         });
     }

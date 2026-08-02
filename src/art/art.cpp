@@ -11,7 +11,7 @@
 #include "../statistics.h"
 #include "../logical_allocator.h"
 #include "../keys.h"
-#include "../logger.h"
+#include "../lzr_log.h"
 #include "../module.h"
 
 // Recursively destroys the tree
@@ -188,7 +188,7 @@ art::node_ptr art_search(const art::tree *t, art::value_type key) {
         }
 
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -253,7 +253,7 @@ bool art::update(tree *t, value_type key,
 
 
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return false;
@@ -502,7 +502,7 @@ art::node_ptr art::lower_bound(const art::tree *t, art::value_type key) {
             return al;
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -537,7 +537,7 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
             } while (increment_trace(t->root, tl));
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -574,7 +574,7 @@ int art::range(const tree *t, value_type key, value_type key_end, LeafCallBack c
             } while (increment_trace(t->root, tl));
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -615,7 +615,7 @@ art::node_ptr art::find(const tree* t, value_type key) {
             depth++;
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -649,7 +649,7 @@ art::iterator::iterator(barch::shard_ptr t, value_type unfiltered_key) : t(t) {
             c = t->get_tree_size() == 1 ? lb : last_node(tl);
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
 }
@@ -906,16 +906,16 @@ int64_t art::iterator::fast_distance(const iterator &other) const {
 
 void art::iterator::log_trace() const {
     size_t ctr = 0;
-    barch::std_log("=======-iterator trace-========");
-    barch::std_log("  tree size: ", this->t->get_tree_size());
+    barch::log({"=======-iterator trace-========"});
+    barch::log({"  tree size: ", this->t->get_tree_size()});
     log_encoded_key(key());
     for (auto &el: tl) {
         auto tp = el.parent->type();
         auto checked = el.parent->check_data();
-        barch::std_log(++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
-                el.child_ix, el.k, tp, checked);
+        barch::log({++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
+                el.child_ix, el.k, tp, checked});
     }
-    barch::std_log("=====-end iterator trace-======");
+    barch::log({"=====-end iterator trace-======"});
 }
 
 /**
@@ -928,7 +928,7 @@ art::node_ptr art_minimum(const art::tree *t) {
         if (l.null()) return nullptr;
         return l;
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -944,7 +944,7 @@ art::node_ptr art::maximum(const art::tree *t) {
         if (l.null()) return nullptr;
         return l;
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return nullptr;
@@ -1223,7 +1223,7 @@ bool art_insert
         }
         return true;
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return false;
@@ -1256,7 +1256,7 @@ void art_insert_no_replace(art::tree *t, const art::key_options &options, art::v
             t->size++;
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
 }
@@ -1360,7 +1360,7 @@ void art_delete(art::tree *t, art::value_type key, const art::NodeResult &fc) {
             free_node(l);
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
 }
@@ -1436,7 +1436,7 @@ int art_iter(art::tree *t, art::CallBack cb, void *data) {
         }
         return recursive_iter(t->root, cb, data);
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
         return -1;
     }
@@ -1525,7 +1525,7 @@ int art_iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *d
             depth++;
         }
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
     return 0;
@@ -1559,12 +1559,12 @@ void art::tree::update_trace(int direction) {
     // although it has a performance penalty
     if (!trace.empty()) {
         if (trace[0].parent != root) {
-            barch::std_log("trace root invalid for",nodes.get_name());
+            barch::log({"trace root invalid for",nodes.get_name()});
             abort_with("invalid trace root");
         }
         auto trd = trace[0].parent->data().descendants;
         if (trd + direction != size) {
-            barch::std_err("descendant count invalid", trd, "!=", size);
+            barch::err({"descendant count invalid", trd, "!=", size});
             abort_with("invalid descendant count");
         }
         for (auto &ut: trace) {
@@ -1572,7 +1572,7 @@ void art::tree::update_trace(int direction) {
         }
         trd = trace[0].parent->data().descendants;
         if (trd != size) {
-            barch::std_err("descendant count invalid", trd, "!=", size);
+            barch::err({"descendant count invalid", trd, "!=", size});
             abort_with("invalid descendant count");
         }
     }
@@ -1641,7 +1641,7 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                 return true;
             });
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
 }
@@ -1682,28 +1682,28 @@ void art::values(tree * t, const keys_spec &spec, value_type pattern,
                 return true;
             });
     } catch (std::exception &e) {
-        barch::log(e, __FILE__, __LINE__);
+        barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;
     }
 }
 
 static void log_trace(const art::tree* t , const std::string& name, const art::trace_list& tl)  {
     size_t ctr = 0;
-    barch::std_log("====-tree trace-",name,"====");
-    barch::std_log("  tree size: ", t->size);
+    barch::log({"====-tree trace-",name,"===="});
+    barch::log({"  tree size: ", t->size});
     for (auto &el: tl) {
         auto tp = el.parent->type();
         auto checked = el.parent->check_data();
-        barch::std_log(++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
-                el.child_ix, "k",el.k,"tp", tp, "checked", checked);
+        barch::log({++ctr, "address:", el.parent.logical.address(), "type:", el.parent->data().type, "child index:",
+                el.child_ix, "k",el.k,"tp", tp, "checked", checked});
         if (el.child.is_leaf) {
             auto l = el.child.const_leaf();
-            //art::std_log(++ctr, "address:", el.child.logical.address(), "type:", "leaf","value size",l->get_value().size);
+            //art::log({++ctr, "address:", el.child.logical.address(), "type:", "leaf","value size",l->get_value().size});
             log_encoded_key(l->get_key());
 
         }
     }
-    barch::std_log("=====-end tree trace-======");
+    barch::log({"=====-end tree trace-======"});
 }
 void art::tree::log_trace() const {
     ::log_trace(this, "trace", trace);

@@ -2,7 +2,7 @@
 // Created by teejip on 4/15/25.
 //
 #include "sastam.h"
-#include "logger.h"
+#include "lzr_log.h"
 #if 0
 static int test(){
 	heap::small_vector<int> testv;
@@ -20,7 +20,7 @@ static int test(){
 	}
 	if (total != ttotal)
 	{
-		barch::std_err("tesfail");
+		barch::err({"tesfail"});
 	}
 	for (auto r = testv.rbegin(); r != testv.rend(); ++r)
 	{
@@ -29,7 +29,7 @@ static int test(){
 	}
 	if (total != 0)
 	{
-		barch::std_err("tesfail");
+		barch::err({"tesfail"});
 	}
 	for (int i = 0; i <100; ++i)
 	{
@@ -38,11 +38,11 @@ static int test(){
 	}
 	if (total != ttotal)
 	{
-		barch::std_err("tesfail");
+		barch::err({"tesfail"});
 	}
 	if (!testv.empty())
 	{
-		barch::std_err("should be empty",testv.size());
+		barch::err({"should be empty",testv.size()});
 	}
 	for (int i = 0; i <100; ++i)
 	{
@@ -56,7 +56,7 @@ static int test(){
 	}
 	if (total != 2*ttotal)
 	{
-		barch::std_err("tesfail");
+		barch::err({"tesfail"});
 	}
 	tbefore = total;
 	t = testv.begin();
@@ -67,7 +67,7 @@ static int test(){
 	}
 	if (total != 3*ttotal)
 	{
-		barch::std_err("tesfail");
+		barch::err({"tesfail"});
 	}
 	auto tr = testv.rbegin();
 	for (int i = 0; i <100; ++i)
@@ -77,7 +77,7 @@ static int test(){
 
 	if (total != tbefore)
 	{
-		barch::std_err("tesfail");
+		barch::err({"tesfail"});
 	}
 	total = ttotal;
 	auto ttv= testv;
@@ -89,7 +89,7 @@ static int test(){
 
 	if (total != 0)
 	{
-		barch::std_err("tesfail");
+		barch::err({"tesfail"});
 	}
     return ttotal;
 }

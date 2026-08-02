@@ -10,7 +10,7 @@
 #include <shared_mutex>
 #include <stdexcept>
 
-#include "logger.h"
+#include "lzr_log.h"
 // a shared lock for read heavy work loads (like caches)
 
 

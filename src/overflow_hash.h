@@ -260,7 +260,7 @@ namespace oh {
                     }
                 }
                 if (to.get_size() != get_size()) {
-                    barch::std_log("resize failed",get_size(), to.get_size());
+                    barch::log({"resize failed",get_size(), to.get_size()});
                     abort_with("rehash failed");
                 }
                 to.rehashed = ++rehashed;

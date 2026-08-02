@@ -570,6 +570,12 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # configuration taken from the environment. Reads it at import, so the test
+        # drives child processes with the environment set
+        add_test(NAME TestEnvConfig
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/envconfigtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestBindings
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/bindingtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

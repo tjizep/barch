@@ -16,7 +16,7 @@
 namespace barch {
     struct key_spaces {
         key_spaces() {
-            barch::std_log("Starting Barch",
+            barch::log({"Starting Barch",
                 "\n",
                 "\n\tversion","[",BARCH_PROJECT_VERSION,"]",
                 "\n\tpage_size","[",(size_t)page_size,"] bytes",
@@ -30,7 +30,7 @@ namespace barch {
                 "\n\tresp service threads","[",(thread_pool::get_system_threads()*resp_pool_factor)/100.0f,"] "
                 "socket accept threads","[",(thread_pool::get_system_threads()*tcp_accept_pool_factor)/100.0f,"]"
                 "\n\tdefault eviction policy","[",get_eviction_policy(),"]",
-                "\n\tcompression","[",get_compression_enabled(),"]","\n");
+                "\n\tcompression","[",get_compression_enabled(),"]","\n"});
 
         };
         ~key_spaces() {
@@ -189,7 +189,7 @@ namespace barch {
             auto end_time = std::chrono::high_resolution_clock::now();
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             shards.swap(shards_out);
-            barch::std_log("Loaded",shards.size(),"shards in", millis/1000.0f, "s", shards_loaded);
+            barch::log({"Loaded",shards.size(),"shards in", millis/1000.0f, "s", shards_loaded});
             // other threads allocate concurrently so only a growth is meaningful here
             uint64_t memory_after = get_total_memory();
             if (memory_after > memory_before) {
@@ -214,14 +214,14 @@ namespace barch {
                        try {
                            s->maintenance();
                        }catch (std::exception& e) {
-                           barch::std_err("exception in maintenance:",e.what());
+                           barch::err({"exception in maintenance:",e.what()});
                        }
                        if (exiting) break;
                    }
 
                 }
             }catch (std::exception& e){
-               barch::std_err("shard maintenance thread error:",e.what());
+               barch::err({"shard maintenance thread error:",e.what()});
             }
             thread_exit.signal(1);
         });

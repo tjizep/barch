@@ -63,3 +63,31 @@
     sections the default should contain: redis returns a documented default set rather
     than everything, so settle by checking what redis-py's INFO parser and redis-cli
     expect to find, then join those sections.
+
+27. [Done] All logging converted to lzr_log [02-08-2026] Nr 28
+
+28. [Done] Variable would not take an unsigned type narrower than 64 bits [02-08-2026] Nr 29
+
+29. General compilation speedup. Converting the logger took 0.65s of includes out of
+    every translation unit and moved a real file only 2 to 6% (DONE 28), which says the
+    time is spread across the big headers rather than concentrated anywhere obvious. A
+    full build is the thing to measure against, not a single file.
+
+    Known starting points, largest first:
+
+      - variable.h is about 1.0s on its own, more than anything else measured. It pulls
+        in fast_float, fmt/format.h and a std::variant over eleven alternatives. Two
+        specific questions: whether fast_float is needed in the header at all, since the
+        conversion helpers it serves are declared rather than defined there, and whether
+        the variant has to be visible to every consumer or could sit behind a pointer
+        for the files that only pass Variables through.
+      - the art headers and asio, which dominate the files that were only 2% faster.
+        rpc/server.cpp is the worst in the project at about 4.0s.
+      - fmt is now confined to lzr_log.cpp for logging, but variable.h still includes
+        fmt/format.h for one call in Variable::to_string.
+
+    Worth doing first, because it turns guessing into measuring: build with
+    -ftime-report or -ftime-trace and total the cost per header across the project,
+    rather than timing files one at a time as was done for the logger. That will also
+    say whether precompiled headers or explicit instantiation would pay, which is a
+    different answer from trimming includes.

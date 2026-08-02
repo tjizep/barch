@@ -49,7 +49,7 @@ namespace barch {
         }
         [[nodiscard]] size_t remaining() const {
             if (in.pos > in.buf.size()) {
-                barch::std_err("invalid buffer size", in.buf.size());
+                barch::err({"invalid buffer size", in.buf.size()});
                 return 0;
             }
             return in.buf.size() - in.pos;
@@ -79,7 +79,7 @@ namespace barch {
                             }
                             readp(in,buffers_size);
                             if (buffers_size == 0) {
-                                barch::std_err("invalid buffer size", buffers_size);
+                                barch::err({"invalid buffer size", buffers_size});
                                 clear();
                                 return false;
                             }
@@ -116,7 +116,7 @@ namespace barch {
                             std::string cn = std::string{params[0]};
                             auto ic = bf->find(cn);
                             if (ic == bf->end()) {
-                                barch::std_err("invalid call", cn);
+                                barch::err({"invalid call", cn});
                                 writep(out, replies_size);
                                 clear();
                                 return true;
@@ -156,7 +156,7 @@ namespace barch {
                     }
                         break;
                     default:
-                        barch::std_err("invalid state", state);
+                        barch::err({"invalid state", state});
                         break;
                 }
             }

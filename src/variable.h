@@ -111,6 +111,24 @@ public:
     }
     Variable(const art::value_type & v) : variable_t(::as_variable(v)){}
 
+    /*
+     * The unsigned types narrower than 64 bits, named so that they resolve.
+     *
+     * They convert without narrowing to both int64_t and uint64_t, so the variant's
+     * converting constructor cannot choose between them and does not compile at all:
+     * `Variable v = some_uint32_t` was an error, in a type meant to hold any value.
+     * Naming them picks uint64_t, which is what they are.
+     *
+     * Only these three. Every other arithmetic type already resolves, and leaving those
+     * to the template means nothing that compiles today changes which alternative it
+     * lands on. bool in particular is deliberately not named: a Variable(bool) would
+     * swallow any pointer through the pointer to bool conversion, and that is a compile
+     * error today and should stay one.
+     */
+    Variable(unsigned char v) : variable_t((uint64_t) v) {}
+    Variable(unsigned short v) : variable_t((uint64_t) v) {}
+    Variable(unsigned int v) : variable_t((uint64_t) v) {}
+
     Variable& operator=(const Variable&) = default;
 
     [[nodiscard]] bool isBoolean() const {

@@ -45,12 +45,17 @@ static range_index::entry make_entry(art::value_type key, size_t shard) {
     return e;
 }
 
-size_t range_index::route(const table& t, art::value_type key) {
+size_t range_index::upper(const table& t, art::value_type key) {
     auto k = route_key(key);
     auto it = std::upper_bound(t.begin(), t.end(), k,
                                [](art::value_type a, const entry& e) { return a < e.value(); });
-    if (it == t.begin()) return 0;   // below every boundary: the span open at the bottom
-    return std::prev(it)->shard;
+    return (size_t) (it - t.begin());
+}
+
+size_t range_index::route(const table& t, art::value_type key) {
+    size_t at = upper(t, key);
+    if (!at) return 0;               // below every boundary: the span open at the bottom
+    return t[at - 1].shard;
 }
 
 void range_index::publish(const std::shared_ptr<table>& t) {

@@ -84,6 +84,18 @@ namespace barch {
         /** the table as it is now. Hold it for as long as the routing decision matters */
         [[nodiscard]] table_ptr get() const { return current.load(std::memory_order_acquire); }
 
+        /**
+         * the position of the first boundary above key.
+         *
+         * This is the lower bound over the shards, and the ordered operations are built
+         * on it rather than on route() because they need both of the shards it names:
+         * the entry before it owns key's span, and the entry at it - if there is one -
+         * is the next shard up. Since every entry is a shard's minimum, that second one
+         * is also the smallest key in the space above key that key's own shard does not
+         * hold itself.
+         */
+        static size_t upper(const table& t, art::value_type key);
+
         /** the shard owning key according to `t` */
         static size_t route(const table& t, art::value_type key);
         /** the shard owning key according to the table as it is now */

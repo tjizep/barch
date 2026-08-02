@@ -329,14 +329,32 @@ bool sharded_store::lower_bound(art::value_type key, const key_cb& cb) const {
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
     if (ordered_shards()) {
-        // nothing below the shard that owns key can answer, and the first shard at or
-        // above it that has an answer has the smallest one
+        // a lower bound over the boundaries, then a lower bound over one art. Nothing
+        // below the shard that owns key can answer at all, so no other shard is asked.
+        //
+        // The owning shard can still miss, which is why there is a second step: key
+        // falling inside a shard's span is not a promise that the shard holds anything
+        // at or above key within it. Shard 0 holding {a, b} and shard 1 holding {m, n}
+        // owns "c" and has no answer for it - "m" does. When that happens the index
+        // already names where to look, because every entry in it is a shard's minimum:
+        // the entry just above key is the next non empty shard, and its minimum is the
+        // answer, since every key above that one is larger still.
         const auto& all = shards();
-        for (size_t s = spc->routes().route(key); s < all.size(); ++s) {
-            if (!all[s]->get_tree_size()) continue;
-            art::node_ptr r = all[s]->lower_bound(key);
-            if (!r.is_leaf) continue;
+        auto table = spc->routes().get();
+        size_t at = range_index::upper(*table, key);
+        size_t owner = at ? (*table)[at - 1].shard : 0;
+        art::node_ptr r = all[owner]->lower_bound(key);
+        if (r.is_leaf) {
             cb(r.const_leaf()->get_key());
+            return true;
+        }
+        for (size_t e = at; e < table->size(); ++e) {
+            // the leaf's key rather than the boundary held next to it: a key handed to
+            // cb has to be the stored form, and the table keeps boundaries with the
+            // terminator already stripped so that they compare against either form
+            auto m = all[(*table)[e].shard]->tree_minimum();
+            if (!m.is_leaf) continue;
+            cb(m.const_leaf()->get_key());
             return true;
         }
         return false;
@@ -360,14 +378,25 @@ bool sharded_store::upper_bound(art::value_type key, const key_cb& cb) const {
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
     if (ordered_shards()) {
+        // the same two steps as lower_bound above, and the same reason for the second
+        // one. The boundaries the index holds are strictly above key, so a shard reached
+        // that way needs no equal key skipped - only the owning shard does
         const auto& all = shards();
-        for (size_t s = spc->routes().route(key); s < all.size(); ++s) {
-            art::iterator ilb(all[s], key);
-            if (ilb.ok() && ilb.key() == key) {
-                ilb.next();
-            }
-            if (!ilb.ok()) continue;
+        auto table = spc->routes().get();
+        size_t at = range_index::upper(*table, key);
+        size_t owner = at ? (*table)[at - 1].shard : 0;
+        art::iterator ilb(all[owner], key);
+        if (ilb.ok() && ilb.key() == key) {
+            ilb.next();
+        }
+        if (ilb.ok()) {
             cb(ilb.key());
+            return true;
+        }
+        for (size_t e = at; e < table->size(); ++e) {
+            auto m = all[(*table)[e].shard]->tree_minimum();
+            if (!m.is_leaf) continue;
+            cb(m.const_leaf()->get_key());
             return true;
         }
         return false;

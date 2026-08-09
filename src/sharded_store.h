@@ -103,6 +103,13 @@ namespace barch {
         /** every shard in the space, in shard number order */
         [[nodiscard]] virtual const heap::vector<shard_ptr>& shards() const;
 
+        /**
+         * true when shard number and key order agree - a range sharded space with no
+         * pull source. The ordered operations below then walk shards rather than
+         * merging them, and can stop at the first shard that cannot contribute.
+         */
+        [[nodiscard]] bool ordered_shards() const;
+
         // ---- single key ----
 
         /**

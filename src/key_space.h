@@ -8,6 +8,7 @@
 #include "../external/include/valkeymodule.h"
 #include "abstract_shard.h"
 #include "merge_options.h"
+#include "range_index.h"
 #include "value_type.h"
 
 namespace barch {
@@ -27,13 +28,17 @@ namespace barch {
          * hash table, where a range means nothing. Asking for it on an unordered space
          * is refused when the space is built rather than half honoured.
          *
-         * Nothing reads this yet - the algorithm it is going to select is TODO 30. It
-         * exists now so that the option, its plumbing and its truthfulness can be
-         * settled separately from the sharding itself.
+         * What it selects is `rindex` below, and the two differences that follow from
+         * it: a route is a binary search of the boundaries rather than a hash, and a
+         * key can change shard while the space is running, which hash routing never
+         * does. Everything that routes then locks has to allow for the second - see
+         * route_moved.
          */
         bool opt_range_sharded = false;
     private:
         heap::vector<barch::shard_ptr> shards{};
+        /** only read when opt_range_sharded; see range_index.h */
+        range_index rindex{};
         decltype(std::chrono::high_resolution_clock::now) start_time;
         std::string name{};
         key_space_ptr src;
@@ -45,6 +50,8 @@ namespace barch {
         std::mutex lock{};
 
         void start_maintain();
+        /** build rindex from the loaded shards, repartitioning them first if they need it */
+        void build_range_index();
 
     public:
         key_space(const std::string &name);
@@ -69,6 +76,28 @@ namespace barch {
         void merge(merge_options options);
         void each_shard(std::function<void(shard_ptr)> f);
         [[nodiscard]] size_t get_shard_count() const;
+
+        // ---- range routing ----
+
+        [[nodiscard]] bool is_range_sharded() const { return opt_range_sharded; }
+        /**
+         * true if a key can change shard while the space is running. Hash routing is a
+         * pure function of the key and so never does; range routing moves boundaries to
+         * keep the shards even.
+         */
+        [[nodiscard]] bool routes_move() const { return opt_range_sharded; }
+        /**
+         * true if key no longer belongs to `t`.
+         *
+         * This is the check that makes routing safe under a moving partition. Route,
+         * take the lock, then ask this: a false answer means no rebalance can take the
+         * key out of `t` while the lock is held, because moving it needs that same lock.
+         * A true answer means the boundary moved in between, and the caller has a lock
+         * on the wrong shard and should drop it and route again.
+         */
+        bool route_moved(art::value_type key, const shard_ptr& t);
+        /** the routing table, for the ordered operations that walk shards in key order */
+        range_index& routes() { return rindex; }
         bool buffer_insert(const std::string& key, const std::string& value);
         size_t hash_buf_size() const ;
     };

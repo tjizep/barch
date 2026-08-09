@@ -18,6 +18,7 @@ alignas(Alignment) std::atomic<uint64_t> statistics::leaf_nodes_replaced = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::pages_evicted = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::keys_evicted = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::pages_defragged = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::range_shard_keys_moved = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vmm_pages_defragged = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::vmm_pages_popped = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::read_locks_active;
@@ -89,6 +90,7 @@ void statistics::reset_statistics() {
     pages_evicted = 0;
     keys_evicted = 0;
     pages_defragged = 0;
+    range_shard_keys_moved = 0;
     vmm_pages_defragged = 0;
     vmm_pages_popped = 0;
     exceptions_raised = 0;

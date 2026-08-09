@@ -16,6 +16,8 @@ namespace statistics {
     extern std::atomic<uint64_t> pages_evicted;
     extern std::atomic<uint64_t> keys_evicted;
     extern std::atomic<uint64_t> pages_defragged;
+    /** keys relocated between shards by the range sharding rebalancer */
+    extern std::atomic<uint64_t> range_shard_keys_moved;
     extern std::atomic<uint64_t> vmm_pages_defragged;
     extern std::atomic<uint64_t> vmm_pages_popped;
     extern std::atomic<uint64_t> exceptions_raised;

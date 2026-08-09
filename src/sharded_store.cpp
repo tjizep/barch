@@ -9,12 +9,47 @@
 #include "abstract_shard.h"
 
 #include <algorithm>
+#include <optional>
 
 #include "art/iterator.h"
 #include "keys.h"
 #include "statistics.h"
 
 namespace barch {
+
+/**
+ * route to the shard owning `key` and lock it, making sure the route is still true once
+ * the lock is held.
+ *
+ * Routing and locking cannot be one step, so there is always a gap between deciding
+ * which shard owns a key and holding the lock that stops it changing. Hash routing does
+ * not care, because a key's shard is a pure function of the key and nothing can move it.
+ * A range sharded space rebalances, so between the two the boundary can move and leave
+ * the caller holding a lock on a shard the key no longer belongs to - which would insert
+ * a key where nothing will ever look for it, or report a live key as absent.
+ *
+ * Re-reading the routing table under the lock closes that. If it still says this shard,
+ * no rebalance can take the key out of it while the lock is held, because a rebalance
+ * changes the table only while holding a write lock on every shard whose span changes.
+ * If it says another shard, the boundary moved in between: drop the lock and go again.
+ * The retry cannot spin for long - it takes another rebalance of this key's boundary to
+ * lose a second time, and those are bounded by the maintenance interval.
+ */
+template<typename Lock>
+static shard_ptr route_locked(const sharded_store& store, art::value_type key,
+                              std::optional<Lock>& held) {
+    for (;;) {
+        // through shard_for rather than the key space, because that is the routing
+        // primitive the class is meant to be specialised on
+        auto t = store.shard_for(key);
+        if (!t) return t;
+        held.emplace(t);
+        if (!store.space()->route_moved(key, t)) {
+            return t;
+        }
+        held.reset();
+    }
+}
 
 art::merge_iterator make_merged(const shard_ptr& shard, art::value_type lower) {
     auto s = shard->sources();
@@ -49,15 +84,27 @@ const heap::vector<shard_ptr>& sharded_store::shards() const {
 // ---- single key ----
 
 bool sharded_store::search(art::value_type key, const node_cb& cb) const {
+    // a shard with sources cannot answer from its own bloom filter alone, because the
+    // key may only exist upstream
+    auto ruled_out = [&key](const shard_ptr& t) {
+        return !t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key);
+    };
     auto t = shard_for(key);
     if (!t) return false;
 
-    // a shard with sources cannot answer from its own bloom filter alone, because the
-    // key may only exist upstream
-    if (!t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key)) {
+    const bool moves = spc->routes_move();
+    // where routing cannot move a key the filter is worth reading before taking the
+    // lock, because a miss saves the lock entirely. Where it can, a filter read off the
+    // shard that used to own the key says nothing, so it waits until the route is settled
+    if (!moves && ruled_out(t)) {
         return false;
     }
-    read_lock release(t);
+    std::optional<read_lock> release;
+    t = route_locked<read_lock>(*this, key, release);
+    if (!t) return false;
+    if (moves && ruled_out(t)) {
+        return false;
+    }
     auto r = t->search(key);
     if (r.null() || r.cl()->is_tomb()) {
         return false;
@@ -67,71 +114,95 @@ bool sharded_store::search(art::value_type key, const node_cb& cb) const {
 }
 
 bool sharded_store::exists(art::value_type key) const {
+    auto ruled_out = [&key](const shard_ptr& t) {
+        return !t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key);
+    };
     auto t = shard_for(key);
     if (!t) return false;
-    if (!t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key)) {
+    const bool moves = spc->routes_move();
+    if (!moves && ruled_out(t)) {
         return false;
     }
-    read_lock release(t);
+    std::optional<read_lock> release;
+    t = route_locked<read_lock>(*this, key, release);
+    if (!t) return false;
+    if (moves && ruled_out(t)) {
+        return false;
+    }
     return !t->search(key).null();
 }
 
 bool sharded_store::insert(const art::key_options& opts, art::value_type key,
                            art::value_type value, bool update, const art::NodeResult& fc) {
-    auto t = shard_for(key);
+    std::optional<storage_release> release;
+    auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
-    storage_release release(t);
     return t->opt_insert(opts, key, value, update, fc);
 }
 
 bool sharded_store::add(const art::key_options& opts, art::value_type key,
                         art::value_type value, const art::NodeResult& fc) {
-    auto t = shard_for(key);
+    std::optional<storage_release> release;
+    auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
-    storage_release release(t);
     return t->insert(opts, key, value, false, fc);
 }
 
 bool sharded_store::remove(art::value_type key, const art::NodeResult& fc) {
-    auto t = shard_for(key);
+    std::optional<storage_release> release;
+    auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
-    storage_release release(t);
     return t->remove(key, fc);
 }
 
 bool sharded_store::update(art::value_type key, const updater_fn& updater) {
-    auto t = shard_for(key);
+    std::optional<storage_release> release;
+    auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return false;
-    storage_release release(t);
     return t->update(key, updater);
 }
 
 void sharded_store::with_key_write(art::value_type key, const shard_fn& fn) {
-    auto t = shard_for(key);
+    std::optional<storage_release> release;
+    auto t = route_locked<storage_release>(*this, key, release);
     if (!t) return;
-    storage_release release(t);
     fn(t);
 }
 
 void sharded_store::with_key_read(art::value_type key, const shard_fn& fn) const {
-    auto t = shard_for(key);
+    std::optional<read_lock> release;
+    auto t = route_locked<read_lock>(*this, key, release);
     if (!t) return;
-    read_lock release(t);
     fn(t);
 }
 
+// the same route, lock, re-route rule as route_locked above, for the callers that need
+// to hold the lock past the end of a callback
+
 sharded_store::write_locked_shard sharded_store::write_locked(art::value_type key) const {
-    auto t = shard_for(key);
-    return {t, write_guard(t)};
+    for (;;) {
+        auto t = shard_for(key);
+        write_guard g(t);
+        if (!spc->route_moved(key, t)) return {t, std::move(g)};
+    }
 }
 
 sharded_store::read_locked_shard sharded_store::read_locked(art::value_type key) const {
-    auto t = shard_for(key);
-    return {t, read_guard(t)};
+    for (;;) {
+        auto t = shard_for(key);
+        read_guard g(t);
+        if (!spc->route_moved(key, t)) return {t, std::move(g)};
+    }
 }
 
 sharded_store::write_guard sharded_store::lock_key_write(art::value_type key) const {
-    return write_guard(shard_for(key));
+    for (;;) {
+        auto t = shard_for(key);
+        write_guard g(t);
+        // the callers of this route again under the lock to get at the shard, so the
+        // route has to be settled before it is handed over
+        if (!spc->route_moved(key, t)) return g;
+    }
 }
 
 sharded_store::write_guard sharded_store::lock_space_write() const {
@@ -183,10 +254,33 @@ void sharded_store::each_shard_parallel(const shard_fn& fn) const {
 
 // ---- ordered fan out ----
 
+/**
+ * true when the shards are a partition of the key order, so that shard number and key
+ * order agree and the operations below can walk shards instead of merging them.
+ *
+ * A space with a pull source is excluded even when it is range sharded: the keys it
+ * answers for are not all its own, and the ones upstream are not part of the partition.
+ */
+bool sharded_store::ordered_shards() const {
+    return spc->is_range_sharded() && !spc->source();
+}
+
 bool sharded_store::minimum(const key_cb& cb) const {
     art::value_type the_min;
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
+    if (ordered_shards()) {
+        // the smallest key in the space is the smallest key of the first shard that has
+        // one - no other shard can hold anything below it
+        for (const auto& t : shards()) {
+            if (!t->get_tree_size()) continue;
+            art::node_ptr r = t->tree_minimum();
+            if (!r.is_leaf) continue;
+            cb(r.const_leaf()->get_key());
+            return true;
+        }
+        return false;
+    }
     for (const auto& t : shards()) {
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_minimum();
@@ -205,6 +299,17 @@ bool sharded_store::maximum(const key_cb& cb) const {
     art::value_type the_max;
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
+    if (ordered_shards()) {
+        const auto& all = shards();
+        for (size_t s = all.size(); s-- > 0;) {
+            if (!all[s]->get_tree_size()) continue;
+            art::node_ptr r = all[s]->tree_maximum();
+            if (!r.is_leaf) continue;
+            cb(r.const_leaf()->get_key());
+            return true;
+        }
+        return false;
+    }
     for (const auto& t : shards()) {
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->tree_maximum();
@@ -223,6 +328,37 @@ bool sharded_store::lower_bound(art::value_type key, const key_cb& cb) const {
     art::value_type the_lb;
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
+    if (ordered_shards()) {
+        // a lower bound over the boundaries, then a lower bound over one art. Nothing
+        // below the shard that owns key can answer at all, so no other shard is asked.
+        //
+        // The owning shard can still miss, which is why there is a second step: key
+        // falling inside a shard's span is not a promise that the shard holds anything
+        // at or above key within it. Shard 0 holding {a, b} and shard 1 holding {m, n}
+        // owns "c" and has no answer for it - "m" does. When that happens the index
+        // already names where to look, because every entry in it is a shard's minimum:
+        // the entry just above key is the next non empty shard, and its minimum is the
+        // answer, since every key above that one is larger still.
+        const auto& all = shards();
+        auto table = spc->routes().get();
+        size_t at = range_index::upper(*table, key);
+        size_t owner = at ? (*table)[at - 1].shard : 0;
+        art::node_ptr r = all[owner]->lower_bound(key);
+        if (r.is_leaf) {
+            cb(r.const_leaf()->get_key());
+            return true;
+        }
+        for (size_t e = at; e < table->size(); ++e) {
+            // the leaf's key rather than the boundary held next to it: a key handed to
+            // cb has to be the stored form, and the table keeps boundaries with the
+            // terminator already stripped so that they compare against either form
+            auto m = all[(*table)[e].shard]->tree_minimum();
+            if (!m.is_leaf) continue;
+            cb(m.const_leaf()->get_key());
+            return true;
+        }
+        return false;
+    }
     for (const auto& t : shards()) {
         if (!t->get_tree_size()) continue;
         art::node_ptr r = t->lower_bound(key);
@@ -241,6 +377,30 @@ bool sharded_store::upper_bound(art::value_type key, const key_cb& cb) const {
     art::value_type the_ub;
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
+    if (ordered_shards()) {
+        // the same two steps as lower_bound above, and the same reason for the second
+        // one. The boundaries the index holds are strictly above key, so a shard reached
+        // that way needs no equal key skipped - only the owning shard does
+        const auto& all = shards();
+        auto table = spc->routes().get();
+        size_t at = range_index::upper(*table, key);
+        size_t owner = at ? (*table)[at - 1].shard : 0;
+        art::iterator ilb(all[owner], key);
+        if (ilb.ok() && ilb.key() == key) {
+            ilb.next();
+        }
+        if (ilb.ok()) {
+            cb(ilb.key());
+            return true;
+        }
+        for (size_t e = at; e < table->size(); ++e) {
+            auto m = all[(*table)[e].shard]->tree_minimum();
+            if (!m.is_leaf) continue;
+            cb(m.const_leaf()->get_key());
+            return true;
+        }
+        return false;
+    }
     for (const auto& t : shards()) {
         if (!t->get_tree_size()) continue;
         art::iterator ilb(t, key);
@@ -280,6 +440,20 @@ int64_t sharded_store::count(art::value_type lo, art::value_type hi) const {
         }
         return count;
     };
+    if (ordered_shards()) {
+        // only the shards whose spans overlap [lo, hi) can contribute, and they are
+        // consecutive: the one that owns lo through the one that owns hi. Both ends come
+        // out of the routing table, so this needs no lock and no tree walk to decide
+        // which shards to open - unlike asking the shards themselves, which would be
+        // reading a tree that a rebalance is entitled to be changing
+        const auto& all = shards();
+        auto table = spc->routes().get();
+        size_t last = range_index::route(*table, hi);
+        for (size_t s = range_index::route(*table, lo); s <= last && s < all.size(); ++s) {
+            total += space_count(spc, s);
+        }
+        return total;
+    }
     for (const auto& t : shards()) {
         total += space_count(spc, t->get_shard_number());
         total += space_count(spc->source(), t->get_shard_number());
@@ -291,6 +465,31 @@ void sharded_store::range(art::value_type lo, art::value_type hi, int64_t limit,
                           const key_cb& cb) const {
     ks_shared kss(spc->source());
     ks_shared ksl(spc);
+
+    if (ordered_shards()) {
+        // this is most of the reason for ordering the shards in the first place.
+        //
+        // Because the shards are a partition of the key order, the keys come out sorted
+        // from walking the shards that overlap [lo, hi) in shard number order and each
+        // of those in key order. There is no striation, no merge, nothing collected and
+        // nothing sorted: a key is handed to cb as it is found. The walk begins at the
+        // shard that owns lo, because nothing below it can hold a key at or above lo,
+        // and stops at the first key not below hi, because nothing after that one is
+        // either.
+        const auto& all = shards();
+        auto table = spc->routes().get();
+        size_t last = range_index::route(*table, hi);
+        for (size_t s = range_index::route(*table, lo); s <= last && s < all.size(); ++s) {
+            for (art::iterator i(all[s], lo); i.ok(); i.next()) {
+                auto k = i.key();
+                if (!(k < hi)) return;
+                if (k < lo) continue;
+                cb(k);
+                if (--limit == 0) return;
+            }
+        }
+        return;
+    }
 
     // walk every shard in lockstep, in 'striations': one pass takes the next key from
     // each shard, so after N passes we are certain we have seen the globally smallest

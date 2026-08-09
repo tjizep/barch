@@ -1,0 +1,1916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BARCH — RESP &amp; SWIG Interface Reference</title>
+<meta name="description" content="Technical reference for the BARCH ordered cache: RESP wire protocol and SWIG (Python / Lua) embedded L1 interfaces.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#141a22;            /* primary text */
+  --ink-2:#3d4854;          /* secondary text */
+  --ink-3:#6b7683;          /* muted */
+  --paper:#f2f4f6;          /* page */
+  --panel:#ffffff;          /* cards */
+  --line:#d7dde3;           /* hairlines */
+  --l1:#2450d6;             /* L1 tier — cobalt (embedded, fast path) */
+  --l1-soft:#e6ecfb;
+  --l2:#b05c2a;             /* L2 tier — copper (remote, wire path) */
+  --l2-soft:#f6ebe2;
+  --ok:#1a7a4a;
+  --warn-bg:#fdf3e4; --warn-bd:#e2b25c; --warn-tx:#7a5310;
+  --note-bg:#e9eef8; --note-bd:#8ba3d9; --note-tx:#27407a;
+  --code-bg:#10151c; --code-tx:#dbe3ec;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'IBM Plex Sans',system-ui,sans-serif;
+  --disp:'Archivo',var(--sans);
+  --sidebar-w:272px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important;animation:none!important}}
+body{font-family:var(--sans);color:var(--ink);background:var(--paper);font-size:15px;line-height:1.62}
+a{color:var(--l1);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--l1);outline-offset:2px}
+
+/* ---------- shell ---------- */
+.shell{display:grid;grid-template-columns:var(--sidebar-w) 1fr;min-height:100vh}
+nav.side{background:#0e1420;color:#c7d0dc;padding:22px 0 40px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.brand{padding:0 22px 18px;border-bottom:1px solid #1f2836}
+.brand .name{font-family:var(--disp);font-weight:800;font-size:24px;letter-spacing:.04em;color:#fff}
+.brand .name em{font-style:normal;color:var(--l2);}
+.brand .sub{font-family:var(--mono);font-size:10.5px;color:#7d8ba0;letter-spacing:.08em;margin-top:4px;text-transform:uppercase}
+nav.side .grp{padding:16px 22px 4px;font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#5f6d84}
+nav.side a{display:block;padding:6px 22px;color:#c7d0dc;font-size:13.5px;border-left:3px solid transparent}
+nav.side a:hover{color:#fff;text-decoration:none;background:#141c2c}
+nav.side a.on{color:#fff;border-left-color:var(--l2);background:#141c2c}
+nav.side a code{font-family:var(--mono);font-size:12px;color:#93a3ba}
+
+main{padding:44px 56px 90px;max-width:1020px;min-width:0}
+article{display:none}
+article.on{display:block}
+.crumb{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);margin-bottom:10px}
+h1{font-family:var(--disp);font-weight:800;font-size:34px;line-height:1.12;letter-spacing:-.01em;margin-bottom:10px}
+.lede{font-size:16.5px;color:var(--ink-2);max-width:72ch;margin-bottom:26px}
+h2{font-family:var(--disp);font-weight:700;font-size:21px;margin:38px 0 12px;letter-spacing:.005em}
+h3{font-family:var(--disp);font-weight:700;font-size:16px;margin:26px 0 8px}
+p{margin:0 0 14px;max-width:78ch}
+ul,ol{margin:0 0 14px 22px;max-width:78ch}
+li{margin-bottom:4px}
+code{font-family:var(--mono);font-size:.88em;background:#e6eaef;border:1px solid var(--line);border-radius:4px;padding:.08em .34em}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+
+/* the three mandated blocks */
+.block{background:var(--panel);border:1px solid var(--line);border-radius:8px;margin:26px 0;overflow:hidden}
+.block>header{display:flex;align-items:center;gap:10px;padding:11px 18px;border-bottom:1px solid var(--line);background:#f8fafc}
+.block>header .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;font-weight:700;text-transform:uppercase;color:#fff;background:var(--ink);border-radius:3px;padding:3px 8px}
+.block>header .tag.ctx{background:var(--ink)}
+.block>header .tag.ref{background:var(--l1)}
+.block>header .tag.code{background:var(--l2)}
+.block>header h2{margin:0;font-size:15px}
+.block .bd{padding:18px 18px 8px}
+
+/* tier + complexity chips — the site signature */
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 18px}
+.chip{font-family:var(--mono);font-size:11.5px;font-weight:500;border-radius:999px;padding:3px 11px;border:1px solid}
+.chip.l1{color:var(--l1);border-color:var(--l1);background:var(--l1-soft)}
+.chip.l2{color:var(--l2);border-color:var(--l2);background:var(--l2-soft)}
+.chip.o{color:var(--ink-2);border-color:var(--line);background:#eef1f4}
+.chip.lock{color:#7a1f3d;border-color:#d9a4b6;background:#faeef2}
+
+/* tables */
+table{border-collapse:collapse;width:100%;margin:10px 0 20px;font-size:13.5px;background:var(--panel);display:block;overflow-x:auto;max-width:100%}
+table tbody{width:100%}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;text-align:left;color:var(--ink-3);border-bottom:2px solid var(--ink);padding:8px 12px 6px;white-space:nowrap}
+td{border-bottom:1px solid var(--line);padding:8px 12px;vertical-align:top}
+td:first-child code{white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.req{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.05em}
+.req.y{color:var(--ok)}.req.n{color:var(--ink-3)}.req.c{color:var(--l2)}
+
+/* notice banners (MDX <Warning>/<Note> equivalents) */
+.notice{border-radius:6px;padding:13px 16px 13px 46px;margin:16px 0;position:relative;font-size:14px;max-width:80ch}
+.notice::before{position:absolute;left:15px;top:12px;font-family:var(--mono);font-weight:700;font-size:13px}
+.notice.warning{background:var(--warn-bg);border:1px solid var(--warn-bd);color:var(--warn-tx)}
+.notice.warning::before{content:"⚠"}
+.notice.note{background:var(--note-bg);border:1px solid var(--note-bd);color:var(--note-tx)}
+.notice.note::before{content:"ℹ"}
+.notice b{font-weight:600}
+.notice code{background:rgba(255,255,255,.6);border-color:transparent}
+
+/* code tabs */
+.tabs{border:1px solid #253042;border-radius:8px;overflow:hidden;margin:14px 0 22px;background:var(--code-bg)}
+.tabbar{display:flex;flex-wrap:wrap;background:#1a2230;border-bottom:1px solid #253042}
+.tabbar button{font-family:var(--mono);font-size:12px;color:#8fa0b6;background:none;border:0;border-right:1px solid #253042;padding:9px 15px;cursor:pointer}
+.tabbar button:hover{color:#fff}
+.tabbar button.on{color:#fff;background:var(--code-bg);box-shadow:inset 0 2px 0 var(--l2)}
+.pane{display:none;position:relative}
+.pane.on{display:block}
+.pane pre{padding:16px 18px;overflow-x:auto;font-family:var(--mono);font-size:12.8px;line-height:1.6;color:var(--code-tx)}
+.pane .cp{position:absolute;top:8px;right:8px;font-family:var(--mono);font-size:10.5px;color:#8fa0b6;background:#1a2230;border:1px solid #253042;border-radius:4px;padding:3px 9px;cursor:pointer}
+.pane .cp:hover{color:#fff}
+pre .c{color:#6d7f97}pre .k{color:#7aa2f7}pre .s{color:#c8a96e}pre .n{color:#79c0a7}
+
+/* single dark code block (non-tabbed) */
+pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;padding:15px 18px;overflow-x:auto;font-family:var(--mono);font-size:12.8px;line-height:1.6;margin:12px 0 20px}
+
+/* hero on overview */
+.hero{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:26px;margin:8px 0 30px;display:grid;grid-template-columns:1fr 300px;gap:26px;align-items:center}
+.tiermap{font-family:var(--mono);font-size:11.5px}
+.tiermap .row{display:flex;align-items:center;gap:10px;margin:7px 0}
+.tiermap .box{border-radius:6px;padding:8px 12px;flex:1;border:1.5px solid}
+.tiermap .box.t1{border-color:var(--l1);background:var(--l1-soft);color:var(--l1)}
+.tiermap .box.t2{border-color:var(--l2);background:var(--l2-soft);color:var(--l2)}
+.tiermap .box.app{border-color:var(--line);background:#eef1f4;color:var(--ink-2)}
+.tiermap .lat{width:86px;text-align:right;color:var(--ink-3)}
+.tiermap .arrow{text-align:center;color:var(--ink-3);margin:1px 0}
+
+.footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-3);font-family:var(--mono)}
+
+@media(max-width:900px){
+  .shell{grid-template-columns:1fr}
+  nav.side{position:static;height:auto}
+  main{padding:26px 18px 70px}
+  .hero{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="side" aria-label="Documentation">
+  <div class="brand">
+    <div class="name">BA<em>RCH</em></div>
+    <div class="sub">RESP + SWIG Reference · v0.5.x</div>
+  </div>
+  <div class="grp">Platform</div>
+  <a href="#overview" data-nav="overview">Architecture Overview</a>
+  <a href="#quickstart" data-nav="quickstart">Quickstart</a>
+  <a href="#configuration" data-nav="configuration">Configuration</a>
+  <a href="#errors" data-nav="errors">Error Model</a>
+  <div class="grp">Interfaces</div>
+  <a href="#resp" data-nav="resp">RESP Wire Interface</a>
+  <a href="#swig-python" data-nav="swig-python">SWIG · Python L1</a>
+  <a href="#swig-lua" data-nav="swig-lua">SWIG · LuaJIT L1</a>
+  <div class="grp">Reference</div>
+  <a href="#ref-keyvalue" data-nav="ref-keyvalue">Key/Value + Ordered Ops</a>
+  <a href="#ref-range-sharding" data-nav="ref-range-sharding">Ordered Range Sharding</a>
+  <a href="#ref-hash" data-nav="ref-hash">HashSet <code>H*</code></a>
+  <a href="#ref-ordered" data-nav="ref-ordered">OrderedSet <code>Z*</code></a>
+  <a href="#ref-list" data-nav="ref-list">List <code>L*</code></a>
+  <a href="#ref-keyspaces" data-nav="ref-keyspaces">Named Key Spaces</a>
+  <a href="#ref-memory" data-nav="ref-memory">Memory &amp; Prefix Elimination</a>
+  <a href="#ref-replication" data-nav="ref-replication">Replication &amp; Routing</a>
+  <a href="#ref-stats" data-nav="ref-stats">Statistics &amp; Introspection</a>
+  <a href="#ref-acl" data-nav="ref-acl">AUTH &amp; ACL</a>
+  <a href="#ref-compression" data-nav="ref-compression">Dictionary Compression</a>
+</nav>
+<main id="main">
+<!-- =============== OVERVIEW =============== -->
+<article id="overview">
+<div class="crumb">Platform / Architecture</div>
+<h1>BARCH Architecture Overview</h1>
+<p class="lede">BARCH is a low-memory, ordered, sharded cache built on an adaptive radix trie (ART). It exposes two access surfaces documented on this site: the <b>RESP wire interface</b> (redis/valkey protocol, default port <code>14000</code>) and the <b>SWIG-generated embedded interface</b> for Python and LuaJIT, which executes against the in-process L1 store without a network hop.</p>
+
+<div class="hero">
+  <div>
+    <h3 style="margin-top:0">Tier model</h3>
+    <p style="margin-bottom:8px">The embedded (SWIG) interface is the L1 fast path: calls resolve in-process against sharded tries. The RESP interface serves the same store over the wire and doubles as the L2 replication endpoint. Every command page on this site is tagged with the tiers it can execute on.</p>
+    <div class="chips">
+      <span class="chip l1">L1 · embedded, in-process</span>
+      <span class="chip l2">L2 · RESP, over the wire</span>
+    </div>
+  </div>
+  <div class="tiermap" aria-hidden="true">
+    <div class="row"><div class="box app">Python / LuaJIT / Java process</div><div class="lat"></div></div>
+    <div class="arrow">│ direct call (SWIG)</div>
+    <div class="row"><div class="box t1">L1 · barch shards (in-process ART)</div><div class="lat">&lt; 1 µs read</div></div>
+    <div class="arrow">│ RESP · publish / pull / routes</div>
+    <div class="row"><div class="box t2">L2 · standalone barch / valkey module</div><div class="lat">~ ms read</div></div>
+  </div>
+</div>
+
+<h2>Storage engine</h2>
+<p>Each keyspace is partitioned into shards; each shard owns an independent ART with adaptive interior nodes (<code>node4</code>, <code>node16</code>, <code>node48</code>, <code>node256</code>) and compressed paths. Consequences that hold across every API on this site:</p>
+<table>
+  <thead><tr><th>Property</th><th>Guarantee</th></tr></thead>
+  <tbody>
+  <tr><td>Point operations</td><td><code>O(k)</code> where <code>k</code> is key length in bytes — independent of key count <code>n</code>.</td></tr>
+  <tr><td>Ordered navigation</td><td><code>MIN</code>, <code>MAX</code>, <code>LB</code>/<code>FIRST</code>, <code>UB</code>/<code>NEXT</code> descend one root-to-leaf path: <code>O(k)</code>, effectively constant time.</td></tr>
+  <tr><td>Range scans</td><td><code>O(k + m)</code> for <code>m</code> results; iteration never blocks other readers. On a range-sharded space, cross-shard ranges walk shards in key order and stop early — see <a href="#ref-range-sharding">Ordered Range Sharding</a>.</td></tr>
+  <tr><td>Memory</td><td>Roughly half of an equivalent hash map — shared key prefixes are stored once rather than per entry (see <a href="#ref-memory">Memory &amp; Prefix Elimination</a>); interior nodes grow adaptively, values optionally compressed (zstd/fsst) inside a VMM-paged arena with defragmentation and LRU/LFU/TTL eviction.</td></tr>
+  <tr><td>Concurrency</td><td>Reader/writer locks per shard. Reads are concurrent and scale linearly with core count; a write serializes only against its own shard.</td></tr>
+  </tbody>
+</table>
+
+<div class="notice note"><b>Ordering is byte-lexicographic with a numeric class below text.</b> <code>MIN</code>/<code>MAX</code> and range endpoints compare numbers as less than strings. Design composite keys (e.g. Morton/Z-order codes) with this collation in mind.</div>
+
+<h2>What this site covers</h2>
+<p>Per project decision, this reference is constrained to the two production access surfaces:</p>
+<ul>
+  <li><b>RESP</b> — every command listed here is reachable on the built-in RESP port with its bare name, and on a hosting valkey server with the <code>B.</code> prefix. Signatures identical to valkey/redis behave identically.</li>
+  <li><b>SWIG</b> — the classes generated from <code>src/barch.i</code>: module functions plus <code>Caller</code>, <code>KeyValue</code>, <code>HashSet</code>, <code>OrderedSet</code>, <code>List</code>, and the <code>Value</code> variant type.</li>
+</ul>
+<p>Both surfaces address the same <a href="#ref-keyspaces">named key spaces</a>. The valkey module loader, JNI bindings, and internal C++ headers are out of scope.</p>
+<div class="footer">MIT licensed · source at github.com/tjizep/barch · this site lives in <code>docs/site/index.html</code> — edit the <code>&lt;article&gt;</code> blocks directly.</div>
+</article>
+
+<!-- =============== QUICKSTART =============== -->
+<article id="quickstart">
+<div class="crumb">Platform / Quickstart</div>
+<h1>Quickstart</h1>
+<p class="lede">Two ways in: attach to a running RESP endpoint, or embed the L1 store in your own process via the SWIG module.</p>
+
+<h2>1 · RESP endpoint</h2>
+<p>Any RESP client works. When barch runs as a valkey module, prefix commands with <code>B.</code> on the valkey port; the native barch port (default <code>14000</code>) takes bare names.</p>
+<pre class="solo"><span class="c"># standalone: valkey hosts the module, barch also listens natively</span>
+valkey-server valkey.conf --loadmodule ./build/_barch.so
+valkey-cli -p 6379 B.SET greeting hello
+valkey-cli -p 14000 GET greeting        <span class="c"># same store, bare names</span></pre>
+
+<h2>2 · Embedded L1 (SWIG)</h2>
+<pre class="solo"><span class="c"># python</span>
+import barch
+k = barch.KeyValue()
+k.set("hello", "world")
+print(k.get("hello"))
+
+<span class="c"># optionally expose the embedded store on RESP so redis-cli can reach it</span>
+barch.start("127.0.0.1", 14000)</pre>
+<p>Unix domain sockets are supported for zero-TCP local serving: <code>barch.start("/tmp/lbarch", 0)</code>, then connect with <code>barch.KeyValue("/tmp/lbarch", 0)</code> from another process.</p>
+
+<div class="notice note"><b>Environment configuration.</b> The Python and Lua modules apply environment-derived configuration at import time, before any user code runs. An explicit <code>setConfiguration()</code> call still wins.</div>
+
+<h2>Build from source</h2>
+<pre class="solo">sudo apt install build-essential cmake swig python3-dev libssl-dev
+cmake -B build -DTEST_OD=ON
+cmake --build build --target barch --parallel     <span class="c"># SWIG python module</span>
+cmake --build build --target lbarch --parallel    <span class="c"># valkey runtime</span>
+sudo cmake --install build --component barchlua   <span class="c"># luajit → /var/lib/lua/5.1/barch.so</span></pre>
+<div class="notice warning"><b>Platform constraint.</b> Linux only, gcc 11+ (any C++20 compiler), amd64+SSE or arm+NEON. Valkey 8.0+ is required only for the module deployment — the embedded and native-RESP paths run without it.</div>
+</article>
+
+<!-- =============== CONFIGURATION =============== -->
+<article id="configuration">
+<div class="crumb">Platform / Configuration</div>
+<h1>Configuration</h1>
+<p class="lede">Every option is dynamic — set at runtime over RESP (<code>CONFIG SET</code>) or in-process (<code>setConfiguration</code>). No restart, no reload. On a hosting valkey port, prefix names with <code>B.</code>; on the native port and in SWIG, use bare names.</p>
+
+<div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2</span><span class="chip o">applies immediately</span></div>
+
+<table>
+<thead><tr><th>Name</th><th>Type</th><th>Requirement</th><th>Bounds / Values</th><th>Default</th></tr></thead>
+<tbody>
+<tr><td><code>max_memory_bytes</code></td><td>size</td><td class="req n">OPTIONAL</td><td><code>k</code>/<code>m</code>/<code>g</code> suffixes; values above valkey <code>maxmemory</code> are ignored under the module</td><td>unlimited</td></tr>
+<tr><td><code>compression</code></td><td>enum</td><td class="req n">OPTIONAL</td><td><code>zstd</code> · <code>fsst</code> · <code>off</code>/<code>none</code></td><td><code>off</code></td></tr>
+<tr><td><code>eviction_policy</code></td><td>enum</td><td class="req n">OPTIONAL</td><td><code>allkeys-lru</code> · <code>allkeys-lfu</code> · <code>allkeys-random</code> · <code>volatile-lru</code> · <code>volatile-lfu</code> · <code>volatile-random</code> · <code>volatile-ttl</code></td><td>none</td></tr>
+<tr><td><code>active_defrag</code></td><td>bool</td><td class="req n">OPTIONAL</td><td><code>on</code>/<code>off</code>/<code>yes</code>/<code>no</code></td><td><code>off</code></td></tr>
+<tr><td><code>min_fragmentation_ratio</code></td><td>float</td><td class="req n">OPTIONAL</td><td><code>0.0 – 1.0</code>; defrag trigger threshold</td><td><code>0.6</code></td></tr>
+<tr><td><code>max_defrag_page_count</code></td><td>int</td><td class="req n">OPTIONAL</td><td>pages per maintenance cycle</td><td><code>1</code></td></tr>
+<tr><td><code>maintenance_poll_delay</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>≥ 0</td><td><code>40</code></td></tr>
+<tr><td><code>save_interval</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>≥ 0</td><td><code>120000</code></td></tr>
+<tr><td><code>max_modifications_before_save</code></td><td>int</td><td class="req n">OPTIONAL</td><td>≥ 0</td><td><code>1300000</code></td></tr>
+<tr><td><code>use_vmm_memory</code></td><td>bool</td><td class="req n">OPTIONAL</td><td>paged value arena on/off</td><td><code>true</code></td></tr>
+<tr><td><code>iteration_worker_count</code></td><td>int</td><td class="req n">OPTIONAL</td><td>≥ 1; parallel scan workers for <code>KEYS</code>/<code>VALUES</code></td><td><code>2</code></td></tr>
+<tr><td><code>rpc_max_buffer</code></td><td>bytes</td><td class="req n">OPTIONAL</td><td>per-connection RPC buffer</td><td><code>131072</code></td></tr>
+<tr><td><code>rpc_client_max_wait_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>client call deadline; drives timeout errors under load</td><td><code>30000</code></td></tr>
+<tr><td><code>bind_interface</code></td><td>string</td><td class="req n">OPTIONAL</td><td>IP or unix socket path</td><td><code>127.0.0.1</code></td></tr>
+<tr><td><code>external_host</code></td><td>string</td><td class="req n">OPTIONAL</td><td>host advertised to replication peers</td><td><code>localhost</code></td></tr>
+<tr><td><code>listen_port</code></td><td>int</td><td class="req n">OPTIONAL</td><td><code>1 – 65535</code>; <code>0</code> with a socket-path interface</td><td><code>12145</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.ordered</code></td><td>bool</td><td class="req c">PER-SPACE</td><td>enables ordered navigation for a named keyspace</td><td>—</td></tr>
+<tr><td><code>&lt;keyspace&gt;.shards</code></td><td>int</td><td class="req c">PER-SPACE</td><td>shard count for the space; set explicitly in every process — unset falls back to the server default, not to what the data was written with</td><td>server default</td></tr>
+<tr><td><code>&lt;keyspace&gt;.range_sharded</code></td><td>bool</td><td class="req c">PER-SPACE</td><td>route keys to shards by range instead of hash, with maintenance-thread rebalancing (<code>ordered-sharding</code> branch); refused unless the space is also ordered — see <a href="#ref-range-sharding">Ordered Range Sharding</a></td><td><code>false</code></td></tr>
+</tbody>
+</table>
+
+<div class="notice warning"><b>Eviction and OOM behaviour are configuration-coupled.</b> With no eviction policy and <code>max_memory_bytes</code> reached, inserts are rejected and counted in <code>oom_avoided_inserts</code> rather than raising a client error on every path. Monitor that counter — see <a href="#errors">Error Model</a>.</div>
+<div class="notice note"><b>Per-space options are read once.</b> See <a href="#ref-keyspaces">Named Key Spaces</a> for the full per-space model. A keyspace reads its <code>&lt;name&gt;.*</code> options when first built in a process and caches them for the process lifetime. Set them before constructing the first handle to the space; changing <code>shards</code> or <code>range_sharded</code> for an open space requires a restart.</div>
+
+<div class="tabs">
+<div class="tabbar">
+<button class="on">RESP (redis-cli)</button><button>redis-python</button><button>python-swig</button><button>lua-swig</button>
+</div>
+<div class="pane on"><pre><span class="c"># on the hosting valkey port — note the B. prefix</span>
+CONFIG SET B.max_memory_bytes 41m
+CONFIG SET B.compression zstd
+CONFIG SET B.eviction_policy allkeys-lru
+
+<span class="c"># on the native barch port (14000) — bare names</span>
+CONFIG SET compression zstd</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(host=<span class="s">"127.0.0.1"</span>, port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+r.config_set(<span class="s">"compression"</span>, <span class="s">"zstd"</span>)
+r.config_set(<span class="s">"eviction_policy"</span>, <span class="s">"allkeys-lru"</span>)
+r.config_set(<span class="s">"max_memory_bytes"</span>, <span class="s">"41m"</span>)</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+barch.setConfiguration(<span class="s">"compression"</span>, <span class="s">"zstd"</span>)
+barch.setConfiguration(<span class="s">"max_memory_bytes"</span>, <span class="s">"41m"</span>)
+
+<span class="c"># per-keyspace options go through the configuration space</span>
+conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf.set(<span class="s">"telemetry.ordered"</span>, <span class="s">"1"</span>)
+conf.set(<span class="s">"telemetry.range_sharded"</span>, <span class="s">"1"</span>)
+
+cfg = barch.config()          <span class="c"># read-back struct</span>
+<span class="k">print</span>(cfg.compression, cfg.listen_port)</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+barch.setConfiguration(<span class="s">"compression"</span>, <span class="s">"zstd"</span>)
+
+<span class="k">local</span> conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf:set(<span class="s">"test.ordered"</span>, <span class="s">"1"</span>)</pre></div>
+</div>
+</article>
+
+<!-- =============== ERROR MODEL =============== -->
+<article id="errors">
+<div class="crumb">Platform / Error Model</div>
+<h1>Error Model</h1>
+<p class="lede">BARCH is RESP-native: failures surface as RESP error replies on the wire and as exceptions or sentinel values in SWIG. For teams fronting BARCH with an HTTP gateway, each error class below carries its conventional HTTP mapping, including the <code>429</code>, <code>409</code>, and <code>503</code> gateway behaviours.</p>
+
+<div class="notice note"><b>BARCH itself never emits HTTP status codes.</b> The mapping column is normative guidance for proxies and SDK authors, not a description of the wire protocol.</div>
+
+<h2>Error tree</h2>
+<table>
+<thead><tr><th>Condition</th><th>RESP reply</th><th>SWIG behaviour</th><th>HTTP mapping</th></tr></thead>
+<tbody>
+<tr><td>Missing key on read</td><td><code>(nil)</code></td><td>empty string / <code>Value.isNull()</code></td><td><code>404 Not Found</code></td></tr>
+<tr><td>Malformed arguments, wrong arity</td><td><code>-ERR syntax error</code></td><td>exception</td><td><code>400 Bad Request</code></td></tr>
+<tr><td>Non-numeric operand to <code>INCR</code>/<code>DECR</code>, overflow</td><td><code>-ERR invalid integer or overflow</code> · <code>-ERR not a valid integer</code></td><td>exception</td><td><code>400 Bad Request</code></td></tr>
+<tr><td>Invalid or oversized key</td><td><code>-ERR</code> key check failure</td><td>exception</td><td><code>400 Bad Request</code></td></tr>
+<tr><td>Authentication failure</td><td><code>-ERR authentication failed</code></td><td>n/a (embedded calls bypass AUTH)</td><td><code>401 Unauthorized</code></td></tr>
+<tr><td>Command denied by ACL category</td><td><code>-ERR</code> permission denied</td><td>n/a</td><td><code>403 Forbidden</code></td></tr>
+<tr><td>Conditional write lost (<code>ADD</code> on existing key, <code>NX</code>/<code>XX</code>/<code>GT</code>/<code>LT</code> flag not satisfied)</td><td><code>(nil)</code> / <code>0</code> — not an error reply</td><td>false-y <code>Value</code></td><td><code>409 Conflict</code></td></tr>
+<tr><td>Client exceeding RPC buffer or call deadline (<code>rpc_client_max_wait_ms</code>)</td><td>timeout / connection error</td><td>exception after deadline</td><td><code>429 Rate Limited</code> — apply exponential backoff; do not tighten the deadline</td></tr>
+<tr><td>Memory ceiling reached, no eviction policy</td><td>write silently rejected; <code>oom_avoided_inserts</code> increments</td><td>write rejected; counter increments</td><td><code>503 Overloaded</code> — shed writes, keep serving reads</td></tr>
+<tr><td>Replication route unreachable</td><td>counted in <code>attempted_routes</code> − <code>routes_succeeded</code>; local write proceeds</td><td>same</td><td><code>503</code> at the peer, invisible to the caller</td></tr>
+</tbody>
+</table>
+
+<div class="notice warning"><b>409-class outcomes are data, not faults.</b> A failed <code>NX</code> write and an <code>ADD</code> against an existing key return nil/zero by design. Gateways must translate on reply shape — matching on RESP error strings alone will miss every conflict.</div>
+<div class="notice warning"><b>503-class outcomes are silent at the call site.</b> An over-ceiling insert without an eviction policy does not raise. Alert on <code>oom_avoided_inserts</code> and <code>request_errors</code> (see <a href="#ref-stats">Statistics</a>) rather than on client exceptions.</div>
+
+<h2>Retry discipline</h2>
+<ul>
+<li><b>Idempotent by construction:</b> <code>SET</code>, <code>HSET</code>, <code>ZADD</code> (same member/score), <code>DEL</code>/<code>REM</code>, all reads — retry freely.</li>
+<li><b>Not idempotent:</b> <code>INCR</code>/<code>DECR</code>/<code>HINCRBY</code>/<code>ZINCRBY</code>, <code>APPEND</code>, <code>LPUSH</code>, <code>LPOP</code> — retry only when the failure provably occurred before dispatch.</li>
+<li><b>Blocking pops</b> (<code>BLPOP</code>/<code>BRPOP</code>) return nil on timeout; treat nil as normal control flow, not an error.</li>
+</ul>
+</article>
+<!-- =============== RESP =============== -->
+<article id="resp">
+<div class="crumb">Interfaces / RESP</div>
+<h1>RESP Wire Interface</h1>
+<p class="lede">The RESP interface is the L2 access path and the replication substrate. It speaks the redis serialization protocol, so every existing redis/valkey client, including <code>redis-cli</code>, <code>redis-py</code>, go-redis, and redis-rs, connects unmodified. The one extension is in how the command name is read: a <a href="#resp-prefix-ref">key space prefix</a> on argument zero selects a space for that command alone.</p>
+<div class="chips"><span class="chip l2">L2 · wire</span><span class="chip o">RESP2</span><span class="chip lock">per-shard RW locks</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Execution model</h2></header>
+<div class="bd">
+<p>A native RESP listener binds <code>bind_interface:listen_port</code> — port <code>14000</code> in the standard deployment, or a unix domain socket when the interface is a filesystem path and the port is <code>0</code>. Under the valkey module, the same command set is additionally exported on the valkey port under the <code>B.</code> prefix.</p>
+<ul>
+<li><b>Complexity:</b> command dispatch is a hash lookup into the shared function map; the command then executes with the engine complexities on the <a href="#overview">overview</a> — <code>O(k)</code> point ops, <code>O(k+m)</code> scans.</li>
+<li><b>Concurrency:</b> a command acquires the read or write lock of exactly the shards its keys hash (or range-route) to. Scans (<code>KEYS</code>, <code>VALUES</code>) run on <code>iteration_worker_count</code> workers and never block writers.</li>
+<li><b>Memory:</b> each connection owns an RPC buffer capped at <code>rpc_max_buffer</code> bytes; replies exceeding it fail the call rather than growing unbounded.</li>
+</ul>
+<div class="notice note"><b>Name equivalence.</b> <code>B.GET</code> on the valkey port, <code>GET</code> on port 14000, and <code>KeyValue.get()</code> in SWIG execute the same function against the same shards. This site documents each command once.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Connection parameters</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Name</th><th>Type</th><th>Requirement</th><th>Bounds</th></tr></thead>
+<tbody>
+<tr><td>host / socket path</td><td>string</td><td class="req y">REQUIRED</td><td>IP, hostname, or absolute unix socket path</td></tr>
+<tr><td>port</td><td>int</td><td class="req y">REQUIRED</td><td><code>1–65535</code>; must be <code>0</code> for unix sockets</td></tr>
+<tr><td><code>AUTH</code> credentials</td><td>user + secret</td><td class="req c">CONDITIONAL</td><td>required once the <code>default</code> user is restricted; see <a href="#ref-acl">AUTH &amp; ACL</a></td></tr>
+<tr><td><code>SELECT</code> index</td><td>int</td><td class="req n">OPTIONAL</td><td>logical database selection, redis semantics</td></tr>
+</tbody>
+</table>
+<p>Session and transport commands available on the wire: <code>PING</code>, <code>AUTH</code>, <code>ACL</code>, <code>SELECT</code>, <code>MULTI</code>/<code>EXEC</code>, <code>CLIENT INFO</code>, <code>INFO</code>, <code>DBSIZE</code>, <code>FLUSHDB</code>/<code>FLUSHALL</code>. TLS material for encrypted listeners lives under <code>tls/</code> in the source tree.</p>
+</div>
+</div>
+
+<div class="block">
+<header id="resp-prefix-ref"><span class="tag ctx">Design context</span><h2>Key space prefixed commands</h2></header>
+<div class="bd">
+<p>The RESP protocol itself is unmodified — commands remain ordinary RESP arrays. What is extended is the interpretation of the <b>command name</b>, argument zero: the native listener splits it on a colon and treats the part before it as a key space selector for that command only.</p>
+<pre class="solo"><span class="c"># three commands, three spaces, one round trip, no session state changed</span>
+catalog:SET sku:00001 widget
+sessions:GET tok:9f2
+metrics:INCR page_views</pre>
+<p>Without it, the same work costs six commands and leaves the connection pointing somewhere the next caller did not choose:</p>
+<pre class="solo">USE catalog
+SET sku:00001 widget
+USE sessions
+GET tok:9f2
+USE metrics
+INCR page_views                <span class="c"># connection is now on `metrics`</span></pre>
+
+<h3>Resolution rules</h3>
+<ul>
+<li><b>Split point is the last colon</b> in the command name. Everything before it is the space name, everything after is the command. A name with no colon, or one ending in a colon, is dispatched unchanged as an ordinary command.</li>
+<li><b>Scope is exactly one command.</b> The session's current space is saved before the call and restored after it, so a prefixed command never leaks its selection into the next command on that connection — including on the error path.</li>
+<li><b>Selection is skipped when it would be a no-op.</b> If the prefix already names the connection's current space, no switch and no restore occurs; the prefix costs a string compare.</li>
+<li><b>The space is created if it does not exist</b>, exactly as <code>USE</code> would, reading its <code>&lt;name&gt;.*</code> options from the <code>configuration</code> space on first reference. See <a href="#ref-keyspaces">Named Key Spaces</a>.</li>
+<li><b>Dispatch and ACL apply to the stripped name.</b> The command is looked up, authorized against its categories, counted, and replicated as if it had been sent unprefixed — <code>catalog:SET</code> is a <code>write</code>+<code>keys</code> command, not an unknown one.</li>
+<li><b>Each element of a pipelined batch resolves independently</b>, and the resolved space is carried with the call, so the shorthand is safe to mix freely inside a pipeline including with asynchronous commands.</li>
+</ul>
+
+<div class="notice note"><b>Why it is worth using.</b> Beyond the round trips, <code>USE</code> makes the key space a property of the <i>connection</i>, which is shared mutable state on a pooled client — a caller that forgets to re-select operates on whatever space the previous borrower left behind. The prefix makes the space a property of the <i>command</i>, which is what makes multi-space access safe to write against a connection pool.</div>
+<div class="notice warning"><b>Native RESP listener only.</b> The shorthand is implemented in the barch RESP session, so it works on the native port (default <code>14000</code>) and on unix domain sockets. Commands dispatched through a hosting valkey server resolve against valkey's own command table, where <code>catalog:B.SET</code> is simply an unknown command — use <code>B.USE</code> there.</div>
+<div class="notice warning"><b>Command names cannot contain a colon; space names must not.</b> Because the split is on the <i>last</i> colon, <code>a:b:SET</code> parses as space <code>a:b</code>, which fails the <code>[0-9A-Za-z_]+</code> name rule and returns an error rather than falling back to unprefixed dispatch. Note the split applies only to argument zero — colons inside <b>keys</b> are untouched, which is why <code>catalog:SET sku:00001 widget</code> is unambiguous.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Prefixed command form</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Element</th><th>Type</th><th>Requirement</th><th>Bounds / Behaviour</th></tr></thead>
+<tbody>
+<tr><td>space prefix</td><td>string before the last <code>:</code> of argv[0]</td><td class="req n">OPTIONAL</td><td>must match <code>[0-9A-Za-z_]+</code>; empty name or <code>0</code> is not addressable this way — use bare <code>USE</code> for the default space</td></tr>
+<tr><td>command name</td><td>string after the last <code>:</code> of argv[0]</td><td class="req y">REQUIRED</td><td>any command in the function map; must be non-empty, so a trailing colon disables the split</td></tr>
+<tr><td>arguments</td><td>as the unprefixed command</td><td class="req c">per command</td><td>unchanged — keys may contain colons freely</td></tr>
+</tbody>
+</table>
+<h3>Error tree</h3>
+<ul>
+<li>Prefix failing the name pattern → <code>-ERR</code> from key space validation → 400.</li>
+<li>Stripped name not in the function map → <code>-ERR unknown command</code> → 400. A malformed prefix does <b>not</b> silently degrade to unprefixed dispatch.</li>
+<li>Caller lacking the stripped command's ACL categories → <code>-ERR not authorized</code> → 403-class. The prefix grants nothing; see <a href="#ref-acl">AUTH &amp; ACL</a>.</li>
+<li>Any exception during resolution is written as an error reply, and the connection's previous space is still restored.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Multi-space access without session state</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>Go</button><button>Rust (async)</button></div>
+<div class="pane on"><pre><span class="c"># one space per command; connection state never changes</span>
+redis-cli -p 14000 catalog:SET sku:00001 widget
+redis-cli -p 14000 sessions:GET tok:9f2
+redis-cli -p 14000 metrics:INCR page_views
+
+<span class="c"># works for every command family, not just key/value</span>
+redis-cli -p 14000 board:ZADD scores 3200 ada
+redis-cli -p 14000 jobs:LPUSH queue '{"id":17}'
+redis-cli -p 14000 catalog:RANGE sku:00000 sku:~ 100</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+
+<span class="c"># a pooled client: no caller owns the connection's current space</span>
+pool = redis.ConnectionPool(host=<span class="s">"127.0.0.1"</span>, port=<span class="n">14000</span>)
+r = redis.Redis(connection_pool=pool, decode_responses=<span class="k">True</span>)
+
+<span class="k">def</span> in_space(space, cmd, *args):
+    <span class="k">return</span> r.execute_command(<span class="s">"%s:%s"</span> % (space, cmd), *args)
+
+in_space(<span class="s">"catalog"</span>, <span class="s">"SET"</span>, <span class="s">"sku:00001"</span>, <span class="s">"widget"</span>)
+tok = in_space(<span class="s">"sessions"</span>, <span class="s">"GET"</span>, <span class="s">"tok:9f2"</span>)
+
+<span class="c"># pipelines resolve each element independently</span>
+p = r.pipeline(transaction=<span class="k">False</span>)
+p.execute_command(<span class="s">"catalog:SET"</span>, <span class="s">"sku:00002"</span>, <span class="s">"gadget"</span>)
+p.execute_command(<span class="s">"metrics:INCR"</span>, <span class="s">"page_views"</span>)
+p.execute_command(<span class="s">"catalog:GET"</span>, <span class="s">"sku:00002"</span>)
+<span class="k">print</span>(p.execute())</pre></div>
+<div class="pane"><pre>ctx := context.Background()
+rdb := redis.NewClient(&amp;redis.Options{Addr: <span class="s">"127.0.0.1:14000"</span>})
+
+<span class="c">// space is part of the command, so a pooled connection is safe</span>
+<span class="k">type</span> Op <span class="k">struct</span>{ Space, Cmd <span class="k">string</span>; Args []<span class="k">any</span> }
+
+ops := <span class="k">make</span>(<span class="k">chan</span> Op, 64)
+<span class="k">go</span> <span class="k">func</span>() {
+    <span class="k">for</span> op := <span class="k">range</span> ops {
+        argv := <span class="k">append</span>([]<span class="k">any</span>{op.Space + <span class="s">":"</span> + op.Cmd}, op.Args...)
+        <span class="k">if</span> err := rdb.Do(ctx, argv...).Err(); err != <span class="k">nil</span> {
+            log.Printf(<span class="s">"%s:%s: %v"</span>, op.Space, op.Cmd, err)
+        }
+    }
+}()
+
+ops &lt;- Op{<span class="s">"catalog"</span>, <span class="s">"SET"</span>, []<span class="k">any</span>{<span class="s">"sku:00001"</span>, <span class="s">"widget"</span>}}
+ops &lt;- Op{<span class="s">"metrics"</span>, <span class="s">"INCR"</span>, []<span class="k">any</span>{<span class="s">"page_views"</span>}}
+<span class="k">close</span>(ops)</pre></div>
+<div class="pane"><pre><span class="k">let mut</span> con = client.get_multiplexed_async_connection().<span class="k">await</span>?;
+
+<span class="c">// a multiplexed connection interleaves callers, so per-command</span>
+<span class="c">// space selection is the only safe form here</span>
+redis::cmd(<span class="s">"catalog:SET"</span>).arg(<span class="s">"sku:00001"</span>).arg(<span class="s">"widget"</span>)
+    .query_async::&lt;()&gt;(&amp;<span class="k">mut</span> con).<span class="k">await</span>?;
+
+<span class="k">let</span> tok: Option&lt;String&gt; = redis::cmd(<span class="s">"sessions:GET"</span>)
+    .arg(<span class="s">"tok:9f2"</span>)
+    .query_async(&amp;<span class="k">mut</span> con).<span class="k">await</span>?;
+
+<span class="k">let</span> views: i64 = redis::cmd(<span class="s">"metrics:INCR"</span>)
+    .arg(<span class="s">"page_views"</span>)
+    .query_async(&amp;<span class="k">mut</span> con).<span class="k">await</span>?;</pre></div>
+</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Connecting</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>Go (go-redis)</button><button>Rust (async)</button></div>
+<div class="pane on"><pre><span class="c"># TCP</span>
+redis-cli -p 14000 PING
+redis-cli -p 14000 SET k v
+redis-cli -p 14000 GET k
+
+<span class="c"># unix domain socket (barch.start("/tmp/lbarch", 0))</span>
+redis-cli -s /tmp/lbarch GET message</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+
+r = redis.Redis(host=<span class="s">"127.0.0.1"</span>, port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+<span class="k">assert</span> r.ping()
+r.set(<span class="s">"k"</span>, <span class="s">"v"</span>)
+<span class="k">print</span>(r.get(<span class="s">"k"</span>))
+
+<span class="c"># unix socket variant</span>
+r = redis.Redis(unix_socket_path=<span class="s">"/tmp/lbarch"</span>, decode_responses=<span class="k">True</span>)</pre></div>
+<div class="pane"><pre><span class="k">package</span> main
+
+<span class="k">import</span> (
+    <span class="s">"context"</span>
+    <span class="s">"log"</span>
+    <span class="s">"github.com/redis/go-redis/v9"</span>
+)
+
+<span class="k">type</span> Cache <span class="k">struct</span>{ rdb *redis.Client }
+
+<span class="k">func</span> main() {
+    c := Cache{rdb: redis.NewClient(&amp;redis.Options{Addr: <span class="s">"127.0.0.1:14000"</span>})}
+    ctx := context.Background()
+
+    <span class="c">// fan writes through a channel; one goroutine owns dispatch</span>
+    jobs := <span class="k">make</span>(<span class="k">chan</span> [2]<span class="k">string</span>, 128)
+    done := <span class="k">make</span>(<span class="k">chan</span> <span class="k">struct</span>{})
+    <span class="k">go</span> <span class="k">func</span>() {
+        <span class="k">defer</span> <span class="k">close</span>(done)
+        <span class="k">for</span> kv := <span class="k">range</span> jobs {
+            <span class="k">if</span> err := c.rdb.Set(ctx, kv[0], kv[1], 0).Err(); err != <span class="k">nil</span> {
+                log.Printf(<span class="s">"set %s: %v"</span>, kv[0], err)
+            }
+        }
+    }()
+    jobs &lt;- [2]<span class="k">string</span>{<span class="s">"k"</span>, <span class="s">"v"</span>}
+    <span class="k">close</span>(jobs); &lt;-done
+    log.Println(c.rdb.Get(ctx, <span class="s">"k"</span>).Val())
+}</pre></div>
+<div class="pane"><pre><span class="k">use</span> redis::AsyncCommands;
+
+#[tokio::main]
+<span class="k">async fn</span> main() -&gt; redis::RedisResult&lt;()&gt; {
+    <span class="k">let</span> client = redis::Client::open(<span class="s">"redis://127.0.0.1:14000/"</span>)?;
+    <span class="k">let mut</span> con = client.get_multiplexed_async_connection().<span class="k">await</span>?;
+
+    con.set::&lt;_, _, ()&gt;(<span class="s">"k"</span>, <span class="s">"v"</span>).<span class="k">await</span>?;
+    <span class="k">let</span> v: String = con.get(<span class="s">"k"</span>).<span class="k">await</span>?;
+    <span class="k">assert_eq!</span>(v, <span class="s">"v"</span>);
+    Ok(())
+}</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== SWIG PYTHON =============== -->
+<article id="swig-python">
+<div class="crumb">Interfaces / SWIG Python</div>
+<h1>SWIG · Python L1 Interface</h1>
+<p class="lede">The <code>barch</code> Python module embeds the full store in-process. Reads resolve in sub-microsecond time because no serialization, syscall, or network hop occurs on the L1 path. The same module can serve its store over RESP (<code>start</code>) and replicate to peers (<code>publish</code>/<code>pull</code>).</p>
+<div class="chips"><span class="chip l1">L1 · embedded</span><span class="chip o">Python ≥ 3.10</span><span class="chip lock">per-object mutex + shard RW locks</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Binding architecture</h2></header>
+<div class="bd">
+<ul>
+<li><b>Generation:</b> classes are SWIG-generated from <code>src/swig_api.h</code> via <code>src/barch.i</code>. <code>std::vector&lt;std::string&gt;</code> maps to Python lists of <code>str</code>; <code>std::vector&lt;Value&gt;</code> maps to lists of <code>Value</code>.</li>
+<li><b>Complexity:</b> identical to the engine — <code>O(k)</code> point ops, <code>O(k+m)</code> ranges — plus a fixed per-call SWIG marshalling cost. No GIL-visible blocking on the fast path; long scans release into worker threads.</li>
+<li><b>Memory:</b> data lives in barch's own arenas, outside the Python heap; <code>barch.stats().heap_bytes_allocated</code> is authoritative, not <code>sys.getsizeof</code>.</li>
+<li><b>Locking:</b> every handle (<code>KeyValue</code>, <code>HashSet</code>, …) derives from <code>Caller</code> and holds an internal mutex — a single handle is thread-safe but serializes its callers. For parallel throughput, construct one handle per thread; shard RW locks then govern actual contention.</li>
+<li><b>Init-time configuration:</b> the module applies environment configuration inside SWIG module init, before user code; explicit <code>setConfiguration()</code> overrides it.</li>
+</ul>
+<div class="notice warning"><b>One handle per thread.</b> Sharing a single <code>KeyValue</code> across a thread pool caps throughput at one in-flight call. The engine's linear read scaling is only observable with per-thread handles.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Module-level functions</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Function</th><th>Arguments</th><th>Requirement</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>start(host, port)</code> / <code>start(port)</code></td><td>string, int|string</td><td class="req n">OPTIONAL</td><td>opens a RESP listener on the embedded store; path + port <code>0</code> = unix socket</td></tr>
+<tr><td><code>stop()</code></td><td>—</td><td class="req n">OPTIONAL</td><td>closes the listener; embedded access continues</td></tr>
+<tr><td><code>publish(ip, port)</code></td><td>string, int|string</td><td class="req n">OPTIONAL</td><td>push replication of local writes to a peer's RESP endpoint</td></tr>
+<tr><td><code>pull(ip, port)</code></td><td>string, int|string</td><td class="req n">OPTIONAL</td><td>subscribe to a peer's write stream</td></tr>
+<tr><td><code>load(host, port)</code> / <code>load()</code></td><td>string, int|string</td><td class="req n">OPTIONAL</td><td>block-load a snapshot from a peer / reload local persistence</td></tr>
+<tr><td><code>save()</code> · <code>saveAll()</code></td><td>—</td><td class="req n">OPTIONAL</td><td>persist current / all keyspaces</td></tr>
+<tr><td><code>size()</code> · <code>sizeAll()</code></td><td>—</td><td class="req n">OPTIONAL</td><td>key counts (may include expired volatile keys)</td></tr>
+<tr><td><code>clear()</code> · <code>clearAll()</code></td><td>—</td><td class="req n">OPTIONAL</td><td>flush current / all keyspaces; returns bool</td></tr>
+<tr><td><code>setConfiguration(name, value)</code></td><td>string, string</td><td class="req n">OPTIONAL</td><td>dynamic config; same names as <a href="#configuration">Configuration</a></td></tr>
+<tr><td><code>config()</code> · <code>stats()</code> · <code>ops_stats()</code> · <code>repl_stats()</code></td><td>—</td><td class="req n">OPTIONAL</td><td>read-back structs; see <a href="#ref-stats">Statistics</a></td></tr>
+<tr><td><code>setRoute(shard, host, port)</code> · <code>removeRoute(shard)</code> · <code>getRoute(shard)</code></td><td>int, string, int</td><td class="req n">OPTIONAL</td><td>per-shard remote routing; see <a href="#ref-replication">Replication</a></td></tr>
+<tr><td><code>calls(name)</code></td><td>string</td><td class="req n">OPTIONAL</td><td>invocation count of a named api function</td></tr>
+</tbody>
+</table>
+
+<h3>Handle constructors</h3>
+<table>
+<thead><tr><th>Constructor</th><th>Binds to</th></tr></thead>
+<tbody>
+<tr><td><code>KeyValue()</code> · <code>HashSet()</code> · <code>OrderedSet()</code> · <code>List()</code></td><td>embedded L1 store, default keyspace</td></tr>
+<tr><td><code>KeyValue("space")</code></td><td>embedded store, named keyspace</td></tr>
+<tr><td><code>KeyValue(host, port)</code> — all classes</td><td>remote RESP endpoint (L2) through the same class API</td></tr>
+<tr><td><code>KeyValue(host, port, "space")</code></td><td>remote endpoint, named keyspace</td></tr>
+</tbody>
+</table>
+<p>Shared <code>Caller</code> methods on every handle: <code>use(keyspace)</code>, <code>setOrdered(bool)</code>, <code>setLru("ON"|"OFF"|"VOLATILE")</code>, <code>getShardCount()</code>, <code>getOrdered()</code>, <code>reload()</code>, <code>save()</code>, and the escape hatch <code>call(method, args)</code> which invokes any command in the function map by name. <code>KeyValue</code> additionally exposes <code>getShards()</code> and <code>getRangeSharded()</code> — the latter reports whether the space routes by range (see <a href="#ref-range-sharding">Ordered Range Sharding</a>).</p>
+
+<h3><code>Value</code> variant</h3>
+<table>
+<thead><tr><th>Member</th><th>Type</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>isString / isInteger / isDouble / isBoolean / isNull</code></td><td>→ bool</td><td>discriminators</td></tr>
+<tr><td><code>s() / i() / d() / b() / t()</code></td><td>str / int / float / bool / type-name</td><td>accessors; comparison operators against native types are defined</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Embedded server, remote client</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">python-swig · server</button><button>python-swig · client</button><button>redis-python · same store</button></div>
+<div class="pane on"><pre><span class="k">import</span> barch, time
+
+<span class="c"># serve the embedded store on a unix socket (tcp: ("0.0.0.0", 14000))</span>
+barch.start(<span class="s">"/tmp/lbarch"</span>, <span class="n">0</span>)
+
+listen = barch.KeyValue()
+listen.set(<span class="s">"message"</span>, <span class="s">"start"</span>)
+msg = <span class="s">"start"</span>
+<span class="k">while</span> msg != <span class="s">"exit"</span>:
+    msg = listen.get(<span class="s">"message"</span>)
+    time.sleep(<span class="n">0.1</span>)
+barch.saveAll()</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+
+<span class="c"># same class API, remote transport</span>
+kv = barch.KeyValue(<span class="s">"/tmp/lbarch"</span>, <span class="n">0</span>)
+<span class="k">print</span>(kv.get(<span class="s">"message"</span>))
+kv.set(<span class="s">"message"</span>, <span class="s">"exit"</span>)</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+
+<span class="c"># the started listener is plain RESP — redis clients interoperate</span>
+r = redis.Redis(unix_socket_path=<span class="s">"/tmp/lbarch"</span>, decode_responses=<span class="k">True</span>)
+<span class="k">print</span>(r.get(<span class="s">"message"</span>))
+r.set(<span class="s">"message"</span>, <span class="s">"exit"</span>)</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== SWIG LUA =============== -->
+<article id="swig-lua">
+<div class="crumb">Interfaces / SWIG LuaJIT</div>
+<h1>SWIG · LuaJIT L1 Interface</h1>
+<p class="lede">The Lua binding exposes the identical class surface as Python — generated from the same interface file — targeting LuaJIT 5.1 environments, principally OpenResty workers that want a shared ordered cache without a redis round trip per request.</p>
+<div class="chips"><span class="chip l1">L1 · embedded</span><span class="chip o">LuaJIT / Lua 5.1</span><span class="chip lock">per-object mutex + shard RW locks</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Binding architecture</h2></header>
+<div class="bd">
+<ul>
+<li><b>Installation:</b> <code>sudo cmake --install build --component barchlua</code> places <code>barch.so</code> at <code>/var/lib/lua/5.1/barch.so</code>; load with <code>require("barch")</code>.</li>
+<li><b>Method call syntax:</b> instance methods use the colon form (<code>kv:set(...)</code>); module functions use the dot form (<code>barch.start(...)</code>). Mixing them is the dominant integration error.</li>
+<li><b>Complexity and locking:</b> identical to the Python binding — engine complexities plus fixed marshalling cost; one handle per OpenResty worker gives lock-free read parallelism across workers.</li>
+<li><b>Environment configuration</b> is applied at <code>require</code> time, exactly as in Python.</li>
+</ul>
+<div class="notice note"><b>Type surface.</b> Lua numbers marshal to the <code>seti</code>/numeric overloads where declared (e.g. <code>kv:seti(i, i)</code>); everything else travels as strings. <code>Value</code> results expose the same <code>s()/i()/d()/isNull()</code> accessors.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Surface</h2></header>
+<div class="bd">
+<p>The Lua module exports the same symbols documented on the <a href="#swig-python">Python page</a>: module functions (<code>start</code>, <code>stop</code>, <code>publish</code>, <code>pull</code>, <code>load</code>, <code>save/saveAll</code>, <code>clear/clearAll</code>, <code>setConfiguration</code>, <code>config</code>, <code>stats</code>, <code>ops_stats</code>, <code>repl_stats</code>, route functions) and the handle classes <code>KeyValue</code>, <code>HashSet</code>, <code>OrderedSet</code>, <code>List</code> with shared <code>Caller</code> methods. Argument tables and bounds are identical; refer to the per-class reference pages.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Ordered keyspace benchmark loop</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">lua-swig</button><button>python-swig · equivalent</button><button>redis-cli · inspect</button></div>
+<div class="pane on"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+
+<span class="c">-- flip a keyspace to ordered before writing to it</span>
+<span class="k">local</span> conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf:set(<span class="s">"test.ordered"</span>, <span class="s">"1"</span>)
+
+<span class="k">local</span> kv = barch.KeyValue(<span class="s">"test"</span>)
+kv:clear()
+
+<span class="k">local</span> count = 1000000
+<span class="k">local</span> start = os.clock()
+<span class="k">for</span> i = 1, count <span class="k">do</span>
+    kv:seti(i, i)
+<span class="k">end</span>
+<span class="k">print</span>(os.clock() - start, kv:size())</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch, time
+
+conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf.set(<span class="s">"test.ordered"</span>, <span class="s">"1"</span>)
+
+kv = barch.KeyValue(<span class="s">"test"</span>)
+kv.clear()
+
+t0 = time.perf_counter()
+<span class="k">for</span> i <span class="k">in</span> <span class="k">range</span>(<span class="n">1_000_000</span>):
+    kv.seti(i, i)
+<span class="k">print</span>(time.perf_counter() - t0, kv.size())</pre></div>
+<div class="pane"><pre><span class="c"># with barch.start("127.0.0.1", 14000) running in the same process:</span>
+redis-cli -p 14000 SIZE
+redis-cli -p 14000 MIN
+redis-cli -p 14000 STATS</pre></div>
+</div>
+</div>
+</div>
+</article>
+<!-- =============== KEYVALUE =============== -->
+<article id="ref-keyvalue">
+<div class="crumb">Reference / Key-Value + Ordered Navigation</div>
+<h1>Key/Value &amp; Ordered Operations</h1>
+<p class="lede">Point reads and writes, counters, TTL, glob scans, and the ordered-navigation primitives (<code>MIN</code>/<code>MAX</code>/<code>LB</code>/<code>UB</code>/<code>RANGE</code>/<code>COUNT</code>) that distinguish BARCH from a plain hash cache.</p>
+<div class="chips"><span class="chip l1">L1 · KeyValue class</span><span class="chip l2">L2 · RESP</span><span class="chip o">point O(k)</span><span class="chip o">range O(k+m)</span><span class="chip lock">write: 1 shard W-lock</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
+<div class="bd">
+<ul>
+<li><b>Point ops</b> (<code>SET</code>/<code>GET</code>/<code>ADD</code>/<code>REM</code>/<code>EXISTS</code>/<code>TTL</code>/<code>EXPIRE</code>/<code>APPEND</code>/counters): one trie descent, <code>O(k)</code> in key length; the key hashes to exactly one shard, so a write takes exactly one shard write lock.</li>
+<li><b>Ordered navigation</b> (<code>MIN</code>, <code>MAX</code>, <code>LB</code>/<code>FIRST</code>, <code>UB</code>/<code>NEXT</code>): a single root-to-boundary descent, <code>O(k)</code>, independent of key count — the basis of the "constant-time ordered" claim. Requires an ordered keyspace.</li>
+<li><b>Ranges</b> (<code>RANGE K1 K2 count</code>, <code>COUNT K1 K2</code>): seek to <code>K1</code> then in-order walk — <code>O(k + m)</code>. Under hash sharding, a range fans out to every shard, collects up to <code>limit × shard_count</code> candidates, and merge-sorts. With <code>&lt;space&gt;.range_sharded</code> enabled (<code>ordered-sharding</code> branch), the walk starts at the shard owning <code>K1</code>, streams results in key order, and stops at the first key ≥ <code>K2</code> — nothing collected, nothing sorted; <code>MIN</code>/<code>MAX</code>/<code>LB</code>/<code>UB</code>/<code>COUNT</code> likewise stop at the first shard that can answer. See <a href="#ref-range-sharding">Ordered Range Sharding</a>.</li>
+<li><b>Scans</b> (<code>KEYS</code>, <code>VALUES</code> with glob): executed by <code>iteration_worker_count</code> workers, non-blocking to concurrent writers — <code>KEYS</code> is deliberately not classified <code>dangerous</code> in the ACL model.</li>
+<li><b>Allocation:</b> a <code>SET</code> replacing a value reuses or replaces one leaf (<code>leaf_nodes_replaced</code> counts these); inserts may grow one interior node along the path (<code>node4→16→48→256</code>). <code>APPEND</code>/<code>PREPEND</code> reallocate the value in the arena.</li>
+</ul>
+<div class="notice warning"><b>Lock constraint.</b> Counters (<code>INCR</code>/<code>DECR</code>) are atomic read-modify-write under one shard write lock. They serialize with all writes to that shard — hot counters on a low shard count are the primary write-contention scenario.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>RESP</th><th>SWIG (KeyValue)</th><th>Arguments</th><th>Requirement</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>SET k v</code></td><td><code>set(k, v)</code> · <code>seti(i, i)</code> · <code>put(k, v)</code></td><td>key ≤ engine key bound; value: string | int64 | double</td><td class="req y">k, v REQUIRED</td><td>OK / prior state</td></tr>
+<tr><td><code>ADD k v</code></td><td>—</td><td>as <code>SET</code>; insert-only</td><td class="req y">k, v REQUIRED</td><td>nil if key exists (409-class)</td></tr>
+<tr><td><code>GET k</code></td><td><code>get(k)</code> · <code>vget(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>value / nil; <code>vget</code> preserves type</td></tr>
+<tr><td><code>MGET k…</code> / <code>MSET k v…</code></td><td>—</td><td>1–n keys / pairs</td><td class="req y">≥ 1 pair</td><td>array / OK</td></tr>
+<tr><td><code>REM k</code> · <code>DEL k</code></td><td><code>erase(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>removed value / nil</td></tr>
+<tr><td><code>EXISTS k</code></td><td><code>exists(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>0 | 1 / bool</td></tr>
+<tr><td><code>INCR / DECR / INCRBY / DECRBY / UINCRBY / UDECRBY</code></td><td><code>incr(k[, by])</code> · <code>decr(k[, by])</code></td><td>key; <code>by</code>: int64 or double</td><td class="req c">by OPTIONAL (default 1)</td><td>new value; error on non-numeric or overflow</td></tr>
+<tr><td><code>APPEND k v</code></td><td><code>append(k, v)</code> · <code>prepend(k, v)</code></td><td>key, string</td><td class="req y">REQUIRED</td><td>new length</td></tr>
+<tr><td><code>EXPIRE k sec [flag]</code></td><td><code>expire(k, sec, flag="")</code></td><td>sec ≥ 0; flag ∈ <code>NX|XX|GT|LT</code></td><td class="req c">flag OPTIONAL</td><td>1 applied / 0 not (409-class)</td></tr>
+<tr><td><code>TTL k</code></td><td><code>ttl(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>seconds; −1 no expiry; −2 missing</td></tr>
+<tr><td><code>MIN</code> · <code>MAX</code></td><td><code>min()/firstKey()</code> · <code>max()/lastKey()</code></td><td>—</td><td class="req n">—</td><td>smallest / largest key or nil</td></tr>
+<tr><td><code>LB k</code> · <code>FIRST k</code></td><td><code>lowerBound(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>first key ≥ k, or nil</td></tr>
+<tr><td><code>UB k</code> · <code>NEXT k</code></td><td><code>upperBound(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>first key &gt; k, or nil</td></tr>
+<tr><td><code>RANGE k1 k2 count</code></td><td><code>range(start, end, limit=-1)</code></td><td>interval endpoints; count ≥ 1 (SWIG: −1 = unbounded)</td><td class="req y">k1, k2 REQUIRED</td><td>array of keys, ≤ count</td></tr>
+<tr><td><code>COUNT k1 k2</code></td><td><code>count(start, end)</code></td><td>interval endpoints</td><td class="req y">REQUIRED</td><td>int64 count</td></tr>
+<tr><td><code>KEYS glob</code> · <code>VALUES glob</code></td><td><code>glob(pattern, max=0)</code> · <code>globCount(pattern)</code></td><td>glob pattern; max 0 = unlimited</td><td class="req c">max OPTIONAL</td><td>array; reply must fit <code>rpc_max_buffer</code> on the wire</td></tr>
+<tr><td><code>SIZE</code> · <code>DBSIZE</code></td><td><code>size()</code></td><td>—</td><td class="req n">—</td><td>key count, may include expired volatile keys</td></tr>
+<tr><td><code>FLUSHDB / FLUSHALL</code></td><td><code>clear()</code> / <code>flush()</code></td><td>—</td><td class="req n">—</td><td>OK / bool · ACL: <code>dangerous</code></td></tr>
+</tbody>
+</table>
+<div class="notice note"><b>Ordered navigation requires an ordered keyspace.</b> Enable it before first write: <code>configuration</code>-space key <code>&lt;name&gt;.ordered = 1</code>, or <code>handle.setOrdered(true)</code>. On unordered spaces, <code>MIN</code>/<code>LB</code>/<code>RANGE</code> semantics are undefined per shard hash order. See <a href="#ref-keyspaces">Named Key Spaces</a>.</div>
+<h3>Error tree (this page's commands)</h3>
+<ul>
+<li><code>-ERR syntax error</code> — wrong arity, malformed flag → 400.</li>
+<li><code>-ERR invalid integer or overflow</code> / <code>-ERR not a valid integer</code> — counter on non-numeric value → 400.</li>
+<li>nil from <code>ADD</code>, <code>0</code> from a flagged <code>EXPIRE</code> — conditional lost → 409-class, not a RESP error.</li>
+<li>Timeout past <code>rpc_client_max_wait_ms</code> on huge <code>RANGE</code>/<code>KEYS</code> replies → 429-class; narrow the glob or paginate with <code>UB</code>.</li>
+<li>Silent write rejection at the memory ceiling → 503-class; watch <code>oom_avoided_inserts</code>.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Ranged query over an ordered keyspace</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>python-swig</button><button>lua-swig</button><button>Go</button><button>Rust (async)</button></div>
+<div class="pane on"><pre><span class="c"># keys sorted lexicographically: zero-pad numeric components</span>
+SET user:00017:name ada
+SET user:00042:name grace
+SET user:00099:name edsger
+
+RANGE user:00000 user:00050 100
+<span class="c"># 1) "user:00017:name"</span>
+<span class="c"># 2) "user:00042:name"</span>
+COUNT user:00000 user:00050
+LB user:00042        <span class="c"># first key not less than the probe</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+r.set(<span class="s">"user:00017:name"</span>, <span class="s">"ada"</span>)
+r.set(<span class="s">"user:00042:name"</span>, <span class="s">"grace"</span>)
+
+<span class="c"># barch-specific commands go through execute_command</span>
+keys  = r.execute_command(<span class="s">"RANGE"</span>, <span class="s">"user:00000"</span>, <span class="s">"user:00050"</span>, <span class="n">100</span>)
+total = r.execute_command(<span class="s">"COUNT"</span>, <span class="s">"user:00000"</span>, <span class="s">"user:00050"</span>)
+nxt   = r.execute_command(<span class="s">"UB"</span>, <span class="s">"user:00017:name"</span>)   <span class="c"># pagination cursor</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+
+conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf.set(<span class="s">"users.ordered"</span>, <span class="s">"1"</span>)
+
+kv = barch.KeyValue(<span class="s">"users"</span>)
+kv.set(<span class="s">"user:00017:name"</span>, <span class="s">"ada"</span>)
+kv.set(<span class="s">"user:00042:name"</span>, <span class="s">"grace"</span>)
+
+<span class="k">for</span> v <span class="k">in</span> kv.range(<span class="s">"user:00000"</span>, <span class="s">"user:00050"</span>, <span class="n">100</span>):
+    <span class="k">print</span>(v.s())
+<span class="k">print</span>(kv.count(<span class="s">"user:00000"</span>, <span class="s">"user:00050"</span>))
+<span class="k">print</span>(kv.lowerBound(<span class="s">"user:00042"</span>).s())</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+<span class="k">local</span> conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf:set(<span class="s">"users.ordered"</span>, <span class="s">"1"</span>)
+
+<span class="k">local</span> kv = barch.KeyValue(<span class="s">"users"</span>)
+kv:set(<span class="s">"user:00017:name"</span>, <span class="s">"ada"</span>)
+kv:set(<span class="s">"user:00042:name"</span>, <span class="s">"grace"</span>)
+
+<span class="k">local</span> hits = kv:range(<span class="s">"user:00000"</span>, <span class="s">"user:00050"</span>, 100)
+<span class="k">for</span> i = 0, hits:size() - 1 <span class="k">do</span>
+    <span class="k">print</span>(hits[i]:s())
+<span class="k">end</span></pre></div>
+<div class="pane"><pre>ctx := context.Background()
+rdb := redis.NewClient(&amp;redis.Options{Addr: <span class="s">"127.0.0.1:14000"</span>})
+
+rdb.Set(ctx, <span class="s">"user:00017:name"</span>, <span class="s">"ada"</span>, 0)
+rdb.Set(ctx, <span class="s">"user:00042:name"</span>, <span class="s">"grace"</span>, 0)
+
+keys, err := rdb.Do(ctx, <span class="s">"RANGE"</span>, <span class="s">"user:00000"</span>, <span class="s">"user:00050"</span>, 100).StringSlice()
+<span class="k">if</span> err != <span class="k">nil</span> { log.Fatal(err) }
+<span class="k">for</span> _, k := <span class="k">range</span> keys { log.Println(k) }</pre></div>
+<div class="pane"><pre><span class="k">let mut</span> con = client.get_multiplexed_async_connection().<span class="k">await</span>?;
+
+redis::cmd(<span class="s">"SET"</span>).arg(<span class="s">"user:00017:name"</span>).arg(<span class="s">"ada"</span>)
+    .query_async::&lt;()&gt;(&amp;<span class="k">mut</span> con).<span class="k">await</span>?;
+
+<span class="k">let</span> keys: Vec&lt;String&gt; = redis::cmd(<span class="s">"RANGE"</span>)
+    .arg(<span class="s">"user:00000"</span>).arg(<span class="s">"user:00050"</span>).arg(100)
+    .query_async(&amp;<span class="k">mut</span> con).<span class="k">await</span>?;
+<span class="k">let</span> n: i64 = redis::cmd(<span class="s">"COUNT"</span>)
+    .arg(<span class="s">"user:00000"</span>).arg(<span class="s">"user:00050"</span>)
+    .query_async(&amp;<span class="k">mut</span> con).<span class="k">await</span>?;</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== RANGE SHARDING =============== -->
+<article id="ref-range-sharding">
+<div class="crumb">Reference / Ordered Range Sharding</div>
+<h1>Ordered Range Sharding</h1>
+<p class="lede">Route keys to shards by the range they fall in rather than by hash. Shard order then agrees with key order, which turns cross-shard ordered reads (<code>RANGE</code>, <code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, <code>COUNT</code>) from a fan-out-and-merge into an ordered walk that stops early. A maintenance-thread rebalancer keeps the partition even as data changes.</p>
+<div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">route: binary search, O(log shards)</span><span class="chip o">opt-in per keyspace, off by default</span><span class="chip lock">rebalance: adjacent shard W-lock pairs</span></div>
+
+<div class="notice note"><b>Branch status.</b> This page documents the implementation on the <code>ordered-sharding</code> branch (v0.5.8b). On <code>main</code>, <code>&lt;space&gt;.range_sharded</code> is accepted and reported by <code>getRangeSharded()</code> but selects nothing.</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Routing model</h2></header>
+<div class="bd">
+<h3>The range index</h3>
+<ul>
+<li><b>Structure:</b> the routing table is a flat sorted vector holding the minimum key of every shard above 0 — at most <code>shard_count − 1</code> entries. A route is a binary search for the last boundary not above the key; a key below every boundary belongs to shard 0, whose span is open at the bottom. Cost: one atomic load plus <code>O(log shards)</code> over a couple of cache lines, per operation.</li>
+<li><b>Lock-free reads:</b> the table is replaced, never mutated — a rebalance builds a new table and swaps it behind an atomic <code>shared_ptr</code>. Routers never lock to read and never observe a half-written table.</li>
+<li><b>Never persisted:</b> the table is a function of the shards (each shard's first key), so a load rebuilds it. There is no index file to version or find out of step with the data.</li>
+</ul>
+<h3>Routing under a moving partition</h3>
+<p>Unlike hash routing, a key's shard can change while the space is running, so there is a gap between routing a key and holding the lock that stops the boundary moving. Two rules close it:</p>
+<ul>
+<li>a rebalance changes the table only while holding write locks on <b>every shard whose span is changing</b> — both neighbours, taken in shard order, the new table published before either lock drops;</li>
+<li>a router routes, takes its lock, then routes again. The same answer proves the key cannot move while the lock is held (moving it needs that lock); a different answer means the boundary moved in between — drop and retry.</li>
+</ul>
+<p>The retry cannot spin: losing twice requires two rebalances of the same boundary, which are bounded by the maintenance interval.</p>
+<h3>Rebalancing</h3>
+<ul>
+<li><b>Placement:</b> the sweep runs on the keyspace's maintenance thread — never on the insert path — making that thread the sole writer of the table.</li>
+<li><b>Algorithm:</b> shards shed to neighbours in both directions, cascading with a per-level budget, shedding only far enough to meet the neighbour halfway. Work per sweep converges on the observed skew (capped on lock pairs, not on passes), which keeps balance even as sweeps get further apart.</li>
+<li><b>Tolerance is a band, not a ceiling:</b> the sweep finishes when no shard is above <code>tolerance × average</code> <i>and</i> none is below <code>average ÷ tolerance</code>. The lower bound is what prevents "balanced" partitions with empty tail shards. Measured targets: ≈1.25× peak-to-average, zero empty shards; e.g. 20 000 ascending keys settle across 8 shards at ≤ 1.30×.</li>
+<li><b>Moves are not user traffic:</b> a moved key carries expiry, volatile, and compression state across, and op counters are corrected — a rebalance does not appear as inserts and deletes nobody issued. <code>range_shard_keys_moved</code> counts moves instead.</li>
+</ul>
+<h3>What the ordered partition buys</h3>
+<ul>
+<li><code>RANGE</code> starts at the shard owning the lower bound, walks shards in order, streams each key as found, and stops at the first key not below the upper bound — nothing is collected, nothing is sorted. Previously the store walked <i>every</i> shard, gathered up to <code>limit × shard_count</code> candidates, and sorted them.</li>
+<li><code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, and <code>COUNT</code> stop at the first shard that can answer instead of reducing over all of them.</li>
+<li>These fast paths are active only when the shards are a true ordered partition — a space with a <b>pull replication source</b> is excluded even when range-sharded, since keys it answers for may live upstream.</li>
+</ul>
+<div class="notice warning"><b>Write-amplification constraint.</b> An append-only (monotonically ascending) workload costs <code>O(shard_count)</code> key moves per insert — every new key lands in the top shard and must cascade down to keep the partition even. There is no way around this; it is why range sharding is opt-in per keyspace and off by default. Random-order keys, by contrast, barely exercise the rebalancer. Prefer hash sharding for append-heavy spaces unless ordered cross-shard reads dominate the workload.</div>
+<div class="notice warning"><b>Rebalance never touches a pull-fed shard.</b> A shard with pull sources leaves tombstones on delete and may answer for upstream keys, so neither its size nor its minimum means what the algorithm needs. Replicated-into spaces keep hash-style behaviour regardless of the option.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Options, commands, counters</h2></header>
+<div class="bd">
+<h3>Per-keyspace options (configuration space)</h3>
+<table>
+<thead><tr><th>Name</th><th>Type</th><th>Requirement</th><th>Bounds / Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;space&gt;.ordered</code></td><td>bool</td><td class="req y">REQUIRED for range sharding</td><td>range sharding on an unordered space is refused when the space is built, not half-honoured</td></tr>
+<tr><td><code>&lt;space&gt;.shards</code></td><td>int</td><td class="req n">OPTIONAL</td><td>shard count for the space; set it explicitly on every process that opens the space — an unset value falls back to the server default, not to what the data was written with</td></tr>
+<tr><td><code>&lt;space&gt;.range_sharded</code></td><td>bool</td><td class="req n">OPTIONAL (default off)</td><td>selects range-index routing + maintenance rebalancing for the space</td></tr>
+</tbody>
+</table>
+<div class="notice warning"><b>Options are read once per process.</b> A keyspace reads its configuration when first built and is then cached for the life of the process. Changing <code>range_sharded</code> (or <code>shards</code>) for a space that is already open requires a process restart — set the options before the first handle to the space is constructed.</div>
+
+<h3>Introspection</h3>
+<table>
+<thead><tr><th>Surface</th><th>Arguments</th><th>Requirement</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>getRangeSharded()</code> (SWIG, KeyValue)</td><td>—</td><td class="req n">—</td><td>true when the open space routes by range</td></tr>
+<tr><td><code>INFO SHARD #n</code> (RESP)</td><td><code>#n</code> = shard by number, <code>0 ≤ n &lt; shards</code></td><td class="req y">REQUIRED</td><td>per-shard info incl. <code>size:</code>; without the <code>#</code> the argument is hashed as a key and answers about some other shard</td></tr>
+<tr><td><code>STATS</code> / <code>stats()</code></td><td>—</td><td class="req n">—</td><td>includes <code>range_shard_keys_moved</code> — cumulative keys moved by rebalancing</td></tr>
+</tbody>
+</table>
+
+<h3>Hash → range conversion</h3>
+<p>Enabling the option on a space that already holds hash-sharded data triggers a repartition at load: boundaries are chosen from a sample (≤ 4096 keys per shard, sorted, cut into quantiles), then each shard is drained in byte-bounded batches into the new partition. Any sampled boundary set yields a <i>correct</i> partition — every key lands on the right side — and the sweep polishes balance afterwards. Measured: 5 000 keys over 4 shards convert in ~7 ms, moving 3 696.</p>
+
+<h3>Error tree</h3>
+<ul>
+<li><code>range_sharded</code> on an unordered space → refused at space construction → 400-class configuration error.</li>
+<li>Shard sizes summed from per-shard <code>INFO SHARD</code> calls while a sweep runs may not add up — a key moved between two reads is counted twice or not at all. Not an error; totals settle when the sweep has nothing left to do.</li>
+<li>Route retry exhaustion cannot occur under the published protocol; a transport-level failure on a routed shard surfaces per the <a href="#ref-replication">routing error tree</a>.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Provision, verify balance, ordered reads</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">python-swig</button><button>redis-cli</button><button>redis-python · balance probe</button><button>lua-swig</button></div>
+<div class="pane on"><pre><span class="k">import</span> barch
+
+<span class="c"># set all three options before the first handle constructs the space</span>
+conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf.set(<span class="s">"events.ordered"</span>, <span class="s">"1"</span>)
+conf.set(<span class="s">"events.shards"</span>, <span class="s">"8"</span>)
+conf.set(<span class="s">"events.range_sharded"</span>, <span class="s">"1"</span>)
+
+ev = barch.KeyValue(<span class="s">"events"</span>)
+<span class="k">assert</span> ev.getRangeSharded()
+
+<span class="k">for</span> i <span class="k">in</span> <span class="k">range</span>(<span class="n">20_000</span>):
+    ev.set(<span class="s">"k%08d"</span> % i, <span class="s">"v%d"</span> % i)   <span class="c"># keys rebalance concurrently</span>
+
+<span class="c"># ordered walk: starts at the owning shard, streams, stops early</span>
+window = ev.range(<span class="s">"k00005000"</span>, <span class="s">"k00005100"</span>)
+<span class="k">print</span>(ev.min().s(), ev.max().s())
+<span class="k">print</span>(barch.stats().range_shard_keys_moved)</pre></div>
+<div class="pane"><pre><span class="c"># same provisioning over the wire (bare names on port 14000)</span>
+USE configuration
+SET events.ordered 1
+SET events.shards 8
+SET events.range_sharded 1
+
+USE events
+SET k00000001 v1
+RANGE k00000000 k00009999 100
+MIN
+<span class="c"># per-shard occupancy — the # form addresses a shard by number</span>
+INFO SHARD #0
+INFO SHARD #7</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis, time
+
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+<span class="k">def</span> shard_sizes(space, shards):
+    r.execute_command(<span class="s">"USE"</span>, space)
+    out = []
+    <span class="k">for</span> s <span class="k">in</span> <span class="k">range</span>(shards):
+        info = r.execute_command(<span class="s">"INFO SHARD #%d"</span> % s)
+        out.append(<span class="k">int</span>(<span class="k">next</span>(l <span class="k">for</span> l <span class="k">in</span> info.split(<span class="s">"\n"</span>)
+                   <span class="k">if</span> l.startswith(<span class="s">"size:"</span>)).split(<span class="s">":"</span>)[<span class="n">1</span>]))
+    <span class="k">return</span> out
+
+<span class="c"># totals only settle once the sweep is idle — poll, don't assert once</span>
+<span class="k">while</span> <span class="k">True</span>:
+    sizes = shard_sizes(<span class="s">"events"</span>, <span class="n">8</span>)
+    ratio = <span class="k">max</span>(sizes) / (<span class="k">sum</span>(sizes) / <span class="k">len</span>(sizes))
+    <span class="k">if</span> <span class="k">sum</span>(sizes) == <span class="n">20_000</span> <span class="k">and</span> ratio &lt;= <span class="n">1.30</span>:
+        <span class="k">break</span>
+    time.sleep(<span class="n">0.1</span>)
+<span class="k">print</span>(<span class="s">"balanced at %.2fx"</span> % ratio, sizes)</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+
+<span class="k">local</span> conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf:set(<span class="s">"events.ordered"</span>, <span class="s">"1"</span>)
+conf:set(<span class="s">"events.shards"</span>, <span class="s">"8"</span>)
+conf:set(<span class="s">"events.range_sharded"</span>, <span class="s">"1"</span>)
+
+<span class="k">local</span> ev = barch.KeyValue(<span class="s">"events"</span>)
+<span class="k">assert</span>(ev:getRangeSharded())
+ev:set(<span class="s">"k00000001"</span>, <span class="s">"v1"</span>)
+<span class="k">print</span>(ev:min():s())</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== HASH =============== -->
+<article id="ref-hash">
+<div class="crumb">Reference / HashSet</div>
+<h1>HashSet <code>H*</code></h1>
+<p class="lede">Field/value maps under a single key with per-field TTL — the redis hash API plus field-level expiry (<code>HEXPIRE</code>, <code>HEXPIREAT</code>, <code>HTTL</code>, <code>HEXPIRETIME</code>).</p>
+<div class="chips"><span class="chip l1">L1 · HashSet class</span><span class="chip l2">L2 · RESP</span><span class="chip o">field op O(k<sub>key</sub>+k<sub>field</sub>)</span><span class="chip lock">write: 1 shard W-lock</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
+<div class="bd">
+<ul>
+<li><b>Layout:</b> fields are addressed as composite paths beneath the hash key, so a field operation costs one descent over key + field bytes; <code>HGETALL</code>/<code>HKEYS</code> walk the key's subtree in <code>O(k + f)</code> for <code>f</code> fields, in field order.</li>
+<li><b>Sharding:</b> the whole hash lives on the shard of its top-level key — a multi-field <code>HSET</code> or <code>HMGET</code> touches exactly one shard lock, making it the cheapest multi-value write in the system.</li>
+<li><b>Per-field TTL</b> stores an expiry alongside each leaf; expired fields are reaped lazily and by the maintenance cycle, so <code>HLEN</code> may transiently include expired fields.</li>
+<li><b>Memory:</b> many small fields amortize interior nodes across the shared prefix — the intended "many small KV pairs, minimal overhead" use case.</li>
+</ul>
+<div class="notice warning"><b>Skew constraint.</b> A single giant hash is one shard's problem: all its writes serialize on one write lock, and reads of that shard contend with them. Distribute hot aggregates across multiple keys when write rates are high.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>RESP</th><th>SWIG (HashSet)</th><th>Arguments</th><th>Requirement</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>HSET k f v [f v …]</code></td><td><code>set(k, [f1,v1,f2,v2,…])</code></td><td>pairs list, even length ≥ 2</td><td class="req y">≥ 1 pair</td><td>fields created</td></tr>
+<tr><td><code>HGET k f</code></td><td><code>get(k, f)</code></td><td>key, field</td><td class="req y">REQUIRED</td><td>value / nil</td></tr>
+<tr><td><code>HMGET k f…</code></td><td><code>mget(k, fields)</code></td><td>≥ 1 fields</td><td class="req y">REQUIRED</td><td>array, nil per missing field</td></tr>
+<tr><td><code>HGETALL k</code> · <code>HKEYS k</code></td><td><code>getall(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>field/value array · field array</td></tr>
+<tr><td><code>HEXISTS k f</code> · <code>HLEN k</code></td><td><code>exists(k, f)</code></td><td>key [, field]</td><td class="req y">REQUIRED</td><td>0|1 · field count</td></tr>
+<tr><td><code>HDEL k f…</code> · <code>HGETDEL k f…</code></td><td><code>remove(k, fields)</code> · <code>getdel(k, fields)</code></td><td>≥ 1 fields</td><td class="req y">REQUIRED</td><td>removed count · removed values</td></tr>
+<tr><td><code>HINCRBY k f n</code> · <code>HINCRBYFLOAT k f x</code></td><td><code>incrby(k, f, n)</code></td><td>int64 / double delta</td><td class="req y">REQUIRED</td><td>new value; 400 on non-numeric</td></tr>
+<tr><td><code>HEXPIRE k sec [flag] FIELDS n f…</code></td><td><code>expire(k, args, fields)</code></td><td>sec ≥ 0; flag ∈ <code>NX|XX|GT|LT</code></td><td class="req c">flag OPTIONAL</td><td>per-field: 1 set / 0 condition lost (409-class) / −2 missing</td></tr>
+<tr><td><code>HEXPIREAT k ts [flag] FIELDS n f…</code></td><td><code>expireat(k, exp, flags, fields)</code></td><td>unix seconds</td><td class="req c">flag OPTIONAL</td><td>as above</td></tr>
+<tr><td><code>HTTL k FIELDS n f…</code> · <code>HEXPIRETIME k FIELDS n f…</code></td><td><code>ttl(k, fields)</code> · <code>expiretime(k, fields)</code></td><td>≥ 1 fields</td><td class="req y">REQUIRED</td><td>seconds remaining · absolute unix time; −1 none, −2 missing</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Session store with field TTL</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>python-swig</button><button>lua-swig</button></div>
+<div class="pane on"><pre>HSET sess:9f2 user ada csrf 5b1 theme dark
+HEXPIRE sess:9f2 900 FIELDS 1 csrf
+HTTL sess:9f2 FIELDS 2 csrf theme
+<span class="c"># 1) (integer) 900     csrf expires</span>
+<span class="c"># 2) (integer) -1      theme persists</span>
+HGETALL sess:9f2</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+r.hset(<span class="s">"sess:9f2"</span>, mapping={<span class="s">"user"</span>: <span class="s">"ada"</span>, <span class="s">"csrf"</span>: <span class="s">"5b1"</span>})
+r.hexpire(<span class="s">"sess:9f2"</span>, <span class="n">900</span>, <span class="s">"csrf"</span>)
+<span class="k">print</span>(r.httl(<span class="s">"sess:9f2"</span>, <span class="s">"csrf"</span>, <span class="s">"user"</span>))
+<span class="k">print</span>(r.hgetall(<span class="s">"sess:9f2"</span>))</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+h = barch.HashSet()
+
+h.set(<span class="s">"sess:9f2"</span>, [<span class="s">"user"</span>,<span class="s">"ada"</span>, <span class="s">"csrf"</span>,<span class="s">"5b1"</span>, <span class="s">"theme"</span>,<span class="s">"dark"</span>])
+h.expire(<span class="s">"sess:9f2"</span>, [<span class="s">"900"</span>], [<span class="s">"csrf"</span>])
+
+<span class="k">for</span> t <span class="k">in</span> h.ttl(<span class="s">"sess:9f2"</span>, [<span class="s">"csrf"</span>, <span class="s">"theme"</span>]):
+    <span class="k">print</span>(t.i())               <span class="c"># 900, -1</span>
+<span class="k">print</span>(h.get(<span class="s">"sess:9f2"</span>, <span class="s">"user"</span>).s())
+h.incrby(<span class="s">"sess:9f2"</span>, <span class="s">"hits"</span>, <span class="n">1</span>)</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+<span class="k">local</span> h = barch.HashSet()
+
+h:set(<span class="s">"sess:9f2"</span>, {<span class="s">"user"</span>,<span class="s">"ada"</span>, <span class="s">"csrf"</span>,<span class="s">"5b1"</span>})
+h:expire(<span class="s">"sess:9f2"</span>, {<span class="s">"900"</span>}, {<span class="s">"csrf"</span>})
+<span class="k">print</span>(h:get(<span class="s">"sess:9f2"</span>, <span class="s">"user"</span>):s())</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== ORDERED SET =============== -->
+<article id="ref-ordered">
+<div class="crumb">Reference / OrderedSet</div>
+<h1>OrderedSet <code>Z*</code></h1>
+<p class="lede">Score-ordered members with the redis <code>Z*</code> surface: ranks, range and rev-range by index / score / lex, pop-min/max, set algebra (<code>ZDIFF</code>/<code>ZINTER</code> and store variants), and constant-time range counting via the trie.</p>
+<div class="chips"><span class="chip l1">L1 · OrderedSet class</span><span class="chip l2">L2 · RESP</span><span class="chip o">add O(k)</span><span class="chip o">rank/count O(k)</span><span class="chip lock">algebra: multi-key R-locks</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
+<div class="bd">
+<ul>
+<li><b>Encoding:</b> members are stored as score-prefixed paths in the ordered trie, so score order <i>is</i> byte order. <code>ZADD</code> is <code>O(k)</code>; re-scoring a member is a remove+insert on one shard.</li>
+<li><b>Pop and rank:</b> <code>ZPOPMIN</code>/<code>ZPOPMAX</code> descend to a boundary leaf — <code>O(k)</code>; this is the constant-time-access priority queue use case. <code>rank(lower, upper)</code>/<code>ZRANK</code>-style counting over a bounded score interval descends both boundary paths rather than walking members — the ZfastRank property that makes small-range counts (ages, buckets, populations) effectively constant time.</li>
+<li><b>Ranges:</b> <code>ZRANGE</code>/<code>ZREVRANGE</code>/<code>…BYSCORE</code>/<code>…BYLEX</code> are boundary seek + ordered walk, <code>O(k + m)</code>.</li>
+<li><b>Set algebra:</b> <code>ZDIFF</code>/<code>ZINTER</code>/<code>ZINTERCARD</code> take read locks on every input key's shard and stream the smaller operand against the others; <code>*STORE</code> variants additionally take the destination's write lock. Cost is linear in the operand cardinalities.</li>
+</ul>
+<div class="notice warning"><b>Lock ordering constraint.</b> Store-variant algebra is the only command family holding one write lock while reading other shards. Keep destination keys off the hottest write shards, and prefer <code>ZINTERCARD</code> when only the cardinality is needed.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>RESP</th><th>SWIG (OrderedSet)</th><th>Arguments</th><th>Requirement</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>ZADD k [NX|XX|GT|LT|CH] score member …</code></td><td><code>add(k, flags, ["score","member",…])</code></td><td>score: double; flags optional</td><td class="req y">≥ 1 pair</td><td>added count; flagged condition lost → 0 (409-class)</td></tr>
+<tr><td><code>ZREM k member…</code></td><td><code>remove(k, members)</code></td><td>≥ 1 members</td><td class="req y">REQUIRED</td><td>removed count</td></tr>
+<tr><td><code>ZCARD k</code></td><td><code>card(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>cardinality</td></tr>
+<tr><td><code>ZINCRBY k delta member</code></td><td><code>incrby(k, delta, member)</code></td><td>delta: double</td><td class="req y">REQUIRED</td><td>new score</td></tr>
+<tr><td><code>ZRANGE k start stop [flags]</code> · <code>ZREVRANGE</code> · <code>ZRANGEBYSCORE</code> · <code>ZREVRANGEBYSCORE</code></td><td><code>range(k, start, stop[, flags])</code> · <code>revrange(…)</code></td><td>bounds: double; flags e.g. <code>WITHSCORES</code></td><td class="req c">flags OPTIONAL</td><td>member array (scores interleaved with <code>WITHSCORES</code>)</td></tr>
+<tr><td><code>ZRANGEBYLEX / ZREVRANGEBYLEX / ZREMRANGEBYLEX</code></td><td><code>remrangebylex(k, lo, hi)</code></td><td>lex bounds with <code>[</code> / <code>(</code> / <code>-</code> / <code>+</code></td><td class="req y">REQUIRED</td><td>member array · removed count</td></tr>
+<tr><td><code>ZPOPMIN k</code> · <code>ZPOPMAX k</code></td><td><code>popmin(k)</code> · <code>popmax(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>member (nil when empty)</td></tr>
+<tr><td><code>ZRANK</code>-family counting</td><td><code>rank(k, lower, upper)</code> · <code>count(k, min, max)</code></td><td>score interval</td><td class="req y">REQUIRED</td><td>count within interval — O(k)</td></tr>
+<tr><td><code>ZDIFF k… </code> · <code>ZINTER k…</code> · <code>ZINTERCARD k…</code></td><td><code>diff(keys[, flags])</code> · <code>inter(keys[, flags])</code> · <code>intercard(keys)</code></td><td>≥ 2 keys</td><td class="req y">REQUIRED</td><td>member array · cardinality</td></tr>
+<tr><td><code>ZDIFFSTORE dst k…</code> · <code>ZINTERSTORE dst k…</code></td><td><code>diffstore(dst, keys)</code> · <code>interstore(dst, keys)</code></td><td>destination + ≥ 2 sources</td><td class="req y">REQUIRED</td><td>stored cardinality; overwrites dst</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Leaderboard + fast range counting</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>python-swig</button><button>lua-swig</button></div>
+<div class="pane on"><pre>ZADD board 3200 ada 2900 grace 4100 edsger
+ZREVRANGE board 0 2 WITHSCORES
+ZPOPMAX board
+ZINCRBY board 150 grace</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+r.zadd(<span class="s">"board"</span>, {<span class="s">"ada"</span>: <span class="n">3200</span>, <span class="s">"grace"</span>: <span class="n">2900</span>, <span class="s">"edsger"</span>: <span class="n">4100</span>})
+top = r.zrevrange(<span class="s">"board"</span>, <span class="n">0</span>, <span class="n">2</span>, withscores=<span class="k">True</span>)
+r.zincrby(<span class="s">"board"</span>, <span class="n">150</span>, <span class="s">"grace"</span>)
+best = r.zpopmax(<span class="s">"board"</span>)</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+z = barch.OrderedSet()
+
+z.add(<span class="s">"ages"</span>, [<span class="s">"34"</span>,<span class="s">"ada"</span>, <span class="s">"29"</span>,<span class="s">"grace"</span>, <span class="s">"41"</span>,<span class="s">"edsger"</span>])
+
+<span class="c"># O(k) interval count — no member walk</span>
+<span class="k">print</span>(z.rank(<span class="s">"ages"</span>, <span class="n">30.0</span>, <span class="n">45.0</span>).i())     <span class="c"># 2</span>
+
+<span class="k">for</span> m <span class="k">in</span> z.revrange(<span class="s">"ages"</span>, <span class="n">0</span>, <span class="n">2</span>, [<span class="s">"WITHSCORES"</span>]):
+    <span class="k">print</span>(m.s())
+oldest = z.popmax(<span class="s">"ages"</span>)
+common = z.intercard([<span class="s">"ages"</span>, <span class="s">"active"</span>])</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+<span class="k">local</span> z = barch.OrderedSet()
+
+z:add(<span class="s">"ages"</span>, {<span class="s">"34"</span>,<span class="s">"ada"</span>, <span class="s">"29"</span>,<span class="s">"grace"</span>})
+<span class="k">print</span>(z:rank(<span class="s">"ages"</span>, 30.0, 45.0):i())
+<span class="k">print</span>(z:popmin(<span class="s">"ages"</span>):s())</pre></div>
+</div>
+</div>
+</div>
+</article>
+<!-- =============== LIST =============== -->
+<article id="ref-list">
+<div class="crumb">Reference / List</div>
+<h1>List <code>L*</code></h1>
+<p class="lede">Queue and deque primitives: push, pop, front/back inspection, and the blocking pops <code>BLPOP</code>/<code>BRPOP</code> for consumer loops.</p>
+<div class="chips"><span class="chip l1">L1 · List class</span><span class="chip l2">L2 · RESP</span><span class="chip o">push/pop O(k)</span><span class="chip lock">blocking pops park the connection, not the shard</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
+<div class="bd">
+<ul>
+<li><b>Complexity:</b> a list is addressed by one key on one shard; <code>LPUSH</code>/<code>LPOP</code>/<code>LFRONT</code>/<code>LBACK</code>/<code>LLEN</code> are <code>O(k)</code> to reach the structure plus constant work at the end being touched. Multi-item <code>LPUSH</code> is one lock acquisition for the batch.</li>
+<li><b>Blocking semantics:</b> <code>BLPOP</code>/<code>BRPOP</code> block the <i>caller</i> up to <code>timeout</code> seconds. The shard write lock is held only for the pop attempt itself — a parked consumer never blocks producers or other consumers.</li>
+<li><b>Contention profile:</b> one queue key = one shard = producers and consumers serialize on that shard's write lock. For high fan-in, shard the queue across N keys and round-robin producers.</li>
+</ul>
+<div class="notice note"><b>Timeout is control flow.</b> A blocking pop returning nil after <code>timeout</code> seconds is the normal empty-queue path — loop, don't log.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>RESP</th><th>SWIG (List)</th><th>Arguments</th><th>Requirement</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>LPUSH k item…</code></td><td><code>push(k, items)</code></td><td>≥ 1 items</td><td class="req y">REQUIRED</td><td>new length</td></tr>
+<tr><td><code>LPOP k [count]</code></td><td><code>pop(k, count)</code></td><td>count ≥ 1</td><td class="req c">count OPTIONAL (RESP)</td><td>popped item(s) / popped count (SWIG)</td></tr>
+<tr><td><code>LLEN k</code></td><td><code>len(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>length; 0 for missing key</td></tr>
+<tr><td><code>LFRONT k</code> · <code>LBACK k</code></td><td><code>front(k)</code> · <code>back(k)</code></td><td>key</td><td class="req y">REQUIRED</td><td>element without removal / nil</td></tr>
+<tr><td><code>BLPOP k timeout</code> · <code>BRPOP k timeout</code></td><td><code>blpop(k, timeout)</code> · <code>brpop(k, timeout)</code></td><td>timeout: double seconds ≥ 0</td><td class="req y">REQUIRED</td><td>element, or nil on timeout</td></tr>
+</tbody>
+</table>
+<div class="notice warning"><b>Deadline interaction.</b> On the wire, keep <code>BLPOP</code> timeouts below <code>rpc_client_max_wait_ms</code> (default 30 s), otherwise the RPC deadline fires first and surfaces as a 429-class transport error instead of a clean nil.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Producer / consumer</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>python-swig</button><button>lua-swig</button></div>
+<div class="pane on"><pre><span class="c"># producer</span>
+LPUSH jobs '{"id":17,"op":"resize"}'
+LLEN jobs
+
+<span class="c"># consumer — blocks up to 5s</span>
+BRPOP jobs 5</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis, json
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+r.lpush(<span class="s">"jobs"</span>, json.dumps({<span class="s">"id"</span>: <span class="n">17</span>, <span class="s">"op"</span>: <span class="s">"resize"</span>}))
+
+<span class="k">while</span> <span class="k">True</span>:
+    item = r.brpop(<span class="s">"jobs"</span>, timeout=<span class="n">5</span>)
+    <span class="k">if</span> item <span class="k">is</span> <span class="k">None</span>:
+        <span class="k">continue</span>                <span class="c"># empty queue — normal</span>
+    handle(json.loads(item[<span class="n">1</span>]))</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+q = barch.List()
+
+q.push(<span class="s">"jobs"</span>, [<span class="s">'{"id":17,"op":"resize"}'</span>])
+<span class="k">print</span>(q.len(<span class="s">"jobs"</span>), q.back(<span class="s">"jobs"</span>))
+
+<span class="k">while</span> <span class="k">True</span>:
+    item = q.brpop(<span class="s">"jobs"</span>, <span class="n">5.0</span>)
+    <span class="k">if</span> item.isNull():
+        <span class="k">continue</span>
+    handle(item.s())</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+<span class="k">local</span> q = barch.List()
+
+q:push(<span class="s">"jobs"</span>, {<span class="s">'{"id":17}'</span>})
+<span class="k">local</span> item = q:brpop(<span class="s">"jobs"</span>, 5.0)
+<span class="k">if</span> <span class="k">not</span> item:isNull() <span class="k">then</span>
+    <span class="k">print</span>(item:s())
+<span class="k">end</span></pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== REPLICATION =============== -->
+<article id="ref-replication">
+<div class="crumb">Reference / Replication &amp; Routing</div>
+<h1>Replication &amp; Routing</h1>
+<p class="lede">How an embedded L1 stays warm against an L2: RESP serving (<code>START</code>/<code>STOP</code>), write streaming (<code>PUBLISH</code>/<code>PULL</code>), snapshot block-load (<code>LOAD</code>/<code>RETRIEVE</code>), and per-shard remote routing (<code>ADDROUTE</code>/<code>ROUTE</code>/<code>REMROUTE</code>).</p>
+<div class="chips"><span class="chip l1">L1 initiates</span><span class="chip l2">L2 receives</span><span class="chip o">async fan-out</span><span class="chip lock">multi-writer, last-write-wins</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Topology model</h2></header>
+<div class="bd">
+<ul>
+<li><b>Push replication (<code>publish</code>):</b> local writes are queued (<code>out_queue_size</code>) and streamed to the peer's RESP endpoint asynchronously. The local write path never waits on the network — a dead peer degrades to counter drift (<code>attempted_routes</code> vs <code>routes_succeeded</code>), never to write latency.</li>
+<li><b>Pull replication (<code>pull</code>):</b> the inverse subscription; two nodes publishing to each other form the multi-writer pair shown below.</li>
+<li><b>Block load (<code>load(host, port)</code> / <code>RETRIEVE</code>):</b> a bulk snapshot transfer to synchronize a cold embedded node against a standalone server — the fast-warmup path, preferred over replaying a write stream.</li>
+<li><b>Shard routing (<code>setRoute</code>):</b> pins a shard index to a remote host; operations on keys owned by a routed shard execute remotely. This is horizontal partitioning at shard granularity, orthogonal to replication.</li>
+<li><b>Memory:</b> the outbound queue is the main replication allocation; it grows with peer lag and is bounded operationally by monitoring <code>out_queue_size</code>.</li>
+</ul>
+<div class="notice warning"><b>Consistency contract.</b> Multi-writer replication is asynchronous and convergent, not transactional: concurrent writes to the same key on two publishers resolve last-write-wins on arrival order. Do not place invariants requiring read-your-peer's-write on this path — route the key instead.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>RESP</th><th>SWIG</th><th>Arguments</th><th>Requirement</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>START host port</code></td><td><code>start(host, port)</code> · <code>start(port)</code></td><td>IP/hostname/socket-path; port 1–65535 or 0</td><td class="req y">REQUIRED</td><td>open RESP listener on this store</td></tr>
+<tr><td><code>STOP</code></td><td><code>stop()</code></td><td>—</td><td class="req n">—</td><td>close listener</td></tr>
+<tr><td><code>PUBLISH ip port</code></td><td><code>publish(ip, port)</code></td><td>peer RESP endpoint</td><td class="req y">REQUIRED</td><td>begin async write streaming to peer</td></tr>
+<tr><td>—</td><td><code>pull(ip, port)</code></td><td>peer RESP endpoint</td><td class="req y">REQUIRED</td><td>subscribe to peer's writes</td></tr>
+<tr><td><code>LOAD [host port]</code> · <code>RETRIEVE</code></td><td><code>load(host, port)</code> · <code>load()</code></td><td>peer endpoint, or none for local persistence</td><td class="req c">peer OPTIONAL</td><td>block-load snapshot · ACL: <code>dangerous</code></td></tr>
+<tr><td><code>SAVE</code></td><td><code>save()</code> · <code>saveAll()</code></td><td>—</td><td class="req n">—</td><td>persist to disk (also periodic via <code>save_interval</code>)</td></tr>
+<tr><td><code>ADDROUTE shard host port</code></td><td><code>setRoute(shard, host, port)</code></td><td>shard ∈ <code>[0, getShardCount())</code></td><td class="req y">REQUIRED</td><td>pin shard to remote node</td></tr>
+<tr><td><code>ROUTE shard</code></td><td><code>getRoute(shard)</code></td><td>shard index</td><td class="req y">REQUIRED</td><td>current <code>Route{host, port}</code></td></tr>
+<tr><td><code>REMROUTE shard</code></td><td><code>removeRoute(shard)</code></td><td>shard index</td><td class="req y">REQUIRED</td><td>restore local ownership</td></tr>
+<tr><td><code>USE space</code></td><td><code>use(space)</code> on any handle</td><td>keyspace name</td><td class="req y">REQUIRED</td><td>switch active keyspace</td></tr>
+</tbody>
+</table>
+<h3>Error tree</h3>
+<ul>
+<li>Unreachable publish peer → local success, <code>attempted_routes − routes_succeeded</code> grows → 503-class at the peer, invisible locally.</li>
+<li><code>LOAD</code> from an unreachable host → exception / error reply → 503-class; retry with backoff.</li>
+<li>Route to a dead shard host → per-call transport error on affected keys → 429/503-class; <code>REMROUTE</code> restores local service.</li>
+<li>Malformed shard index → <code>-ERR</code> → 400.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Multi-writer pair + cold warmup</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">python-swig · node A</button><button>python-swig · node B</button><button>python-swig · warmup</button><button>redis-cli · standalone</button></div>
+<div class="pane on"><pre><span class="k">import</span> barch
+barch.start(<span class="s">"127.0.0.1"</span>, <span class="s">"13000"</span>)      <span class="c"># serve this node</span>
+barch.publish(<span class="s">"w.x.y.b"</span>, <span class="s">"13000"</span>)      <span class="c"># stream writes to B</span>
+
+h = barch.HashSet()
+h.set(<span class="s">"ka"</span>, [<span class="s">"field1"</span>,<span class="s">"value1"</span>])       <span class="c"># replicated to B</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+barch.start(<span class="s">"127.0.0.1"</span>, <span class="s">"13000"</span>)
+barch.publish(<span class="s">"w.x.y.a"</span>, <span class="s">"13000"</span>)      <span class="c"># stream writes to A</span>
+
+h = barch.HashSet()
+h.set(<span class="s">"kb"</span>, [<span class="s">"field1"</span>,<span class="s">"value1"</span>])       <span class="c"># replicated to A</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+
+<span class="c"># cold embedded node: block-load the standalone server's snapshot,</span>
+<span class="c"># then subscribe for the delta</span>
+barch.load(<span class="s">"cache.internal"</span>, <span class="n">14000</span>)
+barch.pull(<span class="s">"cache.internal"</span>, <span class="s">"14000"</span>)
+
+st = barch.repl_stats()
+<span class="k">print</span>(st.bytes_recv, st.out_queue_size, st.routes_succeeded)</pre></div>
+<div class="pane"><pre><span class="c"># drive the same topology on a standalone node's RESP port</span>
+redis-cli -p 14000 START 0.0.0.0 13000
+redis-cli -p 14000 PUBLISH 10.0.0.7 13000
+redis-cli -p 14000 ADDROUTE 3 10.0.0.9 13000
+redis-cli -p 14000 ROUTE 3
+redis-cli -p 14000 REMROUTE 3</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== KEY SPACES =============== -->
+<article id="ref-keyspaces">
+<div class="crumb">Reference / Named Key Spaces</div>
+<h1>Named Key Spaces</h1>
+<p class="lede">A key space is an independently sharded, independently configured, independently persisted store inside one BARCH process. Spaces are selected per connection (<code>USE</code>) or per handle (<code>KeyValue("name")</code>), can be layered so one resolves misses in another (<code>KSPACE DEPENDS</code>), and can be merged, dropped, or unloaded at runtime.</p>
+<div class="chips"><span class="chip l1">L1 · handle constructor</span><span class="chip l2">L2 · <code>USE</code> / <code>KSPACE</code></span><span class="chip o">per-space shard count</span><span class="chip lock">space-level shared/unique lock</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Model</h2></header>
+<div class="bd">
+<h3>What a space owns</h3>
+<ul>
+<li><b>Its own shards.</b> Shard count is per space (<code>&lt;name&gt;.shards</code>), so a small hot space and a large cold one do not share a lock domain or a partitioning decision.</li>
+<li><b>Its own ordering and routing options</b> — <code>&lt;name&gt;.ordered</code>, <code>&lt;name&gt;.range_sharded</code> — plus per-space eviction options set through <code>KSPACE OPTION SET</code>.</li>
+<li><b>Its own persistence and maintenance thread.</b> Each space starts maintenance on construction; saves, defrag, and (where enabled) range rebalancing are per space.</li>
+</ul>
+<h3>Naming and reserved names</h3>
+<ul>
+<li>Names must match <code>[0-9A-Za-z_]+</code>; a non-matching name raises rather than being coerced.</li>
+<li>Internally a user name is suffixed so user spaces cannot collide with system stores. The empty name (and <code>"0"</code>) selects the default space, stored internally as <code>node</code>.</li>
+<li><code>configuration</code> is a real, replicated space used to carry per-space options; it and the default space are not themselves configurable through those options and are always single-shard in the configuration case.</li>
+</ul>
+<h3>Construction and caching</h3>
+<p>A space is built on first reference and cached for the life of the process. Construction is when it reads <code>&lt;name&gt;.shards</code>, <code>&lt;name&gt;.ordered</code>, and <code>&lt;name&gt;.range_sharded</code> out of the <code>configuration</code> space, loads its shards in parallel, and (if range sharded) builds its routing index. Memory allocated during that build is attributed to startup memory.</p>
+<div class="notice warning"><b>Options are read once, at first reference.</b> Writing <code>&lt;name&gt;.shards</code> or <code>&lt;name&gt;.range_sharded</code> after a handle to that space exists in the process has no effect until restart. Provision the <code>configuration</code> space <i>before</i> constructing the first handle, and re-provision in every process that opens the space — the configuration space is not carried between processes, so an unset option falls back to the server default rather than to whatever the data was written with.</div>
+<div class="notice warning"><b>Range sharding is refused, not ignored, on an unordered space.</b> Setting <code>range_sharded</code> without <code>ordered</code> logs an error and leaves the space hash routed, so <code>getRangeSharded()</code> reports the truth about what the space is actually doing.</div>
+<h3>Dependent spaces (layering)</h3>
+<ul>
+<li><code>KSPACE DEPENDS dependent FROM source</code> makes <code>dependent</code> resolve missing keys in <code>source</code>. Writes land in the dependent and are never propagated down — the standard overlay/copy-on-write shape for per-tenant or per-experiment views over a shared base.</li>
+<li><b>Shard counts must match</b> between dependent and source; a mismatch is rejected.</li>
+<li>A dependent is later collapsed with <code>KSPACE MERGE</code>, detached with <code>KSPACE RELEASE</code>, or discarded with <code>KSPACE DROP</code>.</li>
+</ul>
+<div class="notice note"><b>Layering interacts with the ordered fast paths.</b> A space with a source is excluded from the ordered-shard optimizations even when range sharded: keys it answers for may live upstream, and a delete against it leaves a tombstone rather than removing anything. See <a href="#ref-range-sharding">Ordered Range Sharding</a>.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands and constructors</h2></header>
+<div class="bd">
+<h3>Selection and lifecycle</h3>
+<table>
+<thead><tr><th>RESP</th><th>SWIG</th><th>Arguments</th><th>Requirement</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>USE name</code> · <code>SELECT name</code></td><td><code>use(name)</code> on any handle · <code>KeyValue("name")</code></td><td>name matching <code>[0-9A-Za-z_]+</code>; empty or <code>0</code> = default space</td><td class="req c">name OPTIONAL (bare <code>USE</code> selects default)</td><td>OK / bool — changes the connection's space until changed again</td></tr>
+<tr><td><code>space:COMMAND …</code></td><td>—</td><td>prefix on the command name</td><td class="req n">OPTIONAL</td><td>runs one command in <code>space</code> without altering connection state — see <a href="#resp">RESP shorthand</a></td></tr>
+<tr><td><code>SPACE</code> · <code>SPACES</code></td><td>—</td><td>—</td><td class="req n">—</td><td>array of (space name, key count) for every loaded space</td></tr>
+<tr><td><code>KSPACE EXIST name</code></td><td>—</td><td>name</td><td class="req y">REQUIRED</td><td>1 / 0</td></tr>
+<tr><td><code>UNLOAD [name]</code></td><td>—</td><td>name; omitted = default space</td><td class="req n">OPTIONAL</td><td>OK — evicts the space from the process; data on disk survives</td></tr>
+<tr><td><code>KSPACE DROP [name]</code></td><td>—</td><td>name; omitted = current space</td><td class="req n">OPTIONAL</td><td>OK — detaches sources and marks shards drop-on-release · ACL: <code>dangerous</code></td></tr>
+</tbody>
+</table>
+
+<h3>Layering</h3>
+<table>
+<thead><tr><th>Command</th><th>Arguments</th><th>Requirement</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>KSPACE DEPENDS dependent FROM source</code></td><td>two space names</td><td class="req y">REQUIRED</td><td>misses in <code>dependent</code> resolve in <code>source</code>; writes stay in the dependent. Error when shard counts differ</td></tr>
+<tr><td><code>KSPACE DEPENDANTS name</code></td><td>space name</td><td class="req y">REQUIRED</td><td>the source space name, or nil</td></tr>
+<tr><td><code>KSPACE RELEASE dependent FROM source</code></td><td>two space names</td><td class="req y">REQUIRED</td><td>detaches the source; wrong source name → <code>-ERR Invalid source keyspace name</code></td></tr>
+<tr><td><code>KSPACE MERGE dependent [TO target]</code></td><td>dependent, optional target</td><td class="req c">target OPTIONAL (defaults to its sources)</td><td>folds the dependent's keys down into the target</td></tr>
+</tbody>
+</table>
+
+<h3>Per-space options</h3>
+<table>
+<thead><tr><th>Surface</th><th>Values</th><th>Requirement</th><th>Scope</th></tr></thead>
+<tbody>
+<tr><td><code>KSPACE OPTION SET|GET ORDERED [ON|OFF]</code></td><td><code>ON</code> / <code>OFF</code></td><td class="req y">REQUIRED for SET</td><td>applied to the current space's shards and saved with them</td></tr>
+<tr><td><code>KSPACE OPTION SET|GET LRU [ON|OFF|VOLATILE]</code></td><td><code>ON</code> / <code>OFF</code> / <code>VOLATILE</code></td><td class="req y">REQUIRED for SET</td><td>per-space eviction; <code>setLru()</code> in SWIG</td></tr>
+<tr><td><code>KSPACE OPTION SET|GET RANDOM [ON|OFF|VOLATILE]</code></td><td><code>ON</code> / <code>OFF</code> / <code>VOLATILE</code></td><td class="req y">REQUIRED for SET</td><td>per-space random eviction</td></tr>
+<tr><td><code>configuration</code> space keys</td><td><code>&lt;name&gt;.shards</code> · <code>&lt;name&gt;.ordered</code> · <code>&lt;name&gt;.range_sharded</code></td><td class="req c">read at first reference only</td><td>see <a href="#configuration">Configuration</a></td></tr>
+</tbody>
+</table>
+
+<h3>Error tree</h3>
+<ul>
+<li>Name outside <code>[0-9A-Za-z_]+</code> → <code>invalid_argument</code> / <code>-ERR</code> → 400.</li>
+<li><code>KSPACE DEPENDS</code> with mismatched shard counts → <code>-ERR source and dependant shard counts do not match</code> → 409-class (the topology conflicts with the request).</li>
+<li><code>KSPACE RELEASE</code> naming the wrong source → <code>-ERR Invalid source keyspace name</code> → 400.</li>
+<li>Malformed <code>KSPACE</code> subcommand or arity → <code>-ERR syntax error</code> / wrong arity → 400.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Provision a space, layer an overlay, merge it back</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">python-swig</button><button>redis-cli</button><button>redis-python</button><button>lua-swig</button></div>
+<div class="pane on"><pre><span class="k">import</span> barch
+
+<span class="c"># provision before the first handle to the space exists</span>
+conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf.set(<span class="s">"catalog.ordered"</span>, <span class="s">"1"</span>)
+conf.set(<span class="s">"catalog.shards"</span>, <span class="s">"8"</span>)
+
+catalog = barch.KeyValue(<span class="s">"catalog"</span>)
+catalog.set(<span class="s">"sku:00001"</span>, <span class="s">"widget"</span>)
+<span class="k">print</span>(catalog.getShards(), catalog.getOrdered())
+
+<span class="c"># a second, separate space — its own shards, its own maintenance</span>
+sessions = barch.KeyValue(<span class="s">"sessions"</span>)
+sessions.setLru(<span class="s">"VOLATILE"</span>)
+
+<span class="c"># one handle can be repointed instead of constructing another</span>
+h = barch.KeyValue()
+h.use(<span class="s">"catalog"</span>)
+<span class="k">print</span>(h.get(<span class="s">"sku:00001"</span>))</pre></div>
+<div class="pane"><pre><span class="c"># provision options through the configuration space</span>
+USE configuration
+SET catalog.ordered 1
+SET catalog.shards 8
+
+USE catalog
+SET sku:00001 widget
+KSPACE OPTION SET LRU OFF
+
+<span class="c"># overlay: staging resolves misses in catalog, writes stay in staging</span>
+KSPACE DEPENDS staging FROM catalog
+USE staging
+SET sku:00001 widget-v2      <span class="c"># shadows the base, base untouched</span>
+GET sku:00002                <span class="c"># resolved from catalog</span>
+KSPACE DEPENDANTS staging    <span class="c"># -> "catalog"</span>
+
+<span class="c"># promote, then detach</span>
+KSPACE MERGE staging TO catalog
+KSPACE RELEASE staging FROM catalog
+
+<span class="c"># inventory and lifecycle</span>
+SPACE                        <span class="c"># every loaded space + key count</span>
+KSPACE EXIST staging
+UNLOAD staging               <span class="c"># evict from process; disk data survives</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+<span class="c"># the key space is a property of the connection: name it on every call</span>
+<span class="c"># rather than relying on whatever the previous one selected</span>
+<span class="k">def</span> in_space(space, *cmd):
+    r.execute_command(<span class="s">"USE"</span>, space)
+    <span class="k">return</span> r.execute_command(*cmd)
+
+in_space(<span class="s">"catalog"</span>, <span class="s">"SET"</span>, <span class="s">"sku:00001"</span>, <span class="s">"widget"</span>)
+r.execute_command(<span class="s">"KSPACE"</span>, <span class="s">"DEPENDS"</span>, <span class="s">"staging"</span>, <span class="s">"FROM"</span>, <span class="s">"catalog"</span>)
+<span class="k">print</span>(in_space(<span class="s">"staging"</span>, <span class="s">"GET"</span>, <span class="s">"sku:00001"</span>))   <span class="c"># from catalog</span>
+
+<span class="k">for</span> name, count <span class="k">in</span> <span class="k">zip</span>(*[<span class="k">iter</span>(r.execute_command(<span class="s">"SPACE"</span>))] * <span class="n">2</span>):
+    <span class="k">print</span>(name, count)</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+
+<span class="k">local</span> conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf:set(<span class="s">"catalog.ordered"</span>, <span class="s">"1"</span>)
+conf:set(<span class="s">"catalog.shards"</span>, <span class="s">"8"</span>)
+
+<span class="k">local</span> catalog = barch.KeyValue(<span class="s">"catalog"</span>)
+catalog:set(<span class="s">"sku:00001"</span>, <span class="s">"widget"</span>)
+
+<span class="k">local</span> h = barch.KeyValue()
+h:use(<span class="s">"catalog"</span>)
+<span class="k">print</span>(h:get(<span class="s">"sku:00001"</span>))</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== MEMORY / PREFIX ELIMINATION =============== -->
+<article id="ref-memory">
+<div class="crumb">Reference / Memory Model</div>
+<h1>Memory: Structural Prefix Elimination</h1>
+<p class="lede">A hash map stores every key whole, once per entry. A radix trie stores each distinct byte-sequence <i>once, at the depth where it stops being shared</i>. Where a workload's keys share structure — and most cache keyspaces are built from colon-delimited namespaces — that shared structure is stored once rather than per key. This page covers how to design keys to collect that saving, and how to measure it.</p>
+<div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">keys: shared prefixes stored once</span><span class="chip o">values: optional zstd/fsst</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Where the bytes go</h2></header>
+<div class="bd">
+<h3>The trie</h3>
+<ul>
+<li><b>Path compression.</b> A run of single-child edges is collapsed into one node carrying a partial prefix (up to 10 bytes inline per node), so a long unbranching stretch of key does not cost one node per byte.</li>
+<li><b>Adaptive fan-out.</b> Interior nodes are sized to their actual child count — <code>node4</code>, <code>node16</code>, <code>node48</code>, <code>node256</code> — instead of allocating a fixed 256-way array, so a sparse branch costs a small node and a dense one costs a fast one.</li>
+<li><b>No per-entry key copy.</b> The key is reconstructed from the path walked to reach the leaf. Two keys sharing an <i>n</i>-byte prefix pay for those <i>n</i> bytes once between them, not twice.</li>
+<li><b>No per-entry hash bucket.</b> There is no bucket array to keep sparsely occupied and no per-entry hash to store.</li>
+</ul>
+<p>The headline consequence, as measured by the project: roughly <b>half the footprint of a standard hash map</b> at similar single-threaded latency, with the margin widening as keys get longer and more structurally similar.</p>
+<h3>Why this is a design lever, not just a property</h3>
+<p>The saving is a function of <i>how much leading structure the keys share</i>. Two schemes holding identical data can differ substantially in resident size:</p>
+<table>
+<thead><tr><th>Key scheme</th><th>Shared structure</th><th>Trie consequence</th></tr></thead>
+<tbody>
+<tr><td><code>tenant:4471:user:00012:profile</code></td><td>long, left-aligned, highly shared</td><td>the whole <code>tenant:4471:user:</code> stretch is stored once for every key beneath it</td></tr>
+<tr><td><code>00012:profile:user:4471:tenant</code></td><td>same bytes, reversed — divergence at byte 0</td><td>almost nothing shared; each key pays for its own path</td></tr>
+<tr><td><code>a7f3c9e1…</code> (hash/UUID first)</td><td>none by construction</td><td>worst case; branch factor saturates immediately at the root</td></tr>
+</tbody>
+</table>
+<div class="notice note"><b>Put the low-cardinality component leftmost.</b> Order key components from most-shared to least-shared. This is the same rule as composite index column ordering in a relational database, and it is the single highest-leverage decision for both memory and range performance — the same left-aligned structure that shares bytes is what makes <code>RANGE prefix: prefix:~</code> a bounded subtree walk.</div>
+<h3>Redis-shaped patterns that BARCH replaces</h3>
+<ul>
+<li><b>Prefix namespacing to fake isolation.</b> Prefixing every key with <code>app:v3:</code> to separate tenants or environments costs those bytes in a hash map. In BARCH the prefix is shared structure rather than repeated bytes — and where the separation is real, a <a href="#ref-keyspaces">named key space</a> removes the prefix from the key entirely, giving isolation with its own shards, options, and persistence.</li>
+<li><b>Hash-per-object to amortize key overhead.</b> A common Redis pattern is packing fields into a hash specifically because a hash field is cheaper than a top-level key. In BARCH, flat composite keys (<code>obj:00017:field</code>) already amortize their shared prefix, so the choice can be made on access-pattern grounds — flat keys stay individually rangeable and TTL-able. The <a href="#ref-hash">hash API</a> remains the right tool when the whole object is read together or field-level TTL is needed.</li>
+<li><b>Client-side key shortening.</b> Abbreviating <code>user_profile:</code> to <code>up:</code> to save memory trades readability for bytes that a trie was going to share anyway. Prefer descriptive, well-ordered keys.</li>
+<li><b>Sorted-set-as-index for ordering.</b> Maintaining a parallel <code>Z*</code> index purely to get ordered access duplicates every member. Ordered key spaces give ordering from the primary key itself — see <a href="#ref-keyvalue">ordered operations</a>.</li>
+</ul>
+<div class="notice warning"><b>Compression is complementary, not equivalent.</b> <code>compression zstd|fsst</code> applies to <i>values</i> in the arena; keys remain raw bytes so that ordering and range complexity are unaffected. Prefix elimination is the key-side saving, dictionary compression the value-side one — measure them separately via <code>bytes_allocated</code> versus <code>value_bytes_compressed</code>.</div>
+<div class="notice warning"><b>Random-first keys defeat the mechanism.</b> UUID-, hash-, or timestamp-ms-first keys share no leading structure, saturate the root's fan-out, and give up both the memory saving and the range locality. If an opaque identifier must lead, consider a stable low-cardinality component ahead of it (<code>region:eu:</code>, <code>shard:07:</code>) — and note that on a <a href="#ref-range-sharding">range-sharded</a> space, uniformly random leading bytes are the workload the rebalancer handles best, while monotonically ascending ones are the workload it handles worst.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Measuring footprint</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Signal</th><th>Surface</th><th>Reads</th></tr></thead>
+<tbody>
+<tr><td><code>heap_bytes_allocated</code></td><td><code>HEAPBYTES</code> · <code>stats()</code></td><td>bytes allocated by BARCH alone — the number to compare against a Redis <code>used_memory</code>, not the host process RSS</td></tr>
+<tr><td><code>bytes_allocated</code> · <code>bytes_interior</code></td><td><code>STATS</code> · <code>stats()</code></td><td>total versus interior-node bytes; the interior share is what prefix structure costs</td></tr>
+<tr><td><code>leaf_nodes</code> · <code>node4/16/48/256_nodes</code> · <code>node256_occupants</code></td><td><code>STATS</code></td><td>node census. A high <code>node256</code> count relative to leaves indicates wide, unshared branching — the signature of random-first keys</td></tr>
+<tr><td><code>logical_allocated</code> · <code>bytes_in_free_lists</code></td><td><code>STATS</code></td><td>logical versus reclaimable; the gap is fragmentation, addressed by <code>active_defrag</code></td></tr>
+<tr><td><code>value_bytes_compressed</code></td><td><code>STATS</code></td><td>value-side saving only — see <a href="#ref-compression">Dictionary Compression</a></td></tr>
+<tr><td><code>vmm_bytes_allocated</code></td><td><code>STATS</code></td><td>paged value arena, when <code>use_vmm_memory</code> is on</td></tr>
+</tbody>
+</table>
+<div class="notice note"><b>Compare like for like.</b> <code>SIZE</code> may include expired or evicted volatile keys, so bytes-per-key derived from it is a lower bound on efficiency, not an exact figure. For an A/B between two key schemes, load each into its own <a href="#ref-keyspaces">key space</a> in separate processes and compare <code>HEAPBYTES</code> — per-space attribution is not broken out.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>A/B two key schemes</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">python-swig</button><button>redis-cli</button><button>redis-python</button><button>lua-swig</button></div>
+<div class="pane on"><pre><span class="k">import</span> barch
+
+kv = barch.KeyValue()
+before = barch.stats().heap_bytes_allocated
+
+<span class="c"># shared-structure-first: the tenant/user stretch is stored once</span>
+<span class="k">for</span> t <span class="k">in</span> <span class="k">range</span>(<span class="n">50</span>):
+    <span class="k">for</span> u <span class="k">in</span> <span class="k">range</span>(<span class="n">2000</span>):
+        kv.set(<span class="s">"tenant:%04d:user:%06d:profile"</span> % (t, u), <span class="s">"x"</span>)
+
+st = barch.stats()
+<span class="k">print</span>(<span class="s">"bytes/key"</span>, (st.heap_bytes_allocated - before) / kv.size())
+<span class="k">print</span>(<span class="s">"interior share"</span>, st.bytes_interior / st.bytes_allocated)
+<span class="k">print</span>(<span class="s">"nodes"</span>, st.node4_nodes, st.node16_nodes,
+      st.node48_nodes, st.node256_nodes, st.leaf_nodes)
+
+<span class="c"># the same prefix is also the range bound — one bounded subtree walk</span>
+<span class="k">print</span>(kv.count(<span class="s">"tenant:0007:"</span>, <span class="s">"tenant:0007:~"</span>))</pre></div>
+<div class="pane"><pre><span class="c"># footprint before and after a load</span>
+HEAPBYTES
+SET tenant:0007:user:000123:profile x
+STATS
+<span class="c"># read: bytes_allocated, bytes_interior, leaf_nodes,</span>
+<span class="c">#       node4_nodes .. node256_nodes, logical_allocated</span>
+
+<span class="c"># the shared prefix doubles as a range bound</span>
+COUNT tenant:0007: tenant:0007:~
+RANGE tenant:0007: tenant:0007:~ 1000</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+<span class="k">def</span> stats():
+    raw = r.execute_command(<span class="s">"STATS"</span>)
+    <span class="k">return</span> {k: <span class="k">int</span>(v) <span class="k">for</span> k, v <span class="k">in</span> <span class="k">zip</span>(raw[::<span class="n">2</span>], raw[<span class="n">1</span>::<span class="n">2</span>])
+            <span class="k">if</span> <span class="k">str</span>(v).lstrip(<span class="s">"-"</span>).isdigit()}
+
+before = r.execute_command(<span class="s">"HEAPBYTES"</span>)
+<span class="k">for</span> t <span class="k">in</span> <span class="k">range</span>(<span class="n">50</span>):
+    <span class="k">for</span> u <span class="k">in</span> <span class="k">range</span>(<span class="n">2000</span>):
+        r.set(<span class="s">"tenant:%04d:user:%06d:profile"</span> % (t, u), <span class="s">"x"</span>)
+
+after, s = r.execute_command(<span class="s">"HEAPBYTES"</span>), stats()
+<span class="k">print</span>(<span class="s">"bytes/key"</span>, (after - before) / r.dbsize())
+<span class="k">print</span>(<span class="s">"interior/total"</span>, s[<span class="s">"bytes_interior"</span>] / s[<span class="s">"bytes_allocated"</span>])</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+
+<span class="k">local</span> kv = barch.KeyValue()
+<span class="k">local</span> before = barch.stats().heap_bytes_allocated
+
+<span class="k">for</span> t = 0, 49 <span class="k">do</span>
+    <span class="k">for</span> u = 0, 1999 <span class="k">do</span>
+        kv:set(string.format(<span class="s">"tenant:%04d:user:%06d:profile"</span>, t, u), <span class="s">"x"</span>)
+    <span class="k">end</span>
+<span class="k">end</span>
+
+<span class="k">local</span> st = barch.stats()
+<span class="k">print</span>((st.heap_bytes_allocated - before) / kv:size())
+<span class="k">print</span>(st.bytes_interior, st.bytes_allocated)</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== STATS =============== -->
+<article id="ref-stats">
+<div class="crumb">Reference / Statistics</div>
+<h1>Statistics &amp; Introspection</h1>
+<p class="lede">Every operational signal referenced by the error model lives here: engine structure (<code>STATS</code>), command counters (<code>OPS</code>), replication health (<code>repl_stats</code>), and sizing (<code>SIZE</code>, <code>HEAPBYTES</code>, <code>SPACE</code>).</p>
+<div class="chips"><span class="chip l1">L1 structs</span><span class="chip l2">L2 · RESP</span><span class="chip o">read-only, O(shards)</span><span class="chip lock">lock-free counter reads</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Collection model</h2></header>
+<div class="bd">
+<p>Counters are accumulated per shard and aggregated at read time; a stats call takes no write locks and does not perturb the measured system beyond the aggregation walk. SWIG returns plain structs; RESP returns field/value arrays (<code>STATS</code>, <code>OPS</code>) and standard <code>INFO</code> text with a <code>barch_*</code> section.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Surfaces and key fields</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>RESP</th><th>SWIG</th><th>Contents</th></tr></thead>
+<tbody>
+<tr><td><code>STATS</code></td><td><code>stats() → statistics_values</code></td><td>node census (<code>leaf_nodes</code>, <code>node4/16/48/256_nodes</code>), memory (<code>bytes_allocated</code>, <code>heap_bytes_allocated</code>, <code>vmm_bytes_allocated</code>, <code>logical_allocated</code>, <code>bytes_in_free_lists</code>, <code>value_bytes_compressed</code>), maintenance (<code>vacuums_performed</code>, <code>pages_defragged</code>, <code>pages_evicted</code>, <code>keys_evicted</code>, <code>range_shard_keys_moved</code> — keys moved by range-shard rebalancing, <code>ordered-sharding</code> branch), concurrency (<code>read_locks_active</code>, <code>write_locks_active</code>, <code>max_spin</code>, <code>shards</code>), and the health counters <code>oom_avoided_inserts</code>, <code>exceptions_raised</code></td></tr>
+<tr><td><code>OPS</code></td><td><code>ops_stats() → ops_statistics</code></td><td><code>get_ops</code>, <code>set_ops</code>, <code>insert_ops</code>, <code>delete_ops</code>, <code>range_ops</code>, <code>iter_ops</code>, <code>lb_ops</code>, <code>min_ops</code>, <code>max_ops</code>, <code>size_ops</code></td></tr>
+<tr><td>—</td><td><code>repl_stats() → repl_statistics</code></td><td><code>bytes_sent/recv</code>, <code>out_queue_size</code>, <code>insert/remove/find_requests</code>, <code>request_errors</code>, <code>instructions_failed</code>, <code>redis_sessions</code>, <code>attempted_routes</code>, <code>routes_succeeded</code></td></tr>
+<tr><td><code>SIZE</code></td><td><code>size()</code> · <code>sizeAll()</code></td><td>key count — may include expired/evicted volatile keys</td></tr>
+<tr><td><code>HEAPBYTES</code></td><td><code>stats().heap_bytes_allocated</code></td><td>bytes allocated by barch alone</td></tr>
+<tr><td><code>SPACE</code></td><td>—</td><td>keyspace listing</td></tr>
+<tr><td><code>INFO SHARD #n</code></td><td>—</td><td>per-shard info incl. <code>size:</code>; the <code>#</code> addresses a shard by number — omitting it hashes the argument as a key. Per-shard sizes read while a rebalance sweep runs may not sum to the space total (<code>ordered-sharding</code> branch)</td></tr>
+<tr><td><code>INFO</code> · <code>CLIENT INFO</code></td><td>—</td><td>redis-style info text incl. <code>barch_oom_avoided_inserts</code></td></tr>
+<tr><td>—</td><td><code>calls(name)</code></td><td>invocation count of one named api function</td></tr>
+</tbody>
+</table>
+<div class="notice warning"><b>Alert set.</b> Page on: <code>oom_avoided_inserts</code> increasing (503-class silent write shedding), <code>out_queue_size</code> growth (replication lag), <code>attempted_routes − routes_succeeded</code> (dead peers), <code>request_errors</code> and <code>exceptions_raised</code> deltas.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Health probe</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>python-swig</button><button>lua-swig</button></div>
+<div class="pane on"><pre>STATS
+OPS
+SIZE
+HEAPBYTES
+INFO</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+raw = r.execute_command(<span class="s">"STATS"</span>)
+st = <span class="k">dict</span>(<span class="k">zip</span>(raw[::2], raw[1::2]))
+<span class="k">assert</span> <span class="k">int</span>(st[<span class="s">"oom_avoided_inserts"</span>]) == <span class="n">0</span>
+heap = r.execute_command(<span class="s">"HEAPBYTES"</span>)</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+
+st = barch.stats()
+<span class="k">print</span>(st.shards, st.heap_bytes_allocated, st.pages_defragged)
+<span class="k">assert</span> st.oom_avoided_inserts == <span class="n">0</span>
+
+op = barch.ops_stats()
+<span class="k">print</span>(op.get_ops, op.set_ops, op.range_ops)
+
+rp = barch.repl_stats()
+<span class="k">print</span>(rp.out_queue_size, rp.request_errors)
+<span class="k">print</span>(barch.calls(<span class="s">"SET"</span>))</pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+<span class="k">local</span> st = barch.stats()
+<span class="k">print</span>(st.heap_bytes_allocated, st.oom_avoided_inserts)
+<span class="k">local</span> op = barch.ops_stats()
+<span class="k">print</span>(op.get_ops)</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== ACL =============== -->
+<article id="ref-acl">
+<div class="crumb">Reference / AUTH &amp; ACL</div>
+<h1>AUTH &amp; ACL</h1>
+<p class="lede">Category-based access control on the RESP surface. ACL state is stored apart from cache data and is deliberately excluded from replication.</p>
+<div class="chips"><span class="chip l2">L2 · RESP only</span><span class="chip o">13 permission categories</span><span class="chip lock">not replicated</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Model</h2></header>
+<div class="bd">
+<ul>
+<li><b>Scope:</b> <code>ACL</code> administration is only available on the native RESP interface (default port 14000). Embedded SWIG calls execute in-process and bypass authentication entirely — process boundaries are the L1 security perimeter.</li>
+<li><b>Session model:</b> on connect, the <code>default</code> user is authenticated implicitly; if it has no explicit rights configured, all rights are assumed. <code>AUTH</code> switches to a named user.</li>
+<li><b>Isolation:</b> ACL data does not replicate — every node's ACLs are provisioned independently, which prevents a compromised peer from streaming itself privileges.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Subcommands and categories</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Command</th><th>Arguments</th><th>Requirement</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>ACL SETUSER user [on] [&gt;secret] ±category…</code></td><td><code>&gt;</code> sets the secret; <code>+</code>/<code>−</code> grant/revoke; <code>all</code> = every category</td><td class="req y">user REQUIRED</td><td>creates or amends the user</td></tr>
+<tr><td><code>ACL GETUSER user</code></td><td>user</td><td class="req y">REQUIRED</td><td>category/flag array, nil for unknown user</td></tr>
+<tr><td><code>ACL DEL user</code></td><td>user</td><td class="req y">REQUIRED</td><td>removes the user</td></tr>
+<tr><td><code>AUTH user secret</code></td><td>credentials</td><td class="req y">REQUIRED</td><td>OK / <code>-ERR authentication failed</code> (401-class)</td></tr>
+</tbody>
+</table>
+<table>
+<thead><tr><th>Category</th><th>Grants</th></tr></thead>
+<tbody>
+<tr><td><code>read</code> / <code>write</code></td><td>read-only vs mutating commands — combine with a structure category</td></tr>
+<tr><td><code>keys</code> · <code>hash</code> · <code>orderedset</code> · <code>list</code></td><td>KV (<code>GET/SET/ADD</code>…) · <code>H*</code> · <code>Z*</code> · <code>L*</code></td></tr>
+<tr><td><code>data</code></td><td>held by all users</td></tr>
+<tr><td><code>connection</code></td><td>outgoing RPC / replication commands</td></tr>
+<tr><td><code>config</code> · <code>stats</code></td><td><code>CONFIG SET</code> · statistics commands</td></tr>
+<tr><td><code>dangerous</code></td><td><code>LOAD</code>, <code>CLEAR</code>/flush-class commands (<code>KEYS</code> is non-blocking in barch and intentionally excluded)</td></tr>
+<tr><td><code>auth</code></td><td>ability to authenticate — granted by default, removable</td></tr>
+<tr><td><code>keyspace</code></td><td>reserved, unused</td></tr>
+</tbody>
+</table>
+<div class="notice warning"><b>Do not run <code>ACL SETUSER default on &gt;newsecret</code>.</b> Changing the default user's secret makes every fresh connection unable to reach <code>AUTH</code>, bricking the endpoint. To restrict the implicit session, strip rights while keeping authentication: <code>ACL SETUSER default -all +auth</code>.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Provision a scoped application user</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button></div>
+<div class="pane on"><pre>ACL SETUSER svc_leaderboard on &gt;s3cr3t +read +write +orderedset
+ACL GETUSER svc_leaderboard
+ACL SETUSER default -all +auth      <span class="c"># lock down the implicit session</span>
+
+<span class="c"># from the application connection:</span>
+AUTH svc_leaderboard s3cr3t
+ZADD board 100 ada                  <span class="c"># permitted</span>
+SET k v                             <span class="c"># denied — no +keys (403-class)</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+
+admin = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+admin.execute_command(<span class="s">"ACL"</span>, <span class="s">"SETUSER"</span>, <span class="s">"svc_leaderboard"</span>,
+                      <span class="s">"on"</span>, <span class="s">"&gt;s3cr3t"</span>,
+                      <span class="s">"+read"</span>, <span class="s">"+write"</span>, <span class="s">"+orderedset"</span>)
+
+app = redis.Redis(port=<span class="n">14000</span>, username=<span class="s">"svc_leaderboard"</span>,
+                  password=<span class="s">"s3cr3t"</span>, decode_responses=<span class="k">True</span>)
+app.zadd(<span class="s">"board"</span>, {<span class="s">"ada"</span>: <span class="n">100</span>})       <span class="c"># permitted</span></pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== COMPRESSION =============== -->
+<article id="ref-compression">
+<div class="crumb">Reference / Dictionary Compression</div>
+<h1>Dictionary Compression</h1>
+<p class="lede">Value compression with zstd (dictionary-trained) or fsst, toggled at runtime. Training via <code>TRAIN</code> builds a shared dictionary that compresses all subsequent values.</p>
+<div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">runtime toggle</span><span class="chip o">values only — keys stay uncompressed</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Engine implications</h2></header>
+<div class="bd">
+<ul>
+<li><b>Scope:</b> compression applies to values in the arena; trie keys remain raw bytes, so ordered navigation and range complexity are unaffected.</li>
+<li><b>Cost model:</b> writes pay dictionary compression, reads pay decompression — a per-value constant. <code>value_bytes_compressed</code> in <code>STATS</code> measures realized savings against <code>logical_allocated</code>.</li>
+<li><b>Dictionary lifecycle:</b> at least five <code>TRAIN "sample"</code> calls accumulate samples; a bare <code>TRAIN</code> finalizes and persists the dictionary. If compression is enabled with no dictionary, barch trains automatically from live values and saves the result.</li>
+</ul>
+<div class="notice note"><b>Training is optional but leverage is not.</b> Small, repetitive values (JSON fragments, URLs, codes) are where dictionary compression earns its constant-time cost; large already-compressed blobs will not shrink.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Command</th><th>Arguments</th><th>Requirement</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>CONFIG SET compression &lt;mode&gt;</code></td><td><code>zstd</code> · <code>fsst</code> · <code>off</code>/<code>none</code> (prefix <code>B.compression</code> on the valkey port)</td><td class="req y">mode REQUIRED</td><td>enable/disable at runtime</td></tr>
+<tr><td><code>TRAIN "data"</code></td><td>one sample string</td><td class="req y">REQUIRED</td><td>adds a training sample; supply ≥ 5 before finalizing</td></tr>
+<tr><td><code>TRAIN</code></td><td>—</td><td class="req n">—</td><td>finalizes training, saves the dictionary, activates it for all data</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Train and enable</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">redis-cli</button><button>redis-python</button><button>python-swig</button></div>
+<div class="pane on"><pre>CONFIG SET compression zstd
+TRAIN '{"event":"click","page":"/home"}'
+TRAIN '{"event":"click","page":"/about"}'
+TRAIN '{"event":"view","page":"/home"}'
+TRAIN '{"event":"view","page":"/pricing"}'
+TRAIN '{"event":"click","page":"/pricing"}'
+TRAIN
+<span class="c"># verify savings</span>
+STATS        <span class="c"># → value_bytes_compressed</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+
+r.config_set(<span class="s">"compression"</span>, <span class="s">"zstd"</span>)
+<span class="k">for</span> s <span class="k">in</span> samples:                 <span class="c"># >= 5 representative values</span>
+    r.execute_command(<span class="s">"TRAIN"</span>, s)
+r.execute_command(<span class="s">"TRAIN"</span>)        <span class="c"># finalize + save dictionary</span></pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+
+barch.setConfiguration(<span class="s">"compression"</span>, <span class="s">"zstd"</span>)
+<span class="c"># no explicit training in-process: with samples absent, barch trains</span>
+<span class="c"># from live values and persists the dictionary automatically</span>
+
+kv = barch.KeyValue()
+kv.set(<span class="s">"ev:1"</span>, <span class="s">'{"event":"click","page":"/home"}'</span>)
+<span class="k">print</span>(barch.stats().value_bytes_compressed)</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+</main>
+</div>
+<script>
+// hash router
+function route(){
+  const h=(location.hash||'#overview').slice(1);
+  const el=document.getElementById(h);
+  // an in-page anchor (not an article) scrolls within the article already shown
+  if(el && el.tagName!=='ARTICLE'){
+    const host=el.closest('article');
+    if(host && host.classList.contains('on')){el.scrollIntoView({block:'start'});return;}
+  }
+  if(!el || el.tagName!=='ARTICLE'){
+    const host=el&&el.closest('article');
+    if(!host){location.hash='#overview';return;}
+    document.querySelectorAll('article').forEach(a=>a.classList.toggle('on',a===host));
+    document.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('on',a.dataset.nav===host.id));
+    el.scrollIntoView({block:'start'});
+    return;
+  }
+  document.querySelectorAll('article').forEach(a=>a.classList.toggle('on',a.id===h));
+  document.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('on',a.dataset.nav===h));
+  window.scrollTo(0,0);
+}
+window.addEventListener('hashchange',route);
+document.addEventListener('DOMContentLoaded',()=>{
+  route();
+  // tabs
+  document.querySelectorAll('.tabs').forEach(t=>{
+    const btns=[...t.querySelectorAll('.tabbar button')],panes=[...t.querySelectorAll('.pane')];
+    btns.forEach((b,i)=>b.addEventListener('click',()=>{
+      btns.forEach(x=>x.classList.remove('on'));panes.forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');panes[i].classList.add('on');
+    }));
+  });
+  // copy buttons
+  document.querySelectorAll('.pane').forEach(p=>{
+    const b=document.createElement('button');b.className='cp';b.textContent='copy';
+    b.addEventListener('click',()=>{navigator.clipboard.writeText(p.querySelector('pre').innerText).then(()=>{b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)})});
+    p.appendChild(b);
+  });
+});
+</script>
+</body>
+</html>

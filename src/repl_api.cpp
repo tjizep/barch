@@ -72,6 +72,13 @@ int RELOAD(caller& call, const arg_t& argv) {
     store.each_shard_parallel([](const barch::shard_ptr& shard) {
         shard->reload();
     });
+    if (call.kspace()->is_range_sharded()) {
+        // the routing table describes the shards, and the shards were just replaced by
+        // what was on disk. Rebuilding is what a load does anyway - the table is never
+        // written down, only derived - so this is the same step, at the same point
+        auto lock = store.lock_space_write();
+        call.kspace()->routes().rebuild(store.shards());
+    }
     return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
 }
 int START(caller& call, const arg_t& argv) {

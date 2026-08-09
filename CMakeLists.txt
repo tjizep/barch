@@ -581,6 +581,17 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeshardtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the ordered routing the option selects, and the rebalancer behind it
+        add_test(NAME TestRangeShardRouting
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeroutetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # turning the option on for a space that already has hash sharded data in it.
+        # Runs in two processes, because a key space reads its options once
+        add_test(NAME TestRangeShardConvert
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeconverttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestBindings
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/bindingtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

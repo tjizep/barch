@@ -210,6 +210,17 @@
     a hang is only visible as the whole run being killed. Per test timeouts would attribute
     it.
 
+    And the lua tests depend on a side build nothing builds for you. TestStarter lives in
+    test/<CMAKE_BUILD_TYPE>/ and is produced by test/CMakeLists.txt, which is a separate
+    cmake project - the main build never invokes it. When TestStarter is absent ctest
+    reports sixteen tests as "Not Run", which counts as sixteen failures and says nothing
+    about why. Worse, configuring that side project runs `make` over the whole of valkey
+    at configure time, so during a rebuild valkey-server disappears for minutes and any
+    test needing it fails for a reason that has nothing to do with barch - which is
+    exactly what a full run in the middle of one looked like. Either the main build should
+    depend on it, or a missing TestStarter should be one clear message rather than sixteen
+    unexplained ones.
+
     Two more things the same interrupted run showed up:
 
       - killing a run part way leaves the shard files in the build directory truncated,

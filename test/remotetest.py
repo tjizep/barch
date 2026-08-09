@@ -34,11 +34,5 @@ assert(l.front("l")=="b1")
 assert(l.pop("l",1)[0].s()=="b1")
 assert(l.len("l")==2)
 popped = l.pop("l",2)
-# over RPC only the first element of an array reply survives - the rest decode as the
-# wrong type. That is TODO 44 and it is not specific to pop; the same handle returns
-# ['v1', 'false', '0.0'] for a three field HMGET. Asserted here as it behaves so the
-# suite stays honest about it; when TODO 44 is fixed this should become
-# [v.s() for v in popped] == ["a2","a1"]
-assert(len(popped)==2)
-assert(popped[0].s()=="a2")
+assert([v.s() for v in popped]==["a2","a1"])
 assert(l.len("l")==0)

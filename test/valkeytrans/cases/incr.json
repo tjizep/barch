@@ -1,0 +1,557 @@
+{
+ "source": "incr.tcl",
+ "cases": [
+  {
+   "name": "INCR against non existing key",
+   "expected": "11",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res {}\n        append res [r incr novar]\n        append res [r get novar]"
+  },
+  {
+   "name": "INCR against key created by incr itself",
+   "expected": "2",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "incr",
+      "novar"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "DECR against key created by incr",
+   "expected": "1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "decr",
+      "novar"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "DECR against key is not exist and incr",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "novar_not_exist"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "decr",
+      "novar_not_exist"
+     ],
+     "value": "-1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "incr",
+      "novar_not_exist"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "INCR against key originally set with SET",
+   "expected": "101",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "100"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incr",
+      "novar"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "INCR over 32bit value",
+   "expected": "17179869185",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "17179869184"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incr",
+      "novar"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "INCRBY over 32bit value with over 32bit increment",
+   "expected": "34359738368",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "17179869184"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incrby",
+      "novar",
+      "17179869184"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "INCR fails against key with spaces (left)",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "    11"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incr",
+      "novar"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCR fails against key with spaces (right)",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "11    "
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incr",
+      "novar"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCR fails against key with spaces (both)",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "    11    "
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incr",
+      "novar"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "DECRBY negation overflow",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "0"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "decrby",
+      "x",
+      "-9223372036854775808"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCR fails against a key holding a list",
+   "expected": "WRONGTYPE*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "rpush",
+      "mylist",
+      "1"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incr",
+      "mylist"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "rpop",
+      "mylist"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "DECRBY over 32bit value with over 32bit increment, negative res",
+   "expected": "-1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "17179869184"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "decrby",
+      "novar",
+      "17179869185"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "DECRBY against key is not exist",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "key_not_exist"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "decrby",
+      "key_not_exist",
+      "1"
+     ],
+     "value": "-1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "INCR can modify objects in-place",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set foo 20000\n        r incr foo\n        assert_refcount 1 foo\n        set old [lindex [split [r debug object foo]] 1]\n        r incr foo\n        set new [lindex [split [r debug object foo]] 1]\n        assert {[string range $old 0 2] eq \"at:\"}\n        assert {[string range $new 0 2] eq \"at:\"}\n        assert {$old eq $new}"
+  },
+  {
+   "name": "INCRBYFLOAT against non existing key",
+   "expected": "1 1 1.25 1.25",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del novar\n        list    [roundFloat [r incrbyfloat novar 1]] \\\n                [roundFloat [r get novar]] \\\n                [roundFloat [r incrbyfloat novar 0.25]] \\\n                [roundFloat [r get novar]]"
+  },
+  {
+   "name": "INCRBYFLOAT against key originally set with SET",
+   "expected": "3",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set novar 1.5\n        roundFloat [r incrbyfloat novar 1.5]"
+  },
+  {
+   "name": "INCRBYFLOAT over 32bit value",
+   "expected": "17179869185.5",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "17179869184"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "1.5"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "INCRBYFLOAT over 32bit value with over 32bit increment",
+   "expected": "34359738368",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "17179869184"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "17179869184"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "INCRBYFLOAT fails against key with spaces (left)",
+   "expected": "ERR *valid*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "    11"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "1.0"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCRBYFLOAT fails against key with spaces (right)",
+   "expected": "ERR *valid*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "11    "
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "1.0"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCRBYFLOAT fails against key with spaces (both)",
+   "expected": "ERR *valid*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      " 11 "
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "1.0"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCRBYFLOAT fails against a key holding a list",
+   "expected": "WRONGTYPE*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mylist"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "rpush",
+      "mylist",
+      "1"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incrbyfloat",
+      "mylist",
+      "1.0"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mylist"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCRBYFLOAT does not allow NaN or Infinity",
+   "expected": "ERR *would produce*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "0"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incrbyfloat",
+      "foo",
+      "+inf"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "INCRBYFLOAT decrement",
+   "expected": "-0.1",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set foo 1\n        roundFloat [r incrbyfloat foo -1.1]"
+  },
+  {
+   "name": "string to double with null terminator",
+   "expected": "ERR *valid*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "setrange",
+      "foo",
+      "2",
+      "2"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "incrbyfloat",
+      "foo",
+      "1"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "No negative zero",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r incrbyfloat foo [expr double(1)/41]\n        r incrbyfloat foo [expr double(-1)/41]\n        r get foo"
+  },
+  {
+   "name": "INCRBY INCRBYFLOAT DECRBY against unhappy path",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykeyincr\n        assert_error \"*ERR wrong number of arguments*\" {r incr mykeyincr v}\n        assert_error \"*ERR wrong number of arguments*\" {r decr mykeyincr v}\n        assert_error \"*value is not an integer or out of range*\" {r incrby mykeyincr v}\n        assert_error \"*value is not an integer or out of range*\" {r incrby mykeyincr 1.5}\n        assert_error \"*value is not an integer or out of range*\" {r decrby mykeyincr v}\n        assert_error \"*value is not an integer or out of range*\" {r decrby mykeyincr 1.5}\n        assert_error \"*value is not a valid float*\" {r incrbyfloat mykeyincr v}"
+  },
+  {
+   "name": "$cmd operation should update encoding from raw to int",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res {}\n            set expected {1 12}\n            if {[string match {*incr*} $cmd]} {\n                lappend expected 13\n            } else {\n                lappend expected 11\n            }\n\n            r set foo 1\n            assert_encoding \"int\" foo\n            lappend res [r get foo]\n\n            r append foo 2\n            assert_encoding \"raw\" foo\n            lappend res [r get foo]\n\n            if {[string match {*by*} $cmd]} {\n                r $cmd foo 1\n            } else {\n                r $cmd foo\n            }\n            assert_encoding \"int\" foo\n            lappend res [r get foo]\n            assert_equal $res $expected"
+  }
+ ]
+}

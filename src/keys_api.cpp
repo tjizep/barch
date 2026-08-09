@@ -360,7 +360,10 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
 )
 int INCR(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
-    return BarchModifyInteger(call, argv, 1);
+    // (int64_t) matters: a bare 1 deduces IntT as int, so INCR ran on 32 bits and
+    // refused any value above INT32_MAX - redis's INCR is 64 bit signed. INCRBY was
+    // always right because it parses its argument into a long long. See DONE 39
+    return BarchModifyInteger(call, argv, (int64_t) 1);
 }
 int cmd_INCR(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -494,7 +497,7 @@ int cmd_UINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int DECR(caller& call, const arg_t& argv) {
     ++statistics::decr_ops;
-    return BarchModifyInteger(call, argv, -1);
+    return BarchModifyInteger(call, argv, (int64_t) -1);
 }
 
 int cmd_DECR(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

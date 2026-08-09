@@ -1698,3 +1698,151 @@ rather than made to pass:
     wrapped in. It is a bulk string now. The same file already asserted that HINCRBY returns 1
     then 3, which is correct redis behaviour that could not pass until HINCRBY was fixed - so
     that file had been recording the right answer and failing against the wrong one.
+
+## 37. Redis compatibility, the behaviour that differed under a shared name [09-08-2026]
+
+DONE 33 corrected the commands that returned the wrong value or the wrong RESP type. This
+is the other half: the ones where the behaviour itself differed, so fixing them breaks
+whatever was built against the old shape. The direction had been settled - redis
+compatibility is the aim - so these were a question of sequencing rather than of whether.
+Done in the order that put the item which destroyed data first and the item with a
+migration attached last.
+
+**The one that lost data.** All eight increment commands treated a value that is not a
+number as zero and overwrote it with the result: `SET s abc` then `INCR s` left s holding
+1. The cause was shared, which is why all eight behaved identically. `leaf_numeric_update`
+returned a null node for three different reasons - not numeric, overflowed, compressed -
+and `shard::update` reports a declined update exactly as it reports a key that was not
+there. INCR read the decline as a miss and took the insert branch. It now returns a
+`numeric_status` saying which, and both callers keep a `present` flag so a decline and a
+miss are told apart. A non numeric value is refused and left alone.
+
+**Reply and argument shapes.**
+
+  - `ZRANGE` and `ZREVRANGE` read start and stop as positions unless BYSCORE or BYLEX says
+    otherwise, so `ZRANGE key 0 -1` is the whole set rather than an inverted score range
+    answering empty. Negative positions count from the end and out of range ones are
+    clamped. Implemented as its own walk - one pass in score order, then the slice - which
+    is simpler than rank lookups at both ends and is what REV already needed.
+  - `ZRANK key member [WITHSCORE]` reports that member's position from the low end, nil
+    when it is absent. The range count it used to do is left to `ZFASTRANK`, which answers
+    it in constant time. Note the member is stored encoded, the same way ZADD writes it -
+    comparing the raw argument never matches, which cost a build to find out.
+  - `LPOP` and `RPOP` take an optional count and answer with what they removed - one bulk
+    string without a count, an array with one. The bytes are copied before the entry is
+    removed, since the leaf goes with it.
+  - `LPUSH` prepends and `RPUSH` appends, with `LPOP`, `RPOP`, `BLPOP` and `BRPOP` on the
+    matching ends. All six were reversed. The flag they pass was called `left` while it
+    selected the high index end, which is most of why it went unnoticed; it is `at_tail`
+    now. The stored layout does not change, so a saved list reads back in the same order -
+    what changes is which command built it.
+  - `SET`'s options are order free. The parser loops over what follows the key and value
+    instead of walking fixed positions, and refuses an unknown word, a repeat, or a
+    contradictory pair such as NX with XX or KEEPTTL with EX. The dead `H` option is gone.
+  - `SELECT` is its own handler. A number is a database - 0 the default space, n above zero
+    `db<n>` - and a name still selects that space, which barch has always allowed here. A
+    superset of redis rather than a departure.
+
+**Cheap and uncontroversial.** Seven ACL categories corrected: `LBACK`, `ZCARD`, `ZRANGE`,
+`ZDIFF` and `ZINTERCARD` are read rather than write, `HEXPIRETIME` is read, and `CLIENT`
+moved from stats to connection. These matter for the reason DONE 32 established - a
+category a command declares wrongly demands a permission the caller should not need.
+`ZDIFFSTORE` and `ZINTERSTORE` check their arity before reading argv[1]. `EXPIRE` refuses
+a word in the condition position that is not NX, XX, GT or LT rather than consuming it.
+`LFRONT`, `LBACK` and `LLEN` take read locks, as DONE 19 did for SIZE.
+
+**What this cost in callers, which is the part worth remembering.** Changing `ZRANGE`'s
+default meaning silently changes every caller that passed score bounds - it does not error,
+it answers a different question. Four of ours had to be updated: `OrderedSet::range` and
+`revrange` in the binding, which take doubles and now say BYSCORE, and three sites in
+testcomposites.lua. An external caller doing the same will change behaviour without
+noticing, and no test will say so. `List::pop` had to change with its command, from `long`
+to the values removed - the old `.i()` on an array reply terminated the interpreter rather
+than failing an assertion. `zwbenchy.lua` was passing the dead `H` flag, so it really did
+reach callers. `testzrank.lua` was a differential test using ZRANK as the slow reference
+for ZFASTRANK; repurposing ZRANK removed the reference, so it compares against ZCOUNT now
+and still passes, which is an independent check that ZFASTRANK is right.
+
+**Two mistakes of mine in here, recorded because they are the kind that repeat.** The
+index path check added to `ZREVRANGE` matched `ZREVRANGEBYSCORE` as well - the replace
+string was not unique - and sent a fractional score down the position parser. And the
+first `SELECT` refused names outright, which broke spacethreadtest.py, where
+`gr.select("g")` carries the comment "Yes! we can select strings too". Reading what a test
+asserts before deciding a behaviour was accidental would have saved that.
+
+Also worth knowing: the SWIG wrappers do not regenerate on a header change. Changing
+`List::pop`'s return type failed to compile until `barch*_wrap.cxx` was deleted.
+
+Measured: full suite 52 of 52, no stray servers, against a library verified newer than the
+newest source edit. test/respshapetest.py grew from 45 to 77 wire level assertions,
+covering each behaviour changed here.
+
+One defect was surfaced rather than caused and is left open as TODO 44: array replies
+decode wrongly through every remote binding - remote HMGET answers
+`['v1', 'false', '0.0']` where local answers `['v1', 'v2', 'v3']`. It only became visible
+because LPOP started returning an array.
+
+## 38. Command names were case sensitive [09-08-2026]
+
+barch's RESP dispatcher looked commands up with an exact string match against a table
+keyed in upper case, so `SET` worked and `set` and `Set` were answered with
+`unknown command`. Redis is case insensitive here, every example in its documentation is
+lower case, and redis-cli sends whatever the user typed.
+
+Found by the first run of the translation harness in TODO 40, which is the point of that
+harness: valkey's tcl suite writes every command in lower case, so all twenty one
+translated cases failed against barch with `unknown command` while passing against
+valkey-server. No test in this repository had ever sent a lower case command.
+
+The fold happens after the `space:COMMAND` prefix is split rather than before, because a
+key space name is not case insensitive and folding the whole word would have quietly
+renamed the space.
+
+Worth noting how narrowly the existing suite missed this. Every python test drives the
+embedded interface or builds commands in upper case, the lua tests call `B.SET` and
+friends in upper case, and redispytest.py uses redis-py's own method names, which send
+upper case. A defect that makes a plain `redis-cli` session unusable survived 52 tests.
+
+## 40. Every element after the first of a remote reply was decoded one byte late [09-08-2026]
+
+A binding constructed with a host and port answered correctly for a single value and
+wrongly for anything longer. Same build, same data, the only difference being how the
+handle was made:
+
+    local  HMGET f1 f2 f3   -> ['v1', 'v2', 'v3']
+    remote HMGET f1 f2 f3   -> ['v1', 'false', '0.0']
+    remote OrderedSet.range -> ['one', 'false']
+    remote KeyValue.range   -> []            (three keys in range)
+
+The values were not truncated, they were the wrong *types*, which is what pointed at the
+decoder rather than at the commands. In `rpc/server.cpp`:
+
+    for (size_t i = 0; i < buffers_size; i++) {
+        auto v = get_variable(i, replies);
+        result.emplace_back(v.first);
+        i = v.second;
+    }
+
+`get_variable` answers with the offset of the next variable, so assigning it and then
+letting the loop's `i++` run as well steps one byte past every value. The first is read
+from offset zero and is fine; the second onwards takes its type byte out of the middle of
+the preceding payload and becomes whatever that byte happens to mean - usually a bool,
+sometimes a double, sometimes nothing at all. Now a while loop that does not advance i
+itself, with a guard that throws if a decode fails to make progress rather than spinning
+on a malformed reply.
+
+This is on the binary replication protocol rather than RESP, so it is the embedded client
+talking to a remote server - the path the README describes as the reason the embedded L1
+exists. Anything reading a multi value reply across it has been getting rubbish.
+
+Only a reply with more than one value can show it, and that is why it lasted: remotetest.py
+is the only test that drives a binding over RPC, and until LPOP was changed to answer with
+the values it removed (DONE 37) it only ever asked for one thing at a time. The defect was
+already there behind every array returning call.
+
+Guarded now by test/remotearraytest.py, registered as TestRemoteArrays. It is a shape test
+rather than a value test - it runs the same command through a local handle and a remote one
+and asserts the two agree, over HMGET, HGETALL, ZRANGE with and without scores, RANGE, KEYS
+and LPOP. Local is a fair reference because it shares no code with the reply decoder. It
+also asserts each reply has more than one value, since a single value decodes correctly
+either way and a check that quietly degraded to one would prove nothing.

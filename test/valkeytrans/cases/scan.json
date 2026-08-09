@@ -1,0 +1,145 @@
+{
+ "source": "scan.tcl",
+ "cases": [
+  {
+   "name": "{$type} SCAN basic",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        populate 1000\n\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        set keys [lsort -unique $keys]\n        assert_equal 1000 [llength $keys]"
+  },
+  {
+   "name": "{$type} SCAN COUNT",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        populate 1000\n\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur count 5]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        set keys [lsort -unique $keys]\n        assert_equal 1000 [llength $keys]"
+  },
+  {
+   "name": "{$type} SCAN MATCH",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        populate 1000\n\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur match \"key:1??\"]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        set keys [lsort -unique $keys]\n        assert_equal 100 [llength $keys]"
+  },
+  {
+   "name": "{$type} SCAN TYPE",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        # populate only creates strings\n        populate 1000\n\n        # Check non-strings are excluded\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur type \"list\"]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        assert_equal 0 [llength $keys]\n\n        # Check strings are included\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur type \"string\"]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        assert_equal 1000 [llength $keys]\n\n        # Check all three args work together\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur type \"string\" match \"key:*\" count 10]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        assert_equal 1000 [llength $keys]"
+  },
+  {
+   "name": "{$type} SCAN unknown type",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        # Check that passive expiration is not triggered by the scan on an\n        # unknown key type\n        r debug set-active-expire 0\n\n        populate 1000\n        r hset hash f v\n        r pexpire hash 1\n\n        after 2\n\n        assert_error \"*unknown type name*\" {r scan 0 type \"string1\"}\n\n        # expired key is not touched by scan command\n        assert_equal 1001 [scan [regexp -inline {keys\\=([\\d]*)} [r info keyspace]] keys=%d]\n        r debug set-active-expire 1"
+  },
+  {
+   "name": "{$type} SCAN with expired keys",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        # make sure that passive expiration is triggered by the scan\n        r debug set-active-expire 0\n\n        populate 1000\n        r set foo bar\n        r pexpire foo 1\n        \n        # add a hash type key\n        r hset hash f v\n        r pexpire hash 1\n        \n        after 2\n\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur count 10]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        assert_equal 1000 [llength $keys]\n\n        # make sure that expired key have been removed by scan command\n        assert_equal 1000 [scan [regexp -inline {keys\\=([\\d]*)} [r info keyspace]] keys=%d]\n\n        r debug set-active-expire 1"
+  },
+  {
+   "name": "{$type} SCAN with expired keys with TYPE filter",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        # make sure that passive expiration is triggered by the scan\n        r debug set-active-expire 0\n\n        populate 1000\n        r set foo bar\n        r pexpire foo 1\n\n        # add a hash type key\n        r hset hash f v\n        r pexpire hash 1\n\n        after 2\n\n        set cur 0\n        set keys {}\n        while 1 {\n            set res [r scan $cur type \"string\" count 10]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n        }\n\n        assert_equal 1000 [llength $keys]\n\n        # make sure that only the expired key in the type match will been removed by scan command\n        assert_equal 1001 [scan [regexp -inline {keys\\=([\\d]*)} [r info keyspace]] keys=%d]\n\n        r debug set-active-expire 1"
+  },
+  {
+   "name": "{$type} SSCAN with encoding $enc",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Create the Set\n            r del set\n            if {$enc eq {intset}} {\n                set prefix \"\"\n            } else {\n                set prefix \"ele:\"\n            }\n            set count [expr {$enc eq \"hashtable\" ? 200 : 100}]\n            set elements {}\n            for {set j 0} {$j < $count} {incr j} {\n                lappend elements ${prefix}${j}\n            }\n            r sadd set {*}$elements\n\n            # Verify that the encoding matches.\n            assert_encoding $enc set\n\n            # Test SSCAN\n            set cur 0\n            set keys {}\n            while 1 {\n                set res [r sscan set $cur]\n                set cur [lindex $res 0]\n                set k [lindex $res 1]\n                lappend keys {*}$k\n                if {$cur == 0} break\n            }\n\n            set keys [lsort -unique $keys]\n            assert_equal $count [llength $keys]"
+  },
+  {
+   "name": "{$type} HSCAN with encoding $enc",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Create the Hash\n            r del hash\n            if {$enc eq {listpack}} {\n                set count 30\n            } else {\n                set count 1000\n            }\n            set elements {}\n            for {set j 0} {$j < $count} {incr j} {\n                lappend elements key:$j $j\n            }\n            r hmset hash {*}$elements\n\n            # Verify that the encoding matches.\n            assert_encoding $enc hash\n\n            # Test HSCAN\n            set cur 0\n            set keys {}\n            while 1 {\n                set res [r hscan hash $cur]\n                set cur [lindex $res 0]\n                set k [lindex $res 1]\n                lappend keys {*}$k\n                if {$cur == 0} break\n            }\n\n            set keys2 {}\n            foreach {k v} $keys {\n                assert {$k eq \"key:$v\"}\n                lappend keys2 $k\n            }\n\n            set keys2 [lsort -unique $keys2]\n            assert_equal $count [llength $keys2]\n\n            # Test NOVALUES \n            set res [r hscan hash 0 count 1000 novalues]\n            assert_equal [lsort $keys2] [lsort [lindex $res 1]]"
+  },
+  {
+   "name": "{$type} ZSCAN with encoding $enc",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Create the Sorted Set\n            r del zset\n            if {$enc eq {listpack}} {\n                set count 30\n            } else {\n                set count 1000\n            }\n            set elements {}\n            for {set j 0} {$j < $count} {incr j} {\n                lappend elements $j key:$j\n            }\n            r zadd zset {*}$elements\n\n            # Verify that the encoding matches.\n            assert_encoding $enc zset\n\n            # Test ZSCAN\n            set cur 0\n            set keys {}\n            while 1 {\n                set res [r zscan zset $cur]\n                set cur [lindex $res 0]\n                set k [lindex $res 1]\n                lappend keys {*}$k\n                if {$cur == 0} break\n            }\n\n            set keys2 {}\n            foreach {k v} $keys {\n                assert {$k eq \"key:$v\"}\n                lappend keys2 $k\n            }\n\n            set keys2 [lsort -unique $keys2]\n            assert_equal $count [llength $keys2]\n\n            # Test NOSCORES \n            set res [r zscan zset 0 count 1000 noscores]\n            assert_equal [lsort $keys2] [lsort [lindex $res 1]]"
+  },
+  {
+   "name": "{$type} SCAN guarantees check under write load",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        populate 100\n\n        # We start scanning here, so keys from 0 to 99 should all be\n        # reported at the end of the iteration.\n        set keys {}\n        while 1 {\n            set res [r scan $cur]\n            set cur [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cur == 0} break\n            # Write 10 random keys at every SCAN iteration.\n            for {set j 0} {$j < 10} {incr j} {\n                r set addedkey:[randomInt 1000] foo\n            }\n        }\n\n        set keys2 {}\n        foreach k $keys {\n            if {[string length $k] > 6} continue\n            lappend keys2 $k\n        }\n\n        set keys2 [lsort -unique $keys2]\n        assert_equal 100 [llength $keys2]"
+  },
+  {
+   "name": "{$type} SSCAN with integer encoded object (issue #1345)",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set objects {1 a}\n        r del set\n        r sadd set {*}$objects\n        set res [r sscan set 0 MATCH *a* COUNT 100]\n        assert_equal [lsort -unique [lindex $res 1]] {a}\n        set res [r sscan set 0 MATCH *1* COUNT 100]\n        assert_equal [lsort -unique [lindex $res 1]] {1}"
+  },
+  {
+   "name": "{$type} SSCAN with PATTERN",
+   "expected": "foo foobar",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        r sadd mykey foo fab fiz foobar 1 2 3 4\n        set res [r sscan mykey 0 MATCH foo* COUNT 10000]\n        lsort -unique [lindex $res 1]"
+  },
+  {
+   "name": "{$type} HSCAN with PATTERN",
+   "expected": "1 10 foo foobar",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        r hmset mykey foo 1 fab 2 fiz 3 foobar 10 1 a 2 b 3 c 4 d\n        set res [r hscan mykey 0 MATCH foo* COUNT 10000]\n        lsort -unique [lindex $res 1]"
+  },
+  {
+   "name": "{$type} HSCAN with NOVALUES",
+   "expected": "1 2 3 4 fab fiz foo foobar",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        r hmset mykey foo 1 fab 2 fiz 3 foobar 10 1 a 2 b 3 c 4 d\n        set res [r hscan mykey 0 NOVALUES]\n        lsort -unique [lindex $res 1]"
+  },
+  {
+   "name": "{$type} ZSCAN with PATTERN",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        r zadd mykey 1 foo 2 fab 3 fiz 10 foobar\n        set res [r zscan mykey 0 MATCH foo* COUNT 10000]\n        lsort -unique [lindex $res 1]"
+  },
+  {
+   "name": "{$type} ZSCAN with NOSCORES",
+   "expected": "fab fiz foo foobar",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        r zadd mykey 1 foo 2 fab 3 fiz 10 foobar\n        set res [r zscan mykey 0 NOSCORES]\n        lsort -unique [lindex $res 1]"
+  },
+  {
+   "name": "{$type} ZSCAN scores: regression test for issue #2175",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        for {set j 0} {$j < 500} {incr j} {\n            r zadd mykey 9.8813129168249309e-323 $j\n        }\n        set res [lindex [r zscan mykey 0] 1]\n        set first_score [lindex $res 1]\n        assert {$first_score != 0}"
+  },
+  {
+   "name": "{$type} SCAN regression test for issue #4906",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "for {set k 0} {$k < 100} {incr k} {\n            r del set\n            r sadd set x; # Make sure it's not intset encoded\n            set toremove {}\n            unset -nocomplain found\n            array set found {}\n\n            # Populate the set\n            set numele [expr {101+[randomInt 1000]}]\n            for {set j 0} {$j < $numele} {incr j} {\n                r sadd set $j\n                if {$j >= 100} {\n                    lappend toremove $j\n                }\n            }\n\n            # Start scanning\n            set cursor 0\n            set iteration 0\n            set del_iteration [randomInt 10]\n            while {!($cursor == 0 && $iteration != 0)} {\n                lassign [r sscan set $cursor] cursor items\n\n                # Mark found items. We expect to find from 0 to 99 at the end\n                # since those elements will never be removed during the scanning.\n                foreach i $items {\n                    set found($i) 1\n                }\n                incr iteration\n                # At some point remove most of the items to trigger the\n                # rehashing to a smaller hash table.\n                if {$iteration == $del_iteration} {\n                    r srem set {*}$toremove\n                }\n            }\n\n            # Verify that SSCAN reported everything from 0 to 99\n            for {set j 0} {$j < 100} {incr j} {\n                if {![info exists found($j)]} {\n                    fail \"SSCAN element missing $j\"\n                }\n            }\n        }"
+  },
+  {
+   "name": "{$type} SCAN MATCH pattern implies cluster slot",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Tests the code path for an optimization for patterns like \"{foo}-*\"\n        # which implies that all matching keys belong to one slot.\n        r flushdb\n        for {set j 0} {$j < 100} {incr j} {\n            r set \"{foo}-$j\" \"foo\"; # slot 12182\n            r set \"{bar}-$j\" \"bar\"; # slot 5061\n            r set \"{boo}-$j\" \"boo\"; # slot 13142\n        }\n\n        set cursor 0\n        set keys {}\n        while 1 {\n            set res [r scan $cursor match \"{foo}-*\"]\n            set cursor [lindex $res 0]\n            set k [lindex $res 1]\n            lappend keys {*}$k\n            if {$cursor == 0} break\n        }\n\n        set keys [lsort -unique $keys]\n        assert_equal 100 [llength $keys]"
+  }
+ ]
+}

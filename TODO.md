@@ -179,84 +179,7 @@
 36. [Done] Every Z* command declared an ACL category that does not exist [09-08-2026] Nr 32
 
 37. [Done] The RESP commands that answered with the wrong thing [09-08-2026] Nr 33
-38. Redis compatibility, the part that is not just a wrong answer. DONE 33 fixed the
-    commands that returned the wrong value or the wrong RESP type. What is left are the
-    ones where the behaviour itself differs under a shared name, so fixing them breaks
-    whatever is built against the current behaviour. The direction is settled - redis
-    compatibility is the aim - so these are a question of sequencing and of what to do
-    with existing callers, not of whether.
-
-    Semantics that differ under a redis name. Each of these needs a decision about the
-    existing behaviour before the name can be moved:
-
-      - [Done 09-08-2026] `LPUSH` prepends and `RPUSH` appends, and `LPOP`, `RPOP`, `BLPOP`
-        and `BRPOP` follow the same ends. All six were the other way round. The flag they
-        pass was called `left` while it actually selected the high index end, which is
-        most of why it went unnoticed; it is `at_tail` now.
-
-        The migration is smaller than this entry feared. The stored layout does not change
-        - the header still records start and end and the entries still sit between them -
-        so a list saved before this reads back in the same order it was written. What
-        changes is which command built it: a caller who used LPUSH to append has to use
-        RPUSH now, and `LFRONT` on an old list answers with what that caller thought of as
-        the most recent entry. Nothing needs rewriting on disk, but a client that relied
-        on the old direction has to be looked at.
-      - [Done 09-08-2026] `LPOP` and `RPOP` take an optional count and reply with what was
-        removed - one bulk string without a count, an array with one. The bytes are copied
-        before the entry is removed, since the leaf goes with it.
-      - [Done 09-08-2026] `ZRANGE` and `ZREVRANGE` read start and stop as positions unless
-        BYSCORE or BYLEX says otherwise, so `ZRANGE key 0 -1` is the whole set. Negative
-        positions count from the end and out of range ones are clamped, as in redis. Done
-        as its own walk rather than by rank lookup - one pass in score order, then the
-        slice - which is simpler and is what REV already needed anyway.
-      - [Done 09-08-2026] `ZRANK key member [WITHSCORE]` reports that member's position
-        from the low end, nil when it is not there. The range count it used to do is left
-        to `ZFASTRANK`, which answers it in constant time.
-      - [Done 09-08-2026] `SELECT` is its own handler. A number is a database - 0 is the
-        default space, n above zero is `db<n>` - so the numbered databases a redis client
-        switches between are real rather than spaces whose names happen to be digits. A
-        name still selects that space, which barch has always allowed here and
-        spacethreadtest.py exercises deliberately ("Yes! we can select strings too"), so
-        this is a superset of redis rather than a departure. A first attempt refused names
-        and broke that test, which is a fair argument for reading what a test asserts
-        before deciding a behaviour was accidental.
-      - [Done 09-08-2026] `SET`'s dead `H` option is gone and is now refused like any other
-        unknown word.
-      - [Done 09-08-2026] `SET`'s options are order free. The parser loops over what follows
-        the key and value instead of walking fixed positions, and refuses an unknown word,
-        a repeat, or a contradictory pair such as NX with XX or KEEPTTL with EX.
-      - [Done 09-08-2026] The eight increment commands no longer overwrite a value that is
-        not a number. leaf_numeric_update now reports why it declined - not_numeric,
-        overflowed or compressed - and the callers tell a decline from a missing key
-        instead of reading both as "insert", which is what destroyed the value.
-        respshapetest.py updated in the same change.
-
-    Arity checks that are missing rather than wrong. Cheap, no compatibility question:
-
-      - [Done 09-08-2026] `ZDIFFSTORE` and `ZINTERSTORE` check their arity before reading
-        argv[1].
-      - [Done 09-08-2026] `EXPIRE` refuses a word in the condition position that is not
-        NX, XX, GT or LT, rather than consuming it and ignoring it.
-
-    ACL categories that do not match what the command does. These matter more than they
-    look: DONE 32 established that a category a command does not declare cannot be
-    required, and the mirror of that is that one it declares wrongly demands a permission
-    the caller should not need. A read only user cannot currently call these:
-
-      - [Done 09-08-2026] All seven recategorised: `LBACK`, `ZCARD`, `ZRANGE`, `ZDIFF` and
-        `ZINTERCARD` are read rather than write, `HEXPIRETIME` is read, and `CLIENT` moved
-        from stats to connection. `ZINTER` had been listed here in error - it was already
-        read. `ZDIFFSTORE`, `ZINTERSTORE`, `ZPOPMIN`, `ZPOPMAX` and `ZREMRANGEBYLEX`
-        genuinely write and were left alone.
-
-    [Done 09-08-2026] `LFRONT`, `LBACK` and `LLEN` take a read lock rather than a write
-    one, which is what DONE 19 did for SIZE and HEAPBYTES.
-
-    Worth doing before any of it: there is still no test that asserts a reply shape. DONE
-    33 was verified by a throwaway script that spoke RESP at a scratch server, and that
-    script is the thing that should become a test - the defects it caught were all
-    invisible to the existing suite, which tests through the embedded interface and never
-    sees the wire.
+38. [Done] Redis compatibility, the behaviour that differed under a shared name [09-08-2026] Nr 37
 
 39. The tests that spawn a valkey-server leak it when they fail. routetest.py, pulltest.py
     and pulldebug.py each start `valkey-server --port 7777 --loadmodule _barch.so` with
@@ -300,13 +223,15 @@
         the python tests depend on the install, with set_tests_properties DEPENDS, would
         stop that.
 
-40. Translate valkey's own tests and run them against barch. The suite is already in the
-    tree and nobody has used it: test/CMakeLists.txt FetchContents valkey 8.1 and builds
-    it, so test/{build,Debug,RelWithDebInfo}/_deps/valkey-src holds the whole thing.
-    tests/unit/type has string.tcl (810 lines), hash.tcl (864), incr.tcl (214),
-    list.tcl (2490), zset.tcl (2744), and tests/unit adds expire.tcl (1075),
-    keyspace.tcl (571) and scan.tcl (470). That is a specification of the behaviour we
-    have just decided to aim for (TODO 38), written by the people who define it.
+40. Translate valkey's tests: the harness, and incr.tcl and scan.tcl as its proof.
+
+    First of four - 45, 46 and 47 are the rest. This one carries the machinery, so it is
+    the smallest in tests and the largest in work; do it first and the other three become
+    mechanical.
+
+    The suite is already in the tree and unused. test/CMakeLists.txt FetchContents valkey
+    8.1 and builds it, so test/{build,Debug,RelWithDebInfo}/_deps/valkey-src holds the
+    whole thing - 665 tests over the eight files that touch surfaces we implement.
 
     The tcl is regular enough to translate mechanically. Nearly every case is one of
 
@@ -315,38 +240,40 @@
         catch {r cmd} err ; format $err          - matched against {ERR*}
 
     so a translation is `r.cmd(...)` plus an equality assert, with the catch form becoming
-    an expected error. It is worth doing incr.tcl first: it is the smallest, and its case
-    "INCR fails against key with spaces" expects an error where barch currently coerces
-    and overwrites, which is the data loss item in TODO 38. One 214 line file would have
-    caught that on its own.
+    an expected error. Write a script that walks the tcl and emits the obvious cases,
+    leaving anything it cannot parse as a commented stub for a human. Do not translate by
+    hand at volume - the script keeps the translation reviewable and re-runnable when
+    valkey is bumped.
 
-    The part that needs thinking about is the one that makes this worth doing rather than
-    dangerous, and it has a good answer here. A translated test that is subtly wrong is
-    worse than no test: it either passes when it should not, or fails for a reason that is
-    about the translation rather than about barch, and either way someone burns an
-    afternoon. The check is differential, and it is available because the same
-    FetchContent already builds a working valkey-server next to the tests:
+    The part that makes this safe rather than dangerous, and it has a good answer here: a
+    translated test that is subtly wrong either passes when it should not, or fails for a
+    reason about the translation rather than about barch. The check is differential, and
+    the same FetchContent already builds a working valkey-server next to the tests:
 
-      - run the translated python test against valkey-server first. It must pass. That is
-        what makes it a faithful translation rather than an assertion someone made up.
-      - then run it against barch. Anything that fails now is a real difference, and the
+      - run the translated test against valkey-server first. It must pass. That is what
+        makes it a faithful translation rather than an assertion someone invented.
+      - then run it against barch. Anything failing now is a real difference, and the
         translation is not a suspect.
 
-    So each translated file is really two tests, and the valkey one is the fixture for the
-    other. That also gives a natural way to record deliberate differences: a case that
-    passes on valkey and fails on barch is either a defect or an accepted divergence, and
-    the accepted ones want a list of their own with a reason each, not a quietly deleted
-    assertion.
+    So each translated file is two tests, and the valkey one is the fixture for the other.
+    That also gives a natural place to record deliberate differences: a case that passes on
+    valkey and fails on barch is either a defect or an accepted divergence, and the
+    accepted ones want a list with a reason each, not a quietly deleted assertion.
 
-    Scope, since the whole suite is not the goal: only the commands we register. set.tcl
-    and the stream files are out - there is no S* or X* surface. list.tcl and zset.tcl are
-    large and full of cases for options we do not implement, so those want filtering
-    rather than translating whole. string.tcl, incr.tcl, hash.tcl, expire.tcl and
-    keyspace.tcl are the ones that map closely.
+    Prove it on incr.tcl (29 tests) and scan.tcl (20). incr.tcl is the right first file
+    because it is small and because its case "INCR fails against key with spaces" expects
+    an error where barch coerced and overwrote until DONE 37 - those 214 lines would have
+    caught that on their own.
 
-    Do not translate by hand at volume. A small script that walks the tcl and emits the
-    obvious cases, leaving anything it cannot parse as a commented stub for a human, will
-    get most of the way and keeps the translation itself reviewable.
+    Progress: translate.py and differential.py are written and working. incr.tcl gives 21
+    of 29 cases; scan.tcl gives none, because it is loops and `populate` from end to end -
+    which is the honest answer and is what the stubs record. The first run found DONE 38,
+    command names being case sensitive, which had made every lower case command an
+    unknown one. Left to do here: raise incr.tcl's yield by teaching the translator the
+    `set res {}` / `append res` form and the `list [r ...] [r ...]` form it currently
+    stubs, and decide whether scan.tcl is worth hand translating or dropping from this
+    entry - its twenty tests are mostly about cursor guarantees under rehashing, which is
+    valkey's internals rather than a promise barch makes.
 
 41. Static destruction order in shared_mutex.cpp, and whether it is behind the stalls.
 
@@ -467,42 +394,91 @@
     Not proven. Giving each test its own directory would settle it and is probably worth
     doing regardless.
 
-44. Array replies come back wrong through a remote binding.
+44. [Done] Array replies come back wrong through a remote binding [09-08-2026] Nr 40
 
-    Every SWIG binding that answers with more than one value gives the right answer
-    against a local store and the wrong one against a remote one. Measured on the same
-    build, same data, the only difference being whether the handle was constructed with a
-    host and port:
+45. Translate valkey's tests: string.tcl and keyspace.tcl.
 
-        local  HMGET f1 f2 f3   -> ['v1', 'v2', 'v3']
-        remote HMGET f1 f2 f3   -> ['v1', 'false', '0.0']
+    Second of four, and the one closest to what barch is for. 91 tests in string.tcl and
+    59 in keyspace.tcl, against SET, GET, APPEND, MSET, MGET, EXISTS, DEL, TTL, EXPIRE,
+    KEYS, SELECT and the rest of the key/value surface. Depends on the harness in 40.
 
-        local  OrderedSet.range -> ['one', 'two', 'three']
-        remote OrderedSet.range -> ['one', 'false']
+    Expect this one to find the most, because it is the surface DONE 33 and DONE 37 changed
+    most heavily and the surface every client touches. SET's options in particular now
+    parse in any order and reject contradictory pairs, which is exactly what string.tcl
+    exercises at length.
 
-        local  List.pop(k, 2)   -> ['a2', 'a1']
-        remote List.pop(k, 2)   -> ['a2', 'false']
+    Known divergences to expect rather than treat as defects: `SETRANGE`, `GETRANGE`,
+    `GETDEL`, `GETEX`, `SETEX`, `PSETEX`, `SUBSTR` and `LCS` are not implemented, and
+    `SELECT` takes a name as well as a number, which is a superset. Filter those cases out
+    with a reason recorded rather than deleting them silently.
 
-        remote KeyValue.range   -> []            (three keys in range)
+46. Translate valkey's tests: hash.tcl and expire.tcl.
 
-    The first element survives and the rest arrive as something else - usually a boolean,
-    sometimes a double - so it is not truncation, it is the reply being decoded against
-    the wrong types from the second element on. A single element reply is correct, which
-    is why nothing noticed: every binding that returns an array was only ever exercised
-    remotely with one value in it, or not at all.
+    Third of four. 71 tests in hash.tcl and 79 in expire.tcl, against the fifteen H*
+    commands and the expiry surface - EXPIRE, TTL, EXPIREAT, PERSIST and the hash field
+    TTLs. Depends on the harness in 40.
 
-    This is not new. It was found because LPOP was changed to answer with the values it
-    removed instead of the length left behind (TODO 38), so List.pop started returning an
-    array where it used to return one integer, and remotetest.py is the only test that
-    drives a binding over RPC. The bug was already there behind every other array
-    returning call.
+    The hash surface is worth care: DONE 33 changed HGET from a one element array to a bulk
+    string, HEXISTS from a nested array to an integer, and HSET to count fields added, and
+    DONE 37 made HINCRBY refuse a non numeric field instead of overwriting it. Those are
+    exactly the assertions hash.tcl makes, so it is a direct check of that work rather than
+    a search for something new.
 
-    Where to start: the local and remote paths differ in how the flat result is filled -
-    `sc.call` then `append_flat` against a caller that is either local or an rpc_caller -
-    so the disagreement is in how the rpc reply is turned back into Values, not in the
-    commands. A reply with three bulk strings that decodes as string, bool, double looks
-    like a reader taking its type from the wrong position, one field out of step.
+    expire.tcl is the harder half because it is timing sensitive - several cases sleep and
+    then assert a TTL band. Translate those with the same tolerances valkey uses rather
+    than tightening them, or the test will be flaky on a loaded machine and get ignored,
+    which is worse than not having it.
 
-    Worth writing a test for the shape of it first: the same command run through a local
-    handle and a remote handle, asserting the two agree. That is a stronger check than any
-    single expectation and would have caught this the day it appeared.
+    Known divergences: `PERSIST`, `PEXPIRETIME` and `OBJECT FREQ` are not implemented, and
+    the hash field TTL commands take the FIELDS form only.
+
+47. Translate valkey's tests: zset.tcl and list.tcl, filtered.
+
+    Last of four, and the one where the work is filtering rather than translating. 168
+    tests in zset.tcl and 148 in list.tcl, but a large fraction cover commands barch does
+    not implement, so the first job is deciding what applies and recording why the rest
+    does not. Depends on the harness in 40.
+
+    Not implemented on the ordered set side: ZSCORE, ZMSCORE, ZUNION, ZUNIONSTORE,
+    ZREVRANK, ZREMRANGEBYRANK, ZREMRANGEBYSCORE, ZRANDMEMBER, ZLEXCOUNT, ZSCAN, BZPOPMIN
+    and BZPOPMAX. On the list side: LRANGE, LINSERT, LSET, LREM, LTRIM, LPOS, LMPOP,
+    RPOPLPUSH and LMOVE - which is most of list.tcl, so expect only a fraction to survive.
+
+    What does apply is worth having, because both surfaces moved under DONE 37: ZRANGE and
+    ZREVRANGE read positions now, ZRANK reports a member's position, ZPOPMIN and ZPOPMAX
+    answer member first, and LPUSH, RPUSH, LPOP and RPOP were all on the wrong ends. Those
+    are the cases these two files spend most of their length on.
+
+    Ignore the encoding tests - valkey checks listpack against quicklist and skiplist
+    against listpack conversions, which are its internals and say nothing about barch.
+
+48. INCRBYFLOAT is not implemented. `HINCRBYFLOAT` exists for hash fields but there is no
+    plain key equivalent, so `INCRBYFLOAT k 1.5` answers `unknown command`. Found by the
+    translation harness (TODO 40) - incr.tcl spends a third of its cases on it.
+
+    The work is small: BarchModifyInteger already takes the type as a template parameter
+    and hash_api's HNUMERIC does the double form, so this is mostly registration plus the
+    reply formatting. The part worth care is what redis promises about the reply - it is a
+    bulk string, not a double, and it is rendered without a trailing zero, so 3.0 comes
+    back as "3". incr.tcl asserts exactly that in several places, which is a good reason to
+    do this one after the harness rather than before.
+
+49. There is no WRONGTYPE. Redis refuses a command whose key holds a different type -
+    `RPUSH mylist 1` then `INCR mylist` answers `WRONGTYPE Operation against a key holding
+    the wrong kind of value`. barch does not check, and because a list stores its entries
+    under composite keys derived from the name, `INCR mylist` quietly operates on a
+    different key altogether and succeeds.
+
+    Found by the translation harness (TODO 40); incr.tcl, string.tcl and list.tcl all
+    assert it, so it will keep appearing as the other files are translated.
+
+    This is a bigger decision than it looks and should not be taken by whoever hits it
+    next in a test. barch's types are a property of how a key is encoded rather than a
+    tag on a value, so answering WRONGTYPE means being able to ask "is there a list called
+    mylist" cheaply when someone calls INCR on it, for every command and every type. That
+    is a real cost on the hot path for a check that only matters when a caller has already
+    made a mistake. The alternatives are to accept the divergence and document it, or to
+    check only where the composite key makes it cheap.
+
+    Until it is decided, differential.py carries both cases in its ACCEPTED list with this
+    entry as the reason, so the harness stays green and the divergence stays visible.

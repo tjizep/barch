@@ -239,11 +239,24 @@ Value List::blpop(const std::string &key, double timeout) {
     params = {"BLPOP", key, std::to_string(timeout)};
     return sc.callv(params, BLPOP);
 }
-long List::pop(const std::string &key, long long count) {
+/**
+ * The entries removed, in the order they came off.
+ *
+ * This used to answer with the length left behind, because that is what LPOP replied
+ * with. LPOP answers with what it removed now, as redis does, so the binding follows it -
+ * `.i()` on the old form would read an array and terminate. Use len() for the length.
+ */
+std::vector<Value> List::pop(const std::string &key, long long count) {
     std::unique_lock l(lock);
+    result.clear();
     params = {"LPOP", key, std::to_string(count)};
     barch::repl::call(params);
-    return sc.callv(params, LPOP).i();
+    int r = sc.call(params, LPOP);
+    if (r != 0) {
+        barch::err({"pop failed", key});
+    }
+    sc.append_flat(result);
+    return result;
 }
 
 std::string List::back(const std::string &key) {
@@ -836,7 +849,11 @@ Value OrderedSet::add(const std::string &k, const std::vector<std::string>& flag
 std::vector<Value> OrderedSet::range(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
     std::unique_lock l(lock);
     result.clear();
-    params = {"ZRANGE", k, std::to_string(start), std::to_string(stop)};
+    // the bounds here are scores - the signature takes doubles - so the command has
+    // to be told that. ZRANGE reads start and stop as positions by default now, the
+    // way redis does, and without BYSCORE a score range is read as an index range.
+    // See TODO 38
+    params = {"ZRANGE", k, std::to_string(start), std::to_string(stop), "BYSCORE"};
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZRANGE);
     if (sc.flat_empty()) return {nullptr};
@@ -846,7 +863,11 @@ std::vector<Value> OrderedSet::range(const std::string &k, double start, double 
 std::vector<Value> OrderedSet::revrange(const std::string &k, double start, double stop, const std::vector<std::string>& flags) {
     std::unique_lock l(lock);
     result.clear();
-    params = {"ZREVRANGE", k, std::to_string(start), std::to_string(stop)};
+    // the bounds here are scores - the signature takes doubles - so the command has
+    // to be told that. ZRANGE reads start and stop as positions by default now, the
+    // way redis does, and without BYSCORE a score range is read as an index range.
+    // See TODO 38
+    params = {"ZREVRANGE", k, std::to_string(start), std::to_string(stop), "BYSCORE"};
     params.insert(params.end(), flags.begin(), flags.end());
     sc.call(params, ::ZREVRANGE);
     if (sc.flat_empty()) return {nullptr};

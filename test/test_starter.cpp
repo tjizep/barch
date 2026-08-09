@@ -9,24 +9,26 @@
 using namespace std;
 static std::string test_build_dir = "";
 static std::string valkey_path = "/_deps/valkey-src/src/";
-static std::string valkey_cli = valkey_path + "valkey-cli -p 7777";
-static std::string ping_cmd = valkey_cli + " -e PING ";
-static std::string shutdown_cmd = valkey_cli + " -e SHUTDOWN ";
 static std::string failed = "failure: ";
 static std::string binary_name = "_barch.so";
 static unsigned max_iterations = 20;
+// composed when they are used rather than at static initialisation, because every one of
+// them depends on test_build_dir, which is not known until argv has been read. They used
+// to be statics built from an empty test_build_dir, so the string was already wrong by
+// the time anything could set it
+static std::string get_valkey_cli() {
+    return test_build_dir + valkey_path + "valkey-cli -p 7777";
+}
 static std::string get_ping_cmd() {
-    std::string full_ping_cmd = test_build_dir + ping_cmd;
-    return full_ping_cmd;
+    return get_valkey_cli() + " -e PING ";
 }
 static std::string get_shutdown_cmd() {
-    std::string full_ping_cmd = test_build_dir + shutdown_cmd;
-    return full_ping_cmd;
+    return get_valkey_cli() + " -e SHUTDOWN ";
 }
 int wait_to_stop(){
 
     if(0 != std::system(get_shutdown_cmd().c_str())){
-        std::cout << valkey_cli << " valkey-server was not started or an error occurred stopping it" << std::endl;
+        std::cout << get_valkey_cli() << " valkey-server was not started or an error occurred stopping it" << std::endl;
     }
     // wait for it to stop
     unsigned iters = max_iterations;
@@ -62,11 +64,16 @@ int main(int argc, char *argv[]) {
         std::cerr << "Usage: " << argv[0] << " <directory containing "<< binary_name <<"> <lua test file>" << std::endl;
         return -1;
     }
-    if ( 0 != wait_to_stop()) return -1;
-
+    // the paths have to be known before anything shells out: wait_to_stop() used to run
+    // first, with test_build_dir still empty, so the shutdown it sends went to
+    // "/_deps/valkey-src/src/valkey-cli", which does not exist. It failed silently and a
+    // valkey-server left over from an earlier run was never cleared - which is what made
+    // the lua tests fail when one was still holding port 7777
     std::string bindir = argv[1];
     std::string luatest = argv[2];
     test_build_dir = argv[3];
+
+    if ( 0 != wait_to_stop()) return -1;
 
     std::cout << "directory for : "<< binary_name << " " << bindir << std::endl;
     std::cout << "directory for test build : " << test_build_dir << std::endl;
@@ -86,7 +93,7 @@ int main(int argc, char *argv[]) {
         }
     };
     std::thread t(run_server);
-    std::string test_cmd = test_build_dir +valkey_cli + " -e --eval " + luatest;
+    std::string test_cmd = get_valkey_cli() + " -e --eval " + luatest;
     std::cout << "Command to run test " << test_cmd << std::endl;
 
     cout << "waiting to start valkey...";

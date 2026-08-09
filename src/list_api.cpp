@@ -156,12 +156,14 @@ extern "C"{
         return 0;
     }
     int BLPOP(caller& cc, const arg_t& args) {
-        return bpop(cc, args, true);
-    }
-    int BRPOP(caller& cc, const arg_t& args) {
         return bpop(cc, args, false);
     }
-    int push(caller& cc, const arg_t& args, bool left) {
+    int BRPOP(caller& cc, const arg_t& args) {
+        return bpop(cc, args, true);
+    }
+    // `at_tail` means the high index end, which is what LBACK reads. It was called
+    // `left`, which read as the head and is the opposite of what it selects
+    int push(caller& cc, const arg_t& args, bool at_tail) {
         int64_t updated = 0;
         list_header header;
         auto fc = [&](const art::node_ptr &) -> void {
@@ -191,7 +193,7 @@ extern "C"{
             t->call_unblock(args[1].to_string());
         }
         for (size_t n = 2; n < args.size(); n += 1) {
-            if (left) {
+            if (at_tail) {
                 li.push(conversion::comparable_key(end));
                 header.end = conversion::make_int64_bytes(++end);
                 if (conversion::dec_bytes_to_int(header.end) != end) {
@@ -214,7 +216,7 @@ extern "C"{
         list_header h;
         const art::leaf *dl = t->get_last_leaf_added().const_leaf();
         h = dl->get_value();
-        if (left) {
+        if (at_tail) {
             if (conversion::dec_bytes_to_int(h.end) != end) {
                 abort_with("header not updated");
             }
@@ -225,20 +227,44 @@ extern "C"{
         }
         return cc.push_ll(end - start);
     }
+    // L* work on the head, which is the low index end, and R* on the tail. These were
+    // the other way round, so LPUSH appended and RPUSH prepended - the reverse of redis,
+    // and the reason LFRONT appeared to answer with the most recently LPUSHed value.
+    // The stored layout has not changed: a list saved before this reads back in the same
+    // order, but the command that built it is now the other one. See TODO 38
     int LPUSH(caller& cc, const arg_t& args) {
-        return push(cc, args, true);
-    }
-    int RPUSH(caller& cc, const arg_t& args) {
         return push(cc, args, false);
     }
-    int pop(caller& cc, const arg_t& args, bool left) {
-        if (args.size() < 3) {
+    int RPUSH(caller& cc, const arg_t& args) {
+        return push(cc, args, true);
+    }
+    /**
+     * LPOP key [count] / RPOP key [count]
+     *
+     * The count is optional, as in redis, and the reply is what was removed rather than
+     * the length left behind. It used to require the count and answer with the remaining
+     * length, so a caller who wanted the values had to read them first and hope nothing
+     * else popped in between. See TODO 38.
+     *
+     * Without a count the reply is one bulk string, or nil when there was nothing to
+     * take. With a count it is an array of up to that many, which may be shorter than
+     * asked for and may be empty.
+     */
+    int pop(caller& cc, const arg_t& args, bool at_tail) {
+        if (args.size() < 2 || args.size() > 3) {
             return cc.wrong_arity();
         }
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
-        auto count = conversion::to_i64(conversion::as_variable(args[2]));
+        const bool has_count = args.size() == 3;
+        int64_t count = 1;
+        if (has_count) {
+            count = conversion::to_i64(conversion::as_variable(args[2]));
+            if (count < 0) {
+                return cc.push_error("value is out of range, must be positive");
+            }
+        }
         barch::sharded_store store(cc.kspace());
         auto t = store.write_locked(args[1]);
         composite li;
@@ -253,40 +279,56 @@ extern "C"{
         list_header header {value.const_leaf()->get_value()};
         int64_t start = conversion::dec_bytes_to_int(header.start);
         int64_t end = conversion::dec_bytes_to_int(header.end);
-        if (start == end) {
-            return cc.push_null();
-        }
-        int64_t actual = 0;
 
-        for (auto i = 0; i < count; ++i) {
-            if (left) {
+        // the bytes are copied out before the entry is removed, because the leaf they
+        // point at goes away with it
+        heap::std_vector<std::string> popped;
+        for (int64_t i = 0; i < count; ++i) {
+            if (start == end) break;
+            if (at_tail) {
                 li.push(conversion::comparable_key(--end));
-            }else {
+            } else {
                 li.push(conversion::comparable_key(start++));
             }
-            t->remove(li.create());
+            auto entry = li.create();
+            auto held = t->search(entry);
+            if (!held.null()) {
+                auto vt = held.const_leaf()->get_value();
+                popped.emplace_back(vt.chars(), vt.size);
+            }
+            t->remove(entry);
             li.pop_back();
-            if (left) {
+            if (at_tail) {
                 header.end = conversion::make_int64_bytes(end);
-            }else {
+            } else {
                 header.start = conversion::make_int64_bytes(start);
             }
-            if (start == end) {
-                t->remove(key);
-                return cc.push_ll(end - start);
-            }
-            ++actual;
         }
-        // todo: we can set the header directly but that change would not be replicated
-        t->insert(key, header.as_value(), true);
+        if (start == end) {
+            t->remove(key);
+        } else {
+            // todo: we can set the header directly but that change would not be replicated
+            t->insert(key, header.as_value(), true);
+        }
 
-        return cc.push_ll(end - start);
+        if (!has_count) {
+            if (popped.empty()) {
+                return cc.push_null();
+            }
+            return cc.push_vt(art::value_type{popped.front()});
+        }
+        cc.start_array();
+        for (auto& v : popped) {
+            cc.push_vt(art::value_type{v});
+        }
+        cc.end_array();
+        return cc.ok();
     }
     int LPOP(caller& cc, const arg_t& args) {
-        return pop(cc, args, true);
+        return pop(cc, args, false);
     }
     int RPOP(caller& cc, const arg_t& args) {
-        return pop(cc, args, false);
+        return pop(cc, args, true);
     }
     int LLEN(caller& cc, const arg_t& args) {
         if (args.size() < 2) {
@@ -296,7 +338,8 @@ extern "C"{
             return cc.push_null();
         }
         barch::sharded_store store(cc.kspace());
-        auto t = store.write_locked(args[1]);
+        // read only: a shared lock is enough, as DONE 19 did for SIZE
+        auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
         auto value = t->search(key);
@@ -319,7 +362,8 @@ extern "C"{
             return cc.push_null();
         }
         barch::sharded_store store(cc.kspace());
-        auto t = store.write_locked(args[1]);
+        // read only: a shared lock is enough, as DONE 19 did for SIZE
+        auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
         auto value = t->search(key);
@@ -346,7 +390,8 @@ extern "C"{
             return cc.push_null();
         }
         barch::sharded_store store(cc.kspace());
-        auto t = store.write_locked(args[1]);
+        // read only: a shared lock is enough, as DONE 19 did for SIZE
+        auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
         auto key = query.create({container});
         auto value = t->search(key);
@@ -367,7 +412,7 @@ extern "C"{
 
 /* the list commands as a RESP client sees them */
 void register_list_api(function_map& r) {
-    r["LBACK"] = {::LBACK,{"write","list","data"}};
+    r["LBACK"] = {::LBACK,{"read","list","data"}};
     r["LFRONT"] = {::LFRONT,{"read","list","data"}};
     r["LPUSH"] = {::LPUSH,{"write","list","data"}};
     r["RPUSH"] = {::RPUSH,{"write","list","data"}};

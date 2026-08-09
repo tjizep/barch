@@ -4,6 +4,7 @@
 
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
+#include <cctype>
 #include <utility>
 
 #include "abstract_session.h"
@@ -179,6 +180,16 @@ namespace barch {
                 }
 
 
+                // command names are case insensitive, as they are in redis. The table is
+                // keyed in upper case and the lookup used to be an exact match on
+                // whatever arrived, so `set` and `Set` were unknown commands while `SET`
+                // worked. Every example in redis's own documentation is lower case, and
+                // so is the whole of valkey's test suite, which is how this was found.
+                // Folded here rather than above so the key space in a `space:CMD` prefix
+                // keeps the case it was given - space names are not case insensitive
+                for (auto& ch : cn) {
+                    ch = (char) toupper((unsigned char) ch);
+                }
                 if (prev_cn != cn) {
                     ic = barch_functions->find(cn);
                     prev_cn = cn;

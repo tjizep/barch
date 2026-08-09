@@ -52,11 +52,18 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
 
     int r = -1;
     IntT l = IntT();
+    // `present` separates a key that was there from one that was not. shard::update
+    // answers false for both a missing key and an updater that declined, so without
+    // this the decline was read as a miss and the insert below overwrote a value that
+    // simply was not a number
+    bool present = false;
+    numeric_status why = numeric_status::updated;
     auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
         if (value.null()) {
             return nullptr;
         }
-        auto val = leaf_numeric_update(l, value, by);
+        present = true;
+        auto val = leaf_numeric_update(l, value, by, why);
         if (!val.null()) {
             r = 0;
         }
@@ -67,6 +74,9 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     barch::sharded_store store(call.kspace());
     store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
         if (!t->update(converted.get_value(), updater)) {
+            if (present) {
+                return; // there, but not a number we can add to. leave it alone
+            }
             l += by;
             Variable s = l;
             auto fc = [&](const art::node_ptr &) -> void {};
@@ -76,9 +86,11 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     });
     if (r == 0) {
         return call.push_int(l);
-    } else {
-        return call.push_error("invalid integer or overflow");
     }
+    if (present && why == numeric_status::overflowed) {
+        return call.push_error("increment or decrement would overflow");
+    }
+    return call.push_error("value is not an integer or out of range");
 }
 
 extern "C" {
@@ -232,10 +244,21 @@ int SET(caller& call,const arg_t& argv) {
     }
     spec.hash = !sp->opt_ordered_keys;
 
-    art::value_type reply{"", 0};
-    auto fc = [&](const art::node_ptr &) -> void {
-        if (spec.get) {
-            reply = key;
+    // SET ... GET answers with the value that was there before, so the callback has to
+    // read it off the node it is handed. It used to assign `key`, which meant GET
+    // replied with the key being written rather than the old value. The bytes are
+    // copied because the leaf can be replaced by the insert that follows
+    std::string previous;
+    bool had_previous = false;
+    auto fc = [&](const art::node_ptr &existing) -> void {
+        if (spec.get && !existing.null()) {
+            auto cl = existing.const_leaf();
+            auto vt = cl->get_value();
+            if (cl->is_compressed()) {
+                vt = dictionary::decompress(vt);
+            }
+            previous.assign(vt.chars(), vt.size);
+            had_previous = true;
         }
     };
 
@@ -248,18 +271,49 @@ int SET(caller& call,const arg_t& argv) {
     }
 
     barch::sharded_store store(sp);
-    store.insert(opts, key, v, true, fc);
+    bool stored = true;
+    if (spec.nx || spec.xx) {
+        // NX and XX never reached storage: key_options carries no such flag and the
+        // key_spec conversion drops them, so both were parsed and then ignored, and a
+        // SET NX would happily overwrite a key that was already there. The test the
+        // condition names has to be made under the same write lock as the insert that
+        // follows it, or two callers both find the key absent and both write
+        stored = false;
+        store.with_key_write(key, [&](const barch::shard_ptr& t) {
+            art::node_ptr existing = t->search(key);
+            bool present = !existing.null();
+            if (spec.get && present) {
+                auto cl = existing.const_leaf();
+                auto vt = cl->get_value();
+                if (cl->is_compressed()) {
+                    vt = dictionary::decompress(vt);
+                }
+                previous.assign(vt.chars(), vt.size);
+                had_previous = true;
+            }
+            if ((spec.nx && present) || (spec.xx && !present)) {
+                return; // the condition refused it; nothing is written
+            }
+            t->insert(opts, key, v, true, fc);
+            stored = true;
+        });
+    } else {
+        store.insert(opts, key, v, true, fc);
+    }
 
     if (spec.get) {
-        if (reply.size) {
-
-            return call.push_encoded_key(reply);
+        // with GET the reply is the old value whether or not the condition let the
+        // write through, which is what redis does
+        if (had_previous) {
+            return call.push_vt(art::value_type{previous});
         } else {
             return call.push_null();
         }
-    } else {
-        return call.push_simple("OK");
     }
+    if (!stored) {
+        return call.push_null();
+    }
+    return call.push_simple("OK");
 }
 
 
@@ -306,7 +360,10 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
 )
 int INCR(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
-    return BarchModifyInteger(call, argv, 1);
+    // (int64_t) matters: a bare 1 deduces IntT as int, so INCR ran on 32 bits and
+    // refused any value above INT32_MAX - redis's INCR is 64 bit signed. INCRBY was
+    // always right because it parses its argument into a long long. See DONE 39
+    return BarchModifyInteger(call, argv, (int64_t) 1);
 }
 int cmd_INCR(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -440,7 +497,7 @@ int cmd_UINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int DECR(caller& call, const arg_t& argv) {
     ++statistics::decr_ops;
-    return BarchModifyInteger(call, argv, -1);
+    return BarchModifyInteger(call, argv, (int64_t) -1);
 }
 
 int cmd_DECR(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -482,7 +539,9 @@ int cmd_DECRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 
 int MSET(caller& call, const arg_t& argv) {
-    if (argv.size() < 3)
+    // pairs only: an odd list used to walk off the end of argv and surface as the
+    // out_of_range from small_vector rather than as a wrong arity
+    if (argv.size() < 3 || (argv.size() % 2) == 0)
         return call.wrong_arity();
     int r = call.ok();
     barch::sharded_store store(call.kspace());
@@ -506,8 +565,10 @@ int MSET(caller& call, const arg_t& argv) {
 
     }
 
-    call.push_bool(r == call.ok());
-    return call.ok();
+    if (r != call.ok()) {
+        return call.push_error("one or more keys were rejected");
+    }
+    return call.push_simple("OK");
 }
 int cmd_MSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -646,8 +707,10 @@ int TTL(caller& call, const arg_t& argv) {
     barch::sharded_store store(call.kspace());
     int reply = call.ok();
     bool answered = false;
-    // not store.search: that treats a tombstone as absent, and TTL has always
-    // reported one as -2 (present, no expiry). preserved rather than changed here
+    // not store.search: that treats a tombstone as absent, and TTL reports one as
+    // present with no expiry.
+    // the two negatives follow redis: -1 is present with no expiry, -2 is no such key.
+    // they used to be the other way round, which quietly inverted every client's check
     store.with_key_read(converted.get_value(), [&](const barch::shard_ptr& t) {
         art::node_ptr r = t->search(converted.get_value());
         if (r.null()) {
@@ -659,10 +722,10 @@ int TTL(caller& call, const arg_t& argv) {
             long long e = (l->expiry_ms() - art::now())/1000;
             reply = call.push_ll(e);
         } else {
-            reply = call.push_ll(-2);
+            reply = call.push_ll(-1);
         }
     });
-    return answered ? reply : call.push_ll(-1);
+    return answered ? reply : call.push_ll(-2);
 
 }
 int cmd_TTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -673,16 +736,20 @@ int EXISTS(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
         return call.wrong_arity();
     barch::sharded_store store(call.kspace());
+    // the count of keys that exist, counting duplicates, as redis does. it used to be
+    // a single boolean that was true only when every named key was present, which
+    // answers a different question and cannot be told apart from "exactly one of one"
+    int64_t found = 0;
     for (size_t i = 1; i < argv.size(); ++i) {
         auto k = argv[i];
         if (key_ok(k) != 0)
             return call.key_check_error(k);
         auto converted = conversion::as_composite(k);
-        if (!store.exists(converted.get_value())) {
-            return call.push_bool(false);
+        if (store.exists(converted.get_value())) {
+            ++found;
         }
     }
-    return call.push_bool(true);
+    return call.push_ll(found);
 }
 int cmd_EXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -894,6 +961,30 @@ int REM(caller& call, const arg_t& argv) {
 
     return r;
 }
+/* DEL <key> [key ...]
+ *
+ * redis's DEL: takes any number of keys and answers with how many were actually
+ * removed. It used to be registered as another name for REM, which takes one key and
+ * answers with the value it removed - so a client calling DEL got a bulk string where
+ * its parser wanted an integer. REM keeps its own behaviour; this is the compatible one.
+ */
+int DEL(caller& call, const arg_t& argv) {
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    barch::sharded_store store(call.kspace());
+    int64_t removed = 0;
+    for (size_t i = 1; i < argv.size(); ++i) {
+        auto k = argv[i];
+        if (key_ok(k) != 0)
+            return call.key_check_error(k);
+        auto converted = conversion::as_composite(k);
+        auto fc = [&removed](art::node_ptr n) -> void {
+            if (!n.null()) ++removed;
+        };
+        store.remove(converted.get_value(), fc);
+    }
+    return call.push_ll(removed);
+}
 int cmd_REM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, REM);
@@ -1009,7 +1100,7 @@ void register_keys_api(function_map& r) {
     r["FIRST"] = r["LB"]; // alias
     r["NEXT"] = r["UB"];
     r["REM"] = {::REM,{"write","keys","data"}};
-    r["DEL"] = {::REM,{"write","keys","data"}};
+    r["DEL"] = {::DEL,{"write","keys","data"}};
     r["RANGE"] = {::RANGE,{"read","keys","data"}, true};
     r["TTL"] = {::TTL,{"read","keys","data"}};
 }

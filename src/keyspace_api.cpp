@@ -234,9 +234,43 @@ int cmd_USE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, USE);
 }
+/* SELECT <index> | <name>
+ *
+ * redis's SELECT takes a database number. This used to be another name for USE, so
+ * `SELECT 1` gave a key space literally called "1" - which works, but means the numbered
+ * databases a redis client believes it is switching between are only spaces whose names
+ * happen to be digits, and `SELECT 0` matched the default space by a special case.
+ *
+ * A number is now a database: 0 is the default space, n above zero is `db<n>`. A name
+ * still selects that space, which barch has always allowed here, so this is a superset of
+ * redis rather than a departure and nothing that used the name form has to change. USE
+ * remains the command that only takes a name. See TODO 38.
+ */
+int SELECT(caller& call, const arg_t& argv) {
+    if (argv.size() != 2) {
+        return call.wrong_arity();
+    }
+    long long index = 0;
+    if (conversion::to_ll(argv[1], index)) {
+        if (index < 0) {
+            return call.push_error("DB index is out of range");
+        }
+        if (index == 0) {
+            call.use("");
+        } else {
+            call.use("db" + std::to_string(index));
+        }
+        return call.push_simple("OK");
+    }
+    // not a number, so barch's own form: a key space chosen by name. This is a superset
+    // of what redis accepts rather than a departure from it, and spacethreadtest.py
+    // exercises it on purpose - "Yes! we can select strings too"
+    call.use(argv[1].to_string());
+    return call.push_simple("OK");
+}
 int cmd_SELECT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
-    return call.vk_call(ctx, argv, argc, USE);
+    return call.vk_call(ctx, argv, argc, SELECT);
 }
 int UNLOAD(caller& call, const arg_t& argv) {
     if (argv.size() == 1) {
@@ -467,7 +501,7 @@ void register_keyspace_api(function_map& r) {
     r["DBSIZE"] = {::SIZE,{"read"}};
     r["SIZEALL"] = {::SIZEALL,{"read"}};
     r["USE"] = {::USE,{"write"}};
-    r["SELECT"] = {::USE,{"write"}};
+    r["SELECT"] = {::SELECT,{"write"}};
     r["KSOPTIONS"] = {::KSOPTIONS,{"write"}};
     r["UNLOAD"] = {::UNLOAD,{"write"}};
     r["SPACES"] = {::SPACES,{"read"}};
@@ -475,6 +509,8 @@ void register_keyspace_api(function_map& r) {
     r["SAVE"] = {::SAVE,{"read"}};
     r["SAVEALL"] = {::SAVEALL,{"read"}};
     r["FLUSHDB"] = {::CLEAR,{"write","dangerous"}};
-    r["FLUSHALL"] = {::CLEAR,{"write","dangerous"}};
+    // FLUSHALL reaches every key space, as it does in redis; FLUSHDB stays on the
+    // selected one. these were the same handler, so FLUSHALL cleared only one space
+    r["FLUSHALL"] = {::CLEARALL,{"write","dangerous"}};
     r["CLEARALL"] = {::CLEARALL,{"write","dangerous"}};
 }

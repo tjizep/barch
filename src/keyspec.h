@@ -180,66 +180,73 @@ namespace art {
 
         key_spec(const key_spec &) = delete;
 
+        /**
+         * SET's options, in any order.
+         *
+         * This used to walk a cursor through fixed positions, so the options had to
+         * arrive in one particular sequence: `SET k v GET NX` was accepted and
+         * `SET k v NX GET` was a syntax error, which no redis client would predict.
+         * It now loops over whatever is left after the key and the value and takes each
+         * word as it comes, refusing a word it does not know and a duplicate or
+         * contradictory pair. See TODO 38.
+         *
+         * The `H` flag that used to be parsed here is gone. It set `hash`, which SET then
+         * overwrote from the key space's own setting on the next line, so it never did
+         * anything; redis has no such option and it is now refused like any other unknown
+         * word.
+         */
         int parse_options() {
             if (argc < 3) {
                 none = true;
                 return VALKEYMODULE_OK;
             }
-            unsigned spos = 3; // the keys are one and two
-            get = has("get", spos);
-            if (get) ++spos;
-
-            if (argc <= spos)
-                return VALKEYMODULE_OK;
-
-            nx = has("nx", spos);
-
-            if (!nx) {
-                xx = has("xx", spos);
-                if (xx) ++spos;
-            } else {
-                ++spos;
-            }
-
-            if (argc <= spos)
-                return VALKEYMODULE_OK;
-
-            if (has("ex", spos) || has("px", spos)) {
-                if (argc <= spos + 1)
-                    return VALKEYMODULE_ERR;
-
-                if (has("ex", spos)) {
-                    ttl = tol(++spos) * 1000 + now();
-                } else {
-                    ttl = tol(++spos) + now();
+            bool seen_ttl = false;
+            unsigned spos = 3; // the key is one and the value is two
+            while (spos < argc) {
+                if (has("get", spos)) {
+                    if (get) return VALKEYMODULE_ERR;
+                    get = true;
+                    ++spos;
+                    continue;
                 }
-                if (!is_integer(spos)) {
-                    return VALKEYMODULE_ERR;
+                if (has("nx", spos)) {
+                    if (nx || xx) return VALKEYMODULE_ERR;
+                    nx = true;
+                    ++spos;
+                    continue;
                 }
-                ++spos;
-            } else if (has("exat", spos) || has("pxat", spos)) {
-                if (argc <= spos + 1)
-                    return VALKEYMODULE_ERR;
-
-                if (has("exat", spos)) {
-                    ttl = tol(++spos) * 1000;
-                } else {
-                    ttl = tol(++spos);
+                if (has("xx", spos)) {
+                    if (nx || xx) return VALKEYMODULE_ERR;
+                    xx = true;
+                    ++spos;
+                    continue;
                 }
-                ++spos;
+                if (has("keepttl", spos)) {
+                    if (keepttl || seen_ttl) return VALKEYMODULE_ERR;
+                    keepttl = true;
+                    ++spos;
+                    continue;
+                }
+                const bool ex   = has("ex", spos);
+                const bool px   = has("px", spos);
+                const bool exat = has("exat", spos);
+                const bool pxat = has("pxat", spos);
+                if (ex || px || exat || pxat) {
+                    if (seen_ttl || keepttl) return VALKEYMODULE_ERR;
+                    if (argc <= spos + 1) return VALKEYMODULE_ERR;
+                    if (!is_integer(spos + 1)) return VALKEYMODULE_ERR;
+                    int64_t given = tol(spos + 1);
+                    if (ex)   ttl = given * 1000 + now();
+                    if (px)   ttl = given + now();
+                    if (exat) ttl = given * 1000;
+                    if (pxat) ttl = given;
+                    seen_ttl = true;
+                    spos += 2;
+                    continue;
+                }
+                return VALKEYMODULE_ERR; // a word we do not know
             }
-            if (has("keepttl", spos)) {
-                keepttl = true;
-                ++spos;
-            }
-            if (has("h", spos)) {
-                hash = true;
-                ++spos;
-            }
-            if (argc == spos) // all known arguments should be consumed
-                return VALKEYMODULE_OK;
-
-            return VALKEYMODULE_ERR;
+            return VALKEYMODULE_OK;
         }
     };
 
@@ -278,6 +285,11 @@ namespace art {
             xx = has("xx", spos);
             gt = has("gt", spos);
             lt = has("lt", spos);
+            if (!nx && !xx && !gt && !lt) {
+                // the word in this position used to be consumed whatever it said, so
+                // `EXPIRE k 10 NONSENSE` was quietly taken as no condition at all
+                return VALKEYMODULE_ERR;
+            }
             ++spos;
             if (argc <= spos)
                 return VALKEYMODULE_OK;

@@ -6,6 +6,7 @@
 #define HASH_ARENA_H
 #include "logical_address.h"
 #include <fstream>
+#include <stdexcept>
 #include <utility>
 #include <page_modifications.h>
 #include <unordered_set>
@@ -611,11 +612,20 @@ namespace arena {
         [[nodiscard]] uint8_t *get_page_data(logical_address r, bool) const {
             size_t page_pos = r.page() * physical_page_size;
             size_t offset = r.offset();
+            // these two validate an address that can have come out of a file, so they
+            // are reporting bad input rather than a broken invariant, and they throw
+            // instead of aborting. shard::load already wraps _load in a try/catch that
+            // logs "could not load", which is where a bad file is meant to end up;
+            // abort() walked straight past it. Inside the valkey module it was worse
+            // than a crash - several loader threads abort at once, valkey's
+            // sigsegvHandler takes a global lock and then joins the main thread, which
+            // is itself waiting for that lock, and the process hangs at zero cpu
+            // instead of dying. See TODO 42
             if (cow == nullptr && cow_size > 0) {
-                abort_with("invalid CoW page data");
+                throw_exception<std::runtime_error>("invalid CoW page data");
             }
             if (page_pos + offset > std::max(cow_size, page_data_size)) {
-                abort_with("invalid page address");
+                throw_exception<std::runtime_error>("invalid page address");
             }
             if (cow != nullptr) {
                 return get_cow_page(r.page(), r.offset());

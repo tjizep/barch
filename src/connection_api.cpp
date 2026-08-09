@@ -222,7 +222,7 @@ int add_connection_api(ValkeyModuleCtx *ctx) {
 
 void register_connection_api(function_map& r) {
     r["PING"] = {::PING,{"read","connection"}};
-    r["CLIENT"] = {::CLIENT,{"read","stats"}};
+    r["CLIENT"] = {::CLIENT,{"read","connection"}};
     r["HELLO"] = {::HELLO,{"connection"}};
     r["MULTI"] = {::MULTI,{"write"}};
     r["EXEC"] = {::EXEC,{"write"}};

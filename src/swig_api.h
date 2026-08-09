@@ -296,7 +296,7 @@ public:
     long long len(const std::string &key);
     std::string back(const std::string &key);
     std::string front(const std::string &key);
-    long pop(const std::string &key,long long count);
+    std::vector<Value> pop(const std::string &key,long long count);
     Value brpop(const std::string &key, double timeout);
     Value blpop(const std::string &key, double timeout);
 };

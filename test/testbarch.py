@@ -86,10 +86,13 @@ assert(z.diffstore("z1.2",["z1","z2"]).i()==1)
 assert(z.diffstore("z2.1",["z2","z1"]).i()==1)
 assert(z.card("z2.1").i() == 1)
 
-assert(z.popmin("z1").i() == 1)
+# ZPOPMIN and ZPOPMAX answer member first and score second, as redis does - they used
+# to answer score first, and popmin()/popmax() hand back the first element, so these
+# read the member now rather than the score. See DONE 33
+assert(z.popmin("z1").s() == "one")
 assert(z.card("z1").i() == 2)
 assert(z.range("z1",1.99,3.01,["WITHSCORES"])[1].d() == 2)
-assert(z.popmax("z1").i() == 3)
+assert(z.popmax("z1").s() == "three")
 assert(z.range("z1",1.99,3.01,["WITHSCORES"])[1].d() == 2)
 s = barch.size()
 assert(z.remove("z1","1").i() == 1)

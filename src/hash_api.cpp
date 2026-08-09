@@ -16,11 +16,18 @@
 static thread_local composite query;
 extern "C"{
 int HSET(caller& cc, const arg_t& args) {
+    // `added` counts fields that were not there before, which is what redis replies
+    // with. `updated` counts the ones that were, and is only kept because insert wants
+    // a callback
+    int64_t added = 0;
     int64_t updated = 0;
 
     auto fc = [&](const art::node_ptr&) -> void {
         ++updated;
     };
+    if (args.size() < 4 || (args.size() % 2) != 0) {
+        return cc.wrong_arity();
+    }
     if (key_ok(args[1]) != 0) {
         return cc.push_null();
     }
@@ -40,12 +47,14 @@ int HSET(caller& cc, const arg_t& args) {
             art::value_type key = query.create();
             art::value_type val = args[n+1];
 
-            t->insert(key, val, true, fc);
+            if (t->insert(key, val, true, fc)) {
+                ++added;
+            }
 
             query.pop_back();
         }
     });
-    return cc.push_bool(updated);
+    return cc.push_ll(added);
 }
 }
 int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -55,6 +64,71 @@ int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int cmd_HMSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return cmd_HSET(ctx, argv, argc);
+}
+
+
+/**
+ * Add a number to one hash field, creating the field when it is not there.
+ *
+ * HUPDATEEX cannot do this on its own: its updater is only reached through
+ * shard::update, which does nothing when the key is absent, so a missing field was
+ * left alone and the reply was the zero the accumulator started at. This mirrors what
+ * BarchModifyInteger does for plain keys - the miss and the insert that follows it run
+ * under one container write lock, so two callers cannot both decide the field is
+ * missing and both create it.
+ */
+template<typename NumT>
+static int HNUMERIC(caller& call, const arg_t& argv, NumT by, bool as_double) {
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    auto n = argv[1];
+    auto f = argv[2];
+    if (key_ok(n) != 0 || key_ok(f) != 0) {
+        return call.push_null();
+    }
+    NumT l = NumT();
+    bool ok = false;
+    // as in keys_api: a field that is present but not numeric must not be taken for an
+    // absent one and overwritten by the increment
+    bool present = false;
+    numeric_status why = numeric_status::updated;
+    barch::sharded_store store(call.kspace());
+    store.with_container_write(n, [&](const barch::shard_ptr& t) {
+        query.create({conversion::convert(n)});
+        query.push(conversion::convert(f));
+        art::value_type key = query.create();
+        auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
+            if (old.null()) {
+                return nullptr;
+            }
+            present = true;
+            auto v = leaf_numeric_update(l, old, by, why);
+            if (!v.null()) ok = true;
+            return v;
+        };
+        if (!t->update(key, updater)) {
+            if (!present) {
+                // field absent: start it at the increment, as redis does
+                l = by;
+                Variable v = l;
+                std::string held = v.s();
+                auto fc = [&](const art::node_ptr &) -> void {};
+                t->insert(key, art::value_type{held}, true, fc);
+                ok = true;
+            }
+        }
+        query.pop_back();
+    });
+    if (!ok) {
+        if (present && why == numeric_status::overflowed) {
+            return call.push_error("increment or decrement would overflow");
+        }
+        return call.push_error("hash value is not an integer");
+    }
+    if (as_double) {
+        return call.push_double((double) l);
+    }
+    return call.push_ll((int64_t) l);
 }
 
 int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
@@ -237,25 +311,13 @@ int cmd_HGETEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HINCRBY(caller& call, const arg_t &argv) {
+    long long by = 0;
     if (argv.size() != 4)
         return call.wrong_arity();
-
-    long long by = 0;
-
     if (!conversion::to_ll(argv[3], by)) {
-        return call.wrong_arity();
+        return call.push_error("value is not an integer or out of range");
     }
-    long long l = 0;
-    auto vmin = argv;
-    vmin.pop_back();
-    int r = HUPDATEEX(call, vmin, 2, false,
-                      [&](const art::node_ptr &old) -> art::node_ptr {
-                          return leaf_numeric_update(l, old, by);
-                      });
-    if (r == VALKEYMODULE_OK) {
-        return call.push_ll(l);
-    }
-    return call.push_null();
+    return HNUMERIC<long long>(call, argv, by, false);
 }
 
 int cmd_HINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -264,24 +326,13 @@ int cmd_HINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HINCRBYFLOAT(caller& call, const arg_t &argv) {
+    double by = 0;
     if (argv.size() != 4)
         return call.wrong_arity();
-    double by = 0;
     if (!conversion::to_double(argv[3], by)) {
-        return call.wrong_arity();
+        return call.push_error("value is not a valid float");
     }
-    int r = 0;
-    double l = 0;
-    auto arg2 = argv;
-    arg2.pop_back();
-    r = HUPDATEEX(call, arg2, 2, false,
-                  [&l,by](const art::node_ptr &old) -> art::node_ptr {
-                      return leaf_numeric_update(l, old, by);
-                  });
-    if (r == VALKEYMODULE_OK) {
-        return call.push_double(l);
-    }
-    return call.push_null();
+    return HNUMERIC<double>(call, argv, by, true);
 }
 
 int cmd_HINCRBYFLOAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -377,8 +428,18 @@ int cmd_HGETDEL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, HGETDEL);
 }
 
+/**
+ * Shared field lookup for the H* readers.
+ *
+ * `as_array` is what separates the multi field readers from the single field ones.
+ * HMGET and HTTL answer for a list of fields and so wrap their replies in an array;
+ * HGET and HEXISTS answer for exactly one thing and must not, because a redis client
+ * reading HGET expects a bulk string and HEXISTS expects an integer. Wrapping those
+ * was what produced the one element array HGET used to return.
+ */
 int HQUERY(caller& call,const arg_t& argv, bool fancy,
-           const std::function<void(art::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter) {
+           const std::function<void(art::node_ptr leaf)> &reporter, const std::function<void()> &nullreporter,
+           bool as_array) {
 
     if (argv.size() < 3)
         return call.wrong_arity();
@@ -417,7 +478,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
             return;
         }
     }
-    call.start_array();
+    if (as_array) call.start_array();
     for (size_t arg = fields_start; arg < argv.size(); ++arg) {
         auto k = argv[arg];
         if (key_ok(k) != 0) {
@@ -436,16 +497,16 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
             ++responses;
         }
     }
-    call.end_array();
+    if (as_array) call.end_array();
     });
     return missing ? call.push_null() : call.ok();
 }
 
 int HGET_(caller& call, const arg_t& argv,
-         const std::function<void(art::node_ptr leaf)> &reporter) {
+         const std::function<void(art::node_ptr leaf)> &reporter, bool as_array) {
     return HQUERY(call, argv, false, reporter, [&]()-> void {
         call.push_null();
-    });
+    }, as_array);
 }
 extern "C"
 int HTTL(caller& call,const arg_t& argv) {
@@ -461,7 +522,7 @@ int HTTL(caller& call,const arg_t& argv) {
     auto nullreport = [&]() -> void {
         call.push_ll(-2);
     };
-    int r = HQUERY(call, argv, true, reporter, nullreport);
+    int r = HQUERY(call, argv, true, reporter, nullreport, true);
     return r;
 }
 int cmd_HTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -470,11 +531,15 @@ int cmd_HTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HGET(caller& call, const arg_t& argv) {
+    // one key and one field, and the value comes back as a bulk string. It used to be
+    // wrapped in a one element array because it shared HMGET's reply path
+    if (argv.size() != 3)
+        return call.wrong_arity();
     auto reporter = [&](art::node_ptr r) -> void {
         auto vt = r.const_leaf()->get_value();
         call.push_vt(vt);
     };
-    return HGET_(call, argv, reporter);
+    return HGET_(call, argv, reporter, false);
 }
 
 extern "C"
@@ -483,7 +548,7 @@ int HMGET(caller& call, const arg_t& argv) {
         auto vt = r.const_leaf()->get_value();
         call.push_vt(vt);
     };
-    return HGET_(call, argv, reporter);
+    return HGET_(call, argv, reporter, true);
 }
 
 int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -533,7 +598,8 @@ int HEXPIRETIME(caller& call, const arg_t& argv) {
         auto l = r.const_leaf();
         call.push_ll(l->expiry_ms() / 1000);
     };
-    return HQUERY(call, argv, true, reporter, [&]()-> void {call.push_null();});
+    // a FIELDS form reader, so it keeps the array
+    return HQUERY(call, argv, true, reporter, [&]()-> void {call.push_null();}, true);
 }
 
 int cmd_HEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -621,13 +687,16 @@ int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int HEXISTS(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
     int cnt = 0;
     auto reporter = [&](art::node_ptr unused(r)) -> void {
         ++cnt;
     };
+    // no array: the reply is the flag on its own, as a redis client expects
     int r = HQUERY(call, argv, false, reporter, [&]()-> void {
 
-    });
+    }, false);
     if (r == call.ok()) {
         return call.push_bool(cnt>0);
     }
@@ -711,7 +780,7 @@ void register_hash_api(function_map& r) {
     r["HTTL"] = {::HTTL,{"read","hash","data"}};
     r["HGET"] = {::HGET,{"read","hash","data"}};
     r["HLEN"] = {::HLEN,{"read","hash","data"}};
-    r["HEXPIRETIME"] = {::HEXPIRETIME,{"write","hash","data"}};
+    r["HEXPIRETIME"] = {::HEXPIRETIME,{"read","hash","data"}};
     r["HGETALL"] = {::HGETALL,{"read","hash","data"}};
     r["HKEYS"] = {::HKEYS,{"read","hash","data"}};
     r["HEXISTS"] = {::HEXISTS,{"read","hash","data"}};

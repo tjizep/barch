@@ -619,9 +619,23 @@ namespace barch {
                         barch::err({reply_length,"!=",buffers_size});
                         throw_exception<std::length_error>("invalid reply length");
                     }
-                    for (size_t i = 0; i < buffers_size; i++) {
+                    // get_variable answers with the offset of the *next* variable, so
+                    // the loop must not advance i as well. It used to be a for loop with
+                    // an i++, which stepped one byte past each value after the first -
+                    // so the second variable onwards was decoded from a type byte taken
+                    // out of the middle of the preceding payload. The first element of a
+                    // reply was right and everything after it came back as whatever that
+                    // stray byte happened to mean, usually a bool or a double. Only a
+                    // reply with more than one value could show it, which is why every
+                    // remote binding that answers with an array was wrong and nothing
+                    // noticed. See TODO 44
+                    size_t i = 0;
+                    while (i < buffers_size) {
                         auto v = get_variable(i, replies);
                         result.emplace_back(v.first);
+                        if (v.second <= i) {
+                            throw_exception<std::runtime_error>("reply decode made no progress");
+                        }
                         i = v.second;
                     }
                     stream.clear();

@@ -264,12 +264,16 @@ public:
         switch (index()) {
             case var_bool:
                 return std::get<bool>(*this);
+            // a number is true when it is not zero. these three read `== 0`, which is
+            // the opposite, and nothing noticed while the only commands reaching here
+            // answered with a bool. EXISTS started answering with a count and the
+            // binding that calls .b() on it began reporting a key that exists as absent
             case var_int64:
-                return std::get<int64_t>(*this) == 0 ;
+                return std::get<int64_t>(*this) != 0 ;
             case var_uint64:
-                return std::get<uint64_t>(*this) == 0 ;
+                return std::get<uint64_t>(*this) != 0 ;
             case var_double:
-                return std::get<double>(*this) == 0.0f;
+                return std::get<double>(*this) != 0.0;
             case var_string:
                 return conversion::to_e<int>(bulk_str(std::get<std::string>(*this))) > 0;
             case var_array:

@@ -1482,3 +1482,219 @@ Measured: full suite green, 51 of 51, including two new tests - `rangeroutetest.
 routing, balance, ordered reads, deletes and reload, and `rangeconverttest.py` for the
 hash to range conversion, which needs two processes because a key space reads its
 options once.
+
+## 32. Every Z* command declared an ACL category that does not exist [09-08-2026]
+
+All twenty-one ordered set commands registered `ordered` as one of their ACL categories.
+There is no such category. The list in `barch_apis.cpp` defines the name as `orderedset`,
+`cats2vec` discards any name it does not recognise, and so the bit was never set on a
+single `Z*` entry.
+
+What made that worse than a cosmetic slip is the shape of the authorisation test.
+`is_authorized` in `rpc/asio_resp_session.h` walks the categories the *command* declares
+and refuses the call if the user is missing any of them. A category a command never
+declares therefore cannot be required, and cannot be revoked either. The effect was that
+any user holding `read`, `write` and `data` reached every ordered set command whether or
+not they had been granted `orderedset`, and taking `orderedset` away from a user changed
+nothing at all. `docs/ACL.md` has always described category 6 as "orderedset : for Z*
+calls", which is what it was meant to mean and now does.
+
+Found while generating the RESP command index for `barch-docs.html` from the registration
+tables, which is a fair argument for generating documentation out of source rather than
+writing it alongside: nobody reading either file had noticed, and the mismatch was obvious
+the moment the two were put in the same table.
+
+The fix is the one word, in the twenty-one registrations in `ordered_api.cpp`. Nothing
+else refers to the category by name, so nothing else moved.
+
+Worth knowing about the failure mode rather than just the instance: category names are
+strings checked at runtime against a list, and an unknown one is dropped rather than
+rejected. That fails open. A misspelling in any future registration will widen access to
+that command instead of breaking it, and will do so silently. The obvious guards are to
+reject unknown names where the entry is built instead of ignoring them, and to have at
+least one test that asserts a category is genuinely enforced, since none currently does -
+which is the other reason this survived.
+
+## 33. The RESP commands that answered with the wrong thing [09-08-2026]
+
+Documenting all 110 commands (TODO 35) turned up a long list of places where a command
+did not do what its name promises a redis client. TODO 37 gathered them and named the
+decision that had to come first: whether the RESP surface is meant to be redis compatible
+or is a barch surface borrowing redis names. That has now been answered - **redis
+compatibility is the aim** - and this entry is the first group fixed under it, being the
+ones that returned a wrong answer or the wrong RESP type. The rest are TODO 38.
+
+Fixed, each verified against a running server rather than only by reading:
+
+  - `SET k v GET` answered with the key instead of the previous value. The insert
+    callback ignored the node it was handed, which is the only place the old value could
+    come from; it now reads and copies it, decompressing where the leaf was compressed.
+    The copy matters because the insert that follows can replace the leaf.
+  - `HINCRBY` and `HINCRBYFLOAT` replied 0 and did nothing whatever. shard::update does
+    not reach its updater when the key is absent, so a missing field was never created,
+    and an accumulator that started at zero was what got replied. Both now go through a
+    new HNUMERIC helper that does update-or-create under one container write lock, which
+    is the same shape BarchModifyInteger already used for plain keys.
+  - `HSET` always replied 0. It counted the insert callback, which only fires for a field
+    that was already there; it now counts what `insert` reports as newly added.
+  - `HGET` returned a one element array, because it shared HMGET's reply path, and a bare
+    nil when the hash itself was missing - three shapes for one command. HQUERY grew an
+    `as_array` flag: the multi field readers (HMGET, HTTL, HEXPIRETIME) keep the array,
+    the single field ones (HGET, HEXISTS) do not.
+  - `HEXISTS` returned a two element array holding an empty array and then the flag. Same
+    fix; it is now a plain integer.
+  - `TTL` had -1 and -2 the opposite way round from redis, which silently inverts every
+    client's "does this key exist" check. Now -1 is present with no expiry and -2 is no
+    such key.
+  - `EXISTS` answered a single boolean, true only when every named key was present. Now a
+    count, duplicates included, as redis does.
+  - `DEL` was another name for REM, so it took one key and answered with the removed value
+    where a redis client's parser wanted an integer. DEL is now its own handler taking any
+    number of keys and answering with how many were removed. REM keeps its old behaviour
+    under its own name.
+  - `MSET` replied with an integer, and an odd argument list walked off the end of argv
+    and surfaced as small_vector's out_of_range rather than a wrong arity. Now OK, and the
+    pairing is checked up front.
+  - `ZPOPMIN` and `ZPOPMAX` returned the pair score first. Now member first, as redis does.
+  - `FLUSHALL` was the same handler as FLUSHDB and cleared only the selected key space.
+    Now mapped to CLEARALL, so it reaches every space the way redis's does. FLUSHDB is
+    unchanged.
+
+Also tightened while in there: HGET, HEXISTS and HSET now check their arity rather than
+relying on the argv walk to fail, and HSET refuses an odd field/value list.
+
+Not done here, deliberately: the `H` option on SET is still parsed and then overwritten a
+line later. Removing it is a behaviour change of a different kind - it turns an accepted
+no-op into a syntax error - and it belongs with the naming decisions in TODO 38.
+
+Measured: 24 wire level assertions over the changed commands all pass, covering both the
+hit and the miss path of each. The full ctest suite was run to check nothing that depended
+on the old shapes broke.
+
+## 34. SET NX and XX were parsed and then ignored [09-08-2026]
+
+Found by writing the reply shape test in TODO 38, which is the first test in the tree that
+reads the raw wire reply. It asserted redis's answer for `SET k v NX` on a key that
+already exists - nil, nothing written - and got `+OK` back, so the write had gone through.
+
+Both conditions were entirely inert. `key_spec` parses `nx` and `xx` correctly, but
+`key_options`, which is what actually reaches storage, has no flag for either, and the
+`key_options(const key_spec&)` conversion copies expiry, keep_ttl and hashed and drops
+them. Nothing downstream had ever seen them. So `SET k v NX` overwrote a key that was
+already there, and `SET k v XX` created one that was not - both silently, both replying OK.
+
+That is worse than the reply shape defects in DONE 33, because SET NX is the primitive
+every distributed lock is built on. A lock taken with it was never exclusive.
+
+Fixed in SET rather than in key_options. Adding flags to key_options would have been the
+tidier place, but it is serialised by writep/readp and travels between nodes, so a new flag
+is a wire format change for something that does not need to be stored - the condition is
+answered once, at the moment of the write, and is not a property of the key afterwards. So
+SET now takes the owning shard's write lock itself, looks for the key, and decides inside
+that lock whether to insert. The check and the insert have to be under the same lock or two
+callers both find the key absent and both write, which is exactly the race NX exists to
+prevent.
+
+With GET the reply is the previous value whether or not the condition allowed the write,
+which is what redis does. Without GET it is OK when the write happened and nil when the
+condition refused it.
+
+Not fixed, and now written down in TODO 38: option order is still positional, so
+`SET k v NX GET` is a syntax error while `SET k v GET NX` is accepted.
+
+Also added here, and the reason the defect was found at all: `test/respshapetest.py`,
+registered as TestRespShapes. It speaks RESP2 over a socket and asserts the exact bytes of
+45 replies. The suite could not have caught any of this before - every other test drives
+barch through the embedded interface or through redis-py, and redis-py parses a bulk string
+and a one element array holding a bulk string into python values that compare equal. The
+test asserts literal bytes for that reason.
+
+One thing it asserts as it currently behaves rather than as it should: `HINCRBY` on a field
+holding a non numeric value, and `INCR` on a string key, both treat the value as zero and
+overwrite it with the result instead of refusing. `SET s abc` then `INCR s` leaves s as 1.
+That is silent data loss on a type error and it is in TODO 38; the assertion is written so
+it fails when that is fixed.
+
+## 35. A barch abort inside valkey hung the process instead of ending it [09-08-2026]
+
+Reported twice as "there are valkey-servers not using any cpu". Caught the third one while
+it was still running and traced all seven threads, which answered it outright.
+
+Several `barch::shard::load` threads went through art::resolve_read_node and
+logical_allocator::basic_resolve into arena::base_hash_arena::get_page_data, and hit
+`abort_with("invalid page address")`. More than one thread called abort() at the same
+moment. abort raises SIGABRT, valkey handles it in sigsegvHandler, and that takes a global
+`signal_handler_lock` - three threads were parked there. The thread that won the lock went
+on into printCrashReport, doFastMemoryTest, killThreads and killMainThread, which calls
+pthread_join on the main thread. The main thread was one of the ones waiting for
+signal_handler_lock. So valkey's crash reporter joins a thread that is waiting for the
+crash reporter's own lock, nothing progresses, nothing uses cpu, and the process never
+exits.
+
+Worth recording that the hypothesis this replaced was wrong. The symptom - threads parked
+on a futex, zero cpu, at shutdown - fits static destruction order well enough that it was
+worth checking, and there was a genuine hazard of that shape in shared_mutex.cpp which is
+now fixed anyway (TODO 41). But it was not this. One gdb invocation settled in a screen
+what the theory could not:
+
+    gdb -p <pid> -batch -ex "set pagination off" -ex "thread apply all bt"
+
+The fix is that an address which fails validation while reading a shard file is bad input,
+not a broken invariant, and it now throws instead of aborting. The four sites are the two
+in hash_arena.h's get_page_data and the two in logical_allocator.h's address validator.
+`barch::shard::load` already wrapped `_load` in a try/catch that logs "could not load" and
+returns false - the intent was there all along, and abort() simply walked past it.
+
+Measured against the exact data that produced the hang: valkey-server loads with the
+module, reports "could not load invalid page address" 490 times, one line per unreadable
+shard, then serves normally - PING answers PONG, B.SET and B.GET round trip - and
+SHUTDOWN NOSAVE exits cleanly with no process left behind. Before the change the same
+binary against the same directory hung with all threads in futex_do_wait.
+
+What is deliberately not addressed here is why those addresses were invalid. That is still
+open in TODO 42; the difference is that a bad shard file now announces itself instead of
+taking the process down.
+
+## 36. The lua test harness never cleaned up, and three tests asserted the old behaviour [09-08-2026]
+
+Two unrelated things that both surfaced while confirming DONE 33 to 35.
+
+**The harness never shut anything down.** `test_starter.cpp` composed its command strings at
+static initialisation:
+
+    static std::string valkey_path = "/_deps/valkey-src/src/";
+    static std::string valkey_cli  = valkey_path + "valkey-cli -p 7777";
+    static std::string ping_cmd    = valkey_cli + " -e PING ";
+
+and `main` then called `wait_to_stop()` *before* assigning `test_build_dir = argv[3]`. So the
+shutdown it sent went to a bare `/_deps/valkey-src/src/valkey-cli`, which does not exist. The
+shell reported "not found", `wait_to_stop` treated the non-zero result as "no server running"
+and returned success, and a valkey-server left over from an earlier run was never cleared. The
+next test then could not bind port 7777. That is why TestAbc, TestKeys and TestComposites
+failed in ways that had nothing to do with what they were testing, and it is the other half of
+why leaked servers were so disruptive - nothing ever collected them.
+
+Fixed both ends: `test_build_dir` is read before anything shells out, and the composed commands
+are now functions rather than statics, so none of them can be built from a value that has not
+been set yet. This is the pattern the rest of the tree already uses for `ksp()` and `latch()`.
+
+Worth noting the shape, because it is easy to miss: it is not an initialisation *order* bug
+between translation units, which is the usual suspect. All of these are in one file and
+initialise in declaration order. It is a stale *copy* - a string built from another string
+before the second one was finished with. A getter fixes it for the same reason it fixes the
+cross-TU case.
+
+**Three tests asserted behaviour that DONE 33 and 34 corrected**, which is the expected cost of
+changing a documented reply and is recorded here so it is clear they were updated deliberately
+rather than made to pass:
+
+  - `testbarch.py` read `z.popmin("z1").i()` expecting the score, because ZPOPMIN answered
+    score first. It answers member first now, so the assertion reads `.s() == "one"`. Worth
+    knowing that the old form did not fail an assertion - `.i()` on a non numeric string throws
+    out of `to_e`, uncaught, and terminated the interpreter.
+  - `testkeys.lua` asserted `B.SET j 1 get` returns `'j'`, the key. It returns the previous
+    value now, which is `'1'`.
+  - `testcomposites.lua` read `B.HGET(...)[1]`, indexing the one element array HGET used to be
+    wrapped in. It is a bulk string now. The same file already asserted that HINCRBY returns 1
+    then 3, which is correct redis behaviour that could not pass until HINCRBY was fixed - so
+    that file had been recording the right answer and failing against the wrong one.

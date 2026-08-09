@@ -25,13 +25,17 @@ local failures = 0
 for i=1,1000 do
     local min = math.floor((count-count/10)*math.random())
     local max = min + count/10 --count*math.random()--math.floor()
-    local zr = vk.call('B.ZRANK',key,min,max)
+    -- ZCOUNT is the slow reference now. This used to compare against ZRANK, which took
+    -- two bounds and counted between them, but ZRANK has redis's meaning now - a member
+    -- and its position - so ZCOUNT is the command that still asks this question. See
+    -- TODO 38
+    local zr = vk.call('B.ZCOUNT',key,min,max)
     local zr2 = vk.call('B.ZFASTRANK',key,min,max)
     if math.abs(zr-zr2) > 0 then
         local tr = {
             {"min: "..min},
             {"max: "..max},
-            {"guess","slow zr : "..zr,"fast zr: "..zr2},
+            {"guess","zcount : "..zr,"fast zr: "..zr2},
             {"actual 1: "..zr},
             {"max - min: "..(max-min)},
             {"diff",zr2-zr}}

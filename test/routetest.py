@@ -2,6 +2,7 @@ import sys
 import os
 import barch
 import subprocess
+import atexit
 import time
 # test a simple cluster by adding publish replication and some routes
 # start the valkey server
@@ -19,10 +20,18 @@ clidir = f"{os.getcwd()}/_deps/valkey-src/src/"
 
 serverCmd = [f"{serverdir}valkey-server", "--port", "7777", "--loadmodule", f"{barchdir}/_barch.so"]
 serverProc = subprocess.Popen(serverCmd,cwd=serverdir)
+# kill it even when an assertion below fails: without this a failed run leaves
+# valkey-server alive holding its port, and the next run hangs trying to bind
+atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)
+
 time.sleep(1)
 # sourcestart.lua starts a barch on port 14000 and adds some data while publishing to port 13000
 cliCmd = [f"{clidir}valkey-cli", "-p", "7777", "--eval", f"{srcdir}/sourcestart.lua"]
 cliProcess = subprocess.Popen(cliCmd)
+# kill it even when an assertion below fails: without this a failed run leaves
+# valkey-server alive holding its port, and the next run hangs trying to bind
+atexit.register(lambda p=cliProcess: p.kill() if p.poll() is None else None)
+
 time.sleep(1) # wait for published data to come here
 barch.clear()
 barch.save()

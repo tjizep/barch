@@ -592,6 +592,14 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeconverttest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the exact bytes each command answers with. Everything else drives barch through
+        # the embedded interface or through redis-py, and neither can see a reply shape -
+        # redis-py parses a bulk string and a one element array holding one into values
+        # that compare equal. Every defect in DONE 33 was invisible to the suite without it
+        add_test(NAME TestRespShapes
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/respshapetest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestBindings
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/bindingtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

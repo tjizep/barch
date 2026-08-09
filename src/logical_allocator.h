@@ -583,11 +583,15 @@ private:
         if (test_memory == 1) {
             if (!allocated) {
                 barch::err({"failure for",main.name,at.address(), at.page(), at.offset()});
-                abort_with("use after free - no data allocated ");
+                // reached with an address read out of a shard file as well as with a
+                // genuine use after free, and the loader cannot tell them apart. Throwing
+                // lets shard::load report the file it could not read; aborting took the
+                // whole process down, and inside valkey it hung it instead. See TODO 42
+                throw_exception<std::runtime_error>("use after free - no data allocated");
             }
             if (erased.contains(at.address())) {
                 barch::err({"failure for",main.name,at.address(), at.page(), at.offset()});
-                abort_with("use after free");
+                throw_exception<std::runtime_error>("use after free");
             }
         }
         if (at.null()) return nullptr;
@@ -836,6 +840,7 @@ public:
             }
             at.second.fragmentation -= size;
             invalid(r);
+
 
             auto *data = test_memory == 1 ? basic_resolve(r) : nullptr;
             if (test_memory == 1 && data[sz] != 0) {

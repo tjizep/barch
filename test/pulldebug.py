@@ -2,6 +2,7 @@ import sys
 import os
 import barch
 import subprocess
+import atexit
 import time
 
 #start the valkey server
@@ -23,12 +24,18 @@ cliProcess = None
 if launchServer :
     serverCmd = [f"{serverdir}valkey-server", "--port","7777",f"--loadmodule", f"{barchdir}/_barch.so"]
     serverProc = subprocess.Popen(serverCmd,cwd=barchdir)
+    # kill it even when an assertion below fails: without this a failed run leaves
+    # valkey-server alive holding its port, and the next run hangs trying to bind
+    atexit.register(lambda p=serverProc: p.kill() if p.poll() is None else None)
 time.sleep(1)
 
 
 if launchServer :
     cliCmd = [f"{clidir}valkey-cli","-p","7777", f"--eval", f"{srcdir}/smallsourcestart.lua"]
     cliProcess = subprocess.Popen(cliCmd)
+    # kill it even when an assertion below fails: without this a failed run leaves
+    # valkey-server alive holding its port, and the next run hangs trying to bind
+    atexit.register(lambda p=cliProcess: p.kill() if p.poll() is None else None)
 
 time.sleep(10)
 # published keys are received here

@@ -46,16 +46,24 @@ local test = function()
     assert(vk.call('B.EXISTS','j'))
 
     call = call + 1
+    -- SET ... GET answers with the value that was replaced, not with the key. j holds "1"
+    -- from the call above, so that is what comes back. It used to answer with the key,
+    -- which is what this test asserted - see DONE 33
     res = vk.call('B.SET','j',1,'get','px',10)
-    if  res == 'j' then
+    if  res == '1' then
         successes = successes + 1
         result[inc()] = {call, res, successes, 'ok'}
     else
         result[inc()] = {call, res, successes, 'fail'}
     end
     call = call + 1
-    res = vk.call('B.SET','j',1,'get','px',10,"keepttl")
-    if res == 'j' then
+    -- the same call with the options the other way round, which the parser used to
+    -- refuse because it read them positionally. PX and KEEPTTL together is not tested
+    -- here any more: they contradict each other and redis rejects the pair, so this now
+    -- does too. The px 10 above means j may already have expired, in which case there is
+    -- no previous value and the reply is nil
+    res = vk.call('B.SET','j',1,'px',10,'get')
+    if res == '1' or not res then
         successes = successes + 1
         result[inc()] = {call, res, successes, 'ok'}
     else

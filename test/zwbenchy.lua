@@ -52,7 +52,11 @@ local test = function()
     t = vk.call('B.MILLIS')
     for i = 1, count do
         local k = convert(i)
-        vk.call('B.SET', k, i, 'H')
+        -- the 'H' flag used to be accepted here and did nothing: SET parsed it into
+        -- spec.hash and then overwrote that from the key space's own setting on the next
+        -- line. It is refused now, like any other word SET does not know. Whether keys
+        -- are hashed or ordered is a property of the space - see TODO 38
+        vk.call('B.SET', k, i)
     end
     local valids = 0
 

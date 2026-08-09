@@ -38,7 +38,26 @@ struct rh_state {
     }
 };
 
-static rh_state s;
+/**
+ * The registry every shared_mutex reads on lock and unlock.
+ *
+ * It used to be a file scope `static rh_state s;`, which is a destruction order hazard
+ * rather than an initialisation one. The threads that take these locks - accept threads,
+ * resp workers, the session collector - are not all joined before static destruction
+ * runs, and a thread that reaches unlock() or release_thread() after `s` has been
+ * destroyed locks a destroyed std::mutex and walks a destroyed unordered_set. Locking a
+ * destroyed pthread mutex does not usually fault; it blocks, which is why a process in
+ * that state sits at zero cpu and never exits.
+ *
+ * So the object is reached through a function, which fixes the order it is created in,
+ * and it is deliberately never destroyed - the allocation is not a leak that grows, it
+ * is one object kept alive on purpose so that it outlives every thread that might still
+ * be holding a lock on the way out.
+ */
+static rh_state& state() {
+    static rh_state* s = new rh_state();
+    return *s;
+}
 
 thread_local int64_t rh_shared::thread_id = -1;
 
@@ -49,17 +68,17 @@ void rh_shared::init_thread() {
     if (rh_shared::thread_id > -1) {
         abort_with ("thread already initialized");
     }
-    std::lock_guard ini(s.get_mutex() );
-    if (!s.get_released().empty()) {
-        rh_shared::thread_id = *s.get_released().begin();
+    std::lock_guard ini(state().get_mutex() );
+    if (!state().get_released().empty()) {
+        rh_shared::thread_id = *state().get_released().begin();
         if (use_logging)
             barch::log({"reusing thread id",thread_id});
-        s.get_active()[thread_id] = true;
-        s.get_released().erase(rh_shared::thread_id);
+        state().get_active()[thread_id] = true;
+        state().get_released().erase(rh_shared::thread_id);
         return;
     }
-    rh_shared::thread_id = ++s.get_initializer();
-    s.get_active()[thread_id] = true;
+    rh_shared::thread_id = ++state().get_initializer();
+    state().get_active()[thread_id] = true;
 }
 
 void rh_shared::release_thread() {
@@ -68,11 +87,11 @@ void rh_shared::release_thread() {
     }
     if (thread_id < 0) return;
 
-    std::lock_guard ini(s.get_mutex() );
+    std::lock_guard ini(state().get_mutex() );
     if (use_logging)
         barch::log({"releasing thread id",thread_id});
-    s.get_active()[thread_id] = false;
-    s.get_released().insert(rh_shared::thread_id);
+    state().get_active()[thread_id] = false;
+    state().get_released().insert(rh_shared::thread_id);
     rh_shared::thread_id = -1;
 }
 
@@ -147,12 +166,12 @@ bool rh_shared::shared_mutex::try_lock_for(decltype(std::chrono::milliseconds(10
     if (use_logging)
         barch::log({"lock unique",tid,thread_id});
     thread_set threads_entered{};
-    const thread_set& active_threads = s.get_active(); // it's small
+    const thread_set& active_threads = state().get_active(); // it's small
     uint32_t spins = 0;
     for (;;) { // loop until all threads have been excluded
         size_t threads_reading = 0;
 
-        for (auto t = 0; t <= s.get_initializer().load(); ++t) {
+        for (auto t = 0; t <= state().get_initializer().load(); ++t) {
             if (active_threads[t]) {
                 if (!threads_entered[t]) {
                     int32_t test = 0; // can only acquire when its zero
@@ -189,7 +208,7 @@ void rh_shared::shared_mutex::unlock() {
         mutt.unlock();
         return;
     }
-    const thread_set& active_threads = s.get_active(); // it's small
+    const thread_set& active_threads = state().get_active(); // it's small
 
     for (auto t = 0; t < max_threads; ++t) {
         if (active_threads[t]) { // TODO: if active threads where added since lock was called then theres a problem

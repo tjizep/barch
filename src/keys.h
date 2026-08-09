@@ -27,10 +27,28 @@ std::string encoded_key_as_string(art::value_type key);
 
 unsigned log_encoded_key(art::value_type key, bool start = true);
 
+/**
+ * Why a numeric update did not produce a new leaf.
+ *
+ * It used to answer with a null node for all three reasons at once, and shard::update
+ * reports a null the same way it reports a key that was not there. INCR then took the
+ * miss branch and inserted, so `SET s abc` followed by `INCR s` replaced "abc" with 1 -
+ * a type error that silently destroyed the value instead of being refused. The caller
+ * needs to tell the three apart to answer the way redis does.
+ */
+enum class numeric_status {
+    updated,        // a new leaf was produced
+    not_numeric,    // the value that was there is not a number
+    overflowed,     // the arithmetic would wrap
+    compressed      // the leaf is compressed and was not decompressed to try
+};
+
 template<typename UT>
-static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by) {
+static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by, numeric_status& why) {
+    why = numeric_status::updated;
     const art::leaf *leaf = old.const_leaf();
     if (leaf->is_compressed()) {
+        why = numeric_status::compressed;
         return nullptr;
     }
     if (conversion::convert_value(l, leaf->get_value())) {
@@ -40,9 +58,11 @@ static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by)
         auto old = l;
         l += by;
         if ((long long)by > 0ll && l < old) {
+            why = numeric_status::overflowed;
             return nullptr;
         }
         if ((long long)by < 0ll && l > old) {
+            why = numeric_status::overflowed;
             return nullptr;
         }
         auto s = std::to_string(l);
@@ -55,6 +75,7 @@ static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by)
         , leaf->is_compressed()
         );
     }
+    why = numeric_status::not_numeric;
     return nullptr;
 }
 

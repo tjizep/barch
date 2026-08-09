@@ -3,6 +3,7 @@
 //
 
 #include "ordered_api.h"
+#include <cstdlib>
 #include "sharded_store.h"
 #include "conversion.h"
 #include "art/art.h"
@@ -412,6 +413,71 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, ZCOUNT);
 
 }
+
+/**
+ * ZRANGE and ZREVRANGE with start and stop read as positions, which is what redis means
+ * by them unless BYSCORE or BYLEX says otherwise.
+ *
+ * They used to be converted to scores and used as bounds, so `ZRANGE key 0 -1` - the way
+ * almost every example fetches a whole set - described a range whose upper bound sorted
+ * below its lower one and answered empty. See TODO 38.
+ *
+ * Positions are zero based and both ends are inclusive; a negative counts back from the
+ * end, so -1 is the last member. Out of range positions are clamped rather than refused,
+ * again as redis does, so 0 to -1 is the whole set whatever its size and an empty set
+ * answers with an empty array rather than an error.
+ */
+static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_spec &spec) {
+    auto parse = [](const std::string& text, int64_t& out) -> bool {
+        if (text.empty()) return false;
+        char* end = nullptr;
+        long long v = std::strtoll(text.c_str(), &end, 10);
+        if (end == text.c_str() || *end != '\0') return false;
+        out = (int64_t) v;
+        return true;
+    };
+    int64_t start = 0, stop = 0;
+    if (!parse(spec.start, start) || !parse(spec.stop, stop)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+
+    auto container = conversion::convert(spec.key);
+    query lq, pq;
+    auto lower = lq->create({container});
+    auto prefix = pq->create({container}, false);
+
+    // one pass in key order, which is score order. The members are held as they are
+    // found, the way the existing REV path already does, and the shard stays locked
+    // for the whole call
+    heap::std_vector<art::value_type> found;
+    art::iterator ai(t, lower);
+    while (ai.ok()) {
+        auto v = ai.key();
+        if (!v.starts_with(prefix)) break;
+        found.push_back(v.sub(prefix.size, numeric_key_size * 2));
+        ai.next();
+    }
+    const int64_t n = (int64_t) found.size();
+    if (start < 0) start += n;
+    if (stop < 0) stop += n;
+    if (start < 0) start = 0;
+    if (stop >= n) stop = n - 1;
+
+    call.start_array();
+    if (n > 0 && start <= stop && start < n) {
+        for (int64_t i = start; i <= stop; ++i) {
+            // REV counts positions from the high score end
+            const auto& rec = spec.REV ? found[(size_t) (n - 1 - i)] : found[(size_t) i];
+            call.push_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
+            if (spec.has_withscores) {
+                call.push_encoded_key(rec.sub(0, numeric_key_size));
+            }
+        }
+    }
+    call.end_array();
+    return call.ok();
+}
+
 static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec) {
 
     auto container = conversion::convert(spec.key);
@@ -548,7 +614,9 @@ int ZRANGE(caller& call, const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
     }
-
+    if (!spec.BYSCORE && !spec.BYLEX) {
+        return zrange_by_index(call, t, spec);
+    }
     return zrange(call, t, spec);
 }
 
@@ -785,6 +853,10 @@ int cmd_ZDIFF(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZDIFFSTORE(caller& call, const arg_t& argv) {
+    // argv[1] was read before anything checked there was an argv[1], so calling this
+    // bare answered with small_vector's `at()` rather than a wrong arity
+    if (argv.size() < 4)
+        return call.wrong_arity();
     auto member = argv[1];
     if (member.empty())
         return call.push_error("syntax error");
@@ -799,6 +871,10 @@ int cmd_ZDIFFSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 extern "C"
 int ZINTERSTORE(caller& call, const arg_t& argv) {
+    // argv[1] was read before anything checked there was an argv[1], so calling this
+    // bare answered with small_vector's `at()` rather than a wrong arity
+    if (argv.size() < 4)
+        return call.wrong_arity();
     auto member = argv[1];
     if (member.empty())
         return call.push_error("syntax error");
@@ -867,8 +943,10 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
         if (!v.starts_with(lower.pref(1))) break;
         auto encoded_number = v.sub(lower.size, numeric_key_size);
         auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-        call.push_encoded_key(encoded_number);
+        // member first, then its score - redis's order. it used to be the other way
+        // round, which every client's ZPOPMIN/ZPOPMAX parser reads backwards
         call.push_encoded_key(member);
+        call.push_encoded_key(encoded_number);
         replies += 2;
         if (!i.remove()) {
             break;
@@ -925,8 +1003,10 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
         if (!v.starts_with(lower)) break;
         auto encoded_number = v.sub(lower.size, numeric_key_size);
         auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-        call.push_encoded_key(encoded_number);
+        // member first, then its score - redis's order. it used to be the other way
+        // round, which every client's ZPOPMIN/ZPOPMAX parser reads backwards
         call.push_encoded_key(member);
+        call.push_encoded_key(encoded_number);
         replies += 2;
 
         if (!i.remove()) {
@@ -953,6 +1033,9 @@ int ZREVRANGE(caller& call, const arg_t& argv) {
     }
     spec.REV = true;
     spec.BYLEX = false;
+    if (!spec.BYSCORE) {
+        return zrange_by_index(call, t, spec);
+    }
     return zrange(call, t, spec);
 }
 
@@ -993,6 +1076,9 @@ int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     }
     spec.REV = true;
     spec.BYLEX = false;
+    // by score is in the name, so the index path never applies here - an earlier
+    // edit to ZREVRANGE matched this function too and sent 3.01 down it
+    spec.BYSCORE = true;
     return zrange(call, t, spec);
 }
 int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1058,42 +1144,71 @@ int cmd_ZREVRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
     return call.vk_call(ctx, argv, argc, ZREVRANGEBYLEX);
 }
 extern "C"
+/**
+ * ZRANK key member [WITHSCORE]
+ *
+ * redis's ZRANK: the position of one member counting from the lowest score, zero based,
+ * and nil when the member is not in the set. It used to take two bounds and answer how
+ * many members fell between them, which is a different question - ZFASTRANK still answers
+ * that one, in constant time, and is the right command for it. See TODO 38.
+ */
 int ZRANK(caller& call, const arg_t& argv) {
-    if (argv.size() != 4) {
+    if (argv.size() < 3 || argv.size() > 4) {
         return call.wrong_arity();
     }
-    barch::sharded_store kstore(call.kspace());
-    auto t = kstore.write_locked(argv[1]);
+    bool withscore = false;
+    if (argv.size() == 4) {
+        auto opt = argv[3].to_string();
+        for (auto& ch : opt) ch = (char) toupper((unsigned char) ch);
+        if (opt != "WITHSCORE") {
+            return call.syntax_error();
+        }
+        withscore = true;
+    }
     auto c = argv[1];
-    if (c.empty()) {
+    if (c.empty() || argv[2].empty()) {
         return call.wrong_arity();
     }
-    auto a = argv[2];
-    if (a.empty()) {
-        return call.wrong_arity();
-    }
-    auto b = argv[3];
-    if (b.empty()) {
-        return call.wrong_arity();
-    }
+    // the member is stored encoded, the same way ZADD writes it - which is why zrange
+    // hands it back through push_encoded_key. Comparing the raw argument against the
+    // stored bytes never matches
+    auto wanted_key = conversion::convert(argv[2]);
+    art::value_type wanted = wanted_key.get_value();
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.read_locked(c);
 
-    composite qlower, qupper;
     auto container = conversion::convert(c);
-    auto lower = conversion::convert(a, true);
-    auto upper = conversion::convert(b, true);
-    auto min_key = qlower.create({container, lower},false);
-    auto max_key = qupper.create({container, upper}, false);
-    if (max_key < min_key) {
-        return call.push_ll(0);
-    }
-    art::iterator first(t, min_key);
+    query lq, pq;
+    auto lower = lq->create({container});
+    auto prefix = pq->create({container}, false);
 
-    int64_t rank = 0;
-    if (first.ok()) {
-        rank = first.distance(max_key);
+    int64_t position = 0;
+    bool found = false;
+    art::value_type score{};
+    art::iterator ai(t, lower);
+    while (ai.ok()) {
+        auto v = ai.key();
+        if (!v.starts_with(prefix)) break;
+        auto member = v.sub(prefix.size + numeric_key_size);
+        if (member == wanted) {
+            score = v.sub(prefix.size, numeric_key_size);
+            found = true;
+            break;
+        }
+        ++position;
+        ai.next();
     }
-
-    return call.push_ll(rank);
+    if (!found) {
+        return call.push_null();
+    }
+    if (withscore) {
+        call.start_array();
+        call.push_ll(position);
+        call.push_encoded_key(score);
+        call.end_array();
+        return call.ok();
+    }
+    return call.push_ll(position);
 }
 int cmd_ZRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -1213,25 +1328,29 @@ int add_ordered_api(ValkeyModuleCtx *ctx) {
 
 /* the ordered set commands as a RESP client sees them */
 void register_ordered_api(function_map& r) {
-    r["ZADD"] = {::ZADD,{"write","ordered","data"}};
-    r["ZREM"] = {::ZREM,{"write","ordered","data"}};
-    r["ZINCRBY"] = {::ZINCRBY,{"write","ordered","data"}};
-    r["ZRANGE"] = {::ZRANGE,{"write","ordered","data"}};
-    r["ZCARD"] = {::ZCARD,{"write","ordered","data"}};
-    r["ZCOUNT"] = {::ZCOUNT,{"read","ordered","data"}};
-    r["ZDIFF"] = {::ZDIFF,{"write","ordered","data"}};
-    r["ZDIFFSTORE"] = {::ZDIFFSTORE,{"write","ordered","data"}};
-    r["ZINTERSTORE"] = {::ZINTERSTORE,{"write","ordered","data"}};
-    r["ZINTERCARD"] = {::ZINTERCARD,{"write","ordered","data"}};
-    r["ZINTER"] = {::ZINTER,{"read","ordered","data"}};
-    r["ZPOPMIN"] = {::ZPOPMIN,{"write","ordered","data"}};
-    r["ZPOPMAX"] = {::ZPOPMAX,{"write","ordered","data"}};
-    r["ZREVRANGE"] = {::ZREVRANGE,{"read","ordered","data"}};
-    r["ZRANGEBYSCORE"] = {::ZRANGEBYSCORE,{"read","ordered","data"}};
-    r["ZREVRANGEBYSCORE"] = {::ZREVRANGEBYSCORE,{"read","ordered","data"}};
-    r["ZREMRANGEBYLEX"] = {::ZREMRANGEBYLEX,{"write","ordered","data"}};
-    r["ZRANGEBYLEX"] = {::ZRANGEBYLEX,{"read","ordered","data"}};
-    r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX,{"read","ordered","data"}};
-    r["ZRANK"] = {::ZRANK,{"read","ordered","data"}};
-    r["ZFASTRANK"] = {::ZFASTRANK,{"read","ordered","data"}};
+    // the categories say what a command does, and authorisation refuses a caller who
+    // lacks any bit the command declares - so a reader marked write demands a
+    // permission it never uses. Only the forms that actually mutate are write here
+
+    r["ZADD"] = {::ZADD,{"write","orderedset","data"}};
+    r["ZREM"] = {::ZREM,{"write","orderedset","data"}};
+    r["ZINCRBY"] = {::ZINCRBY,{"write","orderedset","data"}};
+    r["ZRANGE"] = {::ZRANGE,{"read","orderedset","data"}};
+    r["ZCARD"] = {::ZCARD,{"read","orderedset","data"}};
+    r["ZCOUNT"] = {::ZCOUNT,{"read","orderedset","data"}};
+    r["ZDIFF"] = {::ZDIFF,{"read","orderedset","data"}};
+    r["ZDIFFSTORE"] = {::ZDIFFSTORE,{"write","orderedset","data"}};
+    r["ZINTERSTORE"] = {::ZINTERSTORE,{"write","orderedset","data"}};
+    r["ZINTERCARD"] = {::ZINTERCARD,{"read","orderedset","data"}};
+    r["ZINTER"] = {::ZINTER,{"read","orderedset","data"}};
+    r["ZPOPMIN"] = {::ZPOPMIN,{"write","orderedset","data"}};
+    r["ZPOPMAX"] = {::ZPOPMAX,{"write","orderedset","data"}};
+    r["ZREVRANGE"] = {::ZREVRANGE,{"read","orderedset","data"}};
+    r["ZRANGEBYSCORE"] = {::ZRANGEBYSCORE,{"read","orderedset","data"}};
+    r["ZREVRANGEBYSCORE"] = {::ZREVRANGEBYSCORE,{"read","orderedset","data"}};
+    r["ZREMRANGEBYLEX"] = {::ZREMRANGEBYLEX,{"write","orderedset","data"}};
+    r["ZRANGEBYLEX"] = {::ZRANGEBYLEX,{"read","orderedset","data"}};
+    r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX,{"read","orderedset","data"}};
+    r["ZRANK"] = {::ZRANK,{"read","orderedset","data"}};
+    r["ZFASTRANK"] = {::ZFASTRANK,{"read","orderedset","data"}};
 }

@@ -4,6 +4,7 @@
 
 #include "list_api.h"
 #include "sharded_store.h"
+#include "key_type.h"
 #include "value_type.h"
 #include "../external/include/valkeymodule.h"
 #include "art/art.h"
@@ -176,6 +177,11 @@ extern "C"{
             return cc.push_null();
         }
         barch::sharded_store store(cc.kspace());
+        // a name already holding a plain value is not a list to be pushed onto. Checked
+        // before the lock: kind_of routes to two shards of its own - see key_type.h
+        if (barch::kind_of(store, args[1]) == barch::key_kind::string) {
+            return cc.push_error(barch::wrong_type_message());
+        }
         auto t = store.write_locked(args[1]);
         composite li;
         auto container = conversion::convert(args[1]);

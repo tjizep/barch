@@ -102,6 +102,23 @@ def shape(w, args, expect, why):
     passed += 1
 
 
+def within(w, args, low, high, why):
+    """assert an integer reply falls in a range.
+
+    For anything whose value moves - a TTL counts down, and whether it reads 100 or 99
+    depends on where in the second the call landed - an exact byte comparison is a
+    coin flip. Everything else in this file asserts exact bytes on purpose; this is for
+    the handful of replies that legitimately cannot be pinned.
+    """
+    global passed
+    got = w.cmd(*args)
+    assert got.startswith(b":"), "%s: expected an integer reply, got %r" % (why, got)
+    value = int(got[1:-2])
+    assert low <= value <= high, "%s\n  %s\n  expected %d..%d got %d" % (
+        why, " ".join(str(a) for a in args), low, high, value)
+    passed += 1
+
+
 print("start resp shape test")
 
 w = Wire(PORT)
@@ -127,7 +144,7 @@ shape(w, ("SET", "absent_xx", "1", "XX"), b"$-1\r\n", "XX on a missing key answe
 
 # --- MSET: OK, and pairs only ----------------------------------------------------
 shape(w, ("MSET", "x", "1", "y", "2"), b"+OK\r\n", "MSET answers OK, not an integer")
-shape(w, ("MSET", "k1", "v1", "k2"), b"-Wrong Arity\r\n",
+shape(w, ("MSET", "k1", "v1", "k2"), b"-ERR wrong number of arguments for 'mset' command\r\n",
       "an odd MSET is a wrong arity, not an out of range from walking off argv")
 
 # --- EXISTS counts, it does not answer a single boolean --------------------------
@@ -150,7 +167,7 @@ shape(w, ("REM", "missing"), b"$-1\r\n", "REM of a missing key is nil")
 shape(w, ("HSET", "h", "f1", "v1", "f2", "v2"), b":2\r\n",
       "HSET counts the fields that were new")
 shape(w, ("HSET", "h", "f1", "other"), b":0\r\n", "updating an existing field adds none")
-shape(w, ("HSET", "h", "f3"), b"-Wrong Arity\r\n", "an odd field list is a wrong arity")
+shape(w, ("HSET", "h", "f3"), b"-ERR wrong number of arguments for 'hset' command\r\n", "an odd field list is a wrong arity")
 
 # HGET is a bulk string. It used to be a one element array holding one
 shape(w, ("HGET", "h", "f1"), b"$5\r\nother\r\n", "HGET answers with a bulk string")
@@ -171,7 +188,7 @@ shape(w, ("HINCRBY", "h", "ctr", "3"), b":6\r\n", "and adds to it when it is the
 shape(w, ("HGET", "h", "ctr"), b"$1\r\n6\r\n", "and the field really holds the total")
 # a field holding something that is not a number is refused, and keeps its value. This
 # used to be coerced to zero and overwritten by the increment, which destroyed it
-shape(w, ("HINCRBY", "h", "f1", "1"), b"-hash value is not an integer\r\n",
+shape(w, ("HINCRBY", "h", "f1", "1"), b"-ERR hash value is not an integer\r\n",
       "a non numeric field is refused")
 shape(w, ("HGET", "h", "f1"), b"$5\r\nother\r\n",
       "and the value it held is still there")
@@ -193,12 +210,12 @@ shape(w, ("ZPOPMAX", "z"), b"*2\r\n$2\r\nm2\r\n$1\r\n2\r\n",
 
 # --- the type error that used to destroy the value -------------------------------
 shape(w, ("SET", "notnum", "abc"), b"+OK\r\n", "a string value")
-shape(w, ("INCR", "notnum"), b"-value is not an integer or out of range\r\n",
+shape(w, ("INCR", "notnum"), b"-ERR value is not an integer or out of range\r\n",
       "INCR on a string is refused")
 shape(w, ("GET", "notnum"), b"$3\r\nabc\r\n", "and the string is untouched")
-shape(w, ("INCRBY", "notnum", "5"), b"-value is not an integer or out of range\r\n",
+shape(w, ("INCRBY", "notnum", "5"), b"-ERR value is not an integer or out of range\r\n",
       "INCRBY likewise")
-shape(w, ("DECR", "notnum"), b"-value is not an integer or out of range\r\n",
+shape(w, ("DECR", "notnum"), b"-ERR value is not an integer or out of range\r\n",
       "and DECR")
 shape(w, ("GET", "notnum"), b"$3\r\nabc\r\n", "still untouched after all three")
 
@@ -207,13 +224,36 @@ shape(w, ("SET", "oo", "1"), b"+OK\r\n", "seed")
 shape(w, ("SET", "oo", "2", "GET", "XX"), b"$1\r\n1\r\n", "GET before XX")
 shape(w, ("SET", "oo", "3", "XX", "GET"), b"$1\r\n2\r\n",
       "XX before GET - the order that used to be a syntax error")
-shape(w, ("SET", "oo", "4", "NX", "XX"), b"-Syntax Error\r\n", "NX and XX together")
-shape(w, ("SET", "oo", "4", "NONSENSE"), b"-Syntax Error\r\n", "an unknown option")
-shape(w, ("SET", "oo", "4", "H"), b"-Syntax Error\r\n",
+shape(w, ("SET", "oo", "4", "NX", "XX"), b"-ERR syntax error\r\n", "NX and XX together")
+shape(w, ("SET", "oo", "4", "NONSENSE"), b"-ERR syntax error\r\n", "an unknown option")
+shape(w, ("SET", "oo", "4", "H"), b"-ERR syntax error\r\n",
       "the H flag is gone and is refused like any other unknown word")
 
+# --- SETRANGE --------------------------------------------------------------------
+shape(w, ("SET", "sr", "Hello World"), b"+OK\r\n", "seed")
+shape(w, ("SETRANGE", "sr", "6", "Redis"), b":11\r\n",
+      "answers with the length after writing, not with OK")
+shape(w, ("GET", "sr"), b"$11\r\nHello Redis\r\n", "and the splice landed where it was asked")
+shape(w, ("SETRANGE", "sr", "0", "ZZ"), b":11\r\n", "overwriting at zero does not change the length")
+shape(w, ("GET", "sr"), b"$11\r\nZZllo Redis\r\n", "and only the two bytes moved")
+
+# a gap is filled with zero bytes, which is what makes an offset useful for building a
+# value out of order. Spaces would be a different command
+w.cmd("DEL", "srpad")
+shape(w, ("SETRANGE", "srpad", "5", "Hello"), b":10\r\n", "a missing key counts as empty")
+shape(w, ("GET", "srpad"), b"$10\r\n\x00\x00\x00\x00\x00Hello\r\n", "the gap is NUL, not space")
+
+# nothing to write and nothing there: no key is brought into being
+w.cmd("DEL", "srnone")
+shape(w, ("SETRANGE", "srnone", "0", ""), b":0\r\n", "an empty write on a missing key is 0")
+shape(w, ("EXISTS", "srnone"), b":0\r\n", "and it did not create the key")
+
+shape(w, ("SETRANGE", "sr", "-1", "x"), b"-ERR offset is out of range\r\n",
+      "a negative offset is refused")
+shape(w, ("SETRANGE", "sr", "1"), b"-ERR wrong number of arguments for 'setrange' command\r\n", "and the arity is checked")
+
 # --- EXPIRE's condition word -----------------------------------------------------
-shape(w, ("EXPIRE", "oo", "100", "NONSENSE"), b"-Syntax Error\r\n",
+shape(w, ("EXPIRE", "oo", "100", "NONSENSE"), b"-ERR syntax error\r\n",
       "a word that is not a condition is refused rather than ignored")
 
 # --- ZRANGE by position ----------------------------------------------------------
@@ -258,8 +298,53 @@ shape(w, ("SELECT", "1"), b"+OK\r\n", "a number above zero is the database db1")
 # barch also lets SELECT take a name, which is a superset of redis rather than a
 # departure from it - spacethreadtest.py relies on it
 shape(w, ("SELECT", "namedspace"), b"+OK\r\n", "and a name selects that space")
-shape(w, ("SELECT", "-1"), b"-DB index is out of range\r\n", "a negative index is refused")
+shape(w, ("SELECT", "-1"), b"-ERR DB index is out of range\r\n", "a negative index is refused")
 assert w.cmd("USE", "respshapes") == b"+OK\r\n"
+
+# --- GETRANGE / SUBSTR -----------------------------------------------------------
+shape(w, ("SET", "gr", "This is a string"), b"+OK\r\n", "seed")
+shape(w, ("GETRANGE", "gr", "0", "3"), b"$4\r\nThis\r\n", "inclusive at both ends")
+shape(w, ("GETRANGE", "gr", "-3", "-1"), b"$3\r\ning\r\n", "negatives count from the end")
+shape(w, ("GETRANGE", "gr", "0", "-1"), b"$16\r\nThis is a string\r\n", "0 to -1 is the whole value")
+shape(w, ("GETRANGE", "gr", "10", "100"), b"$6\r\nstring\r\n", "past the end is clamped")
+shape(w, ("GETRANGE", "nosuchkey", "0", "-1"), b"$0\r\n\r\n",
+      "a missing key is an empty string, not nil - callers rely on that")
+shape(w, ("SUBSTR", "gr", "0", "3"), b"$4\r\nThis\r\n", "SUBSTR is the same command")
+
+# --- GETDEL ----------------------------------------------------------------------
+shape(w, ("SET", "gd", "v1"), b"+OK\r\n", "seed")
+shape(w, ("GETDEL", "gd"), b"$2\r\nv1\r\n", "answers with the value")
+shape(w, ("EXISTS", "gd"), b":0\r\n", "and the key is gone")
+shape(w, ("GETDEL", "gd"), b"$-1\r\n", "a second time is nil")
+
+# --- GETEX -----------------------------------------------------------------------
+shape(w, ("SET", "ge", "v2"), b"+OK\r\n", "seed")
+shape(w, ("GETEX", "ge"), b"$2\r\nv2\r\n", "bare GETEX reads the value")
+shape(w, ("TTL", "ge"), b":-1\r\n", "and leaves the expiry alone rather than persisting")
+shape(w, ("GETEX", "ge", "EX", "100"), b"$2\r\nv2\r\n", "EX sets one on the way past")
+within(w, ("TTL", "ge"), 99, 100, "which is now set")
+shape(w, ("GETEX", "ge", "PERSIST"), b"$2\r\nv2\r\n", "PERSIST clears it")
+shape(w, ("TTL", "ge"), b":-1\r\n", "and it is gone")
+
+# --- SETEX / PSETEX --------------------------------------------------------------
+shape(w, ("SETEX", "se", "100", "v"), b"+OK\r\n", "SETEX takes seconds")
+within(w, ("TTL", "se"), 99, 100, "and applies them")
+shape(w, ("PSETEX", "pse", "100000", "v"), b"+OK\r\n", "PSETEX takes milliseconds")
+within(w, ("TTL", "pse"), 99, 100, "same expiry, different unit")
+shape(w, ("SETEX", "se2", "0", "v"), b"-ERR invalid expire time\r\n",
+      "a non positive time is refused rather than storing a dead key")
+
+# --- LCS, on redis's own documented example --------------------------------------
+shape(w, ("SET", "lk1", "ohmytext"), b"+OK\r\n", "seed")
+shape(w, ("SET", "lk2", "mynewtext"), b"+OK\r\n", "seed")
+shape(w, ("LCS", "lk1", "lk2"), b"$6\r\nmytext\r\n", "the subsequence itself")
+shape(w, ("LCS", "lk1", "lk2", "LEN"), b":6\r\n", "or just its length")
+shape(w, ("LCS", "lk1", "lk2", "IDX", "MINMATCHLEN", "4", "WITHMATCHLEN"),
+      b"*4\r\n+matches\r\n*1\r\n*3\r\n*2\r\n:4\r\n:7\r\n*2\r\n:5\r\n:8\r\n:4\r\n+len\r\n:6\r\n",
+      "IDX reports where the matches are, RESP2 flattening the map")
+shape(w, ("LCS", "lk1", "lk2", "LEN", "IDX"),
+      b"-ERR If you want both the length and indexes, please just use IDX.\r\n",
+      "LEN with IDX is refused, as in redis")
 
 # --- the dispatcher's own answers ---------------------------------------------------
 shape(w, ("PING",), b"+PONG\r\n", "PING is the redis health check")

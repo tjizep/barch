@@ -35,12 +35,14 @@ REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 # here is indistinguishable from a bug someone got tired of.
 ACCEPTED = {
     # name pattern: why
-    "*fails against a key holding a list*":
-        "barch has no WRONGTYPE - types are a property of the key encoding rather than a "
-        "tag on the value, so a command on the wrong type does not fail. See TODO 49",
-    "INCRBYFLOAT*":
-        "INCRBYFLOAT is not implemented for plain keys, only HINCRBYFLOAT for hash "
-        "fields. See TODO 48",
+    # --- commands that are not implemented. See TODO 52 -------------------------
+    "SETBIT*": "the bit commands are not implemented. See TODO 52",
+    "GETBIT*": "the bit commands are not implemented. See TODO 52",
+    "MGET against non-string key": "the case sets up with SADD; there is no set type. "
+                                   "See TODO 52",
+    "SET with IFEQ*": "SET's IFEQ conditional is not implemented. See TODO 52",
+
+    # --- differences already decided about ---------------------------------------
 }
 
 
@@ -89,6 +91,38 @@ def matches(expected, got):
     return got == expected
 
 
+# the leading token of a redis error is its code. redis-py recognises these and strips
+# them off the message it raises, while the tcl expectations were written against the
+# whole line - so `{ERR*}` would never match a message redis-py has already shortened
+ERROR_CODES = ("ERR", "WRONGTYPE", "NOPROTO", "NOAUTH", "NOPERM", "BUSYGROUP",
+               "EXECABORT", "MASTERDOWN", "READONLY", "OOM", "MISCONF", "NOSCRIPT")
+
+
+def matches_error(expected, got):
+    """compare an error expectation, with or without the code redis-py removed"""
+    if matches(expected, got):
+        return True
+    head = expected.split(" ", 1)[0].lstrip("*")
+    for code in ERROR_CODES:
+        if head == code or head.startswith(code):
+            rest = expected[len(expected.split(" ", 1)[0]):].strip()
+            # `ERR*` leaves nothing to match on, and the caller already knows it failed
+            return True if not rest else matches(rest, got)
+    return False
+
+
+def round_float(text):
+    """valkey's roundFloat helper: keep it readable, drop a pointless fraction"""
+    try:
+        v = float(text)
+    except (TypeError, ValueError):
+        return text
+    r = round(v, 10)
+    if r == int(r):
+        return str(int(r))
+    return repr(r)
+
+
 def run_case(conn, case):
     """(ok, detail). Runs the case's steps in order against one connection."""
     import redis
@@ -103,9 +137,17 @@ def run_case(conn, case):
             if step["op"] == "catch":
                 err = str(e)
                 continue
+            if step["op"] == "expect_error":
+                if not matches_error(step["value"], str(e)):
+                    return False, "%s: expected error %r got %r" % (
+                        " ".join(args), step["value"], str(e))
+                continue
             return False, "%s raised %s" % (" ".join(args), e)
         except Exception as e:                       # noqa: BLE001 - report, do not mask
             return False, "%s raised %s: %s" % (" ".join(args), type(e).__name__, e)
+        if step["op"] == "expect_error":
+            return False, "%s: expected it to fail with %r, it returned %r" % (
+                " ".join(args), step["value"], render(reply))
         if step["op"] == "catch":
             # it was supposed to fail and did not
             err = ""
@@ -114,14 +156,26 @@ def run_case(conn, case):
             if not matches(step["value"], got):
                 return False, "%s: expected %r got %r" % (
                     " ".join(args), step["value"], got)
+        if step.get("round"):
+            reply = round_float(render(reply))
         last = reply
-        collected.append(reply)
+        # only tagged steps form the value in list and concat modes; anything else on
+        # those lines is setup. `collected` is not used by the other modes, and the
+        # translator always tags when it sets one of these, so untagged means setup
+        if step.get("collect", False):
+            collected.append(reply)
 
     mode = case.get("mode")
     if mode == "asserts":
         return True, ""
     if mode == "err":
         got = err if err is not None else ""
+        if matches_error(case.get("expected") or "", got):
+            return True, ""
+        return False, "expected %r got %r" % (case.get("expected"), got)
+    elif mode == "concat":
+        # tcl's `append` joins with no separator at all
+        got = "".join(render(x) for x in collected)
     elif mode == "list":
         got = render(collected)
     else:
@@ -135,6 +189,12 @@ def run_all(port, cases, label):
     import redis
     conn = redis.Redis(host="127.0.0.1", port=port, decode_responses=True,
                        socket_timeout=15)
+    # redis-py rewrites the replies of commands it recognises: +OK becomes True, SCAN's
+    # cursor becomes an int, INFO becomes a dict, and so on. Every one of those is a
+    # reply the tcl compares against as text, so the comparison is against redis-py's
+    # idea of the value rather than the server's. Clearing the callbacks gives the raw
+    # reply, which is the only thing worth comparing two servers on
+    conn.response_callbacks = {}
     results = {}
     for case in cases:
         if case.get("skipped"):
@@ -200,15 +260,27 @@ def main(argv):
         vproc.wait()
 
     trusted = [c for c in live if vres.get(c["name"], (False,))[0]]
-    dropped = len(live) - len(trusted)
+    dropped = [c for c in live if not vres.get(c["name"], (False,))[0]]
     if dropped:
-        print("  %d dropped: valkey rejects them, so the translation is not faithful"
-              % dropped)
+        # worth showing rather than counting: a case valkey rejects is usually a
+        # dependant of one the translator skipped, and the state it needed never got
+        # set up - but it can equally be a bug in the translation, and the two look
+        # identical from a count alone
+        print("  %d dropped, valkey rejects them so the translation is not faithful:"
+              % len(dropped))
+        for c in dropped:
+            print("     %-52s %s" % (c["name"][:52], vres[c["name"]][1][:70]))
     if not trusted:
         print("no faithful translations to compare")
         return 1
 
-    # ---- step 2: barch is compared against that set ------------------------------
+    # ---- step 2: barch runs the same cases and is compared on the trusted ones ----
+    #
+    # Every live case is run, not just the trusted ones, because the cases in a tcl file
+    # share state - one sets a key another reads. Running only the trusted set against
+    # barch while valkey ran all of them leaves the two servers in different states by
+    # the time a later case is compared, and reports the difference as barch's fault.
+    # Only the comparison is restricted; the execution is not.
     # `import barch` resolves to the module pip installed into the venv the tests run
     # under. Do not add the build directory to the path: it holds barch.so, the valkey
     # module, which python finds first and cannot load as an extension
@@ -216,7 +288,7 @@ def main(argv):
     bport = 7812
     barch.start("127.0.0.1", bport)
     time.sleep(0.5)
-    bres = run_all(bport, trusted, "barch ")
+    bres = run_all(bport, live, "barch ")
 
     differences = []
     for case in trusted:

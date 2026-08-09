@@ -1,0 +1,863 @@
+{
+ "source": "keyspace.tcl",
+ "cases": [
+  {
+   "name": "DEL against a single item",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set x foo\n        assert {[r get x] eq \"foo\"}\n        r del x\n        r get x"
+  },
+  {
+   "name": "Vararg DEL",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo1{t}",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo2{t}",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo3{t}",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo1{t}",
+      "foo2{t}",
+      "foo3{t}",
+      "foo4{t}"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "mget",
+      "foo1{t}",
+      "foo2{t}",
+      "foo3{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "Untagged multi-key commands",
+   "expected": "3",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "mset",
+      "foo1",
+      "a",
+      "foo2",
+      "b",
+      "foo3",
+      "c"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "mget",
+      "foo1",
+      "foo2",
+      "foo3",
+      "foo4"
+     ],
+     "value": "a b c {}"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo1",
+      "foo2",
+      "foo3",
+      "foo4"
+     ]
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "KEYS with pattern",
+   "expected": "foo_a foo_b foo_c",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "foreach key {key_x key_y key_z foo_a foo_b foo_c} {\n            r set $key hello\n        }\n        lsort [r keys foo*]"
+  },
+  {
+   "name": "KEYS to get all keys",
+   "expected": "foo_a foo_b foo_c key_x key_y key_z",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "lsort [r keys *]"
+  },
+  {
+   "name": "DBSIZE",
+   "expected": "6",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "dbsize"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "KEYS with hashtag",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "foreach key {\"{a}x\" \"{a}y\" \"{a}z\" \"{b}a\" \"{b}b\" \"{b}c\"} {\n            r set $key hello\n        }\n        assert_equal [lsort [r keys \"{a}*\"]] [list \"{a}x\" \"{a}y\" \"{a}z\"]\n        assert_equal [lsort [r keys \"*{b}*\"]] [list \"{b}a\" \"{b}b\" \"{b}c\"]"
+  },
+  {
+   "name": "DEL all keys",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "foreach key [r keys *] {r del $key}\n        r dbsize"
+  },
+  {
+   "name": "KEYS with empty DB",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "keys",
+      "*"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "DEL against expired key",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug set-active-expire 0\n        r setex keyExpire 1 valExpire\n        after 1100\n        assert_equal 0 [r del keyExpire]\n        r debug set-active-expire 1"
+  },
+  {
+   "name": "EXISTS",
+   "expected": "10",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "newkey",
+      "test"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "newkey"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "newkey"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "newkey"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "concat"
+  },
+  {
+   "name": "Zero length value in key. SET/GET/EXISTS",
+   "expected": "10",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set emptykey {}\n        set res [r get emptykey]\n        append res [r exists emptykey]\n        r del emptykey\n        append res [r exists emptykey]"
+  },
+  {
+   "name": "Commands pipelining",
+   "expected": "1xyzk1",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set fd [r channel]\n        puts -nonewline $fd \"SET k1 xyzk\\r\\nGET k1\\r\\nPING\\r\\n\"\n        flush $fd\n        set res {}\n        append res [string match OK* [r read]]\n        append res [r read]\n        append res [string match PONG* [r read]]\n        format $res"
+  },
+  {
+   "name": "Non existing command",
+   "expected": "1",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "catch {r foobaredcommand} err\n        string match ERR* $err"
+  },
+  {
+   "name": "RENAME basic usage",
+   "expected": "hello",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey{t}",
+      "hello"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "rename",
+      "mykey{t}",
+      "mykey1{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "rename",
+      "mykey1{t}",
+      "mykey2{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "mykey2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "RENAME source key should no longer exist",
+   "expected": "0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "mykey"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "RENAME against already existing key",
+   "expected": "b0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set mykey{t} a\n        r set mykey2{t} b\n        r rename mykey2{t} mykey{t}\n        set res [r get mykey{t}]\n        append res [r exists mykey2{t}]"
+  },
+  {
+   "name": "RENAMENX basic usage",
+   "expected": "foobar0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey{t}\n        r del mykey2{t}\n        r set mykey{t} foobar\n        r renamenx mykey{t} mykey2{t}\n        set res [r get mykey2{t}]\n        append res [r exists mykey{t}]"
+  },
+  {
+   "name": "RENAMENX against already existing key",
+   "expected": "0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey{t}",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey2{t}",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "renamenx",
+      "mykey{t}",
+      "mykey2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "RENAMENX against already existing key (2)",
+   "expected": "foobar",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r get mykey{t}]\n        append res [r get mykey2{t}]"
+  },
+  {
+   "name": "RENAME against non existing source key",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "rename",
+      "nokey{t}",
+      "foobar{t}"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "RENAME where source and dest key are the same (existing)",
+   "expected": "OK",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "rename",
+      "mykey",
+      "mykey"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "RENAMENX where source and dest key are the same (existing)",
+   "expected": "0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "renamenx",
+      "mykey",
+      "mykey"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "RENAME where source and dest key are the same (non existing)",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "rename",
+      "mykey",
+      "mykey"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "RENAME with volatile key, should move the TTL as well",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey{t} mykey2{t}\n        r set mykey{t} foo\n        r expire mykey{t} 100\n        assert {[r ttl mykey{t}] > 95 && [r ttl mykey{t}] <= 100}\n        r rename mykey{t} mykey2{t}\n        assert {[r ttl mykey2{t}] > 95 && [r ttl mykey2{t}] <= 100}"
+  },
+  {
+   "name": "RENAME with volatile key, should not inherit TTL of target key",
+   "expected": "-1",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey{t} mykey2{t}\n        r set mykey{t} foo\n        r set mykey2{t} bar\n        r expire mykey2{t} 100\n        assert {[r ttl mykey{t}] == -1 && [r ttl mykey2{t}] > 0}\n        r rename mykey{t} mykey2{t}\n        r ttl mykey2{t}"
+  },
+  {
+   "name": "DEL all keys again (DB 0)",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "foreach key [r keys *] {\n            r del $key\n        }\n        r dbsize"
+  },
+  {
+   "name": "DEL all keys again (DB 1)",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r select 10\n        foreach key [r keys *] {\n            r del $key\n        }\n        set res [r dbsize]\n        r select 9\n        format $res"
+  },
+  {
+   "name": "COPY basic usage for string",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set mykey{t} foobar\n        set res {}\n        r copy mykey{t} mynewkey{t}\n        lappend res [r get mynewkey{t}]\n        lappend res [r dbsize]\n        if {$::singledb} {\n            assert_equal [list foobar 2] [format $res]\n        } else {\n            r copy mykey{t} mynewkey{t} DB 10\n            r select 10\n            lappend res [r get mynewkey{t}]\n            lappend res [r dbsize]\n            r select 9\n            assert_equal [list foobar 2 foobar 1] [format $res]\n        }"
+  },
+  {
+   "name": "COPY for string does not replace an existing key without REPLACE option",
+   "expected": "0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey2{t}",
+      "hello"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "copy",
+      "mykey2{t}",
+      "mynewkey{t}",
+      "DB",
+      "10"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "COPY for string can replace an existing key with REPLACE option",
+   "expected": "hello",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "copy",
+      "mykey2{t}",
+      "mynewkey{t}",
+      "DB",
+      "10",
+      "REPLACE"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "select",
+      "10"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "mynewkey{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "COPY for string ensures that copied data is independent of copying data",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r select 9\n        r set mykey{t} foobar\n        set res {}\n        r copy mykey{t} mynewkey{t} DB 10\n        r select 10\n        lappend res [r get mynewkey{t}]\n        r set mynewkey{t} hoge\n        lappend res [r get mynewkey{t}]\n        r select 9\n        lappend res [r get mykey{t}]\n        r select 10\n        r flushdb\n        r select 9\n        format $res"
+  },
+  {
+   "name": "COPY for string does not copy data to no-integer DB",
+   "expected": "ERR value is not an integer or out of range",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey{t}",
+      "foobar"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "copy",
+      "mykey{t}",
+      "mynewkey{t}",
+      "DB",
+      "notanumber"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "COPY can copy key expire metadata as well",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set mykey{t} foobar ex 100\n        r copy mykey{t} mynewkey{t} REPLACE\n        assert {[r ttl mynewkey{t}] > 0 && [r ttl mynewkey{t}] <= 100}\n        assert {[r get mynewkey{t}] eq \"foobar\"}"
+  },
+  {
+   "name": "COPY does not create an expire if it does not exist",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set mykey{t} foobar\n        assert {[r ttl mykey{t}] == -1}\n        r copy mykey{t} mynewkey{t} REPLACE\n        assert {[r ttl mynewkey{t}] == -1}\n        assert {[r get mynewkey{t}] eq \"foobar\"}"
+  },
+  {
+   "name": "COPY basic usage for list - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mylist{t} mynewlist{t}\n        r lpush mylist{t} a b $large c d\n        assert_encoding $type mylist{t}\n        r copy mylist{t} mynewlist{t}\n        assert_encoding $type mynewlist{t}\n        set digest [debug_digest_value mylist{t}]\n        assert_equal $digest [debug_digest_value mynewlist{t}]\n        assert_refcount 1 mylist{t}\n        assert_refcount 1 mynewlist{t}\n        r del mylist{t}\n        assert_equal $digest [debug_digest_value mynewlist{t}]"
+  },
+  {
+   "name": "COPY basic usage for $type set",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del set1{t} newset1{t}\n            r sadd set1{t} 1 2 3\n            if {$type ne \"intset\"} {\n                r sadd set1{t} a\n            }\n            if {$type eq \"hashtable\"} {\n                for {set i 4} {$i < 200} {incr i} {\n                    r sadd set1{t} $i\n                }\n            }\n            assert_encoding $type set1{t}\n            r copy set1{t} newset1{t}\n            set digest [debug_digest_value set1{t}]\n            assert_equal $digest [debug_digest_value newset1{t}]\n            assert_refcount 1 set1{t}\n            assert_refcount 1 newset1{t}\n            r del set1{t}\n            assert_equal $digest [debug_digest_value newset1{t}]"
+  },
+  {
+   "name": "COPY basic usage for listpack sorted set",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zset1{t} newzset1{t}\n        r zadd zset1{t} 123 foobar\n        assert_encoding listpack zset1{t}\n        r copy zset1{t} newzset1{t}\n        set digest [debug_digest_value zset1{t}]\n        assert_equal $digest [debug_digest_value newzset1{t}]\n        assert_refcount 1 zset1{t}\n        assert_refcount 1 newzset1{t}\n        r del zset1{t}\n        assert_equal $digest [debug_digest_value newzset1{t}]"
+  },
+  {
+   "name": "COPY basic usage for skiplist sorted set",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zset2{t} newzset2{t}\n        set original_max [lindex [r config get zset-max-ziplist-entries] 1]\n        r config set zset-max-ziplist-entries 0\n        for {set j 0} {$j < 130} {incr j} {\n            r zadd zset2{t} [randomInt 50] ele-[randomInt 10]\n        }\n        assert_encoding skiplist zset2{t}\n        r copy zset2{t} newzset2{t}\n        set digest [debug_digest_value zset2{t}]\n        assert_equal $digest [debug_digest_value newzset2{t}]\n        assert_refcount 1 zset2{t}\n        assert_refcount 1 newzset2{t}\n        r del zset2{t}\n        assert_equal $digest [debug_digest_value newzset2{t}]\n        r config set zset-max-ziplist-entries $original_max"
+  },
+  {
+   "name": "COPY basic usage for listpack hash",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del hash1{t} newhash1{t}\n        r hset hash1{t} tmp 17179869184\n        assert_encoding listpack hash1{t}\n        r copy hash1{t} newhash1{t}\n        set digest [debug_digest_value hash1{t}]\n        assert_equal $digest [debug_digest_value newhash1{t}]\n        assert_refcount 1 hash1{t}\n        assert_refcount 1 newhash1{t}\n        r del hash1{t}\n        assert_equal $digest [debug_digest_value newhash1{t}]"
+  },
+  {
+   "name": "COPY basic usage for hashtable hash",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del hash2{t} newhash2{t}\n        set original_max [lindex [r config get hash-max-ziplist-entries] 1]\n        r config set hash-max-ziplist-entries 0\n        for {set i 0} {$i < 64} {incr i} {\n            r hset hash2{t} [randomValue] [randomValue]\n        }\n        assert_encoding hashtable hash2{t}\n        r copy hash2{t} newhash2{t}\n        set digest [debug_digest_value hash2{t}]\n        assert_equal $digest [debug_digest_value newhash2{t}]\n        assert_refcount 1 hash2{t}\n        assert_refcount 1 newhash2{t}\n        r del hash2{t}\n        assert_equal $digest [debug_digest_value newhash2{t}]\n        r config set hash-max-ziplist-entries $original_max"
+  },
+  {
+   "name": "COPY basic usage for stream",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mystream{t} mynewstream{t}\n        for {set i 0} {$i < 1000} {incr i} {\n            r XADD mystream{t} * item 2 value b\n        }\n        r copy mystream{t} mynewstream{t}\n        set digest [debug_digest_value mystream{t}]\n        assert_equal $digest [debug_digest_value mynewstream{t}]\n        assert_refcount 1 mystream{t}\n        assert_refcount 1 mynewstream{t}\n        r del mystream{t}\n        assert_equal $digest [debug_digest_value mynewstream{t}]"
+  },
+  {
+   "name": "COPY basic usage for stream-cgroups",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del x{t}\n        r XADD x{t} 100 a 1\n        set id [r XADD x{t} 101 b 1]\n        r XADD x{t} 102 c 1\n        r XADD x{t} 103 e 1\n        r XADD x{t} 104 f 1\n        r XADD x{t} 105 g 1\n        r XGROUP CREATE x{t} g1 0\n        r XGROUP CREATE x{t} g2 0\n        r XREADGROUP GROUP g1 Alice COUNT 1 STREAMS x{t} >\n        r XREADGROUP GROUP g1 Bob COUNT 1 STREAMS x{t} >\n        r XREADGROUP GROUP g1 Bob NOACK COUNT 1 STREAMS x{t} >\n        r XREADGROUP GROUP g2 Charlie COUNT 4 STREAMS x{t} >\n        r XGROUP SETID x{t} g1 $id\n        r XREADGROUP GROUP g1 Dave COUNT 3 STREAMS x{t} >\n        r XDEL x{t} 103\n\n        r copy x{t} newx{t}\n        set info [r xinfo stream x{t} full]\n        assert_equal $info [r xinfo stream newx{t} full]\n        assert_refcount 1 x{t}\n        assert_refcount 1 newx{t}\n        r del x{t}\n        assert_equal $info [r xinfo stream newx{t} full]\n        r flushdb"
+  },
+  {
+   "name": "MOVE basic usage",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set mykey foobar\n        r move mykey 10\n        set res {}\n        lappend res [r exists mykey]\n        lappend res [r dbsize]\n        r select 10\n        lappend res [r get mykey]\n        lappend res [r dbsize]\n        r select 9\n        format $res"
+  },
+  {
+   "name": "MOVE against key existing in the target DB",
+   "expected": "0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "hello"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "move",
+      "mykey",
+      "10"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "MOVE against non-integer DB (#1428)",
+   "expected": "ERR value is not an integer or out of range",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "hello"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "move",
+      "mykey",
+      "notanumber"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "MOVE can move key expire metadata as well",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r select 10\n        r flushdb\n        r select 9\n        r set mykey foo ex 100\n        r move mykey 10\n        assert {[r ttl mykey] == -2}\n        r select 10\n        assert {[r ttl mykey] > 0 && [r ttl mykey] <= 100}\n        assert {[r get mykey] eq \"foo\"}\n        r select 9"
+  },
+  {
+   "name": "MOVE does not create an expire if it does not exist",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r select 10\n        r flushdb\n        r select 9\n        r set mykey foo\n        r move mykey 10\n        assert {[r ttl mykey] == -2}\n        r select 10\n        assert {[r ttl mykey] == -1}\n        assert {[r get mykey] eq \"foo\"}\n        r select 9"
+  },
+  {
+   "name": "SET/GET keys in different DBs",
+   "expected": "hello world foo bared",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set a hello\n        r set b world\n        r select 10\n        r set a foo\n        r set b bared\n        r select 9\n        set res {}\n        lappend res [r get a]\n        lappend res [r get b]\n        r select 10\n        lappend res [r get a]\n        lappend res [r get b]\n        r select 9\n        format $res"
+  },
+  {
+   "name": "RANDOMKEY",
+   "expected": "1 1",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r set foo x\n        r set bar y\n        set foo_seen 0\n        set bar_seen 0\n        for {set i 0} {$i < 100} {incr i} {\n            set rkey [r randomkey]\n            if {$rkey eq {foo}} {\n                set foo_seen 1\n            }\n            if {$rkey eq {bar}} {\n                set bar_seen 1\n            }\n        }\n        list $foo_seen $bar_seen"
+  },
+  {
+   "name": "RANDOMKEY against empty DB",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "flushdb"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "randomkey"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "RANDOMKEY regression 1",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "flushdb"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "10"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "randomkey"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "KEYS * two times with long key, Github issue #1208",
+   "expected": "dlskeriewrioeuwqoirueioqwrueoqwrueqw",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "flushdb"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "dlskeriewrioeuwqoirueioqwrueoqwrueqw",
+      "test"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "keys",
+      "*"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "keys",
+      "*"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "Regression for pattern matching long nested loops",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "flushdb"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "SET",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "KEYS",
+      "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "Coverage: basic SWAPDB test and unhappy path",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n       r select 0\n       r set swapkey v1\n       r select 1\n       assert_match 0 [r dbsize] ;#verify DB[1] has 0 keys\n       r swapdb 0 1\n       assert_match 1 [r dbsize]\n       r select 0\n       assert_match 0 [r dbsize] ;#verify DB[0] has 0 keys\n       r flushall\n       assert_error \"ERR DB index is out of range*\" {r swapdb 44 55}\n       assert_error \"ERR invalid second DB index*\" {r swapdb 44 a}\n       assert_error \"ERR invalid first DB index*\" {r swapdb a 55}\n       assert_error \"ERR invalid first DB index*\" {r swapdb a b}\n       assert_match \"OK\" [r swapdb 0 0]"
+  },
+  {
+   "name": "Coverage: SWAPDB and FLUSHDB",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# set a key in each db and swapdb one of 2 with different db\n       # and flushdb on swapped db.\n       r flushall\n       r select 0\n       r set swapkey v1\n       r select 1\n       r set swapkey1 v1\n       assert_no_match \"*db2:keys=*\" [r info keyspace]\n       r swapdb 0 2\n       r select 0\n       assert_match 0 [r dbsize]\n       assert_no_match \"*db0:keys=*\" [r info keyspace]\n       r select 2\n       r flushdb\n       assert_match 0 [r dbsize]\n       assert_match \"*db1:keys=*\" [r info keyspace]\n       assert_no_match \"*db0:keys=*\" [r info keyspace]\n       assert_no_match \"*db2:keys=*\" [r info keyspace]\n       r flushall"
+  },
+  {
+   "name": "Regression for pattern matching very long nested loops",
+   "expected": "",
+   "why": "nested command substitution: [string repeat \"a\" 50000]",
+   "skipped": true,
+   "tcl": "r flushdb\n        r SET [string repeat \"a\" 50000] 1\n        r KEYS [string repeat \"*?\" 50000]"
+  },
+  {
+   "name": "KEYS with empty DB in cluster mode",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "keys",
+      "*"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "keys",
+      "foo*"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "KEYS with empty slot in cluster mode",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "keys",
+      "foo"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  }
+ ]
+}

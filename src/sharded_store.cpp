@@ -169,6 +169,51 @@ void sharded_store::with_key_write(art::value_type key, const shard_fn& fn) {
     fn(t);
 }
 
+/**
+ * Two keys at once, for the commands that move a value from one to another.
+ *
+ * The order is by shard number, never by which key the caller named first - see the rule
+ * in keyspace_locks.h. RENAME a->b and RENAME b->a run concurrently often enough to find
+ * a hand chosen order, and when both keys land on the same shard it is locked once, since
+ * taking a shard's write lock twice waits on itself.
+ *
+ * The route is re-checked after the locks are held, the way route_locked does it: on a
+ * range sharded space a key's shard can move under a router, so a route that changes
+ * between deciding and locking means dropping both and trying again. Two locks make that
+ * slightly more likely and no harder - the retry cannot spin, because moving a key needs
+ * the very locks being held.
+ */
+void sharded_store::with_two_keys_write(art::value_type a, art::value_type b,
+                                        const two_shard_fn& fn) {
+    for (;;) {
+        auto sa = shard_for(a);
+        auto sb = shard_for(b);
+        if (!sa || !sb) return;
+
+        if (sa == sb) {
+            std::optional<storage_release> one;
+            auto t = route_locked<storage_release>(*this, a, one);
+            if (!t) return;
+            if (shard_for(b) != t) {
+                continue;   // b moved out from under us
+            }
+            fn(t, t);
+            return;
+        }
+
+        // lowest shard number first, whatever order the caller named them in
+        auto first = sa->get_shard_number() <= sb->get_shard_number() ? sa : sb;
+        auto second = first == sa ? sb : sa;
+        storage_release lock_first(first);
+        storage_release lock_second(second);
+        if (shard_for(a) != sa || shard_for(b) != sb) {
+            continue;   // a boundary moved between routing and locking
+        }
+        fn(sa, sb);
+        return;
+    }
+}
+
 void sharded_store::with_key_read(art::value_type key, const shard_fn& fn) const {
     std::optional<read_lock> release;
     auto t = route_locked<read_lock>(*this, key, release);
@@ -267,8 +312,9 @@ bool sharded_store::ordered_shards() const {
 
 bool sharded_store::minimum(const key_cb& cb) const {
     art::value_type the_min;
-    ks_shared kss(spc->source());
-    ks_shared ksl(spc);
+    // both shared, but still a pair, so it takes the same canonical order everything
+    // else does rather than source-then-self by habit
+    ks_two held(spc->source(), ks_mode::shared, spc, ks_mode::shared);
     if (ordered_shards()) {
         // the smallest key in the space is the smallest key of the first shard that has
         // one - no other shard can hold anything below it

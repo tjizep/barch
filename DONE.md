@@ -1846,3 +1846,223 @@ and asserts the two agree, over HMGET, HGETALL, ZRANGE with and without scores, 
 and LPOP. Local is a fair reference because it shares no code with the reply decoder. It
 also asserts each reply has more than one value, since a single value decodes correctly
 either way and a check that quietly degraded to one would prove nothing.
+
+## 41. string.tcl and keyspace.tcl translated, and what they found [09-08-2026]
+
+TODO 45, the second of the four translation entries. The harness from DONE 40 was pointed
+at valkey's unit/type/string.tcl and unit/keyspace.tcl - 150 tests between them, against
+the surface DONE 33 and DONE 37 changed most.
+
+Translated 71 of those 150 mechanically, on top of the 26 of 29 already done for incr.tcl.
+The rest are stubs carrying their original tcl: loops, `foreach` over encodings, and the
+`assert_encoding` and `debug object` helpers, which are valkey's internals and will never
+translate. valkey itself trusts 77 of the 97 translated cases; the 20 it rejects are
+translation artefacts and are dropped rather than reported, which is what the valkey-first
+step is for.
+
+Of the 77 faithful cases barch passes 35 outright. The 42 differences are all accounted
+for and none of them is a wrong answer:
+
+  - 22 are commands barch does not have - RENAME, RENAMENX, COPY, MOVE, RANDOMKEY, SETNX,
+    GETSET, MSETNX, STRLEN, SETBIT, GETBIT, SET IFEQ, and three cases that set themselves
+    up with SADD. Written up as TODO 52, grouped by how much thought each needs.
+  - 6 are error wording: refused correctly, but `Syntax Error` where redis says
+    `ERR syntax error`, and `Wrong Arity` where redis names the command. TODO 50.
+  - 2 are WRONGTYPE, which barch does not implement at all. TODO 49.
+  - the rest are the INCRBYFLOAT and bit-command gaps already recorded.
+
+Eight commands were implemented along the way rather than accepted as gaps, because they
+are ordinary string operations with no design question in them: `SETRANGE`, `GETRANGE`,
+`SUBSTR`, `GETDEL`, `GETEX`, `SETEX`, `PSETEX` and `LCS`. LCS is the only one with a cost
+worth knowing - it builds an (n+1)(m+1) table, so its memory is the product of the two
+lengths, which is what redis does and what redis warns about. All eight are covered by
+wire level assertions in respshapetest.py, which is now 123 of them.
+
+`SELECT` was settled here too. It takes a number or a name: a number maps to the space
+named by the new `db_number_prefix` option followed by the number, 0 being the default
+space, and a name selects that space directly. The prefix is configurable because which
+name a number maps to is a choice barch has to make and redis does not; setting it empty
+restores the older behaviour where `SELECT 1` selects a space called `1`. Three
+consequences are written up in the Named Key Spaces article rather than left to be
+discovered: the mapping itself, that a space named with a bare number is only reachable
+through `USE`, and that there is no fixed database count - redis refuses `SELECT 16` while
+`SELECT 999` here simply creates that space.
+
+The thing worth carrying to entries 46 and 47: the yield is not the point, the accounting
+is. 97 translated of 199 sounds poor until the stubs are read - most are valkey testing
+its own encodings - and the 42 differences sound alarming until they are grouped, at which
+point they are one list of absent commands and two decisions already recorded. A harness
+that cannot tell those apart would have produced 42 things to investigate.
+
+## 42. One lock order, written down once [09-08-2026]
+
+TODO 20. The concern it recorded was that the rule which avoids deadlock between two key
+spaces was written out at each call site rather than in one place. It was right, and by
+the time it was looked at the sites disagreed: `KSPACE DEPENDS` took source then dependent
+while `KSPACE RELEASE` took dependent then source. Two callers doing those concurrently on
+the same pair is the textbook deadlock, waiting only for the load to find it.
+
+The rule is now in keyspace_locks.h and it is a total order rather than advice:
+
+  1. key spaces by canonical name, byte order
+  2. shards within a space by shard number
+
+`ks_two` takes two spaces with a mode each and locks them in that order whatever order the
+caller names them in - a caller says it wants the source shared and the dependent exclusive
+and does not get to decide which is taken first, which is the whole point. The same space
+named twice is locked once with the stronger of the two modes, because taking a space's
+locks twice waits on itself. The three KSPACE sites and the pair in sharded_store now go
+through it.
+
+`sharded_store::with_two_keys_write` is the same rule one level down, for the commands that
+touch two keys. It locks by shard number, collapses to one lock when both keys are on the
+same shard, and re-checks the route once the locks are held - a key on a range sharded
+space can move under a router, so a route that changed between deciding and locking means
+dropping both and retrying. That retry cannot spin: moving a key needs the locks being held.
+
+The trap the new helper introduces, which cost a debugging round and is commented at both
+sites that hit it: while a whole-space lock is held, sharded_store's own search and insert
+must not be used. They take a shard lock of their own, and asking for one already held by
+this thread waits forever - it showed up as `read lock wait time exceeded` from cross space
+COPY and MOVE. Under ks_two the shards are addressed directly through shard_for, which
+routes without locking.
+
+## 43. The commands string.tcl and keyspace.tcl expected [09-08-2026]
+
+TODO 52, all of it. Nine commands, in the order the entry recommended - the cheap ones
+first, the ones that touch two keys after the lock order was settled in DONE 42.
+
+  - `SETNX`, `GETSET` - the older spellings of `SET NX` and `SET GET`, differing only in
+    the reply. Both do the test and the write under one lock, or two callers both find the
+    key absent.
+  - `STRLEN` - not the alias for LENGTH the entry guessed. LENGTH answers nil for a key
+    that is not there and redis's STRLEN answers 0, and callers compare that to a number.
+  - `MSETNX` - all or nothing, which is the whole point of it, so it holds a write lock on
+    every shard while it works. MSET has never been atomic across keys and says so; this
+    one cannot afford not to be. The cost is that it stops writes to the space for its
+    duration, which is only defensible because MSETNX is a small occasional call.
+  - `RANDOMKEY` - a random shard among those holding anything, then a bounded walk into it.
+    Arbitrary rather than uniform, and that is written in the function: keys near the start
+    of a shard come up more often and a shard with ten keys is as likely as one with ten
+    thousand.
+  - `RENAME`, `RENAMENX`, `COPY` with DB and REPLACE, `MOVE` - all through
+    with_two_keys_write. The value bytes are copied out before anything is written, because
+    when both keys land on one shard the write can move or free the leaf being read.
+
+Two things were found by writing them rather than by reading anything.
+
+`RANDOMKEY` answered with the same key every time. It had been seeded with an empty
+value_type, which is TODO 31's broken iterator form - it finds the minimum and never fills
+its trace, so it walks nothing - and the fallback then returned the global minimum. Seeded
+from the shard's own tree_minimum it returns 34 distinct keys over 60 calls on 50 keys.
+That entry has now caused two bugs, which is an argument for deleting the form rather than
+leaving it callable.
+
+And the harness had been misattributing failures. The valkey pass ran every case so its
+side effects landed, while the barch pass ran only the trusted ones - and since cases in a
+tcl file share state, the two servers drifted apart and later comparisons blamed barch for
+it. Both sides run everything now and only the comparison is restricted to the trusted set.
+That had been inflating the difference count since the harness was written.
+
+Measured: the differential trusts 85 of 97 translated cases and barch agrees on all 85,
+with the remaining divergences accounted for - the bit commands and SET IFEQ are not
+implemented, WRONGTYPE is TODO 49 and the error wording is TODO 50. barch passes 58 of the
+97 cases run, up from 35 of 77 when this entry was opened. Full suite 55 of 55.
+
+## 44. INCRBYFLOAT, and the numbers being stored differently from how they were answered [09-08-2026]
+
+TODO 48. INCRBYFLOAT for plain keys, which only existed for hash fields. It creates the
+key at the increment when absent, refuses a value that is not a number and leaves it
+alone, and refuses NaN and infinity with the message redis uses - the tests match on
+"would produce", which is a different message from "not a valid float", and the argument
+has to be examined as text to tell them apart because readers disagree about parsing
+"+inf".
+
+Found while writing it: `std::to_string` on a double gives six decimal places whatever the
+value, so the reply said 3 and the stored value said 3.000000, and a GET after an
+INCRBYFLOAT disagreed with the INCRBYFLOAT. Both now go through one `numeric_to_text` that
+renders a float the way redis does - seventeen significant digits, no fraction when there
+is not one - and HINCRBYFLOAT was storing the same wrong thing and is fixed with it.
+
+## 45. WRONGTYPE, as far as it can go without a stored type tag [09-08-2026]
+
+TODO 49, which was left as a decision rather than a task because the obvious
+implementation costs something on the hot path. It turned out the entry understated the
+problem: barch did not merely fail to report a wrong type, the types actively interfered.
+One name could hold a string, a list, a hash and an ordered set at once - they are
+genuinely different keys - and on such a name HLEN answered 3 while ZCARD answered 4,
+because both walk the same container prefix and were counting each other's entries.
+
+The type is observed rather than stored. `barch::kind_of` probes the plain key, which
+means a string, and then the container prefix, which means a list, hash or ordered set.
+The second probe only runs when the first misses, so the ordinary path costs one extra
+lookup on a key that is not there - which is what makes it affordable, and was the concern
+the entry recorded.
+
+Three things had to be got right, and each was wrong first:
+
+  - The two probes route to *different shards*. A plain key and its container prefix are
+    different byte sequences. The first version probed both on the shard the caller had
+    already locked, found nothing ever, and passed every check silently.
+  - It has to run before the command takes its own lock. Asking the store for a second
+    shard while holding the first is the self deadlock cross space COPY hit in DONE 42.
+    The gap between checking and writing is a race, but it is redis's race too and the
+    loser writes a value nobody wanted rather than corrupting anything.
+  - `SET` must not be guarded. redis's SET replaces whatever the name held, including a
+    list, and string.tcl relies on it. Every other string command refuses.
+
+Two real defects came out of it:
+
+  - `DEL` never deleted a collection. It removed the plain key only, so a deleted list
+    lived on under its own keys. `remove_container` collects the run under the prefix and
+    removes it, and DEL uses it.
+  - A removed key lingers as a tombstone that lower_bound finds and search does not, so a
+    deleted collection went on reporting itself as a container - GETRANGE on the name
+    answered WRONGTYPE forever after a DEL. The probe walks past tombstones now.
+
+What this does not do is tell one collection from another, and that limit is the reason
+TODO 53 exists. A hash and an ordered set under one name are still indistinguishable and
+still miscount each other, and SET over a collection does not remove what it replaces.
+Both need a type tag written when a container is created, which changes the stored format
+and needs a migration for anything already saved - a decision that should not be taken
+while chasing a red test.
+
+Measured: the differential trusts 85 of 97 translated cases and barch agrees on all 85, up
+from 58 when these two entries were opened. Full suite 55 of 55.
+
+## 46. Error codes, and a wrong argument count reported for a wrong argument [09-08-2026]
+
+TODO 50. barch answered `Wrong Arity` and `Syntax Error` where redis answers
+`ERR wrong number of arguments for 'incr' command` and `ERR syntax error`, and every other
+message was a bare phrase with no code in front of it.
+
+The code is the half that matters to a client. The first word of a redis error is not part
+of the sentence, it is a code, and clients read it - redis-py maps ERR, WRONGTYPE, NOAUTH
+and the rest onto exception classes, so an error without a recognised one arrives as a
+plain ResponseError and anything branching on the type gets the wrong answer. One rule now
+covers all of them: a message already beginning with an all upper case word keeps it,
+anything else is a sentence and gets `ERR` in front. That fixed every push_error site
+without touching any of them, and left WRONGTYPE and NOPROTO alone.
+
+The entry said naming the command in an arity error was the larger half, because
+`wrong_arity()` does not know which command it is serving. That was not true.
+`rpc_caller::call` already copies the parameters into `args` before dispatching, so
+`args[0]` is the command name - it had simply never been looked at. Lower cased, the way
+redis reports it whatever case arrived, and the whole change is four lines.
+
+Found while doing it, and the reason this was worth more than tidier text: **DECRBY and
+UDECRBY answered with a wrong arity error when the increment failed to parse**.
+`DECRBY k v` told the caller the argument count was wrong when the count was fine and the
+value was not a number, which points at entirely the wrong thing. INCRBY and UINCRBY got
+this right, so the two halves of one family disagreed. Only visible because valkey's test
+asserts which message comes back.
+
+Measured: barch agrees with valkey on all 85 faithful cases and passes 77 of the 97 run, up
+from 70 when this entry was opened, with no divergence accepted for wording any more. Full
+suite 55 of 55.
+
+Worth noticing about the entries themselves: this is the third in a row whose recorded
+reasoning turned out to be wrong on inspection - STRLEN was said to be an alias for LENGTH
+and is not, LPUSH and RPUSH were said to need a data migration and did not, and
+wrong_arity() was said to be unable to know its own command. The entries are more reliable
+about what is broken than about what fixing it would cost.

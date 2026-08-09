@@ -146,6 +146,9 @@ namespace barch {
         // knowing about sharding.
 
         void with_key_write(art::value_type key, const shard_fn& fn);
+        /** the shards owning two keys, write locked in shard number order - see keyspace_locks.h */
+        typedef std::function<void(const shard_ptr& a, const shard_ptr& b)> two_shard_fn;
+        void with_two_keys_write(art::value_type a, art::value_type b, const two_shard_fn& fn);
         void with_key_read(art::value_type key, const shard_fn& fn) const;
 
         // ---- held locks ----

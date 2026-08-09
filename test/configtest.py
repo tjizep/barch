@@ -16,7 +16,8 @@ PORT = 14000
 # that a variable added to the server without being added to the reflection - or the
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
-    "active_defrag", "compression", "eviction_policy", "external_host",
+    "active_defrag", "compression", "db_number_prefix", "eviction_policy",
+    "external_host",
     "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
     "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -59,6 +60,10 @@ ALIASES_WRITTEN = {n: b for n, b in REDIS_ALIASES.items() if b not in {"server_p
 NEW_VALUE = {
     "active_defrag": "off",
     "compression": "zstd",
+    # what SELECT <n> puts before the number to name the space. Any word without a colon
+    # or a space in it is accepted; ':' is refused because it separates the key space
+    # from the command in the prefixed form on the wire
+    "db_number_prefix": "database",
     "eviction_policy": "allkeys-lru",
     "external_host": "someotherhost",
     "iteration_worker_count": "6",

@@ -4,6 +4,7 @@
 
 #ifndef SWIG_CALLER_H
 #define SWIG_CALLER_H
+#include <cctype>
 #include "caller.h"
 #include <string>
 #include <vector>
@@ -102,19 +103,51 @@ struct rpc_caller : caller {
     [[nodiscard]] bool is_remote() const override {
         return remote;
     }
+    /**
+     * The first word of a redis error is a code, not part of the sentence.
+     *
+     * Clients read it: redis-py maps ERR, WRONGTYPE, NOAUTH and the rest onto exception
+     * classes, so an error without a recognised code arrives as a bare ResponseError and
+     * anything branching on the type gets it wrong. barch's messages were plain phrases -
+     * `Wrong Arity`, `Syntax Error`, `no such key` - so none of them carried one.
+     *
+     * A message that already begins with an all upper case word is left alone, because
+     * that word is its code; anything else is a sentence and gets ERR in front of it.
+     */
+    static std::string with_error_code(const std::string& message) {
+        auto end = message.find(' ');
+        auto head = end == std::string::npos ? message : message.substr(0, end);
+        if (head.size() >= 3) {
+            bool code = true;
+            for (auto ch : head) {
+                if (!std::isupper((unsigned char) ch)) { code = false; break; }
+            }
+            if (code) return message;
+        }
+        return "ERR " + message;
+    }
+
     [[nodiscard]] int wrong_arity()  override {
-        errors.emplace_back("Wrong Arity");
+        // named, the way redis names it. args[0] is the command as the client sent it,
+        // and redis reports it lower cased whatever case it arrived in
+        std::string name = args.empty() ? std::string() : args[0].to_string();
+        for (auto& ch : name) ch = (char) std::tolower((unsigned char) ch);
+        if (name.empty()) {
+            errors.emplace_back("ERR wrong number of arguments");
+        } else {
+            errors.emplace_back("ERR wrong number of arguments for '" + name + "' command");
+        }
         return 0;
     }
     [[nodiscard]] int syntax_error() override {
-        errors.emplace_back("Syntax Error");
+        errors.emplace_back("ERR syntax error");
         return 0;
     }
     [[nodiscard]] int error() const override {
         return -1;
     }
     [[nodiscard]] int push_error(const char * e) override {
-        errors.emplace_back(e);
+        errors.emplace_back(with_error_code(e));
         return 0;
     }
     int key_check_error(art::value_type k) override {

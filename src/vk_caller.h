@@ -177,7 +177,7 @@ struct vk_caller : caller {
         check_ctx();
         ++call_counter;
         ++errors_counter;
-        return ValkeyModule_ReplyWithError(ctx,"syntax error");
+        return ValkeyModule_ReplyWithError(ctx,"ERR syntax error");
     }
 
     [[nodiscard]] int push_error(const char * e)  override {

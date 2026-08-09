@@ -12,6 +12,7 @@
 #include "keys.h"
 #include "vk_caller.h"
 #include "sharded_store.h"
+#include "key_type.h"
 #include "art/iterator.h"
 static thread_local composite query;
 extern "C"{
@@ -32,6 +33,11 @@ int HSET(caller& cc, const arg_t& args) {
         return cc.push_null();
     }
     barch::sharded_store store(cc.kspace());
+    // a name already holding a plain value is not a hash to add fields to. Checked before
+    // the lock, because kind_of routes to shards of its own - see key_type.h
+    if (barch::kind_of(store, args[1]) == barch::key_kind::string) {
+        return cc.push_error(barch::wrong_type_message());
+    }
     store.with_container_write(args[1], [&](const barch::shard_ptr& t) {
         auto container = conversion::convert(args[1]);
 
@@ -110,8 +116,7 @@ static int HNUMERIC(caller& call, const arg_t& argv, NumT by, bool as_double) {
             if (!present) {
                 // field absent: start it at the increment, as redis does
                 l = by;
-                Variable v = l;
-                std::string held = v.s();
+                std::string held = numeric_to_text(l);
                 auto fc = [&](const art::node_ptr &) -> void {};
                 t->insert(key, art::value_type{held}, true, fc);
                 ok = true;

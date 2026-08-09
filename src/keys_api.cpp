@@ -11,9 +11,12 @@
 #include <cctype>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
 #include <shared_mutex>
 
 #include "keys_api.h"
+#include <algorithm>
+#include <random>
 #include "sharded_store.h"
 #include "barch_apis.h"
 #include "sastam.h"
@@ -25,6 +28,7 @@
 #include "keys.h"
 #include "keyspec.h"
 #include "keyspace_locks.h"
+#include "key_type.h"
 #include "spaces_spec.h"
 #include "configuration.h"
 #include "statistics.h"
@@ -38,6 +42,17 @@
 
 extern "C" {
 #include "../external/include/valkeymodule.h"
+}
+
+/**
+ * Refuse a string command when the name is being used as a list, hash or ordered set.
+ *
+ * Called with the owning shard already locked, so the answer cannot change under it. See
+ * key_type.h for why the type is observed rather than stored, and for what this does not
+ * catch.
+ */
+static bool wrong_type_here(barch::sharded_store& store, art::value_type name) {
+    return barch::kind_of(store, name) == barch::key_kind::container;
 }
 
 template<typename IntT>
@@ -72,6 +87,9 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     // update-or-create: the miss and the insert that follows it must not race, so
     // both run under one write lock on the owning shard
     barch::sharded_store store(call.kspace());
+    if (wrong_type_here(store, k)) {
+        return call.push_error(barch::wrong_type_message());
+    }
     store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
         if (!t->update(converted.get_value(), updater)) {
             if (present) {
@@ -272,6 +290,11 @@ int SET(caller& call,const arg_t& argv) {
 
     barch::sharded_store store(sp);
     bool stored = true;
+    // deliberately no type check here. redis's SET replaces whatever the name held,
+    // including a list or a hash, and the tests rely on that - every other string command
+    // refuses instead. What barch does not yet do is remove the collection it is
+    // replacing, so the old entries stay reachable through their own commands until
+    // something deletes them. See TODO 53
     if (spec.nx || spec.xx) {
         // NX and XX never reached storage: key_options carries no such flag and the
         // key_spec conversion drops them, so both were parsed and then ignored, and a
@@ -360,6 +383,11 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
 )
 int INCR(caller& call, const arg_t& argv) {
     ++statistics::incr_ops;
+    // exactly the key. BarchModifyInteger cannot check this for us - DECRBY hands it an
+    // argv of three and INCRBY one of two - so `INCR k anything` used to be accepted and
+    // the extra word ignored, where redis answers wrong number of arguments
+    if (argv.size() != 2)
+        return call.wrong_arity();
     // (int64_t) matters: a bare 1 deduces IntT as int, so INCR ran on 32 bits and
     // refused any value above INT32_MAX - redis's INCR is 64 bit signed. INCRBY was
     // always right because it parses its argument into a long long. See DONE 39
@@ -376,7 +404,7 @@ int INCRBY(caller& call, const arg_t& argv) {
     long long by = 0;
 
     if (!conversion::to_ll(argv[2], by)) {
-        return call.push_error("not a valid integer");
+        return call.push_error("value is not an integer or out of range");
     }
     auto arg2 = argv;
     arg2.pop_back();
@@ -390,7 +418,7 @@ int UINCRBY(caller& call, const arg_t& argv) {
     uint64_t by = 0;
 
     if (!conversion::to_ui64(argv[2], by)) {
-        return call.push_error("not a valid integer");
+        return call.push_error("value is not an integer or out of range");
     }
     auto arg2 = argv;
     arg2.pop_back();
@@ -434,7 +462,11 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
             s.insert(s.end(), ov.begin(), ov.end());
             s.insert(s.end(), v.begin(), v.end());
         }
-#if 0 // compression on append can get really slow - so we leave it
+// compression on append can get really slow - so we leave it. The value is stored back
+// uncompressed and stays that way until something rewrites it whole; that is a latency
+// measure rather than an oversight, since compressing here puts the entire value through
+// the dictionary on every append. SETRANGE makes the same trade
+#if 0
         const auto& compressed = dictionary::compress({s.data(),s.size()});
         if (!compressed.empty()) {
             statistics::value_bytes_compressed += compressed.size;
@@ -468,6 +500,947 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
     });
     return reply;
 }
+/* SETRANGE <key> <offset> <value>
+ *
+ * Overwrite the value from `offset` with `value`, growing it if it has to. A key that is
+ * not there counts as an empty value, and an offset past the end is filled with zero
+ * bytes rather than refused - both as redis does, and the zero fill is why an offset can
+ * be used to build a value out of order.
+ *
+ * Nothing is created when the value to write is empty and the key does not exist, so
+ * `SETRANGE missing 0 ""` answers 0 and leaves the space alone rather than adding an
+ * empty key nobody asked for.
+ *
+ * Modelled on _APPEND above: the read, the splice and the write are one write lock on the
+ * owning shard, because anything else lets two callers each extend a value from the same
+ * starting point and lose one of the writes.
+ */
+int SETRANGE(caller& call, const arg_t& argv) {
+    ++statistics::set_ops;
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    auto k = argv[1];
+    auto v = argv[3];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+
+    long long offset = 0;
+    if (!conversion::to_ll(argv[2], offset)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+    if (offset < 0) {
+        return call.push_error("offset is out of range");
+    }
+    if ((size_t) offset + v.size > maximum_allocation_size) {
+        return call.push_error("string exceeds maximum allowed size");
+    }
+
+    auto converted = conversion::as_composite(k);
+    auto fc = [&](art::node_ptr) -> void {
+    };
+    int reply = call.ok();
+    barch::sharded_store store(call.kspace());
+    if (wrong_type_here(store, k)) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        auto n = t->search(converted.get_value());
+        art::key_options opts;
+        art::value_type ov{"", 0};
+        const bool existed = n.is_leaf;
+        if (existed) {
+            auto leaf = n.const_leaf();
+            opts = leaf->options();
+            ov = leaf->get_value();
+            if (leaf->is_compressed()) {
+                ov = dictionary::decompress(ov);
+            }
+        } else if (v.size == 0) {
+            // nothing to write and nothing there: do not bring a key into being
+            reply = call.push_ll(0);
+            return;
+        }
+
+        // threadsafe, non-re-entrant, as _APPEND does
+        thread_local heap::vector<uint8_t> s;
+        s.clear();
+        s.insert(s.end(), ov.begin(), ov.end());
+        if ((size_t) offset > s.size()) {
+            s.resize((size_t) offset, 0);   // the gap is zero bytes, not spaces
+        }
+        if ((size_t) offset + v.size > s.size()) {
+            s.resize((size_t) offset + v.size, 0);
+        }
+        std::copy(v.begin(), v.end(), s.begin() + offset);
+
+        art::value_type written{s.data(), s.size()};
+        if (converted.get_value().size + written.size > maximum_allocation_size) {
+            reply = call.push_error("string exceeds maximum allowed size");
+            return;
+        }
+        // a compressed leaf was decompressed above and is stored back uncompressed. That
+        // is deliberate and it is a latency measure, not an oversight: compressing on
+        // every partial write puts the whole value through the dictionary each time, and
+        // a value being built by repeated SETRANGE would pay that on each call. It stays
+        // uncompressed until something rewrites it whole. _APPEND makes the same trade,
+        // and has the recompressing version next to it behind an #if 0
+        opts.set_compressed(false);
+        // opt_insert answers true when the key was *added*, so a false here is the normal
+        // result of replacing a value that was already there - only a new key that failed
+        // to appear is worth reporting, which is the distinction _APPEND makes too
+        if (!t->opt_insert(opts, converted.get_value(), written, true, fc) && !existed) {
+            reply = call.push_error("key value not added");
+            return;
+        }
+        reply = call.push_ll((long long) s.size());
+    });
+    return reply;
+}
+
+/* GETRANGE <key> <start> <end>   (SUBSTR is the old name for it)
+ *
+ * The substring between two inclusive offsets. A negative offset counts back from the
+ * end, so -1 is the last byte. Offsets outside the value are clamped rather than refused,
+ * and a range that ends up empty - or a key that is not there - answers with an empty
+ * string, not nil. Both of those are redis's behaviour and both are relied on: callers
+ * use GETRANGE k 0 -1 to read a whole value without knowing its length.
+ */
+int GETRANGE(caller& call, const arg_t& argv) {
+    ++statistics::get_ops;
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    long long start = 0, end = 0;
+    if (!conversion::to_ll(argv[2], start) || !conversion::to_ll(argv[3], end)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+    auto converted = conversion::as_composite(k);
+    barch::sharded_store store(call.kspace());
+    if (wrong_type_here(store, k)) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    int reply = call.ok();
+    bool found = store.search(converted.get_value(), [&](const art::node_ptr& n) {
+        auto cl = n.const_leaf();
+        auto vt = cl->get_value();
+        std::string held;
+        if (cl->is_compressed()) {
+            auto d = dictionary::decompress(vt);
+            held.assign(d.chars(), d.size);
+        } else {
+            held.assign(vt.chars(), vt.size);
+        }
+        const long long n_bytes = (long long) held.size();
+        long long from = start < 0 ? n_bytes + start : start;
+        long long to = end < 0 ? n_bytes + end : end;
+        if (from < 0) from = 0;
+        if (to >= n_bytes) to = n_bytes - 1;
+        if (n_bytes == 0 || from > to) {
+            reply = call.push_vt(art::value_type{"", 0});
+            return;
+        }
+        std::string part = held.substr((size_t) from, (size_t) (to - from + 1));
+        reply = call.push_vt(art::value_type{part});
+    });
+    if (!found) {
+        return call.push_vt(art::value_type{"", 0});   // empty, not nil
+    }
+    return reply;
+}
+
+/* GETDEL <key>
+ *
+ * The value, and the key is gone afterwards. One write lock covers the read and the
+ * remove, so nothing can read the value between them and believe it is still there.
+ */
+int GETDEL(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+    barch::sharded_store store(call.kspace());
+    int reply = call.ok();
+    bool had = false;
+    std::string held;
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        auto n = t->search(converted.get_value());
+        if (!n.is_leaf) {
+            return;
+        }
+        auto cl = n.const_leaf();
+        auto vt = cl->get_value();
+        if (cl->is_compressed()) {
+            auto d = dictionary::decompress(vt);
+            held.assign(d.chars(), d.size);
+        } else {
+            held.assign(vt.chars(), vt.size);
+        }
+        had = true;
+        t->remove(converted.get_value());
+    });
+    if (!had) {
+        return call.push_null();
+    }
+    reply = call.push_vt(art::value_type{held});
+    return reply;
+}
+
+/* GETEX <key> [EX s | PX ms | EXAT unix-s | PXAT unix-ms | PERSIST]
+ *
+ * The value, and the expiry is changed on the way past. With no option the expiry is left
+ * exactly as it was - GETEX with nothing after the key is a plain GET, not a PERSIST.
+ */
+int GETEX(caller& call, const arg_t& argv) {
+    ++statistics::get_ops;
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+
+    bool persist = false, change = false;
+    int64_t when = 0;
+    if (argv.size() > 2) {
+        auto opt = argv[2].to_string();
+        for (auto& ch : opt) ch = (char) toupper((unsigned char) ch);
+        if (opt == "PERSIST") {
+            if (argv.size() != 3) return call.syntax_error();
+            persist = true;
+            change = true;
+        } else {
+            if (argv.size() != 4) return call.syntax_error();
+            long long given = 0;
+            if (!conversion::to_ll(argv[3], given)) {
+                return call.push_error("value is not an integer or out of range");
+            }
+            if (opt == "EX")        when = art::now() + given * 1000;
+            else if (opt == "PX")   when = art::now() + given;
+            else if (opt == "EXAT") when = given * 1000;
+            else if (opt == "PXAT") when = given;
+            else return call.syntax_error();
+            change = true;
+        }
+    }
+
+    auto converted = conversion::as_composite(k);
+    barch::sharded_store store(call.kspace());
+    bool had = false;
+    std::string held;
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        auto n = t->search(converted.get_value());
+        if (!n.is_leaf) {
+            return;
+        }
+        auto cl = n.const_leaf();
+        auto vt = cl->get_value();
+        if (cl->is_compressed()) {
+            auto d = dictionary::decompress(vt);
+            held.assign(d.chars(), d.size);
+        } else {
+            held.assign(vt.chars(), vt.size);
+        }
+        had = true;
+        if (!change) {
+            return;
+        }
+        auto updater = [&t, persist, when](const art::node_ptr &leaf) -> art::node_ptr {
+            if (leaf.null()) return leaf;
+            auto l = leaf.const_leaf();
+            return art::make_leaf(t->get_ap(), l->get_key(), l->get_value(),
+                                  persist ? 0 : when, l->is_volatile(), l->is_compressed());
+        };
+        t->update(converted.get_value(), updater);
+    });
+    if (!had) {
+        return call.push_null();
+    }
+    return call.push_vt(art::value_type{held});
+}
+
+/* SETEX <key> <seconds> <value> and PSETEX <key> <milliseconds> <value>
+ *
+ * SET with an expiry that is not optional. redis refuses a non positive time here rather
+ * than storing a key that is already dead, which is the only thing separating these from
+ * `SET k v EX n`.
+ */
+static int SETEX_(caller& call, const arg_t& argv, bool millis) {
+    ++statistics::set_ops;
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    auto k = argv[1];
+    auto v = argv[3];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    long long given = 0;
+    if (!conversion::to_ll(argv[2], given)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+    if (given <= 0) {
+        return call.push_error("invalid expire time");
+    }
+    auto converted = conversion::as_composite(k);
+    art::key_options opts;
+    opts.set_expiry(art::now() + (millis ? given : given * 1000));
+    auto fc = [&](const art::node_ptr &) -> void {};
+    const auto& compressed = dictionary::compress(v);
+    if (!compressed.empty()) {
+        statistics::value_bytes_compressed += compressed.size;
+        opts.set_compressed(true);
+        v = compressed;
+    }
+    barch::sharded_store store(call.kspace());
+    store.insert(opts, converted.get_value(), v, true, fc);
+    return call.push_simple("OK");
+}
+int SETEX(caller& call, const arg_t& argv) {
+    return SETEX_(call, argv, false);
+}
+int PSETEX(caller& call, const arg_t& argv) {
+    return SETEX_(call, argv, true);
+}
+
+/* LCS <key1> <key2> [LEN] [IDX] [MINMATCHLEN n] [WITHMATCHLEN]
+ *
+ * The longest common subsequence of two values - subsequence, not substring, so the
+ * characters have to be in order but need not be adjacent.
+ *
+ * Plain, it answers with the subsequence itself. LEN answers with its length instead.
+ * IDX answers with where the matches are: a map of `matches` and `len`, where each match
+ * is the range in key1 and the range in key2, both inclusive, listed from the end of the
+ * strings backwards - which is the order the traceback produces and the order redis
+ * reports. MINMATCHLEN drops the short ones and WITHMATCHLEN adds each match's length.
+ *
+ * The table is (n+1)*(m+1) uint32, as redis's is, so the memory is the product of the two
+ * lengths. That is worth knowing before calling it on large values; redis has the same
+ * cost and the same caveat in its documentation.
+ */
+int LCS(caller& call, const arg_t& argv) {
+    ++statistics::get_ops;
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    bool want_len = false, want_idx = false, with_match_len = false;
+    long long min_match_len = 0;
+    for (size_t i = 3; i < argv.size(); ++i) {
+        auto opt = argv[i].to_string();
+        for (auto& ch : opt) ch = (char) toupper((unsigned char) ch);
+        if (opt == "LEN") {
+            want_len = true;
+        } else if (opt == "IDX") {
+            want_idx = true;
+        } else if (opt == "WITHMATCHLEN") {
+            with_match_len = true;
+        } else if (opt == "MINMATCHLEN") {
+            if (i + 1 >= argv.size()) return call.syntax_error();
+            if (!conversion::to_ll(argv[++i], min_match_len)) {
+                return call.push_error("value is not an integer or out of range");
+            }
+        } else {
+            return call.syntax_error();
+        }
+    }
+    if (want_len && want_idx) {
+        return call.push_error("If you want both the length and indexes, please just use IDX.");
+    }
+
+    // read both values first; the comparison itself needs no lock
+    std::string a, b;
+    barch::sharded_store store(call.kspace());
+    auto read_one = [&](art::value_type key, std::string& into) -> void {
+        if (key_ok(key) != 0) return;
+        auto converted = conversion::as_composite(key);
+        store.search(converted.get_value(), [&](const art::node_ptr& n) {
+            auto cl = n.const_leaf();
+            auto vt = cl->get_value();
+            if (cl->is_compressed()) {
+                auto d = dictionary::decompress(vt);
+                into.assign(d.chars(), d.size);
+            } else {
+                into.assign(vt.chars(), vt.size);
+            }
+        });
+    };
+    read_one(argv[1], a);
+    read_one(argv[2], b);
+
+    const size_t n = a.size(), m = b.size();
+    if ((uint64_t) n * (uint64_t) m > (uint64_t) maximum_allocation_size) {
+        return call.push_error("string too long for LCS");
+    }
+    // one row per character of a, one column per character of b
+    heap::std_vector<uint32_t> table;
+    table.assign((n + 1) * (m + 1), 0);
+    auto at = [&](size_t i, size_t j) -> uint32_t& { return table[i * (m + 1) + j]; };
+    for (size_t i = 1; i <= n; ++i) {
+        for (size_t j = 1; j <= m; ++j) {
+            if (a[i - 1] == b[j - 1]) {
+                at(i, j) = at(i - 1, j - 1) + 1;
+            } else {
+                at(i, j) = std::max(at(i - 1, j), at(i, j - 1));
+            }
+        }
+    }
+    const uint32_t total = (n && m) ? at(n, m) : 0;
+    if (want_len) {
+        return call.push_ll((long long) total);
+    }
+
+    // walk back from the corner. Equal characters extend the current run; anything else
+    // steps whichever way the table came from, which is where a run ends
+    std::string result;
+    struct match { long long a_start, a_end, b_start, b_end; };
+    heap::std_vector<match> matches;
+    size_t i = n, j = m;
+    long long run_a_end = -1, run_b_end = -1;
+    while (i > 0 && j > 0) {
+        if (a[i - 1] == b[j - 1]) {
+            result.push_back(a[i - 1]);
+            if (run_a_end < 0) {
+                run_a_end = (long long) i - 1;
+                run_b_end = (long long) j - 1;
+            }
+            --i; --j;
+            if (i == 0 || j == 0 || a[i - 1] != b[j - 1]) {
+                matches.push_back({(long long) i, run_a_end, (long long) j, run_b_end});
+                run_a_end = run_b_end = -1;
+            }
+        } else if (at(i - 1, j) > at(i, j - 1)) {
+            --i;
+        } else {
+            --j;
+        }
+    }
+    std::reverse(result.begin(), result.end());
+    if (!want_idx) {
+        return call.push_vt(art::value_type{result});
+    }
+
+    // RESP2 flattens this to an array of four; RESP3 sends it as a map
+    call.start_map();
+    call.push_simple("matches");
+    call.start_array();
+    for (const auto& mt : matches) {
+        if (mt.a_end - mt.a_start + 1 < min_match_len) continue;
+        call.start_array();
+        call.start_array();
+        call.push_ll(mt.a_start);
+        call.push_ll(mt.a_end);
+        call.end_array();
+        call.start_array();
+        call.push_ll(mt.b_start);
+        call.push_ll(mt.b_end);
+        call.end_array();
+        if (with_match_len) {
+            call.push_ll(mt.a_end - mt.a_start + 1);
+        }
+        call.end_array();
+    }
+    call.end_array();
+    call.push_simple("len");
+    call.push_ll((long long) total);
+    call.end_map();
+    return call.ok();
+}
+
+/* SETNX <key> <value>
+ *
+ * Set only if the key is absent, answering 1 when it was written and 0 when it was not.
+ * `SET key value NX` does the same work; this is the older spelling, and the difference
+ * is the reply - an integer here, a simple string or nil there.
+ */
+int SETNX(caller& call, const arg_t& argv) {
+    ++statistics::set_ops;
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto k = argv[1];
+    auto v = argv[2];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+    bool stored = false;
+    auto fc = [&](const art::node_ptr &) -> void {};
+    art::key_options opts;
+    const auto& compressed = dictionary::compress(v);
+    if (!compressed.empty()) {
+        statistics::value_bytes_compressed += compressed.size;
+        opts.set_compressed(true);
+        v = compressed;
+    }
+    barch::sharded_store store(call.kspace());
+    // the test and the write are one lock, or two callers both find it absent
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        if (!t->search(converted.get_value()).null()) {
+            return;
+        }
+        t->insert(opts, converted.get_value(), v, true, fc);
+        stored = true;
+    });
+    return call.push_ll(stored ? 1 : 0);
+}
+
+/* GETSET <key> <value>
+ *
+ * Write the value and answer with the one it replaced, nil when there was none. `SET key
+ * value GET` is the same thing; this is the older spelling and redis still documents it.
+ */
+int GETSET(caller& call, const arg_t& argv) {
+    ++statistics::set_ops;
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto k = argv[1];
+    auto v = argv[2];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+    bool had = false;
+    std::string previous;
+    auto fc = [&](const art::node_ptr &) -> void {};
+    art::key_options opts;
+    const auto& compressed = dictionary::compress(v);
+    if (!compressed.empty()) {
+        statistics::value_bytes_compressed += compressed.size;
+        opts.set_compressed(true);
+        v = compressed;
+    }
+    barch::sharded_store store(call.kspace());
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        auto n = t->search(converted.get_value());
+        if (n.is_leaf) {
+            auto cl = n.const_leaf();
+            auto ov = cl->get_value();
+            if (cl->is_compressed()) {
+                auto d = dictionary::decompress(ov);
+                previous.assign(d.chars(), d.size);
+            } else {
+                previous.assign(ov.chars(), ov.size);
+            }
+            had = true;
+        }
+        t->insert(opts, converted.get_value(), v, true, fc);
+    });
+    if (!had) {
+        return call.push_null();
+    }
+    return call.push_vt(art::value_type{previous});
+}
+
+/* STRLEN <key>
+ *
+ * The length of the value in bytes. Not quite an alias for LENGTH: LENGTH answers nil for
+ * a key that is not there and this answers 0, which is what redis does and what callers
+ * that compare the reply to a number rely on.
+ */
+int STRLEN(caller& call, const arg_t& argv) {
+    ++statistics::get_ops;
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+    barch::sharded_store store(call.kspace());
+    if (wrong_type_here(store, k)) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    long long length = 0;
+    store.search(converted.get_value(), [&](const art::node_ptr& n) {
+        auto cl = n.const_leaf();
+        auto vt = cl->get_value();
+        if (cl->is_compressed()) {
+            vt = dictionary::decompress(vt);
+        }
+        length = (long long) vt.size;
+    });
+    return call.push_ll(length);
+}
+
+/* MSETNX <key> <value> [key value ...]
+ *
+ * Write every pair, but only if not one of the keys is already there - all of them or
+ * none. That is the whole point of the command and it is why this holds a write lock on
+ * every shard while it works, rather than one lock per key the way MSET does. MSET has
+ * never been atomic across keys and says so; this one cannot afford not to be.
+ *
+ * The cost is real: it stops writes to the whole key space for the duration. It is only
+ * defensible because MSETNX is a small, occasional call - a caller reaching for it with a
+ * thousand pairs is using the wrong command.
+ */
+int MSETNX(caller& call, const arg_t& argv) {
+    ++statistics::set_ops;
+    if (argv.size() < 3 || (argv.size() % 2) == 0)
+        return call.wrong_arity();
+    barch::sharded_store store(call.kspace());
+    bool any_present = false;
+    // one pass to look, one to write, both under the same set of locks
+    store.each_shard_write([&](const barch::shard_ptr& t) {
+        if (any_present) return;
+        for (size_t n = 1; n < argv.size(); n += 2) {
+            auto k = argv[n];
+            if (key_ok(k) != 0) continue;
+            auto converted = conversion::as_composite(k);
+            if (store.shard_for(converted.get_value()) != t) continue;
+            if (!t->search(converted.get_value()).null()) {
+                any_present = true;
+                return;
+            }
+        }
+    });
+    if (any_present) {
+        return call.push_ll(0);
+    }
+    auto fc = [&](const art::node_ptr &) -> void {};
+    store.each_shard_write([&](const barch::shard_ptr& t) {
+        for (size_t n = 1; n < argv.size(); n += 2) {
+            auto k = argv[n];
+            if (key_ok(k) != 0) continue;
+            auto converted = conversion::as_composite(k);
+            if (store.shard_for(converted.get_value()) != t) continue;
+            art::key_options opts;
+            t->insert(opts, converted.get_value(), argv[n + 1], true, fc);
+        }
+    });
+    return call.push_ll(1);
+}
+
+/* RANDOMKEY
+ *
+ * Some key, or nil when the space is empty.
+ *
+ * "Some" is doing work in that sentence. This picks a shard at random from the ones that
+ * hold anything, then walks a bounded number of steps into it, so the answer varies but
+ * is not uniform over the key space - keys near the start of a shard come up more often,
+ * and a shard with ten keys is as likely as one with ten thousand. redis's own RANDOMKEY
+ * is approximate too, for its own reasons, so this is a difference of shape rather than
+ * of kind. Making it uniform means knowing each shard's size and sampling in proportion,
+ * which is a walk this command does not otherwise need.
+ */
+int RANDOMKEY(caller& call, const arg_t& argv) {
+    ++statistics::get_ops;
+    if (argv.size() != 1)
+        return call.wrong_arity();
+    barch::sharded_store store(call.kspace());
+    heap::std_vector<barch::shard_ptr> holding;
+    store.each_shard_read([&](const barch::shard_ptr& t) {
+        if (t->get_size() > 0) holding.push_back(t);
+    });
+    if (holding.empty()) {
+        return call.push_null();
+    }
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    auto& picked = holding[rng() % holding.size()];
+    // how far to walk into it. Bounded so a large shard does not turn one call into a
+    // long iteration; the bias that introduces is described above
+    enum { max_steps = 64 };
+    size_t steps = (size_t) (rng() % std::min<uint64_t>(picked->get_size(), max_steps));
+    int reply = call.ok();
+    // seeded from the shard's own minimum. art::iterator's one argument form finds the
+    // minimum but never fills its trace, so it walks nothing - TODO 31 - and an empty
+    // value_type as the second argument does the same, which is what made an earlier
+    // version of this answer with the global minimum every single time
+    auto first = picked->tree_minimum();
+    if (!first.is_leaf) {
+        return call.push_null();   // emptied between the count above and here
+    }
+    art::iterator it(picked, first.const_leaf()->get_key());
+    art::value_type found = it.ok() ? it.key() : art::value_type{};
+    for (size_t i = 0; i < steps && it.ok(); ++i) {
+        it.next();
+        if (it.ok()) {
+            found = it.key();      // keep the last good one; a short shard just stops early
+        }
+    }
+    if (found.empty()) {
+        return call.push_null();
+    }
+    reply = call.push_encoded_key(found);
+    return reply;
+}
+
+/**
+ * Move or copy the value at one key to another, under both keys' locks.
+ *
+ * The lock order is sharded_store's, which is by shard number - see keyspace_locks.h for
+ * why the caller does not get to choose it. `replace` says whether an existing
+ * destination may be overwritten; `keep_source` separates COPY from RENAME.
+ *
+ * Answers: 1 moved or copied, 0 the destination was in the way, -1 no such source.
+ */
+static int move_value(barch::sharded_store& store, art::value_type from,
+                      art::value_type to, bool replace, bool keep_source) {
+    int result = -1;
+    store.with_two_keys_write(from, to, [&](const barch::shard_ptr& sf,
+                                            const barch::shard_ptr& st) {
+        auto n = sf->search(from);
+        if (!n.is_leaf) {
+            result = -1;
+            return;
+        }
+        if (!replace && !st->search(to).null()) {
+            result = 0;
+            return;
+        }
+        auto cl = n.const_leaf();
+        art::key_options opts = cl->options();
+        // the bytes are copied out before anything is written, because writing to the
+        // destination can move or free the leaf being read when both are on one shard
+        std::string held(cl->get_value().chars(), cl->get_value().size);
+        auto fc = [&](const art::node_ptr &) -> void {};
+        st->insert(opts, to, art::value_type{held}, true, fc);
+        if (!keep_source) {
+            sf->remove(from);
+        }
+        result = 1;
+    });
+    return result;
+}
+
+/* RENAME <key> <newkey>
+ *
+ * The value moves and the old name is gone. An existing destination is overwritten, and a
+ * source that is not there is an error rather than a quiet nothing - which is the one
+ * place RENAME differs from the rest of the key commands, and it is redis's choice.
+ */
+int RENAME(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto from = argv[1];
+    auto to = argv[2];
+    if (key_ok(from) != 0) return call.key_check_error(from);
+    if (key_ok(to) != 0) return call.key_check_error(to);
+    auto cf = conversion::as_composite(from);
+    auto ct = conversion::as_composite(to);
+    barch::sharded_store store(call.kspace());
+    int r = move_value(store, cf.get_value(), ct.get_value(), true, false);
+    if (r < 0) {
+        return call.push_error("no such key");
+    }
+    return call.push_simple("OK");
+}
+
+/* RENAMENX <key> <newkey>
+ *
+ * As RENAME, but it will not overwrite. 1 when the name was taken, 0 when the destination
+ * was already there. A missing source is still an error.
+ */
+int RENAMENX(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto from = argv[1];
+    auto to = argv[2];
+    if (key_ok(from) != 0) return call.key_check_error(from);
+    if (key_ok(to) != 0) return call.key_check_error(to);
+    auto cf = conversion::as_composite(from);
+    auto ct = conversion::as_composite(to);
+    barch::sharded_store store(call.kspace());
+    int r = move_value(store, cf.get_value(), ct.get_value(), false, false);
+    if (r < 0) {
+        return call.push_error("no such key");
+    }
+    return call.push_ll(r);
+}
+
+/* COPY <source> <destination> [DB <n>] [REPLACE]
+ *
+ * The value is written under the second name and stays under the first. 1 when it was
+ * copied, 0 when the destination existed and REPLACE was not given. A source that is not
+ * there answers 0 rather than an error, unlike RENAME.
+ *
+ * DB selects the destination key space by number, the same mapping SELECT uses, so it
+ * honours `db_number_prefix`. Copying into another space cannot use the two key shard
+ * helper - the keys are in different spaces, not different shards - so it takes the two
+ * spaces through ks_two instead, which is the same rule one level up.
+ */
+int COPY(caller& call, const arg_t& argv) {
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    auto from = argv[1];
+    auto to = argv[2];
+    if (key_ok(from) != 0) return call.key_check_error(from);
+    if (key_ok(to) != 0) return call.key_check_error(to);
+    bool replace = false;
+    long long db = -1;
+    for (size_t i = 3; i < argv.size(); ++i) {
+        auto opt = argv[i].to_string();
+        for (auto& ch : opt) ch = (char) toupper((unsigned char) ch);
+        if (opt == "REPLACE") {
+            replace = true;
+        } else if (opt == "DB") {
+            if (i + 1 >= argv.size()) return call.syntax_error();
+            if (!conversion::to_ll(argv[++i], db)) {
+                return call.push_error("value is not an integer or out of range");
+            }
+            if (db < 0) return call.push_error("DB index is out of range");
+        } else {
+            return call.syntax_error();
+        }
+    }
+    auto cf = conversion::as_composite(from);
+    auto ct = conversion::as_composite(to);
+
+    if (db < 0) {
+        barch::sharded_store store(call.kspace());
+        int r = move_value(store, cf.get_value(), ct.get_value(), replace, true);
+        return call.push_ll(r < 0 ? 0 : r);
+    }
+
+    auto here = call.kspace();
+    auto there = barch::get_keyspace(db == 0 ? "" : barch::get_db_number_prefix() + std::to_string(db));
+    if (here == there) {
+        barch::sharded_store store(here);
+        int r = move_value(store, cf.get_value(), ct.get_value(), replace, true);
+        return call.push_ll(r < 0 ? 0 : r);
+    }
+    ks_two held(here, ks_mode::shared, there, ks_mode::unique);
+    barch::sharded_store src(here);
+    barch::sharded_store dst(there);
+    // the shards are addressed directly. ks_two is already holding every shard lock in
+    // both spaces, and sharded_store's own search and insert take a shard lock of their
+    // own - asking for one that is already held waits for a lock this thread will never
+    // release. shard_for only routes, it does not lock, which is what makes it usable here
+    auto sf = src.shard_for(cf.get_value());
+    auto st = dst.shard_for(ct.get_value());
+    if (!sf || !st) {
+        return call.push_ll(0);
+    }
+    int result = 0;
+    auto n = sf->search(cf.get_value());
+    if (n.is_leaf) {
+        if (replace || st->search(ct.get_value()).null()) {
+            auto cl = n.const_leaf();
+            art::key_options opts = cl->options();
+            std::string value(cl->get_value().chars(), cl->get_value().size);
+            auto fc = [&](const art::node_ptr &) -> void {};
+            st->insert(opts, ct.get_value(), art::value_type{value}, true, fc);
+            result = 1;
+        }
+    }
+    return call.push_ll(result);
+}
+
+/* MOVE <key> <db>
+ *
+ * The value moves to another database, and is gone from this one. 1 when it moved, 0 when
+ * the key was not here or was already there - redis will not overwrite with MOVE, and
+ * says nothing about which of the two reasons it was.
+ */
+int MOVE(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0) return call.key_check_error(k);
+    long long db = 0;
+    if (!conversion::to_ll(argv[2], db)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+    if (db < 0) {
+        return call.push_error("DB index is out of range");
+    }
+    auto here = call.kspace();
+    auto there = barch::get_keyspace(db == 0 ? "" : barch::get_db_number_prefix() + std::to_string(db));
+    if (here == there) {
+        return call.push_error("source and destination objects are the same");
+    }
+    auto converted = conversion::as_composite(k);
+    ks_two held(here, ks_mode::unique, there, ks_mode::unique);
+    barch::sharded_store src(here);
+    barch::sharded_store dst(there);
+    // direct on the shards, for the reason COPY gives above
+    auto sf = src.shard_for(converted.get_value());
+    auto st = dst.shard_for(converted.get_value());
+    if (!sf || !st) {
+        return call.push_ll(0);
+    }
+    auto n = sf->search(converted.get_value());
+    if (!n.is_leaf || !st->search(converted.get_value()).null()) {
+        return call.push_ll(0);
+    }
+    auto cl = n.const_leaf();
+    art::key_options opts = cl->options();
+    std::string value(cl->get_value().chars(), cl->get_value().size);
+    auto fc = [&](const art::node_ptr &) -> void {};
+    st->insert(opts, converted.get_value(), art::value_type{value}, true, fc);
+    sf->remove(converted.get_value());
+    return call.push_ll(1);
+}
+
+/* INCRBYFLOAT <key> <increment>
+ *
+ * Add a floating point amount to a key, creating it at that amount when it is absent.
+ * The reply is a bulk string rather than a double, and redis trims it: 3.0 comes back as
+ * "3", not "3.0", because the value is stored as text and read back the same way.
+ *
+ * A value that is not a number is refused and left alone, as the integer forms have done
+ * since DONE 37.
+ */
+int INCRBYFLOAT(caller& call, const arg_t& argv) {
+    ++statistics::incr_ops;
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    double by = 0;
+    if (!conversion::to_double(argv[2], by)) {
+        // "+inf" and "nan" parse as numbers for some readers and not others, so the
+        // text is checked directly - redis distinguishes "not a float" from "a float we
+        // will not add", and the tests match on the second message
+        std::string given = argv[2].to_string();
+        for (auto& ch : given) ch = (char) tolower((unsigned char) ch);
+        if (given.find("inf") != std::string::npos || given.find("nan") != std::string::npos) {
+            return call.push_error("increment would produce NaN or Infinity");
+        }
+        return call.push_error("value is not a valid float");
+    }
+    if (std::isnan(by) || std::isinf(by)) {
+        return call.push_error("increment would produce NaN or Infinity");
+    }
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+
+    barch::sharded_store store(call.kspace());
+    if (wrong_type_here(store, k)) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    double l = 0;
+    bool present = false;
+    numeric_status why = numeric_status::updated;
+    auto updater = [&](const art::node_ptr &value) -> art::node_ptr {
+        if (value.null()) {
+            return nullptr;
+        }
+        present = true;
+        return leaf_numeric_update(l, value, by, why);
+    };
+    int r = -1;
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        if (t->update(converted.get_value(), updater)) {
+            r = 0;
+            return;
+        }
+        if (present) {
+            return;   // there, but not a number - leave it where it is
+        }
+        l = by;
+        std::string held = numeric_to_text(l);
+        auto fc = [&](const art::node_ptr &) -> void {};
+        t->opt_insert({}, converted.get_value(), art::value_type{held}, true, fc);
+        r = 0;
+    });
+    if (r != 0) {
+        return call.push_error("value is not a valid float");
+    }
+    if (std::isnan(l) || std::isinf(l)) {
+        return call.push_error("increment would produce NaN or Infinity");
+    }
+    // as text, the way redis renders it: seventeen significant digits, and a whole
+    // number without a fraction, so 1.5 + 1.5 is "3" rather than "3.0". Clients compare
+    // this reply as a string
+    std::string text = numeric_to_text(l);
+    return call.push_vt(art::value_type{text});
+}
+
 int APPEND(caller& call, const arg_t& argv) {
     return _APPEND(call, argv, false);
 }
@@ -497,6 +1470,8 @@ int cmd_UINCRBY(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int DECR(caller& call, const arg_t& argv) {
     ++statistics::decr_ops;
+    if (argv.size() != 2)
+        return call.wrong_arity();
     return BarchModifyInteger(call, argv, (int64_t) -1);
 }
 
@@ -511,8 +1486,10 @@ int DECRBY(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     int64_t by = 0;
 
+    // a value that will not parse is not a wrong argument *count* - this answered with an
+    // arity error, which tells the caller to look at the wrong thing entirely
     if (!conversion::to_i64(argv[2], by)) {
-        return call.wrong_arity();
+        return call.push_error("value is not an integer or out of range");
     }
 
     return BarchModifyInteger(call,argv, -by);
@@ -524,7 +1501,7 @@ int UDECRBY(caller& call, const arg_t& argv) {
     uint64_t by = 0;
 
     if (!conversion::to_ui64(argv[2], by)) {
-        return call.wrong_arity();
+        return call.push_error("value is not an integer or out of range");
     }
 
     return BarchModifyInteger(call,argv, -by);
@@ -978,10 +1955,18 @@ int DEL(caller& call, const arg_t& argv) {
         if (key_ok(k) != 0)
             return call.key_check_error(k);
         auto converted = conversion::as_composite(k);
-        auto fc = [&removed](art::node_ptr n) -> void {
-            if (!n.null()) ++removed;
+        bool gone = false;
+        auto fc = [&gone](art::node_ptr n) -> void {
+            if (!n.null()) gone = true;
         };
         store.remove(converted.get_value(), fc);
+        // and whatever the name held as a list, hash or ordered set. Without this a
+        // deleted list stayed behind under its own keys, and the name kept answering as
+        // a container - which made GETRANGE on it report a wrong type after a DEL
+        if (barch::remove_container(store, k) > 0) {
+            gone = true;
+        }
+        if (gone) ++removed;
     }
     return call.push_ll(removed);
 }
@@ -1075,6 +2060,25 @@ int add_keys_api(ValkeyModuleCtx *ctx) {
 void register_keys_api(function_map& r) {
     r["SET"] = {::SET,{"write","keys","data"}};
     r["APPEND"] = {::APPEND,{"write","keys","data"}};
+    r["SETRANGE"] = {::SETRANGE,{"write","keys","data"}};
+    r["GETRANGE"] = {::GETRANGE,{"read","keys","data"}};
+    // SUBSTR is the name GETRANGE had before redis 2.0 and is still accepted
+    r["SUBSTR"] = {::GETRANGE,{"read","keys","data"}};
+    r["GETDEL"] = {::GETDEL,{"write","keys","data"}};
+    r["GETEX"] = {::GETEX,{"write","keys","data"}};
+    r["SETEX"] = {::SETEX,{"write","keys","data"}};
+    r["PSETEX"] = {::PSETEX,{"write","keys","data"}};
+    r["LCS"] = {::LCS,{"read","keys","data"}};
+    r["SETNX"] = {::SETNX,{"write","keys","data"}};
+    r["GETSET"] = {::GETSET,{"write","keys","data"}};
+    r["STRLEN"] = {::STRLEN,{"read","keys","data"}};
+    r["MSETNX"] = {::MSETNX,{"write","keys","data"}};
+    r["RANDOMKEY"] = {::RANDOMKEY,{"read","keys","data"}};
+    r["RENAME"] = {::RENAME,{"write","keys","data"}};
+    r["RENAMENX"] = {::RENAMENX,{"write","keys","data"}};
+    r["COPY"] = {::COPY,{"write","keys","data"}};
+    r["MOVE"] = {::MOVE,{"write","keys","data"}};
+    r["INCRBYFLOAT"] = {::INCRBYFLOAT,{"write","keys","data"}};
     r["PREPEND"] = {::PREPEND,{"write","keys","data"}} ;
     r["KEYS"] = {::KEYS,{"read","keys","data"}, true};
     r["VALUES"] = {::VALUES,{"read","keys","data"}, true};

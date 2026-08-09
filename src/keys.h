@@ -4,6 +4,9 @@
 
 #ifndef KEYS_H
 #define KEYS_H
+#include <cstdio>
+#include <type_traits>
+#include <string>
 #include <cstdlib>
 #include "../external/include/valkeymodule.h"
 #include "art/art.h"
@@ -36,6 +39,25 @@ unsigned log_encoded_key(art::value_type key, bool start = true);
  * a type error that silently destroyed the value instead of being refused. The caller
  * needs to tell the three apart to answer the way redis does.
  */
+/**
+ * A number as it is stored and replied with.
+ *
+ * std::to_string on a double gives six decimal places whatever the value, so 3 came back
+ * as "3.000000" and was stored that way. redis renders a float to seventeen significant
+ * digits and drops a fraction that is not there, so 1.5 + 1.5 is "3", and it stores the
+ * same text it answers with - a GET after an INCRBYFLOAT has to agree with the reply.
+ */
+template<typename NumT>
+static std::string numeric_to_text(NumT v) {
+    if constexpr (std::is_floating_point_v<NumT>) {
+        char buf[64];
+        int n = snprintf(buf, sizeof(buf), "%.17Lg", (long double) v);
+        return std::string(buf, n > 0 ? (size_t) n : 0);
+    } else {
+        return std::to_string(v);
+    }
+}
+
 enum class numeric_status {
     updated,        // a new leaf was produced
     not_numeric,    // the value that was there is not a number
@@ -65,7 +87,7 @@ static art::node_ptr leaf_numeric_update(UT &l, const art::node_ptr &old, UT by,
             why = numeric_status::overflowed;
             return nullptr;
         }
-        auto s = std::to_string(l);
+        auto s = numeric_to_text(l);
         return make_leaf
         (  alloc
         ,  leaf->get_key()

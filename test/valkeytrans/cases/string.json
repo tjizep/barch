@@ -1,0 +1,2090 @@
+{
+ "source": "string.tcl",
+ "cases": [
+  {
+   "name": "SET and GET an item",
+   "expected": "foobar",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "foobar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "SET and GET an empty item",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      ""
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "Very big payload in GET/SET",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set buf [string repeat \"abcd\" 1000000]\n        r set foo $buf\n        r get foo"
+  },
+  {
+   "name": "Very big payload random access",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set err {}\n            array set payload {}\n            for {set j 0} {$j < 100} {incr j} {\n                set size [expr 1+[randomInt 100000]]\n                set buf [string repeat \"pl-$j\" $size]\n                set payload($j) $buf\n                r set bigpayload_$j $buf\n            }\n            for {set j 0} {$j < 1000} {incr j} {\n                set index [randomInt 100]\n                set buf [r get bigpayload_$index]\n                if {$buf != $payload($index)} {\n                    set err \"Values differ: I set '$payload($index)' but I read back '$buf'\"\n                    break\n                }\n            }\n            unset payload\n            set _ $err"
+  },
+  {
+   "name": "SET 10000 numeric keys and access all them in reverse order",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n            set err {}\n            for {set x 0} {$x < 10000} {incr x} {\n                r set $x $x\n            }\n            set sum 0\n            for {set x 9999} {$x >= 0} {incr x -1} {\n                set val [r get $x]\n                if {$val ne $x} {\n                    set err \"Element at position $x is $val instead of $x\"\n                    break\n                }\n            }\n            set _ $err"
+  },
+  {
+   "name": "DBSIZE should be 10000 now",
+   "expected": "10000",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "dbsize"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "memoryusage of string",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Simple test\n        set key \"key\"\n        set value \"value\"\n        r set $key $value\n        assert_lessthan_equal [expr [string length $key] + [string length $value]] [r memory usage key]\n\n        # Big value\n        set key \"key\"\n        set value [string repeat A 100000]\n        r set $key $value\n        assert_lessthan_equal [expr [string length $key] + [string length $value]] [r memory usage key]\n\n        # Big key\n        set key [string repeat A 100000]\n        set value \"value\"\n        r set $key $value\n        assert_lessthan_equal [expr [string length $key] + [string length $value]] [r memory usage key]\n\n        # Big key for int\n        set key [string repeat B 100000]\n        r incr $key\n        assert_lessthan_equal [string length $key] [r memory usage $key]"
+  },
+  {
+   "name": "SETNX target key missing",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "novar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setnx",
+      "novar",
+      "foobared"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "novar"
+     ],
+     "value": "foobared"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETNX target key exists",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "foobared"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setnx",
+      "novar",
+      "blabla"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "novar"
+     ],
+     "value": "foobared"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETNX against not-expired volatile key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "10"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expire",
+      "x",
+      "10000"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setnx",
+      "x",
+      "20"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "x"
+     ],
+     "value": "10"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETNX against expired volatile key",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Make it very unlikely for the key this test uses to be expired by the\n        # active expiry cycle. This is tightly coupled to the implementation of\n        # active expiry and dbAdd() but currently the only way to test that\n        # SETNX expires a key when it should have been.\n        for {set x 0} {$x < 9999} {incr x} {\n            r setex key-$x 3600 value\n        }\n\n        # This will be one of 10000 expiring keys. A cycle is executed every\n        # 100ms, sampling 10 keys for being expired or not.  This key will be\n        # expired for at most 1s when we wait 2s, resulting in a total sample\n        # of 100 keys. The probability of the success of this test being a\n        # false positive is therefore approx. 1%.\n        r set x 10\n        r expire x 1\n\n        # Wait for the key to expire\n        after 2000\n\n        assert_equal 1 [r setnx x 20]\n        assert_equal 20 [r get x]"
+  },
+  {
+   "name": "GETEX EX option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar\n        r getex foo ex 10\n        assert_range [r ttl foo] 5 10"
+  },
+  {
+   "name": "GETEX PX option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar\n        r getex foo px 10000\n        assert_range [r pttl foo] 5000 10000"
+  },
+  {
+   "name": "GETEX EXAT option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar\n        r getex foo exat [expr [clock seconds] + 10]\n        assert_range [r ttl foo] 5 10"
+  },
+  {
+   "name": "GETEX PXAT option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar\n        r getex foo pxat [expr [clock milliseconds] + 10000]\n        assert_range [r pttl foo] 5000 10000"
+  },
+  {
+   "name": "GETEX PERSIST option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar ex 10\n        assert_range [r ttl foo] 5 10\n        r getex foo persist\n        assert_equal -1 [r ttl foo]"
+  },
+  {
+   "name": "GETEX no option",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "getex",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getex",
+      "foo"
+     ],
+     "value": "bar"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETEX syntax errors",
+   "expected": "*syntax*",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "getex",
+      "foo",
+      "non-existent-option"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "GETEX and GET expired key or not exist",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar px 1\n        after 2\n        assert_equal {} [r getex foo]\n        assert_equal {} [r get foo]"
+  },
+  {
+   "name": "GETEX no arguments",
+   "expected": "*wrong number of arguments for 'getex' command",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "getex"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "GETDEL command",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getdel",
+      "foo"
+     ],
+     "value": "bar"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getdel",
+      "foo"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETDEL propagate as DEL command to replica",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set repl [attach_to_replication_stream]\n        r set foo bar\n        r getdel foo\n        assert_replication_stream $repl {\n            {select *}\n            {set foo bar}\n            {del foo}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "GETEX without argument does not propagate to replica",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set repl [attach_to_replication_stream]\n        r set foo bar\n        r getex foo\n        r del foo\n        assert_replication_stream $repl {\n            {select *}\n            {set foo bar}\n            {del foo}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "MGET",
+   "expected": "BAR FOO",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "flushdb"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo{t}",
+      "BAR"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "bar{t}",
+      "FOO"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "mget",
+      "foo{t}",
+      "bar{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "MGET against non existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "mget",
+      "foo{t}",
+      "baazz{t}",
+      "bar{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "MGET against non-string key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "myset{t}",
+      "ciao"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "myset{t}",
+      "bau"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "mget",
+      "foo{t}",
+      "baazz{t}",
+      "bar{t}",
+      "myset{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "GETSET (set new value)",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "getset",
+      "foo",
+      "xyz"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "GETSET (replace old value)",
+   "expected": "bar xyz",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "getset",
+      "foo",
+      "xyz"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "MSET base case",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "mset",
+      "x{t}",
+      "10",
+      "y{t}",
+      "foo bar",
+      "z{t}",
+      "x x x x x x x\\n\\n\\r\\n"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "mget",
+      "x{t}",
+      "y{t}",
+      "z{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "MSET/MSETNX wrong number of args",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "mset",
+      "x{t}",
+      "10",
+      "y{t}",
+      "foo bar",
+      "z{t}"
+     ],
+     "value": "*wrong number of arguments for 'mset' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "msetnx",
+      "x{t}",
+      "20",
+      "y{t}",
+      "foo bar",
+      "z{t}"
+     ],
+     "value": "*wrong number of arguments for 'msetnx' command"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "MSET with already existing - same key twice",
+   "expected": "OK yyy",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x{t}",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "mset",
+      "x{t}",
+      "xxx",
+      "x{t}",
+      "yyy"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "MSETNX with already existent key",
+   "expected": "0 0 0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "msetnx",
+      "x1{t}",
+      "xxx",
+      "y2{t}",
+      "yyy",
+      "x{t}",
+      "20"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "x1{t}"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "y2{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "MSETNX with not existing keys",
+   "expected": "1 xxx yyy",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "msetnx",
+      "x1{t}",
+      "xxx",
+      "y2{t}",
+      "yyy"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x1{t}"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "y2{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "MSETNX with not existing keys - same key twice",
+   "expected": "1 yyy",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "x1{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "msetnx",
+      "x1{t}",
+      "xxx",
+      "x1{t}",
+      "yyy"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x1{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "MSETNX with already existing keys - same key twice",
+   "expected": "0 yyy",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "msetnx",
+      "x1{t}",
+      "xxx",
+      "x1{t}",
+      "zzz"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x1{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "STRLEN against non-existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "strlen",
+      "notakey"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "STRLEN against integer-encoded value",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "myinteger",
+      "-555"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "strlen",
+      "myinteger"
+     ],
+     "value": "4"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "STRLEN against plain string",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mystring",
+      "foozzz0123456789 baz"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "strlen",
+      "mystring"
+     ],
+     "value": "20"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETBIT against non-existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setbit",
+      "mykey",
+      "1",
+      "1"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "binary format B* 01000000"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETBIT against string-encoded key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "@"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setbit",
+      "mykey",
+      "2",
+      "1"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "binary format B* 01100000"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setbit",
+      "mykey",
+      "1",
+      "0"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "binary format B* 00100000"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETBIT against integer-encoded key",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Ascii \"1\" is integer 49 = 00 11 00 01\n        r set mykey 1\n        assert_encoding int mykey\n\n        assert_equal 0 [r setbit mykey 6 1]\n        assert_equal [binary format B* 00110011] [r get mykey]\n        assert_equal 1 [r setbit mykey 2 0]\n        assert_equal [binary format B* 00010011] [r get mykey]"
+  },
+  {
+   "name": "SETBIT against key with wrong type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "setbit",
+      "mykey",
+      "0",
+      "1"
+     ],
+     "value": "WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETBIT with out of range bit offset",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        assert_error \"*out of range*\" {r setbit mykey [expr 4*1024*1024*1024] 1}\n        assert_error \"*out of range*\" {r setbit mykey -1 1}"
+  },
+  {
+   "name": "SETBIT with non-bit argument",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "setbit",
+      "mykey",
+      "0",
+      "-1"
+     ],
+     "value": "*out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "setbit",
+      "mykey",
+      "0",
+      "2"
+     ],
+     "value": "*out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "setbit",
+      "mykey",
+      "0",
+      "10"
+     ],
+     "value": "*out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "setbit",
+      "mykey",
+      "0",
+      "20"
+     ],
+     "value": "*out of range*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETBIT fuzzing",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set str \"\"\n        set len [expr 256*8]\n        r del mykey\n\n        for {set i 0} {$i < 2000} {incr i} {\n            set bitnum [randomInt $len]\n            set bitval [randomInt 2]\n            set fmt [format \"%%-%ds%%d%%-s\" $bitnum]\n            set head [string range $str 0 $bitnum-1]\n            set tail [string range $str $bitnum+1 end]\n            set str [string map {\" \" 0} [format $fmt $head $bitval $tail]]\n\n            r setbit mykey $bitnum $bitval\n            assert_equal [binary format B* $str] [r get mykey]\n        }"
+  },
+  {
+   "name": "GETBIT against non-existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "0"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETBIT against string-encoded key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "`"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "0"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "1"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "2"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "3"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "8"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "100"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getbit",
+      "mykey",
+      "10000"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETBIT against integer-encoded key",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set mykey 1\n        assert_encoding int mykey\n\n        # Ascii \"1\" is integer 49 = 00 11 00 01\n        assert_equal 0 [r getbit mykey 0]\n        assert_equal 0 [r getbit mykey 1]\n        assert_equal 1 [r getbit mykey 2]\n        assert_equal 1 [r getbit mykey 3]\n\n        # Out-range\n        assert_equal 0 [r getbit mykey 8]\n        assert_equal 0 [r getbit mykey 100]\n        assert_equal 0 [r getbit mykey 10000]"
+  },
+  {
+   "name": "SETRANGE against non-existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setrange",
+      "mykey",
+      "0",
+      "foo"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "foo"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setrange",
+      "mykey",
+      "0",
+      ""
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "mykey"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setrange",
+      "mykey",
+      "1",
+      "foo"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "\\000foo"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETRANGE against string-encoded key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setrange",
+      "mykey",
+      "0",
+      "b"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "boo"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setrange",
+      "mykey",
+      "0",
+      ""
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "foo"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setrange",
+      "mykey",
+      "1",
+      "b"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "fbo"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "setrange",
+      "mykey",
+      "4",
+      "bar"
+     ],
+     "value": "7"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "foo\\000bar"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETRANGE against integer-encoded key",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set mykey 1234\n        assert_encoding int mykey\n        assert_equal 4 [r setrange mykey 0 2]\n        assert_encoding raw mykey\n        assert_equal 2234 [r get mykey]\n\n        # Shouldn't change encoding when nothing is set\n        r set mykey 1234\n        assert_encoding int mykey\n        assert_equal 4 [r setrange mykey 0 \"\"]\n        assert_encoding int mykey\n        assert_equal 1234 [r get mykey]\n\n        r set mykey 1234\n        assert_encoding int mykey\n        assert_equal 4 [r setrange mykey 1 3]\n        assert_encoding raw mykey\n        assert_equal 1334 [r get mykey]\n\n        r set mykey 1234\n        assert_encoding int mykey\n        assert_equal 6 [r setrange mykey 5 2]\n        assert_encoding raw mykey\n        assert_equal \"1234\\0002\" [r get mykey]"
+  },
+  {
+   "name": "SETRANGE against key with wrong type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "setrange",
+      "mykey",
+      "0",
+      "bar"
+     ],
+     "value": "WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SETRANGE with out of range offset",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        assert_error \"*maximum allowed size*\" {r setrange mykey [expr 512*1024*1024-4] world}\n\n        r set mykey \"hello\"\n        assert_error \"*out of range*\" {r setrange mykey -1 world}\n        assert_error \"*maximum allowed size*\" {r setrange mykey [expr 512*1024*1024-4] world}"
+  },
+  {
+   "name": "GETRANGE against non-existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "0",
+      "-1"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETRANGE against wrong key type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "lkey1",
+      "list"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "getrange",
+      "lkey1",
+      "0",
+      "-1"
+     ],
+     "value": "WRONGTYPE Operation against a key holding the wrong kind of value*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETRANGE against string value",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "Hello World"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "0",
+      "3"
+     ],
+     "value": "Hell"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "0",
+      "-1"
+     ],
+     "value": "Hello World"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "-4",
+      "-1"
+     ],
+     "value": "orld"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "5",
+      "3"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "5",
+      "5000"
+     ],
+     "value": "World"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "-5000",
+      "10000"
+     ],
+     "value": "Hello World"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETRANGE against integer-encoded value",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "1234"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "0",
+      "2"
+     ],
+     "value": "123"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "0",
+      "-1"
+     ],
+     "value": "1234"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "-3",
+      "-1"
+     ],
+     "value": "234"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "5",
+      "3"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "3",
+      "5000"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "getrange",
+      "mykey",
+      "-5000",
+      "10000"
+     ],
+     "value": "1234"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "GETRANGE fuzzing",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "for {set i 0} {$i < 1000} {incr i} {\n            r set bin [set bin [randstring 0 1024 binary]]\n            set _start [set start [randomInt 1500]]\n            set _end [set end [randomInt 1500]]\n            if {$_start < 0} {set _start \"end-[abs($_start)-1]\"}\n            if {$_end < 0} {set _end \"end-[abs($_end)-1]\"}\n            assert_equal [string range $bin $_start $_end] [r getrange bin $start $end]\n        }"
+  },
+  {
+   "name": "Coverage: SUBSTR",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "key",
+      "abcde"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "substr",
+      "key",
+      "0",
+      "0"
+     ],
+     "value": "a"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "substr",
+      "key",
+      "0",
+      "3"
+     ],
+     "value": "abcd"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "substr",
+      "key",
+      "-4",
+      "-1"
+     ],
+     "value": "bcde"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "substr",
+      "key",
+      "-1",
+      "-3"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "substr",
+      "key",
+      "7",
+      "8"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "substr",
+      "nokey",
+      "0",
+      "1"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "trim on SET with big value",
+   "expected": null,
+   "why": "nested command substitution: [string repeat A 100000]",
+   "skipped": true,
+   "tcl": "# set a big value to trigger increasing the query buf\n        r set key [string repeat A 100000] \n        # set a smaller value but > PROTO_MBULK_BIG_ARG (32*1024) the server will try to save the query buf itself on the DB.\n        r set key [string repeat A 33000]\n        # asset the value was trimmed\n        assert {[r memory usage key] < 42000}; # 42K to count for Jemalloc's additional memory overhead."
+  },
+  {
+   "name": "Extended SET can detect syntax errors",
+   "expected": "*syntax*",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "non-existing-option"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "Extended SET NX option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        set v1 [r set foo 1 nx]\n        set v2 [r set foo 2 nx]\n        list $v1 $v2 [r get foo]"
+  },
+  {
+   "name": "Extended SET XX option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        set v1 [r set foo 1 xx]\n        r set foo bar\n        set v2 [r set foo 2 xx]\n        list $v1 $v2 [r get foo]"
+  },
+  {
+   "name": "Extended SET GET option",
+   "expected": "bar bar2",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar\n        set old_value [r set foo bar2 GET]\n        set new_value [r get foo]\n        list $old_value $new_value"
+  },
+  {
+   "name": "Extended SET GET option with no previous value",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        set old_value [r set foo bar GET]\n        set new_value [r get foo]\n        list $old_value $new_value"
+  },
+  {
+   "name": "Extended SET GET option with XX",
+   "expected": "bar baz",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar\n        set old_value [r set foo baz GET XX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+  },
+  {
+   "name": "Extended SET GET option with XX and no previous value",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        set old_value [r set foo bar GET XX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+  },
+  {
+   "name": "Extended SET GET option with NX",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        set old_value [r set foo bar GET NX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+  },
+  {
+   "name": "Extended SET GET option with NX and previous value",
+   "expected": "bar bar",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar\n        set old_value [r set foo baz GET NX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+  },
+  {
+   "name": "Extended SET GET with incorrect type should result in wrong type error",
+   "expected": "*WRONGTYPE*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "rpush",
+      "foo",
+      "waffle"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "GET"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "rpop",
+      "foo"
+     ],
+     "value": "waffle"
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "SET with IFEQ conditional",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "initial_value"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "set",
+      "foo",
+      "new_value",
+      "ifeq",
+      "initial_value"
+     ],
+     "value": "OK"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "value": "new_value"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "set",
+      "foo",
+      "should_not_set",
+      "ifeq",
+      "wrong_value"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "value": "new_value"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SET with IFEQ conditional - non-string current value",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "foo",
+      "some_set_value"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "set",
+      "foo",
+      "new_value",
+      "ifeq",
+      "some_set_value"
+     ],
+     "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SET with IFEQ conditional - with get",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "set",
+      "foo",
+      "new_value",
+      "ifeq",
+      "initial_value",
+      "get"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "value": ""
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "initial_value"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "set",
+      "foo",
+      "new_value",
+      "ifeq",
+      "initial_value",
+      "get"
+     ],
+     "value": "initial_value"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "value": "new_value"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SET with IFEQ conditional - non string current value with get",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "foo",
+      "some_set_value"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "set",
+      "foo",
+      "new_value",
+      "ifeq",
+      "initial_value",
+      "get"
+     ],
+     "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SET with IFEQ conditional - with xx",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "set",
+      "foo",
+      "new_value",
+      "ifeq",
+      "initial_value",
+      "xx"
+     ],
+     "value": "ERR syntax error"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "SET with IFEQ conditional - with nx",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "set",
+      "foo",
+      "new_value",
+      "ifeq",
+      "initial_value",
+      "nx"
+     ],
+     "value": "ERR syntax error"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "Extended SET EX option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar ex 10\n        set ttl [r ttl foo]\n        assert {$ttl <= 10 && $ttl > 5}"
+  },
+  {
+   "name": "Extended SET PX option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar px 10000\n        set ttl [r ttl foo]\n        assert {$ttl <= 10 && $ttl > 5}"
+  },
+  {
+   "name": "Extended SET EXAT option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar exat [expr [clock seconds] + 10]\n        assert_range [r ttl foo] 5 10"
+  },
+  {
+   "name": "Extended SET PXAT option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo bar pxat [expr [clock milliseconds] + 10000]\n        assert_range [r ttl foo] 5 10"
+  },
+  {
+   "name": "SET EXAT / PXAT Expiration time is expired",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug set-active-expire 0\n        set repl [attach_to_replication_stream]\n\n        # Key exists.\n        r set foo bar\n        r set foo bar exat [expr [clock seconds] - 100]\n        assert_error {ERR no such key} {r debug object foo}\n        r set foo bar\n        r set foo bar pxat [expr [clock milliseconds] - 10000]\n        assert_error {ERR no such key} {r debug object foo}\n\n        # Key does not exist.\n        r del foo\n        r set foo bar exat [expr [clock seconds] - 100]\n        assert_error {ERR no such key} {r debug object foo}\n        r set foo bar pxat [expr [clock milliseconds] - 10000]\n        assert_error {ERR no such key} {r debug object foo}\n\n        r incr foo\n        assert_replication_stream $repl {\n           {select *}\n           {set foo bar}\n           {unlink foo}\n           {set foo bar}\n           {unlink foo}\n           {incr foo}\n        }\n\n        r debug set-active-expire 1\n        close_replication_stream $repl"
+  },
+  {
+   "name": "Extended SET using multiple options at once",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set foo val\n        assert {[r set foo bar xx px 10000] eq {OK}}\n        set ttl [r ttl foo]\n        assert {$ttl <= 10 && $ttl > 5}"
+  },
+  {
+   "name": "GETRANGE with huge ranges, Github issue #1844",
+   "expected": "bar",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "getrange",
+      "foo",
+      "0",
+      "4294967297"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "LCS basic",
+   "expected": null,
+   "why": "variable reference: $rna1",
+   "skipped": true,
+   "tcl": "r set virus1{t} $rna1\n        r set virus2{t} $rna2\n        r LCS virus1{t} virus2{t}"
+  },
+  {
+   "name": "LCS len",
+   "expected": null,
+   "why": "variable reference: $rna1",
+   "skipped": true,
+   "tcl": "r set virus1{t} $rna1\n        r set virus2{t} $rna2\n        r LCS virus1{t} virus2{t} LEN"
+  },
+  {
+   "name": "LCS indexes",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "dict get [r LCS virus1{t} virus2{t} IDX] matches"
+  },
+  {
+   "name": "LCS indexes with match len",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "dict get [r LCS virus1{t} virus2{t} IDX WITHMATCHLEN] matches"
+  },
+  {
+   "name": "LCS indexes with match len and minimum match len",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "dict get [r LCS virus1{t} virus2{t} IDX WITHMATCHLEN MINMATCHLEN 5] matches"
+  },
+  {
+   "name": "SETRANGE with huge offset",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "foreach value {9223372036854775807 2147483647} {\n            catch {[r setrange K $value A]} res\n            # expecting a different error on 32 and 64 bit systems\n            if {![string match \"*string exceeds maximum allowed size*\" $res] && ![string match \"*out of range*\" $res]} {\n                assert_equal $res \"expecting an error\"\n           }\n        }"
+  },
+  {
+   "name": "APPEND modifies the encoding from int to raw",
+   "expected": "12 12",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del foo\n        r set foo 1\n        assert_encoding \"int\" foo\n        r append foo 2\n\n        set res {}\n        lappend res [r get foo]\n        assert_encoding \"raw\" foo\n        \n        r set bar 12\n        assert_encoding \"int\" bar\n        lappend res [r get bar]"
+  },
+  {
+   "name": "Memory usage of embedded string value",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Check that we can fit 9 bytes of key + value into a 32 byte\n        # allocation, including the serverObject itself.\n        r set quux xyzzy\n        assert_lessthan_equal [r memory usage quux] 32\n\n        # Check that the SDS overhead of the embedded key and value is 6 bytes\n        # (sds5 + sds8). This is the memory layout:\n        #\n        # +--------------+--------------+---------------+----------------+\n        # | serverObject |              | sds5 key      | sds8 value     |\n        # | header       | key-hdr-size | hdr \"quux\" \\0 | hdr \"xyzzy\" \\0 |\n        # | 16 bytes     | 1            | 1  + 4    + 1 | 3  + 5     + 1 |\n        # +--------------+--------------+---------------+----------------+\n        #\n        set content_size [expr {[string length quux] + [string length xyzzy]}]\n        regexp {robj:(\\d+)} [r debug structsize] _ obj_header_size\n        set debug_sdslen [r debug sdslen quux]\n        regexp {key_sds_len:4 key_sds_avail:0 obj_alloc:(\\d+)} $debug_sdslen _ obj_alloc\n        regexp {val_sds_len:5 val_sds_avail:(\\d+) val_alloc:(\\d+)} $debug_sdslen _ avail val_alloc\n        set sds_overhead [expr {$obj_alloc + $val_alloc - $obj_header_size - 1 - $content_size - $avail}]\n        assert_equal 6 $sds_overhead"
+  }
+ ]
+}

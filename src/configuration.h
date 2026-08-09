@@ -121,6 +121,8 @@ namespace barch {
     std::string get_tls_tmp_dh_file();
 
     std::string get_eviction_policy();
+    /** what SELECT <n> puts before the number to name the space it selects; "db" by default */
+    std::string get_db_number_prefix();
     uint64_t get_internal_shards();
 
     uint64_t get_rpc_max_buffer();

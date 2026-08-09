@@ -90,8 +90,9 @@ int KSPACE(caller& call, const arg_t& argv) {
         if (dependent->get_shard_count() != source->get_shard_count()) {
             return call.push_error("source and dependant shard counts do not match");
         }
-        ks_shared shl(source);
-        ks_unique ul(dependent);
+        // canonical order, not the order they are named in - see keyspace_locks.h.
+        // This and RELEASE below used to take the same pair in opposite orders
+        ks_two held(source, ks_mode::shared, dependent, ks_mode::unique);
         dependent->depends(source);
         return call.push_simple("OK");
     }
@@ -119,8 +120,7 @@ int KSPACE(caller& call, const arg_t& argv) {
             old = to;
             from->depends(nullptr);
         }
-        ks_shared shl(from);
-        ks_unique ul(to);
+        ks_two held(from, ks_mode::shared, to, ks_mode::unique);
 
         from->merge(to, {});
         if (old) {
@@ -136,8 +136,7 @@ int KSPACE(caller& call, const arg_t& argv) {
             if (!parser.source.empty())
                 return call.push_error("Invalid source keyspace name");
         }
-        ks_unique shl(dependent);
-        ks_shared ul(source);
+        ks_two held(dependent, ks_mode::unique, source, ks_mode::shared);
         dependent->depends(nullptr);
         return call.push_simple("OK");
     }
@@ -241,10 +240,18 @@ int cmd_USE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * databases a redis client believes it is switching between are only spaces whose names
  * happen to be digits, and `SELECT 0` matched the default space by a special case.
  *
- * A number is now a database: 0 is the default space, n above zero is `db<n>`. A name
- * still selects that space, which barch has always allowed here, so this is a superset of
- * redis rather than a departure and nothing that used the name form has to change. USE
- * remains the command that only takes a name. See TODO 38.
+ * A number is now a database: 0 is the default space, and n above zero is the space named
+ * by `db_number_prefix` followed by the number - `db1`, `db2`, unless the prefix is
+ * configured otherwise. A name still selects that space, which barch has always allowed
+ * here, so this is a superset of redis rather than a departure and nothing that used the
+ * name form has to change. USE remains the command that only takes a name.
+ *
+ * Two things follow from key spaces being named where redis's databases are numbered, and
+ * both are written up in the docs rather than hidden here. A space whose name is a bare
+ * number cannot be reached through SELECT, because the number is read as a database - use
+ * USE for that. And there is no fixed count of databases: redis refuses SELECT 16 by
+ * default, while here `SELECT 999` brings that space into being like any other.
+ * See TODO 38.
  */
 int SELECT(caller& call, const arg_t& argv) {
     if (argv.size() != 2) {
@@ -258,7 +265,11 @@ int SELECT(caller& call, const arg_t& argv) {
         if (index == 0) {
             call.use("");
         } else {
-            call.use("db" + std::to_string(index));
+            // the prefix is configurable - `CONFIG SET db_number_prefix ...` - because
+            // which name a number maps to is a choice barch has to make and redis does
+            // not. Setting it to "" gives the pre-existing behaviour, where SELECT 1
+            // selects a space literally named "1"
+            call.use(barch::get_db_number_prefix() + std::to_string(index));
         }
         return call.push_simple("OK");
     }

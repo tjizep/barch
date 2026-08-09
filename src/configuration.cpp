@@ -41,6 +41,10 @@ struct config_state {
     heap::string compression_type{"none"};
     heap::string min_compressed_size{};
     heap::string eviction_type{"none"};
+    // what SELECT <n> puts in front of the number to name the key space it selects. See
+    // the SELECT note in the docs: barch has named key spaces where redis has numbered
+    // databases, so a number has to become a name somehow, and which name is a choice
+    heap::string db_number_prefix{"db"};
     heap::string max_memory_bytes{};
     heap::string max_resp_connections{"2000"};
     heap::string min_fragmentation_ratio{};
@@ -935,6 +939,38 @@ static int ApplyEnablePageTrace(ValkeyModuleCtx *unused_arg, void *unused_arg, V
 }
 
 // ===========================================================================================================
+static ValkeyModuleString *GetDbNumberPrefix(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().db_number_prefix.c_str(),
+                                     state().db_number_prefix.length());
+}
+
+static int SetDbNumberPrefix(const std::string& prefix) {
+    std::lock_guard lock(state().config_mutex);
+    // an empty prefix would make SELECT 1 name the space "1", which is what SELECT did
+    // before it knew about numbers - allowed, because someone may want exactly that
+    for (auto ch : prefix) {
+        if (ch == ':' || ch == ' ') {
+            return VALKEYMODULE_ERR;   // ':' separates the space from the command on the wire
+        }
+    }
+    state().db_number_prefix = prefix.c_str();
+    return VALKEYMODULE_OK;
+}
+
+// the module api hands the value as a ValkeyModuleString, so there is an overload for it
+// beside the plain one that CONFIG SET and the tests use, as eviction_policy does
+static int SetDbNumberPrefix(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                             ValkeyModuleString **unused_arg) {
+    size_t len = 0;
+    const char *s = ValkeyModule_StringPtrLen(val, &len);
+    return SetDbNumberPrefix(std::string(s, len));
+}
+
+static int ApplyDbNumberPrefix(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
 static ValkeyModuleString *GetEvictionType(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().eviction_type.c_str(), state().eviction_type.length());;
@@ -994,6 +1030,9 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "eviction_policy", "none", VALKEYMODULE_CONFIG_DEFAULT,
                                              GetEvictionType, SetEvictionType, ApplyEvictionType, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "db_number_prefix", "db", VALKEYMODULE_CONFIG_DEFAULT,
+                                             GetDbNumberPrefix, SetDbNumberPrefix, ApplyDbNumberPrefix, nullptr);
 
     auto physical = heap::get_physical_memory_bytes();
     auto def = physical;// - physical / 4ull;
@@ -1305,6 +1344,8 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyCompressionType(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "db_number_prefix") {
+        return SetDbNumberPrefix(val);
     } else if (name == "eviction_policy") {
         int r = SetEvictionType(val);
         if (r == VALKEYMODULE_OK) {
@@ -1481,6 +1522,11 @@ bool barch::get_evict_volatile_ttl() {
     return config().evict_volatile_ttl;
 }
 
+std::string barch::get_db_number_prefix() {
+    std::lock_guard lock(state().config_mutex);
+    return state().db_number_prefix.c_str();
+}
+
 std::string barch::get_eviction_policy() {
     //std::lock_guard lock(state().config_mutex);
     return state().eviction_type.c_str();
@@ -1634,7 +1680,8 @@ static std::string cfg_float(F v) {
 
 const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
-        "active_defrag", "compression", "eviction_policy", "external_host",
+        "active_defrag", "compression", "db_number_prefix", "eviction_policy",
+        "external_host",
         "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -1652,6 +1699,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     const auto& c = config();
     if (name == "active_defrag")                    value = cfg_bool(c.active_defrag);
     else if (name == "compression")                 value = state().compression_type.c_str();
+    else if (name == "db_number_prefix")            value = state().db_number_prefix.c_str();
     else if (name == "eviction_policy")             value = state().eviction_type.c_str();
     else if (name == "external_host")               value = c.external_host;
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);

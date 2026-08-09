@@ -38,14 +38,7 @@
 
 19. [Done] Sharding layer defined and keys_api converted onto it [01-08-2026] Nr 16
 
-20. Key space administration - KSPACE DEPENDS / MERGE / RELEASE - locks two key spaces
-    at once, in a hand chosen order, and sharded_store models a single space. Decide
-    whether a cross space lock ordering belongs in the layer (a free function taking
-    two stores, say) or stays where it is. Nothing is known to be wrong today; the
-    concern is that the ordering rule that avoids deadlock is written out at each site
-    rather than in one place. `barch::all_shards`, which walks every space, is the
-    same question.
-
+20. [Done] One lock order, written down once [09-08-2026] Nr 42
 21. [Done] SIZE and HEAPBYTES relaxed to read locks [01-08-2026] Nr 19
 
 22. [Done] Every command moved into a {category}_api file [01-08-2026] Nr 25
@@ -210,16 +203,29 @@
     a hang is only visible as the whole run being killed. Per test timeouts would attribute
     it.
 
-    And the lua tests depend on a side build nothing builds for you. TestStarter lives in
-    test/<CMAKE_BUILD_TYPE>/ and is produced by test/CMakeLists.txt, which is a separate
-    cmake project - the main build never invokes it. When TestStarter is absent ctest
-    reports sixteen tests as "Not Run", which counts as sixteen failures and says nothing
-    about why. Worse, configuring that side project runs `make` over the whole of valkey
-    at configure time, so during a rebuild valkey-server disappears for minutes and any
-    test needing it fails for a reason that has nothing to do with barch - which is
-    exactly what a full run in the middle of one looked like. Either the main build should
-    depend on it, or a missing TestStarter should be one clear message rather than sixteen
-    unexplained ones.
+    And configuring the main project destroys the lua test harness and rebuilds valkey.
+    CMakeLists.txt around line 241 does this at *configure* time, not build time:
+
+        execute_process(COMMAND rm -rf ${TEST_BUILD_DIR} ...)
+        execute_process(COMMAND mkdir ${TEST_BUILD_DIR} ...)
+        execute_process(COMMAND cmake .. ...)
+        execute_process(COMMAND make ...)
+
+    so every `cmake .` deletes test/<CMAKE_BUILD_TYPE>/ - TestStarter and the whole fetched
+    valkey tree with it - then re-fetches valkey from github and rebuilds all of it. That
+    takes minutes, execute_process prints nothing, and the four `RESULT_VARIABLE result`
+    values are never looked at, so a failure is silent as well as slow.
+
+    What it looks like from the outside is a suite that intermittently fails for no reason.
+    A run that starts inside that window reports sixteen lua tests as "Not Run" and
+    TestBarchSimpleClusterRPC as a missing valkey-server, none of which mentions the
+    rebuild. It cost real time twice in one session, both times immediately after adding a
+    test, which is exactly when someone reconfigures.
+
+    Worth fixing properly rather than working around: the side project only needs
+    configuring when it does not exist or its CMakeLists has changed, and the results of
+    those four execute_process calls should be checked. A missing TestStarter should also
+    be one clear message rather than sixteen unexplained ones.
 
     Two more things the same interrupted run showed up:
 
@@ -276,15 +282,29 @@
     an error where barch coerced and overwrote until DONE 37 - those 214 lines would have
     caught that on their own.
 
-    Progress: translate.py and differential.py are written and working. incr.tcl gives 21
-    of 29 cases; scan.tcl gives none, because it is loops and `populate` from end to end -
-    which is the honest answer and is what the stubs record. The first run found DONE 38,
-    command names being case sensitive, which had made every lower case command an
-    unknown one. Left to do here: raise incr.tcl's yield by teaching the translator the
-    `set res {}` / `append res` form and the `list [r ...] [r ...]` form it currently
-    stubs, and decide whether scan.tcl is worth hand translating or dropping from this
-    entry - its twenty tests are mostly about cursor guarantees under rehashing, which is
-    valkey's internals rather than a promise barch makes.
+    Progress: translate.py and differential.py are written and working. incr.tcl gives 26
+    of 29 cases and valkey trusts 25 of those, so the file is effectively covered.
+
+    scan.tcl gives none, and never will - every one of its twenty tests is built out of
+    while loops, `lappend` and `populate`. Reading it properly rather than glancing at it
+    changed what to do about it: half the file is SSCAN, HSCAN and ZSCAN, which barch does
+    not implement, and much of the rest is multiplied out over valkey's internal encodings,
+    but four of the tests are about a promise barch does make. Those are hand written in
+    test/scantest.py now (TestScanGuarantees): a full iteration reports every key, COUNT
+    changes the page size without losing anything, MATCH filters, expired keys are not
+    reported, and - the one that matters - every key present at the start and still present
+    at the end is reported even with writes on every round trip.
+
+    Two things that cost time here and will cost it again in 45 to 47:
+
+      - redis-py runs its own parser over the replies of commands it recognises. It turns
+        SCAN's cursor into an int, so `cursor == "0"` never matches and the walk never
+        ends; it turns INFO into a dict. The wire is correct in both cases. Anything that
+        compares a reply has to know which commands redis-py rewrites.
+      - a test that does not force the condition it claims to test passes for the wrong
+        reason. The guarantee case ran in one round trip against barch's default page of
+        128, so no write ever landed mid-iteration until COUNT 10 was asked for. It now
+        asserts it paged before it asserts what paging preserves.
 
 41. Static destruction order in shared_mutex.cpp, and whether it is behind the stalls.
 
@@ -407,21 +427,7 @@
 
 44. [Done] Array replies come back wrong through a remote binding [09-08-2026] Nr 40
 
-45. Translate valkey's tests: string.tcl and keyspace.tcl.
-
-    Second of four, and the one closest to what barch is for. 91 tests in string.tcl and
-    59 in keyspace.tcl, against SET, GET, APPEND, MSET, MGET, EXISTS, DEL, TTL, EXPIRE,
-    KEYS, SELECT and the rest of the key/value surface. Depends on the harness in 40.
-
-    Expect this one to find the most, because it is the surface DONE 33 and DONE 37 changed
-    most heavily and the surface every client touches. SET's options in particular now
-    parse in any order and reject contradictory pairs, which is exactly what string.tcl
-    exercises at length.
-
-    Known divergences to expect rather than treat as defects: `SETRANGE`, `GETRANGE`,
-    `GETDEL`, `GETEX`, `SETEX`, `PSETEX`, `SUBSTR` and `LCS` are not implemented, and
-    `SELECT` takes a name as well as a number, which is a superset. Filter those cases out
-    with a reason recorded rather than deleting them silently.
+45. [Done] Translate valkey's tests: string.tcl and keyspace.tcl [09-08-2026] Nr 41
 
 46. Translate valkey's tests: hash.tcl and expire.tcl.
 
@@ -463,33 +469,71 @@
     Ignore the encoding tests - valkey checks listpack against quicklist and skiplist
     against listpack conversions, which are its internals and say nothing about barch.
 
-48. INCRBYFLOAT is not implemented. `HINCRBYFLOAT` exists for hash fields but there is no
-    plain key equivalent, so `INCRBYFLOAT k 1.5` answers `unknown command`. Found by the
-    translation harness (TODO 40) - incr.tcl spends a third of its cases on it.
+48. [Done] INCRBYFLOAT implemented [09-08-2026] Nr 44
+49. [Done] WRONGTYPE, as far as it goes without a stored type tag [09-08-2026] Nr 45
+50. [Done] Error codes, and a wrong argument count reported for a wrong argument [09-08-2026] Nr 46
+51. A compress-all command, to reclaim what the partial writes leave behind.
 
-    The work is small: BarchModifyInteger already takes the type as a template parameter
-    and hash_api's HNUMERIC does the double form, so this is mostly registration plus the
-    reply formatting. The part worth care is what redis promises about the reply - it is a
-    bulk string, not a double, and it is rendered without a trailing zero, so 3.0 comes
-    back as "3". incr.tcl asserts exactly that in several places, which is a good reason to
-    do this one after the harness rather than before.
+    APPEND, PREPEND and SETRANGE decompress a value, write into it and store it back
+    uncompressed. That is deliberate - compressing on every partial write puts the whole
+    value through the dictionary each time, and a value built by repeated SETRANGE would
+    pay it on every call, so the latency belongs at the end rather than in the middle. The
+    consequence is that a space which sees a lot of partial writes drifts towards
+    uncompressed, and nothing ever brings it back.
 
-49. There is no WRONGTYPE. Redis refuses a command whose key holds a different type -
-    `RPUSH mylist 1` then `INCR mylist` answers `WRONGTYPE Operation against a key holding
-    the wrong kind of value`. barch does not check, and because a list stores its entries
-    under composite keys derived from the name, `INCR mylist` quietly operates on a
-    different key altogether and succeeds.
+    So there wants to be something that walks a key space and compresses what is not
+    compressed. Points to settle when it is written:
 
-    Found by the translation harness (TODO 40); incr.tcl, string.tcl and list.tcl all
-    assert it, so it will keep appearing as the other files are translated.
+      - explicit command, maintenance thread, or both. The maintenance thread already
+        exists for the range rebalancer and runs off the insert path, which is the right
+        place for it; an explicit command is easier to reason about and to test. Doing the
+        command first and calling it from maintenance later costs nothing.
+      - it has to be interruptible and budgeted the way the rebalancer is (DONE 31), or a
+        space large enough to be worth compressing is a space large enough for this to
+        hold a lock too long. The rebalancer's budget-per-lock-pair shape applies directly.
+      - whether it is worth compressing a value at all is a decision the dictionary can
+        already make - `dictionary::compress` answers empty when it did not help - so the
+        walk keeps whatever it is given when compression does not pay.
+      - a counter, so it can be seen doing something: values examined, values compressed,
+        bytes saved. statistics::value_bytes_compressed exists and is the obvious place.
 
-    This is a bigger decision than it looks and should not be taken by whoever hits it
-    next in a test. barch's types are a property of how a key is encoded rather than a
-    tag on a value, so answering WRONGTYPE means being able to ask "is there a list called
-    mylist" cheaply when someone calls INCR on it, for every command and every type. That
-    is a real cost on the hot path for a check that only matters when a caller has already
-    made a mistake. The alternatives are to accept the divergence and document it, or to
-    check only where the composite key makes it cheap.
+    Worth having a number before building it: how much does a realistic workload actually
+    leave uncompressed? If partial writes are rare in practice this is not urgent, and
+    `INFO` reporting compressed against uncompressed value bytes per space would say so
+    and is much cheaper than the walk.
 
-    Until it is decided, differential.py carries both cases in its ACCEPTED list with this
-    entry as the reason, so the harness stays green and the divergence stays visible.
+52. [Done] The commands string.tcl and keyspace.tcl expected [09-08-2026] Nr 43
+
+53. Telling one collection from another needs a stored type tag.
+
+    DONE 45 made barch answer WRONGTYPE when a string command meets a list, hash or
+    ordered set, and the other way round. What it cannot do is tell those three apart,
+    because it works by observing which keys exist rather than by reading a type, and all
+    three live under the same container prefix.
+
+    Two things follow, and the first is a live bug rather than a missing feature:
+
+      - a hash and an ordered set under one name miscount each other. HLEN walks the
+        container prefix and counts the ordered set's entries; ZCARD does the same in
+        reverse. Nothing stops both being created, so nothing stops the miscount.
+      - `SET` over a name holding a collection does not remove the collection. redis's SET
+        replaces whatever was there, and barch's writes the string beside it, leaving the
+        old entries reachable through their own commands.
+
+    Both are fixed by the same thing: a type tag written when a container is created and
+    read where a type is checked. A list already has a header key at exactly the container
+    prefix, so the shape exists; hashes and ordered sets would grow one.
+
+    That is a change to what is on disk, which is why it is its own entry. Points to
+    settle before starting:
+
+      - what a space saved before the tag does when it is loaded. The tag can be inferred
+        on first access by looking at the shape of the keys under the prefix - a numeric
+        second component is a list index or an ordered set score, a string one is a hash
+        field - but that is guesswork and it is wrong for an empty collection.
+      - whether the tag is a key of its own or a flag on the existing list header. A key
+        costs one entry per collection and is simple; a flag costs nothing but only helps
+        lists.
+      - whether the check belongs in every collection command or only where a collection
+        is created. Only at creation is much cheaper and catches the case that matters,
+        which is two types under one name in the first place.

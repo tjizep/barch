@@ -4,9 +4,25 @@
   {
    "name": "INCR against non existing key",
    "expected": "11",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res {}\n        append res [r incr novar]\n        append res [r get novar]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "incr",
+      "novar"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "novar"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "concat"
   },
   {
    "name": "INCR against key created by incr itself",
@@ -307,16 +323,78 @@
   {
    "name": "INCRBYFLOAT against non existing key",
    "expected": "1 1 1.25 1.25",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del novar\n        list    [roundFloat [r incrbyfloat novar 1]] \\\n                [roundFloat [r get novar]] \\\n                [roundFloat [r incrbyfloat novar 0.25]] \\\n                [roundFloat [r get novar]]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "novar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "1"
+     ],
+     "round": true,
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "novar"
+     ],
+     "round": true,
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "0.25"
+     ],
+     "round": true,
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "novar"
+     ],
+     "round": true,
+     "collect": true
+    }
+   ],
+   "mode": "list"
   },
   {
    "name": "INCRBYFLOAT against key originally set with SET",
    "expected": "3",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r set novar 1.5\n        roundFloat [r incrbyfloat novar 1.5]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "novar",
+      "1.5"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incrbyfloat",
+      "novar",
+      "1.5"
+     ],
+     "round": true
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "INCRBYFLOAT over 32bit value",
@@ -496,9 +574,26 @@
   {
    "name": "INCRBYFLOAT decrement",
    "expected": "-0.1",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r set foo 1\n        roundFloat [r incrbyfloat foo -1.1]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "incrbyfloat",
+      "foo",
+      "-1.1"
+     ],
+     "round": true
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "string to double with null terminator",
@@ -542,9 +637,79 @@
   {
    "name": "INCRBY INCRBYFLOAT DECRBY against unhappy path",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del mykeyincr\n        assert_error \"*ERR wrong number of arguments*\" {r incr mykeyincr v}\n        assert_error \"*ERR wrong number of arguments*\" {r decr mykeyincr v}\n        assert_error \"*value is not an integer or out of range*\" {r incrby mykeyincr v}\n        assert_error \"*value is not an integer or out of range*\" {r incrby mykeyincr 1.5}\n        assert_error \"*value is not an integer or out of range*\" {r decrby mykeyincr v}\n        assert_error \"*value is not an integer or out of range*\" {r decrby mykeyincr 1.5}\n        assert_error \"*value is not a valid float*\" {r incrbyfloat mykeyincr v}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykeyincr"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "incr",
+      "mykeyincr",
+      "v"
+     ],
+     "value": "*ERR wrong number of arguments*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "decr",
+      "mykeyincr",
+      "v"
+     ],
+     "value": "*ERR wrong number of arguments*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "incrby",
+      "mykeyincr",
+      "v"
+     ],
+     "value": "*value is not an integer or out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "incrby",
+      "mykeyincr",
+      "1.5"
+     ],
+     "value": "*value is not an integer or out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "decrby",
+      "mykeyincr",
+      "v"
+     ],
+     "value": "*value is not an integer or out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "decrby",
+      "mykeyincr",
+      "1.5"
+     ],
+     "value": "*value is not an integer or out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "incrbyfloat",
+      "mykeyincr",
+      "v"
+     ],
+     "value": "*value is not a valid float*"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "$cmd operation should update encoding from raw to int",

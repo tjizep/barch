@@ -10,8 +10,11 @@
 #
 #     test {name} { body } {expected}      the value of the last command, glob matched
 #     assert_equal {expected} [r cmd ...]
+#     assert_error {pattern} {r cmd ...}   the command must fail, matching pattern
 #     catch {r cmd ...} err ; format $err  the error text, glob matched
 #     list [r cmd ...] [r cmd ...]         several results as one list
+#     set res {} ; append res [r cmd ...]  several results concatenated with no separator
+#     roundFloat [r cmd ...]               the reply rounded, as valkey's helper does
 #
 # Anything it cannot read becomes a skipped case carrying the original tcl, so the output
 # says what was not translated instead of quietly covering less than it appears to. Those
@@ -136,7 +139,7 @@ def find_tests(text):
 # helpers whose meaning is valkey's internals or its tcl runtime, not a command we can send
 UNTRANSLATABLE = re.compile(
     r'\b(assert_encoding|assert_refcount|debug\s+object|debug\s+jmap|debug\s+sleep|'
-    r'populate|roundFloat|wait_for_condition|wait_for_ofs_sync|assert_replication_stream|'
+    r'populate|wait_for_condition|wait_for_ofs_sync|assert_replication_stream|'
     r'foreach|while|proc|for\s*\{|if\s*\{|lsort|lappend|llength|lindex|expr|'
     r'assert_morethan|assert_lessthan|assert_range|debug_sleep|reconnect|'
     r'wait_for_sync|assert_type|memory_usage)\b')
@@ -153,6 +156,7 @@ def parse_body(body):
       asserts - the body carries its own assert_equal lines and there is nothing else
       list    - several replies are compared as one space separated list
     """
+    body = re.sub(r'\\\s*\n\s*', ' ', body)   # tcl line continuations
     lines = [l.strip() for l in body.split("\n")]
     lines = [l for l in lines if l and not l.startswith("#")]
     if not lines:
@@ -163,7 +167,9 @@ def parse_body(body):
     steps = []
     mode = "last"
     for line in lines:
-        if line.startswith("set err") or line == "set err {}":
+        # `set res {}` and friends only initialise an accumulator; the value is built by
+        # the `append` lines that follow
+        if re.match(r'^set\s+\w+\s*\{\}$', line) or line.startswith("set err"):
             continue
         m = re.match(r'^catch\s*\{\s*r\s+(.*?)\s*\}\s*(\w+)?$', line)
         if m:
@@ -172,6 +178,24 @@ def parse_body(body):
             continue
         if re.match(r'^format\s+\$\w+$', line) or re.match(r'^set\s+\w+$', line):
             mode = "err"
+            continue
+        m = re.match(r'^append\s+\w+\s+\[\s*r\s+(.*?)\s*\]$', line)
+        if m:
+            steps.append({"op": "cmd", "args": tcl_args(m.group(1)), "collect": True})
+            mode = "concat"
+            continue
+        m = re.match(r'^assert_error\s+(.*)$', line)
+        if m:
+            parsed = parse_assert_error(m.group(1))
+            if parsed is None:
+                return None
+            steps.append(parsed)
+            if mode == "last":
+                mode = "asserts"
+            continue
+        m = re.match(r'^roundFloat\s+\[\s*r\s+(.*?)\s*\]$', line)
+        if m:
+            steps.append({"op": "cmd", "args": tcl_args(m.group(1)), "round": True})
             continue
         m = re.match(r'^assert_equal\s+(.*)$', line)
         if m:
@@ -190,11 +214,21 @@ def parse_body(body):
             continue
         m = re.match(r'^list\s+(.*)$', line)
         if m:
-            inner = re.findall(r'\[\s*r\s+([^\]]*?)\s*\]', m.group(1))
-            if not inner:
+            rounded = re.findall(r'\[\s*roundFloat\s+\[\s*r\s+([^\]]*?)\s*\]\s*\]', m.group(1))
+            plain = re.findall(r'(?<!roundFloat )\[\s*r\s+([^\]]*?)\s*\]', m.group(1))
+            # only the commands inside the `list` make up the value. A plain `r ...`
+            # line before it is setup - folding it in made `r del k` count as a result
+            # and the case compare one element too long, which then failed on valkey and
+            # was dropped as an unfaithful translation
+            if rounded:
+                for one in rounded:
+                    steps.append({"op": "cmd", "args": tcl_args(one),
+                                  "round": True, "collect": True})
+            elif plain:
+                for one in plain:
+                    steps.append({"op": "cmd", "args": tcl_args(one), "collect": True})
+            else:
                 return None
-            for one in inner:
-                steps.append({"op": "cmd", "args": tcl_args(one)})
             mode = "list"
             continue
         return None
@@ -215,6 +249,18 @@ def parse_assert_equal(rest):
     if not m:
         return None
     return {"op": "expect", "args": tcl_args(m.group(1)), "value": w1.strip()}
+
+
+def parse_assert_error(rest):
+    """assert_error {pattern} {r cmd ...} -> a step that requires the command to fail"""
+    words = split_words(rest)
+    if len(words) != 2:
+        return None
+    (_, pattern), (kind, body) = words
+    m = re.match(r'^\s*r\s+(.*)$', body)
+    if not m:
+        return None
+    return {"op": "expect_error", "args": tcl_args(m.group(1)), "value": pattern.strip()}
 
 
 def tcl_args(text):

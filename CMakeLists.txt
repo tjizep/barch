@@ -603,6 +603,13 @@ else()
         # the same command through a local handle and a remote one must agree. Guards the
         # reply decoder on the binary protocol, which got every element after the first
         # wrong for as long as nothing asked it for more than one - see DONE 40
+        # SCAN's contract: a full iteration reports every key present at its start and
+        # still present at its end, whatever is written while it runs. Hand written from
+        # valkey's unit/scan.tcl, which cannot be translated mechanically - see TODO 40
+        add_test(NAME TestScanGuarantees
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/scantest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestRemoteArrays
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/remotearraytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

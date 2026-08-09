@@ -241,6 +241,7 @@ namespace conversion {
                   || val.bytes[0] == art::tinteger
                   || val.bytes[0] == art::tdouble
                   || val.bytes[0] == art::tcomposite
+                  || val.bytes[0] == art::tplain
                   || val.bytes[0] == art::tfloat
                   || val.bytes[0] == art::tshort
                   || val.bytes[0] == art::tlast_valid

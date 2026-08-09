@@ -537,3 +537,106 @@
       - whether the check belongs in every collection command or only where a collection
         is created. Only at creation is much cheaper and catches the case that matters,
         which is two types under one name in the first place.
+
+54. as_composite writes into the key it is given.
+
+    `conversion::as_composite` splits a key on the separator with strtok_r, and does it in
+    place: `auto last_tok = (char *)v.begin();` casts away const and strtok_r replaces each
+    separator with a null. The caller's bytes are modified, and the original key is gone by
+    the time the call returns.
+
+    In the server this happens to work, because the bytes come out of a writable network
+    buffer and nothing reads them again. It is still a trap. It was found by writing a
+    small program that passed a string literal to it, which segfaults - literals are in
+    read only memory - and anyone calling it from a test, a tool or the embedded interface
+    with a literal or a shared buffer will hit the same thing.
+
+    The fix is to copy into a scratch buffer before tokenising, which is what the composite
+    path already does for everything else. The cost is one copy on keys that contain a
+    separator, which is the only case that reaches this branch at all - a key without one
+    returns from the fast path above without touching anything.
+
+55. A logical export and import, and a storage version that says when it is needed.
+
+    The key encoding changed on 09-08-2026 - a caller's multi part key now carries `tplain` where
+    it used to carry `tcomposite`, so that it can be told apart from a container key
+    (entry 53). Any key holding a separator that was saved before that is unreadable now.
+    `storage_version` has been bumped for it, so such a file is refused with a clear
+    failure instead of being read as something it is not - but a refusal is only half an
+    answer, because there is still nowhere for that data to go.
+
+    How the version works today. `storage_version` in constants.h is written as the first
+    field of every shard file and checked by `arena::base_hash_arena::arena_retrieve` on
+    load; a mismatch logs "data format is invalid" and the load fails. Since DONE 35 that
+    failure is clean - it reports and skips rather than aborting the process - so the
+    mechanism is sound and only the message and the way out are missing.
+
+    The middle term of `page_size + 11 + test_memory` is the revision, and it was moved
+    from 10 to 11 for the tplain encoding on 09-08-2026. So a file written before that is
+    now refused rather than misread, which closes the silent half of the problem and leaves
+    only the way out.
+
+    What is still missing: "data format is invalid" tells a user nothing they can act on.
+    It should say which version the file is, which the server expects, and that an export
+    from the older server is the way across - which is the part that does not exist yet.
+
+    What the export has to carry. Not the pages - that is what the current format is, and
+    the whole point is to be independent of it. Per key space: every key with its value and
+    expiry, the options the space was built with (ordered, shards, range_sharded), and any
+    dependency it has on another space. Separately the ACL users, which are stored apart
+    from the data and are not replicated. A collection has to come out as its logical
+    contents - a list in order, a hash's fields, an ordered set's members with scores - and
+    not as the composite keys they happen to be stored under, or the export is tied to the
+    very encoding it is meant to outlive.
+
+    The sequencing is the part that is easy to get wrong, and it decides when this can
+    ship. A user upgrades by exporting with the server they are already running and
+    importing into the new one. That means **the exporter has to exist in the version
+    people already have**, which is the one thing a future release cannot add. So either
+
+      - the export lands first, in a release that changes nothing else, and the format
+        bump waits for the release after it; or
+      - the bump ships with a standalone reader that understands the old format, which is
+        more work but does not need anyone to have upgraded in a particular order.
+
+    Until one of those exists, an encoding change is only safe while nobody has data they
+    care about - which is true as of 09-08-2026 and will stop being true without warning.
+
+    Worth doing alongside: RESP already has DUMP and RESTORE for a single key, and redis's
+    are deliberately version tagged with a footer. Following that shape for the per key
+    case would give the same thing at a smaller granularity and is a reasonable first
+    step - one key, one blob, a version in it, and RESTORE refusing a version it does not
+    know rather than guessing.
+
+56. `used_memory_startup` is reported through a clamp, so it moves when it should not.
+
+    `redisinfotest.py` asserts the startup baseline stays put across a write, and it does
+    not always. Measured on 09-08-2026, on a clean data directory:
+
+        before: startup=613293744 used=614922302
+        after : startup=613293744 used=705851798
+
+    which passes - but only by 1.6 MB out of 613, a third of a percent. The reported value
+    is `std::min(get_startup_memory(), used)` at info_api.cpp:158. The accumulated total
+    and the current total are close enough that a transient allocation freed between the
+    load and the first INFO puts `used` under the accumulated figure, the first read is
+    clamped to `used` and the second is not, and the baseline appears to move.
+
+    Two things are worth separating here. The clamp is there because the same test also
+    asserts `startup <= used`, so it cannot simply be removed - it would report a baseline
+    larger than the memory in use, which is worse than the flake. The real question is why
+    the accumulated figure is that close to the total at all.
+
+    `add_startup_memory` (key_space.cpp:210) sums `memory_after - memory_before` for each
+    key space as it loads, and the comment there already notices the difficulty: other
+    threads allocate at the same time, so a growth measured around one space includes work
+    done by another. Summing those deltas double counts, which is exactly how the sum ends
+    up level with the total rather than comfortably below it.
+
+    So the fix is probably not at the reporting end. Take one reading of total memory once
+    every space has finished loading and record that as the baseline, rather than adding up
+    per space differences taken while the loads overlap. That is a single number, it cannot
+    exceed the total it was read from, and the clamp then never fires.
+
+    Seen as a suite failure under `ctest -j4`; it does not reproduce standalone, which fits
+    a timing sensitive margin rather than a wrong constant.

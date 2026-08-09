@@ -89,7 +89,7 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
         if (ValkeyModule_ReplyWithStringBuffer(ctx, k, encoded_str_len(k, kl)) == VALKEYMODULE_ERR) {
             return -1;
         }
-    } else if (key_len >= 1 && (*enck == art::tcomposite)) {
+    } else if (key_len >= 1 && (*enck == art::tcomposite || *enck == art::tplain)) {
 
         return reply_encoded_key(ctx, key.sub(2));
     } else {
@@ -158,7 +158,7 @@ Variable encoded_key_as_variant(art::value_type key) {
         s.insert(s.end(), k, k + encoded_str_len(k, key_len - 2));
         return s;
 
-    } else if (key_len >= 1 && (*enck == art::tcomposite)) {
+    } else if (key_len >= 1 && (*enck == art::tcomposite || *enck == art::tplain)) {
         // not recurrent composites yet
         unsigned kl = 2;
         const char *ptr = (const char *) &enck[2];
@@ -244,7 +244,7 @@ unsigned log_encoded_key(art::value_type key, bool start) {
         barch::std_continue("{ string }[", s, "][", kl, "]");
         if (start) barch::std_end();
         return 2 + kl;
-    } else if (key_len > 1 && *enck == art::tcomposite) {
+    } else if (key_len > 1 && (*enck == art::tcomposite || *enck == art::tplain)) {
         barch::std_continue("{ composite [2] }[");
         unsigned kl = 2;
         const char *ptr = (const char *) &enck[2];

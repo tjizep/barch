@@ -38,6 +38,7 @@ int HSET(caller& cc, const arg_t& args) {
     if (barch::kind_of(store, args[1]) == barch::key_kind::string) {
         return cc.push_error(barch::wrong_type_message());
     }
+    bool wrong_type = false;
     store.with_container_write(args[1], [&](const barch::shard_ptr& t) {
         auto container = conversion::convert(args[1]);
 
@@ -60,6 +61,9 @@ int HSET(caller& cc, const arg_t& args) {
             query.pop_back();
         }
     });
+    if (wrong_type) {
+        return cc.push_error(barch::wrong_type_message());
+    }
     return cc.push_ll(added);
 }
 }

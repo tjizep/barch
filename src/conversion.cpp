@@ -94,7 +94,8 @@ conversion::comparable_key conversion::as_composite(art::value_type v, bool noin
         return conversion::convert(v.chars(), v.size, noint);
     {
         thread_local composite tuple;
-        tuple.create({});
+        // tagged as the caller's key, not as a container's - see art::tplain
+        tuple.begin_plain();
         char spc[] = {sep,'\0'};
         char * state;
         auto last_tok = (char *)v.begin();

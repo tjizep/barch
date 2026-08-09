@@ -69,6 +69,12 @@ struct composite {
         return create(zt);
     }
 
+    /** start a key that belongs to the caller rather than to a container - see tplain */
+    void begin_plain() {
+        comp.clear();
+        comp.push_back(art::ts_plain);
+    }
+
     void push(const conversion::comparable_key &k) {
         comp.push_back(k);
     }

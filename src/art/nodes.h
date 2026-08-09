@@ -28,7 +28,21 @@ namespace art {
         tcomposite = 4u,
         tshort = 5u,
         tfloat = 6u,
-        tlast_valid = 6u,
+        /**
+         * A multi part key that a caller asked for, as opposed to one barch built.
+         *
+         * A key containing the separator is stored as several components, and so is the
+         * key a list, hash or ordered set lives under. They were both tagged tcomposite,
+         * which made them the same bytes: `SET "1.1 a"` and the container for a name
+         * "1.1" with a member "a" are indistinguishable, and the container for "1.1" is a
+         * strict prefix of the plain key. Anything trying to tell a collection from an
+         * ordinary key by looking at the keys around it was therefore guessing, and
+         * guessed wrong - see TODO 53.
+         *
+         * A plain multi part key carries this instead, so the two can never be confused.
+         */
+        tplain = 7u,
+        tlast_valid = 7u,
         tend = 255u,
         tnone = 65536
     };
@@ -41,6 +55,8 @@ namespace art {
     };
 
     static composite_type ts_composite{tcomposite};
+    /** the leading tag of a caller's multi part key - see tplain */
+    static composite_type ts_plain{tplain};
     static composite_type ts_end{tend};
 
     enum node_kind {

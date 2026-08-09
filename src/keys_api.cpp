@@ -290,11 +290,16 @@ int SET(caller& call,const arg_t& argv) {
 
     barch::sharded_store store(sp);
     bool stored = true;
-    // deliberately no type check here. redis's SET replaces whatever the name held,
-    // including a list or a hash, and the tests rely on that - every other string command
-    // refuses instead. What barch does not yet do is remove the collection it is
-    // replacing, so the old entries stay reachable through their own commands until
-    // something deletes them. See TODO 53
+    // deliberately no type check: redis's SET replaces whatever the name held, including
+    // a list or a hash, and the tests rely on it - every other string command refuses
+    // instead. Replacing means removing, though, or the collection stays reachable
+    // through its own commands beside the new value
+    // deliberately no type check and no removal here. redis's SET replaces whatever the
+    // name held, including a list, and string.tcl relies on that - every other string
+    // command refuses instead. Removing the collection it replaces needs to tell a
+    // collection from an ordinary key reliably, which the prefix probe cannot do: a plain
+    // key is itself a composite split on a separator, so `SET "1.1 b"` matched the prefix
+    // of `{1.1, a}` and deleted it. See TODO 53
     if (spec.nx || spec.xx) {
         // NX and XX never reached storage: key_options carries no such flag and the
         // key_spec conversion drops them, so both were parsed and then ignored, and a

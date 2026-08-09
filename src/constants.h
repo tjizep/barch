@@ -18,7 +18,11 @@ enum {
     test_memory = 1,
     fl_test_memory = 0,
     initialize_memory = 1, // currently this should always be one - if the program needs to work
-    storage_version = page_size + 10 + test_memory,
+    // the middle term is the format revision - bump it whenever what is written to a
+    // shard file changes shape, so an older file is refused on load rather than read as
+    // something it is not. 11 is for the tplain key encoding (TODO 53/55): a key holding
+    // the separator no longer encodes the same as a container key
+    storage_version = page_size + 11 + test_memory,
     ticker_size = 16,
     numeric_key_size = 12,
     num32_key_size = 6,

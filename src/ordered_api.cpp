@@ -5,6 +5,7 @@
 #include "ordered_api.h"
 #include <cstdlib>
 #include "sharded_store.h"
+#include "key_type.h"
 #include "conversion.h"
 #include "art/art.h"
 #include "composite.h"

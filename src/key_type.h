@@ -67,6 +67,10 @@ namespace barch {
         if (store.exists(plain.get_value())) {
             return key_kind::string;
         }
+        // A collection is a run of composite keys sharing the container prefix. This is
+        // a probe rather than a lookup of one key, and it cannot tell a hash from an
+        // ordered set - see TODO 53 for what that costs and why the marker that would
+        // fix it was reverted.
         bool container = false;
         composite probe;
         art::value_type prefix = probe.create({conversion::convert(name)});
@@ -74,10 +78,9 @@ namespace barch {
             art::node_ptr lb = t->lower_bound(prefix);
             if (lb.null() || !lb.is_leaf) return;
             if (lb.const_leaf()->prefix(prefix) != 0) return;
-            // a removed key can linger as a tombstone, which lower_bound still finds and
-            // search does not. Walk past them: a container that has been deleted must
-            // stop reporting itself as one, or GETRANGE on the name answers wrong type
-            // forever after a DEL
+            // a removed key lingers as a tombstone, which lower_bound finds and search
+            // does not. Walk past them, or a deleted collection reports itself as one
+            // forever and GETRANGE on the name answers wrong type after a DEL
             for (art::iterator i(t, lb.const_leaf()->get_key()); i.ok(); i.next()) {
                 if (!i.key().starts_with(prefix)) return;
                 const art::leaf *l = i.l();

@@ -10,6 +10,27 @@
 
 #include "abstract_shard.h"
 
+/**
+ * Whether the standard library has std::atomic<std::shared_ptr<T>>.
+ *
+ * It is C++20, but libstdc++ only grew it in GCC 12. Before that the primary template is
+ * selected instead, which static_asserts that its type is trivially copyable - and a
+ * shared_ptr is not, so it fails to compile. That is what the ubuntu build pipeline hits
+ * on GCC 11.
+ *
+ * The free function overloads that specialisation replaced do the same job and exist
+ * either way, so an older library uses those instead: same object, same acquire and
+ * release orderings, only the spelling differs.
+ */
+#ifndef BARCH_HAS_ATOMIC_SHARED_PTR   // -D it to force either path, which is how the
+                                      // one this compiler does not take gets built
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+#define BARCH_HAS_ATOMIC_SHARED_PTR 1
+#else
+#define BARCH_HAS_ATOMIC_SHARED_PTR 0
+#endif
+#endif
+
 namespace barch {
 
     /**
@@ -82,7 +103,13 @@ namespace barch {
         range_index& operator=(const range_index&) = delete;
 
         /** the table as it is now. Hold it for as long as the routing decision matters */
-        [[nodiscard]] table_ptr get() const { return current.load(std::memory_order_acquire); }
+        [[nodiscard]] table_ptr get() const {
+#if BARCH_HAS_ATOMIC_SHARED_PTR
+            return current.load(std::memory_order_acquire);
+#else
+            return std::atomic_load_explicit(&current, std::memory_order_acquire);
+#endif
+        }
 
         /**
          * the position of the first boundary above key.
@@ -164,7 +191,11 @@ namespace barch {
         void refresh(const heap::vector<shard_ptr>& shards, size_t a, size_t b);
         void publish(const std::shared_ptr<table>& t);
 
+#if BARCH_HAS_ATOMIC_SHARED_PTR
         std::atomic<table_ptr> current;
+#else
+        table_ptr current;
+#endif
     };
 
     /**

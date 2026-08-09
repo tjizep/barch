@@ -59,7 +59,11 @@ size_t range_index::route(const table& t, art::value_type key) {
 }
 
 void range_index::publish(const std::shared_ptr<table>& t) {
+#if BARCH_HAS_ATOMIC_SHARED_PTR
     current.store(t, std::memory_order_release);
+#else
+    std::atomic_store_explicit(&current, table_ptr(t), std::memory_order_release);
+#endif
 }
 
 // ---- reading the shards -------------------------------------------------------------

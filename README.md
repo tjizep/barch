@@ -9,6 +9,8 @@ Additionally, it has an embedded server+client for python which can reduce read 
 It implements the Z* (OrderedSet), H* (HashSet) and key value API's available in redis.
 A demo ubuntu 22.04 docker image is available at teejip/barch:v0.4.2.6b
 
+### Docs 
+*[Documentation for API's](https://tjizep.github.io/barch)*
 
 ### Advantages of the embedded L1 server
 
@@ -96,7 +98,7 @@ Checkout and build on (currently linux only) with gcc 10 or above...
 Or alternatively [Via Docker image](https://tjizep.github.io/barch/DOCKER)
 
 # Docs
-1. [Documentation for API's](https://tjizep.github.io/barch/APIS)
+1. [Documentation for API's](https://tjizep.github.io/barch)
 
 # Configuration
 See [Configuration](https://tjizep.github.io/barch/DOCKER) docs

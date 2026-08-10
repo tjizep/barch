@@ -614,6 +614,20 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/remotearraytest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # one name holds one kind of collection, and the kinds count only their own
+        # entries. Asserted against literals rather than against each other, because the
+        # miscount this replaced was two walks of one prefix agreeing with each other while
+        # both were wrong - see DONE 48
+        # a logical export is the migration path a storage version bump leaves people
+        # needing, so the test is a round trip through an emptied store - see DONE 61
+        add_test(NAME TestExportRoundTrip
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/exporttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestContainerKinds
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/containerkindtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestValkeyDifferential
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/valkeytrans/differential.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

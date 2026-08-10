@@ -20,9 +20,17 @@ enum {
     initialize_memory = 1, // currently this should always be one - if the program needs to work
     // the middle term is the format revision - bump it whenever what is written to a
     // shard file changes shape, so an older file is refused on load rather than read as
-    // something it is not. 11 is for the tplain key encoding (TODO 53/55): a key holding
-    // the separator no longer encodes the same as a container key
-    storage_version = page_size + 11 + test_memory,
+    // something it is not. 11 was the tplain key encoding (TODO 55): a key holding the
+    // separator stopped encoding the same as a container key. 12 is the per kind container
+    // leads (TODO 53) - a list, hash and ordered set store under different lead bytes now,
+    // so containers in a file written at 11 would read as the wrong kind or not at all.
+    // 13 is the clock (DONE 55): every stored expiry used to be measured against the time
+    // since the machine started and is now a unix time, so a deadline saved at 12 reads as
+    // a moment in 1970 and the key it belongs to would vanish on load
+    // 14 is the member index marker (DONE 62): it used to encode as a component with no
+    // separator, which made an ordered set's index key identical to the key of a set whose
+    // name began with an 0x03, so the two could not be told apart at all
+    storage_version = page_size + 14 + test_memory,
     ticker_size = 16,
     numeric_key_size = 12,
     num32_key_size = 6,

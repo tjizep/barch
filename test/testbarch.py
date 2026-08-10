@@ -95,8 +95,20 @@ assert(z.range("z1",1.99,3.01,["WITHSCORES"])[1].d() == 2)
 assert(z.popmax("z1").s() == "three")
 assert(z.range("z1",1.99,3.01,["WITHSCORES"])[1].d() == 2)
 s = barch.size()
-assert(z.remove("z1","1").i() == 1)
-assert(barch.size() + 1 == s)
+# remove() takes a list of members. A bare string is taken as a sequence of characters, so
+# z.remove("z1","two") asks to remove "t", "w" and "o" and removes nothing - it only ever
+# looked right here because "1" is one character long.
+#
+# And ZREM names a member, not a score: "1" is a score in this set, not a member, so it
+# removes nothing. It used to answer 1 because a member that is not there landed the walk
+# on whichever member came next and removed that one instead - see DONE 59
+assert(z.remove("z1",["1"]).i() == 0)
+assert(barch.size() == s)
+assert(z.remove("z1",["two"]).i() == 1)
+# a member costs two keys - the score ordered one and its entry in the member index - so
+# removing one drops the size by two. This asserted one, which is what the old ZREM left
+# behind: it removed the score key and orphaned the index entry
+assert(barch.size() + 2 == s)
 
 assert(z.add("zi", ["1","one","2","two","5","five"]).i() == 3)
 s = barch.size()

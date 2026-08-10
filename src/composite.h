@@ -61,18 +61,35 @@ struct composite {
         create(from);
     }
     art::value_type create(std::initializer_list<conversion::comparable_key> from, bool zt = true) {
-        comp.clear();
-        comp.push_back(art::ts_composite);
+        return create(art::ts_composite, from, zt);
+    }
+
+    /**
+     * Build a key under a given lead - which for a container is what says what kind it is.
+     *
+     * The lead is asked for rather than assumed because every container command has to
+     * name the kind it works on, and a command that reaches for the wrong one addresses
+     * somebody else's keys. See tcomposite_list in nodes.h.
+     */
+    art::value_type create(art::composite_type lead,
+                           std::initializer_list<conversion::comparable_key> from,
+                           bool zt = true) {
+        begin(lead);
         for (const auto &i: from) {
             comp.push_back(i);
         }
         return create(zt);
     }
 
+    /** start a key under `lead`, to be filled in with push() */
+    void begin(art::composite_type lead) {
+        comp.clear();
+        comp.push_back(lead);
+    }
+
     /** start a key that belongs to the caller rather than to a container - see tplain */
     void begin_plain() {
-        comp.clear();
-        comp.push_back(art::ts_plain);
+        begin(art::ts_plain);
     }
 
     void push(const conversion::comparable_key &k) {

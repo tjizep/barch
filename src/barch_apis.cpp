@@ -10,6 +10,7 @@
 #include "repl_api.h"
 #include "config_api.h"
 #include "auth_api.h"
+#include "export_api.h"
 //
 // Created by teejip on 7/13/25.
 //
@@ -72,6 +73,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         register_repl_api(*r);
         register_config_api(*r);
         register_auth_api(*r);
+        register_export_api(*r);
     }
 
     return r;

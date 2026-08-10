@@ -2066,3 +2066,759 @@ reasoning turned out to be wrong on inspection - STRLEN was said to be an alias 
 and is not, LPUSH and RPUSH were said to need a data migration and did not, and
 wrong_arity() was said to be unable to know its own command. The entries are more reliable
 about what is broken than about what fixing it would cost.
+
+## 47. A lock nothing used, and the hypothesis it was never worth [10-08-2026]
+
+`rh_shared::shared_mutex` was written as a shared lock for read heavy work loads, which
+is what a cache is, so the intent was sound. It was never adopted. The shards latch on
+`std::shared_timed_mutex` and always did, and a grep for `rh_shared` outside its own two
+files returns nothing at all - `abstract_shard.h` includes the header twice and uses
+none of it, `sastam.h` includes it and uses none of it. Three hundred lines, reachable
+only from themselves.
+
+That would be harmless if it were inert, and it was not. The class kept a registry of
+live threads in a file scope `static rh_state s;` holding a std::mutex, an unordered_set
+and a thread set, read on every lock and unlock. Static destruction order made that a
+real hazard on paper: the threads that would have taken these locks are not all joined
+before static destruction runs, and a thread reaching unlock() after `s` is gone locks a
+destroyed pthread mutex, which does not fault - it blocks. A process in that state sits
+at zero cpu forever.
+
+Which is exactly what the stalled valkey-servers looked like, and that is the part worth
+keeping. The shape of the hypothesis fitted the symptom precisely, and it was wrong. The
+registry was rewritten into the canonical never-destroyed form, and the stalls continued
+unchanged. Attaching to a live one settled it in a single command:
+
+    gdb -p <pid> -batch -ex "set pagination off" -ex "thread apply all bt"
+
+and the answer was somewhere else entirely - an abort inside the module running valkey's
+sigsegvHandler, which blocks on signal_handler_lock and never returns (entry 35). A
+hypothesis that fits the symptom is not evidence, and the code that fits it best here
+could not have caused anything, because nothing ever called it.
+
+So the resolution is not a fix. The whole of `rh_shared` is behind `#ifdef _EXPERIMENTAL_`
+in both files - undefined, the header declares nothing and the implementation is a
+translation unit with only its own include in it. Defined, it builds as before for anyone
+who wants to finish the idea. Nothing else in the tree changes, since nothing else
+referred to it: the suite is unchanged at 55 of 55.
+
+This also disposes of a smaller thing noted in the entry. Lines 233 to 294 were a four
+thread, ten million iteration stress test of the lock ending in `static int tested =
+test();`, sitting inside `#if 0`. It is now inside two guards rather than one, so the one
+character change that would have run a long threaded benchmark before main on every load
+of the module no longer does.
+
+Not covered here, and moved to TODO 57: two other file scope statics with the same
+destruction order exposure - `art/art.cpp`'s `static std::mutex glob_queue{}`, and
+`repl_api.cpp`'s `static restarter restart;`. Those are live code, unlike this, so they
+are worth the reading that this one turned out not to deserve.
+
+## 48. The kind of a collection, put in the key rather than beside it [10-08-2026]
+
+A list, hash and ordered set under one name were one key range. Nothing separated them,
+so HLEN walked the prefix and counted an ordered set's members as fields, ZCARD returned
+the favour, and `SET` over a name holding a collection wrote a string beside it instead
+of replacing it.
+
+The entry proposed a stored type tag, written when a container is created and read where
+a type is checked. What was implemented instead is a lead byte per kind - tcomposite_list,
+tcomposite_hash and tcomposite_ordered_map, with tcomposite_extend reserved and defined as
+"the next byte is the real code" so that the escape hatch is spent now rather than in a
+later format break. The suggestion came from the author and is better than the entry on
+three counts: the kind is part of the address, so it cannot disagree with the data or
+outlive it; it costs no extra entry and no extra lookup, since HLEN simply stops seeing an
+ordered set's keys rather than learning to skip them; and the entry's third open question -
+check at creation or in every command - stops existing, because every command is confined
+to its own range by construction.
+
+What it does not do is stop both existing. Separate ranges mean HSET and ZADD on one name
+would both succeed and be mutually invisible, which is two objects sharing a name rather
+than a miscount. So the kind is claimed where a collection is created - HSET, LPUSH, ZADD,
+ZINCRBY - and that is the only place three cross shard probes are paid for.
+
+The order of the work mattered, and it is the part worth keeping. The fall through in
+keys.cpp for an unrecognised lead byte is a bare abort(), and an abort inside valkey
+deadlocks on the signal handler lock (entry 35), so a lead byte that a decoder had not
+been taught about would not have produced a wrong answer - it would have produced a server
+stuck at zero cpu. The four comparison sites were therefore replaced with a single
+`art::is_composite_lead()` first, before anything wrote a new byte, and only then were the
+bytes emitted. That predicate then absorbed the one mistake made here: a bulk edit matched
+`.create({` but ordered_api.cpp reaches its composites through a handle, so 26 sites at
+`->create({` kept the old lead and ZADD wrote where ZCOUNT was not looking. Six tests
+failed and none of them hung.
+
+Three things were found on the way that the entry did not predict:
+
+  - container detection had never worked at all. `kind_of` built its probe prefix with
+    `create()`, which zero terminates, and a prefix ending in the terminator cannot prefix
+    a key that carries components after the name. It always answered none, so every
+    container direction WRONGTYPE check in keys_api.cpp was dead code. Building the prefix
+    unterminated fixed it, and STRLEN over a hash now answers WRONGTYPE where it used to
+    answer 0.
+  - DEL on an ordered set left its member index behind. The index is keyed member to
+    score and begins with the index marker rather than the name, so a sweep of the name's
+    prefix walked straight past it and a deleted set went on answering ZRANK. Now swept.
+  - the python module under test is installed into the build's venv by a ctest step, so
+    an ad hoc probe run between suites exercises whatever the last suite installed. Half
+    an hour went on a guard that was not firing and instrumentation that would not print,
+    both of which were simply not in the module being loaded. `venv/bin/pip install .`
+    before probing, or do not believe the probe.
+
+Storage version went to 12. Reusing 11 was tempting since 11 is recent, but if it has
+shipped then a file written under it would be accepted and read with the wrong container
+encoding, and being wrongly accepted is the one failure worse than being refused.
+
+TestContainerKinds covers the claim and the counts, asserted against literals. The old
+assertion in testcomposites.lua compares HLEN against the length of HKEYS, which holds
+whenever both are wrong in the same way - and they were: see TODO 58, where a single field
+hash reports zero from both.
+
+## 49. A range over a shard holding one key answered nothing [10-08-2026]
+
+Reported as HLEN and HKEYS returning empty for a hash with a single field while HGET and
+HGETALL read it perfectly well. The entry guessed at the bounds those two commands build.
+The bounds were fine, and the fault was neither in hashes nor in the container leads it
+was found next to.
+
+`inner_lower_bound` has an early return for the case where the walk reaches a leaf with
+nothing in the trace:
+
+    if (trace.empty())
+        return (l->get_key() < key || l->expired()) ? nullptr : n;
+
+It answers with the leaf and leaves the trace empty, which is honest - there is no parent
+to record and nothing to increment to. `art::range` then opened with
+
+    if (lb.null() || tl.empty()) return 0;
+
+and lost the leaf entirely. So a range over a tree that is a single leaf returned nothing,
+whatever it was looking for.
+
+The trace was empty because the tree really was one leaf. It was never about the number of
+fields: two fields share a container prefix and route to the same shard, so that shard's
+root becomes an inner node and the trace fills in. One field sits alone in the shard it
+routes to, and with 347 shards a collection with a single entry lands alone easily. HGET
+and HGETALL were unaffected because neither goes through `range`.
+
+Which makes the real scope wider than the entry: any range query over a shard holding
+exactly one key answered nothing - hashes were only where it was noticed. `range` now
+visits that leaf directly, with the same upper bound and expiry checks the loop applies,
+and returns, since there is nowhere to advance to.
+
+Confirmed by instrumenting the bail: it printed exactly twice for a one field hash, once
+for HLEN and once for HKEYS, and not at all once a second field existed. After the fix
+HLEN is 1, HKEYS is [f], and ZCARD, ZRANGE, ZCOUNT, KEYS and SCAN are all correct over a
+single entry.
+
+The reason this lasted is in the test that should have caught it. testcomposites.lua
+asserts `HLEN == #HKEYS`, and both sides go through `range`, so both were zero and the
+assertion held. A test that compares two implementations of the same walk agrees with
+itself whenever they fail together. TestContainerKinds asserts the single entry case
+against literals instead.
+
+The second `art::range` overload, taking a LeafCallBack, has the same shape and is inside
+`#if 0` with its call site in shard.cpp commented out. Left alone deliberately - it is not
+built, and correcting dead code invites the belief that it works.
+
+## 50. as_composite rewrote the key it was given [10-08-2026]
+
+`strtok_r` writes a terminator over every separator it finds, and the buffer it was being
+handed was the caller's key. So the first conversion of `1.1 a` turned it into `1.1\0a`
+in place. A second conversion of the same key then found no separator, took the fast path
+and encoded it as a single string containing an interior null, which `s_filter_key`
+refuses:
+
+    FILTER-THROW size=7 bytes=03312e31006100
+
+This sat harmlessly for as long as every command converted its key exactly once. The type
+checks broke that: a command that asks what a name holds before reading it converts twice,
+once in the check and once to do the work.
+
+Worth being exact about who broke what, because the first reading was wrong. GET was the
+command that failed the suite, and GET's check was added the same afternoon - so it looked
+like the new code was at fault. It was not. STRLEN and GETRANGE had been carrying the same
+check since earlier in the day and were already broken by it; no test passes them a key
+holding a separator, so nothing said so. GET is covered by redispytest.py line 147, and
+that is the only reason any of it surfaced. The 08-02 build settles it: GET works there
+and the other two do not exist yet.
+
+Fixed as the entry proposed, by tokenising a copy. One thread_local string, assigned only
+on the branch that has a separator to find, which is the only branch that reaches strtok_r
+at all.
+
+The general shape is worth remembering: a function that quietly mutates its argument is
+correct until something calls it twice, and the second caller is usually a new feature
+that has no idea it is the second. TestContainerKinds now converts one such key several
+times over.
+
+## 51. What a keyspace command sees when the name holds a collection [10-08-2026]
+
+Once container detection started working (entry 48), the commands that work on names
+rather than on collections turned out to disagree with redis in four places. Three are
+fixed here and the fourth is documented as a deviation.
+
+  - `GET` on a hash answered nil, as though the name were free. It now answers WRONGTYPE.
+    STRLEN and GETRANGE already did; GET simply never called the check, which is the sort
+    of gap that comes from adding guards one command at a time.
+  - `EXISTS` answered 0 for a name holding a collection, because it looked only for the
+    plain key and a collection has none. It now sees containers, which matters more than
+    it sounds - EXISTS is the command redis expects a caller to ask this question with.
+  - `KEYS` and `SCAN` reported the collection's internals rather than the name: a hash
+    with two fields came back as `k:h f` and `k:h g`, and `KEYS k:h` came back empty. Both
+    now report the name, once.
+
+The name reporting needed the matcher changed and not only the reply. The pattern was
+being matched against the rendered entry, so naming a hash directly matched nothing at
+all - the reply shape was the visible half of the problem and the matching was the other.
+One helper, `encoded_container_name_len`, gives the length of a container key's lead plus
+its name component; slicing there leaves something that still decodes as a composite but
+decodes to the name alone, so both matchers and both reply paths use the renderer that was
+already there. Deduplication is by name, so the set stays the size of the reply rather
+than the size of the key space.
+
+SCAN's deduplication spans one call rather than the whole cursor, deliberately. SCAN
+promises that everything present throughout an iteration is reported at least once and
+explicitly allows repeats, so a container whose entries straddle two calls may be named in
+both. Carrying the set in the cursor would hold memory for the life of the scan to buy a
+guarantee the contract does not ask for.
+
+DBSIZE is left counting stored keys, on the author's call, and is documented as a
+deviation in both keyspace_api.cpp and the docs rather than quietly diverging. It reads
+counters the shards already keep; counting names means walking the key space on every call
+or maintaining a second set of counters on every container write, and barch's storage is
+different enough from redis's that the number would still not line up.
+
+Finding all this cost one unrelated bug, which is entry 50 - the type check converts a key
+twice and as_composite was rewriting it.
+
+## 52. The translation harness, and what it took to make it faithful [10-08-2026]
+
+The machinery was already written and running when this entry was picked up again -
+translate.py walks the tcl and emits the cases it can read, differential.py runs each one
+against valkey first and only trusts the ones valkey passes. incr.tcl and scan.tcl, the
+two proofs the entry asked for, were done: 26 of 29 incr cases translate, and scan.tcl
+translates to nothing at all, for the reason recorded in the entry - half of it is SSCAN,
+HSCAN and ZSCAN, which barch does not implement, and the rest is built out of while loops
+and populate. The four scan tests that are about a promise barch actually makes are hand
+written in test/scantest.py.
+
+So what was left was the part the harness is for: the cases valkey itself rejected. Twelve
+of ninety seven, and the entry's own rule says what that means - if valkey fails a case,
+the translation is wrong, not barch. Reading them one at a time turned up three defects in
+the translator and one in the comparison, and the count of faithful cases went from 85 of
+97 to 89 of 95:
+
+  - **tcl escapes were never resolved.** `"\x00foo"` was compared as the five characters
+    backslash x 0 0 rather than as a null byte and foo. Quoted words now go through a tcl
+    unescape - hex, octal, and the usual single letters - while braced words are left
+    alone, which is what tcl itself does.
+  - **expectations were stripped of their whitespace.** GETRANGE of "Hello World" from 5
+    answers " World", and the leading space is the answer. Only a bare word may be
+    stripped now; a quoted or braced one is kept verbatim.
+  - **and stripped again on the way out.** `matches()` did its own strip, which quietly
+    undid the fix above. That one is worth remembering: two layers each doing something
+    defensible, and the second cancelling the first.
+  - **a nil inside a list prints as {} in tcl**, not as nothing, so MGET over four keys
+    with one missing reads `a b c {}`. The renderer now knows whether it is rendering an
+    element or a whole reply.
+
+Two cases used tcl's `binary format` to build their expectation, which is the tcl runtime
+rather than anything barch could answer. They are stubs now rather than failures - the
+same treatment as populate and the while loops - which is why the translated count went
+down by two while the faithful count went up by four.
+
+Six remain unfaithful and are meant to. Four depend on state that neighbouring tests set
+up, and those neighbours are stubs: `KEYS with empty DB` contains nothing but an assertion
+that the db is empty, and is only true after tests we cannot translate have run. `DBSIZE`
+expects 6 for the same reason. Flushing before each case would make those two honest and
+break the others, so they stay reported rather than papered over. The remaining two are
+COPY and MOVE across databases, which is where barch's named key spaces and redis's
+numbered ones stop lining up.
+
+The headline is the one that matters: **barch agrees with valkey on all 89 faithful
+cases**. Nothing in the accepted list has been quietly enlarged to get there - it still
+holds only the eight cases for commands barch does not implement, each naming TODO 52.
+
+## 53. hash.tcl and expire.tcl, and the crash they found in the first minute [10-08-2026]
+
+150 tests translated to 51 cases, taking the harness from 95 translated to 146 and the
+faithful set from 89 to 136. barch agrees with valkey on all 136.
+
+The first run did not get that far. It cored:
+
+    abort_with("invalid leaf size")  <- art::make_leaf  <- SET
+
+`SET k v EX 10000000000000000` aborts the server. `now() + given * 1000` overflows to a
+negative deadline, and the two places that decide how big a leaf is then disagree about
+it: `leaf::make_size` is declared to take a bool and was handed the raw ttl, so any
+non-zero value reserved eight bytes for an expiry, while the leaf constructor only records
+one when it is positive. The leaf is built one size and measured another, and the check
+between them aborts - which inside valkey is the signal handler deadlock of entry 35, a
+server at zero cpu that ignores SHUTDOWN. A caller could do this from the command line.
+
+Fixed at both ends, because either alone would have been half a fix. The commands refuse
+an expiry that cannot become a deadline, with redis's own wording - "invalid expire time
+in 'set' command" - through one checked conversion now shared by SET, EXPIRE, GETEX and
+SETEX. And `make_leaf` passes `ttl > 0` so the two sizings use the same predicate, which
+makes the abort unreachable rather than merely unlikely.
+
+The rest of what the two files found, in the order the differential reported it - 29
+differences, then 10, then 1, then none:
+
+  - `is_integer` was `[0-9]+`, so a negative argument was a syntax error before anything
+    could judge it as a number. redis reads it and then refuses the value, which is a
+    different message and the one its clients match on. Now `-?[0-9]+`.
+  - EXPIRE read one condition word and refused everything after it, so `EXPIRE k 10 NX GT`
+    could not say what was wrong. It reads them all now and names the combination the way
+    redis does - GT with LT, NX with anything.
+  - an unknown word after the TTL, and an empty TTL, both said "syntax error". They say
+    "Unsupported option AB" and "value is not an integer or out of range" now.
+  - HGET and HMGET answered nil for a name holding a string, which reads as "no such
+    field" rather than "wrong kind of thing". They answer WRONGTYPE.
+  - HINCRBYFLOAT refused an infinite increment as "not a valid float". redis parses it
+    perfectly well and refuses what it would do to the value - "value is NaN or Infinity".
+
+The last difference standing was not a difference at all, and it is the one worth keeping.
+`HSET hash f a` answered WRONGTYPE where valkey allowed it, reproducibly, on what looked
+like a fresh store. It was correct: the key `hash` held a string - a Wikipedia search
+result left in the .dat files in the build directory by some earlier session. barch loads
+whatever is in its working directory and valkey starts empty, so the harness had been
+comparing two different databases and calling the difference a defect. It flushes barch
+before the run now. Two hours went into a bug that did not exist, and the fixture was
+never in the frame.
+
+What is left is written down rather than fixed: TODO 60 for the nine commands these files
+expect and barch does not have - PERSIST, PTTL, PEXPIRE, PEXPIREAT, EXPIRETIME,
+PEXPIRETIME, HSETNX, HMSET, HRANDFIELD, and LRANGE - each an accepted divergence naming
+that entry. And TODO 61 for the deeper one: `art::now()` is monotonic since boot, so EXAT
+and PXAT compare a unix time against a clock that started when the machine did, and a
+persisted deadline means nothing after a restart. The differential found it as a trivial
+overflow disagreement, which is the shallowest symptom it has.
+
+## 54. The commands hash.tcl and expire.tcl expect, implemented [10-08-2026]
+
+Ten commands, plus three the entry did not list and one it had no idea about. barch still
+agrees with valkey on all 136 faithful cases, and now does it with the accepted list
+holding one entry rather than ten.
+
+The expiry surface came out as two shared implementations rather than seven commands.
+TTL, PTTL, EXPIRETIME and PEXPIRETIME are one read with four ways of reporting it; EXPIRE,
+PEXPIRE, EXPIREAT and PEXPIREAT are one write with two axes - the units the caller writes,
+and whether the number is a duration or a moment. EXPIREAT was not on the list and fell
+out of the same code. PERSIST is its own small thing, and answers 1 or 0 depending on
+whether there was a deadline to remove, which is the distinction redis makes.
+
+The hash surface: HMSET, HSETNX and HRANDFIELD as asked, and HSTRLEN and HVALS because
+hash.tcl's wrong type case reaches for every hash command there is and finds the gaps one
+at a time. HSET, HMSET and HSETNX are one write with three ways of answering. And LRANGE,
+with redis's clamping - 0 to -1 is the whole list whatever its length.
+
+Four things worth keeping, in the order they hurt:
+
+  - **a regression of mine from entry 53.** Making the parse produce an absolute deadline
+    left EXPIRE still adding now() to it, so `EXPIRE e 100` answered a TTL of 392759. The
+    differential had not caught it because the cases that would are stubs, and it took
+    writing PTTL - and checking its answer against TTL's - to see it.
+  - **HRANDFIELD took the server down twice.** A negative count asks for exactly that many
+    with repeats, so `-9223372036854770000` grew the reply until the process died. redis
+    survives the same command because it streams to the socket while this builds the whole
+    reply first, so beyond redis's two bounds there is a third at a million entries. That
+    is a real difference and it is written down as one rather than left as a surprise.
+  - **EXAT and PXAT were silently wrong and are now right.** They hand over a unix time and
+    barch measures deadlines against a clock that starts at boot (TODO 61), so the caller's
+    moment is now read as a distance from now and re-expressed. `SET e v EXAT now+90` gives
+    a TTL of 89 where it used to give decades. A deadline already past deletes the key, as
+    redis does - which took two goes, because taking the difference first made a large
+    negative wrap to an enormous positive.
+  - **the differential could not have caught the worst of it.** HMSET was already
+    registered with the valkey module and a second registration made module init fail, so
+    every lua test aborted with "Can't load module" while the differential stayed green.
+    The RESP server and the module register through different tables; a green differential
+    says nothing about whether the module loads. Only the full suite covers that.
+
+Two barch tests changed rather than the code. `EXPIRE k 100 NONSENSE` answered "syntax
+error" and now names the word, and SETEX's "invalid expire time" now names the command.
+valkey answers both the new way and expire.tcl asserts them, so those expectations were
+ours alone and were the thing that was wrong.
+
+Left behind: HSCAN, which is a cursor scoped to a prefix rather than a wrapper over
+something that exists. It is TODO 62, and it is the last accepted divergence in the hash
+file - every other command in that case now answers WRONGTYPE correctly.
+
+## 55. Expiry measured against unix time rather than machine uptime [10-08-2026]
+
+`art::now()` was `steady_clock`, whose epoch is when the machine started, and every
+deadline in the store was measured against it. Within a single run that is coherent -
+EXPIRE stored now+10000 and the key went when the clock passed it - which is exactly why
+it survived this long without anyone noticing.
+
+Two things were wrong with it anyway, and only one of them had a symptom.
+
+The visible one was absolute time. `EXAT`, `PXAT`, `EXPIREAT` and `PEXPIREAT` take a unix
+time from the caller and it was being compared against a clock counting from boot, so on a
+machine up for an hour `EXAT <now+60>` described a deadline about fifty five years away.
+That was patched first, in DONE 54, by reading the caller's moment as a distance from now
+and re-expressing it - correct, and a workaround.
+
+The one with no symptom at all is the reason to fix the clock rather than the commands: a
+deadline written to a shard file meant nothing after a restart, because the clock it was
+measured against restarted too. Nothing reports that, no test could catch it in one
+process, and the data is silently wrong from the moment it is loaded.
+
+So `now()` is milliseconds since the unix epoch, and the workarounds came out rather than
+accumulating. expiry_ms no longer translates between two frames, since there is only one;
+EXPIRETIME and PEXPIRETIME answer the stored number instead of rebuilding it from the time
+remaining; the local unix_now_ms helpers are gone from two files.
+
+Every caller of now() was read before changing it under them. `time_conversion.h` has its
+own, on high_resolution_clock, and is untouched. The only duration measured with this one
+is a client's age in INFO, which is cosmetic if the clock moves.
+
+The cost is real and is written down where the function is: a wall clock can step. An NTP
+correction moves every deadline relative to now, and keys expire early or late by however
+far it moved. redis has the same exposure for the same reason, and a stepped clock is a
+smaller surprise than a saved deadline that means something different tomorrow.
+
+Storage version 13. A deadline saved at 12 reads as a moment in 1970, so the key it belongs
+to would be expired on load - refusing the file is the only safe answer.
+
+The differential went from 125 to 126 cases: valkey refuses `EXPIRE foo 9223370399119966`
+because adding its basetime overflows, and barch used to accept it because its basetime was
+the few hours since boot rather than fifty five years of unix time. That case is no longer
+an accepted divergence, and the accepted list is down to one entry.
+
+Worth noting how it was found, since it was not found by looking. It surfaced as a trivial
+disagreement about an overflow in a translated test - the shallowest symptom it has - and
+the entry it turned into was written while explaining why that one case could be accepted.
+The restart problem was never observed at all; it followed from reading what the clock was.
+
+## 56. zset.tcl and list.tcl, and a blocking pop that took the store with it [10-08-2026]
+
+The last of the four translation entries. 316 tests became 102 cases, taking the harness
+from 146 translated to 248 and the faithful set from 136 to 226. barch agrees with valkey
+on all 226.
+
+The entry expected the work to be filtering rather than translating, and it was - most of
+zset.tcl is set algebra and most of list.tcl is commands beyond push and pop, none of which
+exist here. What it did not expect is that three of the four hardest problems were in the
+harness rather than in either file, and one was a server that stops answering.
+
+**A blocking pop with no bound on its timeout.** `BLPOP blist1 0x7FFFFFFFFFFFFF` was
+accepted - the timeout was read after the locks were taken and never judged - so the wait
+never ended, and because the locks were already held the whole store went with it. Every
+command after it answered nil until the server was restarted. That is what forty seven
+"differences" turned out to be: string.tcl running after list.tcl against a wedged server.
+The timeout is now read before anything is locked and judged as redis judges it, with
+strtod rather than the strict reader so that a hex or exponent form is a number that is too
+big rather than a word that is not a number. `BLPOP notalist 0` was the same shape from the
+other side - a wrong type that blocked forever instead of answering - and now answers
+WRONGTYPE.
+
+**Two more cases poisoning every case after them.** `HELLO 3` succeeds and leaves the
+connection speaking a protocol the client is not parsing, so replies are misread rather
+than refused; `MULTI` with a command the server does not know leaves a transaction the next
+case inherits. Both were reported as barch failing cases it had never been asked about. The
+runner now takes a fresh connection after any case that changes the connection's state.
+Recognising this took longer than it should have because the symptom - a string command
+answering empty - looks nothing like its cause.
+
+**A translator that stopped at the first surprise.** zset.tcl has a body whose braces the
+scanner cannot read, and the exception took the whole run down rather than the case. A case
+it cannot parse is a stub like any other now, which is the difference between 0 and 77
+translated cases from that file.
+
+What was actually wrong in barch, beyond the blocking pop:
+
+  - `LLEN` and `LPOP` answered as though a string were an empty list rather than saying
+    wrong type.
+  - `ZADD` took its score on trust. `ZADD z nan m` stored the word and answered as though
+    it had worked, and so did an empty score - the score is judged before the key check
+    now, because an unreadable score is a bad score rather than a bad key.
+  - `ZINCRBY` refused `+inf`, which redis stores happily, and said "invalid argument" for
+    everything - it reads scores the way redis does now and refuses only a NaN, in redis's
+    wording.
+
+Left written down rather than fixed: TODO 63 for the commands these two files expect and
+barch does not have - the set algebra, ZSCORE and ZMSCORE, ZRANDMEMBER, the list moves -
+and TODO 64 for the range bound validation, the NaN result that the member index path
+misses, and two cases that pass alone and fail in sequence.
+
+One thing worth carrying into 63. Twice today a case has failed reproducibly and turned out
+to be correct - `hash` holding a leftover string, and these two zset cases. Each time the
+first instinct was that barch was wrong. The differential is only as good as the fixture,
+and when a case fails alone it is a bug, while a case that fails only in company is a
+question about the company.
+
+## 57. HSCAN, and a cursor scoped to a prefix [10-08-2026]
+
+The entry said HSCAN was the one of the three worth doing - there is no set type for SSCAN
+and ZSCAN duplicates what ZRANGE covers - and that the work was a cursor scoped to a prefix
+rather than to a shard. That turned out to be right, and smaller than it sounds.
+
+A hash does not span shards. Its fields are a contiguous run of keys under one prefix in
+the shard its name routes to, so a position in that run is a whole cursor, where a key
+space scan needs a shard and a page as well. `scan_cursor` already carries a buffer for the
+page it is walking; HSCAN uses it to hold the key to resume from, and everything else about
+the cursor - how many a connection may hold, what they cost, when they are dropped - is the
+machinery SCAN already had.
+
+The contract is redis's: a full iteration reports every field present throughout it,
+repeats are allowed, COUNT is a hint about work per call rather than a promise about the
+size of the reply, and a cursor the server does not recognise starts again from the
+beginning rather than erroring, since a client is allowed to lose one. MATCH and NOVALUES
+both work.
+
+One thing cost most of the time, and it is worth writing down because it will recur. MATCH
+found nothing at all - not even `*`. The field name taken out of a key is still encoded: a
+component carries its own type byte and terminator, so the pattern was being compared
+against bytes no caller ever typed. The fix is to hand it back to the ordinary key
+renderer, and that needs the right framing - the renderer starts reading components at byte
+two, so a lead byte alone is not enough and the component needs the companion byte a real
+composite carries between its parts. A pattern matching nothing whatsoever, rather than
+matching badly, is the signature of comparing against raw encoded bytes.
+
+`Hash commands against wrong type` is no longer an accepted divergence - it was the case
+that walks every hash command, and HSCAN was the last one it could not reach. The accepted
+list is down to the commands that genuinely do not exist.
+
+SSCAN and ZSCAN are not done and are not planned. There is no set type at all, and ZSCAN
+would answer what ZRANGE already answers with a cursor bolted on; if a caller needs to page
+an ordered set, positions do it without server side state.
+
+## 58. The set algebra, which was answering a different question [10-08-2026]
+
+`ZINTER` was not a slow or approximate intersection, it was a different operation. For
+each member of the first set it sought the other set at `{set, score}` and checked whether
+the score sitting there matched, so what it actually asked was "does that set hold anything
+at all with this score". Two sets sharing a score looked like a match whatever their
+members were, which is why an intersection came back looking like a union - and why
+`ZINTERSTORE` counted three where valkey counted two.
+
+The store has an index for exactly this question - member to score, the one ZADD maintains
+alongside the ordered keys - and membership now goes through it.
+
+Two more things in the same function were wrong and had never been visible underneath the
+first. `WEIGHTS` was indexed by how far through the first set the walk had got rather than
+by which input the score came from, so the weights applied to arbitrary members. And only
+the first set's score was ever used, which left `AGGREGATE` with nothing to aggregate; it
+had grown a barch specific meaning instead, reducing the whole reply to a single number.
+Both are now what redis means: each member's score is what AGGREGATE does with the scores
+it had in every input it appeared in, after each was multiplied by that input's weight.
+
+`ZUNION` and `ZUNIONSTORE` did not exist, and the comment where the union case should have
+been said "does not work yet". It could not have: the loop walked the first set and asked
+about the others, and a union has to walk them all. With the loop reshaped around a map
+from member to accumulated score, union is the same code as the other two.
+
+Added with it: `ZSCORE` and `ZMSCORE`, which fall straight out of the member index helper,
+`ZRANDMEMBER`, which is HRANDFIELD over an ordered set including the bound on a negative
+count that keeps a reply from taking the process down (DONE 54), `ZREMRANGEBYSCORE`, and
+`LPUSHX` with `RPUSHX`.
+
+Three option rules were wrong as well, all found by the differential rather than by
+reading: `WITHSCORES` with `AGGREGATE` was refused for every command, when that is the rule
+for the STORE forms alone - they have nowhere to put scores in a reply; the arity demanded
+four arguments, so `ZUNION 1 s` with a single input was a wrong argument count; and
+`ZINTERCARD` never parsed `LIMIT` at all. redis distinguishes a missing LIMIT value, which
+is a syntax error, from one that is a word or negative, which gets the LIMIT wording, and
+so does this now.
+
+barch went from 159 of 247 translated cases to 195, and ten accepted divergences were
+removed rather than added.
+
+The one that needed judgement is in testcomposites.lua. Four of its assertions encoded the
+old behaviour, and two of those depended on the barch specific AGGREGATE - `ZINTER ...
+AGGREGATE SUM` answering the string "16.5". That is not a reply shape anyone should depend
+on, and it only existed because the intersection was wrong: the number was the sum over
+whichever members happened to share a score. The assertions were rewritten to what redis
+answers, with the values checked against a live server first rather than worked out on
+paper. Anything relying on a scalar from AGGREGATE is broken on purpose.
+
+Left in 63, deliberately rather than for lack of time: `LINSERT`, `LMPOP`, `ZMPOP` and
+`BZMPOP`, and the moves - `RPOPLPUSH`, `LMOVE` and `BRPOPLPUSH`. The moves are why the line
+is drawn here. They take two keys, so they need the lock order of DONE 42, and the last
+two key path written without that care self deadlocked and took a long time to find. That
+is not work to start at the end of a long session.
+
+## 59. Ordered set validation, and two cases that were not what they looked like [10-08-2026]
+
+The entry asked for range bound validation and named two cases that "pass on their own and
+fail only in the translated sequence". It ended with a caution: confirm that is all it is,
+because a duplicate member in a range answer is exactly what a real bug would look like
+too.
+
+Both were real bugs. Neither had anything to do with the sequence.
+
+**ZREM abandoned the rest of its arguments, and could remove the wrong member.** The member
+index is walked with an iterator, which is a lower bound, so a member that is not there
+lands on whichever member comes after it. The code then did two things with that: it
+`break`ed out of the whole loop, so `ZREM k missing present` removed nothing and answered
+0; and it never checked the key it landed on was the one asked for, so the member that
+happened to be next could be removed in place of the one that was not there. The second is
+the serious one - a caller removing a member that does not exist could lose one that does.
+It now compares the found key against the sought key and skips rather than breaking.
+
+**ZINCRBY never wrote the member index for a new member.** A member has two keys, the score
+ordered one and its entry in the index; that branch wrote only the first. So nothing could
+find the member afterwards: ZSCORE answered nil, and the next ZINCRBY did not find it
+either - instead of adding to the score it wrote a second entry for the same member. That
+is where the duplicate in a ZRANGE reply came from. `ZINCRBY z 5 k` twice gave 3 rather
+than 8.
+
+**ZADD could not store a positive infinity.** It re-encoded the score from the text with a
+reader that does not accept "inf", so `+inf` was stored as the string "inf" - a component
+of a different shape - and every read of that member missed it. `-inf` survived, which is
+why the two behaved differently and why the asymmetry looked like nothing in particular. It
+now encodes from the number it has already parsed and validated, which is the same number
+the NaN check uses.
+
+With those three fixed, the NaN result the entry describes appears on its own: `+inf` then
+`-inf` now reaches the check and is refused, where before the second call could not find
+the member at all.
+
+The validation the entry asked for: ZRANGEBYSCORE refuses a bound that is not a number,
+ZRANGEBYLEX refuses one without the leading `(` or `[`. That second one needed more than a
+check - barch had never understood redis's lex syntax, only the bare form, so validating it
+would have refused the only bounds it could handle. The bracket is stripped before the
+bound is encoded now. Exclusivity is parsed but not yet honoured in the walk: `(a` behaves
+as `[a` does, which is TODO 65.
+
+Three test expectations changed, and all three were encoding a bug rather than a choice:
+
+  - testcomposites.lua used bare lex bounds, which is what barch understood and redis
+    refuses.
+  - testbarch.py asserted `z.remove("z1","1") == 1`. "1" is a score in that set, not a
+    member, so the answer is 0 - it only ever returned 1 because of the ZREM bug above,
+    which means that line was quietly deleting "two".
+  - the same test asserted the store shrank by one key when a member was removed. It
+    shrinks by two, the score key and the index entry. Expecting one is what the old ZREM
+    actually did: it removed the score key and orphaned the index entry.
+
+And a trap worth knowing about in the python binding, found while fixing that test:
+`remove()` takes a list of members, and a bare string is taken as a sequence of characters,
+so `z.remove("k","two")` asks to remove "t", "w" and "o" and removes nothing. The line only
+looked right because "1" is one character long.
+
+All six of the entry's accepted divergences are gone rather than re-explained. barch went
+from 195 of 247 cases to 201.
+
+## 60. An exclusive lex bound, and the two ends of the range [10-08-2026]
+
+The entry described this as a flag that was parsed and thrown away, and said honouring it
+meant skipping the first entry when the bound is exclusive. That is exactly right for the
+start and not enough for the stop.
+
+The start is what the entry describes: the walk begins at the member the bound names, so
+skipping that first entry is the whole of it.
+
+The stop is not, and the first attempt at it looked correct and did nothing. The loop
+compares a truncated composite - the key cut to the length of the bound - against the upper
+key, and the member equal to the bound is a *prefix* of that key, so it reads as less than.
+Changing `<=` to `<` therefore excluded nothing, and `[a (c` went on answering a, b and c.
+It recognises the whole key for the named member now and ends the walk before reporting it,
+which is what the ordering already guarantees is the right place to stop.
+
+`-` and `+` were not in the entry and had to be done with it. The validation added in
+DONE 59 accepts them, because redis does, but the walk had never supported them: barch only
+understood a bare member as a bound, so `ZRANGEBYLEX k - +` - the ordinary way to ask for
+everything - would have looked for members named `-` and `+` and found none. A validator
+that accepts syntax the implementation mishandles is worse than one that refuses it, so
+`-` starts the walk at the first member there is and `+` drops the upper bound entirely.
+
+All eight cases were checked against a live server: inclusive at both ends, exclusive at
+the start, exclusive at the stop, exclusive at both, `- +` over the whole set, `- [b`,
+`(b +`, and a bare bound still refused.
+
+The regression is hand written in TestContainerKinds, and the entry said why before the
+work started: nothing in the translated valkey tests covers lex exclusivity. That is how it
+went unnoticed in the first place, and a test that only exists because someone predicted
+its absence is worth more than the fix it guards.
+
+## 61. A logical export, so a version bump has somewhere for the data to go [10-08-2026]
+
+`storage_version` refuses a shard file written by a different build, which is right - a
+format that has changed should not be read as though it had not. What it leaves behind is a
+user whose data is intact and unreadable. That version moved three times today alone: the
+tplain key encoding, the per kind container leads, and the clock. Each time the answer to
+"what do I do with the data I already have" was nothing.
+
+EXPORT writes the current key space as the commands that would rebuild it - SET, HSET,
+RPUSH, ZADD - and IMPORT replays them. It is deliberately not a copy of anything: a page
+dump is faster and smaller and is exactly the thing that stops working when the format
+moves. Commands go through the ordinary command path, so they land correctly on any build
+that has those commands at all, which is the only property that matters here.
+
+The stream is RESP rather than lines, and that is not a stylistic choice. A value may hold
+a newline, a null, or nothing at all, and a line based format loses all three; the test
+exports `a\\0b\\nc\\r\\nd` and reads it back. It also means the file can be replayed by
+anything that speaks the protocol - `redis-cli --pipe` - and not only by IMPORT.
+
+Two details worth stating because they are decisions rather than mechanics. An expiry
+travels as an absolute PXAT, so a slow export does not quietly shorten every deadline the
+way a remaining-seconds form would. And IMPORT merges rather than replaces: it overwrites
+the names the stream mentions and leaves everything else alone, so clearing the space first
+is the caller's choice to make.
+
+IMPORT replays each command through a caller of its own. Handing it the connection's caller
+would push every reply into the reply being built, and IMPORT answers with a count.
+
+The round trip is a test rather than a claim: seven keys of every kind through a FLUSHALL
+and back, including an empty value, a binary one, and a set whose scores are negative. It
+also asserts that a two member ordered set exports as one ZADD, because exporting a set
+twice is what it looks like when the member index is mistaken for data.
+
+Which is the one thing this turned up and did not fix. `KEYS` reports an ordered set twice,
+as `z` and as a phantom `\\x03z` - its member index, read as though it were a key someone
+wrote. It predates this work, comes from the name reporting of DONE 51, and the export is
+not affected by it. Three ways of telling the index apart were tried and all three failed;
+what each one established is written into TODO 66 so the next attempt starts from facts
+rather than from my guesses. The hook where the answer goes is already in place and is a
+no-op until someone settles how an empty component encodes.
+
+## 62. The member index had no empty component, so it collided with a real name [10-08-2026]
+
+`KEYS` listed every ordered set twice: once as itself and once as a phantom made of its
+index bytes. Five attempts were made at telling the two apart in the reader and all five
+failed, which was the clue and was not read as one.
+
+The author asked for examples of keys with empty components. There were none. That is the
+whole answer:
+
+    a real empty component      {""}                 0a 01 03 01
+    two, empty first            {"", "z"}            0a 01 03 01 03 7a 01
+
+    what the writer produced    {IX_MEMBER, z, a}    0a 01 03 03 7a 01 03 61 00
+    a set actually named \\x03z  {"\\x03z", a}         0a 01 03 03 7a 01 03 61 00
+
+`IX_MEMBER` was the bare literal `""`. Neither `comparable_key("")` nor
+`comparable_key("", 0)` builds a component - both leave out the separator that ends one -
+so the component after the marker merged into it, and the index key for a set named `z`
+came out byte for byte identical to the score key of a set named `\\x03z`. Only `convert()`
+lays a component out properly, and nothing had ever passed an empty value through it.
+
+So the two keys were the same bytes. No reader could have distinguished them, and every
+attempt to write one was an attempt to answer a question the data could not answer. This is
+the same shape as the tplain collision of entry 48 - two different things sharing one
+encoding - and it has the same kind of fix, which is at the writer.
+
+`conversion::empty_component()` builds the marker through convert(). The index is ten bytes
+now instead of nine and cannot be confused with anything; the readers skip a container key
+whose name decodes empty, which is what the index genuinely is once it is written properly.
+
+Storage version 14, because the stored shape of every ordered set's index changed. That is
+the third bump today, which is exactly the situation the export of entry 61 exists for.
+
+Two things said earlier in the session were wrong and are corrected here, because both were
+reported with confidence:
+
+  - that a probe showed the index and score keys decoding to the same name. They do not.
+    The probe printed candidates with `%s`, and the index decodes to a name with a leading
+    0x03 - invisible in a terminal, and identical to the right answer at a glance.
+  - that an empty component encodes as a bare `03`. It encodes as `03 01`. What the writer
+    produced was not an empty component at all.
+
+The lesson is the one the failures were pointing at the whole time: five reader side fixes
+that each looked reasonable and each did nothing is not five mistakes, it is evidence that
+the distinction being asked for is not present in what was read. The question to ask after
+the second failure is not "what else could tell these apart" but "are these actually
+different".

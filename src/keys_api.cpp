@@ -28,6 +28,8 @@
 #include "keys.h"
 #include "keyspec.h"
 #include "keyspace_locks.h"
+#include <unordered_set>
+#include <chrono>
 #include "key_type.h"
 #include "spaces_spec.h"
 #include "configuration.h"
@@ -196,9 +198,37 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     art::value_type pattern = argv[1];
     barch::sharded_store store(call.kspace());
 
+    // A container stores one key per entry and they all carry the same name, so a walk of
+    // the key space would report a hash once per field. Reporting the name means slicing
+    // each key back to it and answering once - see TODO 59. The set is what makes "once"
+    // true, and it holds names rather than keys, so it stays the size of the reply
+    std::unordered_set<std::string> named;
+    auto reportable = [&](const art::leaf& l, std::string& out) -> bool {
+        auto key = l.get_key();
+        std::string name = encoded_container_name(key);
+        if (name.empty()) {
+            if (art::is_container_lead(*key.bytes)) {
+                // a container key whose name is empty is the ordered set's member index,
+                // which names nothing a caller wrote - see DONE 62
+                return false;
+            }
+            out.assign(key.chars(), key.size);
+            return true;                      // an ordinary key, reported as it is stored
+        }
+        // first entry of this container to arrive wins; the rest carry the same name. The
+        // name is decoded rather than sliced so that an ordered set's index and its score
+        // keys agree - slicing gave two different answers and listed the set twice
+        out = name;
+        return named.emplace(name).second;
+    };
+
     if (spec.count) {
-        store.glob(spec, pattern, by_value, [&](const art::leaf& unused(l)) -> bool {
-            ++replies;
+        store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
+            std::lock_guard lk(vklock);
+            std::string reported;
+            if (reportable(l, reported)) {
+                ++replies;
+            }
             return true;
         });
         return call.push_ll(replies);
@@ -207,7 +237,15 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     call.start_array();
     store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
         std::lock_guard lk(vklock); // worker threads call in here concurrently
-        if (0 != call.push_encoded_key(l.get_key())) {
+        std::string reported;
+        if (!reportable(l, reported)) {
+            return true;
+        }
+        // a container's name is already text; an ordinary key is still encoded
+        int pushed = encoded_container_name(l.get_key()).empty()
+                         ? call.push_encoded_key(art::value_type{reported})
+                         : call.push_vt(art::value_type{reported});
+        if (0 != pushed) {
             return false;
         }
         ++replies;
@@ -258,7 +296,9 @@ int SET(caller& call,const arg_t& argv) {
     auto key = converted.get_value();
     art::key_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
-        return call.syntax_error();
+        return spec.bad_expire
+                   ? call.push_error("invalid expire time in 'set' command")
+                   : call.syntax_error();
     }
     spec.hash = !sp->opt_ordered_keys;
 
@@ -722,11 +762,14 @@ int GETEX(caller& call, const arg_t& argv) {
             if (!conversion::to_ll(argv[3], given)) {
                 return call.push_error("value is not an integer or out of range");
             }
-            if (opt == "EX")        when = art::now() + given * 1000;
-            else if (opt == "PX")   when = art::now() + given;
-            else if (opt == "EXAT") when = given * 1000;
-            else if (opt == "PXAT") when = given;
-            else return call.syntax_error();
+            bool secs = (opt == "EX" || opt == "EXAT");
+            bool rel = (opt == "EX" || opt == "PX");
+            if (opt != "EX" && opt != "PX" && opt != "EXAT" && opt != "PXAT") {
+                return call.syntax_error();
+            }
+            if (!art::expiry_ms(given, secs, rel, when)) {
+                return call.push_error("invalid expire time in 'getex' command");
+            }
             change = true;
         }
     }
@@ -784,12 +827,13 @@ static int SETEX_(caller& call, const arg_t& argv, bool millis) {
     if (!conversion::to_ll(argv[2], given)) {
         return call.push_error("value is not an integer or out of range");
     }
-    if (given <= 0) {
-        return call.push_error("invalid expire time");
+    int64_t deadline = 0;
+    if (given <= 0 || !art::expiry_ms(given, !millis, true, deadline)) {
+        return call.push_error("invalid expire time in 'setex' command");
     }
     auto converted = conversion::as_composite(k);
     art::key_options opts;
-    opts.set_expiry(art::now() + (millis ? given : given * 1000));
+    opts.set_expiry(deadline);
     auto fc = [&](const art::node_ptr &) -> void {};
     const auto& compressed = dictionary::compress(v);
     if (!compressed.empty()) {
@@ -1594,6 +1638,11 @@ int GET(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     auto converted = conversion::as_composite(k);
     barch::sharded_store store(call.kspace());
+    // a collection is not a string to read. STRLEN and GETRANGE said so already; GET did
+    // not, and answered nil as though the name were free - see TODO 59
+    if (wrong_type_here(store, k)) {
+        return call.push_error(barch::wrong_type_message());
+    }
     int r = call.ok();
     bool found = store.search(converted.get_value(), [&](const art::node_ptr& n) {
         auto cl = n.const_leaf();
@@ -1634,8 +1683,23 @@ int SCAN(caller& call, const arg_t& argv) {
     }
     call.push_string(std::to_string(cursor->id));
     call.start_array();
+    // as with KEYS, a container is reported by its name rather than once per entry. The
+    // set only spans this call: SCAN promises that everything present throughout the
+    // iteration is reported at least once, and explicitly allows repeats, so a container
+    // whose entries straddle two calls may be named in both - see TODO 59
+    std::unordered_set<std::string> named;
     bool complete = store.scan(*cursor, spec, [&](art::value_type key) -> bool {
-        call.push_encoded_key(key); // it throws so it's ok
+        std::string name = encoded_container_name(key);
+        if (!name.empty()) {
+            if (!named.emplace(name).second) {
+                return call.results_count() < spec.count;
+            }
+            call.push_vt(art::value_type{name});
+        } else if (key.size && art::is_container_lead(*key.bytes)) {
+            return call.results_count() < spec.count;   // the member index
+        } else {
+            call.push_encoded_key(key); // it throws so it's ok
+        }
         return call.results_count() < spec.count;
     });
     call.end_array();
@@ -1710,6 +1774,114 @@ int TTL(caller& call, const arg_t& argv) {
     return answered ? reply : call.push_ll(-2);
 
 }
+/**
+ * TTL, PTTL, EXPIRETIME and PEXPIRETIME are one read with four ways of reporting it.
+ *
+ * The two negatives follow redis: -1 is present with no expiry, -2 is no such key.
+ *
+ * The deadline forms answer the stored number directly. They used to rebuild it from the
+ * time remaining, because expiry was measured against a clock that started when the
+ * machine did and the stored number was not a unix time; since DONE 55 it is one.
+ */
+enum class ttl_report { seconds, millis, deadline_seconds, deadline_millis };
+
+static int ttl_query(caller& call, const arg_t& argv, ttl_report form) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+    barch::sharded_store store(call.kspace());
+    int reply = call.ok();
+    bool answered = false;
+    store.with_key_read(converted.get_value(), [&](const barch::shard_ptr& t) {
+        art::node_ptr r = t->search(converted.get_value());
+        if (r.null()) {
+            return;
+        }
+        answered = true;
+        auto l = r.const_leaf();
+        if (!l->is_expiry()) {
+            reply = call.push_ll(-1);
+            return;
+        }
+        long long left = l->expiry_ms() - art::now();
+        switch (form) {
+            case ttl_report::seconds:
+                reply = call.push_ll(left / 1000);
+                break;
+            case ttl_report::millis:
+                reply = call.push_ll(left);
+                break;
+            case ttl_report::deadline_seconds:
+                reply = call.push_ll(l->expiry_ms() / 1000);
+                break;
+            case ttl_report::deadline_millis:
+                reply = call.push_ll(l->expiry_ms());
+                break;
+        }
+    });
+    return answered ? reply : call.push_ll(-2);
+}
+
+int PTTL(caller& call, const arg_t& argv) {
+    return ttl_query(call, argv, ttl_report::millis);
+}
+int cmd_PTTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PTTL);
+}
+int EXPIRETIME(caller& call, const arg_t& argv) {
+    return ttl_query(call, argv, ttl_report::deadline_seconds);
+}
+int cmd_EXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, EXPIRETIME);
+}
+int PEXPIRETIME(caller& call, const arg_t& argv) {
+    return ttl_query(call, argv, ttl_report::deadline_millis);
+}
+int cmd_PEXPIRETIME(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PEXPIRETIME);
+}
+
+/**
+ * PERSIST - the key keeps its value and loses its deadline.
+ *
+ * Answers 1 when there was an expiry to remove and 0 when the key is missing or had none,
+ * which is the distinction redis makes and the reason it is not simply a write.
+ */
+int PERSIST(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.key_check_error(k);
+    auto converted = conversion::as_composite(k);
+    barch::sharded_store store(call.kspace());
+    bool removed = false;
+    store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
+        auto n = t->search(converted.get_value());
+        if (!n.is_leaf) return;
+        auto l = n.const_leaf();
+        if (!l->is_expiry()) return;
+        auto updater = [&t](const art::node_ptr &leaf) -> art::node_ptr {
+            if (leaf.null()) return leaf;
+            auto ol = leaf.const_leaf();
+            return art::make_leaf(t->get_ap(), ol->get_key(), ol->get_value(),
+                                  0, ol->is_volatile(), ol->is_compressed());
+        };
+        removed = t->update(converted.get_value(), updater);
+    });
+    return call.push_ll(removed ? 1 : 0);
+}
+int cmd_PERSIST(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PERSIST);
+}
+
 int cmd_TTL(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, TTL);
@@ -1726,8 +1898,11 @@ int EXISTS(caller& call, const arg_t& argv) {
         auto k = argv[i];
         if (key_ok(k) != 0)
             return call.key_check_error(k);
+        // a name holding a collection has no plain key, so looking only for that answered
+        // 0 for a hash - and EXISTS is the command redis expects a caller to ask with
         auto converted = conversion::as_composite(k);
-        if (store.exists(converted.get_value())) {
+        if (store.exists(converted.get_value())
+            || barch::kind_of_container(store, k) != barch::container_kind::none) {
             ++found;
         }
     }
@@ -1738,7 +1913,14 @@ int cmd_EXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, EXISTS);
 }
 
-int EXPIRE(caller& call, const arg_t& argv) {
+/**
+ * EXPIRE, PEXPIRE, EXPIREAT and PEXPIREAT differ only in the units the caller writes and
+ * whether the number is a duration or a moment. Everything after that - the NX, XX, GT and
+ * LT conditions, the deadline check, the rewrite of the leaf - is the same, so it is
+ * written once and the two axes are passed in.
+ */
+static int expire_command(caller& call, const arg_t& argv, bool millis, bool absolute,
+                          const char *named) {
     if (argv.size() < 2)
         return call.wrong_arity();
     auto k = argv[1];
@@ -1755,39 +1937,77 @@ int EXPIRE(caller& call, const arg_t& argv) {
             return;
         }
         art::key_expire_spec spec(argv);
+        spec.millis = millis;
+        spec.absolute = absolute;
         if (spec.parse_options() != call.ok()) {
             answered = true;
-            reply = call.syntax_error();
+            reply = spec.bad_expire
+                        ? call.push_error(("invalid expire time in '"
+                                           + std::string(named) + "' command").c_str())
+                        : (!spec.reason.empty() ? call.push_error(spec.reason.c_str())
+                                                : call.syntax_error());
             return;
         }
 
         auto l = r.const_leaf();
+        // a deadline that has already passed removes the key, which is what redis does
+        // with EXPIRE k -1 and with any EXPIREAT in the past
+        if (spec.ttl <= art::now()) {
+            answered = true;
+            reply = t->remove(converted.get_value()) ? call.push_ll(1) : call.push_ll(0);
+            return;
+        }
         if (spec.nx) {
             if (l->is_expiry()) return;
         } else if (spec.xx) {
             if (!l->is_expiry()) return;
         } else if (spec.gt) {
-            if (spec.ttl + art::now() < l->expiry_ms()) return;
+            // spec.ttl is the deadline itself, not a duration - expiry_ms folded now() in
+            // when it parsed the argument. Adding it again here dated the key from twice
+            // the current clock, so EXPIRE e 100 answered a TTL of six minutes
+            if (spec.ttl < l->expiry_ms()) return;
         } else if (spec.lt) {
-            if (spec.ttl + art::now() > l->expiry_ms()) return;
+            if (spec.ttl > l->expiry_ms()) return;
         }
         auto updater = [&t,spec](const art::node_ptr &leaf) -> art::node_ptr {
             if (leaf.null()) {
                 return leaf;
             }
             auto l = leaf.const_leaf();
-            if (art::now() + spec.ttl == 0) {
-                barch::log({"why"});
-            }
             return art::make_leaf(t->get_ap(), l->get_key(),
                 l->get_value(),
-                art::now() + spec.ttl, l->is_volatile(),
+                spec.ttl, l->is_volatile(),
                 l->is_compressed());
         };
         answered = true;
         reply = t->update(l->get_key(), updater) ? call.push_ll(1) : call.push_ll(-2);
     });
     return answered ? reply : call.push_ll(-1);
+}
+
+int EXPIRE(caller& call, const arg_t& argv) {
+    return expire_command(call, argv, false, false, "expire");
+}
+int PEXPIRE(caller& call, const arg_t& argv) {
+    return expire_command(call, argv, true, false, "pexpire");
+}
+int EXPIREAT(caller& call, const arg_t& argv) {
+    return expire_command(call, argv, false, true, "expireat");
+}
+int PEXPIREAT(caller& call, const arg_t& argv) {
+    return expire_command(call, argv, true, true, "pexpireat");
+}
+int cmd_PEXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PEXPIRE);
+}
+int cmd_EXPIREAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, EXPIREAT);
+}
+int cmd_PEXPIREAT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, PEXPIREAT);
 }
 int cmd_EXPIRE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
@@ -2033,6 +2253,27 @@ int add_keys_api(ValkeyModuleCtx *ctx) {
     if (ValkeyModule_CreateCommand(ctx, NAME(TTL), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(PTTL), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PEXPIRE), "write", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(EXPIREAT), "write", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PEXPIREAT), "write", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(EXPIRETIME), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PEXPIRETIME), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(PERSIST), "write", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(MGET), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -2096,6 +2337,9 @@ void register_keys_api(function_map& r) {
     r["COUNT"] = {::COUNT,{"read","keys","data"}};
     r["EXISTS"] = {::EXISTS,{"read","keys","data"}};
     r["EXPIRE"] = {::EXPIRE,{"write","keys","data"}};
+    r["PEXPIRE"] = {::PEXPIRE,{"write","keys","data"}};
+    r["EXPIREAT"] = {::EXPIREAT,{"write","keys","data"}};
+    r["PEXPIREAT"] = {::PEXPIREAT,{"write","keys","data"}};
     r["MSET"] = {::MSET,{"write","keys","data"}};
     r["ADD"] = {::ADD,{"write","keys","data"}};
     r["GET"] = {::GET,{"read","keys","data"}};
@@ -2112,4 +2356,8 @@ void register_keys_api(function_map& r) {
     r["DEL"] = {::DEL,{"write","keys","data"}};
     r["RANGE"] = {::RANGE,{"read","keys","data"}, true};
     r["TTL"] = {::TTL,{"read","keys","data"}};
+    r["PTTL"] = {::PTTL,{"read","keys","data"}};
+    r["EXPIRETIME"] = {::EXPIRETIME,{"read","keys","data"}};
+    r["PEXPIRETIME"] = {::PEXPIRETIME,{"read","keys","data"}};
+    r["PERSIST"] = {::PERSIST,{"write","keys","data"}};
 }

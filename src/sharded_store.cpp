@@ -663,7 +663,15 @@ static bool scan_page(barch::scan_cursor& cursor, const barch::shard_ptr& shard,
                         // key from matching
                         if (td.size) --td.size;
                     } else {
-                        tmp = encoded_key_as_string(l->get_key());
+                        // matched by the name the container belongs to, decoded rather
+                        // than sliced - see DONE 62
+                        tmp = encoded_container_name(l->get_key());
+                        if (tmp.empty()) {
+                            if (art::is_container_lead(*l->get_key().bytes)) {
+                                return advance(l, pos);   // the member index
+                            }
+                            tmp = encoded_key_as_string(l->get_key());
+                        }
                         td = tmp;
                     }
 

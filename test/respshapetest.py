@@ -253,8 +253,10 @@ shape(w, ("SETRANGE", "sr", "-1", "x"), b"-ERR offset is out of range\r\n",
 shape(w, ("SETRANGE", "sr", "1"), b"-ERR wrong number of arguments for 'setrange' command\r\n", "and the arity is checked")
 
 # --- EXPIRE's condition word -----------------------------------------------------
-shape(w, ("EXPIRE", "oo", "100", "NONSENSE"), b"-ERR syntax error\r\n",
-      "a word that is not a condition is refused rather than ignored")
+# the word is named, as redis names it - valkey answers "ERR Unsupported option AB" for
+# the same shape and expire.tcl asserts it, so the older "syntax error" was ours alone
+shape(w, ("EXPIRE", "oo", "100", "NONSENSE"), b"-ERR Unsupported option NONSENSE\r\n",
+      "a word that is not a condition is refused, and named")
 
 # --- ZRANGE by position ----------------------------------------------------------
 w.cmd("DEL", "zz")
@@ -331,7 +333,8 @@ shape(w, ("SETEX", "se", "100", "v"), b"+OK\r\n", "SETEX takes seconds")
 within(w, ("TTL", "se"), 99, 100, "and applies them")
 shape(w, ("PSETEX", "pse", "100000", "v"), b"+OK\r\n", "PSETEX takes milliseconds")
 within(w, ("TTL", "pse"), 99, 100, "same expiry, different unit")
-shape(w, ("SETEX", "se2", "0", "v"), b"-ERR invalid expire time\r\n",
+# redis names the command in this one too - "invalid expire time in 'setex' command"
+shape(w, ("SETEX", "se2", "0", "v"), b"-ERR invalid expire time in 'setex' command\r\n",
       "a non positive time is refused rather than storing a dead key")
 
 # --- LCS, on redis's own documented example --------------------------------------

@@ -4,6 +4,10 @@
 
 #include "shared_mutex.h"
 
+// nothing uses rh_shared - see the header. Undefined, this file is a single empty
+// translation unit and the registry of live threads it keeps does not exist at all
+#ifdef _EXPERIMENTAL_
+
 #include <barrier>
 #include <random>
 #include <thread>
@@ -311,3 +315,4 @@ static int test() {
 
 static int tested = test();
 #endif
+#endif //_EXPERIMENTAL_

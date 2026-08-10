@@ -61,7 +61,21 @@ DBSIZE                     MULTI
 EXEC                       CLIENT INFO
 INFO                       APPEND
 KEYS                       VALUES
-SELECT
+SELECT                     RPUSH
+RPOP                       LENGTH
+GETDEL                     GETEX
+GETSET                     SETNX
+SETEX                      PSETEX
+SETRANGE                   GETRANGE
+SUBSTR                     STRLEN
+MSETNX                     INCRBYFLOAT
+LCS                        RANDOMKEY
+RENAME                     RENAMENX
+COPY                       MOVE
+PERSIST                    PTTL
+EXPIREAT                   PEXPIRE
+PEXPIREAT                  EXPIRETIME
+PEXPIRETIME
 
 ```
 ## Hash Set API's Implemented
@@ -73,7 +87,10 @@ HDEL                       HGETDEL
 HTTL                       HGET
 HLEN                       HEXPIRETIME
 HGETALL                    HKEYS
-HEXISTS
+HEXISTS                    HVALS
+HMSET                      HSETNX
+HSTRLEN                    HRANDFIELD
+HSCAN
 ```
 ## Ordered Set API's Implemented
 ```
@@ -86,7 +103,11 @@ ZPOPMIN                    ZPOPMAX
 ZREVRANGE                  ZRANGEBYSCORE
 ZREVRANGEBYSCORE           ZREMRANGEBYLEX
 ZRANGEBYLEX                ZREVRANGEBYLEX
-ZRANK
+ZRANK                      ZCOUNT
+ZFASTRANK                  ZUNION
+ZUNIONSTORE                ZSCORE
+ZMSCORE                    ZRANDMEMBER
+ZREMRANGEBYSCORE
  
 ``` 
 # List API's Implemented
@@ -94,5 +115,16 @@ ZRANK
 LLEN                        LPUSH
 LPOP                        BLPOP
 BRPOP                       LFRONT
-LBACK
+LBACK                       LRANGE
+LPUSHX                      RPUSHX
+```
+
+# Key space and server API's implemented
+```
+KSPACE                     KSOPTIONS
+SPACES                     SIZEALL
+SAVEALL                    CLEARALL
+RELOAD                     UNLOAD
+PULL                       PREPEND
+RPING                      HELLO
 ```

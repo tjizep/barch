@@ -3,6 +3,7 @@
 //
 
 #include "keys.h"
+#include "composite.h"
 // std_start/std_continue/std_end - the streaming form, which lzr_log does not have
 #include "logger.h"
 #include <cstdlib>
@@ -89,7 +90,7 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key) {
         if (ValkeyModule_ReplyWithStringBuffer(ctx, k, encoded_str_len(k, kl)) == VALKEYMODULE_ERR) {
             return -1;
         }
-    } else if (key_len >= 1 && (*enck == art::tcomposite || *enck == art::tplain)) {
+    } else if (key_len >= 1 && art::is_composite_lead(*enck)) {
 
         return reply_encoded_key(ctx, key.sub(2));
     } else {
@@ -158,7 +159,7 @@ Variable encoded_key_as_variant(art::value_type key) {
         s.insert(s.end(), k, k + encoded_str_len(k, key_len - 2));
         return s;
 
-    } else if (key_len >= 1 && (*enck == art::tcomposite || *enck == art::tplain)) {
+    } else if (key_len >= 1 && art::is_composite_lead(*enck)) {
         // not recurrent composites yet
         unsigned kl = 2;
         const char *ptr = (const char *) &enck[2];
@@ -196,6 +197,90 @@ Variable encoded_key_as_variant(art::value_type key) {
     }
     return "";
 }
+/**
+ * How much of a container's key names the container.
+ *
+ * A list, hash or ordered set stores one key per entry, all of them beginning with the
+ * kind's lead byte followed by the name. Slicing a key at the end of that first component
+ * leaves something that still decodes as a composite, but decodes to the name alone - so
+ * both the glob matcher and the reply can talk about names without a second renderer.
+ *
+ * Answers 0 when the key does not belong to a container, which is the caller's signal to
+ * use the whole key as it always did.
+ */
+unsigned encoded_container_name_len(art::value_type key) {
+    if (!key.size || !art::is_container_lead(*key.bytes)) {
+        return 0;
+    }
+    if (key.size < 3) return 0;
+    const char *ptr = (const char *) &key.bytes[2];
+    unsigned len = 0;
+    switch (*ptr) {
+        case art::tinteger:
+        case art::tdouble:
+            len = numeric_key_size;
+            break;
+        case art::tfloat:
+        case art::tshort:
+            len = num32_key_size;
+            break;
+        case art::tstring:
+            len = encoded_str_len(ptr + 1, key.size - 2) + 2;
+            break;
+        default:
+            return 0;
+    }
+    if (2u + len > key.size) return 0;
+    return 2u + len;
+}
+
+/**
+ * Is this key a container's own bookkeeping rather than something a caller named?
+ *
+ * An ordered set keeps a second range, member to score, whose keys begin with the kind's
+ * lead byte and then an empty component before the name. `encoded_container_name_len`
+ * cannot measure a name there because there is none in the first position, and every
+ * caller that reports names took that zero to mean "an ordinary key" - so KEYS answered a
+ * set twice, once as itself and once as a nonsense name made of its index bytes.
+ */
+/**
+ * The name a container key belongs to, decoded.
+ *
+ * Every key of a container carries the name, but not always in the same place: an ordered
+ * set's member index puts an empty component first, so the name sits second. A compiled
+ * probe settled what that looks like - an empty component is a bare type byte with no
+ * content and no terminator, `0a 01 03`, and the component after it follows immediately:
+ *
+ *     score key: 0a 01 03 7a 01 | 02 02 4079... | 03 61 00
+ *     index key: 0a 01 03 | 03 7a 01 | 03 61 00
+ *
+ * The useful part is that the decoder steps over the empty component on its own, so both
+ * of those decode to the same name. Reporting that string, rather than a slice of the
+ * bytes, makes the two keys agree - which is what stops an ordered set being listed twice,
+ * once as itself and once as a phantom made of its index bytes.
+ */
+std::string encoded_container_name(art::value_type key) {
+    if (!key.size || !art::is_container_lead(*key.bytes)) {
+        return {};
+    }
+    unsigned nl = encoded_container_name_len(key);
+    if (!nl) {
+        return {};
+    }
+    std::string framed;
+    framed.push_back((char) art::tcomposite);
+    framed.push_back('\x01');
+    framed.append((const char *) key.bytes + 2, nl - 2);
+    return encoded_key_as_string(art::value_type{framed});
+}
+
+bool is_container_internal(art::value_type key) {
+    if (!key.size || !art::is_container_lead(*key.bytes)) {
+        return false;
+    }
+    return encoded_container_name_len(key) == 0;
+}
+
 std::string encoded_key_as_string(art::value_type key) {
     Variable v = encoded_key_as_variant(key);
     return v.s();
@@ -244,7 +329,7 @@ unsigned log_encoded_key(art::value_type key, bool start) {
         barch::std_continue("{ string }[", s, "][", kl, "]");
         if (start) barch::std_end();
         return 2 + kl;
-    } else if (key_len > 1 && (*enck == art::tcomposite || *enck == art::tplain)) {
+    } else if (key_len > 1 && art::is_composite_lead(*enck)) {
         barch::std_continue("{ composite [2] }[");
         unsigned kl = 2;
         const char *ptr = (const char *) &enck[2];

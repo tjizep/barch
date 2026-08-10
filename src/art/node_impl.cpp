@@ -41,7 +41,13 @@ namespace art {
             key = alloc.copy_key(key);
             v = alloc.copy_value(v);
         }
-        size_t leaf_size = leaf::make_size(key_len,val_len,ttl,is_volatile);
+        // the same predicate the leaf constructor uses. make_size took any non-zero ttl
+        // as one needing eight bytes reserved while the constructor only records an expiry
+        // when it is positive, so a negative deadline - which an overflowed EX produced -
+        // sized the leaf one way and built it another, and the check below aborted. The
+        // commands refuse such an expiry now (DONE 53), and this makes it unreachable
+        // rather than merely unlikely
+        size_t leaf_size = leaf::make_size(key_len,val_len,ttl > 0,is_volatile);
         // NB the + 1 is for a hidden 0 byte ay the end of the key not reflected by length()
         logical_address logical{&alloc};
         auto ldata = alloc.get_leaves().new_address(logical, leaf_size);

@@ -42,10 +42,67 @@ namespace art {
          * A plain multi part key carries this instead, so the two can never be confused.
          */
         tplain = 7u,
-        tlast_valid = 7u,
+
+        /**
+         * The lead byte of a container's keys, one value per kind of container.
+         *
+         * All three kinds used to live under tcomposite, which made them one namespace
+         * under any given name. Nothing separated them, so HLEN walked the prefix and
+         * counted an ordered set's entries as fields, and ZCARD returned the favour. The
+         * fix that was tried first - a type tag stored alongside the data - can disagree
+         * with the data it describes, can be missing, and can outlive the collection.
+         *
+         * Putting the kind in the lead byte instead makes it part of the address. A hash
+         * and an ordered set under one name are simply different key ranges, so neither
+         * can see the other and there is nothing to keep in step. It costs no extra entry
+         * and no extra lookup.
+         *
+         * What it does not do is stop both existing. Two kinds under one name are no
+         * longer a miscount but they are still two objects sharing a name, so the kind is
+         * claimed when a container is created - see barch::claim_container_kind.
+         */
+        tcomposite_list = 8u,
+        tcomposite_hash = 9u,
+        tcomposite_ordered_map = 10u,
+
+        /**
+         * Reserved, and deliberately spent now rather than later.
+         *
+         * The byte after this one is the real type code, which buys another 256 kinds
+         * without a third level of indirection. Nothing writes it yet. It exists because
+         * adding an escape hatch to a stored format costs a version bump and a migration
+         * once the format is in the wild, and costs nothing at all today.
+         */
+        tcomposite_extend = 11u,
+
+        tlast_valid = 11u,
         tend = 255u,
         tnone = 65536
     };
+
+    /**
+     * Does this lead byte begin a multi part key?
+     *
+     * Every site that decodes a key has to answer this, and each one used to answer it
+     * with its own chain of comparisons - which is how tplain came to be accepted in
+     * three places in keys.cpp and one in conversion.h, and would have had to be added to
+     * all four again for every container kind. Worse, the fall through at keys.cpp is a
+     * bare abort(), and inside valkey an abort deadlocks on the signal handler lock, so a
+     * lead byte that one of those chains had not been taught about does not produce a
+     * wrong answer - it produces a server stuck at zero cpu.
+     *
+     * One predicate, so the next type is one edit.
+     */
+    inline bool is_composite_lead(uint8_t lead) {
+        return lead == tcomposite
+            || lead == tplain
+            || (lead >= tcomposite_list && lead <= tcomposite_extend);
+    }
+
+    /** the container kinds only, for deciding what a name is being used as */
+    inline bool is_container_lead(uint8_t lead) {
+        return lead >= tcomposite_list && lead <= tcomposite_extend;
+    }
 
     struct composite_type {
         uint8_t id{};
@@ -57,6 +114,10 @@ namespace art {
     static composite_type ts_composite{tcomposite};
     /** the leading tag of a caller's multi part key - see tplain */
     static composite_type ts_plain{tplain};
+    /** one lead per container kind - see tcomposite_list */
+    static composite_type ts_list{tcomposite_list};
+    static composite_type ts_hash{tcomposite_hash};
+    static composite_type ts_ordered_map{tcomposite_ordered_map};
     static composite_type ts_end{tend};
 
     enum node_kind {

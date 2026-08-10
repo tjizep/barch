@@ -4,6 +4,10 @@
 
 #include "list_api.h"
 #include "sharded_store.h"
+#include <limits>
+#include <cstdlib>
+#include <cmath>
+#include <cerrno>
 #include "key_type.h"
 #include "value_type.h"
 #include "../external/include/valkeymodule.h"
@@ -70,14 +74,55 @@ extern "C"{
         if (blocking && cc.has_blocks()) {
             return cc.push_error("block already set");
         }
+        // The timeout is read and judged before anything is locked. It used to be taken
+        // after, and taken on trust: `BLPOP k 0x7FFFFFFFFFFFFF` was accepted, the wait
+        // never ended, and because the locks were already held the whole store went with
+        // it - every later command answered nil until the server was restarted. redis
+        // refuses the same timeout outright.
+        uint64_t time_out = 0;
+        if (blocking) {
+            double secs = 0;
+            // strtod rather than the strict reader: redis parses the timeout with the C
+            // library, which takes hex and exponent forms, and then judges the value. A
+            // caller writing 0x7FFFFFFFFFFFFF should be told the number is too big, not
+            // that it is not a number
+            std::string t(args.back().chars(), args.back().size);
+            char *tail = nullptr;
+            errno = 0;
+            secs = std::strtod(t.c_str(), &tail);
+            if (t.empty() || tail != t.c_str() + t.size() || std::isnan(secs)) {
+                return cc.push_error("timeout is not a float or out of range");
+            }
+            if (secs < 0) {
+                return cc.push_error("timeout is negative");
+            }
+            // the wait is kept in milliseconds, so a timeout that cannot be one is not a
+            // very long wait, it is an unreadable number
+            if (errno == ERANGE || std::isinf(secs)
+                || !(secs * 1000.0 < (double) std::numeric_limits<int64_t>::max())) {
+                return cc.push_error("timeout is out of range");
+            }
+            time_out = (uint64_t) (secs * 1000.0);
+        }
+
+        {
+            // a name holding a string is a wrong type, and saying so matters more here
+            // than elsewhere: without it `BLPOP notalist 0` waits for a list that can
+            // never arrive, and 0 means forever
+            barch::sharded_store wt(cc.kspace());
+            for (size_t ki = 1; ki + 1 < args.size(); ++ki) {
+                if (barch::kind_of(wt, args[ki]) == barch::key_kind::string) {
+                    return cc.push_error(barch::wrong_type_message());
+                }
+            }
+        }
+
         caller::keys_t blocks;
         auto spc = cc.kspace();
         barch::sharded_store store(spc);
         // a multi key pop has to hold every shard, a single key one only its own
         auto locks = args.size() > 3 ? store.lock_space_write()
                                      : store.lock_key_write(args[1]);
-
-        uint64_t time_out = blocking ? conversion::to_double(conversion::as_variable(args.back()))*1000ull : 0;
         // the array is not opened until there is something to put in it. A blocking pop
         // that finds nothing has no reply to give yet - the block callback answers later,
         // or the timeout does - and opening one here would have to be taken back, which
@@ -96,14 +141,14 @@ extern "C"{
 
             composite li;
             auto container = conversion::convert(args[ki]);
-            auto key = query.create({container});
+            auto key = query.create(art::ts_list, {container});
             auto value = t->search(key);
             if (value.null()) {
                 if (blocking) blocks.emplace_back(args[ki].to_string(),t->get_shard_number());
                 // the key does not exist at all and we must add a block here
                 continue;
             }
-            li.create({container});
+            li.create(art::ts_list, {container});
 
             list_header header {value.const_leaf()->get_value()};
             int64_t start = conversion::dec_bytes_to_int(header.start);
@@ -177,16 +222,17 @@ extern "C"{
             return cc.push_null();
         }
         barch::sharded_store store(cc.kspace());
-        // a name already holding a plain value is not a list to be pushed onto. Checked
-        // before the lock: kind_of routes to two shards of its own - see key_type.h
-        if (barch::kind_of(store, args[1]) == barch::key_kind::string) {
+        // a name already holding a plain value is not a list to be pushed onto, and
+        // neither is one already holding a hash or an ordered set. Checked before the
+        // lock: this routes to shards of its own - see key_type.h
+        if (!barch::container_writable(store, args[1], barch::container_kind::list)) {
             return cc.push_error(barch::wrong_type_message());
         }
         auto t = store.write_locked(args[1]);
         composite li;
         auto container = conversion::convert(args[1]);
-        auto key = query.create({container});
-        li.create({container});
+        auto key = query.create(art::ts_list, {container});
+        li.create(art::ts_list, {container});
         auto added = t->insert(key, header.as_value(), false, fc);
         if (added) {
         } else {
@@ -245,6 +291,41 @@ extern "C"{
         return push(cc, args, true);
     }
     /**
+     * LPUSHX and RPUSHX push only onto a list that is already there.
+     *
+     * A missing list is not created and nothing is written; the reply is 0, which is the
+     * length a caller would have got had it existed and been empty - redis makes the same
+     * choice, and it is what lets a caller append to a list without ever creating one.
+     */
+    static int pushx(caller& cc, const arg_t& args, bool at_tail) {
+        if (args.size() < 3) {
+            return cc.wrong_arity();
+        }
+        if (key_ok(args[1]) != 0) {
+            return cc.push_null();
+        }
+        barch::sharded_store store(cc.kspace());
+        if (barch::kind_of(store, args[1]) == barch::key_kind::string) {
+            return cc.push_error(barch::wrong_type_message());
+        }
+        {
+            // exists is asked before the push so that a missing list is left missing
+            auto t = store.read_locked(args[1]);
+            composite q;
+            auto key = q.create(art::ts_list, {conversion::convert(args[1])});
+            if (t->search(key).null()) {
+                return cc.push_ll(0);
+            }
+        }
+        return push(cc, args, at_tail);
+    }
+    int LPUSHX(caller& cc, const arg_t& args) {
+        return pushx(cc, args, false);
+    }
+    int RPUSHX(caller& cc, const arg_t& args) {
+        return pushx(cc, args, true);
+    }
+    /**
      * LPOP key [count] / RPOP key [count]
      *
      * The count is optional, as in redis, and the reply is what was removed rather than
@@ -263,6 +344,13 @@ extern "C"{
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
+        {
+            // popping from a name that holds a string is a wrong type, not an empty list
+            barch::sharded_store wt(cc.kspace());
+            if (barch::kind_of(wt, args[1]) == barch::key_kind::string) {
+                return cc.push_error(barch::wrong_type_message());
+            }
+        }
         const bool has_count = args.size() == 3;
         int64_t count = 1;
         if (has_count) {
@@ -275,12 +363,12 @@ extern "C"{
         auto t = store.write_locked(args[1]);
         composite li;
         auto container = conversion::convert(args[1]);
-        auto key = query.create({container});
+        auto key = query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_null();
         }
-        li.create({container});
+        li.create(art::ts_list, {container});
 
         list_header header {value.const_leaf()->get_value()};
         int64_t start = conversion::dec_bytes_to_int(header.start);
@@ -343,11 +431,18 @@ extern "C"{
         if (key_ok(args[1]) != 0) {
             return cc.push_null();
         }
+        {
+            // a name holding a string is not an empty list
+            barch::sharded_store wt(cc.kspace());
+            if (barch::kind_of(wt, args[1]) == barch::key_kind::string) {
+                return cc.push_error(barch::wrong_type_message());
+            }
+        }
         barch::sharded_store store(cc.kspace());
         // read only: a shared lock is enough, as DONE 19 did for SIZE
         auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto key = query.create({container});
+        auto key = query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_ll(0);
@@ -360,6 +455,63 @@ extern "C"{
         return cc.push_ll(end - start);
 
     }
+    /**
+     * LRANGE key start stop - the elements between two positions, both ends inclusive.
+     *
+     * Positions are zero based and a negative counts back from the end, so 0 -1 is the
+     * whole list. Out of range positions are clamped rather than refused and a start past
+     * the end answers an empty array, which is what redis does and what ZRANGE was taught
+     * to do in DONE 38.
+     *
+     * The elements are stored at consecutive indices between the header's start and end,
+     * so this is a walk of exactly the span asked for rather than of the list.
+     */
+    int LRANGE(caller& cc, const arg_t& args) {
+        if (args.size() != 4) {
+            return cc.wrong_arity();
+        }
+        if (key_ok(args[1]) != 0) {
+            return cc.push_null();
+        }
+        long long from = 0, to = 0;
+        if (!conversion::to_ll(args[2], from) || !conversion::to_ll(args[3], to)) {
+            return cc.push_error("value is not an integer or out of range");
+        }
+        barch::sharded_store store(cc.kspace());
+        if (barch::kind_of(store, args[1]) == barch::key_kind::string) {
+            return cc.push_error(barch::wrong_type_message());
+        }
+        auto t = store.read_locked(args[1]);
+        auto container = conversion::convert(args[1]);
+        auto key = query.create(art::ts_list, {container});
+        auto value = t->search(key);
+        if (value.null()) {
+            cc.start_array();
+            cc.end_array();
+            return cc.ok();
+        }
+        list_header header {value.const_leaf()->get_value()};
+        int64_t first = conversion::dec_bytes_to_int(header.start);
+        int64_t last = conversion::dec_bytes_to_int(header.end);
+        int64_t len = last - first;
+
+        if (from < 0) from += len;
+        if (to < 0) to += len;
+        if (from < 0) from = 0;
+        if (to >= len) to = len - 1;
+
+        cc.start_array();
+        for (int64_t i = from; i <= to && i < len; ++i) {
+            composite li;
+            li.create(art::ts_list, {container, conversion::comparable_key(first + i)});
+            auto e = t->search(li.create());
+            if (e.null()) continue;
+            cc.push_vt(e.const_leaf()->get_value());
+        }
+        cc.end_array();
+        return cc.ok();
+    }
+
     int LBACK(caller& cc, const arg_t& args) {
         if (args.size() < 2) {
             return cc.wrong_arity();
@@ -371,7 +523,7 @@ extern "C"{
         // read only: a shared lock is enough, as DONE 19 did for SIZE
         auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto key = query.create({container});
+        auto key = query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_null();
@@ -380,7 +532,7 @@ extern "C"{
         list_header header {value.const_leaf()->get_value()};
         int64_t end = conversion::dec_bytes_to_int(header.end);
         composite li;
-        li.create({container,conversion::comparable_key(--end)});
+        li.create(art::ts_list, {container,conversion::comparable_key(--end)});
         auto back = t->search(li.create());
         if (back.null()) {
             return cc.push_null();
@@ -399,7 +551,7 @@ extern "C"{
         // read only: a shared lock is enough, as DONE 19 did for SIZE
         auto t = store.read_locked(args[1]);
         auto container = conversion::convert(args[1]);
-        auto key = query.create({container});
+        auto key = query.create(art::ts_list, {container});
         auto value = t->search(key);
         if (value.null()) {
             return cc.push_null();
@@ -407,7 +559,7 @@ extern "C"{
         list_header header {value.const_leaf()->get_value()};
         int64_t start = conversion::dec_bytes_to_int(header.start);
         composite li;
-        li.create({container,conversion::comparable_key(start)});
+        li.create(art::ts_list, {container,conversion::comparable_key(start)});
         auto front = t->search(li.create());
         if (front.null()) {
             return cc.push_null();
@@ -421,10 +573,13 @@ void register_list_api(function_map& r) {
     r["LBACK"] = {::LBACK,{"read","list","data"}};
     r["LFRONT"] = {::LFRONT,{"read","list","data"}};
     r["LPUSH"] = {::LPUSH,{"write","list","data"}};
+    r["LPUSHX"] = {::LPUSHX,{"write","list","data"}};
+    r["RPUSHX"] = {::RPUSHX,{"write","list","data"}};
     r["RPUSH"] = {::RPUSH,{"write","list","data"}};
     r["RPOP"] = {::RPOP,{"write","list","data"}};
     r["LPOP"] = {::LPOP,{"write","list","data"}};
     r["BLPOP"] = {::BLPOP,{"write","list","data"}};
     r["BRPOP"] = {::BRPOP,{"write","list","data"}};
     r["LLEN"] = {::LLEN,{"read","list","data"}};
+    r["LRANGE"] = {::LRANGE,{"read","list","data"}};
 }

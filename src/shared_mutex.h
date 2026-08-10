@@ -11,8 +11,22 @@
 #include <stdexcept>
 
 #include "lzr_log.h"
-// a shared lock for read heavy work loads (like caches)
 
+/**
+ * A shared lock meant for read heavy work loads, and not used by anything.
+ *
+ * The shards latch on `std::shared_timed_mutex`; this was written to replace that and the
+ * replacement never happened, so the whole of `rh_shared` is reachable only from its own
+ * translation unit. Left compiled in it was not free - it carried a registry of live
+ * threads in a file scope static that outlived nothing in particular, which made it a
+ * plausible suspect for a stall it turned out to have no part in (TODO 41), and it costs
+ * a `std::array<guard, 64>` of thought every time someone reads the header looking for
+ * how locking actually works here.
+ *
+ * So it is behind `_EXPERIMENTAL_` rather than deleted. Define it to build the thing and
+ * work on it; leave it undefined and none of this exists.
+ */
+#ifdef _EXPERIMENTAL_
 
 namespace rh_shared {
     enum {
@@ -53,6 +67,6 @@ namespace rh_shared {
     };
 }
 
-
+#endif //_EXPERIMENTAL_
 
 #endif //BARCH_RH_SHARED_LOCK_H

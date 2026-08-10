@@ -240,115 +240,9 @@
         the python tests depend on the install, with set_tests_properties DEPENDS, would
         stop that.
 
-40. Translate valkey's tests: the harness, and incr.tcl and scan.tcl as its proof.
+40. [Done] The translation harness, and what it took to make it faithful [10-08-2026] Nr 52
 
-    First of four - 45, 46 and 47 are the rest. This one carries the machinery, so it is
-    the smallest in tests and the largest in work; do it first and the other three become
-    mechanical.
-
-    The suite is already in the tree and unused. test/CMakeLists.txt FetchContents valkey
-    8.1 and builds it, so test/{build,Debug,RelWithDebInfo}/_deps/valkey-src holds the
-    whole thing - 665 tests over the eight files that touch surfaces we implement.
-
-    The tcl is regular enough to translate mechanically. Nearly every case is one of
-
-        test {name} { body } {expected}          - last value of body compared
-        assert_equal {expected} [r cmd args]
-        catch {r cmd} err ; format $err          - matched against {ERR*}
-
-    so a translation is `r.cmd(...)` plus an equality assert, with the catch form becoming
-    an expected error. Write a script that walks the tcl and emits the obvious cases,
-    leaving anything it cannot parse as a commented stub for a human. Do not translate by
-    hand at volume - the script keeps the translation reviewable and re-runnable when
-    valkey is bumped.
-
-    The part that makes this safe rather than dangerous, and it has a good answer here: a
-    translated test that is subtly wrong either passes when it should not, or fails for a
-    reason about the translation rather than about barch. The check is differential, and
-    the same FetchContent already builds a working valkey-server next to the tests:
-
-      - run the translated test against valkey-server first. It must pass. That is what
-        makes it a faithful translation rather than an assertion someone invented.
-      - then run it against barch. Anything failing now is a real difference, and the
-        translation is not a suspect.
-
-    So each translated file is two tests, and the valkey one is the fixture for the other.
-    That also gives a natural place to record deliberate differences: a case that passes on
-    valkey and fails on barch is either a defect or an accepted divergence, and the
-    accepted ones want a list with a reason each, not a quietly deleted assertion.
-
-    Prove it on incr.tcl (29 tests) and scan.tcl (20). incr.tcl is the right first file
-    because it is small and because its case "INCR fails against key with spaces" expects
-    an error where barch coerced and overwrote until DONE 37 - those 214 lines would have
-    caught that on their own.
-
-    Progress: translate.py and differential.py are written and working. incr.tcl gives 26
-    of 29 cases and valkey trusts 25 of those, so the file is effectively covered.
-
-    scan.tcl gives none, and never will - every one of its twenty tests is built out of
-    while loops, `lappend` and `populate`. Reading it properly rather than glancing at it
-    changed what to do about it: half the file is SSCAN, HSCAN and ZSCAN, which barch does
-    not implement, and much of the rest is multiplied out over valkey's internal encodings,
-    but four of the tests are about a promise barch does make. Those are hand written in
-    test/scantest.py now (TestScanGuarantees): a full iteration reports every key, COUNT
-    changes the page size without losing anything, MATCH filters, expired keys are not
-    reported, and - the one that matters - every key present at the start and still present
-    at the end is reported even with writes on every round trip.
-
-    Two things that cost time here and will cost it again in 45 to 47:
-
-      - redis-py runs its own parser over the replies of commands it recognises. It turns
-        SCAN's cursor into an int, so `cursor == "0"` never matches and the walk never
-        ends; it turns INFO into a dict. The wire is correct in both cases. Anything that
-        compares a reply has to know which commands redis-py rewrites.
-      - a test that does not force the condition it claims to test passes for the wrong
-        reason. The guarantee case ran in one round trip against barch's default page of
-        128, so no write ever landed mid-iteration until COUNT 10 was asked for. It now
-        asserts it paged before it asserts what paging preserves.
-
-41. Static destruction order in shared_mutex.cpp, and whether it is behind the stalls.
-
-    `rh_state` is the registry every rh_shared::shared_mutex reads - init_thread and
-    release_thread mutate it, and both unlock() and unlock_shared() walk its active thread
-    set on the way out. It was a file scope `static rh_state s;`, holding a std::mutex, an
-    unordered_set and a thread_set.
-
-    That is a destruction order hazard rather than an initialisation one, and the shape of
-    it fits the symptom exactly. The threads holding these locks - accept threads, the
-    resp workers, the session collector - are not all joined before static destruction
-    runs. A thread that reaches unlock() or release_thread() after `s` is gone locks a
-    destroyed pthread mutex, and that does not fault, it blocks. A process in that state
-    sits at zero cpu forever, which is what the leftover valkey-servers looked like.
-
-    Changed to the canonical form: reached through a function so the creation order is
-    fixed, and deliberately never destroyed, so it outlives every thread that might still
-    be unlocking on the way out. The allocation does not grow - it is one object kept
-    alive on purpose.
-
-    This was NOT the cause of the stalls. A stuck valkey-server was caught while still
-    running and every thread traced, and the answer was somewhere else entirely - see
-    entry 42. The change above is still right on its own terms and is worth keeping, but
-    it settled nothing, and it is a good reminder that a hypothesis which fits the symptom
-    is not evidence. Attaching to the process took one command and answered in one screen:
-
-        gdb -p <pid> -batch -ex "set pagination off" -ex "thread apply all bt"
-
-    Two neighbours worth the same treatment if this turns out to be the pattern:
-
-      - `art/art.cpp` has a file scope `static std::mutex glob_queue{}`. Destroying a
-        locked mutex is undefined, and the glob commands run on their own threads.
-      - `repl_api.cpp` has a file scope `static restarter restart;`. If its destructor
-        stops or joins anything, it runs during static destruction with the same exposure,
-        and a destructor that joins a thread which is itself blocked is a stall that hides
-        behind a different symptom.
-
-    Also noticed while reading the file, and unrelated to the above: lines 233 to 294 are a
-    four thread, ten million iteration stress test of the lock, ending in
-    `static int tested = test();` so that it would run at library load. It is inside
-    `#if 0` and therefore dead. It is worth either deleting it or moving it into the test
-    directory where it can be run on purpose - left where it is, enabling it would run a
-    long threaded benchmark before main on every load of the module, which is a surprising
-    thing for a one character change to do.
+41. [Done] A lock nothing used, compiled out behind _EXPERIMENTAL_ [10-08-2026] Nr 47
 
 42. [Done] A barch abort inside valkey hung the process instead of ending it [09-08-2026] Nr 35
 
@@ -429,45 +323,9 @@
 
 45. [Done] Translate valkey's tests: string.tcl and keyspace.tcl [09-08-2026] Nr 41
 
-46. Translate valkey's tests: hash.tcl and expire.tcl.
+46. [Done] hash.tcl and expire.tcl, and the crash they found [10-08-2026] Nr 53
 
-    Third of four. 71 tests in hash.tcl and 79 in expire.tcl, against the fifteen H*
-    commands and the expiry surface - EXPIRE, TTL, EXPIREAT, PERSIST and the hash field
-    TTLs. Depends on the harness in 40.
-
-    The hash surface is worth care: DONE 33 changed HGET from a one element array to a bulk
-    string, HEXISTS from a nested array to an integer, and HSET to count fields added, and
-    DONE 37 made HINCRBY refuse a non numeric field instead of overwriting it. Those are
-    exactly the assertions hash.tcl makes, so it is a direct check of that work rather than
-    a search for something new.
-
-    expire.tcl is the harder half because it is timing sensitive - several cases sleep and
-    then assert a TTL band. Translate those with the same tolerances valkey uses rather
-    than tightening them, or the test will be flaky on a loaded machine and get ignored,
-    which is worse than not having it.
-
-    Known divergences: `PERSIST`, `PEXPIRETIME` and `OBJECT FREQ` are not implemented, and
-    the hash field TTL commands take the FIELDS form only.
-
-47. Translate valkey's tests: zset.tcl and list.tcl, filtered.
-
-    Last of four, and the one where the work is filtering rather than translating. 168
-    tests in zset.tcl and 148 in list.tcl, but a large fraction cover commands barch does
-    not implement, so the first job is deciding what applies and recording why the rest
-    does not. Depends on the harness in 40.
-
-    Not implemented on the ordered set side: ZSCORE, ZMSCORE, ZUNION, ZUNIONSTORE,
-    ZREVRANK, ZREMRANGEBYRANK, ZREMRANGEBYSCORE, ZRANDMEMBER, ZLEXCOUNT, ZSCAN, BZPOPMIN
-    and BZPOPMAX. On the list side: LRANGE, LINSERT, LSET, LREM, LTRIM, LPOS, LMPOP,
-    RPOPLPUSH and LMOVE - which is most of list.tcl, so expect only a fraction to survive.
-
-    What does apply is worth having, because both surfaces moved under DONE 37: ZRANGE and
-    ZREVRANGE read positions now, ZRANK reports a member's position, ZPOPMIN and ZPOPMAX
-    answer member first, and LPUSH, RPUSH, LPOP and RPOP were all on the wrong ends. Those
-    are the cases these two files spend most of their length on.
-
-    Ignore the encoding tests - valkey checks listpack against quicklist and skiplist
-    against listpack conversions, which are its internals and say nothing about barch.
+47. [Done] zset.tcl and list.tcl, and a blocking pop that took the store with it [10-08-2026] Nr 56
 
 48. [Done] INCRBYFLOAT implemented [09-08-2026] Nr 44
 49. [Done] WRONGTYPE, as far as it goes without a stored type tag [09-08-2026] Nr 45
@@ -504,109 +362,11 @@
 
 52. [Done] The commands string.tcl and keyspace.tcl expected [09-08-2026] Nr 43
 
-53. Telling one collection from another needs a stored type tag.
+53. [Done] A lead byte per container kind, and the name claimed at creation [10-08-2026] Nr 48
 
-    DONE 45 made barch answer WRONGTYPE when a string command meets a list, hash or
-    ordered set, and the other way round. What it cannot do is tell those three apart,
-    because it works by observing which keys exist rather than by reading a type, and all
-    three live under the same container prefix.
+54. [Done] as_composite rewrote the key it was given [10-08-2026] Nr 50
 
-    Two things follow, and the first is a live bug rather than a missing feature:
-
-      - a hash and an ordered set under one name miscount each other. HLEN walks the
-        container prefix and counts the ordered set's entries; ZCARD does the same in
-        reverse. Nothing stops both being created, so nothing stops the miscount.
-      - `SET` over a name holding a collection does not remove the collection. redis's SET
-        replaces whatever was there, and barch's writes the string beside it, leaving the
-        old entries reachable through their own commands.
-
-    Both are fixed by the same thing: a type tag written when a container is created and
-    read where a type is checked. A list already has a header key at exactly the container
-    prefix, so the shape exists; hashes and ordered sets would grow one.
-
-    That is a change to what is on disk, which is why it is its own entry. Points to
-    settle before starting:
-
-      - what a space saved before the tag does when it is loaded. The tag can be inferred
-        on first access by looking at the shape of the keys under the prefix - a numeric
-        second component is a list index or an ordered set score, a string one is a hash
-        field - but that is guesswork and it is wrong for an empty collection.
-      - whether the tag is a key of its own or a flag on the existing list header. A key
-        costs one entry per collection and is simple; a flag costs nothing but only helps
-        lists.
-      - whether the check belongs in every collection command or only where a collection
-        is created. Only at creation is much cheaper and catches the case that matters,
-        which is two types under one name in the first place.
-
-54. as_composite writes into the key it is given.
-
-    `conversion::as_composite` splits a key on the separator with strtok_r, and does it in
-    place: `auto last_tok = (char *)v.begin();` casts away const and strtok_r replaces each
-    separator with a null. The caller's bytes are modified, and the original key is gone by
-    the time the call returns.
-
-    In the server this happens to work, because the bytes come out of a writable network
-    buffer and nothing reads them again. It is still a trap. It was found by writing a
-    small program that passed a string literal to it, which segfaults - literals are in
-    read only memory - and anyone calling it from a test, a tool or the embedded interface
-    with a literal or a shared buffer will hit the same thing.
-
-    The fix is to copy into a scratch buffer before tokenising, which is what the composite
-    path already does for everything else. The cost is one copy on keys that contain a
-    separator, which is the only case that reaches this branch at all - a key without one
-    returns from the fast path above without touching anything.
-
-55. A logical export and import, and a storage version that says when it is needed.
-
-    The key encoding changed on 09-08-2026 - a caller's multi part key now carries `tplain` where
-    it used to carry `tcomposite`, so that it can be told apart from a container key
-    (entry 53). Any key holding a separator that was saved before that is unreadable now.
-    `storage_version` has been bumped for it, so such a file is refused with a clear
-    failure instead of being read as something it is not - but a refusal is only half an
-    answer, because there is still nowhere for that data to go.
-
-    How the version works today. `storage_version` in constants.h is written as the first
-    field of every shard file and checked by `arena::base_hash_arena::arena_retrieve` on
-    load; a mismatch logs "data format is invalid" and the load fails. Since DONE 35 that
-    failure is clean - it reports and skips rather than aborting the process - so the
-    mechanism is sound and only the message and the way out are missing.
-
-    The middle term of `page_size + 11 + test_memory` is the revision, and it was moved
-    from 10 to 11 for the tplain encoding on 09-08-2026. So a file written before that is
-    now refused rather than misread, which closes the silent half of the problem and leaves
-    only the way out.
-
-    What is still missing: "data format is invalid" tells a user nothing they can act on.
-    It should say which version the file is, which the server expects, and that an export
-    from the older server is the way across - which is the part that does not exist yet.
-
-    What the export has to carry. Not the pages - that is what the current format is, and
-    the whole point is to be independent of it. Per key space: every key with its value and
-    expiry, the options the space was built with (ordered, shards, range_sharded), and any
-    dependency it has on another space. Separately the ACL users, which are stored apart
-    from the data and are not replicated. A collection has to come out as its logical
-    contents - a list in order, a hash's fields, an ordered set's members with scores - and
-    not as the composite keys they happen to be stored under, or the export is tied to the
-    very encoding it is meant to outlive.
-
-    The sequencing is the part that is easy to get wrong, and it decides when this can
-    ship. A user upgrades by exporting with the server they are already running and
-    importing into the new one. That means **the exporter has to exist in the version
-    people already have**, which is the one thing a future release cannot add. So either
-
-      - the export lands first, in a release that changes nothing else, and the format
-        bump waits for the release after it; or
-      - the bump ships with a standalone reader that understands the old format, which is
-        more work but does not need anyone to have upgraded in a particular order.
-
-    Until one of those exists, an encoding change is only safe while nobody has data they
-    care about - which is true as of 09-08-2026 and will stop being true without warning.
-
-    Worth doing alongside: RESP already has DUMP and RESTORE for a single key, and redis's
-    are deliberately version tagged with a footer. Following that shape for the per key
-    case would give the same thing at a smaller granularity and is a reasonable first
-    step - one key, one blob, a version in it, and RESTORE refusing a version it does not
-    know rather than guessing.
+55. [Done] A logical export, so a version bump has somewhere for the data to go [10-08-2026] Nr 61
 
 56. `used_memory_startup` is reported through a clamp, so it moves when it should not.
 
@@ -640,3 +400,60 @@
 
     Seen as a suite failure under `ctest -j4`; it does not reproduce standalone, which fits
     a timing sensitive margin rather than a wrong constant.
+
+57. Two file scope statics that outlive the threads which touch them.
+
+    Carried out of entry 41, which disposed of a third one by compiling it out. These two
+    are live code, so they need reading rather than removing:
+
+      - `art/art.cpp` has a file scope `static std::mutex glob_queue{}`. Destroying a
+        locked mutex is undefined, and the glob commands run on their own threads, so the
+        question is whether any of them can still be holding it when static destruction
+        runs.
+      - `repl_api.cpp` has a file scope `static restarter restart;`. If its destructor
+        stops or joins anything then it runs during static destruction with the same
+        exposure, and a destructor that joins a thread which is itself blocked is a stall
+        wearing a different symptom.
+
+    Entry 41 is the caution to read these with. The same reasoning applied to
+    shared_mutex.cpp produced a hypothesis that fitted the observed stalls exactly and was
+    still wrong, because nothing ever called that code. So establish first whether either
+    of these is reached on a shutdown path at all, and only then decide whether the
+    lifetime needs changing. The canonical fix, if one is needed, is the never destroyed
+    form: reach the object through a function and let it outlive the threads.
+
+58. [Done] A range over a shard holding one key answered nothing [10-08-2026] Nr 49
+
+59. [Done] What a keyspace command sees when the name holds a collection [10-08-2026] Nr 51
+
+60. [Done] The commands hash.tcl and expire.tcl expect, implemented [10-08-2026] Nr 54
+
+61. [Done] Expiry measured against unix time rather than machine uptime [10-08-2026] Nr 55
+
+62. [Done] HSCAN, and a cursor scoped to a prefix [10-08-2026] Nr 57
+
+63. The list commands zset.tcl and list.tcl expect, and the two key moves.
+
+    What is left of the original entry after DONE 58, which did the ordered set side. Each
+    is an accepted divergence in differential.py naming this entry, and the tests are
+    already wired up, so a command starts passing cases the moment it answers.
+
+      - `LINSERT key BEFORE|AFTER pivot value` - find a member by value and put one beside
+        it. The list is stored at consecutive indices between the header's start and end,
+        so an insert in the middle has to move everything after it or leave a gap; which of
+        those is the decision worth making before writing any of it.
+      - `LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT n]`, and `ZMPOP` and `BZMPOP` beside
+        it - pop from the first of several keys that has anything. The blocking form needs
+        the timeout validation of DONE 56, not a second copy of it.
+      - `RPOPLPUSH`, `LMOVE` and `BRPOPLPUSH` - move an element between two lists.
+
+    The moves are the reason this was stopped rather than finished. They take two keys, so
+    they go through `sharded_store::with_two_keys_write` and the lock order rule, and the
+    last two key path written without that care self deadlocked - DONE 42 - and cost hours
+    to find. Read that entry first.
+
+64. [Done] Ordered set validation, and two cases that were not what they looked like [10-08-2026] Nr 59
+
+65. [Done] An exclusive lex bound, and the two ends of the range [10-08-2026] Nr 60
+
+66. [Done] The member index had no empty component, so it collided with a real name [10-08-2026] Nr 62

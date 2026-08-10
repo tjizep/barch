@@ -50,15 +50,24 @@ assert(vk.call('B.SIZE') >= 10)
 assert(vk.call('B.ZCARD', 'bgame') == 2)
 assert(vk.call('B.ZCARD', 'zgame') == 3)
 assert(vk.call('B.ZCARD', 'ygame') == 3)
-assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3) == 2)
+-- ZINTER answers the members the two sets share. It used to answer the members whose
+-- scores happened to coincide, which is a different question and gave 2 here where the
+-- sets share all three members; and AGGREGATE reduced the whole reply to a single number
+-- rather than combining each member's scores. Both were fixed together - see DONE 58
+assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3) == 3)
+assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3, 'AGGREGATE','SUM') == 3)
 
-assert(vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3, 'AGGREGATE','SUM') == "16.5")
+-- with WITHSCORES the reply is member, score, member, score - so twice the members - and
+-- the score is the sum of what the member scored in each input, after its weight
+local scored = vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 1, 2, 3, 'AGGREGATE','SUM', 'WITHSCORES')
+assert(#scored == 6)
+assert(math.abs(tonumber(scored[2]) - 3.3) < 0.001)   -- first: 1.1*1 + 1.1*2
 
-assert(vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 3, 3, 3, 'AGGREGATE','SUM') == "19.8")
-assert(vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 1, 2, 3, 'AGGREGATE','SUM') == "15.6")
-assert(vk.call('B.ZINTER', 2, 'zgame', 'yzgame', 'WEIGHTS', 1, 1, 1, 'AGGREGATE','SUM') == "0")
-assert(vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'WEIGHTS', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == "0")
-assert(vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'AGGREGATE', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == "0")
+-- an input that does not exist leaves nothing to intersect with
+assert(#vk.call('B.ZINTER', 2, 'zgame', 'yzgame', 'WEIGHTS', 1, 1, 1, 'AGGREGATE','SUM') == 0)
+assert(#vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'WEIGHTS', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == 0)
+-- the third named input is the word AGGREGATE, which is not a set, so nothing is shared
+assert(#vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'AGGREGATE', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == 0)
 assert(#vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WITHSCORES') == 6)
 assert(vk.call('B.ZINTERSTORE','storezegame', 2, 'zgame', 'zgame') == 3)
 assert(vk.call('B.ZCARD','storezegame') == 3)
@@ -67,8 +76,9 @@ assert(vk.call('B.ZADD','diffy2',1,'one',2,'two',3,'three')==3)
 assert(vk.call('B.ZADD','diffy3',1,'one',2,'two')==2)
 assert(vk.call('B.ZADD','diffy4',1,'one',2,'two',3,'three',4,'four')==4)
 assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy2') == 0)
-assert(vk.call('B.ZDIFF', 2, 'diffy1','diffy2','AGGREGATE','MIN') == "0")
-assert(vk.call('B.ZDIFF', 2, 'diffy1','diffy2','AGGREGATE','MAX') == "0")
+-- AGGREGATE says how to combine scores, it does not turn the reply into one number
+assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy2','AGGREGATE','MIN') == 0)
+assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy2','AGGREGATE','MAX') == 0)
 assert(#vk.call('B.ZDIFF', 2, 'diffy1','diffy4') == 0)
 assert(#vk.call('B.ZDIFF', 2, 'diffy4','diffy1') == 1)
 assert(#vk.call('B.ZDIFF', 2, 'diffy3','diffy1') == 0)
@@ -92,9 +102,11 @@ assert(#vk.call('B.ZREVRANGE', 'cbgame',1,3,'BYSCORE') == 3)
 assert(#vk.call('B.ZRANGEBYSCORE', 'cbgame',1,3.01) == 3)
 assert(#vk.call('B.ZRANGEBYSCORE', 'cbgame',1,3.01) == 3)
 assert(#vk.call('B.ZREVRANGEBYSCORE', 'cbgame',1,3.01) == 3)
-assert(#vk.call('B.ZRANGEBYLEX', 'cbgame','a','z') == 3)
-assert(#vk.call('B.ZRANGEBYLEX', 'cbgame','a','z','WITHSCORES') == 6)
-assert(#vk.call('B.ZREVRANGEBYLEX', 'cbgame','a','z') == 3)
+-- a lex bound says whether its end is open: [a is inclusive, (a is not, and - and + are
+-- the ends of the range. A bare `a` is refused now, as redis refuses it - see DONE 59
+assert(#vk.call('B.ZRANGEBYLEX', 'cbgame','[a','[z') == 3)
+assert(#vk.call('B.ZRANGEBYLEX', 'cbgame','[a','[z','WITHSCORES') == 6)
+assert(#vk.call('B.ZREVRANGEBYLEX', 'cbgame','[a','[z') == 3)
 assert(#vk.call('B.ZRANGE', 'cbgame',1,3.01,'BYSCORE','WITHSCORES') == 6)
 assert(#vk.call('B.ZRANGE', 'cbgame','a','z','WITHSCORES','REV','BYLEX') == 6)
 assert(#vk.call('B.ZRANGE', 'cbgame','a','z','BYLEX') == 3)

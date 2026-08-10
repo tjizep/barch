@@ -12,11 +12,22 @@
 #include "keys.h"
 #include "vk_caller.h"
 #include "sharded_store.h"
+#include <cmath>
+#include <limits>
 #include "key_type.h"
 #include "art/iterator.h"
 static thread_local composite query;
 extern "C"{
-int HSET(caller& cc, const arg_t& args) {
+/**
+ * HSET, HMSET and HSETNX are one write with three ways of answering.
+ *
+ * HSET counts the fields that were not there before. HMSET is the older spelling that
+ * answers OK whatever happened - it is deprecated in redis and still used by half the
+ * tests. HSETNX writes a single field only when it is absent, and says whether it did.
+ */
+enum class hset_mode { count, ok, if_absent };
+
+int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
     // `added` counts fields that were not there before, which is what redis replies
     // with. `updated` counts the ones that were, and is only kept because insert wants
     // a callback
@@ -26,23 +37,26 @@ int HSET(caller& cc, const arg_t& args) {
     auto fc = [&](const art::node_ptr&) -> void {
         ++updated;
     };
-    if (args.size() < 4 || (args.size() % 2) != 0) {
+    if (mode == hset_mode::if_absent) {
+        if (args.size() != 4) return cc.wrong_arity();
+    } else if (args.size() < 4 || (args.size() % 2) != 0) {
         return cc.wrong_arity();
     }
     if (key_ok(args[1]) != 0) {
         return cc.push_null();
     }
     barch::sharded_store store(cc.kspace());
-    // a name already holding a plain value is not a hash to add fields to. Checked before
-    // the lock, because kind_of routes to shards of its own - see key_type.h
-    if (barch::kind_of(store, args[1]) == barch::key_kind::string) {
+    // a name already holding a plain value is not a hash to add fields to, and neither is
+    // one already holding a list or an ordered set. Checked before the lock, because this
+    // routes to shards of its own - see key_type.h
+    if (!barch::container_writable(store, args[1], barch::container_kind::hash)) {
         return cc.push_error(barch::wrong_type_message());
     }
     bool wrong_type = false;
     store.with_container_write(args[1], [&](const barch::shard_ptr& t) {
         auto container = conversion::convert(args[1]);
 
-        query.create({container});
+        query.create(art::ts_hash, {container});
         for (size_t n = 2; n < args.size(); n += 2) {
 
             if (key_ok(args[n]) != 0) {
@@ -54,7 +68,8 @@ int HSET(caller& cc, const arg_t& args) {
             art::value_type key = query.create();
             art::value_type val = args[n+1];
 
-            if (t->insert(key, val, true, fc)) {
+            // HSETNX must not overwrite, and insert reports whether it added
+            if (t->insert(key, val, mode != hset_mode::if_absent, fc)) {
                 ++added;
             }
 
@@ -64,7 +79,20 @@ int HSET(caller& cc, const arg_t& args) {
     if (wrong_type) {
         return cc.push_error(barch::wrong_type_message());
     }
+    if (mode == hset_mode::ok) {
+        return cc.push_simple("OK");
+    }
     return cc.push_ll(added);
+}
+
+int HSET(caller& cc, const arg_t& args) {
+    return hset_impl(cc, args, hset_mode::count);
+}
+int HMSET(caller& cc, const arg_t& args) {
+    return hset_impl(cc, args, hset_mode::ok);
+}
+int HSETNX(caller& cc, const arg_t& args) {
+    return hset_impl(cc, args, hset_mode::if_absent);
 }
 }
 int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -73,7 +101,13 @@ int cmd_HSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 
 int cmd_HMSET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    return cmd_HSET(ctx, argv, argc);
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HMSET);
+}
+
+int cmd_HSETNX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HSETNX);
 }
 
 
@@ -96,6 +130,14 @@ static int HNUMERIC(caller& call, const arg_t& argv, NumT by, bool as_double) {
     if (key_ok(n) != 0 || key_ok(f) != 0) {
         return call.push_null();
     }
+    {
+        // incrementing a field of a name that holds a string is a wrong type. It used to
+        // create a hash beside the string and answer as though nothing were amiss
+        barch::sharded_store wt_store(call.kspace());
+        if (barch::kind_of(wt_store, n) == barch::key_kind::string) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
     NumT l = NumT();
     bool ok = false;
     // as in keys_api: a field that is present but not numeric must not be taken for an
@@ -104,7 +146,7 @@ static int HNUMERIC(caller& call, const arg_t& argv, NumT by, bool as_double) {
     numeric_status why = numeric_status::updated;
     barch::sharded_store store(call.kspace());
     store.with_container_write(n, [&](const barch::shard_ptr& t) {
-        query.create({conversion::convert(n)});
+        query.create(art::ts_hash, {conversion::convert(n)});
         query.push(conversion::convert(f));
         art::value_type key = query.create();
         auto updater = [&](const art::node_ptr &old) -> art::node_ptr {
@@ -155,7 +197,7 @@ int HUPDATEEX(caller& call, const arg_t&argv, int fields_start,
     }
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create({conversion::convert(n)});
+        query.create(art::ts_hash, {conversion::convert(n)});
         if (replies)
             call.start_array();
         for (size_t n = fields_start; n < argv.size(); ++n) {
@@ -338,7 +380,15 @@ int HINCRBYFLOAT(caller& call, const arg_t &argv) {
     double by = 0;
     if (argv.size() != 4)
         return call.wrong_arity();
-    if (!conversion::to_double(argv[3], by)) {
+    if (!conversion::to_double(argv[3], by) || !std::isfinite(by)) {
+        // redis reads inf and nan as perfectly good floats and then refuses them for what
+        // they would do to the stored value, which is a different complaint from "that is
+        // not a number" - and its clients match on the wording
+        std::string given(argv[3].chars(), argv[3].size);
+        for (auto& ch : given) ch = (char) tolower(ch);
+        if (given.find("inf") != std::string::npos || given.find("nan") != std::string::npos) {
+            return call.push_error("value is NaN or Infinity");
+        }
         return call.push_error("value is not a valid float");
     }
     return HNUMERIC<double>(call, argv, by, true);
@@ -353,6 +403,13 @@ int HDEL(caller& call, const arg_t &argv) {
 
     if (argv.size() < 3)
         return call.wrong_arity();
+    {
+        // deleting a field of something that is not a hash is a wrong type, not a miss
+        barch::sharded_store wt_store(call.kspace());
+        if (barch::kind_of(wt_store, argv[1]) == barch::key_kind::string) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
 
     int responses = 0;
     art::key_spec spec;
@@ -368,7 +425,7 @@ int HDEL(caller& call, const arg_t &argv) {
     // unsynchronised against readers. one route, one write lock, as HSET already did
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create({conversion::convert(k)});
+        query.create(art::ts_hash, {conversion::convert(k)});
         for (size_t n = 2; n < argv.size(); ++n) {
             size_t klen = 0;
             auto k = argv[n];
@@ -412,7 +469,7 @@ int HGETDEL(caller& call, const arg_t &argv) {
     // as HDEL: was re-routing per member with no lock held over the removes
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create({conversion::convert(n)});
+        query.create(art::ts_hash, {conversion::convert(n)});
         for (size_t n = 3; n < argv.size(); ++n) {
             auto k = argv[n];
 
@@ -452,6 +509,14 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
 
     if (argv.size() < 3)
         return call.wrong_arity();
+    {
+        // reading fields off a name that holds a string is a wrong type, and the reads
+        // did not say so - HGET and HMGET answered nil, which reads as "no such field"
+        barch::sharded_store store(call.kspace());
+        if (barch::kind_of(store, argv[1]) == barch::key_kind::string) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
     int fields_start = 2;
     if (fancy) {
         art::hgetex_spec spec(argv);
@@ -474,7 +539,7 @@ int HQUERY(caller& call,const arg_t& argv, bool fancy,
     barch::sharded_store store(call.kspace());
     bool missing = false;
     store.with_container_write(n, [&](const barch::shard_ptr& t) {
-    art::value_type any_key = query.create({conversion::convert(n)});
+    art::value_type any_key = query.create(art::ts_hash, {conversion::convert(n)});
     art::node_ptr lb = t->lower_bound(any_key);
     if (lb.null()) {
         missing = true;
@@ -560,6 +625,29 @@ int HMGET(caller& call, const arg_t& argv) {
     return HGET_(call, argv, reporter, true);
 }
 
+/**
+ * HSTRLEN key field - how long the field's value is, or 0 when there is no such field.
+ *
+ * Not in TODO 60's list; hash.tcl's wrong type case reaches for it, which is how it was
+ * noticed. A missing field is zero rather than nil, the same way STRLEN treats a missing
+ * key, so a caller cannot tell an empty value from an absent one - that is redis's
+ * choice and this follows it.
+ */
+int HSTRLEN(caller& call, const arg_t& argv) {
+    auto reporter = [&](art::node_ptr r) -> void {
+        // hash values are stored as given; the compression path is for plain keys
+        call.push_ll((long long) r.const_leaf()->get_value().size);
+    };
+    auto nullreport = [&]() -> void {
+        call.push_ll(0);
+    };
+    return HQUERY(call, argv, false, reporter, nullreport, false);
+}
+int cmd_HSTRLEN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HSTRLEN);
+}
+
 int cmd_HGET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HGET);
@@ -568,6 +656,14 @@ extern "C"
 int HLEN(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
+    {
+        // the wrong type checks these reads were missing - an empty array reads as an
+        // empty hash, which is not what a string under this name means
+        barch::sharded_store wt_store(call.kspace());
+        if (barch::kind_of(wt_store, argv[1]) == barch::key_kind::string) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
     int responses = 0;
     size_t nlen = 0;
     auto n = argv[1];
@@ -577,7 +673,7 @@ int HLEN(caller& call, const arg_t& argv) {
 
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        query.create({conversion::convert(n, nlen), art::ts_end});
+        query.create(art::ts_hash, {conversion::convert(n, nlen), art::ts_end});
         auto search_end = query.end();
         auto search_start = query.prefix(2);
         auto table_key = query.prefix(2);
@@ -619,6 +715,14 @@ extern "C"
 int HGETALL(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
+    {
+        // the same wrong type check the field reads make - HGETALL answered an empty array
+        // for a name holding a string, which reads as an empty hash
+        barch::sharded_store wt_store(call.kspace());
+        if (barch::kind_of(wt_store, argv[1]) == barch::key_kind::string) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
     int responses = 0;
     auto n = argv[1];
     if (key_ok(n) != 0) {
@@ -627,7 +731,7 @@ int HGETALL(caller& call, const arg_t& argv) {
     barch::sharded_store store(call.kspace());
     bool missing = false;
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        art::value_type search_start = query.create({conversion::convert(n)},false);
+        art::value_type search_start = query.create(art::ts_hash, {conversion::convert(n)},false);
 
         art::value_type table_key = search_start;
         //bool exists = false;
@@ -663,6 +767,14 @@ extern "C"
 int HKEYS(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
+    {
+        // the wrong type checks these reads were missing - an empty array reads as an
+        // empty hash, which is not what a string under this name means
+        barch::sharded_store wt_store(call.kspace());
+        if (barch::kind_of(wt_store, argv[1]) == barch::key_kind::string) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
 
     int responses = 0;
     auto n = argv[1];
@@ -671,7 +783,7 @@ int HKEYS(caller& call, const arg_t& argv) {
     };
     barch::sharded_store store(call.kspace());
     store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
-        art::value_type search_end = query.create({conversion::convert(n), art::ts_end});
+        art::value_type search_end = query.create(art::ts_hash, {conversion::convert(n), art::ts_end});
         art::value_type search_start = query.prefix(2);
         art::value_type table_key = search_start;
         call.start_array();
@@ -690,6 +802,296 @@ int HKEYS(caller& call, const arg_t& argv) {
     });
     return call.ok();
 }
+/**
+ * HRANDFIELD key [count [WITHVALUES]]
+ *
+ * Without a count, one field or nil for a missing hash. With a positive count, up to that
+ * many distinct fields; with a negative one, exactly that many allowing repeats, which is
+ * how redis distinguishes sampling without replacement from sampling with it.
+ *
+ * The fields are collected before any are chosen. A hash is a bounded run of keys under
+ * one prefix rather than the whole key space, so this is the size of the hash rather than
+ * the size of the database - unlike RANDOMKEY (DONE 44), which cannot afford to collect.
+ */
+int HRANDFIELD(caller& call, const arg_t& argv) {
+    if (argv.size() < 2 || argv.size() > 4)
+        return call.wrong_arity();
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.push_null();
+    }
+    bool counted = argv.size() > 2;
+    long long count = 1;
+    if (counted && !conversion::to_ll(argv[2], count)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+    if (count < -std::numeric_limits<long long>::max()) {
+        return call.push_error("value is out of range");
+    }
+    bool with_values = false;
+    if (argv.size() == 4) {
+        std::string opt(argv[3].chars(), argv[3].size);
+        for (auto& ch : opt) ch = (char) toupper(ch);
+        if (opt != "WITHVALUES") return call.syntax_error();
+        with_values = true;
+    }
+    // A negative count asks for exactly that many entries, repeats allowed, so its
+    // magnitude is a promise about how long the reply will be. redis refuses one that
+    // cannot be counted (past LONG_MAX) and, with WITHVALUES, one past half of that, since
+    // each entry costs two elements.
+    //
+    // barch needs a third bound that redis does not, and it is a real difference rather
+    // than an oversight: redis streams a reply to the socket as it goes, while this builds
+    // the whole thing in memory first. `HRANDFIELD h -9223372036854770000` is merely a very
+    // long answer there and a dead process here - it took the server down before this
+    // bound existed. A million entries is far past any real use and still cheap to refuse.
+    if (with_values && count < -(std::numeric_limits<long long>::max() / 2)) {
+        return call.push_error("value is out of range");
+    }
+    if (count < -1000000) {
+        return call.push_error("value is out of range");
+    }
+
+    barch::sharded_store store(call.kspace());
+    if (barch::kind_of(store, n) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+
+    heap::std_vector<std::string> fields;
+    heap::std_vector<std::string> values;
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        composite q;
+        art::value_type search_end = q.create(art::ts_hash, {conversion::convert(n), art::ts_end});
+        art::value_type search_start = q.prefix(2);
+        size_t prefix_len = search_start.size;
+        auto collect = [&](void *, art::value_type key, art::value_type value)-> int {
+            if (!key.starts_with(search_start.pref(1))) {
+                return -1;
+            }
+            fields.emplace_back((const char*)key.bytes + prefix_len, key.size - prefix_len);
+            values.emplace_back(value.chars(), value.size);
+            return 0;
+        };
+        t->range(search_start, search_end, collect, nullptr);
+    });
+
+    auto emit = [&](size_t i) {
+        call.push_encoded_key(art::value_type{fields[i]});
+        if (with_values) {
+            call.push_vt(art::value_type{values[i]});
+        }
+    };
+
+    if (fields.empty()) {
+        if (!counted) return call.push_null();
+        call.start_array();
+        call.end_array();
+        return call.ok();
+    }
+    if (!counted) {
+        call.push_encoded_key(art::value_type{fields[std::rand() % fields.size()]});
+        return call.ok();
+    }
+    call.start_array();
+    if (count < 0) {
+        // repeats allowed, and exactly as many as asked for
+        for (int64_t i = 0; i < -count; ++i) {
+            emit(std::rand() % fields.size());
+        }
+    } else {
+        // distinct, so no more than there are. Shuffling the order the fields were
+        // collected in is enough - they came out sorted, and a caller must not be able to
+        // read the hash's order off a sample
+        heap::std_vector<size_t> order;
+        for (size_t i = 0; i < fields.size(); ++i) order.push_back(i);
+        for (size_t i = order.size(); i > 1; --i) {
+            std::swap(order[i - 1], order[std::rand() % i]);
+        }
+        size_t want = std::min<size_t>((size_t) count, order.size());
+        for (size_t i = 0; i < want; ++i) emit(order[i]);
+    }
+    call.end_array();
+    return call.ok();
+}
+int cmd_HRANDFIELD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HRANDFIELD);
+}
+
+/** HVALS key - the values, in the order the fields sort, which is what HKEYS answers in */
+int HVALS(caller& call, const arg_t& argv) {
+    if (argv.size() != 2)
+        return call.wrong_arity();
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.push_null();
+    }
+    barch::sharded_store store(call.kspace());
+    if (barch::kind_of(store, n) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    store.with_container_write(argv[1], [&](const barch::shard_ptr& t) {
+        composite q;
+        art::value_type search_end = q.create(art::ts_hash, {conversion::convert(n), art::ts_end});
+        art::value_type search_start = q.prefix(2);
+        call.start_array();
+        auto table_iter = [&](void *, art::value_type key, art::value_type value)-> int {
+            if (!key.starts_with(search_start.pref(1))) {
+                return -1;
+            }
+            call.push_vt(value);
+            return 0;
+        };
+        t->range(search_start, search_end, table_iter, nullptr);
+        call.end_array();
+    });
+    return call.ok();
+}
+/**
+ * HSCAN key cursor [MATCH pattern] [COUNT n] [NOVALUES]
+ *
+ * SCAN's contract over one hash: a full iteration reports every field that is there
+ * throughout it, repeats are allowed, and COUNT is a hint about how much work to do per
+ * call rather than how many fields come back.
+ *
+ * It is much less work than SCAN because a hash does not span shards. Its fields are a
+ * contiguous run of keys under one prefix in the shard the name routes to, so a position
+ * in that run is a whole cursor - which is what the scan_cursor's buffer holds here,
+ * rather than the shard and page a key space scan needs.
+ *
+ * A cursor of 0 starts an iteration. Any other value is one this connection was given
+ * back; one that is not recognised starts again from the beginning rather than erroring,
+ * since a client is allowed to lose one.
+ */
+int HSCAN(caller& call, const arg_t& argv) {
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    auto n = argv[1];
+    if (key_ok(n) != 0) {
+        return call.push_null();
+    }
+    long long given = 0;
+    if (!conversion::to_ll(argv[2], given) || given < 0) {
+        return call.push_error("invalid cursor");
+    }
+    long long count = 10;
+    bool novalues = false;
+    std::string match;
+    for (size_t i = 3; i < argv.size(); ++i) {
+        std::string opt(argv[i].chars(), argv[i].size);
+        for (auto& ch : opt) ch = (char) toupper(ch);
+        if (opt == "NOVALUES") {
+            novalues = true;
+        } else if (opt == "MATCH" && i + 1 < argv.size()) {
+            match.assign(argv[i + 1].chars(), argv[i + 1].size);
+            ++i;
+        } else if (opt == "COUNT" && i + 1 < argv.size()) {
+            if (!conversion::to_ll(argv[i + 1], count) || count < 1) {
+                return call.push_error("syntax error");
+            }
+            ++i;
+        } else {
+            return call.syntax_error();
+        }
+    }
+
+    barch::sharded_store store(call.kspace());
+    if (barch::kind_of(store, n) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+
+    caller::iteration_ptr cursor;
+    if (given != 0) {
+        cursor = call.get_iteration((size_t) given);
+    }
+    // where to resume: the saved key if this cursor has one, the prefix otherwise
+    std::string from;
+    if (cursor && !cursor->buffer.empty()) {
+        from.assign((const char*) cursor->buffer.data(), cursor->buffer.size());
+    }
+
+    heap::std_vector<std::string> fields;
+    heap::std_vector<std::string> values;
+    std::string next;
+    bool complete = true;
+    store.with_container_read(argv[1], [&](const barch::shard_ptr& t) {
+        composite q;
+        art::value_type prefix = q.create(art::ts_hash, {conversion::convert(n)}, false);
+        size_t plen = prefix.size;
+        art::value_type start = from.empty() ? prefix : art::value_type{from};
+        art::node_ptr lb = t->lower_bound(start);
+        if (lb.null() || !lb.is_leaf) return;
+        long long examined = 0;
+        for (art::iterator i(t, lb.const_leaf()->get_key()); i.ok(); i.next()) {
+            auto k = i.key();
+            if (!k.starts_with(prefix)) return;
+            const art::leaf *l = i.l();
+            if (!l || l->is_tomb() || l->deleted() || l->expired()) continue;
+            if (examined >= count) {
+                // more to come: remember where to pick up
+                next.assign(k.chars(), k.size);
+                complete = false;
+                return;
+            }
+            ++examined;
+            std::string field(k.chars() + plen, k.size - plen);
+            if (!match.empty()) {
+                // the slice is still encoded - a component carries its own type byte and
+                // terminator - so matching the pattern against it compared the pattern to
+                // bytes no caller ever typed, and MATCH found nothing. Put a composite
+                // lead in front and the ordinary key renderer gives the text back
+                // the renderer starts reading components at byte two, so the lead needs
+                // a companion byte in front of the component - the same one a real
+                // composite carries between its parts
+                std::string decodable;
+                decodable.push_back((char) art::tcomposite);
+                decodable.push_back('\x01');
+                decodable.append(field);
+                std::string text = encoded_key_as_string(art::value_type{decodable});
+                if (1 != glob::stringmatchlen(art::value_type{match}, art::value_type{text}, 0)) {
+                    continue;
+                }
+            }
+            fields.emplace_back(field);
+            auto v = l->get_value();
+            values.emplace_back(v.chars(), v.size);
+        }
+    });
+
+    if (complete) {
+        if (cursor) call.erase_iteration(cursor->id);
+        call.push_string("0");
+    } else {
+        if (!cursor) {
+            auto max_iterations = barch::get_max_scan_iterators();
+            if (max_iterations && call.iteration_count() >= max_iterations) {
+                return call.push_error("too many open SCAN cursors, finish one or use CLIENT CLEAR_ITERS");
+            }
+            cursor = call.create_iteration();
+        }
+        cursor->buffer.assign(next.begin(), next.end());
+        call.push_string(std::to_string(cursor->id));
+    }
+    call.start_array();
+    for (size_t x = 0; x < fields.size(); ++x) {
+        call.push_encoded_key(art::value_type{fields[x]});
+        if (!novalues) {
+            call.push_vt(art::value_type{values[x]});
+        }
+    }
+    call.end_array();
+    return call.ok();
+}
+int cmd_HSCAN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HSCAN);
+}
+
+int cmd_HVALS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, HVALS);
+}
+
 int cmd_HKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, HKEYS);
@@ -719,6 +1121,21 @@ int cmd_HEXISTS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 int add_hash_api(ValkeyModuleCtx *ctx) {
     if (ValkeyModule_CreateCommand(ctx, NAME(HSET), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HSETNX), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HRANDFIELD), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HSTRLEN), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HVALS), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(HSCAN), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     if (ValkeyModule_CreateCommand(ctx, NAME(HGETDEL), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
@@ -778,6 +1195,12 @@ int add_hash_api(ValkeyModuleCtx *ctx) {
  * table as it stands. */
 void register_hash_api(function_map& r) {
     r["HSET"] = {::HSET,{"write","hash","data"}};
+    r["HMSET"] = {::HMSET,{"write","hash","data"}};
+    r["HSETNX"] = {::HSETNX,{"write","hash","data"}};
+    r["HRANDFIELD"] = {::HRANDFIELD,{"read","hash","data"}};
+    r["HSTRLEN"] = {::HSTRLEN,{"read","hash","data"}};
+    r["HVALS"] = {::HVALS,{"read","hash","data"}};
+    r["HSCAN"] = {::HSCAN,{"read","hash","data"}};
     r["HEXPIREAT"] = {::HEXPIREAT,{"write","hash","data"}};
     r["HEXPIRE"] = {::HEXPIRE,{"write","hash","data"}};
     //r["HGETEX"] = ::HGETEX;

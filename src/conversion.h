@@ -240,8 +240,7 @@ namespace conversion {
             if (!(val.bytes[0] == art::tstring
                   || val.bytes[0] == art::tinteger
                   || val.bytes[0] == art::tdouble
-                  || val.bytes[0] == art::tcomposite
-                  || val.bytes[0] == art::tplain
+                  || art::is_composite_lead(val.bytes[0])
                   || val.bytes[0] == art::tfloat
                   || val.bytes[0] == art::tshort
                   || val.bytes[0] == art::tlast_valid
@@ -333,6 +332,20 @@ namespace conversion {
     comparable_key convert(const char *v, size_t vlen, bool noint = false);
 
     comparable_key convert(art::value_type vt, bool noint = false);
+
+    /**
+     * The empty component, built the way every other component is.
+     *
+     * Neither `comparable_key("")` nor `comparable_key("", 0)` produces one: both leave
+     * out the separator that follows a component, so whatever comes next merges into it.
+     * An ordered set's member index used the bare literal as its marker and the key it
+     * built was byte for byte the same as the key of a set whose name began with an 0x03 -
+     * two different things with one encoding, which no reader can tell apart. Only
+     * convert() lays it out properly. See DONE 62.
+     */
+    inline comparable_key empty_component() {
+        return convert(art::value_type{(const uint8_t *) "", 0u});
+    }
 
     comparable_key as_composite(art::value_type v, bool noint = false, char sep = ' ');
     comparable_key convert(const std::string &str, bool noint = false);

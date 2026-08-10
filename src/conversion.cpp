@@ -2,6 +2,7 @@
 // Created by teejip on 4/9/25.
 //
 #include "conversion.h"
+#include <string>
 
 #include "composite.h"
 // take a string and convert to a number as bytes or leave it alone
@@ -94,12 +95,22 @@ conversion::comparable_key conversion::as_composite(art::value_type v, bool noin
         return conversion::convert(v.chars(), v.size, noint);
     {
         thread_local composite tuple;
+        // strtok_r writes a terminator over every separator it finds, and the buffer it
+        // was being handed is the caller's key. So the first call through here rewrote
+        // `1.1 a` into `1.1\0a` in place, and a second call on the same key found no
+        // separator and encoded it as one string containing an interior null - which the
+        // key filter refuses. Nothing noticed while a command converted its key once;
+        // GET now checks the type before reading, and converts twice. See TODO 54.
+        //
+        // Tokenising a copy costs one allocation on the keys that hold a separator, which
+        // is the only case that reaches this branch at all
+        thread_local std::string scratch;
+        scratch.assign(v.chars(), v.size);
         // tagged as the caller's key, not as a container's - see art::tplain
         tuple.begin_plain();
         char spc[] = {sep,'\0'};
         char * state;
-        auto last_tok = (char *)v.begin();
-        auto token = strtok_r(last_tok, &spc[0], &state);
+        auto token = strtok_r(scratch.data(), &spc[0], &state);
         while (token != nullptr) {
             size_t len = state - token;
             while (len && token[len - 1] == 0) {

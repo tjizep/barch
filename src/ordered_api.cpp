@@ -5,6 +5,8 @@
 #include "ordered_api.h"
 #include <cstdlib>
 #include "sharded_store.h"
+#include <map>
+#include <cmath>
 #include "key_type.h"
 #include "conversion.h"
 #include "art/art.h"
@@ -15,7 +17,13 @@
 #include "vk_caller.h"
 // TODO: one day this counters gonna wrap
 static std::atomic<int64_t> counter = art::now() * 1000000;
-#define IX_MEMBER ""
+// The marker that puts a member index key before the score keys of the same set.
+//
+// It was the bare literal "", which does not build an empty component: the const char*
+// form leaves out the separator, so the component after it merges in and the key came out
+// byte for byte identical to that of a set whose name really began with an 0x03. Two
+// different things with one encoding - see DONE 62.
+#define IX_MEMBER conversion::empty_component()
 
 static thread_local composite cmd_ZADD_q1;
 static thread_local composite cmd_ZADD_qindex;
@@ -148,7 +156,24 @@ void remove_ordered(caller& call, ordered_keys &thing) {
 }
 
 
+/**
+ * A score as redis reads one: the C library's parse, so inf and exponent forms are
+ * numbers, and only nan and a word that is not a number at all are refused.
+ *
+ * conversion::to_double is stricter than that and rejects "inf", which made ZINCRBY refuse
+ * an increment redis stores happily.
+ */
+static bool read_score(art::value_type v, double& out) {
+    std::string t(v.chars(), v.size);
+    if (t.empty()) return false;
+    char *tail = nullptr;
+    out = std::strtod(t.c_str(), &tail);
+    if (tail != t.c_str() + t.size()) return false;
+    return !std::isnan(out);
+}
+
 extern "C"
+
 int ZADD(caller& call, const arg_t &argv) {
 
     if (argv.size() < 4)
@@ -165,6 +190,11 @@ int ZADD(caller& call, const arg_t &argv) {
     }
 
     barch::sharded_store kstore(call.kspace());
+    // a name already holding a plain value, a list or a hash is not an ordered set to add
+    // members to. Before the lock, because this routes to shards of its own - key_type.h
+    if (!barch::container_writable(kstore, key, barch::container_kind::ordered_map)) {
+        return call.push_error(barch::wrong_type_message());
+    }
     auto t = kstore.write_locked(key);
 
     zspec.LFI = true;
@@ -189,13 +219,25 @@ int ZADD(caller& call, const arg_t &argv) {
         }
         auto v =argv[n + 1];
 
+        // the score is judged before the key check, because an empty or unreadable score
+        // is a bad score rather than a bad key - `ZADD z '' m` used to answer as though it
+        // had worked, and so did `ZADD z nan m`
+        double sc = 0;
+        if (!read_score(k, sc)) {
+            return call.push_error("value is not a valid float");
+        }
         if (key_ok(k) != 0 || key_ok(v) != 0) {
             r |= call.push_null();
             ++responses;
             continue;
         }
 
-        auto score = conversion::convert(k, true);
+        // the score is encoded from the number already parsed rather than from the text
+        // again. The text reader does not accept "inf", so a positive infinity was being
+        // stored as the string "inf" - a component of a different shape - and every read
+        // of that member afterwards missed it. -inf happened to survive, which is why the
+        // two behaved differently
+        auto score = conversion::comparable_key(sc);
         auto member = conversion::convert(v);
         if (score.ctype() != art::tfloat && score.ctype() != art::tdouble) {
             r |= call.push_null();
@@ -203,7 +245,7 @@ int ZADD(caller& call, const arg_t &argv) {
             continue;
         }
 
-        art::value_type qkey = cmd_ZADD_q1.create({container, score, member});
+        art::value_type qkey = cmd_ZADD_q1.create(art::ts_ordered_map, {container, score, member});
         if (zspec.XX) {
             t->update(qkey, [&](const art::node_ptr &old) -> art::node_ptr {
                 if (old.null()) return nullptr;
@@ -213,7 +255,7 @@ int ZADD(caller& call, const arg_t &argv) {
             });
         } else {
             if (zspec.LFI) {
-                auto member_key = cmd_ZADD_qindex.create({IX_MEMBER, container, member}); //, score
+                auto member_key = cmd_ZADD_qindex.create(art::ts_ordered_map, {IX_MEMBER, container, member}); //, score
                 t->insert({}, member_key, qkey, true, fcfk);
                 ++fkadded;
             }
@@ -251,8 +293,8 @@ int ZREM(caller& call, const arg_t& argv) {
     auto t = kstore.write_locked(argv[1]);
     auto container = conversion::convert(key);
     query q1, qmember;
-    q1->create({container});
-    auto member_prefix = qmember->create({IX_MEMBER, container});
+    q1->create(art::ts_ordered_map, {container});
+    auto member_prefix = qmember->create(art::ts_ordered_map, {IX_MEMBER, container});
     for (size_t n = 2; n < argv.size(); ++n) {
         auto mem = argv[n];
 
@@ -263,16 +305,23 @@ int ZREM(caller& call, const arg_t& argv) {
         }
 
         auto member = conversion::convert(mem);
-        conversion::comparable_key id{++counter};
         qmember->push(member);
-        art::iterator byscore(t, qmember->create());
+        art::value_type wanted = qmember->create();
+        art::iterator byscore(t, wanted);
         if (byscore.ok()) {
             auto kscore = byscore.key();
-            if (!kscore.starts_with(member_prefix.pref(1))) break;
-            auto fkmember = byscore.value();
-            t->remove(fkmember);
-            if (byscore.remove()) {
-                ++removed;
+            // the iterator is a lower bound, so a member that is not there lands on
+            // whichever member comes after it. Two things went wrong with that: the walk
+            // broke out of the whole loop rather than skipping the one member, so
+            // `ZREM k missing present` removed nothing and answered 0; and the key it
+            // landed on was never checked against the one asked for, so the member that
+            // happened to be next could be removed in place of the one that was not there
+            if (kscore == wanted) {
+                auto fkmember = byscore.value();
+                t->remove(fkmember);
+                if (byscore.remove()) {
+                    ++removed;
+                }
             }
         }
         qmember->pop(1);
@@ -297,14 +346,21 @@ int ZINCRBY(caller& call, const arg_t& argv) {
         return call.push_null();
     }
     barch::sharded_store kstore(call.kspace());
+    // ZINCRBY creates the set when it is not there, so it claims the name like ZADD does
+    if (!barch::container_writable(kstore, argv[1], barch::container_kind::ordered_map)) {
+        return call.push_error(barch::wrong_type_message());
+    }
     auto t = kstore.write_locked(argv[1]);
     auto fcfk = [&](const art::node_ptr& ) -> void {
         ++updated;
     };
 
     double incr = 0.0f;
-    if (!conversion::to_double(argv[2], incr)) {
-        return call.push_error("invalid argument");
+    // an infinite increment is allowed - redis stores it and only complains when the
+    // arithmetic would produce a nan, which is adding opposite infinities. A nan handed
+    // in directly is refused here, in redis's wording rather than "invalid argument"
+    if (!read_score(argv[2], incr)) {
+        return call.push_error("value is not a valid float");
     }
     auto v = argv[3];
 
@@ -315,8 +371,8 @@ int ZINCRBY(caller& call, const arg_t& argv) {
     auto target_member = target.get_value();
     auto container = conversion::convert(key);
     query q1, q2, qfield;
-    art::value_type field_key = qfield->create({IX_MEMBER, container, target});
-    auto prefix = q1->create({container},false);
+    art::value_type field_key = qfield->create(art::ts_ordered_map, {IX_MEMBER, container, target});
+    auto prefix = q1->create(art::ts_ordered_map, {container},false);
 
     art::iterator fields(t, field_key);
     if (fields.ok()) {
@@ -332,6 +388,11 @@ int ZINCRBY(caller& call, const arg_t& argv) {
                     if (target_member == member) {
                         double number = conversion::enc_bytes_to_dbl(encoded_number);
                         number += incr;
+                        // adding opposite infinities is the one arithmetic redis refuses,
+                        // because the result cannot be ordered against anything
+                        if (std::isnan(number)) {
+                            return call.push_error("resulting score is not a number (NaN)");
+                        }
                         q1->push(conversion::comparable_key(number));
                         q1->push(member);
                         art::value_type qkey = q1->create();
@@ -354,14 +415,18 @@ int ZINCRBY(caller& call, const arg_t& argv) {
 
 
     if (responses == 0) {
-        auto score = conversion::comparable_key(incr);
-        auto member = conversion::convert(v);
-        q1->push(score);
-        q1->push(member);
-        art::value_type qkey = q1->create();
-        art::value_type qv = v ;
-        t->insert( {}, qkey, qv, true, fcfk);
-        q1->pop(2);
+        // A member has two keys: the score ordered one, and its entry in the member index
+        // that says where to find it. This branch wrote only the first, so nothing could
+        // find the member afterwards - ZSCORE answered nil, and the next ZINCRBY did not
+        // find it either, so instead of adding to the score it wrote a second entry for
+        // the same member. That is where the duplicate in a ZRANGE reply came from, which
+        // TODO 64 had put down to the translated tests leaning on each other. It was this.
+        composite score_key, member_key;
+        auto mk = conversion::convert(v);
+        score_key.create(art::ts_ordered_map, {container, conversion::comparable_key(incr), mk});
+        member_key.create(art::ts_ordered_map, {IX_MEMBER, container, mk});
+        ordered_keys fresh(score_key, member_key, v);
+        insert_ordered(call, fresh);
         return call.push_double(incr);
     }
 
@@ -392,9 +457,9 @@ int ZCOUNT(caller& call, const arg_t& argv) {
     auto mn = conversion::convert(smin, minlen, true);
     auto mx = conversion::convert(smax, maxlen, true);
     query lq, uq, pq;
-    auto lower = lq->create({container, mn});
-    auto prefix = pq->create({container});
-    auto upper = uq->create({container, mx});
+    auto lower = lq->create(art::ts_ordered_map, {container, mn});
+    auto prefix = pq->create(art::ts_ordered_map, {container});
+    auto upper = uq->create(art::ts_ordered_map, {container, mx});
     long long count = 0;
     art::iterator ai(t, lower);
     while (ai.ok()) {
@@ -444,8 +509,8 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
 
     auto container = conversion::convert(spec.key);
     query lq, pq;
-    auto lower = lq->create({container});
-    auto prefix = pq->create({container}, false);
+    auto lower = lq->create(art::ts_ordered_map, {container});
+    auto prefix = pq->create(art::ts_ordered_map, {container}, false);
 
     // one pass in key order, which is score order. The members are held as they are
     // found, the way the existing REV path already does, and the shard stays locked
@@ -482,24 +547,55 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
 static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec) {
 
     auto container = conversion::convert(spec.key);
-    auto mn = conversion::convert(spec.start, true);
-    auto mx = conversion::convert(spec.stop, true);
-    query lq, uq, pq, tq;
+    // A lex bound carries the character that says whether its end is open - `[a` includes
+    // a, `(a` excludes it, and `-` and `+` are the ends of the range. barch only ever
+    // understood the bare form, so the bracket has to come off before the bound is
+    // encoded, or `[a` looks for a member whose name starts with a bracket
+    std::string lex_start(spec.start);
+    std::string lex_stop(spec.stop);
+    bool lex_open_start = false, lex_open_stop = false;
+    // `-` and `+` are the ends of the range rather than members, so they bound nothing
+    bool lex_from_start = false, lex_to_end = false;
+    if (spec.BYLEX) {
+        auto strip = [](std::string v, bool& open) -> std::string {
+            if (v.empty()) return v;
+            if (v[0] == '(' || v[0] == '[') {
+                open = (v[0] == '(');
+                return v.substr(1);
+            }
+            return v;
+        };
+        lex_from_start = (lex_start == "-");
+        lex_to_end = (lex_stop == "+");
+        if (!lex_from_start) lex_start = strip(lex_start, lex_open_start);
+        if (!lex_to_end) lex_stop = strip(lex_stop, lex_open_stop);
+    }
+    auto mn = conversion::convert(spec.BYLEX ? lex_start : std::string(spec.start), true);
+    auto mx = conversion::convert(spec.BYLEX ? lex_stop : std::string(spec.stop), true);
+    query lq, uq, pq, tq, xq;
+    art::value_type upper_exact;
     art::value_type lower;
     art::value_type prefix;
     art::value_type nprefix;
     art::value_type upper;
     if (spec.BYLEX) {
         // it is implied that mn and mx are non-numeric strings
-        lower = lq->create({IX_MEMBER, container, mn});
-        prefix = pq->create({IX_MEMBER, container},false);
-        nprefix = tq->create({container},false);
-        upper = uq->create({IX_MEMBER, container, mx},false);
+        prefix = pq->create(art::ts_ordered_map, {IX_MEMBER, container},false);
+        nprefix = tq->create(art::ts_ordered_map, {container},false);
+        // `-` starts at the first member there is, which is the prefix itself
+        lower = lex_from_start ? prefix
+                               : lq->create(art::ts_ordered_map, {IX_MEMBER, container, mn});
+        upper = uq->create(art::ts_ordered_map, {IX_MEMBER, container, mx},false);
+        // the whole key for the member the stop names, which is what an exclusive stop has
+        // to recognise. Comparing the truncated form cannot do it: the member equal to the
+        // bound is a prefix of it and so reads as less than, which is exactly the case
+        // being excluded
+        upper_exact = xq->create(art::ts_ordered_map, {IX_MEMBER, container, mx});
     } else {
-        lower = lq->create({container, mn});
-        prefix = pq->create({container},false);
+        lower = lq->create(art::ts_ordered_map, {container, mn});
+        prefix = pq->create(art::ts_ordered_map, {container},false);
         nprefix = prefix;
-        upper = uq->create({container, mx},false);
+        upper = uq->create(art::ts_ordered_map, {container, mx},false);
     }
     long long count = 0;
     long long replies = 0;
@@ -515,6 +611,16 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         if (!v.starts_with(prefix)) {
             break;
         }
+        // an exclusive start names a member that is not in the range. The walk begins at
+        // that member, so it is the first entry and skipping it is the whole of it
+        if (spec.BYLEX && lex_open_start && v == lower) {
+            ai.next();
+            continue;
+        }
+        // an exclusive stop ends the walk at the member it names, before reporting it
+        if (spec.BYLEX && lex_open_stop && !lex_to_end && v == upper_exact) {
+            break;
+        }
         art::value_type current_comp;
         if (spec.BYLEX) {
             current_comp = v.sub(0, prefix.size + mx.get_size() - 1);
@@ -522,7 +628,10 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         } else {
             current_comp = v.sub(0, prefix.size + numeric_key_size);
         }
-        if (current_comp <= upper) {
+        // `+` has no upper bound to compare against, and an exclusive stop excludes the
+        // member it names rather than including it
+        bool within = (spec.BYLEX && lex_to_end) || current_comp <= upper;
+        if (within) {
             bool doprint = !spec.count;
 
             if (spec.count && count >= spec.offset && (count - spec.offset < spec.count)) {
@@ -545,9 +654,9 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                 if (!pushed && spec.REMOVE) // scheduled for removal
                 {
                     composite score_key, member_key;
-                    score_key.create({container, encoded_number, member});
+                    score_key.create(art::ts_ordered_map, {container, encoded_number, member});
                     // fyi: member key means lex key
-                    member_key.create({IX_MEMBER, container, member});
+                    member_key.create(art::ts_ordered_map, {IX_MEMBER, container, member});
                     removals.push_back({score_key, member_key, art::value_type()});
                 }
                 if (!pushed && !spec.REMOVE) // bylex should be in correct order
@@ -639,8 +748,8 @@ int ZCARD(caller& call, const arg_t& argv) {
 
     auto container = conversion::convert(n);
     query lq, uq;
-    auto lower = lq->create({container});
-    auto upper = uq->create({container, art::ts_end});
+    auto lower = lq->create(art::ts_ordered_map, {container});
+    auto upper = uq->create(art::ts_ordered_map, {container, art::ts_end});
     long long count = 0;
     art::iterator ai(t, lower);
     while (ai.ok()) {
@@ -674,174 +783,213 @@ static double rnd(double f) {
     return f;
 }
 
+/**
+ * Is `member` in this ordered set, and at what score?
+ *
+ * Through the member index, which is what it is for. The set algebra used to ask a
+ * different question - it sought the other set at `{set, score}` and checked whether the
+ * score sitting there matched - so it answered "does that set hold anything with the same
+ * score", and two sets sharing a score looked like a match whatever their members were.
+ * That is why an intersection came back looking like a union.
+ */
+static bool member_score(barch::sharded_store& kstore, const std::string& set,
+                         art::value_type member, double& out) {
+    composite mq, cq;
+    auto container = conversion::convert(art::value_type{set});
+    art::value_type mkey = mq.create(art::ts_ordered_map,
+                                     {IX_MEMBER, container, conversion::comparable_key(member)});
+    art::value_type prefix = cq.create(art::ts_ordered_map, {container}, false);
+    bool found = false;
+    kstore.with_container_read(art::value_type{set}, [&](const barch::shard_ptr& t) {
+        auto n = t->search(mkey);
+        if (n.null() || !n.is_leaf) return;
+        auto l = n.const_leaf();
+        if (l->is_tomb() || l->deleted() || l->expired()) return;
+        // the index holds the score key, and the score is the component after the name
+        auto sk = l->get_value();
+        if (sk.size < prefix.size + numeric_key_size) return;
+        out = conversion::enc_bytes_to_dbl(sk.sub(prefix.size, numeric_key_size));
+        found = true;
+    });
+    return found;
+}
+
+/** every member of one ordered set, with its score */
+static void each_member(barch::sharded_store& kstore, const std::string& set,
+                        const std::function<void(art::value_type, double)>& cb) {
+    composite lq;
+    auto container = conversion::convert(art::value_type{set});
+    art::value_type lower = lq.create(art::ts_ordered_map, {container});
+    kstore.with_container_read(art::value_type{set}, [&](const barch::shard_ptr& t) {
+        for (art::iterator i(t, lower); i.ok(); i.next()) {
+            auto v = i.key();
+            if (!v.starts_with(lower.pref(1))) break;
+            if (v.size < lower.size + numeric_key_size) continue;
+            const art::leaf *l = i.l();
+            if (!l || l->is_tomb() || l->deleted() || l->expired()) continue;
+            auto encoded_number = v.sub(lower.size, numeric_key_size);
+            cb(v.sub(lower.size + numeric_key_size),
+               conversion::enc_bytes_to_dbl(encoded_number));
+        }
+    });
+}
+
+/**
+ * ZUNION, ZINTER and ZDIFF, and the STORE and CARD forms of them.
+ *
+ * One member of the result is one member of the inputs, and its score is what AGGREGATE
+ * says to do with the scores it had in each input it appeared in, after each of those was
+ * multiplied by that input's WEIGHT. Both of those used to be wrong in the same way: the
+ * weight was indexed by how far through the first set the walk had got rather than by
+ * which set the score came from, and only the first set's score was ever used, so the
+ * aggregate had nothing to aggregate.
+ *
+ * A union has to walk every input, not just the first. That is why it was left unfinished -
+ * the shape of the old loop could not express it.
+ */
 static int ZOPER(
     caller& call,
     const arg_t& argv,
     ops operate,
     art::value_type store = {},
     bool card = false,
-    bool removal = false) {
+    bool removal = false,
+    const char *named = "zunion") {
 
-    if (argv.size() < 4)
+    // three is enough: a count and one input. It used to want four, so a single input set
+    // - which redis allows and its tests use - was refused as a wrong argument count
+    if (argv.size() < 3)
         return call.wrong_arity();
     art::zops_spec spec(argv);
 
     if (spec.parse_options() != call.ok()) {
-        return call.push_error("syntax error");
-    }
-    if (spec.aggr == art::zops_spec::agg_none && store.empty())
-        call.start_array();
-    long long replies = 0;
-    double aggr = 0.0f;
-    size_t count = 0;
-    size_t results_added = 0;
-    heap::vector<ordered_keys> new_keys;
-    heap::vector<ordered_keys> removed_keys;
-
-    size_t ks = spec.keys.size();
-    auto fk = spec.keys.begin();
-    switch (spec.aggr) {
-        case art::zops_spec::agg_none:
-        case art::zops_spec::avg:
-        case art::zops_spec::sum:
-            break;
-        case art::zops_spec::min:
-            aggr = std::numeric_limits<double>::max();
-            break;
-        case art::zops_spec::max:
-            aggr = std::numeric_limits<double>::min();
-            break;
-    }
-
-    if (spec.aggr == art::zops_spec::min) {
-        aggr = std::numeric_limits<double>::max();
-    }
-    if (fk != spec.keys.end()) {
-        barch::sharded_store kstore(call.kspace());
-        auto t = kstore.write_locked(*fk);
-
-        query lq, uq;
-        auto container = conversion::convert(*fk);
-        auto lower = lq->create({container});
-
-        art::iterator i(t, lower);
-
-        for (; i.ok();) {
-            auto v = i.key();
-            if (!v.starts_with(lower.pref(1))) break;
-            auto encoded_number = v.sub(lower.size, numeric_key_size);
-            auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-            auto number = conversion::enc_bytes_to_dbl(encoded_number);
-
-            size_t found_count = 0;
-            auto ok = spec.keys.begin();
-            ++ok;
-
-            for (; ok != spec.keys.end(); ++ok) {
-                query tainerq, checkq;
-                auto check_set = conversion::convert(*ok);
-                auto check_tainer = tainerq->create({check_set});
-                auto check = checkq->create({check_set, conversion::comparable_key(number)});
-                art::iterator j(kstore.shard_for(*ok), check);
-                bool found = false;
-                if (j.ok()) {
-                    auto kf = j.key();
-                    if (!kf.starts_with(check.pref(1))) break;
-
-                    auto efn = kf.sub(check_tainer.size, numeric_key_size);
-                    auto fn = conversion::enc_bytes_to_dbl(efn);
-                    found = fn == number;
-                }
-                if (found) found_count++;
-            }
-
-            if (count < spec.weight_values.size()) {
-                number *= spec.weight_values[count];
-            }
-            bool add_result = false;
-            switch (operate) {
-                case intersect:
-                    add_result = (found_count == ks - 1);
-                    break;
-                case difference:
-                    add_result = (found_count == 0);
-                    break;
-                case onion: // union lol, does not work yet
-
-                    break;
-            }
-            if (add_result) {
-                ++results_added;
-                switch (spec.aggr) {
-                    case art::zops_spec::agg_none:
-                        if (store.empty()) {
-                            call.push_encoded_key(member);
-                            ++replies;
-                            if (spec.has_withscores) {
-                                call.push_encoded_key(encoded_number);
-                                ++replies;
-                            }
-                        } else {
-                            // this is possible because the art tree is guaranteed not to reallocate
-                            // anything during the compressed_release scope
-                            if (!card) {
-                                composite score_key, member_key;
-                                if (removal) {
-                                    score_key.create({container, encoded_number, member});
-                                    member_key.create({IX_MEMBER, container, member});
-                                    removed_keys.emplace_back(score_key, member_key, i.value());
-                                } else {
-                                    score_key.create({conversion::convert(store), encoded_number, member});
-                                    member_key.create({IX_MEMBER, conversion::convert(store), member});
-                                    new_keys.emplace_back(score_key, member_key, i.value());
-                                }
-                            }
-                            replies++;
-                        }
-
-                        break;
-                    case art::zops_spec::avg:
-                    case art::zops_spec::sum:
-                        aggr += rnd(number);
-                        break;
-                    case art::zops_spec::min:
-                        aggr = std::min(rnd(number), aggr);
-                        break;
-                    case art::zops_spec::max:
-                        aggr = std::max(rnd(number), aggr);
-                        break;
-                }
-            }
-            ++count;
-            i.next();
+        if (spec.bad_limit) {
+            return call.push_error("LIMIT can't be negative");
         }
+        if (spec.no_keys) {
+            return call.push_error(("at least 1 input key is needed for '"
+                                    + std::string(named) + "' command").c_str());
+        }
+        return call.syntax_error();
+    }
+    if (spec.keys.empty()) {
+        return call.push_error(("at least 1 input key is needed for '"
+                                + std::string(named) + "' command").c_str());
+    }
+    // a STORE form writes a set rather than answering one, so it has nowhere to put the
+    // scores WITHSCORES asks for - redis calls that a syntax error and its tests check it
+    if (!store.empty() && spec.has_withscores) {
+        return call.syntax_error();
+    }
+    barch::sharded_store kstore(call.kspace());
+
+    auto weight_of = [&](size_t which) -> double {
+        return which < spec.weight_values.size() ? spec.weight_values[which] : 1.0;
+    };
+    auto combine = [&](double have, double add, size_t seen) -> double {
+        switch (spec.aggr) {
+            case art::zops_spec::min: return seen ? std::min(have, add) : add;
+            case art::zops_spec::max: return seen ? std::max(have, add) : add;
+            default:                  return seen ? have + add : add;   // sum, and the default
+        }
+    };
+
+    // member bytes to the score it has earned so far, and how many inputs it came from.
+    // the encoded member is the identity here, exactly as it is in the store
+    struct acc { double score{}; size_t seen{}; };
+    std::map<std::string, acc> gathered;
+    heap::std_vector<std::string> order;   // first appearance, so a tie is stable
+
+    auto note = [&](art::value_type member, double score, size_t which) {
+        std::string id(member.chars(), member.size);
+        auto it = gathered.find(id);
+        if (it == gathered.end()) {
+            order.push_back(id);
+            gathered[id] = acc{score * weight_of(which), 1};
+        } else {
+            it->second.score = combine(it->second.score, score * weight_of(which), it->second.seen);
+            ++it->second.seen;
+        }
+    };
+
+    if (operate == onion) {
+        for (size_t k = 0; k < spec.keys.size(); ++k) {
+            each_member(kstore, spec.keys[k], [&](art::value_type m, double sc) {
+                note(m, sc, k);
+            });
+        }
+    } else {
+        // intersection and difference are both decided by the first set's members
+        each_member(kstore, spec.keys[0], [&](art::value_type m, double sc) {
+            size_t found = 0;
+            double total = sc * weight_of(0);
+            size_t seen = 1;
+            for (size_t k = 1; k < spec.keys.size(); ++k) {
+                double other = 0;
+                if (member_score(kstore, spec.keys[k], m, other)) {
+                    ++found;
+                    total = combine(total, other * weight_of(k), seen);
+                    ++seen;
+                }
+            }
+            bool keep = (operate == intersect) ? (found == spec.keys.size() - 1)
+                                               : (found == 0);
+            if (keep) {
+                std::string id(m.chars(), m.size);
+                order.push_back(id);
+                gathered[id] = acc{total, seen};
+            }
+        });
     }
 
-    for (auto &ordered_keys: new_keys) {
-        insert_ordered(call, ordered_keys);
+    if (card) {
+        long long n = (long long) order.size();
+        if (spec.limit > 0 && n > spec.limit) n = spec.limit;
+        return call.push_ll(n);
     }
-    for (auto &ordered_keys: removed_keys) {
-        remove_ordered(call, ordered_keys);
-    }
-    if (replies == 0 && spec.aggr != art::zops_spec::agg_none) {
-        return call.push_double(results_added > 0 ? aggr : 0.0f);
-    }
-    // the same condition the array was opened under further up. it used to close on
-    // store.empty() alone, so an aggregating call with no destination would close an
-    // array it never opened - a no-op, since end_array does nothing with an empty
-    // stack, but it read as though the two were paired when they were not
-    if (spec.aggr == art::zops_spec::agg_none && store.empty()) {
+
+    // redis answers these in score order, and by member where scores tie
+    std::stable_sort(order.begin(), order.end(),
+        [&](const std::string& a, const std::string& b) {
+            double sa = gathered[a].score;
+            double sb = gathered[b].score;
+            if (sa != sb) return sa < sb;
+            return a < b;
+        });
+
+    if (store.empty()) {
+        call.start_array();
+        for (const auto& id : order) {
+            call.push_encoded_key(art::value_type{id});
+            if (spec.has_withscores) {
+                call.push_double(gathered[id].score);
+            }
+        }
         call.end_array();
-    } else if (!store.empty()) {
-        return call.push_ll(replies);
+        return call.ok();
     }
 
-    return call.ok();
+    // the destination is replaced, not added to, which is what redis does with it
+    barch::remove_container(kstore, store);
+    for (const auto& id : order) {
+        composite score_key, member_key;
+        auto dest = conversion::convert(store);
+        art::value_type member{id};
+        conversion::comparable_key sc(gathered[id].score);
+        conversion::comparable_key mk(member);
+        score_key.create(art::ts_ordered_map, {dest, sc, mk});
+        member_key.create(art::ts_ordered_map, {IX_MEMBER, dest, mk});
+        ordered_keys ok(score_key, member_key, {});
+        insert_ordered(call, ok);
+    }
+    (void) removal;
+    return call.push_ll((long long) order.size());
 }
+
 extern "C"
 int ZDIFF(caller& call, const arg_t& argv) {
     try {
-        return ZOPER(call, argv, difference);
+        return ZOPER(call, argv, difference, {}, false, false, "zdiff");
     } catch (std::exception &e) {
         barch::err({e.what(), __FILE__, __LINE__});
     }
@@ -863,7 +1011,7 @@ int ZDIFFSTORE(caller& call, const arg_t& argv) {
         return call.push_error("syntax error");
     arg_t narg;
     std::copy(++argv.begin(), argv.end(), std::back_inserter(narg));
-    return ZOPER(call, narg, difference, member);
+    return ZOPER(call, narg, difference, member, false, false, "zdiffstore");
 }
 
 int cmd_ZDIFFSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -881,16 +1029,221 @@ int ZINTERSTORE(caller& call, const arg_t& argv) {
         return call.push_error("syntax error");
     arg_t narg;
     std::copy(++argv.begin(), argv.end(), std::back_inserter(narg));
-    return ZOPER(call, narg, intersect, member);
+    return ZOPER(call, narg, intersect, member, false, false, "zinterstore");
 }
 
 int cmd_ZINTERSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZINTERSTORE);
 }
+/**
+ * ZRANDMEMBER key [count [WITHSCORES]]
+ *
+ * HRANDFIELD over an ordered set, and it follows it closely (DONE 54): no count answers
+ * one member, a positive count answers that many distinct ones, a negative count answers
+ * exactly that many and allows repeats. The same bound applies for the same reason - the
+ * whole reply is built before it is sent, so a magnitude past a million is refused rather
+ * than attempted.
+ */
+/**
+ * ZREMRANGEBYSCORE key min max - remove every member whose score falls in the range.
+ *
+ * Both ends are inclusive, and each member has two keys to remove: the score ordered one
+ * and its entry in the member index. Removing while walking would invalidate the iterator,
+ * so the range is collected first and the run is the size of what is being removed rather
+ * than the size of the set.
+ */
+extern "C"
+int ZREMRANGEBYSCORE(caller& call, const arg_t& argv) {
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    if (key_ok(argv[1]) != 0)
+        return call.push_null();
+    double lo = 0, hi = 0;
+    if (!read_score(argv[2], lo) || !read_score(argv[3], hi)) {
+        return call.push_error("min or max is not a float");
+    }
+    barch::sharded_store kstore(call.kspace());
+    if (barch::kind_of(kstore, argv[1]) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    std::string set(argv[1].chars(), argv[1].size);
+    heap::std_vector<std::string> doomed;
+    each_member(kstore, set, [&](art::value_type m, double sc) {
+        if (sc < lo || sc > hi) return;
+        doomed.emplace_back(m.chars(), m.size);
+    });
+    long long removed = 0;
+    auto container = conversion::convert(argv[1]);
+    for (const auto& id : doomed) {
+        double sc = 0;
+        art::value_type member{id};
+        if (!member_score(kstore, set, member, sc)) continue;
+        composite score_key, member_key;
+        conversion::comparable_key mk(member);
+        score_key.create(art::ts_ordered_map, {container, conversion::comparable_key(sc), mk});
+        member_key.create(art::ts_ordered_map, {IX_MEMBER, container, mk});
+        ordered_keys ok(score_key, member_key, {});
+        remove_ordered(call, ok);
+        ++removed;
+    }
+    return call.push_ll(removed);
+}
+int cmd_ZREMRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZREMRANGEBYSCORE);
+}
+
+extern "C"
+int ZRANDMEMBER(caller& call, const arg_t& argv) {
+    if (argv.size() < 2 || argv.size() > 4)
+        return call.wrong_arity();
+    if (key_ok(argv[1]) != 0)
+        return call.push_null();
+    bool counted = argv.size() > 2;
+    long long count = 1;
+    if (counted && !conversion::to_ll(argv[2], count)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+    bool with_scores = false;
+    if (argv.size() == 4) {
+        std::string opt(argv[3].chars(), argv[3].size);
+        for (auto& ch : opt) ch = (char) toupper(ch);
+        if (opt != "WITHSCORES") return call.syntax_error();
+        with_scores = true;
+    }
+    if (count < -std::numeric_limits<long long>::max()
+        || (with_scores && count < -(std::numeric_limits<long long>::max() / 2))
+        || count < -1000000) {
+        return call.push_error("value is out of range");
+    }
+    barch::sharded_store kstore(call.kspace());
+    if (barch::kind_of(kstore, argv[1]) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    std::string set(argv[1].chars(), argv[1].size);
+    heap::std_vector<std::string> members;
+    heap::std_vector<double> scores;
+    each_member(kstore, set, [&](art::value_type m, double sc) {
+        members.emplace_back(m.chars(), m.size);
+        scores.push_back(sc);
+    });
+    auto emit = [&](size_t ix) {
+        call.push_encoded_key(art::value_type{members[ix]});
+        if (with_scores) call.push_double(scores[ix]);
+    };
+    if (members.empty()) {
+        if (!counted) return call.push_null();
+        call.start_array();
+        call.end_array();
+        return call.ok();
+    }
+    if (!counted) {
+        call.push_encoded_key(art::value_type{members[std::rand() % members.size()]});
+        return call.ok();
+    }
+    call.start_array();
+    if (count < 0) {
+        for (long long i = 0; i < -count; ++i) emit(std::rand() % members.size());
+    } else {
+        heap::std_vector<size_t> order;
+        for (size_t i = 0; i < members.size(); ++i) order.push_back(i);
+        for (size_t i = order.size(); i > 1; --i) {
+            std::swap(order[i - 1], order[std::rand() % i]);
+        }
+        size_t want = std::min<size_t>((size_t) count, order.size());
+        for (size_t i = 0; i < want; ++i) emit(order[i]);
+    }
+    call.end_array();
+    return call.ok();
+}
+int cmd_ZRANDMEMBER(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZRANDMEMBER);
+}
+
+/**
+ * ZSCORE key member, and ZMSCORE key member [member ...]
+ *
+ * The score a member holds, or nil when the set or the member is not there - which is the
+ * one question the member index answers directly, so neither walks the set.
+ */
+extern "C"
+int ZSCORE(caller& call, const arg_t& argv) {
+    if (argv.size() != 3)
+        return call.wrong_arity();
+    if (key_ok(argv[1]) != 0)
+        return call.push_null();
+    barch::sharded_store kstore(call.kspace());
+    if (barch::kind_of(kstore, argv[1]) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    std::string set(argv[1].chars(), argv[1].size);
+    auto wanted = conversion::convert(argv[2]);
+    double score = 0;
+    if (!member_score(kstore, set, wanted.get_value(), score)) {
+        return call.push_null();
+    }
+    return call.push_double(score);
+}
+int cmd_ZSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZSCORE);
+}
+extern "C"
+int ZMSCORE(caller& call, const arg_t& argv) {
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    if (key_ok(argv[1]) != 0)
+        return call.push_null();
+    barch::sharded_store kstore(call.kspace());
+    if (barch::kind_of(kstore, argv[1]) == barch::key_kind::string) {
+        return call.push_error(barch::wrong_type_message());
+    }
+    std::string set(argv[1].chars(), argv[1].size);
+    call.start_array();
+    for (size_t i = 2; i < argv.size(); ++i) {
+        auto wanted = conversion::convert(argv[i]);
+        double score = 0;
+        if (member_score(kstore, set, wanted.get_value(), score)) {
+            call.push_double(score);
+        } else {
+            call.push_null();
+        }
+    }
+    call.end_array();
+    return call.ok();
+}
+int cmd_ZMSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZMSCORE);
+}
+extern "C"
+int ZUNION(caller& call, const arg_t& argv) {
+    return ZOPER(call, argv, onion, {}, false, false, "zunion");
+}
+int cmd_ZUNION(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZUNION);
+}
+extern "C"
+int ZUNIONSTORE(caller& call, const arg_t& argv) {
+    if (argv.size() < 4)
+        return call.wrong_arity();
+    auto dest = argv[1];
+    if (dest.empty())
+        return call.push_error("syntax error");
+    arg_t narg;
+    std::copy(++argv.begin(), argv.end(), std::back_inserter(narg));
+    return ZOPER(call, narg, onion, dest, false, false, "zunionstore");
+}
+int cmd_ZUNIONSTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZUNIONSTORE);
+}
 extern "C"
 int ZINTERCARD(caller& call, const arg_t& argv) {
-    return ZOPER(call, argv, intersect, {"#",1}, true);
+    return ZOPER(call, argv, intersect, {"#",1}, true, false, "zintercard");
 }
 
 int cmd_ZINTERCARD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -900,7 +1253,7 @@ int cmd_ZINTERCARD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 extern "C"
 int ZINTER(caller& call, const arg_t& argv) {
     try {
-        return ZOPER(call, argv, intersect);
+        return ZOPER(call, argv, intersect, {}, false, false, "zinter");
     } catch (std::exception &e) {
         barch::err({e.what(), __FILE__, __LINE__});
     }
@@ -932,7 +1285,7 @@ int ZPOPMIN(caller& call, const arg_t& argv) {
     }
     auto container = conversion::convert(k);
     query l, u;
-    auto lower = l->create({container});
+    auto lower = l->create(art::ts_ordered_map, {container});
     call.start_array();
 
     for (long long c = 0; c < count; ++c) {
@@ -982,8 +1335,8 @@ int ZPOPMAX(caller& call, const arg_t& argv) {
 
     auto container = conversion::convert(k);
     query l, u;
-    auto lower = l->create({container},false);
-    auto upper = u->create({container, art::ts_end});
+    auto lower = l->create(art::ts_ordered_map, {container},false);
+    auto upper = u->create(art::ts_ordered_map, {container, art::ts_end});
     call.start_array();
     for (long long c = 0; c < count; ++c) {
         art::iterator i(t, upper);
@@ -1045,6 +1398,31 @@ int cmd_ZREVRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, ZREVRANGE);
 }
 // this is deprecated in later redis and can be replaced by range using BYSCORE command
+/**
+ * A score range bound, as redis reads one: a number, or an exclusive form written with a
+ * leading `(`, or the words -inf and +inf. Refusing a bound that is none of those is the
+ * point - a caller with a typo used to get an empty reply and no complaint.
+ */
+static bool score_bound(art::value_type v, double& out) {
+    std::string t(v.chars(), v.size);
+    if (t.empty()) return false;
+    if (t[0] == '(') t.erase(0, 1);
+    if (t.empty()) return false;
+    return read_score(art::value_type{t}, out);
+}
+
+/**
+ * A lex range bound. redis requires the leading character to say whether the end is open,
+ * so `(a` and `[a` are bounds and a bare `a` is an error, with `-` and `+` meaning the
+ * ends of the range.
+ */
+static bool lex_bound(art::value_type v) {
+    if (v.size == 0) return false;
+    char c = v.chars()[0];
+    if (v.size == 1 && (c == '-' || c == '+')) return true;
+    return c == '(' || c == '[';
+}
+
 extern "C"
 int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
@@ -1054,6 +1432,10 @@ int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
+    }
+    double lo = 0, hi = 0;
+    if (!score_bound(argv[2], lo) || !score_bound(argv[3], hi)) {
+        return call.push_error("min or max is not a float");
     }
     spec.REV = false;
     spec.BYLEX = false;
@@ -1115,6 +1497,9 @@ int ZRANGEBYLEX(caller& call, const arg_t& argv) {
     art::zrange_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
+    }
+    if (!lex_bound(argv[2]) || !lex_bound(argv[3])) {
+        return call.push_error("min or max not valid string range item");
     }
     spec.REV = false;
     spec.BYLEX = true;
@@ -1180,8 +1565,8 @@ int ZRANK(caller& call, const arg_t& argv) {
 
     auto container = conversion::convert(c);
     query lq, pq;
-    auto lower = lq->create({container});
-    auto prefix = pq->create({container}, false);
+    auto lower = lq->create(art::ts_ordered_map, {container});
+    auto prefix = pq->create(art::ts_ordered_map, {container}, false);
 
     int64_t position = 0;
     bool found = false;
@@ -1239,8 +1624,8 @@ int ZFASTRANK(caller& call, const arg_t& argv) {
     auto container = conversion::convert(c);
     auto lower = conversion::convert(a, true);
     auto upper = conversion::convert(b, true);
-    auto min_key = qlower.create({container, lower},false);
-    auto max_key = qupper.create({container, upper}, false);
+    auto min_key = qlower.create(art::ts_ordered_map, {container, lower},false);
+    auto max_key = qupper.create(art::ts_ordered_map, {container, upper}, false);
     if (max_key < min_key) {
         return call.push_ll(0);
     }
@@ -1342,6 +1727,12 @@ void register_ordered_api(function_map& r) {
     r["ZDIFF"] = {::ZDIFF,{"read","orderedset","data"}};
     r["ZDIFFSTORE"] = {::ZDIFFSTORE,{"write","orderedset","data"}};
     r["ZINTERSTORE"] = {::ZINTERSTORE,{"write","orderedset","data"}};
+    r["ZREMRANGEBYSCORE"] = {::ZREMRANGEBYSCORE,{"write","orderedset","data"}};
+    r["ZRANDMEMBER"] = {::ZRANDMEMBER,{"read","orderedset","data"}};
+    r["ZSCORE"] = {::ZSCORE,{"read","orderedset","data"}};
+    r["ZMSCORE"] = {::ZMSCORE,{"read","orderedset","data"}};
+    r["ZUNION"] = {::ZUNION,{"read","orderedset","data"}};
+    r["ZUNIONSTORE"] = {::ZUNIONSTORE,{"write","orderedset","data"}};
     r["ZINTERCARD"] = {::ZINTERCARD,{"read","orderedset","data"}};
     r["ZINTER"] = {::ZINTER,{"read","orderedset","data"}};
     r["ZPOPMIN"] = {::ZPOPMIN,{"write","orderedset","data"}};

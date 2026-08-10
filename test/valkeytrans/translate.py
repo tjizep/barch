@@ -142,6 +142,7 @@ UNTRANSLATABLE = re.compile(
     r'populate|wait_for_condition|wait_for_ofs_sync|assert_replication_stream|'
     r'foreach|while|proc|for\s*\{|if\s*\{|lsort|lappend|llength|lindex|expr|'
     r'assert_morethan|assert_lessthan|assert_range|debug_sleep|reconnect|'
+    r'binary\s+format|binary\s+scan|string\s+repeat|randomInt|randstring|'
     r'wait_for_sync|assert_type|memory_usage)\b')
 
 
@@ -237,6 +238,71 @@ def parse_body(body):
     return steps, mode
 
 
+
+# tcl substitutes backslash escapes inside "quotes" and leaves them alone inside {braces}.
+# Ignoring that made every expectation containing a byte written as an escape unfaithful:
+# `"\x00foo"` was compared as the five characters \x00 rather than as a null and foo, and
+# valkey rejected the translation - correctly - before barch ever saw it.
+_TCL_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f",
+               "v": "\v", "\\": "\\", '"': '"', "{": "{", "}": "}", "[": "[", "]": "]",
+               "$": "$", " ": " "}
+
+
+def tcl_unescape(text):
+    """what tcl makes of a double quoted word - escapes resolved, everything else kept"""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        nxt = text[i + 1]
+        if nxt == "x":
+            j = i + 2
+            hexd = ""
+            while j < n and len(hexd) < 2 and text[j] in "0123456789abcdefABCDEF":
+                hexd += text[j]
+                j += 1
+            if hexd:
+                out.append(chr(int(hexd, 16)))
+                i = j
+                continue
+        if nxt in "01234567":
+            j = i + 1
+            octd = ""
+            while j < n and len(octd) < 3 and text[j] in "01234567":
+                octd += text[j]
+                j += 1
+            out.append(chr(int(octd, 8) & 0xFF))
+            i = j
+            continue
+        if nxt in _TCL_SIMPLE:
+            out.append(_TCL_SIMPLE[nxt])
+            i += 2
+            continue
+        out.append(nxt)
+        i += 2
+    return out and "".join(out) or ""
+
+
+def expected_value(kind, word):
+    """
+    the string an expectation compares against.
+
+    Only a bare word may be stripped. A quoted or braced one carries its whitespace on
+    purpose - `getrange` of "Hello World" from 5 answers " World", and stripping that
+    turned a faithful case into one valkey rejected.
+    """
+    if kind == "quote":
+        return tcl_unescape(word)
+    if kind == "brace":
+        return word
+    return word.strip()
+
+
 def parse_assert_equal(rest):
     """assert_equal {expected} [r cmd ...] -> a step that checks one reply"""
     words = split_words(rest)
@@ -248,7 +314,7 @@ def parse_assert_equal(rest):
     m = re.match(r'^\s*r\s+(.*)$', w2)
     if not m:
         return None
-    return {"op": "expect", "args": tcl_args(m.group(1)), "value": w1.strip()}
+    return {"op": "expect", "args": tcl_args(m.group(1)), "value": expected_value(k1, w1)}
 
 
 def parse_assert_error(rest):
@@ -289,6 +355,13 @@ def translate_file(path):
         except Unsupported as e:
             parsed = None
             entry["why"] = str(e)
+        except ValueError as e:
+            # the brace and quote scanners refuse what they cannot read, and a body they
+            # cannot read is a stub like any other. zset.tcl has one, and it used to take
+            # the whole run down with it - a translator that cannot skip a case it does not
+            # understand is a translator that stops at the first surprise
+            parsed = None
+            entry["why"] = "tcl this translator cannot scan: %s" % e
         if parsed is None:
             entry["skipped"] = True
             entry.setdefault("why", "body uses tcl this translator does not read")

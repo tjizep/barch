@@ -790,85 +790,16 @@
   {
    "name": "SETBIT against non-existing key",
    "expected": null,
-   "steps": [
-    {
-     "op": "cmd",
-     "args": [
-      "del",
-      "mykey"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "setbit",
-      "mykey",
-      "1",
-      "1"
-     ],
-     "value": "0"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "get",
-      "mykey"
-     ],
-     "value": "binary format B* 01000000"
-    }
-   ],
-   "mode": "asserts"
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mykey\n        assert_equal 0 [r setbit mykey 1 1]\n        assert_equal [binary format B* 01000000] [r get mykey]"
   },
   {
    "name": "SETBIT against string-encoded key",
    "expected": null,
-   "steps": [
-    {
-     "op": "cmd",
-     "args": [
-      "set",
-      "mykey",
-      "@"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "setbit",
-      "mykey",
-      "2",
-      "1"
-     ],
-     "value": "0"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "get",
-      "mykey"
-     ],
-     "value": "binary format B* 01100000"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "setbit",
-      "mykey",
-      "1",
-      "0"
-     ],
-     "value": "1"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "get",
-      "mykey"
-     ],
-     "value": "binary format B* 00100000"
-    }
-   ],
-   "mode": "asserts"
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Ascii \"@\" is integer 64 = 01 00 00 00\n        r set mykey \"@\"\n\n        assert_equal 0 [r setbit mykey 2 1]\n        assert_equal [binary format B* 01100000] [r get mykey]\n        assert_equal 1 [r setbit mykey 1 0]\n        assert_equal [binary format B* 00100000] [r get mykey]"
   },
   {
    "name": "SETBIT against integer-encoded key",
@@ -1162,7 +1093,7 @@
       "get",
       "mykey"
      ],
-     "value": "\\000foo"
+     "value": "\u0000foo"
     }
    ],
    "mode": "asserts"
@@ -1273,7 +1204,7 @@
       "get",
       "mykey"
      ],
-     "value": "foo\\000bar"
+     "value": "foo\u0000bar"
     }
    ],
    "mode": "asserts"
@@ -1433,7 +1364,7 @@
       "5",
       "5000"
      ],
-     "value": "World"
+     "value": " World"
     },
     {
      "op": "expect",
@@ -1608,8 +1539,8 @@
   {
    "name": "trim on SET with big value",
    "expected": null,
-   "why": "nested command substitution: [string repeat A 100000]",
    "skipped": true,
+   "why": "body uses tcl this translator does not read",
    "tcl": "# set a big value to trigger increasing the query buf\n        r set key [string repeat A 100000] \n        # set a smaller value but > PROTO_MBULK_BIG_ARG (32*1024) the server will try to save the query buf itself on the DB.\n        r set key [string repeat A 33000]\n        # asset the value was trimmed\n        assert {[r memory usage key] < 42000}; # 42K to count for Jemalloc's additional memory overhead."
   },
   {

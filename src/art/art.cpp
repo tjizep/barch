@@ -513,7 +513,21 @@ int art::range(const art::tree *t, art::value_type key, art::value_type key_end,
     try {
         art::trace_list tl;
         auto lb = inner_lower_bound(tl, t, key);
-        if (lb.null() || tl.empty()) return 0;
+        if (lb.null()) return 0;
+        // A tree that is a single leaf has no trace to walk: inner_lower_bound answers
+        // with the leaf itself and leaves the trace empty, since there is no parent to
+        // record and nothing to increment to. Bailing on that lost the leaf entirely, so
+        // any range over a shard holding exactly one key answered nothing - which is what
+        // made HLEN and HKEYS report an empty hash whenever it had one field, the field
+        // key being alone in the shard it routes to. See TODO 58.
+        if (tl.empty()) {
+            const art::leaf *only = lb.const_leaf();
+            if (only && !only->expired() && only->compare(key_end) <= 0) {
+                ++statistics::iter_range_ops;
+                return cb(data, only->get_key(), only->get_value());
+            }
+            return 0;
+        }
         const art::leaf *al = lb.const_leaf();
         if (al) {
             do {
@@ -1623,7 +1637,20 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                                 // the end of the key from matching
                                 if (td.size) --td.size;
                             }else {
-                                tmp = encoded_key_as_string(l->get_key());
+                                // matched by the name a container belongs to rather than
+                                // by each entry under it - see DONE 51. The name is the
+                                // decoded string rather than a slice of the key, because
+                                // an ordered set's index holds it in a different position
+                                // and only the decoded forms agree - see DONE 62
+                                tmp = encoded_container_name(l->get_key());
+                                if (tmp.empty()) {
+                                    if (art::is_container_lead(*l->get_key().bytes)) {
+                                        ++misses;      // the member index names nothing
+                                        i += l->next_leaf();
+                                        continue;
+                                    }
+                                    tmp = encoded_key_as_string(l->get_key());
+                                }
                                 td = tmp;
                             }
                         }

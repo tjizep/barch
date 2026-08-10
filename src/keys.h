@@ -27,6 +27,12 @@ Variable param_as_variant(art::value_type param);
 Variable encoded_key_as_variant(art::value_type key);
 
 std::string encoded_key_as_string(art::value_type key);
+/** the decoded name a container key belongs to, empty when the key is not a container's */
+std::string encoded_container_name(art::value_type key);
+/** true for a container's internal bookkeeping keys, which name nothing a caller wrote */
+bool is_container_internal(art::value_type key);
+/** the length of the lead plus the name component of a container key, 0 if not one */
+unsigned encoded_container_name_len(art::value_type key);
 
 unsigned log_encoded_key(art::value_type key, bool start = true);
 

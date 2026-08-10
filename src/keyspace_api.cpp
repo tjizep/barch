@@ -321,6 +321,20 @@ int cmd_SPACES(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 /* B.SIZE
  * @return the size or o.k.a. key count.
  */
+/**
+ * The number of keys stored, which is deliberately not redis's DBSIZE.
+ *
+ * redis counts one per name. barch counts one per stored key, and a collection stores a
+ * key per entry, so a hash with twenty fields weighs twenty here and one there. KEYS and
+ * SCAN were brought into line with redis and report names (DONE 51); this was not, and
+ * the difference is worth stating rather than hiding.
+ *
+ * The reason is what it would cost. This reads counters the shards already keep, so it
+ * answers without walking anything. Counting names instead means either a full walk of
+ * the key space on every call, or a second set of counters maintained on every container
+ * write - and barch's storage is different enough from redis's that the number would
+ * still not mean the same thing. A caller that wants names can count what KEYS answers.
+ */
 int SIZE(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)

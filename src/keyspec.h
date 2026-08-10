@@ -21,13 +21,73 @@ namespace barch {
     extern bool check_ks_name(const std::string& name_);
 }
 namespace art {
+
+
+
     /**
-         * the current time in milliseconds
-         */
+     * The current time in milliseconds since the unix epoch.
+     *
+     * This was `steady_clock` - milliseconds since the machine started - and every expiry
+     * in the store is measured against it. Within a single run that is coherent, which is
+     * why it went unnoticed: EXPIRE stored now+10000 and the key went when the clock
+     * passed it. Two things were wrong with it anyway. A caller handing over an absolute
+     * time, through EXAT or EXPIREAT, meant a unix time and was compared against a clock
+     * counting from boot, so the deadline landed decades out; and a deadline written to a
+     * shard file meant nothing after a restart, because the clock it was measured against
+     * restarted too.
+     *
+     * The cost of a wall clock is that it can step - an NTP correction moves every
+     * deadline relative to it. That is the behaviour redis has, and a stepped clock
+     * expiring keys early or late is a smaller surprise than a saved deadline that means
+     * something different tomorrow. See DONE 55.
+     */
     static int64_t now() {
         using namespace std::chrono;
-        return std::chrono::duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
     }
+
+/**
+ * A caller's expiry, in milliseconds since the epoch, or a refusal.
+ *
+ * `now() + given * 1000` overflows for a large enough EX, and a negative result is worse
+ * than a wrong one here: `leaf::make_size` treats any non-zero expiry as one that needs
+ * eight bytes reserved, while the leaf constructor only sets the expiry flag when it is
+ * positive. The two then disagree about how big the leaf is and `make_leaf` aborts - which
+ * inside valkey is a process that hangs rather than one that dies. `SET k v EX
+ * 10000000000000000` did exactly that.
+ *
+ * redis refuses these instead, with "invalid expire time in '<command>' command", and its
+ * own tests assert as much. So does this now.
+ *
+ * @param given    what the caller wrote
+ * @param seconds  true when the units are seconds and have to be multiplied up
+ * @param relative true when it is a duration from now rather than an absolute time
+ */
+inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) {
+    constexpr int64_t limit = std::numeric_limits<int64_t>::max();
+    int64_t ms = given;
+    if (seconds) {
+        if (given > limit / 1000 || given < -limit / 1000) return false;
+        ms = given * 1000;
+    }
+    if (relative) {
+        int64_t base = now();
+        if (ms > limit - base) return false;
+        ms += base;
+    } else if (ms <= 0) {
+        // an absolute form - EXAT, PXAT, EXPIREAT - is a unix time, and now that deadlines
+        // are unix times too there is nothing to convert. A moment already past is not an
+        // error: the caller is asking for the key to go, and 1 rather than 0 says so,
+        // since a zero expiry means "no expiry" rather than "expired"
+        out = 1;
+        return true;
+    }
+    // A deadline already past is not an error. redis takes it as an instruction to remove
+    // the key, and the callers here do that rather than refusing - see expire_command
+    out = ms;
+    return true;
+}
+
 
     struct base_key_spec {
         arg_t argv{};
@@ -160,6 +220,8 @@ namespace art {
     };
 
     struct key_spec : base_key_spec {
+        /** the expiry was a number, but not one that can be a deadline - see expiry_ms */
+        bool bad_expire = false;
         bool none = false;
         bool get = false;
         bool nx = false;
@@ -236,10 +298,10 @@ namespace art {
                     if (argc <= spos + 1) return VALKEYMODULE_ERR;
                     if (!is_integer(spos + 1)) return VALKEYMODULE_ERR;
                     int64_t given = tol(spos + 1);
-                    if (ex)   ttl = given * 1000 + now();
-                    if (px)   ttl = given + now();
-                    if (exat) ttl = given * 1000;
-                    if (pxat) ttl = given;
+                    if (!expiry_ms(given, ex || exat, ex || px, ttl)) {
+                        bad_expire = true;
+                        return VALKEYMODULE_ERR;
+                    }
                     seen_ttl = true;
                     spos += 2;
                     continue;
@@ -251,6 +313,13 @@ namespace art {
     };
 
     struct key_expire_spec : base_key_spec {
+        /** the expiry was a number, but not one that can be a deadline - see expiry_ms */
+        bool bad_expire = false;
+        /** what was wrong, when the parse can say something better than "syntax error" */
+        std::string reason;
+        /** EXPIRE reads seconds from now; PEXPIRE, EXPIREAT and PEXPIREAT vary both axes */
+        bool millis = false;
+        bool absolute = false;
         bool nx = false;
         bool xx = false;
         bool gt = false;
@@ -272,29 +341,46 @@ namespace art {
         int parse_options() {
 
             unsigned spos = 2; // the keys at one
-            if (!is_integer(spos))
-                return VALKEYMODULE_ERR;
-
-            ttl = tol(spos++);
-            ttl *= 1000;
-
-            if (argc <= spos)
-                return VALKEYMODULE_OK;
-
-            nx = has("nx", spos);
-            xx = has("xx", spos);
-            gt = has("gt", spos);
-            lt = has("lt", spos);
-            if (!nx && !xx && !gt && !lt) {
-                // the word in this position used to be consumed whatever it said, so
-                // `EXPIRE k 10 NONSENSE` was quietly taken as no condition at all
+            if (!is_integer(spos)) {
+                // an empty string, or a word - redis calls that a bad number rather than
+                // a bad command, and says which
+                reason = "value is not an integer or out of range";
                 return VALKEYMODULE_ERR;
             }
-            ++spos;
+
+            if (!expiry_ms(tol(spos++), !millis, !absolute, ttl)) {
+                bad_expire = true;
+                return VALKEYMODULE_ERR;
+            }
+
             if (argc <= spos)
                 return VALKEYMODULE_OK;
 
-            return VALKEYMODULE_ERR;
+            // every remaining word is a condition. Only one used to be read, and anything
+            // after it was refused, so `EXPIRE k 10 NX GT` could not say what was wrong
+            // with it - and what is wrong with it is that redis names the combination
+            while (spos < argc) {
+                if (has("nx", spos)) nx = true;
+                else if (has("xx", spos)) xx = true;
+                else if (has("gt", spos)) gt = true;
+                else if (has("lt", spos)) lt = true;
+                else {
+                    // the word in this position used to be consumed whatever it said, so
+                    // `EXPIRE k 10 NONSENSE` was quietly taken as no condition at all
+                    reason = "Unsupported option " + tos(spos);
+                    return VALKEYMODULE_ERR;
+                }
+                ++spos;
+            }
+            if (gt && lt) {
+                reason = "GT and LT options at the same time are not compatible";
+                return VALKEYMODULE_ERR;
+            }
+            if (nx && (xx || gt || lt)) {
+                reason = "NX and XX, GT or LT options at the same time are not compatible";
+                return VALKEYMODULE_ERR;
+            }
+            return VALKEYMODULE_OK;
         }
     };
 
@@ -593,6 +679,11 @@ namespace art {
         size_t numkeys{0};
         heap::std_vector<std::string> keys{};
         heap::std_vector<double> weight_values{};
+        /** ZINTERCARD stops counting here; 0 means no limit, which is also the default */
+        long long limit{0};
+        bool bad_limit{false};
+        /** numkeys was zero, which redis names rather than calling a syntax error */
+        bool no_keys{false};
 
         enum keyword_index {
             weights = 0,
@@ -625,12 +716,18 @@ namespace art {
 
         int parse_options() {
             unsigned spos = 1; // the key is the first one
-            if (argc < 4) {
+            // three is enough - a count and one input set. Four refused `ZUNION 1 s`,
+            // which redis accepts and its own tests use
+            if (argc < 3) {
                 return VALKEYMODULE_ERR;
             }
             if (is_integer(spos)) {
                 numkeys = tol(spos++);
             } else {
+                return VALKEYMODULE_ERR;
+            }
+            if (numkeys == 0) {
+                no_keys = true;
                 return VALKEYMODULE_ERR;
             }
 
@@ -647,8 +744,26 @@ namespace art {
                 return VALKEYMODULE_OK;
             }
             do {
-                unsigned which = has_enum({"weights", "aggregate", "withscores"}, spos);
+                unsigned which = has_enum({"weights", "aggregate", "withscores", "limit"}, spos);
                 switch (which) {
+                    case 3: // LIMIT, which only ZINTERCARD takes
+                        ++spos;
+                        // no value at all is a plain syntax error - the keyword is simply
+                        // incomplete. A value that is there but is not a count, whether a
+                        // word or a negative number, gets redis's LIMIT wording
+                        if (spos >= argc) {
+                            return VALKEYMODULE_ERR;
+                        }
+                        if (!is_integer(spos)) {
+                            bad_limit = true;
+                            return VALKEYMODULE_ERR;
+                        }
+                        limit = tol(spos++);
+                        if (limit < 0) {
+                            bad_limit = true;
+                            return VALKEYMODULE_ERR;
+                        }
+                        break;
                     case weights:
                         ++spos;
                         if (!weight_values.empty()) {
@@ -677,9 +792,10 @@ namespace art {
                         return VALKEYMODULE_ERR;
                 }
             } while (spos < argc);
-            if (has_withscores && aggr != agg_none) {
-                return VALKEYMODULE_ERR;
-            }
+            // WITHSCORES with AGGREGATE used to be refused here for everything, which is
+            // the rule for the STORE forms only - they have nowhere to put scores in a
+            // reply. ZUNION, ZINTER and ZDIFF take both, and the caller that has a
+            // destination is the one that knows to refuse it
             return VALKEYMODULE_OK;
         }
     };

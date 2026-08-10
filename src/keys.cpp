@@ -29,6 +29,14 @@ int key_ok(const char *k, size_t klen) {
     //}
     return 0;
 }
+bool fits_in_leaf(size_t key_bytes, size_t value_bytes) {
+    return key_bytes + value_bytes <= (size_t) maximum_allocation_size;
+}
+
+const char *too_large_message() {
+    return "string exceeds maximum allowed size";
+}
+
 int key_ok(art::value_type v) {
     return key_ok(v.chars(), v.size);
 }

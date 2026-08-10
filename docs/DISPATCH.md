@@ -4,14 +4,14 @@ Developer notes on the machinery behind the RESP surface: how a name becomes a h
 what the ACL categories on an entry actually do, and the behaviours that are decided at
 registration rather than inside the command.
 
-None of this is needed to *use* the commands. The list of them, with syntax and replies,
-is the RESP Command Index in `barch-docs.html`.
+None of this is needed to *use* the commands. The list of them, with syntax and replies, is
+the RESP Command Index, which is the front page of the documentation site (`docs/index.html`).
 
 ## What the index is built from
 
 Every command the RESP dispatcher will answer to comes from the registration tables in
-`src/*_api.cpp`. One hundred and fifty two names are registered over one hundred and
-forty nine handlers - the difference is aliases, where two names share one function, as
+`src/*_api.cpp`. One hundred and fifty four names are registered over one hundred and
+fifty one handlers - the difference is aliases, where two names share one function, as
 `GETRANGE` and `SUBSTR` do, and `FIRST` and `LB`.
 
 Three of a command's behaviours are decided at registration rather than inside the command

@@ -515,12 +515,20 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
     // one pass in key order, which is score order. The members are held as they are
     // found, the way the existing REV path already does, and the shard stays locked
     // for the whole call
-    heap::std_vector<art::value_type> found;
+    // score and member are kept separately because only the score has a fixed width. The
+    // pair used to be held as one slice of numeric_key_size * 2 and the member read back
+    // out of its second half, which silently cut every member to ten characters - a
+    // member is whatever length the caller gave it, and there is no bound to slice at
+    struct scored { art::value_type score, member; };
+    heap::std_vector<scored> found;
     art::iterator ai(t, lower);
     while (ai.ok()) {
         auto v = ai.key();
         if (!v.starts_with(prefix)) break;
-        found.push_back(v.sub(prefix.size, numeric_key_size * 2));
+        if (v.size <= prefix.size + numeric_key_size) { ai.next(); continue; }
+        found.push_back({v.sub(prefix.size, numeric_key_size),
+                         v.sub(prefix.size + numeric_key_size,
+                               v.size - prefix.size - numeric_key_size)});
         ai.next();
     }
     const int64_t n = (int64_t) found.size();
@@ -534,9 +542,9 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
         for (int64_t i = start; i <= stop; ++i) {
             // REV counts positions from the high score end
             const auto& rec = spec.REV ? found[(size_t) (n - 1 - i)] : found[(size_t) i];
-            call.push_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
+            call.push_encoded_key(rec.member);
             if (spec.has_withscores) {
-                call.push_encoded_key(rec.sub(0, numeric_key_size));
+                call.push_encoded_key(rec.score);
             }
         }
     }

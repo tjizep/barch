@@ -53,6 +53,7 @@ int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
         return cc.push_error(barch::wrong_type_message());
     }
     bool wrong_type = false;
+    bool too_big = false;
     store.with_container_write(args[1], [&](const barch::shard_ptr& t) {
         auto container = conversion::convert(args[1]);
 
@@ -67,6 +68,11 @@ int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
             query.push(field);
             art::value_type key = query.create();
             art::value_type val = args[n+1];
+            if (!fits_in_leaf(key.size, val.size)) {
+                query.pop_back();
+                too_big = true;
+                continue;
+            }
 
             // HSETNX must not overwrite, and insert reports whether it added
             if (t->insert(key, val, mode != hset_mode::if_absent, fc)) {
@@ -78,6 +84,9 @@ int hset_impl(caller& cc, const arg_t& args, hset_mode mode) {
     });
     if (wrong_type) {
         return cc.push_error(barch::wrong_type_message());
+    }
+    if (too_big) {
+        return cc.push_error(too_large_message());
     }
     if (mode == hset_mode::ok) {
         return cc.push_simple("OK");

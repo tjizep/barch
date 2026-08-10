@@ -244,6 +244,15 @@ extern "C"{
         if (start == end) {
             t->call_unblock(args[1].to_string());
         }
+        // every element has to fit in a leaf with its index. Checked before any of them is
+        // written, so a push either happens or does not: it used to insert what fit, fail
+        // the rest silently, and still advance the header - the list then reported a
+        // length it did not have and LLEN agreed with it
+        for (size_t n = 2; n < args.size(); n += 1) {
+            if (!fits_in_leaf(key.size + numeric_key_size, args[n].size)) {
+                return cc.push_error(too_large_message());
+            }
+        }
         for (size_t n = 2; n < args.size(); n += 1) {
             if (at_tail) {
                 li.push(conversion::comparable_key(end));

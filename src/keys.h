@@ -18,6 +18,21 @@ int key_ok(const char *k, size_t klen);
 
 int key_ok(art::value_type v);
 
+/**
+ * Will a key and value fit in one leaf?
+ *
+ * A leaf holds both and has to fit inside a page, so the pair is bounded by
+ * maximum_allocation_size. The insert already refuses a pair that does not - it throws,
+ * the art layer catches and logs it, and answers false - but most of the write commands
+ * never looked at that answer. SET said OK, SETNX said 1, RPUSH said the list had grown
+ * and LLEN agreed, and none of them had stored anything. A write that reports success and
+ * loses the data is the worst way to be wrong, so every writer asks this first. See
+ * DONE 63.
+ */
+bool fits_in_leaf(size_t key_bytes, size_t value_bytes);
+/** what to answer when it does not - redis's wording for the same condition */
+const char *too_large_message();
+
 int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen);
 
 int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key);

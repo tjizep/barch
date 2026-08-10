@@ -291,6 +291,14 @@ int SET(caller& call,const arg_t& argv) {
 
     if (key_ok(k) != 0)
         return call.key_check_error(k);
+    // A leaf holds the key and the value together and has to fit in a page. The insert
+    // already refuses a pair that does not - it throws, art_insert catches it, logs it and
+    // answers false - but SET never looked at that answer, so an oversized value was
+    // acknowledged with OK and stored nothing. Silent loss on a write that said it worked
+    // is the worst way to be wrong, so the size is judged here where it can be reported.
+    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+        return call.push_error(too_large_message());
+    }
     auto sp = call.kspace();
     auto converted = conversion::as_composite(k);
     auto key = converted.get_value();
@@ -831,6 +839,9 @@ static int SETEX_(caller& call, const arg_t& argv, bool millis) {
     if (given <= 0 || !art::expiry_ms(given, !millis, true, deadline)) {
         return call.push_error("invalid expire time in 'setex' command");
     }
+    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+        return call.push_error(too_large_message());
+    }
     auto converted = conversion::as_composite(k);
     art::key_options opts;
     opts.set_expiry(deadline);
@@ -1008,6 +1019,9 @@ int SETNX(caller& call, const arg_t& argv) {
     auto v = argv[2];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
+    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+        return call.push_error(too_large_message());
+    }
     auto converted = conversion::as_composite(k);
     bool stored = false;
     auto fc = [&](const art::node_ptr &) -> void {};
@@ -1043,6 +1057,9 @@ int GETSET(caller& call, const arg_t& argv) {
     auto v = argv[2];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
+    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+        return call.push_error(too_large_message());
+    }
     auto converted = conversion::as_composite(k);
     bool had = false;
     std::string previous;
@@ -1571,6 +1588,15 @@ int MSET(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     int r = call.ok();
     barch::sharded_store store(call.kspace());
+    // every pair is measured before any is written. MSET answers OK or an error, with no
+    // room in that reply to say "most of them" - so a pair that cannot fit stops the whole
+    // command rather than leaving the caller with a success and a gap
+    for (size_t n = 1; n + 1 < argv.size(); n += 2) {
+        if (key_ok(argv[n]) == 0
+            && !fits_in_leaf(conversion::as_composite(argv[n]).get_value().size, argv[n + 1].size)) {
+            return call.push_error(too_large_message());
+        }
+    }
     for (size_t n = 1; n < argv.size(); n += 2) {
         auto k = argv[n];
         auto v = argv[n + 1];

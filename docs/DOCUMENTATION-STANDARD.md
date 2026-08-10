@@ -12,7 +12,7 @@ have caught, and those places are called out as they come up.
 
 ## 1. Scope
 
-This governs `docs/barch-docs.html`, which is the reference site, and it governs the
+This governs `docs/index.html`, which is the reference site and its front page, and it governs the
 per-command markdown files that sit beside it - `SET.md`, `GET.md`, `KEYS.md`, `ACL.md`
 and the others. The two are written to different templates, because they are doing
 different jobs, and sections 2 and 4 describe them separately.
@@ -460,7 +460,7 @@ to the site's three-block spine, partly because markdown cannot really carry it,
 mostly because maintaining a second parallel reference is a liability whatever shape it
 takes. Instead each file gets resolved one of two ways.
 
-A file is **retired** when its content already exists in `barch-docs.html` at equal or
+A file is **retired** when its content already exists in `docs/index.html` at equal or
 better depth, in which case the body is replaced with a link to the relevant article
 anchor so that any published URL keeps working. A file is **absorbed** when it holds
 material the site lacks, in which case that material moves into the appropriate article

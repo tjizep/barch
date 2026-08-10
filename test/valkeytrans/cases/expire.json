@@ -1,0 +1,1162 @@
+{
+ "source": "expire.tcl",
+ "cases": [
+  {
+   "name": "EXPIRE - set timeouts multiple times",
+   "expected": "1 [45] 1 10",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set x foobar\n        set v1 [r expire x 5]\n        set v2 [r ttl x]\n        set v3 [r expire x 10]\n        set v4 [r ttl x]\n        r expire x 2\n        list $v1 $v2 $v3 $v4"
+  },
+  {
+   "name": "EXPIRE - It should be still possible to read 'x'",
+   "expected": "foobar",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "EXPIRE - After 2.1 seconds the key should no longer be here",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "after 2100\n            list [r get x] [r exists x]"
+  },
+  {
+   "name": "EXPIRE - write on expire should work",
+   "expected": "bar foo",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "x",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expire",
+      "x",
+      "1000"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "x",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lrange",
+      "x",
+      "0",
+      "-1"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "EXPIREAT - Check for EXPIRE alike behavior",
+   "expected": "1[345]",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del x\n        r set x foo\n        r expireat x [expr [clock seconds]+15]\n        r ttl x"
+  },
+  {
+   "name": "SETEX - Set + Expire combo operation. Check for TTL",
+   "expected": "1[012]",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "setex",
+      "x",
+      "12",
+      "test"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "x"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "SETEX - Check value",
+   "expected": "test",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "SETEX - Overwrite old key",
+   "expected": "foo",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "setex",
+      "y",
+      "1",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "y"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "SETEX - Wait for the key to expire",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "after 1100\n            r get y"
+  },
+  {
+   "name": "SETEX - Wrong time parameter",
+   "expected": "*invalid expire*",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "catch {r setex z -10 foo} e\n        set _ $e"
+  },
+  {
+   "name": "PERSIST can undo an EXPIRE",
+   "expected": "50 1 -1 foo",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expire",
+      "x",
+      "50"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "persist",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "PERSIST returns 0 against non existing or non volatile keys",
+   "expected": "0 0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "persist",
+      "foo"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "persist",
+      "nokeyatall"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "EXPIRE precision is now the millisecond",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# This test is very likely to do a false positive if the\n        # server is under pressure, so if it does not work give it a few more\n        # chances.\n        for {set j 0} {$j < 30} {incr j} {\n            r del x\n            r setex x 1 somevalue\n            after 800\n            set a [r get x]\n            if {$a ne {somevalue}} continue\n            after 300\n            set b [r get x]\n            if {$b eq {}} break\n        }\n        if {$::verbose} {\n            puts \"millisecond expire test attempts: $j\"\n        }\n        assert_equal $a {somevalue}\n        assert_equal $b {}"
+  },
+  {
+   "name": "PSETEX can set sub-second expires",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# This test is very likely to do a false positive if the server is\n        # under pressure, so if it does not work give it a few more chances.\n        for {set j 0} {$j < 50} {incr j} {\n            r del x\n            r psetex x 100 somevalue\n            set a [r get x]\n            after 101\n            set b [r get x]\n\n            if {$a eq {somevalue} && $b eq {}} break\n        }\n        if {$::verbose} { puts \"PSETEX sub-second expire test attempts: $j\" }\n        list $a $b"
+  },
+  {
+   "name": "PEXPIRE can set sub-second expires",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# This test is very likely to do a false positive if the server is\n        # under pressure, so if it does not work give it a few more chances.\n        for {set j 0} {$j < 50} {incr j} {\n            r set x somevalue\n            r pexpire x 100\n            set c [r get x]\n            after 101\n            set d [r get x]\n\n            if {$c eq {somevalue} && $d eq {}} break\n        }\n        if {$::verbose} { puts \"PEXPIRE sub-second expire test attempts: $j\" }\n        list $c $d"
+  },
+  {
+   "name": "PEXPIREAT can set sub-second expires",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# This test is very likely to do a false positive if the server is\n        # under pressure, so if it does not work give it a few more chances.\n        for {set j 0} {$j < 50} {incr j} {\n            r set x somevalue\n            set now [r time]\n            r pexpireat x [expr ([lindex $now 0]*1000)+([lindex $now 1]/1000)+200]\n            set e [r get x]\n            after 201\n            set f [r get x]\n\n            if {$e eq {somevalue} && $f eq {}} break\n        }\n        if {$::verbose} { puts \"PEXPIREAT sub-second expire test attempts: $j\" }\n        list $e $f"
+  },
+  {
+   "name": "EXPIRE / EXPIREAT / PEXPIRE / PEXPIREAT Expiration time is already expired",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n        r config resetstat\n\n        r set x somevalue\n        r expire x -1\n        assert_equal {0} [r exists x]\n        assert_equal {1} [s expired_keys]\n\n        r set x somevalue\n        r expireat x [expr [clock seconds] - 1]\n        assert_equal {0} [r exists x]\n        assert_equal {2}  [s expired_keys]\n\n        r set x somevalue\n        r pexpire x -1000\n        assert_equal {0} [r exists x]\n        assert_equal {3} [s expired_keys]\n\n        r set x somevalue\n        r pexpireat x [expr [clock milliseconds] - 1000]\n        assert_equal {0} [r exists x]\n        assert_equal {4} [s expired_keys]"
+  },
+  {
+   "name": "TTL returns time to live in seconds",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del x\n        r setex x 10 somevalue\n        set ttl [r ttl x]\n        assert {$ttl > 8 && $ttl <= 10}"
+  },
+  {
+   "name": "PTTL returns time to live in milliseconds",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del x\n        r setex x 1 somevalue\n        set ttl [r pttl x]\n        assert {$ttl > 500 && $ttl <= 1000}"
+  },
+  {
+   "name": "TTL / PTTL / EXPIRETIME / PEXPIRETIME return -1 if key has no expire",
+   "expected": "-1 -1 -1 -1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "hello"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "pttl",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expiretime",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "pexpiretime",
+      "x"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "TTL / PTTL / EXPIRETIME / PEXPIRETIME return -2 if key does not exit",
+   "expected": "-2 -2 -2 -2",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "pttl",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expiretime",
+      "x"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "pexpiretime",
+      "x"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "EXPIRETIME returns absolute expiration time in seconds",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del x\n        set abs_expire [expr [clock seconds] + 100]\n        r set x somevalue exat $abs_expire\n        assert_equal [r expiretime x] $abs_expire"
+  },
+  {
+   "name": "PEXPIRETIME returns absolute expiration time in milliseconds",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del x\n        set abs_expire [expr [clock milliseconds] + 100000]\n        r set x somevalue pxat $abs_expire\n        assert_equal [r pexpiretime x] $abs_expire"
+  },
+  {
+   "name": "Server should actively expire keys incrementally",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r psetex key1 500 a\n        r psetex key2 500 a\n        r psetex key3 500 a\n        assert_equal 3 [r dbsize]\n        # The server expires random keys ten times every second so we are\n        # fairly sure that all the three keys should be evicted after\n        # two seconds.\n        wait_for_condition 20 100 {\n            [r dbsize] eq 0\n        } else {\n            fail \"Keys did not actively expire.\"\n        }"
+  },
+  {
+   "name": "Server should lazy expire keys",
+   "expected": "3 3 0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug set-active-expire 0\n        r psetex key1{t} 500 a\n        r psetex key2{t} 500 a\n        r psetex key3{t} 500 a\n        set size1 [r dbsize]\n        # The server expires random keys ten times every second so we are\n        # fairly sure that all the three keys should be evicted after\n        # one second.\n        after 1000\n        set size2 [r dbsize]\n        r mget key1{t} key2{t} key3{t}\n        set size3 [r dbsize]\n        r debug set-active-expire 1\n        list $size1 $size2 $size3"
+  },
+  {
+   "name": "EXPIRE should not resurrect keys (issue #1026)",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug set-active-expire 0\n        r set foo bar\n        r pexpire foo 500\n        after 1000\n        r expire foo 10\n        r debug set-active-expire 1\n        r exists foo"
+  },
+  {
+   "name": "5 keys in, 5 keys out",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r set a c\n        r expire a 5\n        r set t c\n        r set e c\n        r set s c\n        r set foo b\n        assert_equal [lsort [r keys *]] {a e foo s t}\n        r del a ; # Do not leak volatile keys to other tests"
+  },
+  {
+   "name": "EXPIRE with empty string as TTL should report an error",
+   "expected": "*not an integer*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "expire",
+      "foo",
+      ""
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "SET with EX with big integer should report an error",
+   "expected": "ERR invalid expire time in 'set' command",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "EX",
+      "10000000000000000"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "SET with EX with smallest integer should report an error",
+   "expected": "ERR invalid expire time in 'set' command",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "SET",
+      "foo",
+      "bar",
+      "EX",
+      "-9999999999999999"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "GETEX with big integer should report an error",
+   "expected": "ERR invalid expire time in 'getex' command",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "GETEX",
+      "foo",
+      "EX",
+      "10000000000000000"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "GETEX with smallest integer should report an error",
+   "expected": "ERR invalid expire time in 'getex' command",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "GETEX",
+      "foo",
+      "EX",
+      "-9999999999999999"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with big integer overflows when converted to milliseconds",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "9223370399119966"
+     ],
+     "value": "ERR invalid expire time in 'expire' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "9223372036854776"
+     ],
+     "value": "ERR invalid expire time in 'expire' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "10000000000000000"
+     ],
+     "value": "ERR invalid expire time in 'expire' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "18446744073709561"
+     ],
+     "value": "ERR invalid expire time in 'expire' command"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "ttl",
+      "foo"
+     ],
+     "value": "-1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "PEXPIRE with big integer overflow when basetime is added",
+   "expected": "ERR invalid expire time in 'pexpire' command",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "PEXPIRE",
+      "foo",
+      "9223372036854770000"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with big negative integer",
+   "expected": "-1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "-9223372036854776"
+     ],
+     "value": "ERR invalid expire time in 'expire' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "-9999999999999999"
+     ],
+     "value": "ERR invalid expire time in 'expire' command"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "foo"
+     ]
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "PEXPIREAT with big integer works",
+   "expected": "1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "PEXPIREAT",
+      "foo",
+      "9223372036854770000"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "PEXPIREAT with big negative integer works",
+   "expected": "-2",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "PEXPIREAT",
+      "foo",
+      "-9223372036854770000"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "foo"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "All time-to-live(TTL) in commands are propagated as absolute timestamp in milliseconds in AOF",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# This test makes sure that expire times are propagated as absolute\n            # times to the AOF file and not as relative time, so that when the AOF\n            # is reloaded the TTLs are not being shifted forward to the future.\n            # We want the time to logically pass when the server is restarted!\n\n            set aof [get_last_incr_aof_path r]\n\n            # Apply each TTL-related command to a unique key\n            # SET commands\n            r set foo1 bar ex 100\n            r set foo2 bar px 100000\n            r set foo3 bar exat [expr [clock seconds]+100]\n            r set foo4 bar PXAT [expr [clock milliseconds]+100000]\n            r setex foo5 100 bar\n            r psetex foo6 100000 bar\n            # EXPIRE-family commands\n            r set foo7 bar\n            r expire foo7 100\n            r set foo8 bar\n            r pexpire foo8 100000\n            r set foo9 bar\n            r expireat foo9 [expr [clock seconds]+100]\n            r set foo10 bar\n            r pexpireat foo10 [expr [clock seconds]*1000+100000]\n            r set foo11 bar\n            r expireat foo11 [expr [clock seconds]-100]\n            # GETEX commands\n            r set foo12 bar\n            r getex foo12 ex 100\n            r set foo13 bar\n            r getex foo13 px 100000\n            r set foo14 bar\n            r getex foo14 exat [expr [clock seconds]+100]\n            r set foo15 bar\n            r getex foo15 pxat [expr [clock milliseconds]+100000]\n            # RESTORE commands\n            r set foo16 bar\n            set encoded [r dump foo16]\n            r restore foo17 100000 $encoded\n            r restore foo18 [expr [clock milliseconds]+100000] $encoded absttl\n\n            # Assert that each TTL-related command are persisted with absolute timestamps in AOF\n            assert_aof_content $aof {\n                {select *}\n                {set foo1 bar PXAT *}\n                {set foo2 bar PXAT *}\n                {set foo3 bar PXAT *}\n                {set foo4 bar PXAT *}\n                {set foo5 bar PXAT *}\n                {set foo6 bar PXAT *}\n                {set foo7 bar}\n                {pexpireat foo7 *}\n                {set foo8 bar}\n                {pexpireat foo8 *}\n                {set foo9 bar}\n                {pexpireat foo9 *}\n                {set foo10 bar}\n                {pexpireat foo10 *}\n                {set foo11 bar}\n                {unlink foo11}\n                {set foo12 bar}\n                {pexpireat foo12 *}\n                {set foo13 bar}\n                {pexpireat foo13 *}\n                {set foo14 bar}\n                {pexpireat foo14 *}\n                {set foo15 bar}\n                {pexpireat foo15 *}\n                {set foo16 bar}\n                {restore foo17 * * ABSTTL}\n                {restore foo18 * * absttl}\n            }\n\n            # Remember the absolute TTLs of all the keys\n            set ttl1 [r pexpiretime foo1]\n            set ttl2 [r pexpiretime foo2]\n            set ttl3 [r pexpiretime foo3]\n            set ttl4 [r pexpiretime foo4]\n            set ttl5 [r pexpiretime foo5]\n            set ttl6 [r pexpiretime foo6]\n            set ttl7 [r pexpiretime foo7]\n            set ttl8 [r pexpiretime foo8]\n            set ttl9 [r pexpiretime foo9]\n            set ttl10 [r pexpiretime foo10]\n            assert_equal \"-2\" [r pexpiretime foo11] ; # foo11 is gone\n            set ttl12 [r pexpiretime foo12]\n            set ttl13 [r pexpiretime foo13]\n            set ttl14 [r pexpiretime foo14]\n            set ttl15 [r pexpiretime foo15]\n            assert_equal \"-1\" [r pexpiretime foo16] ; # foo16 has no TTL\n            set ttl17 [r pexpiretime foo17]\n            set ttl18 [r pexpiretime foo18]\n\n            # Let some time pass and reload data from AOF\n            after 2000\n            r debug loadaof\n\n            # Assert that relative TTLs are roughly the same\n            assert_range [r ttl foo1] 90 98\n            assert_range [r ttl foo2] 90 98\n            assert_range [r ttl foo3] 90 98\n            assert_range [r ttl foo4] 90 98\n            assert_range [r ttl foo5] 90 98\n            assert_range [r ttl foo6] 90 98\n            assert_range [r ttl foo7] 90 98\n            assert_range [r ttl foo8] 90 98\n            assert_range [r ttl foo9] 90 98\n            assert_range [r ttl foo10] 90 98\n            assert_equal [r ttl foo11] \"-2\" ; # foo11 is gone\n            assert_range [r ttl foo12] 90 98\n            assert_range [r ttl foo13] 90 98\n            assert_range [r ttl foo14] 90 98\n            assert_range [r ttl foo15] 90 98\n            assert_equal [r ttl foo16] \"-1\" ; # foo16 has no TTL\n            assert_range [r ttl foo17] 90 98\n            assert_range [r ttl foo18] 90 98\n\n            # Assert that all keys have restored the same absolute TTLs from AOF\n            assert_equal [r pexpiretime foo1] $ttl1\n            assert_equal [r pexpiretime foo2] $ttl2\n            assert_equal [r pexpiretime foo3] $ttl3\n            assert_equal [r pexpiretime foo4] $ttl4\n            assert_equal [r pexpiretime foo5] $ttl5\n            assert_equal [r pexpiretime foo6] $ttl6\n            assert_equal [r pexpiretime foo7] $ttl7\n            assert_equal [r pexpiretime foo8] $ttl8\n            assert_equal [r pexpiretime foo9] $ttl9\n            assert_equal [r pexpiretime foo10] $ttl10\n            assert_equal [r pexpiretime foo11] \"-2\" ; # foo11 is gone\n            assert_equal [r pexpiretime foo12] $ttl12\n            assert_equal [r pexpiretime foo13] $ttl13\n            assert_equal [r pexpiretime foo14] $ttl14\n            assert_equal [r pexpiretime foo15] $ttl15\n            assert_equal [r pexpiretime foo16] \"-1\" ; # foo16 has no TTL\n            assert_equal [r pexpiretime foo17] $ttl17\n            assert_equal [r pexpiretime foo18] $ttl18"
+  },
+  {
+   "name": "All TTL in commands are propagated as absolute timestamp in replication stream",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Make sure that both relative and absolute expire commands are propagated\n        # as absolute to replicas for two reasons:\n        # 1) We want to avoid replicas retaining data much longer than primary due\n        #    to replication lag.\n        # 2) We want to unify the way TTLs are replicated in both RDB and replication\n        #    stream, which is as absolute timestamps.\n        # See Redis OSS issue: https://github.com/redis/redis/issues/8433\n\n        r flushall ; # Clean up keyspace to avoid interference by keys from other tests\n        set repl [attach_to_replication_stream]\n        # SET commands\n        r set foo1 bar ex 200\n        r set foo1 bar px 100000\n        r set foo1 bar exat [expr [clock seconds]+100]\n        r set foo1 bar pxat [expr [clock milliseconds]+100000]\n        r setex foo1 100 bar\n        r psetex foo1 100000 bar\n        r set foo2 bar\n        # EXPIRE-family commands\n        r expire foo2 100\n        r pexpire foo2 100000\n        r set foo3 bar\n        r expireat foo3 [expr [clock seconds]+100]\n        r pexpireat foo3 [expr [clock seconds]*1000+100000]\n        r expireat foo3 [expr [clock seconds]-100]\n        # GETEX-family commands\n        r set foo4 bar\n        r getex foo4 ex 200\n        r getex foo4 px 200000\n        r getex foo4 exat [expr [clock seconds]+100]\n        r getex foo4 pxat [expr [clock milliseconds]+100000]\n        # RESTORE commands\n        r set foo5 bar\n        set encoded [r dump foo5]\n        r restore foo6 100000 $encoded\n        r restore foo7 [expr [clock milliseconds]+100000] $encoded absttl\n\n        assert_replication_stream $repl {\n            {select *}\n            {set foo1 bar PXAT *}\n            {set foo1 bar PXAT *}\n            {set foo1 bar PXAT *}\n            {set foo1 bar pxat *}\n            {set foo1 bar PXAT *}\n            {set foo1 bar PXAT *}\n            {set foo2 bar}\n            {pexpireat foo2 *}\n            {pexpireat foo2 *}\n            {set foo3 bar}\n            {pexpireat foo3 *}\n            {pexpireat foo3 *}\n            {unlink foo3}\n            {set foo4 bar}\n            {pexpireat foo4 *}\n            {pexpireat foo4 *}\n            {pexpireat foo4 *}\n            {pexpireat foo4 *}\n            {set foo5 bar}\n            {restore foo6 * * ABSTTL}\n            {restore foo7 * * absttl}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "First server should have role slave after REPLICAOF",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "$replica replicaof $primary_host $primary_port\n            wait_for_condition 50 100 {\n                [s 0 role] eq {slave}\n            } else {\n                fail \"Replication not started.\"\n            }"
+  },
+  {
+   "name": "For all replicated TTL-related commands, absolute expire times are identical on primary and replica",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Apply each TTL-related command to a unique key on primary\n            # SET commands\n            $primary set foo1 bar ex 100\n            $primary set foo2 bar px 100000\n            $primary set foo3 bar exat [expr [clock seconds]+100]\n            $primary set foo4 bar pxat [expr [clock milliseconds]+100000]\n            $primary setex foo5 100 bar\n            $primary psetex foo6 100000 bar\n            # EXPIRE-family commands\n            $primary set foo7 bar\n            $primary expire foo7 100\n            $primary set foo8 bar\n            $primary pexpire foo8 100000\n            $primary set foo9 bar\n            $primary expireat foo9 [expr [clock seconds]+100]\n            $primary set foo10 bar\n            $primary pexpireat foo10 [expr [clock milliseconds]+100000]\n            # GETEX commands\n            $primary set foo11 bar\n            $primary getex foo11 ex 100\n            $primary set foo12 bar\n            $primary getex foo12 px 100000\n            $primary set foo13 bar\n            $primary getex foo13 exat [expr [clock seconds]+100]\n            $primary set foo14 bar\n            $primary getex foo14 pxat [expr [clock milliseconds]+100000]\n            # RESTORE commands\n            $primary set foo15 bar\n            set encoded [$primary dump foo15]\n            $primary restore foo16 100000 $encoded\n            $primary restore foo17 [expr [clock milliseconds]+100000] $encoded absttl\n\n            # Wait for replica to get the keys and TTLs\n            assert {[$primary wait 1 0] == 1}\n\n            # Verify absolute TTLs are identical on primary and replica for all keys\n            # This is because TTLs are always replicated as absolute values\n            foreach key [$primary keys *] {\n                assert_equal [$primary pexpiretime $key] [$replica pexpiretime $key]\n            }"
+  },
+  {
+   "name": "expired key which is created in writeable replicas should be deleted by active expiry",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "$primary flushall\n            $replica config set replica-read-only no\n            foreach {yes_or_no} {yes no} {\n                $replica config set appendonly $yes_or_no\n                waitForBgrewriteaof $replica\n                set prev_expired [s expired_keys]\n                $replica set foo bar PX 1\n                wait_for_condition 100 10 {\n                    [s expired_keys] eq $prev_expired + 1\n                } else {\n                    fail \"key not expired\"\n                }\n                assert_equal {} [$replica get foo]\n            }"
+  },
+  {
+   "name": "SET command will remove expire",
+   "expected": "-1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "EX",
+      "100"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "foo"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "SET - use KEEPTTL option, TTL should not be removed",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r set foo bar EX 100\n        r set foo bar KEEPTTL\n        set ttl [r ttl foo]\n        assert {$ttl <= 100 && $ttl > 90}"
+  },
+  {
+   "name": "SET - use KEEPTTL option, TTL should not be removed after loadaof",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r config set appendonly yes\n        r set foo bar EX 100\n        r set foo bar2 KEEPTTL\n        after 2000\n        r debug loadaof\n        set ttl [r ttl foo]\n        assert {$ttl <= 98 && $ttl > 90}"
+  },
+  {
+   "name": "GETEX use of PERSIST option should remove TTL",
+   "expected": "-1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "EX",
+      "100"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "getex",
+      "foo",
+      "PERSIST"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "foo"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "GETEX use of PERSIST option should remove TTL after loadaof",
+   "expected": "-1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "config",
+      "set",
+      "appendonly",
+      "yes"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "EX",
+      "100"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "getex",
+      "foo",
+      "PERSIST"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "debug",
+      "loadaof"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "foo"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "GETEX propagate as to replica as PERSIST, UNLINK, or nothing",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# In the above tests, many keys with random expiration times are set, flush\n        # the DBs to avoid active expiry kicking in and messing the replication streams.\n        r flushall\n       set repl [attach_to_replication_stream]\n       r set foo bar EX 100\n       r getex foo PERSIST\n       r getex foo\n       r getex foo exat [expr [clock seconds]-100]\n       assert_replication_stream $repl {\n           {select *}\n           {set foo bar PXAT *}\n           {persist foo}\n           {unlink foo}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "EXPIRE with NX option on a key with ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 100\n        assert_equal [r EXPIRE foo 200 NX] 0\n        assert_range [r TTL foo] 50 100"
+  },
+  {
+   "name": "EXPIRE with NX option on a key without ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 200 NX] 1\n        assert_range [r TTL foo] 100 200"
+  },
+  {
+   "name": "EXPIRE with XX option on a key with ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 100\n        assert_equal [r EXPIRE foo 200 XX] 1\n        assert_range [r TTL foo] 100 200"
+  },
+  {
+   "name": "EXPIRE with XX option on a key without ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 200 XX] 0\n        assert_equal [r TTL foo] -1"
+  },
+  {
+   "name": "EXPIRE with GT option on a key with lower ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 100\n        assert_equal [r EXPIRE foo 200 GT] 1\n        assert_range [r TTL foo] 100 200"
+  },
+  {
+   "name": "EXPIRE with GT option on a key with higher ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 200\n        assert_equal [r EXPIRE foo 100 GT] 0\n        assert_range [r TTL foo] 100 200"
+  },
+  {
+   "name": "EXPIRE with GT option on a key without ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 200 GT] 0\n        assert_equal [r TTL foo] -1"
+  },
+  {
+   "name": "EXPIRE with LT option on a key with higher ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 100\n        assert_equal [r EXPIRE foo 200 LT] 0\n        assert_range [r TTL foo] 50 100"
+  },
+  {
+   "name": "EXPIRE with LT option on a key with lower ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 200\n        assert_equal [r EXPIRE foo 100 LT] 1\n        assert_range [r TTL foo] 50 100"
+  },
+  {
+   "name": "EXPIRE with LT option on a key without ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 100 LT] 1\n        assert_range [r TTL foo] 50 100"
+  },
+  {
+   "name": "EXPIRE with LT and XX option on a key with ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 200\n        assert_equal [r EXPIRE foo 100 LT XX] 1\n        assert_range [r TTL foo] 50 100"
+  },
+  {
+   "name": "EXPIRE with LT and XX option on a key without ttl",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 200 LT XX] 0\n        assert_equal [r TTL foo] -1"
+  },
+  {
+   "name": "EXPIRE with conflicting options: LT GT",
+   "expected": "ERR GT and LT options at the same time are not compatible",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "LT",
+      "GT"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with conflicting options: NX GT",
+   "expected": "ERR NX and XX, GT or LT options at the same time are not compatible",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "NX",
+      "GT"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with conflicting options: NX LT",
+   "expected": "ERR NX and XX, GT or LT options at the same time are not compatible",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "NX",
+      "LT"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with conflicting options: NX XX",
+   "expected": "ERR NX and XX, GT or LT options at the same time are not compatible",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "NX",
+      "XX"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with unsupported options",
+   "expected": "ERR Unsupported option AB",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "AB"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with unsupported options",
+   "expected": "ERR Unsupported option AB",
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "XX",
+      "AB"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "EXPIRE with negative expiry",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar EX 100\n        assert_equal [r EXPIRE foo -10 LT] 1\n        assert_equal [r TTL foo] -2"
+  },
+  {
+   "name": "EXPIRE with negative expiry on a non-valitale key",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo -10 LT] 1\n        assert_equal [r TTL foo] -2"
+  },
+  {
+   "name": "EXPIRE with non-existed key",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert_equal [r EXPIRE none 100 NX] 0\n        assert_equal [r EXPIRE none 100 XX] 0\n        assert_equal [r EXPIRE none 100 GT] 0\n        assert_equal [r EXPIRE none 100 LT] 0"
+  },
+  {
+   "name": "Server should not propagate the read command on lazy expire",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug set-active-expire 0\n        r flushall ; # Clean up keyspace to avoid interference by keys from other tests\n        r set foo bar PX 1\n        set repl [attach_to_replication_stream]\n        wait_for_condition 50 100 {\n            [r get foo] eq {}\n        } else {\n            fail \"Replication not started.\"\n        }\n\n        # dummy command to verify nothing else gets into the replication stream.\n        r set x 1\n\n        assert_replication_stream $repl {\n            {select *}\n            {unlink foo}\n            {set x 1}\n        }\n        close_replication_stream $repl\n        assert_equal [r debug set-active-expire 1] {OK}"
+  },
+  {
+   "name": "SCAN: Lazy-expire should not be wrapped in MULTI/EXEC",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug set-active-expire 0\n        r flushall\n\n        r set foo1 bar PX 1\n        r set foo2 bar PX 1\n        after 2\n\n        set repl [attach_to_replication_stream]\n\n        r scan 0\n\n        assert_replication_stream $repl {\n            {select *}\n            {unlink foo*}\n            {unlink foo*}\n        }\n        close_replication_stream $repl\n        assert_equal [r debug set-active-expire 1] {OK}"
+  },
+  {
+   "name": "RANDOMKEY: Lazy-expire should not be wrapped in MULTI/EXEC",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug set-active-expire 0\n        r flushall\n\n        r set foo1 bar PX 1\n        r set foo2 bar PX 1\n        after 2\n\n        set repl [attach_to_replication_stream]\n\n        r randomkey\n\n        assert_replication_stream $repl {\n            {select *}\n            {unlink foo*}\n            {unlink foo*}\n        }\n        close_replication_stream $repl\n        assert_equal [r debug set-active-expire 1] {OK}"
+  },
+  {
+   "name": "import-source can be closed when import-mode is off",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r config set import-mode no\n        assert_error \"ERR Server is not in import mode\" {r client import-source on}\n\n        r config set import-mode yes\n        assert_equal [r client import-source on] {OK}\n        assert_match {*flags=I*} [r client list id [r client id]]\n\n        r config set import-mode no\n        assert_equal [r client import-source off] {OK}\n        assert_match {*flags=N*} [r client list id [r client id]]"
+  },
+  {
+   "name": "Import mode should forbid active expiration",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n\n        r config set import-mode yes\n        assert_equal [r client import-source on] {OK}\n\n        r set foo1 bar PX 1\n        r set foo2 bar PX 1\n        after 10\n\n        assert_equal [r dbsize] {2}\n\n        assert_equal [r client import-source off] {OK}\n        r config set import-mode no\n\n        # Verify all keys have expired\n        wait_for_condition 40 100 {\n            [r dbsize] eq 0\n        } else {\n            fail \"Keys did not actively expire.\"\n        }"
+  },
+  {
+   "name": "Import mode should forbid lazy expiration",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n        r debug set-active-expire 0 \n\n        r config set import-mode yes\n        assert_equal [r client import-source on] {OK}\n\n        r set foo1 1 PX 1\n        after 10\n\n        r get foo1\n        assert_equal [r dbsize] {1}\n\n        assert_equal [r client import-source off] {OK}\n        r config set import-mode no\n\n        r get foo1\n\n        assert_equal [r dbsize] {0}\n\n        assert_equal [r debug set-active-expire 1] {OK}"
+  },
+  {
+   "name": "Client can visit expired key in import-source state",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n\n        r config set import-mode yes\n\n        r set foo1 1 PX 1\n        after 10\n\n        # Normal clients cannot visit expired key.\n        assert_equal [r get foo1] {}\n        assert_equal [r ttl foo1] {-2}\n        assert_equal [r dbsize] 1\n\n        # Client can visit expired key when in import-source state.\n        assert_equal [r client import-source on] {OK}\n        assert_equal [r ttl foo1] {0}\n        assert_equal [r get foo1] {1}\n        assert_equal [r incr foo1] {2}\n        assert_equal [r randomkey] {foo1}\n        assert_equal [r scan 0 match * count 10000] {0 foo1}\n        assert_equal [r keys *] {foo1}\n\n        assert_equal [r client import-source off] {OK}\n        r config set import-mode no\n\n        # Verify all keys have expired\n        wait_for_condition 40 100 {\n            [r dbsize] eq 0\n        } else {\n            fail \"Keys did not actively expire.\"\n        }"
+  },
+  {
+   "name": "Negative ttl will not cause server to crash when import mode is on",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n        r config set import-mode yes\n        r set foo bar\n        r expireat foo -1\n        r set foo1 bar\n        r expireat foo1 -10000\n        assert_equal [r dbsize] 2\n        r config set import-mode no\n        wait_for_condition 30 100 {\n            [r dbsize] == 0\n        } else {\n            fail \"key wasn't expired\"\n        }"
+  },
+  {
+   "name": "Active expiration triggers hashtable shrink",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug SET-ACTIVE-EXPIRE 0\n        set persistent_keys 5\n        set volatile_keys 100\n        set total_keys [expr $persistent_keys + $volatile_keys]\n\n        for {set i 0} {$i < $persistent_keys} {incr i} {\n            r set \"key_$i\" \"value_$i\"\n        }\n        for {set i 0} {$i < $volatile_keys} {incr i} {\n            r psetex \"expire_key_${i}\" 100 \"expire_value_${i}\"\n        }\n        set table_size_before_expire [main_hash_table_size]\n\n        # Verify keys are set\n        assert_equal $total_keys [r dbsize]\n\n        # Wait for active expiration\n        r debug SET-ACTIVE-EXPIRE 1\n        wait_for_condition 100 50 {\n            [r dbsize] eq $persistent_keys\n        } else {\n            fail \"Keys not expired\"\n        }\n\n        # Wait for the table to shrink and active rehashing finish\n        wait_for_condition 100 50 {\n            [main_hash_table_size] < $table_size_before_expire\n        } else {\n            puts [r debug htstats 9]\n            fail \"Table didn't shrink\"\n        }\n\n        # Verify server is still responsive\n        assert_equal [r ping] {PONG}"
+  },
+  {
+   "name": "expire scan should skip dictionaries with lot's of empty buckets",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug set-active-expire 0\n\n        # Collect two slots to help determine the expiry scan logic is able\n        # to go past certain slots which aren't valid for scanning at the given point of time.\n        # And the next non empty slot after that still gets scanned and expiration happens.\n\n        # hashslot(alice) is 749\n        r psetex alice 500 val\n\n        # hashslot(foo) is 12182\n        # fill data across different slots with expiration\n        for {set j 1} {$j <= 1000} {incr j} {\n            r psetex \"{foo}$j\" 500 a\n        }\n        # hashslot(key) is 12539\n        r psetex key 500 val\n\n        # disable resizing, the reason for not using slow bgsave is because\n        # it will hit the dict_force_resize_ratio.\n        r debug dict-resizing 0\n\n        # delete data to have lot's (99%) of empty buckets (slot 12182 should be skipped)\n        for {set j 1} {$j <= 999} {incr j} {\n            r del \"{foo}$j\"\n        }\n\n        # Trigger a full traversal of all dictionaries.\n        r keys *\n\n        r debug set-active-expire 1\n\n        # Verify {foo}100 still exists and remaining got cleaned up\n        wait_for_condition 20 100 {\n            [r dbsize] eq 1\n        } else {\n            if {[r dbsize] eq 0} {\n                puts [r debug htstats 0]\n                fail \"scan didn't handle slot skipping logic.\"\n            } else {\n                puts [r debug htstats 0]\n                fail \"scan didn't process all valid slots.\"\n            }\n        }\n\n        # Enable resizing\n        r debug dict-resizing 1\n\n        # put some data into slot 12182 and trigger the resize\n        # by deleting it to trigger shrink\n        r psetex \"{foo}0\" 500 a\n        r del \"{foo}0\"\n\n        # Verify all keys have expired\n        wait_for_condition 400 100 {\n            [r dbsize] eq 0\n        } else {\n            puts [r dbsize]\n            flush stdout\n            fail \"Keys did not actively expire.\"\n        }\n\n        # Make sure we don't have any timeouts.\n        assert_equal 0 [s 0 expired_time_cap_reached_count]"
+  }
+ ]
+}

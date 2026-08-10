@@ -1,0 +1,1882 @@
+{
+ "source": "list.tcl",
+ "cases": [
+  {
+   "name": "$container node check compression with insert and pop",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r lpush list1 [string repeat a $size]\n        r lpush list1 [string repeat b $size]\n        r lpush list1 [string repeat c $size]\n        r lpush list1 [string repeat d $size]\n        r linsert list1 after [string repeat d $size] [string repeat e $size]\n        r linsert list1 after [string repeat d $size] [string repeat f $size]\n        r linsert list1 after [string repeat d $size] [string repeat g $size]\n        r linsert list1 after [string repeat d $size] [string repeat j $size]\n        assert_equal [r lpop list1] [string repeat d $size]\n        assert_equal [r lpop list1] [string repeat j $size]\n        assert_equal [r lpop list1] [string repeat g $size]\n        assert_equal [r lpop list1] [string repeat f $size]\n        assert_equal [r lpop list1] [string repeat e $size]\n        assert_equal [r lpop list1] [string repeat c $size]\n        assert_equal [r lpop list1] [string repeat b $size]\n        assert_equal [r lpop list1] [string repeat a $size]"
+  },
+  {
+   "name": "$container node check compression combined with trim",
+   "expected": "2",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r lpush list2 [string repeat a $size]\n        r linsert list2 after  [string repeat a $size] [string repeat b $size]\n        r rpush list2 [string repeat c $size]\n        assert_equal [string repeat b $size] [r lindex list2 1]\n        r LTRIM list2 1 -1\n        r llen list2"
+  },
+  {
+   "name": "$container node check compression with lset",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r lpush list3 [string repeat a $size]\n        r LSET list3 0 [string repeat b $size]\n        assert_equal [string repeat b $size] [r lindex list3 0]\n        r lpush list3 [string repeat c $size]\n        r LSET list3 0 [string repeat d $size]\n        assert_equal [string repeat d $size] [r lindex list3 0]"
+  },
+  {
+   "name": "Test LPUSH and LPOP on plain nodes",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 1b\n        r lpush lst 9\n        r lpush lst xxxxxxxxxx\n        r lpush lst xxxxxxxxxx\n        assert_encoding $type lst\n        set s0 [s used_memory]\n        assert {$s0 > 10}\n        assert {[r llen lst] == 3}\n        set s0 [r rpop lst]\n        set s1 [r rpop lst]\n        assert {$s0 eq \"9\"}\n        assert {[r llen lst] == 1}\n        r lpop lst\n        assert {[string length $s1] == 10}\n        # check rdb\n        r lpush lst xxxxxxxxxx\n        r lpush lst bb\n        r debug reload\n        assert_equal [r rpop lst] \"xxxxxxxxxx\"\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LINDEX and LINSERT on plain nodes",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 1b\n        r lpush lst xxxxxxxxxxx\n        r lpush lst 9\n        r lpush lst xxxxxxxxxxx\n        assert_encoding $type lst\n        r linsert lst before \"9\" \"8\"\n        assert {[r lindex lst 1] eq \"8\"}\n        r linsert lst BEFORE \"9\" \"7\"\n        r linsert lst BEFORE \"9\" \"xxxxxxxxxxx\"\n        assert {[r lindex lst 3] eq \"xxxxxxxxxxx\"}\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LTRIM on plain nodes",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 1b\n        r lpush lst1 9\n        r lpush lst1 xxxxxxxxxxx\n        r lpush lst1 9\n        assert_encoding $type lst1\n        r LTRIM lst1 1 -1\n        assert_equal [r llen lst1] 2\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LREM on plain nodes",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 1b\n        r lpush lst one\n        r lpush lst xxxxxxxxxxx\n        assert_encoding $type lst\n        set s0 [s used_memory]\n        assert {$s0 > 10}\n        r lpush lst 9\n        r LREM lst -2 \"one\"\n        assert_equal [r llen lst] 2\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LPOS on plain nodes",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 1b\n        r RPUSH lst \"aa\"\n        r RPUSH lst \"bb\"\n        r RPUSH lst \"cc\"\n        assert_encoding $type lst\n        r LSET lst 0 \"xxxxxxxxxxx\"\n        assert_equal [r LPOS lst \"xxxxxxxxxxx\"] 0\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LMOVE on plain nodes",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 1b\n        r RPUSH lst2{t} \"aa\"\n        r RPUSH lst2{t} \"bb\"\n        assert_encoding $type lst2{t}\n        r LSET lst2{t} 0 xxxxxxxxxxx\n        r RPUSH lst2{t} \"cc\"\n        r RPUSH lst2{t} \"dd\"\n        r LMOVE lst2{t} lst{t} RIGHT LEFT\n        r LMOVE lst2{t} lst{t} LEFT RIGHT\n        assert_equal [r llen lst{t}] 2\n        assert_equal [r llen lst2{t}] 2\n        assert_equal [r lpop lst2{t}] \"bb\"\n        assert_equal [r lpop lst2{t}] \"cc\"\n        assert_equal [r lpop lst{t}] \"dd\"\n        assert_equal [r lpop lst{t}] \"xxxxxxxxxxx\"\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LSET with packed / plain combinations",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug quicklist-packed-threshold 5b\n        r RPUSH lst \"aa\"\n        r RPUSH lst \"bb\"\n        assert_encoding $type lst\n        r lset lst 0 [string repeat d 50001]\n        set s1 [r lpop lst]\n        assert_equal $s1 [string repeat d 50001]\n        r RPUSH lst [string repeat f 50001]\n        r lset lst 0 [string repeat e 50001]\n        set s1 [r lpop lst]\n        assert_equal $s1 [string repeat e 50001]\n        r RPUSH lst [string repeat m 50001]\n        r lset lst 0 \"bb\"\n        set s1 [r lpop lst]\n        assert_equal $s1 \"bb\"\n        r RPUSH lst \"bb\"\n        r lset lst 0 \"cc\"\n        set s1 [r lpop lst]\n        assert_equal $s1 \"cc\"\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LSET with packed is split in the middle",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set original_config [config_get_set list-max-listpack-size 4]\n        r flushdb\n        r debug quicklist-packed-threshold 5b\n        r RPUSH lst \"aa\"\n        r RPUSH lst \"bb\"\n        r RPUSH lst \"cc\"\n        r RPUSH lst \"dd\"\n        r RPUSH lst \"ee\"\n        assert_encoding quicklist lst\n        r lset lst 2 [string repeat e 10]\n        assert_equal [r lpop lst] \"aa\"\n        assert_equal [r lpop lst] \"bb\"\n        assert_equal [r lpop lst] [string repeat e 10]\n        assert_equal [r lpop lst] \"dd\"\n        assert_equal [r lpop lst] \"ee\"\n        r debug quicklist-packed-threshold 0\n        r config set list-max-listpack-size $original_config"
+  },
+  {
+   "name": "Test LSET with packed consist only one item",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        set original_config [config_get_set list-max-ziplist-size 1]\n        r debug quicklist-packed-threshold 1b\n        r RPUSH lst \"aa\"\n        r RPUSH lst \"bb\"\n        r lset lst 0 [string repeat d 50001]\n        set s1 [r lpop lst]\n        assert_equal $s1 [string repeat d 50001]\n        r RPUSH lst [string repeat f 50001]\n        r lset lst 0 [string repeat e 50001]\n        set s1 [r lpop lst]\n        assert_equal $s1 [string repeat e 50001]\n        r RPUSH lst [string repeat m 50001]\n        r lset lst 0 \"bb\"\n        set s1 [r lpop lst]\n        assert_equal $s1 \"bb\"\n        r RPUSH lst \"bb\"\n        r lset lst 0 \"cc\"\n        set s1 [r lpop lst]\n        assert_equal $s1 \"cc\"\n        r debug quicklist-packed-threshold 0\n        r config set list-max-ziplist-size $original_config"
+  },
+  {
+   "name": "Crash due to delete entry from a compress quicklist node",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 100b\n        set original_config [config_get_set list-compress-depth 1]\n\n        set small_ele [string repeat x 32]\n        set large_ele [string repeat x 100]\n\n        # Push a large element\n        r RPUSH lst $large_ele\n\n        # Insert two elements and keep them in the same node\n        r RPUSH lst $small_ele\n        r RPUSH lst $small_ele\n        assert_encoding $type lst\n\n        # When setting the position of -1 to a large element, we first insert\n        # a large element at the end and then delete its previous element.\n        r LSET lst -1 $large_ele\n        assert_equal \"$large_ele $small_ele $large_ele\" [r LRANGE lst 0 -1]\n\n        r debug quicklist-packed-threshold 0\n        r config set list-compress-depth $original_config"
+  },
+  {
+   "name": "Crash due to split quicklist node wrongly",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r debug quicklist-packed-threshold 10b\n\n        r LPUSH lst \"aa\"\n        r LPUSH lst \"bb\"\n        assert_encoding $type lst\n        r LSET lst -2 [string repeat x 10]\n        r RPOP lst\n        assert_equal [string repeat x 10] [r LRANGE lst 0 -1]\n\n        r debug quicklist-packed-threshold 0"
+  },
+  {
+   "name": "Test LPUSH and LPOP on plain nodes over 4GB",
+   "expected": "",
+   "why": "variable reference: *3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n",
+   "skipped": true,
+   "tcl": "r flushdb\n        r lpush lst 9\n        r write \"*3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n\"\n        write_big_bulk $str_length;\n        r write \"*3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n\"\n        write_big_bulk $str_length;\n        set s0 [s used_memory]\n        assert {$s0 > $str_length}\n        assert {[r llen lst] == 3}\n        assert_equal [r rpop lst] \"9\"\n        assert_equal [read_big_bulk {r rpop lst}] $str_length\n        assert {[r llen lst] == 1}\n        assert_equal [read_big_bulk {r rpop lst}] $str_length"
+  },
+  {
+   "name": "Test LINDEX and LINSERT on plain nodes over 4GB",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n       r write \"*3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n\"\n       write_big_bulk $str_length;\n       r lpush lst 9\n       r write \"*3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n\"\n       write_big_bulk $str_length;\n       r linsert lst before \"9\" \"8\"\n       assert_equal [r lindex lst 1] \"8\"\n       r LINSERT lst BEFORE \"9\" \"7\"\n       r write \"*5\\r\\n\\$7\\r\\nLINSERT\\r\\n\\$3\\r\\nlst\\r\\n\\$6\\r\\nBEFORE\\r\\n\\$3\\r\\n\\\"9\\\"\\r\\n\"\n       write_big_bulk 10;\n       assert_equal [read_big_bulk {r rpop lst}] $str_length"
+  },
+  {
+   "name": "Test LTRIM on plain nodes over 4GB",
+   "expected": "",
+   "why": "variable reference: *3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n",
+   "skipped": true,
+   "tcl": "r flushdb\n       r lpush lst 9\n       r write \"*3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n\"\n       write_big_bulk $str_length;\n       r lpush lst 9\n       r LTRIM lst 1 -1\n       assert_equal [r llen lst] 2\n       assert_equal [r rpop lst] 9\n       assert_equal [read_big_bulk {r rpop lst}] $str_length"
+  },
+  {
+   "name": "Test LREM on plain nodes over 4GB",
+   "expected": "1",
+   "why": "variable reference: *3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n",
+   "skipped": true,
+   "tcl": "r flushdb\n       r lpush lst one\n       r write \"*3\\r\\n\\$5\\r\\nLPUSH\\r\\n\\$3\\r\\nlst\\r\\n\"\n       write_big_bulk $str_length;\n       r lpush lst 9\n       r LREM lst -2 \"one\"\n       assert_equal [read_big_bulk {r rpop lst}] $str_length\n       r llen lst"
+  },
+  {
+   "name": "Test LSET on plain nodes over 4GB",
+   "expected": "",
+   "why": "variable reference: *4\\r\\n\\$4\\r\\nLSET\\r\\n\\$3\\r\\nlst\\r\\n\\$1\\r\\n0\\r\\n",
+   "skipped": true,
+   "tcl": "r flushdb\n       r RPUSH lst \"aa\"\n       r RPUSH lst \"bb\"\n       r RPUSH lst \"cc\"\n       r write \"*4\\r\\n\\$4\\r\\nLSET\\r\\n\\$3\\r\\nlst\\r\\n\\$1\\r\\n0\\r\\n\"\n       write_big_bulk $str_length;\n       assert_equal [r rpop lst] \"cc\"\n       assert_equal [r rpop lst] \"bb\"\n       assert_equal [read_big_bulk {r rpop lst}] $str_length"
+  },
+  {
+   "name": "Test LSET on plain nodes with large elements under packed_threshold over 4GB",
+   "expected": "PONG",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushdb\n        r rpush lst a b c d e\n        for {set i 0} {$i < 5} {incr i} {\n            r write \"*4\\r\\n\\$4\\r\\nlset\\r\\n\\$3\\r\\nlst\\r\\n\\$1\\r\\n$i\\r\\n\"\n            write_big_bulk 1000000000\n        }\n        r ping"
+  },
+  {
+   "name": "Test LSET splits a quicklist node, and then merge",
+   "expected": "PONG",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Test when a quicklist node can't be inserted and is split, the split\n        # node merges with the node before it and the `before` node is kept.\n        r flushdb\n        r rpush lst [string repeat \"x\" 4096]\n        r lpush lst a b c d e f g\n        r lpush lst [string repeat \"y\" 4096]\n        # now: [y...]    [g f e d c b a x...]\n        #      (node0)        (node1)\n        # Keep inserting elements into node1 until node1 is split into two\n        # nodes([g] [...]), eventually node0 will merge with the [g] node.\n        # Since node0 is larger, after the merge node0 will be kept and\n        # the [g] node will be deleted.\n        for {set i 7} {$i >= 3} {incr i -1} {\n            r write \"*4\\r\\n\\$4\\r\\nlset\\r\\n\\$3\\r\\nlst\\r\\n\\$1\\r\\n$i\\r\\n\"\n            write_big_bulk 1000000000\n        }\n        assert_equal \"g\" [r lindex lst 1]\n        r ping"
+  },
+  {
+   "name": "Test LSET splits a LZF compressed quicklist node, and then merge",
+   "expected": "PONG",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Test when a LZF compressed quicklist node can't be inserted and is split,\n        # the split node merges with the node before it and the split node is kept.\n        r flushdb\n        r config set list-compress-depth 1\n        r lpush lst [string repeat \"x\" 2000]\n        r rpush lst [string repeat \"y\" 7000]\n        r rpush lst a b c d e f g\n        r rpush lst [string repeat \"z\" 8000]\n        r lset lst 0 h\n        # now: [h]     [y... a b c d e f g] [z...]\n        #      node0        node1(LZF)\n        # Keep inserting elements into node1 until node1 is split into two\n        # nodes([y...] [...]), eventually node0 will merge with the [y...] node.\n        # Since [y...] node is larger, after the merge node0 will be deleted and\n        # the [y...] node will be kept.\n        for {set i 7} {$i >= 3} {incr i -1} {\n            r write \"*4\\r\\n\\$4\\r\\nlset\\r\\n\\$3\\r\\nlst\\r\\n\\$1\\r\\n$i\\r\\n\"\n            write_big_bulk 1000000000\n        }\n        assert_equal \"h\" [r lindex lst 0]\n        r config set list-compress-depth 0\n        r ping"
+  },
+  {
+   "name": "Test LMOVE on plain nodes over 4GB",
+   "expected": "",
+   "why": "variable reference: *4\\r\\n\\$4\\r\\nLSET\\r\\n\\$7\\r\\nlst2{t}\\r\\n\\$1\\r\\n0\\r\\n",
+   "skipped": true,
+   "tcl": "r flushdb\n       r RPUSH lst2{t} \"aa\"\n       r RPUSH lst2{t} \"bb\"\n       r write \"*4\\r\\n\\$4\\r\\nLSET\\r\\n\\$7\\r\\nlst2{t}\\r\\n\\$1\\r\\n0\\r\\n\"\n       write_big_bulk $str_length;\n       r RPUSH lst2{t} \"cc\"\n       r RPUSH lst2{t} \"dd\"\n       r LMOVE lst2{t} lst{t} RIGHT LEFT\n       assert_equal [read_big_bulk {r LMOVE lst2{t} lst{t} LEFT RIGHT}] $str_length\n       assert_equal [r llen lst{t}] 2\n       assert_equal [r llen lst2{t}] 2\n       assert_equal [r lpop lst2{t}] \"bb\"\n       assert_equal [r lpop lst2{t}] \"cc\"\n       assert_equal [r lpop lst{t}] \"dd\"\n       assert_equal [read_big_bulk {r rpop lst{t}}] $str_length"
+  },
+  {
+   "name": "LPOS basic usage - $type",
+   "expected": null,
+   "why": "variable reference: $large",
+   "skipped": true,
+   "tcl": "r DEL mylist\n        r RPUSH mylist a b c $large 2 3 c c\n        assert {[r LPOS mylist a] == 0}\n        assert {[r LPOS mylist c] == 2}"
+  },
+  {
+   "name": "LPOS RANK (positive, negative and zero rank) option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert {[r LPOS mylist c RANK 1] == 2}\n        assert {[r LPOS mylist c RANK 2] == 6}\n        assert {[r LPOS mylist c RANK 4] eq \"\"}\n        assert {[r LPOS mylist c RANK -1] == 7}\n        assert {[r LPOS mylist c RANK -2] == 6}\n        assert_error \"*RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start*\" {r LPOS mylist c RANK 0}\n        assert_error \"*value is out of range*\" {r LPOS mylist c RANK -9223372036854775808}"
+  },
+  {
+   "name": "LPOS COUNT option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert {[r LPOS mylist c COUNT 0] == {2 6 7}}\n        assert {[r LPOS mylist c COUNT 1] == {2}}\n        assert {[r LPOS mylist c COUNT 2] == {2 6}}\n        assert {[r LPOS mylist c COUNT 100] == {2 6 7}}"
+  },
+  {
+   "name": "LPOS COUNT + RANK option",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert {[r LPOS mylist c COUNT 0 RANK 2] == {6 7}}\n        assert {[r LPOS mylist c COUNT 2 RANK -1] == {7 6}}"
+  },
+  {
+   "name": "LPOS non existing key",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert {[r LPOS mylistxxx c COUNT 0 RANK 2] eq {}}"
+  },
+  {
+   "name": "LPOS no match",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert {[r LPOS mylist x COUNT 2 RANK -1] eq {}}\n        assert {[r LPOS mylist x RANK -1] eq {}}"
+  },
+  {
+   "name": "LPOS MAXLEN",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert {[r LPOS mylist a COUNT 0 MAXLEN 1] == {0}}\n        assert {[r LPOS mylist c COUNT 0 MAXLEN 1] == {}}\n        assert {[r LPOS mylist c COUNT 0 MAXLEN 3] == {2}}\n        assert {[r LPOS mylist c COUNT 0 MAXLEN 3 RANK -1] == {7 6}}\n        assert {[r LPOS mylist c COUNT 0 MAXLEN 7 RANK 2] == {6}}"
+  },
+  {
+   "name": "LPOS when RANK is greater than matches",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r DEL mylist\n        r LPUSH mylist a\n        assert {[r LPOS mylist b COUNT 10 RANK 5] eq {}}"
+  },
+  {
+   "name": "LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# first lpush then rpush\n        r del mylist1\n        assert_equal 1 [r lpush mylist1 $large]\n        assert_encoding $type mylist1\n        assert_equal 2 [r rpush mylist1 b]\n        assert_equal 3 [r rpush mylist1 c]\n        assert_equal 3 [r llen mylist1]\n        assert_equal $large [r lindex mylist1 0]\n        assert_equal b [r lindex mylist1 1]\n        assert_equal c [r lindex mylist1 2]\n        assert_equal {} [r lindex mylist1 3]\n        assert_equal c [r rpop mylist1]\n        assert_equal $large [r lpop mylist1]\n\n        # first rpush then lpush\n        r del mylist2\n        assert_equal 1 [r rpush mylist2 $large]\n        assert_equal 2 [r lpush mylist2 b]\n        assert_equal 3 [r lpush mylist2 c]\n        assert_encoding $type mylist2\n        assert_equal 3 [r llen mylist2]\n        assert_equal c [r lindex mylist2 0]\n        assert_equal b [r lindex mylist2 1]\n        assert_equal $large [r lindex mylist2 2]\n        assert_equal {} [r lindex mylist2 3]\n        assert_equal $large [r rpop mylist2]\n        assert_equal c [r lpop mylist2]"
+  },
+  {
+   "name": "LPOP/RPOP with wrong number of arguments",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "lpop",
+      "key",
+      "1",
+      "1"
+     ],
+     "value": "*wrong number of arguments for 'lpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "rpop",
+      "key",
+      "2",
+      "2"
+     ],
+     "value": "*wrong number of arguments for 'rpop' command"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "RPOP/LPOP with the optional count argument - $type",
+   "expected": null,
+   "why": "variable reference: $large",
+   "skipped": true,
+   "tcl": "assert_equal 7 [r lpush listcount aa $large cc dd ee ff gg]\n        assert_equal {gg} [r lpop listcount 1]\n        assert_equal {ff ee} [r lpop listcount 2]\n        assert_equal \"aa $large\" [r rpop listcount 2]\n        assert_equal {cc} [r rpop listcount 1]\n        assert_equal {dd} [r rpop listcount 123]\n        assert_error \"*ERR*range*\" {r lpop forbarqaz -123}"
+  },
+  {
+   "name": "LPOP/RPOP with the count 0 returns an empty array in RESP$resp",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "listcount",
+      "zero"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lpop",
+      "listcount",
+      "0"
+     ],
+     "value": "*0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "rpop",
+      "listcount",
+      "0"
+     ],
+     "value": "*0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LPOP/RPOP against non existing key in RESP$resp",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del non_existing_key\n\n            verify_resp_response $resp [r lpop non_existing_key] {$-1} {_}\n            verify_resp_response $resp [r rpop non_existing_key] {$-1} {_}"
+  },
+  {
+   "name": "LPOP/RPOP with <count> against non existing key in RESP$resp",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del non_existing_key\n\n            verify_resp_response $resp [r lpop non_existing_key 0] {*-1} {_}\n            verify_resp_response $resp [r lpop non_existing_key 1] {*-1} {_}\n\n            verify_resp_response $resp [r rpop non_existing_key 0] {*-1} {_}\n            verify_resp_response $resp [r rpop non_existing_key 1] {*-1} {_}"
+  },
+  {
+   "name": "Variadic RPUSH/LPUSH",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mylist"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lpush",
+      "mylist",
+      "a",
+      "b",
+      "c",
+      "d"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "rpush",
+      "mylist",
+      "0",
+      "1",
+      "2",
+      "3"
+     ],
+     "value": "8"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lrange",
+      "mylist",
+      "0",
+      "-1"
+     ],
+     "value": "d c b a 0 1 2 3"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "DEL a list",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "del",
+      "mylist2"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "mylist2"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "llen",
+      "mylist2"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "$pop: single existing list - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            create_$type blist \"a b $large c d\"\n\n            bpop_command $rd $pop blist 1\n            assert_equal {blist a} [$rd read]\n            if {$pop == \"BLPOP\"} {\n                bpop_command $rd BRPOP blist 1\n            } else {\n                bpop_command $rd BLMPOP_RIGHT blist 1\n            }\n            assert_equal {blist d} [$rd read]\n\n            bpop_command $rd $pop blist 1\n            assert_equal {blist b} [$rd read]\n            if {$pop == \"BLPOP\"} {\n                bpop_command $rd BRPOP blist 1\n            } else {\n                bpop_command $rd BLMPOP_RIGHT blist 1\n            }\n            assert_equal {blist c} [$rd read]\n\n            assert_equal 1 [r llen blist]\n            $rd close"
+  },
+  {
+   "name": "$pop: multiple existing lists - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            create_$type blist1{t} \"a $large c\"\n            create_$type blist2{t} \"d $large f\"\n\n            bpop_command_two_key $rd $pop blist1{t} blist2{t} 1\n            assert_equal {blist1{t} a} [$rd read]\n            if {$pop == \"BLPOP\"} {\n                bpop_command_two_key $rd BRPOP blist1{t} blist2{t} 1\n            } else {\n                bpop_command_two_key $rd BLMPOP_RIGHT blist1{t} blist2{t} 1\n            }\n            assert_equal {blist1{t} c} [$rd read]\n            assert_equal 1 [r llen blist1{t}]\n            assert_equal 3 [r llen blist2{t}]\n\n            bpop_command_two_key $rd $pop blist2{t} blist1{t} 1\n            assert_equal {blist2{t} d} [$rd read]\n            if {$pop == \"BLPOP\"} {\n                bpop_command_two_key $rd BRPOP blist2{t} blist1{t} 1\n            } else {\n                bpop_command_two_key $rd BLMPOP_RIGHT blist2{t} blist1{t} 1\n            }\n            assert_equal {blist2{t} f} [$rd read]\n            assert_equal 1 [r llen blist1{t}]\n            assert_equal 1 [r llen blist2{t}]\n            $rd close"
+  },
+  {
+   "name": "$pop: second list has an entry - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del blist1{t}\n            create_$type blist2{t} \"d $large f\"\n\n            bpop_command_two_key $rd $pop blist1{t} blist2{t} 1\n            assert_equal {blist2{t} d} [$rd read]\n            if {$pop == \"BLPOP\"} {\n                bpop_command_two_key $rd BRPOP blist1{t} blist2{t} 1\n            } else {\n                bpop_command_two_key $rd BLMPOP_RIGHT blist1{t} blist2{t} 1\n            }\n            assert_equal {blist2{t} f} [$rd read]\n            assert_equal 0 [r llen blist1{t}]\n            assert_equal 1 [r llen blist2{t}]\n            $rd close"
+  },
+  {
+   "name": "BRPOPLPUSH - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del target{t}\n            r rpush target{t} bar\n\n            set rd [valkey_deferring_client]\n            create_$type blist{t} \"a b $large c d\"\n\n            $rd brpoplpush blist{t} target{t} 1\n            assert_equal d [$rd read]\n\n            assert_equal d [r lpop target{t}]\n            assert_equal \"a b $large c\" [r lrange blist{t} 0 -1]\n            $rd close"
+  },
+  {
+   "name": "BLMOVE $wherefrom $whereto - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del target{t}\n                    r rpush target{t} bar\n\n                    set rd [valkey_deferring_client]\n                    create_$type blist{t} \"a b $large c d\"\n\n                    $rd blmove blist{t} target{t} $wherefrom $whereto 1\n                    set poppedelement [$rd read]\n\n                    if {$wherefrom eq \"right\"} {\n                        assert_equal d $poppedelement\n                        assert_equal \"a b $large c\" [r lrange blist{t} 0 -1]\n                    } else {\n                        assert_equal a $poppedelement\n                        assert_equal \"b $large c d\" [r lrange blist{t} 0 -1]\n                    }\n\n                    if {$whereto eq \"right\"} {\n                        assert_equal $poppedelement [r rpop target{t}]\n                    } else {\n                        assert_equal $poppedelement [r lpop target{t}]\n                    }\n                    $rd close"
+  },
+  {
+   "name": "$pop, LPUSH + DEL should not awake blocked client",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del list\n\n        bpop_command $rd $pop list 0\n        wait_for_blocked_client\n\n        r multi\n        r lpush list a\n        r del list\n        r exec\n        r del list\n        r lpush list b\n        assert_equal {list b} [$rd read]\n        $rd close"
+  },
+  {
+   "name": "$pop, LPUSH + DEL + SET should not awake blocked client",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del list\n\n        bpop_command $rd $pop list 0\n        wait_for_blocked_client\n\n        r multi\n        r lpush list a\n        r del list\n        r set list foo\n        r exec\n        r del list\n        r lpush list b\n        assert_equal {list b} [$rd read]\n        $rd close"
+  },
+  {
+   "name": "BLPOP with same key multiple times should work (issue #801)",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del list1{t} list2{t}\n\n        # Data arriving after the BLPOP.\n        $rd blpop list1{t} list2{t} list2{t} list1{t} 0\n        wait_for_blocked_client\n        r lpush list1{t} a\n        assert_equal [$rd read] {list1{t} a}\n        $rd blpop list1{t} list2{t} list2{t} list1{t} 0\n        wait_for_blocked_client\n        r lpush list2{t} b\n        assert_equal [$rd read] {list2{t} b}\n\n        # Data already there.\n        r lpush list1{t} a\n        r lpush list2{t} b\n        $rd blpop list1{t} list2{t} list2{t} list1{t} 0\n        assert_equal [$rd read] {list1{t} a}\n        $rd blpop list1{t} list2{t} list2{t} list1{t} 0\n        assert_equal [$rd read] {list2{t} b}\n        $rd close"
+  },
+  {
+   "name": "MULTI/EXEC is isolated from the point of view of $pop",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del list\n\n        bpop_command $rd $pop list 0\n        wait_for_blocked_client\n\n        r multi\n        r lpush list a\n        r lpush list b\n        r lpush list c\n        r exec\n        assert_equal {list c} [$rd read]\n        $rd close"
+  },
+  {
+   "name": "$pop with variadic LPUSH",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del blist\n        bpop_command $rd $pop blist 0\n        wait_for_blocked_client\n        assert_equal 2 [r lpush blist foo bar]\n        assert_equal {blist bar} [$rd read]\n        assert_equal foo [lindex [r lrange blist 0 -1] 0]\n        $rd close"
+  },
+  {
+   "name": "BRPOPLPUSH with zero timeout should block indefinitely",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del blist{t} target{t}\n        r rpush target{t} bar\n        $rd brpoplpush blist{t} target{t} 0\n        wait_for_blocked_clients_count 1\n        r rpush blist{t} foo\n        assert_equal foo [$rd read]\n        assert_equal {foo bar} [r lrange target{t} 0 -1]\n        $rd close"
+  },
+  {
+   "name": "BLMOVE $wherefrom $whereto with zero timeout should block indefinitely",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n                r del blist{t} target{t}\n                r rpush target{t} bar\n                $rd blmove blist{t} target{t} $wherefrom $whereto 0\n                wait_for_blocked_clients_count 1\n                r rpush blist{t} foo\n                assert_equal foo [$rd read]\n                if {$whereto eq \"right\"} {\n                    assert_equal {bar foo} [r lrange target{t} 0 -1]\n                } else {\n                    assert_equal {foo bar} [r lrange target{t} 0 -1]\n                }\n                $rd close"
+  },
+  {
+   "name": "BLMOVE ($wherefrom, $whereto) with a client BLPOPing the target list",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n                set rd2 [valkey_deferring_client]\n                r del blist{t} target{t}\n                $rd2 blpop target{t} 0\n                wait_for_blocked_clients_count 1\n                $rd blmove blist{t} target{t} $wherefrom $whereto 0\n                wait_for_blocked_clients_count 2\n                r rpush blist{t} foo\n                assert_equal foo [$rd read]\n                assert_equal {target{t} foo} [$rd2 read]\n                assert_equal 0 [r exists target{t}]\n                $rd close\n                $rd2 close"
+  },
+  {
+   "name": "BRPOPLPUSH with wrong source type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del blist{t} target{t}\n        r set blist{t} nolist\n        $rd brpoplpush blist{t} target{t} 1\n        assert_error \"WRONGTYPE*\" {$rd read}\n        $rd close"
+  },
+  {
+   "name": "BRPOPLPUSH with wrong destination type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del blist{t} target{t}\n        r set target{t} nolist\n        r lpush blist{t} foo\n        $rd brpoplpush blist{t} target{t} 1\n        assert_error \"WRONGTYPE*\" {$rd read}\n        $rd close\n\n        set rd [valkey_deferring_client]\n        r del blist{t} target{t}\n        r set target{t} nolist\n        $rd brpoplpush blist{t} target{t} 0\n        wait_for_blocked_clients_count 1\n        r rpush blist{t} foo\n        assert_error \"WRONGTYPE*\" {$rd read}\n        assert_equal {foo} [r lrange blist{t} 0 -1]\n        $rd close"
+  },
+  {
+   "name": "BRPOPLPUSH maintains order of elements after failure",
+   "expected": "a b c",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del blist{t} target{t}\n        r set target{t} nolist\n        $rd brpoplpush blist{t} target{t} 0\n        wait_for_blocked_client\n        r rpush blist{t} a b c\n        assert_error \"WRONGTYPE*\" {$rd read}\n        $rd close\n        r lrange blist{t} 0 -1"
+  },
+  {
+   "name": "BRPOPLPUSH with multiple blocked clients",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        r del blist{t} target1{t} target2{t}\n        r set target1{t} nolist\n        $rd1 brpoplpush blist{t} target1{t} 0\n        wait_for_blocked_clients_count 1\n        $rd2 brpoplpush blist{t} target2{t} 0\n        wait_for_blocked_clients_count 2\n        r lpush blist{t} foo\n\n        assert_error \"WRONGTYPE*\" {$rd1 read}\n        assert_equal {foo} [$rd2 read]\n        assert_equal {foo} [r lrange target2{t} 0 -1]\n        $rd1 close\n        $rd2 close"
+  },
+  {
+   "name": "BLMPOP with multiple blocked clients",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        set rd3 [valkey_deferring_client]\n        set rd4 [valkey_deferring_client]\n        r del blist{t} blist2{t}\n\n        $rd1 blmpop 0 2 blist{t} blist2{t} left count 1\n        wait_for_blocked_clients_count 1\n        $rd2 blmpop 0 2 blist{t} blist2{t} right count 10\n        wait_for_blocked_clients_count 2\n        $rd3 blmpop 0 2 blist{t} blist2{t} left count 10\n        wait_for_blocked_clients_count 3\n        $rd4 blmpop 0 2 blist{t} blist2{t} right count 1\n        wait_for_blocked_clients_count 4\n\n        r multi\n        r lpush blist{t} a b c d e\n        r lpush blist2{t} 1 2 3 4 5\n        r exec\n\n        assert_equal {blist{t} e} [$rd1 read]\n        assert_equal {blist{t} {a b c d}} [$rd2 read]\n        assert_equal {blist2{t} {5 4 3 2 1}} [$rd3 read]\n\n        r lpush blist2{t} 1 2 3\n        assert_equal {blist2{t} 1} [$rd4 read]\n        $rd1 close\n        $rd2 close\n        $rd3 close\n        $rd4 close"
+  },
+  {
+   "name": "Linked LMOVEs",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n      set rd2 [valkey_deferring_client]\n\n      r del list1{t} list2{t} list3{t}\n\n      $rd1 blmove list1{t} list2{t} right left 0\n      wait_for_blocked_clients_count 1\n      $rd2 blmove list2{t} list3{t} left right 0\n      wait_for_blocked_clients_count 2\n\n      r rpush list1{t} foo\n\n      assert_equal {} [r lrange list1{t} 0 -1]\n      assert_equal {} [r lrange list2{t} 0 -1]\n      assert_equal {foo} [r lrange list3{t} 0 -1]\n      $rd1 close\n      $rd2 close"
+  },
+  {
+   "name": "Circular BRPOPLPUSH",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n      set rd2 [valkey_deferring_client]\n\n      r del list1{t} list2{t}\n\n      $rd1 brpoplpush list1{t} list2{t} 0\n      wait_for_blocked_clients_count 1\n      $rd2 brpoplpush list2{t} list1{t} 0\n      wait_for_blocked_clients_count 2\n\n      r rpush list1{t} foo\n\n      assert_equal {foo} [r lrange list1{t} 0 -1]\n      assert_equal {} [r lrange list2{t} 0 -1]\n      $rd1 close\n      $rd2 close"
+  },
+  {
+   "name": "Self-referential BRPOPLPUSH",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n\n      r del blist{t}\n\n      $rd brpoplpush blist{t} blist{t} 0\n      wait_for_blocked_client\n\n      r rpush blist{t} foo\n\n      assert_equal {foo} [r lrange blist{t} 0 -1]\n      $rd close"
+  },
+  {
+   "name": "BRPOPLPUSH inside a transaction",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "xlist{t}",
+      "target{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "xlist{t}",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lpush",
+      "xlist{t}",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "brpoplpush",
+      "xlist{t}",
+      "target{t}",
+      "0"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "brpoplpush",
+      "xlist{t}",
+      "target{t}",
+      "0"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "brpoplpush",
+      "xlist{t}",
+      "target{t}",
+      "0"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lrange",
+      "xlist{t}",
+      "0",
+      "-1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "lrange",
+      "target{t}",
+      "0",
+      "-1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "PUSH resulting from BRPOPLPUSH affect WATCH",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set blocked_client [valkey_deferring_client]\n        set watching_client [valkey_deferring_client]\n        r del srclist{t} dstlist{t} somekey{t}\n        r set somekey{t} somevalue\n        $blocked_client brpoplpush srclist{t} dstlist{t} 0\n        wait_for_blocked_client\n        $watching_client watch dstlist{t}\n        $watching_client read\n        $watching_client multi\n        $watching_client read\n        $watching_client get somekey{t}\n        $watching_client read\n        r lpush srclist{t} element\n        $watching_client exec\n        set res [$watching_client read]\n        $blocked_client close\n        $watching_client close\n        set _ $res"
+  },
+  {
+   "name": "BRPOPLPUSH does not affect WATCH while still blocked",
+   "expected": "somevalue",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set blocked_client [valkey_deferring_client]\n        set watching_client [valkey_deferring_client]\n        r del srclist{t} dstlist{t} somekey{t}\n        r set somekey{t} somevalue\n        $blocked_client brpoplpush srclist{t} dstlist{t} 0\n        wait_for_blocked_client\n        $watching_client watch dstlist{t}\n        $watching_client read\n        $watching_client multi\n        $watching_client read\n        $watching_client get somekey{t}\n        $watching_client read\n        $watching_client exec\n        # wait for exec to be called.\n        wait_for_condition 50 10 {\n            [llength [lsearch -all [split [string trim [r client list]] \"\\r\\n\"] *cmd=exec*]] == 1\n        } else {\n            fail \"$cmd was not called\"\n        }\n\n        # Blocked BLPOPLPUSH may create problems, unblock it.\n        r lpush srclist{t} element\n        set res [$watching_client read]\n        $blocked_client close\n        $watching_client close\n        set _ $res"
+  },
+  {
+   "name": "BRPOPLPUSH timeout",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n\n      $rd brpoplpush foo_list{t} bar_list{t} 1\n      wait_for_blocked_clients_count 1\n      wait_for_blocked_clients_count 0 500 10\n      set res [$rd read]\n      $rd close\n      set _ $res"
+  },
+  {
+   "name": "SWAPDB awakes blocked client",
+   "expected": "k hello",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n        r select 1\n        r rpush k hello\n        r select 9\n        set rd [valkey_deferring_client]\n        $rd brpop k 5\n        wait_for_blocked_clients_count 1\n        r swapdb 1 9\n        $rd read"
+  },
+  {
+   "name": "SWAPDB wants to wake blocked client, but the key already expired",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set repl [attach_to_replication_stream]\n        r flushall\n        r debug set-active-expire 0\n        r select 1\n        r rpush k hello\n        r pexpire k 100\n        set rd [valkey_deferring_client]\n        $rd deferred 0\n        $rd select 9\n        set id [$rd client id]\n        $rd deferred 1\n        $rd brpop k 1\n        wait_for_blocked_clients_count 1\n        after 101\n        r swapdb 1 9\n        # The SWAPDB command tries to awake the blocked client, but it remains\n        # blocked because the key is expired. Check that the deferred client is\n        # still blocked. Then unblock it.\n        assert_match \"*flags=b*\" [r client list id $id]\n        r client unblock $id\n        assert_equal {} [$rd read]\n        $rd deferred 0\n        # We want to force key deletion to be propagated to the replica \n        # in order to verify it was expired on the replication stream.\n        $rd set somekey1 someval1\n        $rd exists k\n        r set somekey2 someval2\n        \n        assert_replication_stream $repl {\n            {select *}\n            {flushall}\n            {select 1}\n            {rpush k hello}\n            {pexpireat k *}\n            {swapdb 1 9}\n            {select 9}\n            {set somekey1 someval1}\n            {unlink k}\n            {select 1}\n            {set somekey2 someval2}\n        }\n        close_replication_stream $repl\n        r debug set-active-expire 1\n        # Restore server and client state\n        r select 9"
+  },
+  {
+   "name": "MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set repl [attach_to_replication_stream]\n        r flushall\n        r debug set-active-expire 0\n\n        set rd [valkey_deferring_client]\n        $rd client id\n        set id [$rd read]\n        $rd brpop k 0\n        wait_for_blocked_clients_count 1\n\n        r multi\n        r rpush k hello\n        r pexpire k 100\n        r debug sleep 0.2\n        r exec\n\n        # The EXEC command tries to awake the blocked client, but it remains\n        # blocked because the key is expired. Check that the deferred client is\n        # still blocked. Then unblock it.\n        assert_match \"*flags=b*\" [r client list id $id]\n        r client unblock $id\n        assert_equal {} [$rd read]\n        # We want to force key deletion to be propagated to the replica \n        # in order to verify it was expired on the replication stream.\n        $rd exists k\n        assert_equal {0} [$rd read]\n        assert_replication_stream $repl {\n            {select *}\n            {flushall}\n            {multi}\n            {rpush k hello}\n            {pexpireat k *}\n            {exec}\n            {unlink k}\n        }\n        close_replication_stream $repl\n        # Restore server and client state\n        r debug set-active-expire 1\n        r select 9"
+  },
+  {
+   "name": "BLPOP unblock but the key is expired and then block again - reprocessing command",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n        r debug set-active-expire 0\n        set rd [valkey_deferring_client]\n\n        set start [clock milliseconds]\n        $rd blpop mylist 1\n        wait_for_blocked_clients_count 1\n\n        # The exec will try to awake the blocked client, but the key is expired,\n        # so the client will be blocked again during the command reprocessing.\n        r multi\n        r rpush mylist a\n        r pexpire mylist 100\n        r debug sleep 0.2\n        r exec\n\n        assert_equal {} [$rd read]\n        set end [clock milliseconds]\n\n        # Before the fix in #13004, this time would have been 1200+ (i.e. more than 1200ms),\n        # now it should be 1000, but in order to avoid timing issues, we increase the range a bit.\n        assert_range [expr $end-$start] 1000 1150\n\n        r debug set-active-expire 1\n        $rd close"
+  },
+  {
+   "name": "$pop when new key is moved into place",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        r del foo{t}\n\n        bpop_command $rd $pop foo{t} 0\n        wait_for_blocked_client\n        r lpush bob{t} abc def hij\n        r rename bob{t} foo{t}\n        set res [$rd read]\n        $rd close\n        set _ $res"
+  },
+  {
+   "name": "$pop when result key is created by SORT..STORE",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n\n        # zero out list from previous test without explicit delete\n        r lpop foo{t}\n        r lpop foo{t}\n        r lpop foo{t}\n\n        bpop_command $rd $pop foo{t} 5\n        wait_for_blocked_client\n        r lpush notfoo{t} hello hola aguacate konichiwa zanzibar\n        r sort notfoo{t} ALPHA store foo{t}\n        set res [$rd read]\n        $rd close\n        set _ $res"
+  },
+  {
+   "name": "BLPOP: timeout value out of range",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "BLPOP",
+      "blist1",
+      "0x7FFFFFFFFFFFFF"
+     ],
+     "value": "ERR *is out of range*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "$pop: with single empty list argument",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del blist1\n            bpop_command $rd $pop blist1 1\n            wait_for_blocked_client\n            r rpush blist1 foo\n            assert_equal {blist1 foo} [$rd read]\n            assert_equal 0 [r exists blist1]\n            $rd close"
+  },
+  {
+   "name": "$pop: with negative timeout",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            bpop_command $rd $pop blist1 -1\n            assert_error \"ERR *is negative*\" {$rd read}\n            $rd close"
+  },
+  {
+   "name": "$pop: with non-integer timeout",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del blist1\n            bpop_command $rd $pop blist1 0.1\n            r rpush blist1 foo\n            assert_equal {blist1 foo} [$rd read]\n            assert_equal 0 [r exists blist1]\n            $rd close"
+  },
+  {
+   "name": "$pop: with zero timeout should block indefinitely",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# To test this, use a timeout of 0 and wait a second.\n            # The blocking pop should still be waiting for a push.\n            set rd [valkey_deferring_client]\n            bpop_command $rd $pop blist1 0\n            wait_for_blocked_client\n            r rpush blist1 foo\n            assert_equal {blist1 foo} [$rd read]\n            $rd close"
+  },
+  {
+   "name": "$pop: with 0.001 timeout should not block indefinitely",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Use a timeout of 0.001 and wait for the number of blocked clients to equal 0.\n            # Validate the empty read from the deferring client.\n            set rd [valkey_deferring_client]\n            bpop_command $rd $pop blist1 0.001\n            wait_for_blocked_clients_count 0\n            assert_equal {} [$rd read]\n            $rd close"
+  },
+  {
+   "name": "$pop: second argument is not a list",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del blist1{t} blist2{t}\n            r set blist2{t} nolist{t}\n            bpop_command_two_key $rd $pop blist1{t} blist2{t} 1\n            assert_error \"WRONGTYPE*\" {$rd read}\n            $rd close"
+  },
+  {
+   "name": "$pop: timeout",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del blist1{t} blist2{t}\n            bpop_command_two_key $rd $pop blist1{t} blist2{t} 1\n            wait_for_blocked_client\n            assert_equal {} [$rd read]\n            $rd close"
+  },
+  {
+   "name": "$pop: arguments are empty",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del blist1{t} blist2{t}\n\n            bpop_command_two_key $rd $pop blist1{t} blist2{t} 1\n            wait_for_blocked_client\n            r rpush blist1{t} foo\n            assert_equal {blist1{t} foo} [$rd read]\n            assert_equal 0 [r exists blist1{t}]\n            assert_equal 0 [r exists blist2{t}]\n\n            bpop_command_two_key $rd $pop blist1{t} blist2{t} 1\n            wait_for_blocked_client\n            r rpush blist2{t} foo\n            assert_equal {blist2{t} foo} [$rd read]\n            assert_equal 0 [r exists blist1{t}]\n            assert_equal 0 [r exists blist2{t}]\n            $rd close"
+  },
+  {
+   "name": "$pop inside a transaction",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del xlist\n        r lpush xlist foo\n        r lpush xlist bar\n        r multi\n\n        bpop_command r $pop xlist 0\n        bpop_command r $pop xlist 0\n        bpop_command r $pop xlist 0\n        r exec"
+  },
+  {
+   "name": "BLMPOP propagate as pop with count command to replica",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        set repl [attach_to_replication_stream]\n\n        # BLMPOP without being blocked.\n        r lpush mylist{t} a b c\n        r rpush mylist2{t} 1 2 3\n        r blmpop 0 1 mylist{t} left count 1\n        r blmpop 0 2 mylist{t} mylist2{t} right count 10\n        r blmpop 0 2 mylist{t} mylist2{t} right count 10\n\n        # BLMPOP that gets blocked.\n        $rd blmpop 0 1 mylist{t} left count 1\n        wait_for_blocked_client\n        r lpush mylist{t} a\n        $rd blmpop 0 2 mylist{t} mylist2{t} left count 5\n        wait_for_blocked_client\n        r lpush mylist{t} a b c\n        $rd blmpop 0 2 mylist{t} mylist2{t} right count 10\n        wait_for_blocked_client\n        r rpush mylist2{t} a b c\n\n        # Released on timeout.\n        assert_equal {} [r blmpop 0.01 1 mylist{t} left count 10]\n        r set foo{t} bar ;# something else to propagate after, so we can make sure the above pop didn't.\n\n        $rd close\n\n        assert_replication_stream $repl {\n            {select *}\n            {lpush mylist{t} a b c}\n            {rpush mylist2{t} 1 2 3}\n            {lpop mylist{t} 1}\n            {rpop mylist{t} 2}\n            {rpop mylist2{t} 3}\n            {lpush mylist{t} a}\n            {lpop mylist{t} 1}\n            {lpush mylist{t} a b c}\n            {lpop mylist{t} 3}\n            {rpush mylist2{t} a b c}\n            {rpop mylist2{t} 3}\n            {set foo{t} bar}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "LPUSHX, RPUSHX - generic",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "xlist"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lpushx",
+      "xlist",
+      "a"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "llen",
+      "xlist"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "rpushx",
+      "xlist",
+      "a"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "llen",
+      "xlist"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LPUSHX, RPUSHX - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type xlist \"$large c\"\n            assert_equal 3 [r rpushx xlist d]\n            assert_equal 4 [r lpushx xlist a]\n            assert_equal 6 [r rpushx xlist 42 x]\n            assert_equal 9 [r lpushx xlist y3 y2 y1]\n            assert_equal \"y1 y2 y3 a $large c d 42 x\" [r lrange xlist 0 -1]"
+  },
+  {
+   "name": "LINSERT - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type xlist \"a $large c d\"\n            assert_equal 5 [r linsert xlist before c zz] \"before c\"\n            assert_equal \"a $large zz c d\" [r lrange xlist 0 10] \"lrangeA\"\n            assert_equal 6 [r linsert xlist after c yy] \"after c\"\n            assert_equal \"a $large zz c yy d\" [r lrange xlist 0 10] \"lrangeB\"\n            assert_equal 7 [r linsert xlist after d dd] \"after d\"\n            assert_equal -1 [r linsert xlist after bad ddd] \"after bad\"\n            assert_equal \"a $large zz c yy d dd\" [r lrange xlist 0 10] \"lrangeC\"\n            assert_equal 8 [r linsert xlist before a aa] \"before a\"\n            assert_equal -1 [r linsert xlist before bad aaa] \"before bad\"\n            assert_equal \"aa a $large zz c yy d dd\" [r lrange xlist 0 10] \"lrangeD\"\n\n            # check inserting integer encoded value\n            assert_equal 9 [r linsert xlist before aa 42] \"before aa\"\n            assert_equal 42 [r lrange xlist 0 0] \"lrangeE\""
+  },
+  {
+   "name": "LINSERT raise error on bad syntax",
+   "expected": "*ERR*syntax*error*",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "catch {[r linsert xlist aft3r aa 42]} e\n        set e"
+  },
+  {
+   "name": "LINSERT against non-list value error",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "k1",
+      "v1"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "linsert",
+      "k1",
+      "after",
+      "0",
+      "0"
+     ],
+     "value": "WRONGTYPE Operation against a key holding the wrong kind of value*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LINSERT against non existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "linsert",
+      "not-a-key",
+      "before",
+      "0",
+      "0"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LINDEX consistency test - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mylist\n            for {set i 0} {$i < $num} {incr i} {\n                r rpush mylist $i\n            }\n            assert_encoding $type mylist\n            check_numbered_list_consistency mylist"
+  },
+  {
+   "name": "LINDEX random access - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert_encoding $type mylist\n            check_random_access_consistency mylist"
+  },
+  {
+   "name": "Check if list is still ok after a DEBUG RELOAD - $type",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r debug reload\n            assert_encoding $type mylist\n            check_numbered_list_consistency mylist\n            check_random_access_consistency mylist"
+  },
+  {
+   "name": "LLEN against non-list value error",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mylist"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mylist",
+      "foobar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "llen",
+      "mylist"
+     ],
+     "value": "WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LLEN against non existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "llen",
+      "not-a-key"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LINDEX against non-list value error",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert_error WRONGTYPE* {r lindex mylist 0}"
+  },
+  {
+   "name": "LINDEX against non existing key",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert_equal \"\" [r lindex not-a-key 10]"
+  },
+  {
+   "name": "LPUSH against non-list value error",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "lpush",
+      "mylist",
+      "0"
+     ],
+     "value": "WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "RPUSH against non-list value error",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "rpush",
+      "mylist",
+      "0"
+     ],
+     "value": "WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "RPOPLPUSH base case - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mylist1{t} mylist2{t}\n            create_$type mylist1{t} \"a $large c d\"\n            assert_equal d [r rpoplpush mylist1{t} mylist2{t}]\n            assert_equal c [r rpoplpush mylist1{t} mylist2{t}]\n            assert_equal $large [r rpoplpush mylist1{t} mylist2{t}]\n            assert_equal \"a\" [r lrange mylist1{t} 0 -1]\n            assert_equal \"$large c d\" [r lrange mylist2{t} 0 -1]\n            assert_encoding listpack mylist1{t} ;# converted to listpack after shrinking\n            assert_encoding $type mylist2{t}"
+  },
+  {
+   "name": "LMOVE $wherefrom $whereto base case - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mylist1{t} mylist2{t}\n\n                    if {$wherefrom eq \"right\"} {\n                        create_$type mylist1{t} \"c d $large a\"\n                    } else {\n                        create_$type mylist1{t} \"a $large c d\"\n                    }\n                    assert_equal a [r lmove mylist1{t} mylist2{t} $wherefrom $whereto]\n                    assert_equal $large [r lmove mylist1{t} mylist2{t} $wherefrom $whereto]\n                    assert_equal \"c d\" [r lrange mylist1{t} 0 -1]\n                    if {$whereto eq \"right\"} {\n                        assert_equal \"a $large\" [r lrange mylist2{t} 0 -1]\n                    } else {\n                        assert_equal \"$large a\" [r lrange mylist2{t} 0 -1]\n                    }\n                    assert_encoding $type mylist2{t}"
+  },
+  {
+   "name": "RPOPLPUSH with the same list as src and dst - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist{t} \"a $large c\"\n            assert_equal \"a $large c\" [r lrange mylist{t} 0 -1]\n            assert_equal c [r rpoplpush mylist{t} mylist{t}]\n            assert_equal \"c a $large\" [r lrange mylist{t} 0 -1]"
+  },
+  {
+   "name": "LMOVE $wherefrom $whereto with the same list as src and dst - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "if {$wherefrom eq \"right\"} {\n                        create_$type mylist{t} \"a $large c\"\n                        assert_equal \"a $large c\" [r lrange mylist{t} 0 -1]\n                    } else {\n                        create_$type mylist{t} \"c a $large\"\n                        assert_equal \"c a $large\" [r lrange mylist{t} 0 -1]\n                    }\n                    assert_equal c [r lmove mylist{t} mylist{t} $wherefrom $whereto]\n                    if {$whereto eq \"right\"} {\n                        assert_equal \"a $large c\" [r lrange mylist{t} 0 -1]\n                    } else {\n                        assert_equal \"c a $large\" [r lrange mylist{t} 0 -1]\n                    }"
+  },
+  {
+   "name": "RPOPLPUSH with $type source and existing target $othertype",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type srclist{t} \"a b c $large\"\n                create_$othertype dstlist{t} \"$otherlarge\"\n                assert_equal $large [r rpoplpush srclist{t} dstlist{t}]\n                assert_equal c [r rpoplpush srclist{t} dstlist{t}]\n                assert_equal \"a b\" [r lrange srclist{t} 0 -1]\n                assert_equal \"c $large $otherlarge\" [r lrange dstlist{t} 0 -1]\n\n                # When we rpoplpush'ed a large value, dstlist should be\n                # converted to the same encoding as srclist.\n                if {$type eq \"quicklist\"} {\n                    assert_encoding quicklist dstlist{t}\n                }"
+  },
+  {
+   "name": "LMOVE $wherefrom $whereto with $type source and existing target $othertype",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$othertype dstlist{t} \"$otherlarge\"\n\n                        if {$wherefrom eq \"right\"} {\n                            create_$type srclist{t} \"a b c $large\"\n                        } else {\n                            create_$type srclist{t} \"$large c a b\"\n                        }\n                        assert_equal $large [r lmove srclist{t} dstlist{t} $wherefrom $whereto]\n                        assert_equal c [r lmove srclist{t} dstlist{t} $wherefrom $whereto]\n                        assert_equal \"a b\" [r lrange srclist{t} 0 -1]\n\n                        if {$whereto eq \"right\"} {\n                            assert_equal \"$otherlarge $large c\" [r lrange dstlist{t} 0 -1]\n                        } else {\n                            assert_equal \"c $large $otherlarge\" [r lrange dstlist{t} 0 -1]\n                        }\n\n                        # When we lmoved a large value, dstlist should be\n                        # converted to the same encoding as srclist.\n                        if {$type eq \"quicklist\"} {\n                            assert_encoding quicklist dstlist{t}\n                        }"
+  },
+  {
+   "name": "RPOPLPUSH against non existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "srclist{t}",
+      "dstlist{t}"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "rpoplpush",
+      "srclist{t}",
+      "dstlist{t}"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "srclist{t}"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "dstlist{t}"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "RPOPLPUSH against non list src key",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del srclist{t} dstlist{t}\n        r set srclist{t} x\n        assert_error WRONGTYPE* {r rpoplpush srclist{t} dstlist{t}}\n        assert_type string srclist{t}\n        assert_equal 0 [r exists newlist{t}]"
+  },
+  {
+   "name": "RPOPLPUSH against non list dst key - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type srclist{t} \"a $large c d\"\n        r set dstlist{t} x\n        assert_error WRONGTYPE* {r rpoplpush srclist{t} dstlist{t}}\n        assert_type string dstlist{t}\n        assert_equal \"a $large c d\" [r lrange srclist{t} 0 -1]"
+  },
+  {
+   "name": "RPOPLPUSH against non existing src key",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "srclist{t}",
+      "dstlist{t}"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "rpoplpush",
+      "srclist{t}",
+      "dstlist{t}"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "Basic LPOP/RPOP/LMPOP - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"$large 1 2\"\n            assert_equal $large [r lpop mylist]\n            assert_equal 2 [r rpop mylist]\n            assert_equal 1 [r lpop mylist]\n            assert_equal 0 [r llen mylist]\n\n            create_$type mylist \"$large 1 2\"\n            assert_equal \"mylist $large\" [r lmpop 1 mylist left count 1]\n            assert_equal {mylist {2 1}} [r lmpop 2 mylist mylist right count 2]"
+  },
+  {
+   "name": "LPOP/RPOP/LMPOP against empty list",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "non-existing-list{t}",
+      "non-existing-list2{t}"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lpop",
+      "non-existing-list{t}"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "rpop",
+      "non-existing-list2{t}"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lmpop",
+      "1",
+      "non-existing-list{t}",
+      "left",
+      "count",
+      "1"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lmpop",
+      "1",
+      "non-existing-list{t}",
+      "left",
+      "count",
+      "10"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lmpop",
+      "2",
+      "non-existing-list{t}",
+      "non-existing-list2{t}",
+      "right",
+      "count",
+      "1"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lmpop",
+      "2",
+      "non-existing-list{t}",
+      "non-existing-list2{t}",
+      "right",
+      "count",
+      "10"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LPOP/RPOP/LMPOP NON-BLOCK or BLOCK against non list value",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "notalist{t}",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lpop",
+      "notalist{t}"
+     ],
+     "value": "WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "blpop",
+      "notalist{t}",
+      "0"
+     ],
+     "value": "WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "rpop",
+      "notalist{t}"
+     ],
+     "value": "WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "brpop",
+      "notalist{t}",
+      "0"
+     ],
+     "value": "WRONGTYPE*"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "notalist2{t}"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "2",
+      "notalist{t}",
+      "notalist2{t}",
+      "left",
+      "count",
+      "1"
+     ],
+     "value": "WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "blmpop",
+      "0",
+      "2",
+      "notalist{t}",
+      "notalist2{t}",
+      "left",
+      "count",
+      "1"
+     ],
+     "value": "WRONGTYPE*"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "notalist{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "notalist2{t}",
+      "nolist"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "2",
+      "notalist{t}",
+      "notalist2{t}",
+      "right",
+      "count",
+      "10"
+     ],
+     "value": "WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "blmpop",
+      "0",
+      "2",
+      "notalist{t}",
+      "notalist2{t}",
+      "left",
+      "count",
+      "1"
+     ],
+     "value": "WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "Mass RPOP/LPOP - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del mylist\n            set sum1 0\n            for {set i 0} {$i < $num} {incr i} {\n                if {$i == [expr $num/2]} {\n                    r lpush mylist $large\n                }\n                r lpush mylist $i\n                incr sum1 $i\n            }\n            assert_encoding $type mylist\n            set sum2 0\n            for {set i 0} {$i < [expr $num/2]} {incr i} {\n                incr sum2 [r lpop mylist]\n                incr sum2 [r rpop mylist]\n            }\n            assert_equal $sum1 $sum2"
+  },
+  {
+   "name": "LMPOP with illegal argument",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop"
+     ],
+     "value": "ERR wrong number of arguments for 'lmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1"
+     ],
+     "value": "ERR wrong number of arguments for 'lmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}"
+     ],
+     "value": "ERR wrong number of arguments for 'lmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "0",
+      "mylist{t}",
+      "LEFT"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "a",
+      "mylist{t}",
+      "LEFT"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "-1",
+      "mylist{t}",
+      "RIGHT"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "bad_where"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "LEFT",
+      "bar_arg"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "RIGHT",
+      "LEFT"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "COUNT"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "LEFT",
+      "COUNT",
+      "1",
+      "COUNT",
+      "2"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "2",
+      "mylist{t}",
+      "mylist2{t}",
+      "bad_arg"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "LEFT",
+      "COUNT",
+      "0"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "RIGHT",
+      "COUNT",
+      "a"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "1",
+      "mylist{t}",
+      "LEFT",
+      "COUNT",
+      "-1"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lmpop",
+      "2",
+      "mylist{t}",
+      "mylist2{t}",
+      "RIGHT",
+      "COUNT",
+      "-1"
+     ],
+     "value": "ERR count*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LMPOP single existing list - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Same key multiple times.\n        create_$type mylist{t} \"a b $large d e f\"\n        assert_equal {mylist{t} {a b}} [r lmpop 2 mylist{t} mylist{t} left count 2]\n        assert_equal {mylist{t} {f e}} [r lmpop 2 mylist{t} mylist{t} right count 2]\n        assert_equal 2 [r llen mylist{t}]\n\n        # First one exists, second one does not exist.\n        create_$type mylist{t} \"a b $large d e\"\n        r del mylist2{t}\n        assert_equal {mylist{t} a} [r lmpop 2 mylist{t} mylist2{t} left count 1]\n        assert_equal 4 [r llen mylist{t}]\n        assert_equal \"mylist{t} {e d $large b}\" [r lmpop 2 mylist{t} mylist2{t} right count 10]\n        assert_equal {} [r lmpop 2 mylist{t} mylist2{t} right count 1]\n\n        # First one does not exist, second one exists.\n        r del mylist{t}\n        create_$type mylist2{t} \"1 2 $large 4 5\"\n        assert_equal {mylist2{t} 5} [r lmpop 2 mylist{t} mylist2{t} right count 1]\n        assert_equal 4 [r llen mylist2{t}]\n        assert_equal \"mylist2{t} {1 2 $large 4}\" [r lmpop 2 mylist{t} mylist2{t} left count 10]\n\n        assert_equal 0 [r exists mylist{t} mylist2{t}]"
+  },
+  {
+   "name": "LMPOP multiple existing lists - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist{t} \"a b $large d e\"\n        create_$type mylist2{t} \"1 2 $large 4 5\"\n\n        # Pop up from the first key.\n        assert_equal {mylist{t} {a b}} [r lmpop 2 mylist{t} mylist2{t} left count 2]\n        assert_equal 3 [r llen mylist{t}]\n        assert_equal \"mylist{t} {e d $large}\" [r lmpop 2 mylist{t} mylist2{t} right count 3]\n        assert_equal 0 [r exists mylist{t}]\n\n        # Pop up from the second key.\n        assert_equal \"mylist2{t} {1 2 $large}\" [r lmpop 2 mylist{t} mylist2{t} left count 3]\n        assert_equal 2 [r llen mylist2{t}]\n        assert_equal {mylist2{t} {5 4}} [r lmpop 2 mylist{t} mylist2{t} right count 2]\n        assert_equal 0 [r exists mylist{t}]\n\n        # Pop up all elements.\n        create_$type mylist{t} \"a $large c\"\n        create_$type mylist2{t} \"1 $large 3\"\n        assert_equal \"mylist{t} {a $large c}\" [r lmpop 2 mylist{t} mylist2{t} left count 10]\n        assert_equal 0 [r llen mylist{t}]\n        assert_equal \"mylist2{t} {3 $large 1}\" [r lmpop 2 mylist{t} mylist2{t} right count 10]\n        assert_equal 0 [r llen mylist2{t}]\n        assert_equal 0 [r exists mylist{t} mylist2{t}]"
+  },
+  {
+   "name": "LMPOP propagate as pop with count command to replica",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set repl [attach_to_replication_stream]\n\n        # left/right propagate as lpop/rpop with count\n        r lpush mylist{t} a b c\n\n        # Pop elements from one list.\n        r lmpop 1 mylist{t} left count 1\n        r lmpop 1 mylist{t} right count 1\n\n        # Now the list have only one element\n        r lmpop 2 mylist{t} mylist2{t} left count 10\n\n        # No elements so we don't propagate.\n        r lmpop 2 mylist{t} mylist2{t} left count 10\n\n        # Pop elements from the second list.\n        r rpush mylist2{t} 1 2 3\n        r lmpop 2 mylist{t} mylist2{t} left count 2\n        r lmpop 2 mylist{t} mylist2{t} right count 1\n\n        # Pop all elements.\n        r rpush mylist{t} a b c\n        r rpush mylist2{t} 1 2 3\n        r lmpop 2 mylist{t} mylist2{t} left count 10\n        r lmpop 2 mylist{t} mylist2{t} right count 10\n\n        assert_replication_stream $repl {\n            {select *}\n            {lpush mylist{t} a b c}\n            {lpop mylist{t} 1}\n            {rpop mylist{t} 1}\n            {lpop mylist{t} 1}\n            {rpush mylist2{t} 1 2 3}\n            {lpop mylist2{t} 2}\n            {rpop mylist2{t} 1}\n            {rpush mylist{t} a b c}\n            {rpush mylist2{t} 1 2 3}\n            {lpop mylist{t} 3}\n            {rpop mylist2{t} 3}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "LRANGE basics - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"$large 1 2 3 4 5 6 7 8 9\"\n            assert_equal {1 2 3 4 5 6 7 8} [r lrange mylist 1 -2]\n            assert_equal {7 8 9} [r lrange mylist -3 -1]\n            assert_equal {4} [r lrange mylist 4 4]"
+  },
+  {
+   "name": "LRANGE inverted indexes - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"$large 1 2 3 4 5 6 7 8 9\"\n            assert_equal {} [r lrange mylist 6 2]"
+  },
+  {
+   "name": "LRANGE out of range indexes including the full list - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"$large 1 2 3\"\n            assert_equal \"$large 1 2 3\" [r lrange mylist -1000 1000]"
+  },
+  {
+   "name": "LRANGE out of range negative end index - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"$large 1 2 3\"\n            assert_equal $large [r lrange mylist 0 -4]\n            assert_equal {} [r lrange mylist 0 -5]"
+  },
+  {
+   "name": "LRANGE against non existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "lrange",
+      "nosuchkey",
+      "0",
+      "1"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LRANGE with start > end yields an empty array for backward compatibility",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"1 $large 3\"\n        assert_equal {} [r lrange mylist 1 0]\n        assert_equal {} [r lrange mylist -1 -2]"
+  },
+  {
+   "name": "LTRIM basics - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert_equal \"1\" [trim_list $type 0 0]\n            assert_equal \"1 2\" [trim_list $type 0 1]\n            assert_equal \"1 2 3\" [trim_list $type 0 2]\n            assert_equal \"2 3\" [trim_list $type 1 2]\n            assert_equal \"2 3 4 $large\" [trim_list $type 1 -1]\n            assert_equal \"2 3 4\" [trim_list $type 1 -2]\n            assert_equal \"4 $large\" [trim_list $type -2 -1]\n            assert_equal \"$large\" [trim_list $type -1 -1]\n            assert_equal \"1 2 3 4 $large\" [trim_list $type -5 -1]\n            assert_equal \"1 2 3 4 $large\" [trim_list $type -10 10]\n            assert_equal \"1 2 3 4 $large\" [trim_list $type 0 5]\n            assert_equal \"1 2 3 4 $large\" [trim_list $type 0 10]"
+  },
+  {
+   "name": "LTRIM out of range negative end index - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "assert_equal {1} [trim_list $type 0 -5]\n            assert_equal {} [trim_list $type 0 -6]"
+  },
+  {
+   "name": "LSET - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"99 98 $large 96 95\"\n            r lset mylist 1 foo\n            r lset mylist -1 bar\n            assert_equal \"99 foo $large 96 bar\" [r lrange mylist 0 -1]"
+  },
+  {
+   "name": "LSET out of range index - $type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "lset",
+      "mylist",
+      "10",
+      "foo"
+     ],
+     "value": "ERR*range*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LSET against non existing key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "lset",
+      "nosuchkey",
+      "10",
+      "foo"
+     ],
+     "value": "ERR*key*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LSET against non list value",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "nolist",
+      "foobar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "lset",
+      "nolist",
+      "0",
+      "foo"
+     ],
+     "value": "WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LREM remove all the occurrences - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"$e foo bar foobar foobared zap bar test foo\"\n            assert_equal 2 [r lrem mylist 0 bar]\n            assert_equal \"$e foo foobar foobared zap test foo\" [r lrange mylist 0 -1]"
+  },
+  {
+   "name": "LREM remove the first occurrence - $type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "lrem",
+      "mylist",
+      "1",
+      "foo"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lrange",
+      "mylist",
+      "0",
+      "-1"
+     ],
+     "value": "$e foobar foobared zap test foo"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LREM remove non existing element - $type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "lrem",
+      "mylist",
+      "1",
+      "nosuchelement"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lrange",
+      "mylist",
+      "0",
+      "-1"
+     ],
+     "value": "$e foobar foobared zap test foo"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LREM starting from tail with negative count - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type mylist \"$e foo bar foobar foobared zap bar test foo foo\"\n            assert_equal 1 [r lrem mylist -1 bar]\n            assert_equal \"$e foo bar foobar foobared zap test foo foo\" [r lrange mylist 0 -1]"
+  },
+  {
+   "name": "LREM starting from tail with negative count (2) - $type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "lrem",
+      "mylist",
+      "-2",
+      "foo"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "lrange",
+      "mylist",
+      "0",
+      "-1"
+     ],
+     "value": "$e foo bar foobar foobared zap test"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "LREM deleting objects that may be int encoded - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_$type myotherlist \"$e 1 2 3\"\n            assert_equal 1 [r lrem myotherlist 1 2]\n            assert_equal 3 [r llen myotherlist]"
+  },
+  {
+   "name": "Regression for bug 593 - chaining BRPOPLPUSH with other blocking cmds",
+   "expected": "PONG",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n\n        $rd1 brpoplpush a{t} b{t} 0\n        $rd1 brpoplpush a{t} b{t} 0\n        wait_for_blocked_clients_count 1\n        $rd2 brpoplpush b{t} c{t} 0\n        wait_for_blocked_clients_count 2\n        r lpush a{t} data\n        $rd1 close\n        $rd2 close\n        r ping"
+  },
+  {
+   "name": "BLPOP/BLMOVE should increase dirty",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del lst{t} lst1{t}\n        set rd [valkey_deferring_client]\n\n        set dirty [s rdb_changes_since_last_save]\n        $rd blpop lst{t} 0\n        wait_for_blocked_client\n        r lpush lst{t} a\n        assert_equal {lst{t} a} [$rd read]\n        set dirty2 [s rdb_changes_since_last_save]\n        assert {$dirty2 == $dirty + 2}\n\n        set dirty [s rdb_changes_since_last_save]\n        $rd blmove lst{t} lst1{t} left left 0\n        wait_for_blocked_client\n        r lpush lst{t} a\n        assert_equal {a} [$rd read]\n        set dirty2 [s rdb_changes_since_last_save]\n        assert {$dirty2 == $dirty + 2}\n\n        $rd close"
+  },
+  {
+   "name": "client unblock tests",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del l\n        set rd [valkey_deferring_client]\n        $rd client id\n        set id [$rd read]\n\n        # test default args\n        bpop_command $rd $pop l 0\n        wait_for_blocked_client\n        r client unblock $id\n        assert_equal {} [$rd read]\n\n        # test with timeout\n        bpop_command $rd $pop l 0\n        wait_for_blocked_client\n        r client unblock $id TIMEOUT\n        assert_equal {} [$rd read]\n\n        # test with error\n        bpop_command $rd $pop l 0\n        wait_for_blocked_client\n        r client unblock $id ERROR\n        catch {[$rd read]} e\n        assert_equal $e \"UNBLOCKED client unblocked via CLIENT UNBLOCK\"\n\n        # test with invalid client id\n        catch {[r client unblock asd]} e\n        assert_equal $e \"ERR value is not an integer or out of range\"\n\n        # test with non blocked client\n        set myid [r client id]\n        catch {[r client unblock $myid]} e\n        assert_equal $e {invalid command name \"0\"}\n\n        # finally, see the this client and list are still functional\n        bpop_command $rd $pop l 0\n        wait_for_blocked_client\n        r lpush l foo\n        assert_equal {l foo} [$rd read]\n        $rd close"
+  },
+  {
+   "name": "List listpack -> quicklist encoding conversion",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set origin_conf [config_get_set list-max-listpack-size $max_lp_size]\n\n            # RPUSH\n            create_listpack lst \"a b c\"\n            r RPUSH lst $large\n            assert_encoding quicklist lst\n\n            # LINSERT\n            create_listpack lst \"a b c\"\n            r LINSERT lst after b $large\n            assert_encoding quicklist lst\n\n            # LSET\n            create_listpack lst \"a b c\"\n            r LSET lst 0 $large\n            assert_encoding quicklist lst\n\n            # LMOVE\n            create_quicklist lsrc{t} \"a b c $large\"\n            create_listpack ldes{t} \"d e f\"\n            r LMOVE lsrc{t} ldes{t} right right\n            assert_encoding quicklist ldes{t}\n\n            r config set list-max-listpack-size $origin_conf"
+  },
+  {
+   "name": "List quicklist -> listpack encoding conversion",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set origin_conf [config_get_set list-max-listpack-size 3]\n\n        # RPOP\n        create_quicklist lst \"a b c d\"\n        r RPOP lst 3\n        assert_encoding listpack lst\n\n        # LREM\n        create_quicklist lst \"a a a d\"\n        r LREM lst 3 a\n        assert_encoding listpack lst\n\n        # LTRIM\n        create_quicklist lst \"a b c d\"\n        r LTRIM lst 1 1\n        assert_encoding listpack lst\n\n        r config set list-max-listpack-size -1\n\n        # RPOP\n        create_quicklist lst \"a b c $largevalue(quicklist)\"\n        r RPOP lst 1\n        assert_encoding listpack lst\n\n        # LREM\n        create_quicklist lst \"a $largevalue(quicklist)\"\n        r LREM lst 1 $largevalue(quicklist)\n        assert_encoding listpack lst\n\n        # LTRIM\n        create_quicklist lst \"a b $largevalue(quicklist)\"\n        r LTRIM lst 0 1\n        assert_encoding listpack lst\n\n        # LSET\n        create_quicklist lst \"$largevalue(quicklist) a b\"\n        r RPOP lst 2\n        assert_encoding quicklist lst\n        r LSET lst -1 c\n        assert_encoding listpack lst\n\n        r config set list-max-listpack-size $origin_conf"
+  },
+  {
+   "name": "List encoding conversion when RDB loading",
+   "expected": "OK",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set origin_conf [config_get_set list-max-listpack-size 3]\n        create_listpack lst \"a b c\"\n\n        # list is still a listpack after DEBUG RELOAD\n        r DEBUG RELOAD\n        assert_encoding listpack lst\n\n        # list is still a quicklist after DEBUG RELOAD\n        r RPUSH lst d\n        r DEBUG RELOAD\n        assert_encoding quicklist lst\n\n        # when a quicklist has only one packed node, it will be\n        # converted to listpack during rdb loading\n        r RPOP lst\n        assert_encoding quicklist lst \n        r DEBUG RELOAD\n        assert_encoding listpack lst\n\n        r config set list-max-listpack-size $origin_conf"
+  },
+  {
+   "name": "List invalid list-max-listpack-size config",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# \u200bWhen list-max-listpack-size is 0 we treat it as 1 and it'll\n        # still be listpack if there's a single element in the list.\n        r config set list-max-listpack-size 0\n        r DEL lst\n        r RPUSH lst a\n        assert_encoding listpack lst\n        r RPUSH lst b\n        assert_encoding quicklist lst\n\n        # When list-max-listpack-size < -5 we treat it as -5.\n        r config set list-max-listpack-size -6\n        r DEL lst\n        r RPUSH lst [string repeat \"x\" 60000]\n        assert_encoding listpack lst\n        # Converted to quicklist when the size of listpack exceed 65536\n        r RPUSH lst [string repeat \"x\" 5536]\n        assert_encoding quicklist lst"
+  },
+  {
+   "name": "List of various encodings",
+   "expected": "12 0 9223372036854775808 2147483647 32767 127",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del k\n        r lpush k 127 ;# ZIP_INT_8B\n        r lpush k 32767 ;# ZIP_INT_16B\n        r lpush k 2147483647 ;# ZIP_INT_32B\n        r lpush k 9223372036854775808 ;# ZIP_INT_64B\n        r lpush k 0 ;# ZIP_INT_IMM_MIN\n        r lpush k 12 ;# ZIP_INT_IMM_MAX\n        r lpush k [string repeat x 31] ;# ZIP_STR_06B\n        r lpush k [string repeat x 8191] ;# ZIP_STR_14B\n        r lpush k [string repeat x 65535] ;# ZIP_STR_32B\n        assert_encoding quicklist k ;# exceeds the size limit of quicklist node\n        set k [r lrange k 0 -1]\n        set dump [r dump k]\n\n        # coverage for objectComputeSize\n        assert_morethan [memory_usage k] 0\n\n        config_set sanitize-dump-payload no mayfail\n        r restore kk 0 $dump replace\n        assert_encoding quicklist kk\n        set kk [r lrange kk 0 -1]\n\n        # try some forward and backward searches to make sure all encodings\n        # can be traversed\n        assert_equal [r lindex kk 5] {9223372036854775808}\n        assert_equal [r lindex kk -5] {0}\n        assert_equal [r lpos kk foo rank 1] {}\n        assert_equal [r lpos kk foo rank -1] {}\n\n        # make sure the values are right\n        assert_equal $k $kk\n        assert_equal [lpop k] [string repeat x 65535]\n        assert_equal [lpop k] [string repeat x 8191]\n        assert_equal [lpop k] [string repeat x 31]\n        set _ $k"
+  },
+  {
+   "name": "List of various encodings - sanitize dump",
+   "expected": "12 0 9223372036854775808 2147483647 32767 127",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "config_set sanitize-dump-payload yes mayfail\n        r restore kk 0 $dump replace\n        assert_encoding quicklist kk\n        set k [r lrange k 0 -1]\n        set kk [r lrange kk 0 -1]\n\n        # make sure the values are right\n        assert_equal $k $kk\n        assert_equal [lpop k] [string repeat x 65535]\n        assert_equal [lpop k] [string repeat x 8191]\n        assert_equal [lpop k] [string repeat x 31]\n        set _ $k"
+  },
+  {
+   "name": "Unblock fairness is kept while pipelining",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        \n        # delete the list in case already exists\n        r del mylist\n        \n        # block a client on the list\n        $rd1 BLPOP mylist 0\n        wait_for_blocked_clients_count 1\n        \n        # pipeline on other client a list push and a blocking pop\n        # we should expect the fairness to be kept and have $rd1\n        # being unblocked\n        set buf \"\"\n        append buf \"LPUSH mylist 1\\r\\n\"\n        append buf \"BLPOP mylist 0\\r\\n\"\n        $rd2 write $buf\n        $rd2 flush\n        \n        # we check that we still have 1 blocked client\n        # and that the first blocked client has been served\n        assert_equal [$rd1 read] {mylist 1}\n        assert_equal [$rd2 read] {1}\n        wait_for_blocked_clients_count 1\n        \n        # We no unblock the last client and verify it was served last \n        r LPUSH mylist 2\n        wait_for_blocked_clients_count 0\n        assert_equal [$rd2 read] {mylist 2}\n        \n        $rd1 close\n        $rd2 close"
+  },
+  {
+   "name": "Unblock fairness is kept during nested unblock",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        set rd3 [valkey_deferring_client]\n        \n        # delete the list in case already exists\n        r del l1{t} l2{t} l3{t}\n        \n        # block a client on the list\n        $rd1 BRPOPLPUSH l1{t} l3{t} 0\n        wait_for_blocked_clients_count 1\n        \n        $rd2 BLPOP l2{t} 0\n        wait_for_blocked_clients_count 2\n        \n        $rd3 BLMPOP 0 2 l2{t} l3{t} LEFT COUNT 1\n        wait_for_blocked_clients_count 3\n        \n        r multi\n        r lpush l1{t} 1\n        r lpush l2{t} 2\n        r exec\n        \n        wait_for_blocked_clients_count 0\n        \n        assert_equal [$rd1 read] {1}\n        assert_equal [$rd2 read] {l2{t} 2}\n        assert_equal [$rd3 read] {l3{t} 1}\n        \n        $rd1 close\n        $rd2 close\n        $rd3 close"
+  },
+  {
+   "name": "Blocking command accounted only once in commandstats",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# cleanup first\n        r del mylist\n        \n        # create a test client\n        set rd [valkey_deferring_client]\n        \n        # reset the server stats\n        r config resetstat\n        \n        # block a client on the list\n        $rd BLPOP mylist 0\n        wait_for_blocked_clients_count 1\n        \n        # unblock the list\n        r LPUSH mylist 1\n        wait_for_blocked_clients_count 0\n        \n        assert_match {*calls=1,*,rejected_calls=0,failed_calls=0} [cmdrstat blpop r]\n        \n        $rd close"
+  },
+  {
+   "name": "Blocking command accounted only once in commandstats after timeout",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# cleanup first\n        r del mylist\n        \n        # create a test client\n        set rd [valkey_deferring_client]\n        $rd client id\n        set id [$rd read]\n\n        # reset the server stats\n        r config resetstat\n        \n        # block a client on the list\n        $rd BLPOP mylist 0\n        wait_for_blocked_clients_count 1\n        \n        # unblock the client on timeout\n        r client unblock $id timeout\n        \n        assert_match {*calls=1,*,rejected_calls=0,failed_calls=0} [cmdrstat blpop r]\n        \n        $rd close"
+  },
+  {
+   "name": "Command being unblocked cause another command to get unblocked execution order test",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del src{t} dst{t} key1{t} key2{t} key3{t}\n        set repl [attach_to_replication_stream]\n\n        set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        set rd3 [valkey_deferring_client]\n\n        $rd1 blmove src{t} dst{t} left right 0\n        wait_for_blocked_clients_count 1\n\n        $rd2 blmove dst{t} src{t} right left 0\n        wait_for_blocked_clients_count 2\n\n        # Create a pipeline of commands that will be processed in one socket read.\n        # Insert two set commands before and after lpush to observe the execution order.\n        set buf \"\"\n        append buf \"set key1{t} value1\\r\\n\"\n        append buf \"lpush src{t} dummy\\r\\n\"\n        append buf \"set key2{t} value2\\r\\n\"\n        $rd3 write $buf\n        $rd3 flush\n\n        wait_for_blocked_clients_count 0\n\n        r set key3{t} value3\n\n        # If a command being unblocked causes another command to get unblocked, like a BLMOVE would do,\n        # then the new unblocked command will get processed right away rather than wait for later.\n        # If the set command occurs between two lmove commands, the results are not as expected.\n        assert_replication_stream $repl {\n            {select *}\n            {set key1{t} value1}\n            {lpush src{t} dummy}\n            {lmove src{t} dst{t} left right}\n            {lmove dst{t} src{t} right left}\n            {set key2{t} value2}\n            {set key3{t} value3}\n        }\n\n        $rd1 close\n        $rd2 close\n        $rd3 close\n\n        close_replication_stream $repl"
+  },
+  {
+   "name": "Blocking timeout following PAUSE should honor the timeout",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# cleanup first\n        r del mylist\n        \n        # create a test client\n        set rd [valkey_deferring_client]\n        \n        # first PAUSE all writes for a very long time\n        r client pause 10000000000000 write\n\n        # block a client on the list\n        $rd BLPOP mylist 1\n        wait_for_blocked_clients_count 1\n        \n        # now unpause the writes\n        r client unpause\n\n        # client should time-out\n        wait_for_blocked_clients_count 0\n        \n        $rd close"
+  },
+  {
+   "name": "CLIENT NO-TOUCH with BRPOP and RPUSH regression test",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Test scenario:\n        # 1. Client 1: CLIENT NO-TOUCH on\n        # 2. Client 2: BRPOP mylist 0\n        # 3. Client 1: RPUSH mylist elem\n        \n        # cleanup first\n        r del mylist\n        \n        # Create two test clients\n        set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        \n        # Client 1: Enable CLIENT NO-TOUCH\n        $rd1 client no-touch on\n        assert_equal {OK} [$rd1 read]\n        \n        # Client 2: Block waiting for elements in mylist\n        $rd2 brpop mylist 0\n        wait_for_blocked_client\n        \n        # Client 1: Push an element to mylist\n        $rd1 rpush mylist elem\n        assert_equal {1} [$rd1 read]\n\n        # Verify Client 2 received the element\n        assert_equal {mylist elem} [$rd2 read]\n\n        $rd1 close\n        $rd2 close"
+  }
+ ]
+}

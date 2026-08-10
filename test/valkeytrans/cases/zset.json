@@ -1,0 +1,4666 @@
+{
+ "source": "zset.tcl",
+ "cases": [
+  {
+   "name": "Check encoding - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x\n            assert_encoding $encoding ztmp"
+  },
+  {
+   "name": "ZSET basic ZADD and score update - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "20",
+      "y"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "0",
+      "-1"
+     ],
+     "value": "x y z"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "1",
+      "y"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "0",
+      "-1"
+     ],
+     "value": "y x z"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZSET element can't be set to NaN with ZADD - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zadd",
+      "myzset",
+      "nan",
+      "abc"
+     ],
+     "value": "*not*float*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZSET element can't be set to NaN with ZINCRBY - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zincrby",
+      "myzset",
+      "nan",
+      "abc"
+     ],
+     "value": "*not*float*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZADD with options syntax error with incomplete pair - $encoding",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "zadd",
+      "ztmp",
+      "xx",
+      "10",
+      "x",
+      "20"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "ZADD XX option without key - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            assert {[r zadd ztmp xx 10 x] == 0}\n            assert {[r type ztmp] eq {none}}"
+  },
+  {
+   "name": "ZADD XX existing key - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x\n            assert {[r zadd ztmp xx 20 y] == 0}\n            assert {[r zcard ztmp] == 1}"
+  },
+  {
+   "name": "ZADD XX returns the number of elements actually added - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x\n            set retval [r zadd ztmp 10 x 20 y 30 z]\n            assert {$retval == 2}"
+  },
+  {
+   "name": "ZADD XX updates existing elements score - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            r zadd ztmp xx 5 foo 11 x 21 y 40 zap\n            assert {[r zcard ztmp] == 3}\n            assert {[r zscore ztmp x] == 11}\n            assert {[r zscore ztmp y] == 21}"
+  },
+  {
+   "name": "ZADD GT updates existing elements when new scores are greater - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp gt ch 5 foo 11 x 21 y 29 z] == 3}\n            assert {[r zcard ztmp] == 4}\n            assert {[r zscore ztmp x] == 11}\n            assert {[r zscore ztmp y] == 21}\n            assert {[r zscore ztmp z] == 30}"
+  },
+  {
+   "name": "ZADD LT updates existing elements when new scores are lower - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp lt ch 5 foo 11 x 21 y 29 z] == 2}\n            assert {[r zcard ztmp] == 4}\n            assert {[r zscore ztmp x] == 10}\n            assert {[r zscore ztmp y] == 20}\n            assert {[r zscore ztmp z] == 29}"
+  },
+  {
+   "name": "ZADD GT XX updates existing elements when new scores are greater and skips new elements - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp gt xx ch 5 foo 11 x 21 y 29 z] == 2}\n            assert {[r zcard ztmp] == 3}\n            assert {[r zscore ztmp x] == 11}\n            assert {[r zscore ztmp y] == 21}\n            assert {[r zscore ztmp z] == 30}"
+  },
+  {
+   "name": "ZADD LT XX updates existing elements when new scores are lower and skips new elements - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp lt xx ch 5 foo 11 x 21 y 29 z] == 1}\n            assert {[r zcard ztmp] == 3}\n            assert {[r zscore ztmp x] == 10}\n            assert {[r zscore ztmp y] == 20}\n            assert {[r zscore ztmp z] == 29}"
+  },
+  {
+   "name": "ZADD XX and NX are not compatible - $encoding",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "zadd",
+      "ztmp",
+      "xx",
+      "nx",
+      "10",
+      "x"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "ZADD NX with non existing key - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp nx 10 x 20 y 30 z\n            assert {[r zcard ztmp] == 3}"
+  },
+  {
+   "name": "ZADD NX only add new elements without updating old ones - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp nx 11 x 21 y 100 a 200 b] == 2}\n            assert {[r zscore ztmp x] == 10}\n            assert {[r zscore ztmp y] == 20}\n            assert {[r zscore ztmp a] == 100}\n            assert {[r zscore ztmp b] == 200}"
+  },
+  {
+   "name": "ZADD GT and NX are not compatible - $encoding",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "nx",
+      "10",
+      "x"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "ZADD LT and NX are not compatible - $encoding",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "nx",
+      "10",
+      "x"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "ZADD LT and GT are not compatible - $encoding",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "gt",
+      "10",
+      "x"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "ZADD INCR LT/GT replies with nill if score not updated - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 28 x\n            assert {[r zadd ztmp lt incr 1 x] eq {}}\n            assert {[r zscore ztmp x] == 28}\n            assert {[r zadd ztmp gt incr -1 x] eq {}}\n            assert {[r zscore ztmp x] == 28}"
+  },
+  {
+   "name": "ZADD INCR LT/GT with inf - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp +inf x -inf y\n\n            assert {[r zadd ztmp lt incr 1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n            assert {[r zadd ztmp gt incr -1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n            assert {[r zadd ztmp lt incr -1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n            assert {[r zadd ztmp gt incr 1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n\n            assert {[r zadd ztmp lt incr 1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}\n            assert {[r zadd ztmp gt incr -1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}\n            assert {[r zadd ztmp lt incr -1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}\n            assert {[r zadd ztmp gt incr 1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}"
+  },
+  {
+   "name": "ZADD INCR works like ZINCRBY - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            r zadd ztmp INCR 15 x\n            assert {[r zscore ztmp x] == 25}"
+  },
+  {
+   "name": "ZADD INCR works with a single score-element pair - $encoding",
+   "expected": "ERR*",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "catch",
+     "args": [
+      "zadd",
+      "ztmp",
+      "INCR",
+      "15",
+      "x",
+      "10",
+      "y"
+     ]
+    }
+   ],
+   "mode": "err"
+  },
+  {
+   "name": "ZADD CH option changes return value to all changed elements - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp 11 x 21 y 30 z] == 0}\n            assert {[r zadd ztmp ch 12 x 22 y 30 z] == 2}"
+  },
+  {
+   "name": "ZINCRBY calls leading to NaN result in error - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zincrby",
+      "myzset",
+      "+inf",
+      "abc"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zincrby",
+      "myzset",
+      "-inf",
+      "abc"
+     ],
+     "value": "*NaN*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINCRBY against invalid incr value - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zincr"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zincr",
+      "1",
+      "one"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zincrby",
+      "zincr",
+      "v",
+      "one"
+     ],
+     "value": "*value is not a valid*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZADD - Variadic version base case - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myzset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset",
+      "10",
+      "a",
+      "20",
+      "b",
+      "30",
+      "c"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "myzset",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "ZADD - Return value is the number of actually added items - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset",
+      "5",
+      "x",
+      "20",
+      "b",
+      "30",
+      "c"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "myzset",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "list"
+  },
+  {
+   "name": "ZADD - Variadic version does not add nothing on single parsing err - $encoding",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del myzset\n            catch {r zadd myzset 10 a 20 b 30.badscore c} e\n            assert_match {*ERR*not*float*} $e\n            r exists myzset"
+  },
+  {
+   "name": "ZADD - Variadic version will raise error on missing arg - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del myzset\n            catch {r zadd myzset 10 a 20 b 30 c 40} e\n            assert_match {*ERR*syntax*} $e"
+  },
+  {
+   "name": "ZINCRBY does not work variadic even if shares ZADD implementation - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del myzset\n            catch {r zincrby myzset 10 a 20 b 30 c} e\n            assert_match {*ERR*wrong*number*arg*} $e"
+  },
+  {
+   "name": "ZCARD basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "a",
+      "20",
+      "b",
+      "30",
+      "c"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "zdoesntexist"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZREM removes key after last element is removed - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "20",
+      "y"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "ztmp"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrem",
+      "ztmp",
+      "z"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrem",
+      "ztmp",
+      "y"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrem",
+      "ztmp",
+      "x"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "ztmp"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZREM variadic version - $encoding",
+   "expected": "0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "a",
+      "20",
+      "b",
+      "30",
+      "c"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrem",
+      "ztmp",
+      "x",
+      "y",
+      "a",
+      "b",
+      "k"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrem",
+      "ztmp",
+      "foo",
+      "bar"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrem",
+      "ztmp",
+      "c"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "ztmp"
+     ]
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZREM variadic version -- remove elements after key deletion - $encoding",
+   "expected": "3",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "a",
+      "20",
+      "b",
+      "30",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrem",
+      "ztmp",
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZRANGE basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "3",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "4",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "0",
+      "-1"
+     ],
+     "value": "a b c d"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "0",
+      "-2"
+     ],
+     "value": "a b c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "1",
+      "-1"
+     ],
+     "value": "b c d"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "1",
+      "-2"
+     ],
+     "value": "b c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "-2",
+      "-1"
+     ],
+     "value": "c d"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "-2",
+      "-2"
+     ],
+     "value": "c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "-5",
+      "2"
+     ],
+     "value": "a b c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "-5",
+      "1"
+     ],
+     "value": "a b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "5",
+      "-1"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "5",
+      "-2"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "0",
+      "5"
+     ],
+     "value": "a b c d"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "1",
+      "5"
+     ],
+     "value": "b c d"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "0",
+      "-5"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "1",
+      "-5"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "ztmp",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1 b 2 c 3 d 4"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZREVRANGE basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "3",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "4",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "0",
+      "-1"
+     ],
+     "value": "d c b a"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "0",
+      "-2"
+     ],
+     "value": "d c b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "1",
+      "-1"
+     ],
+     "value": "c b a"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "1",
+      "-2"
+     ],
+     "value": "c b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "-2",
+      "-1"
+     ],
+     "value": "b a"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "-2",
+      "-2"
+     ],
+     "value": "b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "-5",
+      "2"
+     ],
+     "value": "d c b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "-5",
+      "1"
+     ],
+     "value": "d c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "5",
+      "-1"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "5",
+      "-2"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "0",
+      "5"
+     ],
+     "value": "d c b a"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "1",
+      "5"
+     ],
+     "value": "c b a"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "0",
+      "-5"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "1",
+      "-5"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrange",
+      "ztmp",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "d 4 c 3 b 2 a 1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZRANK/ZREVRANK basics - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set nullres {$-1}\n            if {$::force_resp3} {\n                set nullres {_}\n            }\n            r del zranktmp\n            r zadd zranktmp 10 x\n            r zadd zranktmp 20 y\n            r zadd zranktmp 30 z\n            assert_equal 0 [r zrank zranktmp x]\n            assert_equal 1 [r zrank zranktmp y]\n            assert_equal 2 [r zrank zranktmp z]\n            assert_equal 2 [r zrevrank zranktmp x]\n            assert_equal 1 [r zrevrank zranktmp y]\n            assert_equal 0 [r zrevrank zranktmp z]\n            r readraw 1\n            assert_equal $nullres [r zrank zranktmp foo]\n            assert_equal $nullres [r zrevrank zranktmp foo]\n            r readraw 0\n\n            # withscore\n            set nullres {*-1}\n            if {$::force_resp3} {\n                set nullres {_}\n            }\n            assert_equal {0 10} [r zrank zranktmp x withscore]\n            assert_equal {1 20} [r zrank zranktmp y withscore]\n            assert_equal {2 30} [r zrank zranktmp z withscore]\n            assert_equal {2 10} [r zrevrank zranktmp x withscore]\n            assert_equal {1 20} [r zrevrank zranktmp y withscore]\n            assert_equal {0 30} [r zrevrank zranktmp z withscore]\n            r readraw 1\n            assert_equal $nullres [r zrank zranktmp foo withscore]\n            assert_equal $nullres [r zrevrank zranktmp foo withscore]\n            r readraw 0"
+  },
+  {
+   "name": "ZRANK - after deletion - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zrem",
+      "zranktmp",
+      "y"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrank",
+      "zranktmp",
+      "x"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrank",
+      "zranktmp",
+      "z"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrank",
+      "zranktmp",
+      "x",
+      "withscore"
+     ],
+     "value": "0 10"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrank",
+      "zranktmp",
+      "z",
+      "withscore"
+     ],
+     "value": "1 30"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINCRBY - can create a new sorted set - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zincrby",
+      "zset",
+      "1",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "foo"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "zset",
+      "foo"
+     ],
+     "value": "1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINCRBY - increment and decrement - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zincrby",
+      "zset",
+      "2",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zincrby",
+      "zset",
+      "1",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "bar foo"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zincrby",
+      "zset",
+      "10",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zincrby",
+      "zset",
+      "-5",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zincrby",
+      "zset",
+      "-5",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "foo bar"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "zset",
+      "foo"
+     ],
+     "value": "-2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "zset",
+      "bar"
+     ],
+     "value": "6"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINCRBY return value - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del ztmp\n            set retval [r zincrby ztmp 1.0 x]\n            assert {$retval == 1.0}"
+  },
+  {
+   "name": "ZRANGEBYSCORE/ZREVRANGEBYSCORE/ZCOUNT basics - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_default_zset\n\n            # inclusive range\n            assert_equal {a b c} [r zrangebyscore zset -inf 2]\n            assert_equal {b c d} [r zrangebyscore zset 0 3]\n            assert_equal {d e f} [r zrangebyscore zset 3 6]\n            assert_equal {e f g} [r zrangebyscore zset 4 +inf]\n            assert_equal {c b a} [r zrevrangebyscore zset 2 -inf]\n            assert_equal {d c b} [r zrevrangebyscore zset 3 0]\n            assert_equal {f e d} [r zrevrangebyscore zset 6 3]\n            assert_equal {g f e} [r zrevrangebyscore zset +inf 4]\n            assert_equal 3 [r zcount zset 0 3]\n\n            # exclusive range\n            assert_equal {b}   [r zrangebyscore zset (-inf (2]\n            assert_equal {b c} [r zrangebyscore zset (0 (3]\n            assert_equal {e f} [r zrangebyscore zset (3 (6]\n            assert_equal {f}   [r zrangebyscore zset (4 (+inf]\n            assert_equal {b}   [r zrevrangebyscore zset (2 (-inf]\n            assert_equal {c b} [r zrevrangebyscore zset (3 (0]\n            assert_equal {f e} [r zrevrangebyscore zset (6 (3]\n            assert_equal {f}   [r zrevrangebyscore zset (+inf (4]\n            assert_equal 2 [r zcount zset (0 (3]\n\n            # test empty ranges\n            r zrem zset a\n            r zrem zset g\n\n            # inclusive\n            assert_equal {} [r zrangebyscore zset 4 2]\n            assert_equal {} [r zrangebyscore zset 6 +inf]\n            assert_equal {} [r zrangebyscore zset -inf -6]\n            assert_equal {} [r zrevrangebyscore zset +inf 6]\n            assert_equal {} [r zrevrangebyscore zset -6 -inf]\n\n            # exclusive\n            assert_equal {} [r zrangebyscore zset (4 (2]\n            assert_equal {} [r zrangebyscore zset 2 (2]\n            assert_equal {} [r zrangebyscore zset (2 2]\n            assert_equal {} [r zrangebyscore zset (6 (+inf]\n            assert_equal {} [r zrangebyscore zset (-inf (-6]\n            assert_equal {} [r zrevrangebyscore zset (+inf (6]\n            assert_equal {} [r zrevrangebyscore zset (-6 (-inf]\n\n            # empty inner range\n            assert_equal {} [r zrangebyscore zset 2.4 2.6]\n            assert_equal {} [r zrangebyscore zset (2.4 2.6]\n            assert_equal {} [r zrangebyscore zset 2.4 (2.6]\n            assert_equal {} [r zrangebyscore zset (2.4 (2.6]"
+  },
+  {
+   "name": "ZRANGEBYSCORE with WITHSCORES - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_default_zset\n            assert_equal {b 1 c 2 d 3} [r zrangebyscore zset 0 3 withscores]\n            assert_equal {d 3 c 2 b 1} [r zrevrangebyscore zset 3 0 withscores]"
+  },
+  {
+   "name": "ZRANGEBYSCORE with LIMIT - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_default_zset\n            assert_equal {b c}   [r zrangebyscore zset 0 10 LIMIT 0 2]\n            assert_equal {d e f} [r zrangebyscore zset 0 10 LIMIT 2 3]\n            assert_equal {d e f} [r zrangebyscore zset 0 10 LIMIT 2 10]\n            assert_equal {}      [r zrangebyscore zset 0 10 LIMIT 20 10]\n            assert_equal {f e}   [r zrevrangebyscore zset 10 0 LIMIT 0 2]\n            assert_equal {d c b} [r zrevrangebyscore zset 10 0 LIMIT 2 3]\n            assert_equal {d c b} [r zrevrangebyscore zset 10 0 LIMIT 2 10]\n            assert_equal {}      [r zrevrangebyscore zset 10 0 LIMIT 20 10]\n            # zrangebyscore uses different logic when offset > ZSKIPLIST_MAX_SEARCH\n            create_long_zset zset 30\n            assert_equal {i12 i13 i14} [r zrangebyscore zset 0 20 LIMIT 12 3]\n            assert_equal {i14 i15}     [r zrangebyscore zset 0 20 LIMIT 14 2]\n            assert_equal {i19 i20 i21} [r zrangebyscore zset 0 30 LIMIT 19 3]\n            assert_equal {i29}     [r zrangebyscore zset 10 30 LIMIT 19 2]\n            assert_equal {i17 i16 i15} [r zrevrangebyscore zset 30 10 LIMIT 12 3]\n            assert_equal {i6 i5}       [r zrevrangebyscore zset 20 0 LIMIT 14 2]\n            assert_equal {i2 i1 i0}    [r zrevrangebyscore zset 20 0 LIMIT 18 5]\n            assert_equal {i0}          [r zrevrangebyscore zset 20 0 LIMIT 20 5]"
+  },
+  {
+   "name": "ZRANGEBYSCORE with LIMIT and WITHSCORES - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_default_zset\n            assert_equal {e 4 f 5} [r zrangebyscore zset 2 5 LIMIT 2 3 WITHSCORES]\n            assert_equal {d 3 c 2} [r zrevrangebyscore zset 5 2 LIMIT 2 3 WITHSCORES]\n            assert_equal {} [r zrangebyscore zset 2 5 LIMIT 12 13 WITHSCORES]"
+  },
+  {
+   "name": "ZRANGEBYSCORE with non-value min or max - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebyscore",
+      "fooz",
+      "str",
+      "1"
+     ],
+     "value": "*not*float*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebyscore",
+      "fooz",
+      "1",
+      "str"
+     ],
+     "value": "*not*float*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebyscore",
+      "fooz",
+      "1",
+      "NaN"
+     ],
+     "value": "*not*float*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZRANGEBYLEX/ZREVRANGEBYLEX/ZLEXCOUNT basics - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_default_lex_zset\n\n            # inclusive range\n            assert_equal {alpha bar cool} [r zrangebylex zset - \\[cool]\n            assert_equal {bar cool down} [r zrangebylex zset \\[bar \\[down]\n            assert_equal {great hill omega} [r zrangebylex zset \\[g +]\n            assert_equal {cool bar alpha} [r zrevrangebylex zset \\[cool -]\n            assert_equal {down cool bar} [r zrevrangebylex zset \\[down \\[bar]\n            assert_equal {omega hill great foo elephant down} [r zrevrangebylex zset + \\[d]\n            assert_equal 3 [r zlexcount zset \\[ele \\[h]\n\n            # exclusive range\n            assert_equal {alpha bar} [r zrangebylex zset - (cool]\n            assert_equal {cool} [r zrangebylex zset (bar (down]\n            assert_equal {hill omega} [r zrangebylex zset (great +]\n            assert_equal {bar alpha} [r zrevrangebylex zset (cool -]\n            assert_equal {cool} [r zrevrangebylex zset (down (bar]\n            assert_equal {omega hill} [r zrevrangebylex zset + (great]\n            assert_equal 2 [r zlexcount zset (ele (great]\n\n            # inclusive and exclusive\n            assert_equal {} [r zrangebylex zset (az (b]\n            assert_equal {} [r zrangebylex zset (z +]\n            assert_equal {} [r zrangebylex zset - \\[aaaa]\n            assert_equal {} [r zrevrangebylex zset \\[elez \\[elex]\n            assert_equal {} [r zrevrangebylex zset (hill (omega]"
+  },
+  {
+   "name": "ZLEXCOUNT advanced - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_default_lex_zset\n\n            assert_equal 9 [r zlexcount zset - +]\n            assert_equal 0 [r zlexcount zset + -]\n            assert_equal 0 [r zlexcount zset + \\[c]\n            assert_equal 0 [r zlexcount zset \\[c -]\n            assert_equal 8 [r zlexcount zset \\[bar +]\n            assert_equal 5 [r zlexcount zset \\[bar \\[foo]\n            assert_equal 4 [r zlexcount zset \\[bar (foo]\n            assert_equal 4 [r zlexcount zset (bar \\[foo]\n            assert_equal 3 [r zlexcount zset (bar (foo]\n            assert_equal 5 [r zlexcount zset - (foo]\n            assert_equal 1 [r zlexcount zset (maxstring +]"
+  },
+  {
+   "name": "ZRANGEBYLEX with LIMIT - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "create_default_lex_zset\n            assert_equal {alpha bar} [r zrangebylex zset - \\[cool LIMIT 0 2]\n            assert_equal {bar cool} [r zrangebylex zset - \\[cool LIMIT 1 2]\n            assert_equal {} [r zrangebylex zset \\[bar \\[down LIMIT 0 0]\n            assert_equal {} [r zrangebylex zset \\[bar \\[down LIMIT 2 0]\n            assert_equal {bar} [r zrangebylex zset \\[bar \\[down LIMIT 0 1]\n            assert_equal {cool} [r zrangebylex zset \\[bar \\[down LIMIT 1 1]\n            assert_equal {bar cool down} [r zrangebylex zset \\[bar \\[down LIMIT 0 100]\n            assert_equal {omega hill great foo elephant} [r zrevrangebylex zset + \\[d LIMIT 0 5]\n            assert_equal {omega hill great foo} [r zrevrangebylex zset + \\[d LIMIT 0 4]\n            assert_equal {great foo elephant} [r zrevrangebylex zset + \\[d LIMIT 2 3]\n            # zrangebylex uses different logic when offset > ZSKIPLIST_MAX_SEARCH\n            create_long_lex_zset\n            assert_equal {max null} [r zrangebylex zset - \\[tree LIMIT 12 2]\n            assert_equal {point query} [r zrangebylex zset - \\[tree LIMIT 15 2]\n            assert_equal {} [r zrangebylex zset \\[max \\[tree LIMIT 10 0]\n            assert_equal {} [r zrangebylex zset \\[max \\[tree LIMIT 12 0]\n            assert_equal {max} [r zrangebylex zset \\[max \\[null LIMIT 0 1]\n            assert_equal {null} [r zrangebylex zset \\[max \\[null LIMIT 1 1]\n            assert_equal {max null omega point} [r zrangebylex zset \\[max \\[point LIMIT 0 100]\n            assert_equal {tree sea result query point} [r zrevrangebylex zset + \\[o LIMIT 0 5]\n            assert_equal {tree sea result query} [r zrevrangebylex zset + \\[o LIMIT 0 4]\n            assert_equal {omega null max lip} [r zrevrangebylex zset + \\[l LIMIT 5 4]\n            assert_equal {elephant down} [r zrevrangebylex zset + \\[a LIMIT 15 2]\n            assert_equal {bar alpha} [r zrevrangebylex zset + - LIMIT 18 6]\n            assert_equal {hill great foo} [r zrevrangebylex zset + \\[c LIMIT 12 3]"
+  },
+  {
+   "name": "ZRANGEBYLEX with invalid lex range specifiers - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebylex",
+      "fooz",
+      "foo",
+      "bar"
+     ],
+     "value": "*not*string*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebylex",
+      "fooz",
+      "\\[foo",
+      "bar"
+     ],
+     "value": "*not*string*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebylex",
+      "fooz",
+      "foo",
+      "\\[bar"
+     ],
+     "value": "*not*string*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebylex",
+      "fooz",
+      "+x",
+      "\\[bar"
+     ],
+     "value": "*not*string*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebylex",
+      "fooz",
+      "-x",
+      "\\[bar"
+     ],
+     "value": "*not*string*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZREMRANGEBYSCORE basics - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "proc remrangebyscore {min max} {\n                create_zset zset {1 a 2 b 3 c 4 d 5 e}\n                assert_equal 1 [r exists zset]\n                r zremrangebyscore zset $min $max\n            }\n\n            # inner range\n            assert_equal 3 [remrangebyscore 2 4]\n            assert_equal {a e} [r zrange zset 0 -1]\n\n            # start underflow\n            assert_equal 1 [remrangebyscore -10 1]\n            assert_equal {b c d e} [r zrange zset 0 -1]\n\n            # end overflow\n            assert_equal 1 [remrangebyscore 5 10]\n            assert_equal {a b c d} [r zrange zset 0 -1]\n\n            # switch min and max\n            assert_equal 0 [remrangebyscore 4 2]\n            assert_equal {a b c d e} [r zrange zset 0 -1]\n\n            # -inf to mid\n            assert_equal 3 [remrangebyscore -inf 3]\n            assert_equal {d e} [r zrange zset 0 -1]\n\n            # mid to +inf\n            assert_equal 3 [remrangebyscore 3 +inf]\n            assert_equal {a b} [r zrange zset 0 -1]\n\n            # -inf to +inf\n            assert_equal 5 [remrangebyscore -inf +inf]\n            assert_equal {} [r zrange zset 0 -1]\n\n            # exclusive min\n            assert_equal 4 [remrangebyscore (1 5]\n            assert_equal {a} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebyscore (2 5]\n            assert_equal {a b} [r zrange zset 0 -1]\n\n            # exclusive max\n            assert_equal 4 [remrangebyscore 1 (5]\n            assert_equal {e} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebyscore 1 (4]\n            assert_equal {d e} [r zrange zset 0 -1]\n\n            # exclusive min and max\n            assert_equal 3 [remrangebyscore (1 (5]\n            assert_equal {a e} [r zrange zset 0 -1]\n\n            # destroy when empty\n            assert_equal 5 [remrangebyscore 1 5]\n            assert_equal 0 [r exists zset]"
+  },
+  {
+   "name": "ZREMRANGEBYSCORE with non-value min or max - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zremrangebyscore",
+      "fooz",
+      "str",
+      "1"
+     ],
+     "value": "*not*float*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zremrangebyscore",
+      "fooz",
+      "1",
+      "str"
+     ],
+     "value": "*not*float*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zremrangebyscore",
+      "fooz",
+      "1",
+      "NaN"
+     ],
+     "value": "*not*float*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZREMRANGEBYRANK basics - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "proc remrangebyrank {min max} {\n                create_zset zset {1 a 2 b 3 c 4 d 5 e}\n                assert_equal 1 [r exists zset]\n                r zremrangebyrank zset $min $max\n            }\n\n            # inner range\n            assert_equal 3 [remrangebyrank 1 3]\n            assert_equal {a e} [r zrange zset 0 -1]\n\n            # start underflow\n            assert_equal 1 [remrangebyrank -10 0]\n            assert_equal {b c d e} [r zrange zset 0 -1]\n\n            # start overflow\n            assert_equal 0 [remrangebyrank 10 -1]\n            assert_equal {a b c d e} [r zrange zset 0 -1]\n\n            # end underflow\n            assert_equal 0 [remrangebyrank 0 -10]\n            assert_equal {a b c d e} [r zrange zset 0 -1]\n\n            # end overflow\n            assert_equal 5 [remrangebyrank 0 10]\n            assert_equal {} [r zrange zset 0 -1]\n\n            # destroy when empty\n            assert_equal 5 [remrangebyrank 0 4]\n            assert_equal 0 [r exists zset]"
+  },
+  {
+   "name": "ZREMRANGEBYLEX basics - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "proc remrangebylex {min max} {\n                create_default_lex_zset\n                assert_equal 1 [r exists zset]\n                r zremrangebylex zset $min $max\n            }\n\n            # inclusive range\n            assert_equal 3 [remrangebylex - \\[cool]\n            assert_equal {down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebylex \\[bar \\[down]\n            assert_equal {alpha elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebylex \\[g +]\n            assert_equal {alpha bar cool down elephant foo} [r zrange zset 0 -1]\n            assert_equal 6 [r zcard zset]\n\n            # exclusive range\n            assert_equal 2 [remrangebylex - (cool]\n            assert_equal {cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 1 [remrangebylex (bar (down]\n            assert_equal {alpha bar down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 2 [remrangebylex (great +]\n            assert_equal {alpha bar cool down elephant foo great} [r zrange zset 0 -1]\n            assert_equal 7 [r zcard zset]\n\n            # inclusive and exclusive\n            assert_equal 0 [remrangebylex (az (b]\n            assert_equal {alpha bar cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 0 [remrangebylex (z +]\n            assert_equal {alpha bar cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 0 [remrangebylex - \\[aaaa]\n            assert_equal {alpha bar cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 9 [r zcard zset]\n\n            # destroy when empty\n            assert_equal 9 [remrangebylex - +]\n            assert_equal 0 [r zcard zset]\n            assert_equal 0 [r exists zset]"
+  },
+  {
+   "name": "ZUNIONSTORE against non-existing key doesn't set destination - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta{t}"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zunionstore",
+      "dst_key{t}",
+      "1",
+      "zseta{t}"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "dst_key{t}"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNION/ZINTER/ZINTERCARD/ZDIFF against non-existing key - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zunion",
+      "1",
+      "zseta"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "1",
+      "zseta"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "1",
+      "zseta"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "1",
+      "zseta",
+      "limit",
+      "0"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zdiff",
+      "1",
+      "zseta"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNIONSTORE with empty set - $encoding",
+   "expected": "a 1 b 2",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta{t}",
+      "zsetb{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zunionstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZUNION/ZINTER/ZINTERCARD/ZDIFF with empty set - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta{t}",
+      "zsetb{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zunion",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "withscores"
+     ],
+     "value": "a 1 b 2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "withscores"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "limit",
+      "0"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zdiff",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "withscores"
+     ],
+     "value": "a 1 b 2"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNIONSTORE basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta{t}",
+      "zsetb{t}",
+      "zsetc{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "3",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "1",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "2",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "3",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zunionstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1 b 3 d 3 c 5"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNION/ZINTER/ZINTERCARD/ZDIFF with integer members - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zsetd{t}",
+      "zsetf{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetd{t}",
+      "1",
+      "1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetd{t}",
+      "2",
+      "2"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetd{t}",
+      "3",
+      "3"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetf{t}",
+      "1",
+      "1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetf{t}",
+      "3",
+      "3"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetf{t}",
+      "4",
+      "4"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zunion",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}",
+      "withscores"
+     ],
+     "value": "1 2 2 2 4 4 3 6"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}",
+      "withscores"
+     ],
+     "value": "1 2 3 6"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}",
+      "limit",
+      "0"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zdiff",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}",
+      "withscores"
+     ],
+     "value": "2 2"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNIONSTORE with weights - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zunionstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "weights",
+      "2",
+      "3"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 2 b 7 d 9 c 12"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNION with weights - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zunion",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "weights",
+      "2",
+      "3",
+      "withscores"
+     ],
+     "value": "a 2 b 7 d 9 c 12"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "weights",
+      "2",
+      "3",
+      "withscores"
+     ],
+     "value": "b 7 c 12"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNIONSTORE with a regular set and weights - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "seta{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "c"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zunionstore",
+      "zsetc{t}",
+      "2",
+      "seta{t}",
+      "zsetb{t}",
+      "weights",
+      "2",
+      "3"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 2 b 5 c 8 d 9"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNIONSTORE with AGGREGATE MIN - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zunionstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "min"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1 b 1 c 2 d 3"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNION/ZINTER with AGGREGATE MIN - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zunion",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "min",
+      "withscores"
+     ],
+     "value": "a 1 b 1 c 2 d 3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "min",
+      "withscores"
+     ],
+     "value": "b 1 c 2"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNIONSTORE with AGGREGATE MAX - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zunionstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "max"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1 b 2 c 3 d 3"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZUNION/ZINTER with AGGREGATE MAX - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zunion",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "max",
+      "withscores"
+     ],
+     "value": "a 1 b 2 c 3 d 3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "max",
+      "withscores"
+     ],
+     "value": "b 2 c 3"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTERSTORE basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zinterstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "b 3 c 5"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTER basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "withscores"
+     ],
+     "value": "b 3 c 5"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTERCARD with illegal arguments",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zintercard",
+      "1",
+      "zseta{t}",
+      "zseta{t}"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zintercard",
+      "1",
+      "zseta{t}",
+      "bar_arg"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zintercard",
+      "1",
+      "zseta{t}",
+      "LIMIT"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zintercard",
+      "1",
+      "myset{t}",
+      "LIMIT",
+      "-1"
+     ],
+     "value": "ERR LIMIT*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zintercard",
+      "1",
+      "myset{t}",
+      "LIMIT",
+      "a"
+     ],
+     "value": "ERR LIMIT*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTERCARD basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "limit",
+      "0"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "limit",
+      "1"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zintercard",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "limit",
+      "10"
+     ],
+     "value": "2"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTER RESP3 - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "3"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "withscores"
+     ],
+     "value": "{b 3.0} {c 5.0}"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "2"
+     ]
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTERSTORE with weights - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zinterstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "weights",
+      "2",
+      "3"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "b 7 c 12"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTER with weights - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zinter",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "weights",
+      "2",
+      "3",
+      "withscores"
+     ],
+     "value": "b 7 c 12"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTERSTORE with a regular set and weights - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "seta{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "c"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zinterstore",
+      "zsetc{t}",
+      "2",
+      "seta{t}",
+      "zsetb{t}",
+      "weights",
+      "2",
+      "3"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "b 5 c 8"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTERSTORE with AGGREGATE MIN - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zinterstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "min"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "b 1 c 2"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZINTERSTORE with AGGREGATE MAX - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zinterstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "aggregate",
+      "max"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "b 2 c 3"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "$cmd with +inf/-inf scores - $encoding",
+   "expected": null,
+   "why": "variable reference: $cmd",
+   "skipped": true,
+   "tcl": "r del zsetinf1{t} zsetinf2{t}\n\n                r zadd zsetinf1{t} +inf key\n                r zadd zsetinf2{t} +inf key\n                r $cmd zsetinf3{t} 2 zsetinf1{t} zsetinf2{t}\n                assert_equal inf [r zscore zsetinf3{t} key]\n\n                r zadd zsetinf1{t} -inf key\n                r zadd zsetinf2{t} +inf key\n                r $cmd zsetinf3{t} 2 zsetinf1{t} zsetinf2{t}\n                assert_equal 0 [r zscore zsetinf3{t} key]\n\n                r zadd zsetinf1{t} +inf key\n                r zadd zsetinf2{t} -inf key\n                r $cmd zsetinf3{t} 2 zsetinf1{t} zsetinf2{t}\n                assert_equal 0 [r zscore zsetinf3{t} key]\n\n                r zadd zsetinf1{t} -inf key\n                r zadd zsetinf2{t} -inf key\n                r $cmd zsetinf3{t} 2 zsetinf1{t} zsetinf2{t}\n                assert_equal -inf [r zscore zsetinf3{t} key]"
+  },
+  {
+   "name": "$cmd with NaN weights - $encoding",
+   "expected": null,
+   "why": "tcl this translator cannot scan: unbalanced brace from offset 21",
+   "skipped": true,
+   "tcl": "r del zsetinf1{t} zsetinf2{t}\n\n                r zadd zsetinf1{t} 1.0 key\n                r zadd zsetinf2{t} 1.0 key\n                assert_error \"*weight*not*float*\" {\n                    r $cmd zsetinf3{t} 2 zsetinf1{t} zsetinf2{t} weights nan nan\n                }"
+  },
+  {
+   "name": "ZDIFFSTORE basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zdiffstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZDIFF basics - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zdiff",
+      "2",
+      "zseta{t}",
+      "zsetb{t}",
+      "withscores"
+     ],
+     "value": "a 1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZDIFFSTORE with a regular set - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "seta{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "seta{t}",
+      "c"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zdiffstore",
+      "zsetc{t}",
+      "2",
+      "seta{t}",
+      "zsetb{t}"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZDIFF subtracting set from itself - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zdiffstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zseta{t}"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZDIFF algorithm 1 - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta{t}",
+      "zsetb{t}",
+      "zsetc{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "3",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "1",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "2",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "3",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zdiffstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZDIFF algorithm 2 - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta{t}",
+      "zsetb{t}",
+      "zsetc{t}",
+      "zsetd{t}",
+      "zsete{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "3",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "1",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetc{t}",
+      "1",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetd{t}",
+      "1",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zdiffstore",
+      "zsete{t}",
+      "4",
+      "zseta{t}",
+      "zsetb{t}",
+      "zsetc{t}",
+      "zsetd{t}"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsete{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "a 1 e 5"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZDIFF algorithm 2 empty result early - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zseta{t}",
+      "zsetb{t}",
+      "zsetc{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zseta{t}",
+      "1",
+      "a",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zsetb{t}",
+      "1",
+      "a",
+      "2",
+      "b"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zdiffstore",
+      "zsetc{t}",
+      "2",
+      "zseta{t}",
+      "zsetb{t}"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zsetc{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZDIFF fuzzing - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "for {set j 0} {$j < 100} {incr j} {\n                unset -nocomplain s\n                array set s {}\n                set args {}\n                set num_sets [expr {[randomInt 10]+1}]\n                for {set i 0} {$i < $num_sets} {incr i} {\n                    set num_elements [randomInt 100]\n                    r del zset_$i{t}\n                    lappend args zset_$i{t}\n                    while {$num_elements} {\n                        set ele [randomValue]\n                        r zadd zset_$i{t} [randomInt 100] $ele\n                        if {$i == 0} {\n                            set s($ele) x\n                        } else {\n                            unset -nocomplain s($ele)\n                        }\n                        incr num_elements -1\n                    }\n                }\n                set result [lsort [r zdiff [llength $args] {*}$args]]\n                assert_equal $result [lsort [array names s]]\n            }"
+  },
+  {
+   "name": "$pop with the count 0 returns an empty array",
+   "expected": null,
+   "why": "variable reference: $pop",
+   "skipped": true,
+   "tcl": "r del zset\n                r zadd zset 1 a 2 b 3 c\n                assert_equal {} [r $pop zset 0]\n\n                # Make sure we can distinguish between an empty array and a null response\n                r readraw 1\n                assert_equal {*0} [r $pop zset 0]\n                r readraw 0\n\n                assert_equal 3 [r zcard zset]"
+  },
+  {
+   "name": "$pop with negative count",
+   "expected": null,
+   "why": "variable reference: $pop",
+   "skipped": true,
+   "tcl": "r set zset foo\n                assert_error \"ERR *must be positive\" {r $pop zset -1}\n\n                r del zset\n                assert_error \"ERR *must be positive\" {r $pop zset -2}\n\n                r zadd zset 1 a 2 b 3 c\n                assert_error \"ERR *must be positive\" {r $pop zset -3}"
+  },
+  {
+   "name": "Basic $popmin/$popmax with a single key - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zset\n            verify_zpop_response r $popmin zset 0 {} {}\n\n            create_zset zset {-1 a 1 b 2 c 3 d 4 e}\n            verify_zpop_response r $popmin zset 0 {a -1} {zset {{a -1}}}\n            verify_zpop_response r $popmin zset 0 {b 1} {zset {{b 1}}}\n            verify_zpop_response r $popmax zset 0 {e 4} {zset {{e 4}}}\n            verify_zpop_response r $popmax zset 0 {d 3} {zset {{d 3}}}\n            verify_zpop_response r $popmin zset 0 {c 2} {zset {{c 2}}}\n            assert_equal 0 [r exists zset]"
+  },
+  {
+   "name": "$popmin/$popmax with count - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del z1\n            verify_zpop_response r $popmin z1 2 {} {}\n\n            create_zset z1 {0 a 1 b 2 c 3 d}\n            verify_zpop_response r $popmin z1 2 {a 0 b 1} {z1 {{a 0} {b 1}}}\n            verify_zpop_response r $popmax z1 2 {d 3 c 2} {z1 {{d 3} {c 2}}}"
+  },
+  {
+   "name": "$popmin/$popmax with a single existing sorted set - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            create_zset zset {0 a 1 b 2 c 3 d}\n\n            verify_bzpop_response $rd $popmin zset 5 0 {zset a 0} {zset {{a 0}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset d 3} {zset {{d 3}}}\n            verify_bzpop_response $rd $popmin zset 5 0 {zset b 1} {zset {{b 1}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset c 2} {zset {{c 2}}}\n            assert_equal 0 [r exists zset]\n            $rd close"
+  },
+  {
+   "name": "$popmin/$popmax with multiple existing sorted sets - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            create_zset z1{t} {0 a 1 b 2 c}\n            create_zset z2{t} {3 d 4 e 5 f}\n\n            verify_bzpop_two_key_response $rd $popmin z1{t} z2{t} 5 0 {z1{t} a 0} {z1{t} {{a 0}}}\n            verify_bzpop_two_key_response $rd $popmax z1{t} z2{t} 5 0 {z1{t} c 2} {z1{t} {{c 2}}}\n            assert_equal 1 [r zcard z1{t}]\n            assert_equal 3 [r zcard z2{t}]\n\n            verify_bzpop_two_key_response $rd $popmax z2{t} z1{t} 5 0 {z2{t} f 5} {z2{t} {{f 5}}}\n            verify_bzpop_two_key_response $rd $popmin z2{t} z1{t} 5 0 {z2{t} d 3} {z2{t} {{d 3}}}\n            assert_equal 1 [r zcard z1{t}]\n            assert_equal 1 [r zcard z2{t}]\n            $rd close"
+  },
+  {
+   "name": "$popmin/$popmax second sorted set has members - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del z1{t}\n            create_zset z2{t} {3 d 4 e 5 f}\n\n            verify_bzpop_two_key_response $rd $popmax z1{t} z2{t} 5 0 {z2{t} f 5} {z2{t} {{f 5}}}\n            verify_bzpop_two_key_response $rd $popmin z1{t} z2{t} 5 0 {z2{t} d 3} {z2{t} {{d 3}}}\n            assert_equal 0 [r zcard z1{t}]\n            assert_equal 1 [r zcard z2{t}]\n            $rd close"
+  },
+  {
+   "name": "Basic $popmin/$popmax - $encoding RESP3",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r hello 3\n            create_zset z1 {0 a 1 b 2 c 3 d}\n            verify_zpop_response r $popmin z1 0 {a 0.0} {z1 {{a 0.0}}}\n            verify_zpop_response r $popmax z1 0 {d 3.0} {z1 {{d 3.0}}}\n            r hello 2"
+  },
+  {
+   "name": "$popmin/$popmax with count - $encoding RESP3",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r hello 3\n            create_zset z1 {0 a 1 b 2 c 3 d}\n            verify_zpop_response r $popmin z1 2 {{a 0.0} {b 1.0}} {z1 {{a 0.0} {b 1.0}}}\n            verify_zpop_response r $popmax z1 2 {{d 3.0} {c 2.0}} {z1 {{d 3.0} {c 2.0}}}\n            r hello 2"
+  },
+  {
+   "name": "$popmin/$popmax - $encoding RESP3",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r hello 3\n            set rd [valkey_deferring_client]\n            create_zset zset {0 a 1 b 2 c 3 d}\n\n            verify_bzpop_response $rd $popmin zset 5 0 {zset a 0} {zset {{a 0}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset d 3} {zset {{d 3}}}\n            verify_bzpop_response $rd $popmin zset 5 0 {zset b 1} {zset {{b 1}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset c 2} {zset {{c 2}}}\n\n            assert_equal 0 [r exists zset]\n            r hello 2\n            $rd close"
+  },
+  {
+   "name": "ZPOP/ZMPOP against wrong type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo{t}",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zpopmin",
+      "foo{t}"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zpopmin",
+      "foo{t}",
+      "0"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zpopmax",
+      "foo{t}"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zpopmax",
+      "foo{t}",
+      "0"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zpopmin",
+      "foo{t}",
+      "2"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "foo{t}",
+      "min"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "foo{t}",
+      "max"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "foo{t}",
+      "max",
+      "count",
+      "200"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo2{t}",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "2",
+      "foo{t}",
+      "foo2{t}",
+      "min"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "2",
+      "foo2{t}",
+      "foo1{t}",
+      "max",
+      "count",
+      "1"
+     ],
+     "value": "*WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZMPOP with illegal argument",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop"
+     ],
+     "value": "ERR wrong number of arguments for 'zmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1"
+     ],
+     "value": "ERR wrong number of arguments for 'zmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}"
+     ],
+     "value": "ERR wrong number of arguments for 'zmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "0",
+      "myzset{t}",
+      "MIN"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "a",
+      "myzset{t}",
+      "MIN"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "-1",
+      "myzset{t}",
+      "MAX"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "bad_where"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "MIN",
+      "bar_arg"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "MAX",
+      "MIN"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "COUNT"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "MAX",
+      "COUNT",
+      "1",
+      "COUNT",
+      "2"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "bad_arg"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "MIN",
+      "COUNT",
+      "0"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "MAX",
+      "COUNT",
+      "a"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "1",
+      "myzset{t}",
+      "MIN",
+      "COUNT",
+      "-1"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmpop",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "MAX",
+      "COUNT",
+      "-1"
+     ],
+     "value": "ERR count*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZMPOP propagate as pop with count command to replica",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set repl [attach_to_replication_stream]\n\n        # ZMPOP min/max propagate as ZPOPMIN/ZPOPMAX with count\n        r zadd myzset{t} 1 one 2 two 3 three\n\n        # Pop elements from one zset.\n        r zmpop 1 myzset{t} min\n        r zmpop 1 myzset{t} max count 1\n\n        # Now the zset have only one element\n        r zmpop 2 myzset{t} myzset2{t} min count 10\n\n        # No elements so we don't propagate.\n        r zmpop 2 myzset{t} myzset2{t} max count 10\n\n        # Pop elements from the second zset.\n        r zadd myzset2{t} 1 one 2 two 3 three\n        r zmpop 2 myzset{t} myzset2{t} min count 2\n        r zmpop 2 myzset{t} myzset2{t} max count 1\n\n        # Pop all elements.\n        r zadd myzset{t} 1 one 2 two 3 three\n        r zadd myzset2{t} 4 four 5 five 6 six\n        r zmpop 2 myzset{t} myzset2{t} min count 10\n        r zmpop 2 myzset{t} myzset2{t} max count 10\n\n        assert_replication_stream $repl {\n            {select *}\n            {zadd myzset{t} 1 one 2 two 3 three}\n            {zpopmin myzset{t} 1}\n            {zpopmax myzset{t} 1}\n            {zpopmin myzset{t} 1}\n            {zadd myzset2{t} 1 one 2 two 3 three}\n            {zpopmin myzset2{t} 2}\n            {zpopmax myzset2{t} 1}\n            {zadd myzset{t} 1 one 2 two 3 three}\n            {zadd myzset2{t} 4 four 5 five 6 six}\n            {zpopmin myzset{t} 3}\n            {zpopmax myzset2{t} 3}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "ZPOPMIN/ZPOPMAX readraw in RESP$resp",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zset{t}\n            create_zset zset2{t} {1 a 2 b 3 c 4 d 5 e}\n\n            r readraw 1\n\n            # ZPOP against non existing key.\n            assert_equal {*0} [r zpopmin zset{t}]\n            assert_equal {*0} [r zpopmin zset{t} 1]\n\n            # ZPOP without COUNT option.\n            assert_equal {*2} [r zpopmin zset2{t}]\n            assert_equal [r read] {$1}\n            assert_equal [r read] {a}\n            verify_score_response r $resp 1\n\n            # ZPOP with COUNT option.\n            if {$resp == 2} {\n                assert_equal {*2} [r zpopmax zset2{t} 1]\n                assert_equal [r read] {$1}\n                assert_equal [r read] {e}\n            } elseif {$resp == 3} {\n                assert_equal {*1} [r zpopmax zset2{t} 1]\n                assert_equal [r read] {*2}\n                assert_equal [r read] {$1}\n                assert_equal [r read] {e}\n            }\n            verify_score_response r $resp 5\n\n            r readraw 0"
+  },
+  {
+   "name": "BZPOPMIN/BZPOPMAX readraw in RESP$resp",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zset{t}\n            create_zset zset2{t} {1 a 2 b 3 c 4 d 5 e}\n\n            $rd readraw 1\n\n            # BZPOP released on timeout.\n            $rd bzpopmin zset{t} 0.01\n            verify_nil_response $resp [$rd read]\n            $rd bzpopmax zset{t} 0.01\n            verify_nil_response $resp [$rd read]\n\n            # BZPOP non-blocking path.\n            $rd bzpopmin zset1{t} zset2{t} 0.1\n            assert_equal [$rd read] {*3}\n            assert_equal [$rd read] {$8}\n            assert_equal [$rd read] {zset2{t}}\n            assert_equal [$rd read] {$1}\n            assert_equal [$rd read] {a}\n            verify_score_response $rd $resp 1\n\n            # BZPOP blocking path.\n            $rd bzpopmin zset{t} 5\n            wait_for_blocked_client\n            r zadd zset{t} 1 a\n            assert_equal [$rd read] {*3}\n            assert_equal [$rd read] {$7}\n            assert_equal [$rd read] {zset{t}}\n            assert_equal [$rd read] {$1}\n            assert_equal [$rd read] {a}\n            verify_score_response $rd $resp 1\n\n            $rd readraw 0"
+  },
+  {
+   "name": "ZMPOP readraw in RESP$resp",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zset{t} zset2{t}\n            create_zset zset3{t} {1 a}\n            create_zset zset4{t} {1 a 2 b 3 c 4 d 5 e}\n\n            r readraw 1\n\n            # ZMPOP against non existing key.\n            verify_nil_response $resp [r zmpop 1 zset{t} min]\n            verify_nil_response $resp [r zmpop 1 zset{t} max count 1]\n            verify_nil_response $resp [r zmpop 2 zset{t} zset2{t} min]\n            verify_nil_response $resp [r zmpop 2 zset{t} zset2{t} max count 1]\n\n            # ZMPOP with one input key.\n            assert_equal {*2} [r zmpop 1 zset3{t} max]\n            assert_equal [r read] {$8}\n            assert_equal [r read] {zset3{t}}\n            assert_equal [r read] {*1}\n            assert_equal [r read] {*2}\n            assert_equal [r read] {$1}\n            assert_equal [r read] {a}\n            verify_score_response r $resp 1\n\n            # ZMPOP with COUNT option.\n            assert_equal {*2} [r zmpop 2 zset3{t} zset4{t} min count 2]\n            assert_equal [r read] {$8}\n            assert_equal [r read] {zset4{t}}\n            assert_equal [r read] {*2}\n            assert_equal [r read] {*2}\n            assert_equal [r read] {$1}\n            assert_equal [r read] {a}\n            verify_score_response r $resp 1\n            assert_equal [r read] {*2}\n            assert_equal [r read] {$1}\n            assert_equal [r read] {b}\n            verify_score_response r $resp 2\n\n            r readraw 0"
+  },
+  {
+   "name": "BZMPOP readraw in RESP$resp",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zset{t} zset2{t}\n            create_zset zset3{t} {1 a 2 b 3 c 4 d 5 e}\n\n            $rd readraw 1\n\n            # BZMPOP released on timeout.\n            $rd bzmpop 0.01 1 zset{t} min\n            verify_nil_response $resp [$rd read]\n            $rd bzmpop 0.01 2 zset{t} zset2{t} max\n            verify_nil_response $resp [$rd read]\n\n            # BZMPOP non-blocking path.\n            $rd bzmpop 0.1 2 zset3{t} zset4{t} min\n\n            assert_equal [$rd read] {*2}\n            assert_equal [$rd read] {$8}\n            assert_equal [$rd read] {zset3{t}}\n            assert_equal [$rd read] {*1}\n            assert_equal [$rd read] {*2}\n            assert_equal [$rd read] {$1}\n            assert_equal [$rd read] {a}\n            verify_score_response $rd $resp 1\n\n            # BZMPOP blocking path with COUNT option.\n            $rd bzmpop 5 2 zset{t} zset2{t} max count 2\n            wait_for_blocked_client\n            r zadd zset2{t} 1 a 2 b 3 c\n\n            assert_equal [$rd read] {*2}\n            assert_equal [$rd read] {$8}\n            assert_equal [$rd read] {zset2{t}}\n            assert_equal [$rd read] {*2}\n            assert_equal [$rd read] {*2}\n            assert_equal [$rd read] {$1}\n            assert_equal [$rd read] {c}\n            verify_score_response $rd $resp 3\n            assert_equal [$rd read] {*2}\n            assert_equal [$rd read] {$1}\n            assert_equal [$rd read] {b}\n            verify_score_response $rd $resp 2"
+  },
+  {
+   "name": "ZINTERSTORE regression with two sets, intset+hashtable",
+   "expected": "0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "seta{t}",
+      "setb{t}",
+      "setc{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "set1{t}",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "set2{t}",
+      "10"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zinterstore",
+      "set3{t}",
+      "2",
+      "set1{t}",
+      "set2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZUNIONSTORE regression, should not create NaN in scores",
+   "expected": "neginf 0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z{t}",
+      "-inf",
+      "neginf"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zunionstore",
+      "out{t}",
+      "1",
+      "z{t}",
+      "weights",
+      "0"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "out{t}",
+      "0",
+      "-1",
+      "withscores"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZINTERSTORE #516 regression, mixed sets and ziplist zsets",
+   "expected": "100",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "one{t}",
+      "100",
+      "101",
+      "102",
+      "103"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "sadd",
+      "two{t}",
+      "100",
+      "200",
+      "201",
+      "202"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "three{t}",
+      "1",
+      "500",
+      "1",
+      "501",
+      "1",
+      "502",
+      "1",
+      "503",
+      "1",
+      "100"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zinterstore",
+      "to_here{t}",
+      "3",
+      "one{t}",
+      "two{t}",
+      "three{t}",
+      "WEIGHTS",
+      "0",
+      "0",
+      "1"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "to_here{t}",
+      "0",
+      "-1"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZUNIONSTORE result is sorted",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "# Create two sets with common and not common elements, perform\n        # the UNION, check that elements are still sorted.\n        r del one{t} two{t} dest{t}\n        set cmd1 [list r zadd one{t}]\n        set cmd2 [list r zadd two{t}]\n        for {set j 0} {$j < 1000} {incr j} {\n            lappend cmd1 [expr rand()] [randomInt 1000]\n            lappend cmd2 [expr rand()] [randomInt 1000]\n        }\n        {*}$cmd1\n        {*}$cmd2\n        assert {[r zcard one{t}] > 100}\n        assert {[r zcard two{t}] > 100}\n        r zunionstore dest{t} 2 one{t} two{t}\n        set oldscore 0\n        foreach {ele score} [r zrange dest{t} 0 -1 withscores] {\n            assert {$score >= $oldscore}\n            set oldscore $score\n        }"
+  },
+  {
+   "name": "ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE error if using WITHSCORES",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zunionstore",
+      "foo{t}",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}",
+      "withscores"
+     ],
+     "value": "*ERR*syntax*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zinterstore",
+      "foo{t}",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}",
+      "withscores"
+     ],
+     "value": "*ERR*syntax*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zdiffstore",
+      "foo{t}",
+      "2",
+      "zsetd{t}",
+      "zsetf{t}",
+      "withscores"
+     ],
+     "value": "*ERR*syntax*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZMSCORE retrieve",
+   "expected": "10 20",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zmscoretest"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmscoretest",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmscoretest",
+      "20",
+      "y"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zmscore",
+      "zmscoretest",
+      "x",
+      "y"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZMSCORE retrieve from empty set",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zmscoretest"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zmscore",
+      "zmscoretest",
+      "x",
+      "y"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZMSCORE retrieve with missing member",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zmscoretest"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmscoretest",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zmscore",
+      "zmscoretest",
+      "x",
+      "y"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZMSCORE retrieve single member",
+   "expected": "10",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zmscoretest"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmscoretest",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmscoretest",
+      "20",
+      "y"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zmscore",
+      "zmscoretest",
+      "x"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZMSCORE retrieve requires one or more members",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zmscoretest\n        r zadd zmscoretest 10 x\n        r zadd zmscoretest 20 y\n\n        catch {r zmscore zmscoretest} e\n        assert_match {*ERR*wrong*number*arg*} $e"
+  },
+  {
+   "name": "ZSET commands don't accept the empty strings as valid score",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zadd",
+      "myzset",
+      "",
+      "abc"
+     ],
+     "value": "*not*float*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "zunionInterDiffGenericCommand at least 1 input key",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zunion",
+      "0",
+      "key{t}"
+     ],
+     "value": "*at least 1 input key * 'zunion' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zunionstore",
+      "dst_key{t}",
+      "0",
+      "key{t}"
+     ],
+     "value": "*at least 1 input key * 'zunionstore' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zinter",
+      "0",
+      "key{t}"
+     ],
+     "value": "*at least 1 input key * 'zinter' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zinterstore",
+      "dst_key{t}",
+      "0",
+      "key{t}"
+     ],
+     "value": "*at least 1 input key * 'zinterstore' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zdiff",
+      "0",
+      "key{t}"
+     ],
+     "value": "*at least 1 input key * 'zdiff' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zdiffstore",
+      "dst_key{t}",
+      "0",
+      "key{t}"
+     ],
+     "value": "*at least 1 input key * 'zdiffstore' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zintercard",
+      "0",
+      "key{t}"
+     ],
+     "value": "*at least 1 input key * 'zintercard' command"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZSCORE - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zscoretest\n            set aux {}\n            for {set i 0} {$i < $elements} {incr i} {\n                set score [expr rand()]\n                lappend aux $score\n                r zadd zscoretest $score $i\n            }\n\n            assert_encoding $encoding zscoretest\n            for {set i 0} {$i < $elements} {incr i} {\n                # If an IEEE 754 double-precision number is converted to a decimal string with at\n                # least 17 significant digits (reply of zscore), and then converted back to double-precision representation,\n                # the final result replied via zscore command must match the original number present on the $aux list.\n                # Given Tcl is mostly very relaxed about types (everything is a string) we need to use expr to convert a string to float.\n                assert_equal [expr [lindex $aux $i]] [expr [r zscore zscoretest $i]]\n            }"
+  },
+  {
+   "name": "ZMSCORE - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zscoretest\n            set aux {}\n            for {set i 0} {$i < $elements} {incr i} {\n                set score [expr rand()]\n                lappend aux $score\n                r zadd zscoretest $score $i\n            }\n\n            assert_encoding $encoding zscoretest\n            for {set i 0} {$i < $elements} {incr i} {\n                # Check above notes on IEEE 754 double-precision comparison\n                assert_equal [expr [lindex $aux $i]] [expr [r zscore zscoretest $i]]\n            }"
+  },
+  {
+   "name": "ZSCORE after a DEBUG RELOAD - $encoding",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del zscoretest\n            set aux {}\n            for {set i 0} {$i < $elements} {incr i} {\n                set score [expr rand()]\n                lappend aux $score\n                r zadd zscoretest $score $i\n            }\n\n            r debug reload\n            assert_encoding $encoding zscoretest\n            for {set i 0} {$i < $elements} {incr i} {\n                # Check above notes on IEEE 754 double-precision comparison\n                assert_equal [expr [lindex $aux $i]] [expr [r zscore zscoretest $i]]\n            }"
+  },
+  {
+   "name": "ZSET sorting stresser - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set delta 0\n            for {set test 0} {$test < 2} {incr test} {\n                unset -nocomplain auxarray\n                array set auxarray {}\n                set auxlist {}\n                r del myzset\n                for {set i 0} {$i < $elements} {incr i} {\n                    if {$test == 0} {\n                        set score [expr rand()]\n                    } else {\n                        set score [expr int(rand()*10)]\n                    }\n                    set auxarray($i) $score\n                    r zadd myzset $score $i\n                    # Random update\n                    if {[expr rand()] < .2} {\n                        set j [expr int(rand()*1000)]\n                        if {$test == 0} {\n                            set score [expr rand()]\n                        } else {\n                            set score [expr int(rand()*10)]\n                        }\n                        set auxarray($j) $score\n                        r zadd myzset $score $j\n                    }\n                }\n                foreach {item score} [array get auxarray] {\n                    lappend auxlist [list $score $item]\n                }\n                set sorted [lsort -command zlistAlikeSort $auxlist]\n                set auxlist {}\n                foreach x $sorted {\n                    lappend auxlist [lindex $x 1]\n                }\n\n                assert_encoding $encoding myzset\n                set fromredis [r zrange myzset 0 -1]\n                set delta 0\n                for {set i 0} {$i < [llength $fromredis]} {incr i} {\n                    if {[lindex $fromredis $i] != [lindex $auxlist $i]} {\n                        incr delta\n                    }\n                }\n            }\n            assert_equal 0 $delta"
+  },
+  {
+   "name": "ZRANGEBYSCORE fuzzy test, 100 ranges in $elements element sorted set - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set err {}\n            r del zset\n            for {set i 0} {$i < $elements} {incr i} {\n                r zadd zset [expr rand()] $i\n            }\n\n            assert_encoding $encoding zset\n            for {set i 0} {$i < 100} {incr i} {\n                set min [expr rand()]\n                set max [expr rand()]\n                if {$min > $max} {\n                    set aux $min\n                    set min $max\n                    set max $aux\n                }\n                set low [r zrangebyscore zset -inf $min]\n                set ok [r zrangebyscore zset $min $max]\n                set high [r zrangebyscore zset $max +inf]\n                set lowx [r zrangebyscore zset -inf ($min]\n                set okx [r zrangebyscore zset ($min ($max]\n                set highx [r zrangebyscore zset ($max +inf]\n\n                if {[r zcount zset -inf $min] != [llength $low]} {\n                    append err \"Error, len does not match zcount\\n\"\n                }\n                if {[r zcount zset $min $max] != [llength $ok]} {\n                    append err \"Error, len does not match zcount\\n\"\n                }\n                if {[r zcount zset $max +inf] != [llength $high]} {\n                    append err \"Error, len does not match zcount\\n\"\n                }\n                if {[r zcount zset -inf ($min] != [llength $lowx]} {\n                    append err \"Error, len does not match zcount\\n\"\n                }\n                if {[r zcount zset ($min ($max] != [llength $okx]} {\n                    append err \"Error, len does not match zcount\\n\"\n                }\n                if {[r zcount zset ($max +inf] != [llength $highx]} {\n                    append err \"Error, len does not match zcount\\n\"\n                }\n\n                foreach x $low {\n                    set score [r zscore zset $x]\n                    if {$score > $min} {\n                        append err \"Error, score for $x is $score > $min\\n\"\n                    }\n                }\n                foreach x $lowx {\n                    set score [r zscore zset $x]\n                    if {$score >= $min} {\n                        append err \"Error, score for $x is $score >= $min\\n\"\n                    }\n                }\n                foreach x $ok {\n                    set score [r zscore zset $x]\n                    if {$score < $min || $score > $max} {\n                        append err \"Error, score for $x is $score outside $min-$max range\\n\"\n                    }\n                }\n                foreach x $okx {\n                    set score [r zscore zset $x]\n                    if {$score <= $min || $score >= $max} {\n                        append err \"Error, score for $x is $score outside $min-$max open range\\n\"\n                    }\n                }\n                foreach x $high {\n                    set score [r zscore zset $x]\n                    if {$score < $max} {\n                        append err \"Error, score for $x is $score < $max\\n\"\n                    }\n                }\n                foreach x $highx {\n                    set score [r zscore zset $x]\n                    if {$score <= $max} {\n                        append err \"Error, score for $x is $score <= $max\\n\"\n                    }\n                }\n            }\n            assert_equal {} $err"
+  },
+  {
+   "name": "ZRANGEBYLEX fuzzy test, 100 ranges in $elements element sorted set - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set lexset {}\n            r del zset\n            for {set j 0} {$j < $elements} {incr j} {\n                set e [randstring 0 30 alpha]\n                lappend lexset $e\n                r zadd zset 0 $e\n            }\n            set lexset [lsort -unique $lexset]\n            for {set j 0} {$j < 100} {incr j} {\n                set min [randstring 0 30 alpha]\n                set max [randstring 0 30 alpha]\n                set mininc [randomInt 2]\n                set maxinc [randomInt 2]\n                if {$mininc} {set cmin \"\\[$min\"} else {set cmin \"($min\"}\n                if {$maxinc} {set cmax \"\\[$max\"} else {set cmax \"($max\"}\n                set rev [randomInt 2]\n                if {$rev} {\n                    set cmd zrevrangebylex\n                } else {\n                    set cmd zrangebylex\n                }\n\n                # Make sure data is the same in both sides\n                assert {[r zrange zset 0 -1] eq $lexset}\n\n                # Get the server output\n                set output [r $cmd zset $cmin $cmax]\n                if {$rev} {\n                    set outlen [r zlexcount zset $cmax $cmin]\n                } else {\n                    set outlen [r zlexcount zset $cmin $cmax]\n                }\n\n                # Compute the same output via Tcl\n                set o {}\n                set copy $lexset\n                if {(!$rev && [string compare $min $max] > 0) ||\n                    ($rev && [string compare $max $min] > 0)} {\n                    # Empty output when ranges are inverted.\n                } else {\n                    if {$rev} {\n                        # Invert the Tcl array using the server itself.\n                        set copy [r zrevrange zset 0 -1]\n                        # Invert min / max as well\n                        lassign [list $min $max $mininc $maxinc] \\\n                            max min maxinc mininc\n                    }\n                    foreach e $copy {\n                        set mincmp [string compare $e $min]\n                        set maxcmp [string compare $e $max]\n                        if {\n                             ($mininc && $mincmp >= 0 || !$mininc && $mincmp > 0)\n                             &&\n                             ($maxinc && $maxcmp <= 0 || !$maxinc && $maxcmp < 0)\n                        } {\n                            lappend o $e\n                        }\n                    }\n                }\n                assert {$o eq $output}\n                assert {$outlen eq [llength $output]}\n            }"
+  },
+  {
+   "name": "ZREMRANGEBYLEX fuzzy test, 100 ranges in $elements element sorted set - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set lexset {}\n            r del zset{t} zsetcopy{t}\n            for {set j 0} {$j < $elements} {incr j} {\n                set e [randstring 0 30 alpha]\n                lappend lexset $e\n                r zadd zset{t} 0 $e\n            }\n            set lexset [lsort -unique $lexset]\n            for {set j 0} {$j < 100} {incr j} {\n                # Copy...\n                r zunionstore zsetcopy{t} 1 zset{t}\n                set lexsetcopy $lexset\n\n                set min [randstring 0 30 alpha]\n                set max [randstring 0 30 alpha]\n                set mininc [randomInt 2]\n                set maxinc [randomInt 2]\n                if {$mininc} {set cmin \"\\[$min\"} else {set cmin \"($min\"}\n                if {$maxinc} {set cmax \"\\[$max\"} else {set cmax \"($max\"}\n\n                # Make sure data is the same in both sides\n                assert {[r zrange zset{t} 0 -1] eq $lexset}\n\n                # Get the range we are going to remove\n                set torem [r zrangebylex zset{t} $cmin $cmax]\n                set toremlen [r zlexcount zset{t} $cmin $cmax]\n                r zremrangebylex zsetcopy{t} $cmin $cmax\n                set output [r zrange zsetcopy{t} 0 -1]\n\n                # Remove the range with Tcl from the original list\n                if {$toremlen} {\n                    set first [lsearch -exact $lexsetcopy [lindex $torem 0]]\n                    set last [expr {$first+$toremlen-1}]\n                    set lexsetcopy [lreplace $lexsetcopy $first $last]\n                }\n                assert {$lexsetcopy eq $output}\n            }"
+  },
+  {
+   "name": "ZSETs skiplist implementation backlink consistency test - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set diff 0\n            for {set j 0} {$j < $elements} {incr j} {\n                r zadd myzset [expr rand()] \"Element-$j\"\n                r zrem myzset \"Element-[expr int(rand()*$elements)]\"\n            }\n\n            assert_encoding $encoding myzset\n            set l1 [r zrange myzset 0 -1]\n            set l2 [r zrevrange myzset 0 -1]\n            for {set j 0} {$j < [llength $l1]} {incr j} {\n                if {[lindex $l1 $j] ne [lindex $l2 end-$j]} {\n                    incr diff\n                }\n            }\n            assert_equal 0 $diff"
+  },
+  {
+   "name": "ZSETs ZRANK augmented skip list stress testing - $encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set err {}\n            r del myzset\n            for {set k 0} {$k < 2000} {incr k} {\n                set i [expr {$k % $elements}]\n                if {[expr rand()] < .2} {\n                    r zrem myzset $i\n                } else {\n                    set score [expr rand()]\n                    r zadd myzset $score $i\n                    assert_encoding $encoding myzset\n                }\n\n                set card [r zcard myzset]\n                if {$card > 0} {\n                    set index [randomInt $card]\n                    set ele [lindex [r zrange myzset $index $index] 0]\n                    set rank [r zrank myzset $ele]\n                    if {$rank != $index} {\n                        set err \"$ele RANK is wrong! ($rank != $index)\"\n                        break\n                    }\n                }\n            }\n            assert_equal {} $err"
+  },
+  {
+   "name": "$pop, ZADD + DEL should not awake blocked client",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n\n            r multi\n            r zadd zset 0 foo\n            r del zset\n            r exec\n            r del zset\n            r zadd zset 1 bar\n\n            verify_pop_response $pop [$rd read] {zset bar 1} {zset {{bar 1}}}\n            $rd close"
+  },
+  {
+   "name": "$pop, ZADD + DEL + SET should not awake blocked client",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n\n            r multi\n            r zadd zset 0 foo\n            r del zset\n            r set zset foo\n            r exec\n            r del zset\n            r zadd zset 1 bar\n\n            verify_pop_response $pop [$rd read] {zset bar 1} {zset {{bar 1}}}\n            $rd close"
+  },
+  {
+   "name": "BZPOPMIN unblock but the key is expired and then block again - reprocessing command",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n            r debug set-active-expire 0\n            set rd [valkey_deferring_client]\n\n            set start [clock milliseconds]\n            $rd bzpopmin zset{t} 1\n            wait_for_blocked_clients_count 1\n\n            # The exec will try to awake the blocked client, but the key is expired,\n            # so the client will be blocked again during the command reprocessing.\n            r multi\n            r zadd zset{t} 1 one\n            r pexpire zset{t} 100\n            r debug sleep 0.2\n            r exec\n\n            assert_equal {} [$rd read]\n            set end [clock milliseconds]\n\n            # Before the fix in #13004, this time would have been 1200+ (i.e. more than 1200ms),\n            # now it should be 1000, but in order to avoid timing issues, we increase the range a bit.\n            assert_range [expr $end-$start] 1000 1150\n            puts \"Time: [expr $end-$start]\"\n\n            r debug set-active-expire 1\n            $rd close"
+  },
+  {
+   "name": "BZPOPMIN with same key multiple times should work",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del z1{t} z2{t}\n\n            # Data arriving after the BZPOPMIN.\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            wait_for_blocked_client\n            r zadd z1{t} 0 a\n            assert_equal [$rd read] {z1{t} a 0}\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            wait_for_blocked_client\n            r zadd z2{t} 1 b\n            assert_equal [$rd read] {z2{t} b 1}\n\n            # Data already there.\n            r zadd z1{t} 0 a\n            r zadd z2{t} 1 b\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            assert_equal [$rd read] {z1{t} a 0}\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            assert_equal [$rd read] {z2{t} b 1}\n            $rd close"
+  },
+  {
+   "name": "MULTI/EXEC is isolated from the point of view of $pop",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n\n            r multi\n            r zadd zset 0 a\n            r zadd zset 1 b\n            r zadd zset 2 c\n            r exec\n\n            verify_pop_response $pop [$rd read] {zset a 0} {zset {{a 0}}}\n            $rd close"
+  },
+  {
+   "name": "$pop with variadic ZADD",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n            if {$::valgrind} {after 100}\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n            if {$::valgrind} {after 100}\n            assert_equal 2 [r zadd zset -1 foo 1 bar]\n            if {$::valgrind} {after 100}\n            verify_pop_response $pop [$rd read] {zset foo -1} {zset {{foo -1}}}\n            assert_equal {bar} [r zrange zset 0 -1]\n            $rd close"
+  },
+  {
+   "name": "$pop with zero timeout should block indefinitely",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n            after 1000\n            r zadd zset 0 foo\n            verify_pop_response $pop [$rd read] {zset foo 0} {zset {{foo 0}}}\n            $rd close"
+  },
+  {
+   "name": "BZPOP/BZMPOP against wrong type",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo{t}",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzpopmin",
+      "foo{t}",
+      "1"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzpopmax",
+      "foo{t}",
+      "1"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "foo{t}",
+      "min"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "foo{t}",
+      "max"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "foo{t}",
+      "min",
+      "count",
+      "10"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo2{t}",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "2",
+      "foo{t}",
+      "foo2{t}",
+      "min"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "2",
+      "foo2{t}",
+      "foo{t}",
+      "max",
+      "count",
+      "1"
+     ],
+     "value": "*WRONGTYPE*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP with illegal argument",
+   "expected": null,
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop"
+     ],
+     "value": "ERR wrong number of arguments for 'bzmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "0",
+      "1"
+     ],
+     "value": "ERR wrong number of arguments for 'bzmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "0",
+      "1",
+      "myzset{t}"
+     ],
+     "value": "ERR wrong number of arguments for 'bzmpop' command"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "0",
+      "myzset{t}",
+      "MIN"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "a",
+      "myzset{t}",
+      "MIN"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "-1",
+      "myzset{t}",
+      "MAX"
+     ],
+     "value": "ERR numkeys*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "bad_where"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "MIN",
+      "bar_arg"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "MAX",
+      "MIN"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "COUNT"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "MIN",
+      "COUNT",
+      "1",
+      "COUNT",
+      "2"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "bad_arg"
+     ],
+     "value": "ERR syntax error*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "MIN",
+      "COUNT",
+      "0"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "MAX",
+      "COUNT",
+      "a"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "1",
+      "myzset{t}",
+      "MIN",
+      "COUNT",
+      "-1"
+     ],
+     "value": "ERR count*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "bzmpop",
+      "1",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "MAX",
+      "COUNT",
+      "-1"
+     ],
+     "value": "ERR count*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP with multiple blocked clients",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        set rd3 [valkey_deferring_client]\n        set rd4 [valkey_deferring_client]\n        r del myzset{t} myzset2{t}\n\n        $rd1 bzmpop 0 2 myzset{t} myzset2{t} min count 1\n        wait_for_blocked_clients_count 1\n        $rd2 bzmpop 0 2 myzset{t} myzset2{t} max count 10\n        wait_for_blocked_clients_count 2\n        $rd3 bzmpop 0 2 myzset{t} myzset2{t} min count 10\n        wait_for_blocked_clients_count 3\n        $rd4 bzmpop 0 2 myzset{t} myzset2{t} max count 1\n        wait_for_blocked_clients_count 4\n\n        r multi\n        r zadd myzset{t} 1 a 2 b 3 c 4 d 5 e\n        r zadd myzset2{t} 1 a 2 b 3 c 4 d 5 e\n        r exec\n\n        assert_equal {myzset{t} {{a 1}}} [$rd1 read]\n        assert_equal {myzset{t} {{e 5} {d 4} {c 3} {b 2}}} [$rd2 read]\n        assert_equal {myzset2{t} {{a 1} {b 2} {c 3} {d 4} {e 5}}} [$rd3 read]\n\n        r zadd myzset2{t} 1 a 2 b 3 c\n        assert_equal {myzset2{t} {{c 3}}} [$rd4 read]\n\n        r del myzset{t} myzset2{t}\n        $rd1 close\n        $rd2 close\n        $rd3 close\n        $rd4 close"
+  },
+  {
+   "name": "BZMPOP propagate as pop with count command to replica",
+   "expected": "",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd [valkey_deferring_client]\n        set repl [attach_to_replication_stream]\n\n        # BZMPOP without being blocked.\n        r zadd myzset{t} 1 one 2 two 3 three\n        r zadd myzset2{t} 4 four 5 five 6 six\n        r bzmpop 0 1 myzset{t} min\n        r bzmpop 0 2 myzset{t} myzset2{t} max count 10\n        r bzmpop 0 2 myzset{t} myzset2{t} max count 10\n\n        # BZMPOP that gets blocked.\n        $rd bzmpop 0 1 myzset{t} min count 1\n        wait_for_blocked_client\n        r zadd myzset{t} 1 one\n        $rd bzmpop 0 2 myzset{t} myzset2{t} min count 5\n        wait_for_blocked_client\n        r zadd myzset{t} 1 one 2 two 3 three\n        $rd bzmpop 0 2 myzset{t} myzset2{t} max count 10\n        wait_for_blocked_client\n        r zadd myzset2{t} 4 four 5 five 6 six\n\n        # Released on timeout.\n        assert_equal {} [r bzmpop 0.01 1 myzset{t} max count 10]\n        r set foo{t} bar ;# something else to propagate after, so we can make sure the above pop didn't.\n\n        $rd close\n\n        assert_replication_stream $repl {\n            {select *}\n            {zadd myzset{t} 1 one 2 two 3 three}\n            {zadd myzset2{t} 4 four 5 five 6 six}\n            {zpopmin myzset{t} 1}\n            {zpopmax myzset{t} 2}\n            {zpopmax myzset2{t} 3}\n            {zadd myzset{t} 1 one}\n            {zpopmin myzset{t} 1}\n            {zadd myzset{t} 1 one 2 two 3 three}\n            {zpopmin myzset{t} 3}\n            {zadd myzset2{t} 4 four 5 five 6 six}\n            {zpopmax myzset2{t} 3}\n            {set foo{t} bar}\n        }\n        close_replication_stream $repl"
+  },
+  {
+   "name": "BZMPOP should not blocks on non key arguments - #10762",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        r del myzset myzset2 myzset3\n\n        $rd1 bzmpop 0 1 myzset min count 10\n        wait_for_blocked_clients_count 1\n        $rd2 bzmpop 0 2 myzset2 myzset3 max count 10\n        wait_for_blocked_clients_count 2\n\n        # These non-key keys will not unblock the clients.\n        r zadd 0 100 timeout_value\n        r zadd 1 200 numkeys_value\n        r zadd min 300 min_token\n        r zadd max 400 max_token\n        r zadd count 500 count_token\n        r zadd 10 600 count_value\n\n        r zadd myzset 1 zset\n        r zadd myzset3 1 zset3\n        assert_equal {myzset {{zset 1}}} [$rd1 read]\n        assert_equal {myzset3 {{zset3 1}}} [$rd2 read]\n\n        $rd1 close\n        $rd2 close"
+  },
+  {
+   "name": "ZSET skiplist order consistency when elements are moved",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set original_max [lindex [r config get zset-max-ziplist-entries] 1]\n        r config set zset-max-ziplist-entries 0\n        for {set times 0} {$times < 10} {incr times} {\n            r del zset\n            for {set j 0} {$j < 1000} {incr j} {\n                r zadd zset [randomInt 50] ele-[randomInt 10]\n            }\n\n            # Make sure that element ordering is correct\n            set prev_element {}\n            set prev_score -1\n            foreach {element score} [r zrange zset 0 -1 WITHSCORES] {\n                # Assert that elements are in increasing ordering\n                assert {\n                    $prev_score < $score ||\n                    ($prev_score == $score &&\n                     [string compare $prev_element $element] == -1)\n                }\n                set prev_element $element\n                set prev_score $score\n            }\n        }\n        r config set zset-max-ziplist-entries $original_max"
+  },
+  {
+   "name": "ZRANGESTORE basic",
+   "expected": "a 1 b 2 c 3 d 4",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r flushall\n        r zadd z1{t} 1 a 2 b 3 c 4 d\n        set res [r zrangestore z2{t} z1{t} 0 -1]\n        assert_equal $res 4\n        r zrange z2{t} 0 -1 withscores"
+  },
+  {
+   "name": "ZRANGESTORE RESP3",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r hello 3\n        assert_equal [r zrange z2{t} 0 -1 withscores] {{a 1.0} {b 2.0} {c 3.0} {d 4.0}}\n        r hello 2"
+  },
+  {
+   "name": "ZRANGESTORE range",
+   "expected": "b 2 c 3",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z2{t} z1{t} 1 2]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+  },
+  {
+   "name": "ZRANGESTORE BYLEX",
+   "expected": "b 2 c 3",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z3{t} z1{t} \\[b \\[c BYLEX]\n        assert_equal $res 2\n        assert_encoding listpack z3{t}\n        set res [r zrangestore z2{t} z1{t} \\[b \\[c BYLEX]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+  },
+  {
+   "name": "ZRANGESTORE BYSCORE",
+   "expected": "a 1 b 2",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z4{t} z1{t} 1 2 BYSCORE]\n        assert_equal $res 2\n        assert_encoding listpack z4{t}\n        set res [r zrangestore z2{t} z1{t} 1 2 BYSCORE]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+  },
+  {
+   "name": "ZRANGESTORE BYSCORE LIMIT",
+   "expected": "a 1 b 2",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z2{t} z1{t} 0 5 BYSCORE LIMIT 0 2]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+  },
+  {
+   "name": "ZRANGESTORE BYSCORE REV LIMIT",
+   "expected": "c 3 d 4",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z2{t} z1{t} 5 0 BYSCORE REV LIMIT 0 2]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+  },
+  {
+   "name": "ZRANGE BYSCORE REV LIMIT",
+   "expected": "d 4 c 3",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "z1{t}",
+      "5",
+      "0",
+      "BYSCORE",
+      "REV",
+      "LIMIT",
+      "0",
+      "2",
+      "WITHSCORES"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZRANGESTORE - src key missing",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z2{t} missing{t} 0 -1]\n        assert_equal $res 0\n        r exists z2{t}"
+  },
+  {
+   "name": "ZRANGESTORE - src key wrong type",
+   "expected": "a",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z2{t}",
+      "1",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo{t}",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "foo{t}",
+      "0",
+      "-1"
+     ],
+     "value": "*WRONGTYPE*"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "z2{t}",
+      "0",
+      "-1"
+     ]
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZRANGESTORE - empty range",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z2{t} z1{t} 5 6]\n        assert_equal $res 0\n        r exists z2{t}"
+  },
+  {
+   "name": "ZRANGESTORE BYLEX - empty range",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z2{t} z1{t} \\[f \\[g BYLEX]\n        assert_equal $res 0\n        r exists z2{t}"
+  },
+  {
+   "name": "ZRANGESTORE BYSCORE - empty range",
+   "expected": "0",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set res [r zrangestore z2{t} z1{t} 5 6 BYSCORE]\n        assert_equal $res 0\n        r exists z2{t}"
+  },
+  {
+   "name": "ZRANGE BYLEX",
+   "expected": "b c",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "z1{t}",
+      "\\[b",
+      "\\[c",
+      "BYLEX"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZRANGESTORE invalid syntax",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "catch {r zrangestore z2{t} z1{t} 0 -1 limit 1 2} err\n        assert_match \"*syntax*\" $err\n        catch {r zrangestore z2{t} z1{t} 0 -1 WITHSCORES} err\n        assert_match \"*syntax*\" $err"
+  },
+  {
+   "name": "ZRANGESTORE with zset-max-listpack-entries 0 #10767 case",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set original_max [lindex [r config get zset-max-listpack-entries] 1]\n        r config set zset-max-listpack-entries 0\n        r del z1{t} z2{t}\n        r zadd z1{t} 1 a\n        assert_encoding skiplist z1{t}\n        assert_equal 1 [r zrangestore z2{t} z1{t} 0 -1]\n        assert_encoding skiplist z2{t}\n        r config set zset-max-listpack-entries $original_max"
+  },
+  {
+   "name": "ZRANGESTORE with zset-max-listpack-entries 1 dst key should use skiplist encoding",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set original_max [lindex [r config get zset-max-listpack-entries] 1]\n        r config set zset-max-listpack-entries 1\n        r del z1{t} z2{t} z3{t}\n        r zadd z1{t} 1 a 2 b\n        assert_equal 1 [r zrangestore z2{t} z1{t} 0 0]\n        assert_encoding listpack z2{t}\n        assert_equal 2 [r zrangestore z3{t} z1{t} 0 1]\n        assert_encoding skiplist z3{t}\n        r config set zset-max-listpack-entries $original_max"
+  },
+  {
+   "name": "ZRANGE invalid syntax",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "catch {r zrange z1{t} 0 -1 limit 1 2} err\n        assert_match \"*syntax*\" $err\n        catch {r zrange z1{t} 0 -1 BYLEX WITHSCORES} err\n        assert_match \"*syntax*\" $err\n        catch {r zrevrange z1{t} 0 -1 BYSCORE} err\n        assert_match \"*syntax*\" $err\n        catch {r zrangebyscore z1{t} 0 -1 REV} err\n        assert_match \"*syntax*\" $err"
+  },
+  {
+   "name": "ZRANDMEMBER - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "unset -nocomplain myzset\n            array set myzset {}\n            for {set i 0} {$i < 100} {incr i} {\n                set key [r zrandmember myzset]\n                set myzset($key) 1\n            }\n            assert_equal [lsort [get_keys $contents]] [lsort [array names myzset]]"
+  },
+  {
+   "name": "ZRANDMEMBER with RESP3",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r hello 3\n        set res [r zrandmember myzset 3 withscores]\n        assert_equal [llength $res] 3\n        assert_equal [llength [lindex $res 1]] 2\n\n        set res [r zrandmember myzset 3]\n        assert_equal [llength $res] 3\n        assert_equal [llength [lindex $res 1]] 1\n        r hello 2"
+  },
+  {
+   "name": "ZRANDMEMBER count of 0 is handled correctly",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zrandmember",
+      "myzset",
+      "0"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZRANDMEMBER with <count> against non existing key",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zrandmember",
+      "nonexisting_key",
+      "100"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZRANDMEMBER count overflow",
+   "expected": "",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset",
+      "0",
+      "a"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrandmember",
+      "myzset",
+      "-9223372036854770000",
+      "withscores"
+     ],
+     "value": "*value is out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrandmember",
+      "myzset",
+      "-9223372036854775808",
+      "withscores"
+     ],
+     "value": "*value is out of range*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrandmember",
+      "myzset",
+      "-9223372036854775808"
+     ],
+     "value": "*value is out of range*"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "ZRANDMEMBER count of 0 is handled correctly - emptyarray",
+   "expected": "*0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zrandmember",
+      "myzset",
+      "0"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZRANDMEMBER with <count> against non existing key - emptyarray",
+   "expected": "*0",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "zrandmember",
+      "nonexisting_key",
+      "100"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "ZRANDMEMBER with <count> - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set original_max_value [lindex [r config get zset-max-ziplist-value] 1]\n            r config set zset-max-ziplist-value 10\n            create_zset myzset $contents\n            assert_encoding $type myzset\n\n            # create a dict for easy lookup\n            set mydict [dict create {*}[r zrange myzset 0 -1 withscores]]\n\n            # We'll stress different parts of the code, see the implementation\n            # of ZRANDMEMBER for more information, but basically there are\n            # four different code paths.\n\n            # PATH 1: Use negative count.\n\n            # 1) Check that it returns repeated elements with and without values.\n            # 2) Check that all the elements actually belong to the original zset.\n            set res [r zrandmember myzset -20]\n            assert_equal [llength $res] 20\n            check_member $mydict $res\n\n            set res [r zrandmember myzset -1001]\n            assert_equal [llength $res] 1001\n            check_member $mydict $res\n\n            # again with WITHSCORES\n            set res [r zrandmember myzset -20 withscores]\n            assert_equal [llength $res] 40\n            check_member_and_score $mydict $res\n\n            set res [r zrandmember myzset -1001 withscores]\n            assert_equal [llength $res] 2002\n            check_member_and_score $mydict $res\n\n            # Test random uniform distribution\n            # df = 9, 40 means 0.00001 probability\n            set res [r zrandmember myzset -1000]\n            assert_lessthan [chi_square_value $res] 40\n            check_member $mydict $res\n\n            # 3) Check that eventually all the elements are returned.\n            #    Use both WITHSCORES and without\n            unset -nocomplain auxset\n            set iterations 1000\n            while {$iterations != 0} {\n                incr iterations -1\n                if {[expr {$iterations % 2}] == 0} {\n                    set res [r zrandmember myzset -3 withscores]\n                    foreach {key val} $res {\n                        dict append auxset $key $val\n                    }\n                } else {\n                    set res [r zrandmember myzset -3]\n                    foreach key $res {\n                        dict append auxset $key\n                    }\n                }\n                if {[lsort [dict keys $mydict]] eq\n                    [lsort [dict keys $auxset]]} {\n                    break;\n                }\n            }\n            assert {$iterations != 0}\n\n            # PATH 2: positive count (unique behavior) with requested size\n            # equal or greater than set size.\n            foreach size {10 20} {\n                set res [r zrandmember myzset $size]\n                assert_equal [llength $res] 10\n                assert_equal [lsort $res] [lsort [dict keys $mydict]]\n                check_member $mydict $res\n\n                # again with WITHSCORES\n                set res [r zrandmember myzset $size withscores]\n                assert_equal [llength $res] 20\n                assert_equal [lsort $res] [lsort $mydict]\n                check_member_and_score $mydict $res\n            }\n\n            # PATH 3: Ask almost as elements as there are in the set.\n            # In this case the implementation will duplicate the original\n            # set and will remove random elements up to the requested size.\n            #\n            # PATH 4: Ask a number of elements definitely smaller than\n            # the set size.\n            #\n            # We can test both the code paths just changing the size but\n            # using the same code.\n            foreach size {1 2 8} {\n                # 1) Check that all the elements actually belong to the\n                # original set.\n                set res [r zrandmember myzset $size]\n                assert_equal [llength $res] $size\n                check_member $mydict $res\n\n                # again with WITHSCORES\n                set res [r zrandmember myzset $size withscores]\n                assert_equal [llength $res] [expr {$size * 2}]\n                check_member_and_score $mydict $res\n\n                # 2) Check that eventually all the elements are returned.\n                #    Use both WITHSCORES and without\n                unset -nocomplain auxset\n                unset -nocomplain allkey\n                set iterations [expr {1000 / $size}]\n                set all_ele_return false\n                while {$iterations != 0} {\n                    incr iterations -1\n                    if {[expr {$iterations % 2}] == 0} {\n                        set res [r zrandmember myzset $size withscores]\n                        foreach {key value} $res {\n                            dict append auxset $key $value\n                            lappend allkey $key\n                        }\n                    } else {\n                        set res [r zrandmember myzset $size]\n                        foreach key $res {\n                            dict append auxset $key\n                            lappend allkey $key\n                        }\n                    }\n                    if {[lsort [dict keys $mydict]] eq\n                        [lsort [dict keys $auxset]]} {\n                        set all_ele_return true\n                    }\n                }\n                assert_equal $all_ele_return true\n                # df = 9, 40 means 0.00001 probability\n                assert_lessthan [chi_square_value $allkey] 40\n            }"
+  },
+  {
+   "name": "zset score double range",
+   "expected": "1.7976931348623157e+308",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "set dblmax 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.00000000000000000\n        r del zz\n        r zadd zz $dblmax dblmax\n        assert_encoding listpack zz\n        r zscore zz dblmax"
+  },
+  {
+   "name": "zunionInterDiffGenericCommand acts on SET and ZSET",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del set_small{t} set_big{t} zset_small{t} zset_big{t} zset_dest{t}\n\n        foreach set_type {intset listpack hashtable} {\n            # Restore all default configurations before each round of testing.\n            r config set set-max-intset-entries 512\n            r config set set-max-listpack-entries 128\n            r config set zset-max-listpack-entries 128\n\n            r del set_small{t} set_big{t}\n\n            if {$set_type == \"intset\"} {\n                r sadd set_small{t} 1 2 3\n                r sadd set_big{t} 1 2 3 4 5\n                assert_encoding intset set_small{t}\n                assert_encoding intset set_big{t}\n            } elseif {$set_type == \"listpack\"} {\n                # Add an \"a\" and then remove it, make sure the set is listpack encoding.\n                r sadd set_small{t} a 1 2 3\n                r sadd set_big{t} a 1 2 3 4 5\n                r srem set_small{t} a\n                r srem set_big{t} a\n                assert_encoding listpack set_small{t}\n                assert_encoding listpack set_big{t}\n            } elseif {$set_type == \"hashtable\"} {\n                r config set set-max-intset-entries 0\n                r config set set-max-listpack-entries 0\n                r sadd set_small{t} 1 2 3\n                r sadd set_big{t} 1 2 3 4 5\n                assert_encoding hashtable set_small{t}\n                assert_encoding hashtable set_big{t}\n            }\n\n            foreach zset_type {listpack skiplist} {\n                r del zset_small{t} zset_big{t}\n\n                if {$zset_type == \"listpack\"} {\n                    r zadd zset_small{t} 1 1 2 2 3 3\n                    r zadd zset_big{t} 1 1 2 2 3 3 4 4 5 5\n                    assert_encoding listpack zset_small{t}\n                    assert_encoding listpack zset_big{t}\n                } elseif {$zset_type == \"skiplist\"} {\n                    r config set zset-max-listpack-entries 0\n                    r zadd zset_small{t} 1 1 2 2 3 3\n                    r zadd zset_big{t} 1 1 2 2 3 3 4 4 5 5\n                    assert_encoding skiplist zset_small{t}\n                    assert_encoding skiplist zset_big{t}\n                }\n\n                # Test one key is big and one key is small separately.\n                # The reason for this is because we will sort the sets from smallest to largest.\n                # So set one big key and one small key, then the test can cover more code paths.\n                foreach {small_or_big set_key zset_key} {\n                    small set_small{t} zset_big{t}\n                    big set_big{t} zset_small{t}\n                } {\n                    # The result of these commands are not related to the order of the keys.\n                    assert_equal {1 2 3 4 5} [lsort [r zunion 2 $set_key $zset_key]]\n                    assert_equal {5} [r zunionstore zset_dest{t} 2 $set_key $zset_key]\n                    assert_equal {1 2 3} [lsort [r zinter 2 $set_key $zset_key]]\n                    assert_equal {3} [r zinterstore zset_dest{t} 2 $set_key $zset_key]\n                    assert_equal {3} [r zintercard 2 $set_key $zset_key]\n\n                    # The result of sdiff is related to the order of the keys.\n                    if {$small_or_big == \"small\"} {\n                        assert_equal {} [r zdiff 2 $set_key $zset_key]\n                        assert_equal {0} [r zdiffstore zset_dest{t} 2 $set_key $zset_key]\n                    } else {\n                        assert_equal {4 5} [lsort [r zdiff 2 $set_key $zset_key]]\n                        assert_equal {2} [r zdiffstore zset_dest{t} 2 $set_key $zset_key]\n                    }\n                }\n            }\n        }\n\n        r config set set-max-intset-entries 512\n        r config set set-max-listpack-entries 128\n        r config set zset-max-listpack-entries 128"
+  },
+  {
+   "name": "ZADD overflows the maximum allowed elements in a listpack - $type",
+   "expected": null,
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "r del myzset\n\n            set max_entries 64\n            set original_max [lindex [r config get zset-max-listpack-entries] 1]\n            r config set zset-max-listpack-entries $max_entries\n\n            if {$type == \"single\"} {\n                # All are single zadd commands.\n                for {set i 0} {$i < $max_entries} {incr i} { r zadd myzset $i $i }\n            } elseif {$type == \"multiple\"} {\n                # One zadd command to add all elements.\n                set args {}\n                for {set i 0} {$i < $max_entries * 2} {incr i} { lappend args $i }\n                r zadd myzset {*}$args\n            } elseif {$type == \"single_multiple\"} {\n                # First one zadd adds an element (creates a key) and then one zadd adds all elements.\n                r zadd myzset 1 1\n                set args {}\n                for {set i 0} {$i < $max_entries * 2} {incr i} { lappend args $i }\n                r zadd myzset {*}$args\n            }\n\n            assert_encoding listpack myzset\n            assert_equal $max_entries [r zcard myzset]\n            assert_equal 1 [r zadd myzset 1 b]\n            assert_encoding skiplist myzset\n\n            r config set zset-max-listpack-entries $original_max"
+  }
+ ]
+}

@@ -198,60 +198,100 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     art::value_type pattern = argv[1];
     barch::sharded_store store(call.kspace());
 
-    // A container stores one key per entry and they all carry the same name, so a walk of
-    // the key space would report a hash once per field. Reporting the name means slicing
-    // each key back to it and answering once - see TODO 59. The set is what makes "once"
-    // true, and it holds names rather than keys, so it stays the size of the reply
-    std::unordered_set<std::string> named;
-    auto reportable = [&](const art::leaf& l, std::string& out) -> bool {
-        auto key = l.get_key();
-        std::string name = encoded_container_name(key);
-        if (name.empty()) {
-            if (art::is_container_lead(*key.bytes)) {
-                // a container key whose name is empty is the ordered set's member index,
-                // which names nothing a caller wrote - see DONE 62
-                return false;
-            }
-            out.assign(key.chars(), key.size);
-            return true;                      // an ordinary key, reported as it is stored
-        }
-        // first entry of this container to arrive wins; the rest carry the same name. The
-        // name is decoded rather than sliced so that an ordered set's index and its score
-        // keys agree - slicing gave two different answers and listed the set twice
-        out = name;
-        return named.emplace(name).second;
-    };
-
+    // A container is answered by name, once - and the cost of working that out is kept
+    // off the keys that are not containers.
+    //
+    // Three things were being paid for on every key the walk touched: a name was decoded
+    // from it whether or not it had one, a string was built to carry the answer, and the
+    // reply lock was taken even when only counting, which left the glob's worker threads
+    // queueing on one mutex instead of scanning.
+    //
+    //   - a key that is not a container is recognised by its first byte and pushed as it
+    //     is stored: no decode, no temporary. In an ordinary store that is most keys.
+    //   - the name is decoded once and reused, rather than once to dedupe and again to
+    //     decide how to push it.
+    //   - counting locks only when it has something to remember, so ordinary keys count
+    //     through the atomic and the threads stay threads.
+    //
+    // What remains is a set of the container names already answered: one entry per
+    // collection rather than per key, and every one of them is in the reply as well, so it
+    // is the same order of memory the answer already costs.
+    //
+    // "the same order as the answer" is still unbounded if the answer is, so the walk
+    // watches the ceiling as it goes. heap::string_set allocates through the tracking
+    // allocator, so the set is already counted in get_total_memory() - which is
+    // heap::allocated, everything the process holds - and no separate accounting is
+    // needed. Stopping the walk is what art::glob already does when max_count is reached,
+    // so a short answer is a shape callers of this command can already get.
+    //
+    // The ceiling is max_memory_bytes, the same number eviction triggers on, deliberately.
+    // Both mean the process is at its limit, so a reply stops being built at the moment
+    // the store would start shedding data, and there is nothing further to configure. The
+    // cost of the check when no limit is set - the default is UINT64_MAX - is one atomic
+    // read per new container name, and nothing at all per ordinary key.
+    heap::string_set named;
+    const uint64_t memory_ceiling = barch::get_max_module_memory();
+    bool stopped_early = false;
     if (spec.count) {
         store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
-            std::lock_guard lk(vklock);
-            std::string reported;
-            if (reportable(l, reported)) {
+            auto key = l.get_key();
+            if (!key.size || !art::is_container_lead(*key.bytes)) {
                 ++replies;
+                return true;
+            }
+            std::string name = encoded_container_name(key);
+            if (name.empty()) return true;          // an ordered set's member index
+            std::lock_guard lk(vklock);
+            if (named.emplace(std::move(name)).second) {
+                ++replies;
+                // only a new name grows the set, so that is the only place the ceiling can
+                // be crossed by this walk
+                if (get_total_memory() >= memory_ceiling) {
+                    stopped_early = true;
+                    return false;
+                }
             }
             return true;
         });
+        if (stopped_early) {
+            barch::err({"KEYS stopped at the memory ceiling; the count is short",
+                        __FILE__, __LINE__});
+        }
         return call.push_ll(replies);
     }
     /* Reply with the matching items. */
     call.start_array();
     store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
-        std::lock_guard lk(vklock); // worker threads call in here concurrently
-        std::string reported;
-        if (!reportable(l, reported)) {
+        auto key = l.get_key();
+        if (!key.size || !art::is_container_lead(*key.bytes)) {
+            std::lock_guard lk(vklock); // worker threads call in here concurrently
+            if (0 != call.push_encoded_key(key)) {
+                return false;
+            }
+            ++replies;
             return true;
         }
-        // a container's name is already text; an ordinary key is still encoded
-        int pushed = encoded_container_name(l.get_key()).empty()
-                         ? call.push_encoded_key(art::value_type{reported})
-                         : call.push_vt(art::value_type{reported});
-        if (0 != pushed) {
+        std::string name = encoded_container_name(key);
+        if (name.empty()) return true;              // an ordered set's member index
+        std::lock_guard lk(vklock);
+        if (!named.emplace(name).second) {
+            return true;                            // this collection is already answered
+        }
+        if (0 != call.push_vt(art::value_type{name})) {
             return false;
         }
         ++replies;
+        if (get_total_memory() >= memory_ceiling) {
+            stopped_early = true;
+            return false;
+        }
         return true;
     });
     call.end_array();
+    if (stopped_early) {
+        barch::err({"KEYS stopped at the memory ceiling; the reply is short",
+                    __FILE__, __LINE__});
+    }
     return call.ok();
 }
 

@@ -13,6 +13,8 @@
 #include "conversion.h"
 #include "keys.h"
 #include "key_type.h"
+#include "configuration.h"
+#include "module.h"
 #include "sharded_store.h"
 #include "art/iterator.h"
 #include "dictionary_compressor.h"
@@ -79,9 +81,13 @@ namespace {
      * ordered set also keeps a member index whose first component is empty; those decode
      * to an empty name and are skipped, or every set would be exported twice.
      */
-    std::map<std::string, named> names_in(barch::sharded_store& store) {
-        std::map<std::string, named> found;
+    heap::string_map<named> names_in(barch::sharded_store& store, bool& hit_ceiling) {
+        // the tracking map, so what this costs is counted in get_total_memory() along with
+        // everything else, and the ceiling below is measured against the real figure
+        heap::string_map<named> found;
+        const uint64_t memory_ceiling = barch::get_max_module_memory();
         store.each_shard_read([&](const barch::shard_ptr& t) {
+            if (hit_ceiling) return;
             art::node_ptr first = t->tree_minimum();
             if (first.null() || !first.is_leaf) return;
             for (art::iterator i(t, first.const_leaf()->get_key()); i.ok(); i.next()) {
@@ -101,6 +107,13 @@ namespace {
                         default: continue;
                     }
                     found[name].kind = kind;
+                    // an export that stops early and still says it worked is a backup with
+                    // a hole in it, so this is a refusal rather than a short file - see the
+                    // check on the result below
+                    if (get_total_memory() >= memory_ceiling) {
+                        hit_ceiling = true;
+                        return;
+                    }
                 } else if (art::is_container_lead(*k.bytes)) {
                     // a container key whose name component did not decode is the ordered
                     // set's member index, whose first component is empty. Falling through
@@ -109,6 +122,10 @@ namespace {
                     continue;
                 } else {
                     found[encoded_key_as_string(k)].kind = barch::container_kind::none;
+                    if (get_total_memory() >= memory_ceiling) {
+                        hit_ceiling = true;
+                        return;
+                    }
                 }
             }
         });
@@ -232,7 +249,13 @@ int EXPORT(caller& call, const arg_t& argv) {
     }
     barch::sharded_store store(call.kspace());
     size_t written = 0;
-    for (const auto& [name, what] : names_in(store)) {
+    bool hit_ceiling = false;
+    auto names = names_in(store, hit_ceiling);
+    if (hit_ceiling) {
+        return call.push_error("not enough memory to export: raise max_memory_bytes, or "
+                               "export one key space at a time");
+    }
+    for (const auto& [name, what] : names) {
         written += export_one(out, store, name, what.kind);
     }
     out.flush();

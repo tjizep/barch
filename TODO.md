@@ -457,3 +457,45 @@
 65. [Done] An exclusive lex bound, and the two ends of the range [10-08-2026] Nr 60
 
 66. [Done] The member index had no empty component, so it collided with a real name [10-08-2026] Nr 62
+
+67. A flush() on the caller interface, so a reply does not have to fit in memory.
+
+    Every reply is assembled whole before any of it is sent. That is behind most of the
+    memory limits barch has: KEYS and SCAN buffer the entire answer, HRANDFIELD and
+    ZRANDMEMBER cap a negative count at a million because the reply would be built before
+    it was written, LCS holds its whole table, and the glob's memory ceiling (DONE 63)
+    exists to stop a walk that would otherwise be bounded only by the key space. redis has
+    none of these because it writes as it goes.
+
+    What is wanted is `flush()` on `caller`: push what has accumulated to the socket and
+    carry on. The rpc_caller writes to a socket and can do it; vk_caller hands its reply to
+    valkey and probably cannot, so the interface has to allow a flush that does nothing.
+
+    The obstacle is the array length, and it is worth understanding before starting. RESP2
+    prefixes an aggregate with its element count, so nothing inside an array can be sent
+    until the count is known - which is exactly what these commands do not know until they
+    finish. Three ways out, in the order they are worth trying:
+
+      - **RESP3 streamed aggregates.** `*?` opens an array of unknown length and `.` closes
+        it. A connection that has said HELLO 3 can be streamed to today, and one that has
+        not cannot - so this is per connection and the buffering path stays for RESP2.
+      - **Flush between top level replies.** Commands that answer with many independent
+        items rather than one array - the export, replication catch up - can flush at each
+        boundary with no protocol change at all.
+      - **Count first, then stream.** Two passes over the data: one to count, one to send.
+        Doubles the walk and is only sane where the walk is cheap relative to the reply.
+
+    Whichever lands, `caller::flush()` is the thing to add first, because the commands can
+    then be converted one at a time and the ones that are not converted keep working.
+
+68. A failed EXPORT leaves an empty file where the old one was.
+
+    EXPORT opens the path with `std::ios::trunc` before it walks anything, so a run that
+    then fails - the memory ceiling of DONE 63, a full disk, a command the walk cannot
+    encode - has already destroyed whatever was at that path. For a command whose whole
+    purpose is to be a way back from a bad state, overwriting the last good export with an
+    empty file on failure is the wrong way round.
+
+    Write to a temporary beside the target and rename it into place once the walk has
+    finished and the stream has flushed cleanly. A rename within one directory is atomic,
+    so the target is either the previous export or the new one and never a partial file.

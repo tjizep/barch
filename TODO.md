@@ -499,3 +499,5 @@
     Write to a temporary beside the target and rename it into place once the walk has
     finished and the stream has flushed cleanly. A rename within one directory is atomic,
     so the target is either the previous export or the new one and never a partial file.
+
+69. [Done] Per shard statistics, clear and load no longer rewrite the globals [12-08-2026] Nr 63

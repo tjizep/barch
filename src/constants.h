@@ -30,7 +30,7 @@ enum {
     // 14 is the member index marker (DONE 62): it used to encode as a component with no
     // separator, which made an ordered set's index key identical to the key of a set whose
     // name began with an 0x03, so the two could not be told apart at all
-    storage_version = page_size + 14 + test_memory,
+    storage_version = page_size + 15 + test_memory,
     ticker_size = 16,
     numeric_key_size = 12,
     num32_key_size = 6,

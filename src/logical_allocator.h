@@ -696,6 +696,7 @@ public:
             erased.insert(at.address());
         }
         statistics::logical_allocated -= size;
+        if (ap) ap->owned.logical -= (int64_t) size;
         if (t.size == 1) {
             auto tp = at.page();
 
@@ -852,6 +853,7 @@ public:
 
             allocated += size;
             statistics::logical_allocated += size;
+            if (ap) ap->owned.logical += (int64_t) size;
             uint8_t *pd = get_alloc_page_data(r, sz);
             if (initialize_memory == 1) {
                 memset(pd, 0, sz);
@@ -896,6 +898,7 @@ public:
 
 
         statistics::logical_allocated += size;
+        if (ap) ap->owned.logical += (int64_t) size;
         r = ca;
         if (this->opt_page_trace) {
             barch::log({"allocate size [",main.name,"]", size,"at",r.address(),"as new","allocated",allocated});
@@ -1205,6 +1208,7 @@ struct alloc_pair : public abstract_leaf_pair{
 
     size_t shard_number{};
     barch::latch_t latch{};
+
 
     bool is_debug = false;
     std::string name{};

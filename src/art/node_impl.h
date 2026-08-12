@@ -425,6 +425,7 @@ namespace art {
                 }
                 new_node.modify()->copy_header(this);
                 statistics::node256_occupants += new_node->data().occupants;
+                this->get_logical().owned.occupants += (int64_t) new_node->data().occupants;
                 ref = new_node;
                 free_node(this);
                 return new_node.modify()->add_child(c, ref, child);
@@ -583,6 +584,7 @@ namespace art {
             dat.types[key] = 0;
             --dat.occupants;
             --statistics::node256_occupants;
+            --this->get_logical().owned.occupants;
             // Resize to a node48 on underflow, not immediately to prevent
             // trashing if we sit on the 48/49 boundary
             if (dat.occupants == 37) {
@@ -608,6 +610,7 @@ namespace art {
             if (!has_child(c)) {
                 auto &dat = nd();
                 ++statistics::node256_occupants;
+                ++this->get_logical().owned.occupants;
                 ++dat.occupants; // just to keep stats ok
                 if (!child.is_leaf) {
                     dat.descendants += child->data().descendants;

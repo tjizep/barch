@@ -149,48 +149,76 @@ art_repl_statistics barch::get_repl_statistics(){
 #include "ioutil.h"
 
 template<typename OutStream>
-static void stats_to_stream(OutStream &of) {
-    writep(of, statistics::n4_nodes);
-    writep(of, statistics::n16_nodes);
-    writep(of, statistics::n48_nodes);
-    writep(of, statistics::n256_nodes);
-    writep(of, statistics::node256_occupants);
-    writep(of, statistics::leaf_nodes);
-    writep(of, statistics::value_bytes_compressed);
+static void stats_to_stream(OutStream &of, const owned_content_stats &o) {
+    // what this shard holds, not what the process holds. the file used to carry the globals,
+    // so restoring shard n overwrote the totals that shards 0..n-1 had already contributed.
+    writep(of, (int64_t) o.n4);
+    writep(of, (int64_t) o.n16);
+    writep(of, (int64_t) o.n48);
+    writep(of, (int64_t) o.n256);
+    writep(of, (int64_t) o.occupants);
+    writep(of, (int64_t) o.leaves);
     int64_t empty = 0;
+    // value_bytes_compressed and oom_avoided_inserts are counted where no shard is in scope
+    // and are not attributable to one, so they are no longer written or restored
+    writep(of, empty);
     writep(of, empty);
 
     writep(of, empty);
     writep(of, empty);
     writep(of, empty);
-    writep(of, statistics::oom_avoided_inserts);
-    writep(of, statistics::logical_allocated);
+    writep(of, empty);
+    writep(of, (int64_t) o.logical);
 
     if (!of.good()) {
         throw std::runtime_error("art::stats_to_stream: bad output stream");
     }
 }
 
+/**
+ * Read a shard's counters back and move the globals by the difference.
+ *
+ * The same call serves a load and a transaction rollback: on a load `o` is zero so the
+ * globals gain the whole of what was saved, and on a rollback `o` holds whatever the
+ * transaction did, so the globals give exactly that back.
+ */
 template<typename InStream>
-static void stream_to_stats(InStream &in) {
+static void stream_to_stats(InStream &in, owned_content_stats &o) {
     if (!in.good()) {
         throw std::runtime_error("art::stream_to_stats: bad output stream");
     }
-    readp(in, statistics::n4_nodes);
-    readp(in, statistics::n16_nodes);
-    readp(in, statistics::n48_nodes);
-    readp(in, statistics::n256_nodes);
-    readp(in, statistics::node256_occupants);
-    readp(in, statistics::leaf_nodes);
-    readp(in, statistics::value_bytes_compressed);
-    int64_t empty = 0;
+    owned_content_stats loaded;
+    int64_t v = 0, empty = 0;
+    readp(in, v); loaded.n4 = v;
+    readp(in, v); loaded.n16 = v;
+    readp(in, v); loaded.n48 = v;
+    readp(in, v); loaded.n256 = v;
+    readp(in, v); loaded.occupants = v;
+    readp(in, v); loaded.leaves = v;
+    readp(in, empty);
     readp(in, empty);
 
     readp(in, empty);
     readp(in, empty);
     readp(in, empty);
-    readp(in, statistics::oom_avoided_inserts);
-    readp(in, statistics::logical_allocated);
+    readp(in, empty);
+    readp(in, v); loaded.logical = v;
+
+    statistics::n4_nodes += (int64_t) loaded.n4 - (int64_t) o.n4;
+    statistics::n16_nodes += (int64_t) loaded.n16 - (int64_t) o.n16;
+    statistics::n48_nodes += (int64_t) loaded.n48 - (int64_t) o.n48;
+    statistics::n256_nodes += (int64_t) loaded.n256 - (int64_t) o.n256;
+    statistics::node256_occupants += (int64_t) loaded.occupants - (int64_t) o.occupants;
+    statistics::leaf_nodes += (int64_t) loaded.leaves - (int64_t) o.leaves;
+    statistics::logical_allocated += (int64_t) loaded.logical - (int64_t) o.logical;
+
+    o.n4 = (int64_t) loaded.n4;
+    o.n16 = (int64_t) loaded.n16;
+    o.n48 = (int64_t) loaded.n48;
+    o.n256 = (int64_t) loaded.n256;
+    o.occupants = (int64_t) loaded.occupants;
+    o.leaves = (int64_t) loaded.leaves;
+    o.logical = (int64_t) loaded.logical;
 }
 
 
@@ -356,7 +384,7 @@ bool barch::shard::_save(bool stats) const {
         }
         writep(of, w_stats);
         if (w_stats == 1) {
-            stats_to_stream(of);
+            stats_to_stream(of, t->owned);
         }
         auto root = logical_address(troot.logical);
         writep(of, root);
@@ -421,7 +449,7 @@ bool barch::shard::send(std::ostream& unused(out)) {
         if (!saved) {
             abort_with("synch error");
         }
-        stats_to_stream(of);
+        stats_to_stream(of, t->owned);
         auto root = logical_address(troot.logical);
         writep(of, root);
         writep(of, troot.is_leaf);
@@ -483,7 +511,7 @@ bool barch::shard::_load(bool) {
         uint32_t w_stats = 0;
         readp(in, w_stats);
         if (w_stats != 0) {
-            stream_to_stats(in);
+            stream_to_stats(in, t->owned);
         }
         readp(in, root);
         readp(in, is_leaf);
@@ -548,7 +576,7 @@ bool barch::shard::retrieve(std::istream& unused(in)) {
             uint32_t w_stats = 0;
             readp(in, w_stats);
             if (w_stats != 0) {
-                stream_to_stats(in);
+                stream_to_stats(in, t->owned);
             }
 
             readp(in, root);
@@ -597,7 +625,7 @@ void barch::shard::begin() {
     save_root = root;
     save_size = size;
     save_stats.clear();
-    stats_to_stream(save_stats);
+    stats_to_stream(save_stats, owned);
     {
        storage_release release(this->shared_from_this());
         get_leaves().begin();
@@ -623,7 +651,7 @@ void barch::shard::rollback() {
     root = save_root;
     size = save_size;
     save_stats.seek(0);
-    stream_to_stats(save_stats);
+    stream_to_stats(save_stats, owned);
     transacted = false;
 }
 void barch::shard::load_bloom() {
@@ -652,18 +680,19 @@ void barch::shard::_clear() {
     get_leaves().clear();
     get_nodes().clear();
     h.clear();
-    statistics::n4_nodes = 0;
-    statistics::n16_nodes = 0;
-    statistics::n48_nodes = 0;
-    statistics::n256_nodes = 0;
-    statistics::node256_occupants = 0;
-    statistics::leaf_nodes = 0;
-    statistics::value_bytes_compressed = 0;
-    statistics::oom_avoided_inserts = 0;
-    statistics::keys_found = 0;
-    statistics::new_keys_added = 0;
-    statistics::keys_replaced = 0;
-    statistics::logical_allocated = 0;
+    // take away what this shard held, rather than zeroing counters the other shards share.
+    // the event counters (oom_avoided_inserts, keys_found, new_keys_added, keys_replaced)
+    // count things that happened rather than things that exist, so clearing a shard does
+    // not unmake them and they are left alone. value_bytes_compressed is counted where no
+    // shard is in scope, so it cannot be attributed here either.
+    statistics::n4_nodes -= (int64_t) owned.n4;
+    statistics::n16_nodes -= (int64_t) owned.n16;
+    statistics::n48_nodes -= (int64_t) owned.n48;
+    statistics::n256_nodes -= (int64_t) owned.n256;
+    statistics::node256_occupants -= (int64_t) owned.occupants;
+    statistics::leaf_nodes -= (int64_t) owned.leaves;
+    statistics::logical_allocated -= (int64_t) owned.logical;
+    owned.zero();
 }
 void barch::shard::clear() {
     std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently

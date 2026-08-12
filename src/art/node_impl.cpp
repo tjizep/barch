@@ -56,6 +56,7 @@ namespace art {
             barch::log({"allocated leaf at", logical.address(),"size", leaf_size});
         }
         ++statistics::leaf_nodes;
+        ++alloc.owned.leaves;
         l->set_key(key);
         l->set_value(v);
         if (alloc.opt_all_keys_lru) {
@@ -83,6 +84,7 @@ void art::free_leaf_node(leaf *l, logical_address logical) {
     l->set_deleted();
     logical.get_ap<alloc_pair>().get_leaves().free(logical, l->byte_size());
     --statistics::leaf_nodes;
+    --ap.owned.leaves;
 }
 
 void art::free_leaf_node(art::node_ptr n) {

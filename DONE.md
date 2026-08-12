@@ -2822,3 +2822,56 @@ that each looked reasonable and each did nothing is not five mistakes, it is evi
 the distinction being asked for is not present in what was read. The question to ask after
 the second failure is not "what else could tell these apart" but "are these actually
 different".
+
+## 63. Per shard statistics, so clearing one tree stops erasing the rest [12-08-2026]
+
+The reproduction from the entry, before and after:
+
+    USE alpha; 5000 keys        leaf 5000   n4 1684   logical 215219
+    USE beta;  5000 keys        leaf 10000  n4 3403   logical 428434
+    FLUSHDB   (beta only)       leaf 5000   n4 1684   logical 215219     was 0 0 0
+    USE alpha; DBSIZE 5000
+    FLUSHDB   (alpha too)       leaf 0      n4 0      logical 0
+
+The interesting line is the third rather than the fourth. Clearing beta returns every
+counter to exactly the value it had when only alpha existed - not approximately, the same
+integers - which says the increments and decrements are matched per shard and not just
+that the subtraction happens.
+
+`owned_content_stats` sits on `abstract_alloc_pair` (logical_address.h) rather than on
+`alloc_pair`, which was the one design decision worth making carefully. The allocator holds
+its pair as `abstract_leaf_pair*`, and the node templates reach theirs through
+`address.get_ap<>()`, so putting the counters on the base is what lets the three
+`logical_allocated` sites in logical_allocator.h and the node and leaf sites all reach them
+without a cast or a new accessor. `node256` was the only site that could not: it touches
+`node256_occupants` from three places and `address` is private to it, but
+`encoded_node_content::get_logical()` already existed and returns exactly the pair.
+
+The globals stay, maintained beside the per shard ones. That was the open question in the
+entry and the answer is that `logical_allocated` is read on the insert and eviction paths -
+shard.cpp 698, 739, 768, 1243, 1268, 1274 and hash_arena.cpp:154 - so a sum over 347 shards
+per insert was never a serious option. Nothing reads the sum; INFO reads the same global it
+always did.
+
+Load and rollback turned out to be one function. `stream_to_stats` reads the file into a
+temporary and moves each global by `loaded - owned` before assigning `owned = loaded`. On a
+load `owned` is zero, so the globals gain the whole of what the file holds, which is the
+fix. On a transaction rollback - `shard::begin` snapshots through the same pair of
+functions - `owned` holds whatever the transaction did, so the globals give back exactly
+that and no more. The delta form is not a cleverness, it is what both callers need.
+
+Two counters are deliberately not per shard. `value_bytes_compressed` is incremented in
+keys_api where no shard is in scope, and `oom_avoided_inserts` counts refusals rather than
+contents; neither is attributable to a tree. Both are now written as zero into the shard
+files and ignored on read, and `_clear` leaves them alone along with `keys_found`,
+`new_keys_added` and `keys_replaced` - clearing a shard does not unmake something that
+happened. `value_bytes_compressed` therefore no longer survives a restart, which is a real
+if small loss and is the honest position: it was persisted before, but per shard, and
+whichever shard loaded last decided the value.
+
+Storage version 15, because the shard file no longer means the same thing by those fields.
+
+`test/shardstatstest.py` measures the gauge against `DBSIZE`, which is independent of it,
+across an operation that touches part of the store. That is the shape that catches this
+class of bug: the old code passed every existing statistics test, because they all read the
+counters right after filling a single space.

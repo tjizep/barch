@@ -570,6 +570,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # the content gauges are per shard, so clearing one key space must not zero them
+        add_test(NAME TestShardStats
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/shardstatstest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # configuration taken from the environment. Reads it at import, so the test
         # drives child processes with the environment set
         add_test(NAME TestEnvConfig

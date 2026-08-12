@@ -218,15 +218,19 @@ namespace art {
             switch (node_type) {
                 case node_4:
                     ++statistics::n4_nodes;
+                    ++alloc.owned.n4;
                     break;
                 case node_16:
                     ++statistics::n16_nodes;
+                    ++alloc.owned.n16;
                     break;
                 case node_48:
                     ++statistics::n48_nodes;
+                    ++alloc.owned.n48;
                     break;
                 case node_256:
                     ++statistics::n256_nodes;
+                    ++alloc.owned.n256;
                     break;
                 default:
                     abort();
@@ -236,25 +240,30 @@ namespace art {
         }
 
         void free_data() final {
+            alloc_pair& alloc = this->address.template get_ap<alloc_pair>();
             switch (node_type) {
                 case node_4:
                     --statistics::n4_nodes;
+                    --alloc.owned.n4;
                     break;
                 case node_16:
                     --statistics::n16_nodes;
+                    --alloc.owned.n16;
                     break;
                 case node_48:
                     --statistics::n48_nodes;
+                    --alloc.owned.n48;
                     break;
                 case node_256:
                     --statistics::n256_nodes;
+                    --alloc.owned.n256;
                     break;
                 default:
                     abort();
             }
             //if (address.is_null_base())
             //    abort();
-            address.get_ap<alloc_pair>().get_nodes().free(address, alloc_size());
+            alloc.get_nodes().free(address, alloc_size());
         }
 
         encoded_node_content() = default;

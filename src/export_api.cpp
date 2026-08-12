@@ -3,6 +3,7 @@
 //
 #include "export_api.h"
 
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -238,20 +239,30 @@ namespace {
  *
  * Answers with how many keys were written. The file is a RESP command stream: replay it
  * with IMPORT, or pipe it at any server that speaks the protocol.
+ *
+ * The walk writes a temporary beside the target and only renames it into place once the
+ * stream has flushed cleanly. A failed export then leaves the previous file alone, which
+ * is the right way round for a command whose purpose is a way back from a bad state.
  */
 int EXPORT(caller& call, const arg_t& argv) {
     if (argv.size() != 2)
         return call.wrong_arity();
     std::string path(argv[1].chars(), argv[1].size);
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    std::string tmp = path + ".tmp";
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
     if (!out) {
         return call.push_error("could not open the export file for writing");
     }
+    auto abandon = [&] {
+        out.close();
+        std::remove(tmp.c_str());
+    };
     barch::sharded_store store(call.kspace());
     size_t written = 0;
     bool hit_ceiling = false;
     auto names = names_in(store, hit_ceiling);
     if (hit_ceiling) {
+        abandon();
         return call.push_error("not enough memory to export: raise max_memory_bytes, or "
                                "export one key space at a time");
     }
@@ -260,6 +271,12 @@ int EXPORT(caller& call, const arg_t& argv) {
     }
     out.flush();
     if (!out) {
+        abandon();
+        return call.push_error("the export could not be written");
+    }
+    out.close();
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
         return call.push_error("the export could not be written");
     }
     return call.push_ll((long long) written);

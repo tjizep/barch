@@ -488,16 +488,6 @@
     Whichever lands, `caller::flush()` is the thing to add first, because the commands can
     then be converted one at a time and the ones that are not converted keep working.
 
-68. A failed EXPORT leaves an empty file where the old one was.
-
-    EXPORT opens the path with `std::ios::trunc` before it walks anything, so a run that
-    then fails - the memory ceiling of DONE 63, a full disk, a command the walk cannot
-    encode - has already destroyed whatever was at that path. For a command whose whole
-    purpose is to be a way back from a bad state, overwriting the last good export with an
-    empty file on failure is the wrong way round.
-
-    Write to a temporary beside the target and rename it into place once the walk has
-    finished and the stream has flushed cleanly. A rename within one directory is atomic,
-    so the target is either the previous export or the new one and never a partial file.
+68. [Done] A failed EXPORT leaves an empty file where the old one was [12-08-2026] Nr 64
 
 69. [Done] Per shard statistics, clear and load no longer rewrite the globals [12-08-2026] Nr 63

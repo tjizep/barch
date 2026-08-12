@@ -40,6 +40,25 @@ path = os.path.abspath("export_roundtrip.resp")
 written = c("EXPORT", path)
 assert written >= 7, "exported %r keys, expected at least the seven written" % written
 assert os.path.getsize(path) > 0, "the export file is empty"
+assert not os.path.exists(path + ".tmp"), "a finished export left its temporary behind"
+
+# a failed export must leave the last good file alone. Opening the path with trunc
+# before the walk was the old order, and a ceiling refusal then left an empty file
+# where the previous export had been
+previous = open(path, "rb").read()
+limit = c("CONFIG", "GET", "max_memory_bytes")
+original_limit = limit[1] if isinstance(limit, list) else limit[b"max_memory_bytes"]
+c("CONFIG", "SET", "max_memory_bytes", "1")
+try:
+    try:
+        c("EXPORT", path)
+        assert False, "EXPORT should have refused at the memory ceiling"
+    except redis.exceptions.ResponseError as e:
+        assert "not enough memory" in str(e), "EXPORT failed for the wrong reason: %r" % e
+    assert open(path, "rb").read() == previous, "a failed export replaced the previous file"
+    assert not os.path.exists(path + ".tmp"), "a failed export left its temporary behind"
+finally:
+    c("CONFIG", "SET", "max_memory_bytes", original_limit)
 
 c("FLUSHALL")
 assert c("GET", "e:plain") is None, "the store was not emptied before the import"

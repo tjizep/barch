@@ -2875,3 +2875,26 @@ Storage version 15, because the shard file no longer means the same thing by tho
 across an operation that touches part of the store. That is the shape that catches this
 class of bug: the old code passed every existing statistics test, because they all read the
 counters right after filling a single space.
+
+## 64. A failed EXPORT leaves an empty file where the old one was [12-08-2026]
+
+*Was `TODO.md` entry 68.*
+
+EXPORT opened the destination with `std::ios::trunc` before it walked anything. The
+memory-ceiling refusal in `names_in` - and the write-error path after the walk - then
+returned with that file already empty. For a command whose purpose is a way back from a
+bad state, that is the wrong way round.
+
+It writes `path.tmp` now and only `rename`s it onto the target after `flush` succeeds.
+A rename in the same directory is atomic, so the path is the previous export or the new
+one and never a partial file. The temporary is removed on every failure path, including
+a rename that does not take.
+
+The ceiling is still the only failure the suite can provoke on purpose. The test writes a
+good export, drops `max_memory_bytes` to 1, exports again to the same path, and checks
+that the bytes did not change and that the `.tmp` is gone. The existing round trip still
+covers a successful replace.
+
+The command index said the path was "created or truncated". That described the old open
+and is no longer true, so the arg and the reply now say the file is replaced only when
+the export finishes and a failure leaves the previous one alone.

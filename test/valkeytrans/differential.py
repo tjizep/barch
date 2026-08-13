@@ -42,17 +42,9 @@ ACCEPTED = {
                                    "See TODO 52",
     "SET with IFEQ*": "SET's IFEQ conditional is not implemented. See TODO 52",
 
-    # --- set algebra over ordered sets, not implemented. See TODO 63 --------------
-    "ZMPOP*": "ZMPOP and BZMPOP are not implemented. See TODO 63",
-    "BZMPOP*": "ZMPOP and BZMPOP are not implemented. See TODO 63",
-    "ZPOP/ZMPOP against wrong type": "ZMPOP is not implemented. See TODO 63",
-
-    # --- list commands beyond push and pop, not implemented. See TODO 63 ----------
-    "LINSERT*": "LINSERT is not implemented. See TODO 63",
-    "LMPOP*": "LMPOP is not implemented. See TODO 63",
-    "RPOPLPUSH*": "RPOPLPUSH and LMOVE are not implemented. See TODO 63",
-    "BRPOPLPUSH*": "BRPOPLPUSH is not implemented. See TODO 63",
-    "LPOP/RPOP/LMPOP against empty list": "LMPOP is not implemented. See TODO 63",
+    # --- list/zset leftovers from TODO 63. The commands exist; these cases need
+    #     MULTI, replication, or a type the translator skipped. -----------------
+    "BRPOPLPUSH inside a transaction": "MULTI/EXEC is not implemented. See TODO 63",
 
     # --- cases whose setup uses a type or command barch does not have -------------
     "ZDIFFSTORE with a regular set*": "the case sets up with SADD; there is no set type. "

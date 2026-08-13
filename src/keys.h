@@ -18,6 +18,15 @@ int key_ok(const char *k, size_t klen);
 
 int key_ok(art::value_type v);
 
+struct caller;
+/**
+ * A blocking-pop timeout, judged before anything is locked.
+ *
+ * Shared by BLPOP, BRPOP, BLMPOP, BZMPOP and BLMOVE so the check exists in one
+ * place - see DONE 56. False if the value was refused; the error is already on the caller.
+ */
+bool parse_block_timeout(caller& cc, art::value_type text, uint64_t& time_out);
+
 /**
  * Will a key and value fit in one leaf?
  *

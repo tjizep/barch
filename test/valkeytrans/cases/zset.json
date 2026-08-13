@@ -3420,6 +3420,87 @@
    "mode": "asserts"
   },
   {
+   "name": "ZMPOP first non-empty set",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zmpop-a",
+      "zmpop-b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmpop-a",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zmpop",
+      "1",
+      "zmpop-a",
+      "min"
+     ],
+     "value": "zmpop-a a 1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zmpop",
+      "1",
+      "zmpop-a",
+      "max",
+      "count",
+      "1"
+     ],
+     "value": "zmpop-a c 3"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmpop-b",
+      "4",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zmpop",
+      "2",
+      "zmpop-a",
+      "zmpop-b",
+      "min"
+     ],
+     "value": "zmpop-a b 2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zmpop",
+      "2",
+      "zmpop-a",
+      "zmpop-b",
+      "min"
+     ],
+     "value": "zmpop-b d 4"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
    "name": "ZMPOP propagate as pop with count command to replica",
    "expected": "",
    "skipped": true,

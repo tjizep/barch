@@ -432,25 +432,7 @@
 
 62. [Done] HSCAN, and a cursor scoped to a prefix [10-08-2026] Nr 57
 
-63. The list commands zset.tcl and list.tcl expect, and the two key moves.
-
-    What is left of the original entry after DONE 58, which did the ordered set side. Each
-    is an accepted divergence in differential.py naming this entry, and the tests are
-    already wired up, so a command starts passing cases the moment it answers.
-
-      - `LINSERT key BEFORE|AFTER pivot value` - find a member by value and put one beside
-        it. The list is stored at consecutive indices between the header's start and end,
-        so an insert in the middle has to move everything after it or leave a gap; which of
-        those is the decision worth making before writing any of it.
-      - `LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT n]`, and `ZMPOP` and `BZMPOP` beside
-        it - pop from the first of several keys that has anything. The blocking form needs
-        the timeout validation of DONE 56, not a second copy of it.
-      - `RPOPLPUSH`, `LMOVE` and `BRPOPLPUSH` - move an element between two lists.
-
-    The moves are the reason this was stopped rather than finished. They take two keys, so
-    they go through `sharded_store::with_two_keys_write` and the lock order rule, and the
-    last two key path written without that care self deadlocked - DONE 42 - and cost hours
-    to find. Read that entry first.
+63. [Done] The list commands zset.tcl and list.tcl expect, and the two key moves [12-08-2026] Nr 65
 
 64. [Done] Ordered set validation, and two cases that were not what they looked like [10-08-2026] Nr 59
 

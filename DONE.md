@@ -2898,3 +2898,36 @@ covers a successful replace.
 The command index said the path was "created or truncated". That described the old open
 and is no longer true, so the arg and the reply now say the file is replaced only when
 the export finishes and a failure leaves the previous one alone.
+
+## 65. The list commands zset.tcl and list.tcl expect, and the two key moves [12-08-2026]
+
+*Was `TODO.md` entry 63.*
+
+What was left after DONE 58. The ordered set algebra was already in; this is the list
+side and the multi-key pops, including the two-key moves that stopped the earlier
+session.
+
+`LINSERT` keeps the list dense. A middle insert shifts everything after the hole up by
+one. A gap would break `LLEN` and the pops, which assume consecutive indices. Inserting
+at an end is `LPUSH` or `RPUSH` and does not move. Missing key answers 0, a missing
+pivot answers -1, a string is WRONGTYPE.
+
+`LMPOP` / `BLMPOP` and `ZMPOP` / `BZMPOP` pop from the first of several keys that has
+anything. One key takes its shard; several take the space, the way `BLPOP` already did.
+The blocking forms share `parse_block_timeout` in keys.cpp - the check that used to live
+only in `bpop`, so a second copy could not hide another unbounded wait (DONE 56).
+`ZMPOP` removes both the score key and the member index, which is what `ZREM` does.
+`ZPOPMIN` / `ZPOPMAX` still only remove the score key; they were not rewritten, but they
+now say WRONGTYPE on a string, which is why `ZPOP/ZMPOP against wrong type` could leave
+the accepted list. `ZADD` wakes a blocked `BZMPOP`.
+
+The moves are `LMOVE`, `RPOPLPUSH` (`RIGHT` then `LEFT`), `BLMOVE` and `BRPOPLPUSH`.
+They go through `with_two_keys_write`, lock by shard number, collapse to one lock when
+both names land on the same shard, and copy the value bytes out before the destination
+is written. Type probes run before those locks. Same-list `LMOVE` is one lock and a
+pop then a push on the same header.
+
+list.tcl: barch agrees with valkey on all 24 faithful cases. The `$type` bodies are
+still stubs. zset.tcl's new `ZMPOP` cases pass; the one remaining zset difference is
+`ZUNIONSTORE` writing `-nan` where valkey writes `0` for opposite infinities, which
+predates this work.

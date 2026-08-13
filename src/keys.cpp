@@ -3,7 +3,11 @@
 //
 
 #include "keys.h"
+#include "caller.h"
 #include "composite.h"
+#include <cerrno>
+#include <cmath>
+#include <limits>
 // std_start/std_continue/std_end - the streaming form, which lzr_log does not have
 #include "logger.h"
 #include <cstdlib>
@@ -39,6 +43,34 @@ const char *too_large_message() {
 
 int key_ok(art::value_type v) {
     return key_ok(v.chars(), v.size);
+}
+
+bool parse_block_timeout(caller& cc, art::value_type text, uint64_t& time_out) {
+    // strtod rather than the strict reader: redis parses the timeout with the C
+    // library, which takes hex and exponent forms, and then judges the value. A
+    // caller writing 0x7FFFFFFFFFFFFF should be told the number is too big, not
+    // that it is not a number
+    std::string t(text.chars(), text.size);
+    char *tail = nullptr;
+    errno = 0;
+    double secs = std::strtod(t.c_str(), &tail);
+    if (t.empty() || tail != t.c_str() + t.size() || std::isnan(secs)) {
+        cc.push_error("timeout is not a float or out of range");
+        return false;
+    }
+    if (secs < 0) {
+        cc.push_error("timeout is negative");
+        return false;
+    }
+    // the wait is kept in milliseconds, so a timeout that cannot be one is not a
+    // very long wait, it is an unreadable number
+    if (errno == ERANGE || std::isinf(secs)
+        || !(secs * 1000.0 < (double) std::numeric_limits<int64_t>::max())) {
+        cc.push_error("timeout is out of range");
+        return false;
+    }
+    time_out = (uint64_t) (secs * 1000.0);
+    return true;
 }
 
 int key_check(ValkeyModuleCtx *ctx, const char *k, size_t klen) {

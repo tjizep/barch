@@ -14,6 +14,13 @@ extern "C" {
     int LPOP(caller& cc, const arg_t& args);
     int RPOP(caller& cc, const arg_t& args);
     int LLEN(caller& cc, const arg_t& args);
+    int LINSERT(caller& cc, const arg_t& args);
+    int LMPOP(caller& cc, const arg_t& args);
+    int BLMPOP(caller& cc, const arg_t& args);
+    int LMOVE(caller& cc, const arg_t& args);
+    int RPOPLPUSH(caller& cc, const arg_t& args);
+    int BLMOVE(caller& cc, const arg_t& args);
+    int BRPOPLPUSH(caller& cc, const arg_t& args);
     int BLPOP(caller& cc, const arg_t& args);
     int BRPOP(caller& cc, const arg_t& args);
 }

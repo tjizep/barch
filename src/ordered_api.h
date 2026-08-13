@@ -21,6 +21,8 @@ extern "C" {
     int ZINTER(caller& call, const arg_t& argv);
     int ZPOPMIN(caller& call, const arg_t& argv);
     int ZPOPMAX(caller& call, const arg_t& argv);
+    int ZMPOP(caller& call, const arg_t& argv);
+    int BZMPOP(caller& call, const arg_t& argv);
     int ZREVRANGE(caller& call, const arg_t& argv);
     int ZRANGEBYSCORE(caller& call, const arg_t& argv);
     int ZREVRANGEBYSCORE(caller& call, const arg_t& argv);

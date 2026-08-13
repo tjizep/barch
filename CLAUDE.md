@@ -69,3 +69,22 @@ When an entry is finished, do not delete it and do not leave the detail in `TODO
 Numbers in `TODO.md` stay put once assigned, so the remaining entries are never
 renumbered and references to them keep working. `DONE.md` numbering is independent
 and only ever grows.
+
+## How to write
+
+Say what to do with a thing, not what the thing "is". Finish the sentence: if a
+preposition needs an object, put the object in. Prefer an ordinary verb (use, read,
+check, write) over a compressed identity.
+
+  Not: Entry 41 is the caution to read these with.
+  But: Use entry 41 as an example of the level of caution when reading these.
+
+Do not pad a step with first, at all, only then, or whether it needs changing.
+Name the two actions.
+
+  Not: So establish first whether either of these is reached on a shutdown path
+       at all, and only then decide whether the lifetime needs changing.
+  But: Determine if these are reached on shutdown, then decide on actual lifetime.
+
+Short is fine. A riddle is not. One claim per sentence. More examples will be added
+here as they come up.

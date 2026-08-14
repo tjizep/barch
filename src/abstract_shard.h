@@ -119,8 +119,12 @@ namespace barch {
         virtual bool send(std::ostream& out) = 0;
 
         virtual bool load(bool stats) = 0;
+        /** caller already holds the shard write lock. LOAD takes the space. */
+        virtual bool load_holding_lock() = 0;
 
         virtual bool reload() = 0;
+        /** caller already holds the shard write lock. RELOAD takes the space. */
+        virtual bool reload_holding_lock() = 0;
 
         virtual bool retrieve(std::istream& in) = 0;
 

@@ -44,6 +44,13 @@ namespace barch {
      * every operation here is composed from, so a later stateful implementation -
      * one that keeps a routing table for remote shards, or carries a transaction or a
      * scan cursor across calls - can override those two and inherit the rest.
+     *
+     * Overriding those two is not enough if a key can change shard. Hash routing
+     * is a function of the key. Range routing is state: the table, and which
+     * shard holds which key, change while the space runs. SAVE, LOAD, RELOAD and
+     * SAVEALL freeze that state when key_space::is_stateful_sharding() is true
+     * (DONE 70, 71, 72). A new method that can move a key returns true there
+     * and inherits the four freezes.
      */
     /**
      * Where a scan has got to.

@@ -54,9 +54,25 @@ int LOAD(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     std::atomic<size_t> errors = 0;
     barch::sharded_store store(call.kspace());
-    store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
-        if (!shard->load(true)) ++errors;
-    });
+    // freeze only when the partition is state. a key moving after one shard
+    // was replaced from disk and before the next would be lost, or kept live
+    // next to the one just read back. hash sharding loads under each shard's
+    // own latch. the range table is rebuilt before the space lock drops,
+    // because it is nothing but each shard's first key
+    barch::sharded_store::write_guard held;
+    if (call.kspace()->is_stateful_sharding()) {
+        held = store.lock_space_write();
+        store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
+            if (!shard->load_holding_lock()) ++errors;
+        });
+        if (call.kspace()->is_range_sharded()) {
+            call.kspace()->routes().rebuild(store.shards());
+        }
+    } else {
+        store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
+            if (!shard->load(true)) ++errors;
+        });
+    }
     return errors>0 ? call.push_error("some shards did not load") : call.push_simple("OK");
 }
 int cmd_LOAD(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -69,19 +85,27 @@ int RELOAD(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     std::atomic<size_t> errors = 0;
     barch::sharded_store store(call.kspace());
-    // exclusive on every shard, then the per-shard reload does not take the latch
-    // itself. a range sweep needs two write locks to move a key, so it waits,
-    // and a key cannot leave a shard that has already been replaced from disk
-    // for one that has not. the table is rebuilt before any of those locks drop
-    auto held = store.lock_space_write();
-    store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
-        if (!shard->reload()) ++errors;
-    });
-    if (call.kspace()->is_range_sharded()) {
-        // the routing table describes the shards, and the shards were just replaced by
-        // what was on disk. Rebuilding is what a load does anyway - the table is never
-        // written down, only derived - so this is the same step, at the same point
-        call.kspace()->routes().rebuild(store.shards());
+    // freeze only when the partition is state. a range sweep needs two write
+    // locks to move a key, so it waits, and a key cannot leave a shard that
+    // has already been replaced from disk for one that has not. hash sharding
+    // reloads under each shard's own latch. the range table is rebuilt before
+    // the space lock drops
+    barch::sharded_store::write_guard held;
+    if (call.kspace()->is_stateful_sharding()) {
+        held = store.lock_space_write();
+        store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
+            if (!shard->reload_holding_lock()) ++errors;
+        });
+        if (call.kspace()->is_range_sharded()) {
+            // the routing table describes the shards, and the shards were just
+            // replaced by what was on disk. rebuilding is what a load does
+            // anyway - the table is never written down, only derived
+            call.kspace()->routes().rebuild(store.shards());
+        }
+    } else {
+        store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
+            if (!shard->reload()) ++errors;
+        });
     }
     return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");
 }

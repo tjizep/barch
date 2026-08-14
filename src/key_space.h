@@ -83,9 +83,20 @@ namespace barch {
         /**
          * true if a key can change shard while the space is running. Hash routing is a
          * pure function of the key and so never does; range routing moves boundaries to
-         * keep the shards even.
+         * keep the shards even. Used by the route-then-lock-then-route-again check.
          */
         [[nodiscard]] bool routes_move() const { return opt_range_sharded; }
+        /**
+         * true if a snapshot or a replace of the shards has to freeze the space.
+         *
+         * Hash routing has no partition state: a key's shard is a function of the
+         * key. Range routing does: the table, and which shard holds which key,
+         * change while the space runs. SAVE, LOAD, RELOAD and SAVEALL lock when
+         * this is true (DONE 70, 71, 72). A later method that can move a key
+         * returns true here and inherits those four freezes. Today only range
+         * sharding does.
+         */
+        [[nodiscard]] bool is_stateful_sharding() const;
         /**
          * true if key no longer belongs to `t`.
          *

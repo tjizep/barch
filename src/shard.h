@@ -261,7 +261,9 @@ namespace barch {
         bool send(std::ostream& out) final;
 
         bool load(bool stats) final;
+        bool load_holding_lock() final;
         bool reload() final;
+        bool reload_holding_lock() final;
 
         void load_bloom() final;
 

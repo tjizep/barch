@@ -75,6 +75,10 @@ def decoded(items):
     return [i.decode() if isinstance(i, bytes) else i for i in items]
 
 
+def resp_ok(reply):
+    return reply == b"OK" or reply == "OK"
+
+
 def rng(conn, space, lo, hi, count=-1):
     """B.RANGE over `space`, as strings.
 
@@ -188,6 +192,17 @@ for i in range(0, KEYS, 7):
 reloaded = rng(r, "rs_route", key(0), "k~")
 assert reloaded == [key(i) for i in range(KEYS)], len(reloaded)
 
+# --- LOAD is not RELOAD: it does not write first ---------------------------------------
+# the files are whatever save left. the table must still be derived from the shards
+# after they are replaced, or the reads below go to the old spans and miss
+assert rs.save()
+r.execute_command("USE", "rs_route")
+assert resp_ok(r.execute_command("LOAD")), "LOAD"
+for i in range(0, KEYS, 7):
+    assert rs.get(key(i)) == "v%d" % i, "after load: %s" % key(i)
+loaded = rng(r, "rs_route", key(0), "k~")
+assert loaded == [key(i) for i in range(KEYS)], len(loaded)
+
 # --- a bound that falls in a gap wide enough to empty a shard --------------------------
 # the case the ordered lower bound needs its second step for. Routing names the shard
 # whose span contains the key, but a span is a range of the key order, not a promise that
@@ -238,6 +253,24 @@ for i in range(20, 80):
 assert gap.lowerBound(key(19)) == key(19)
 assert gap.upperBound(key(19)) == key(80)
 assert rng(r, "rs_gap", key(18), key(82)) == [key(18), key(19), key(80), key(81)]
+
+# --- SAVEALL of a range space the sweep is still moving --------------------------------
+# SAVEALL walks every space. the writes above are ascending, so the sweep has work
+# for the whole of the insert loop. not settling first is the point: a snapshot
+# taken while keys are crossing boundaries must still hold every key once
+conf.set("rs_all.ordered", "1")
+conf.set("rs_all.shards", str(SHARDS))
+conf.set("rs_all.range_sharded", "1")
+rs_all = barch.KeyValue("rs_all")
+for i in range(KEYS):
+    rs_all.set(key(i), "v%d" % i)
+assert resp_ok(r.execute_command("SAVEALL")), "SAVEALL"
+r.execute_command("USE", "rs_all")
+assert resp_ok(r.execute_command("LOAD")), "LOAD after SAVEALL"
+for i in range(0, KEYS, 7):
+    assert rs_all.get(key(i)) == "v%d" % i, "after SAVEALL/LOAD: %s" % key(i)
+saved_all = rng(r, "rs_all", key(0), "k~")
+assert saved_all == [key(i) for i in range(KEYS)], len(saved_all)
 
 # --- a hash sharded space is untouched by any of this ----------------------------------
 # the same keys, the same shard count, routed by hash: it must still answer for every one

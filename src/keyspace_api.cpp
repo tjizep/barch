@@ -5,11 +5,13 @@
 //
 
 #include "keyspace_api.h"
+#include <algorithm>
 #include <ranges>
 #include <cctype>
 #include <cstring>
 #include <cmath>
 #include <shared_mutex>
+#include <vector>
 
 #include "barch_apis.h"
 #include "caller.h"
@@ -45,13 +47,13 @@ extern "C" {
 static size_t save(caller& call) {
     std::atomic<size_t> errors = 0;
     barch::sharded_store store(call.kspace());
-    // a range sweep moves keys under write locks on two shards. holding every
-    // shard shared stops that for the snapshot, so a key cannot land in two
-    // shards' files or in neither. hash-sharded spaces never move keys, so
-    // they do not pay for the space lock. save() takes its own shared latch
-    // on a worker thread, which is allowed to share with this one.
+    // a stateful method can move a key between shards while they are being
+    // written. holding every shard shared stops that for the snapshot, so a
+    // key cannot land in two files or in neither. hash sharding is a function
+    // of the key and does not pay. save() takes its own shared latch on a
+    // worker thread, which is allowed to share with this one.
     barch::sharded_store::read_guard held;
-    if (store.space()->is_range_sharded()) {
+    if (store.space()->is_stateful_sharding()) {
         held = store.lock_space_read();
     }
     store.each_shard_parallel([&](const barch::shard_ptr& shard) {
@@ -379,6 +381,24 @@ int cmd_SAVE(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
 int SAVEALL(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
+    // hold every stateful space shared, in canonical name order, so a key
+    // cannot move between two of that space's files while they are being
+    // written. hash-sharded spaces are walked without the lock. save() takes
+    // its own shared latch on each shard, which is allowed to share with these.
+    heap::vector<barch::key_space_ptr> stateful;
+    barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
+        if (ks && ks->is_stateful_sharding()) stateful.push_back(ks);
+    });
+    std::sort(stateful.begin(), stateful.end(),
+              [](const barch::key_space_ptr& a, const barch::key_space_ptr& b) {
+                  return a->get_canonical_name() < b->get_canonical_name();
+              });
+    std::vector<barch::sharded_store::read_guard> held;
+    held.reserve(stateful.size());
+    for (const auto& ks : stateful) {
+        barch::sharded_store store(ks);
+        held.push_back(store.lock_space_read());
+    }
     barch::all_shards([](auto& shard) {
         shard->save(true);
     });

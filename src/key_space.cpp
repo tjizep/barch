@@ -375,6 +375,14 @@ namespace barch {
         return hshard;
     }
 
+    bool key_space::is_stateful_sharding() const {
+        // hash routing is a function of the key. range routing is not: the table
+        // and which shard holds which key change while the space runs. SAVE,
+        // LOAD, RELOAD and SAVEALL freeze the space when this is true. a later
+        // method that can move a key returns true here. today only range does.
+        return opt_range_sharded;
+    }
+
     bool key_space::route_moved(art::value_type key, const shard_ptr& t) {
         if (!opt_range_sharded || !t) return false;
         return get_shard_index(key) != t->get_shard_number();

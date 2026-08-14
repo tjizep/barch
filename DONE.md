@@ -3085,3 +3085,58 @@ does not rebuild the table. SAVEALL still walks every shard of every space the
 same way. Neither is on the path the test takes. That is TODO 76.
 
 Measured: `rangeroutetest.py` four times green, `rangeshardtest.py` once.
+
+## 71. LOAD and SAVEALL raced the range rebalancer [14-08-2026]
+
+*Was `TODO.md` entry 76.*
+
+DONE 70 froze SAVE and RELOAD and left these two. They were the same race on
+paths the test did not take.
+
+LOAD replaced shards in parallel with no space lock, then returned. The
+routing table is never persisted. A range-sharded space that is LOADed
+therefore kept the table it had before the files were read, so a key whose
+span moved on disk was looked up in the shard that used to own it. GET and
+RANGE would miss. The sweep could also move a live key into a shard that had
+already been replaced, or out of one that had not, and lose it.
+
+SAVEALL walked every shard of every space the same way SAVE used to: no
+space lock, so a sweep that crossed a pair mid-write persisted that key
+twice or not at all.
+
+LOAD now takes a space write lock, loads without taking the latch again
+(`load_holding_lock`), and rebuilds the table before those locks drop. It
+also `_clear`s each shard before `_load`. Overwriting a live tree without
+that left the arena free list populated, and `read_emancipated` logged
+"erased should be empty" once per shard. RELOAD already cleared; LOAD is
+the overwrite path and did not.
+
+SAVEALL collects every range-sharded space, takes a space read lock on each
+in canonical name order, then writes every shard. Hash-sharded spaces are
+walked without that lock. Their keys do not move.
+
+`rangeroutetest.py` now LOADs `rs_route` after a save, and SAVEALLs a new
+ascending space without settling first, then LOADs it. Both must return
+every key, in order. The second is the case a sweep is still working.
+
+Measured: `rangeroutetest.py` green, including the two new sections. No
+"erased should be empty" once LOAD cleared first.
+
+## 72. Stateful sharding is a key space check, not a range-sharding special case [14-08-2026]
+
+*Was `TODO.md` entry 77.*
+
+DONE 70 and 71 froze SAVE, LOAD, RELOAD and SAVEALL because range sharding
+can move a key. The freezes keyed off `is_range_sharded()`, so they read as
+a special case of that algorithm rather than as the duty of any method whose
+partition is state.
+
+`key_space::is_stateful_sharding()` is that duty. Today it returns
+`opt_range_sharded`. The four commands lock when it is true, and do not
+when it is false. Hash-sharded LOAD and RELOAD go back to each shard's own
+latch. The range table is still rebuilt only when the space is range
+sharded, because the table belongs to that method.
+
+A later method that can move a key returns true here and inherits the four
+freezes. `routes_move()` stays the route-then-lock-then-route-again check.
+The two happen to agree today. They answer different questions.

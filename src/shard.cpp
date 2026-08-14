@@ -490,6 +490,15 @@ bool barch::shard::send(std::ostream& unused(out)) {
     return true;
 }
 bool barch::shard::reload() {
+    try {
+        unique_latch release(this->latch);
+        return reload_holding_lock();
+    }catch (std::exception &e) {
+        log({"could not load",e.what()});
+        return false;
+    }
+}
+bool barch::shard::reload_holding_lock() {
     // the caller holds the shard write lock. RELOAD takes the whole space so a
     // range sweep cannot move a key between two shards while one is already
     // the snapshot and the other is still live. taking the latch here would
@@ -565,6 +574,24 @@ bool barch::shard::load(bool) {
         return false;
     }
     return true;
+}
+bool barch::shard::load_holding_lock() {
+    // the caller holds the shard write lock. LOAD takes the whole space so a
+    // range sweep cannot move a key between two shards while one is already
+    // the file and the other is still live. taking the latch here would wait
+    // on that space lock from a worker thread and never return.
+    try {
+        std::unique_lock guard(save_load_mutex);
+        // overwrite: the files replace what is live. without the clear, the
+        // arena free list from the file is read into a shard that still holds
+        // the old one, and read_emancipated logs "erased should be empty"
+        _clear();
+        _load(true);
+        return true;
+    }catch (std::exception &e) {
+        log({"could not load",e.what()});
+        return false;
+    }
 }
 bool barch::shard::retrieve(std::istream& unused(in)) {
 

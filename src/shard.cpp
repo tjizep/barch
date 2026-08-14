@@ -35,7 +35,7 @@ uint64_t art_evict_lru(barch::shard_ptr t) {
                 continue;
             }
             t->remove(l->get_key(),fc);
-            //art_delete(t, l->get_key(), fc);
+            //art::erase(t, l->get_key(), fc);
             i += l->next_leaf();
         }
         ++statistics::pages_evicted;
@@ -710,7 +710,7 @@ bool barch::shard::insert(const key_options& options, value_type unfiltered_key,
 bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
     ++inserts;
     //add_bloom(key);
-    return art_insert(this, options, key, value, update, fc);
+    return art::insert(this, options, key, value, update, fc);
 }
 
 bool barch::shard::hash_erase(logical_address lad) {
@@ -780,7 +780,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
     if (options.is_hashed()) {
         hash_insert(options, key, value, update, fc);
     }else {
-        art_insert(this, options, key, value, update, fc);
+        art::insert(this, options, key, value, update, fc);
     }
     return size+h.size() > before;
 }
@@ -861,7 +861,7 @@ bool barch::shard::evict(const leaf* l) {
 
         return false;
     }
-    art_delete(this, l->get_key(), [](const art::node_ptr &){});
+    art::erase(this, l->get_key(), [](const art::node_ptr &){});
     if (size < before) {
         ++statistics::keys_evicted;
     }
@@ -885,14 +885,14 @@ bool barch::shard::evict(value_type unfiltered_key) {
         }
     }
     --statistics::delete_ops; // were not counting these deletes
-    art_delete(this, key, [](const art::node_ptr &){});
+    art::erase(this, key, [](const art::node_ptr &){});
     return size < before;
 
 }
 bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
     auto sbef = size;
     ++deletes;
-    art_delete(this, key, fc);
+    art::erase(this, key, fc);
     return sbef < size;
 }
 
@@ -945,7 +945,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         }
     } // else continue
 
-    art_delete(this, key, fc);
+    art::erase(this, key, fc);
     return size < before;
 }
 
@@ -1016,7 +1016,7 @@ bool barch::shard::is_present(value_type unfiltered_key) {
         return !n.null();
     }
 
-    auto r = art_search(this, key);
+    auto r = art::search(this, key);
     return !r.null();
 }
 
@@ -1036,7 +1036,7 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
         return n;
     }
 
-    auto r = art_search(this, key);
+    auto r = art::search(this, key);
     if (r.null()) {
         if (dependencies) {
             r = dependencies->search(key); // this can recurse down
@@ -1056,7 +1056,7 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
 }
 art::node_ptr barch::shard::tree_minimum() const {
     auto dmin = dependencies ? dependencies->tree_minimum() : nullptr;
-    auto tmin = art_minimum(this);
+    auto tmin = art::minimum(this);
     if (dmin.is_leaf && tmin.is_leaf) {
         if (dmin.cl()->get_key() < tmin.cl()->get_key()) {
             return dmin;

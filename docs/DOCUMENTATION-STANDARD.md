@@ -25,6 +25,22 @@ article structure, since that is a site-level concern rather than a source-level
 `README.md` is a landing page rather than a reference, so it is out of scope, as are
 `RELEASES.md`, `TODO.md`, `DONE.md` and `BENCHMARKS.md`.
 
+The site splits on audience, not on how technical the page is. A caller of barch is a
+user even when they write Python, speak RESP, or read lock notes. A developer is
+someone who works on the tree.
+
+- **User** — the four narrative articles (`overview`, `quickstart`, `configuration`,
+  `errors`). How to get in, what the options are, how failures look.
+- **Reference** — a surface a caller can invoke. Still user documentation. Section 2's
+  spine applies here. The crumb is `Reference / {Topic}`.
+- **Developer** — how a surface is built and bound: `#resp`, `#swig-python`,
+  `#swig-lua`. These keep the spine, because they still document a surface, but they
+  sit after the user material. A caller looking up a command should not have to pass
+  through them. The crumb is `Developer / {Topic}`.
+
+User crumbs are `User / {Topic}`. Do not use `Platform` or `Interfaces`; those names
+mixed the two audiences.
+
 ## 2. The shape of a reference article on the site
 
 A reference article documents a surface that a caller can invoke, and every one of them
@@ -69,8 +85,12 @@ reader something.
 
 Four articles - `overview`, `quickstart`, `configuration` and `errors` - are narrative
 rather than reference, and they are exempt from the spine, though they still take a
-crumb, an `h1` and a lede. They are a closed set. Adding a fifth should be a deliberate
-decision that someone argues for, rather than a convenient way of avoiding the structure.
+crumb (`User / {Topic}`), an `h1` and a lede. They are a closed set. Adding a fifth
+should be a deliberate decision that someone argues for, rather than a convenient way
+of avoiding the structure. The three Developer articles (`resp`, `swig-python`,
+`swig-lua`) are not a fifth narrative page: they keep this spine, and they sit in
+their own nav group because they explain how a surface is bound, not what a caller
+invokes.
 
 ## 3. What belongs in each of the three blocks
 

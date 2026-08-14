@@ -332,7 +332,7 @@ int SET(caller& call,const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     // A leaf holds the key and the value together and has to fit in a page. The insert
-    // already refuses a pair that does not - it throws, art_insert catches it, logs it and
+    // already refuses a pair that does not - it throws, art::insert catches it, logs it and
     // answers false - but SET never looked at that answer, so an oversized value was
     // acknowledged with OK and stored nothing. Silent loss on a write that said it worked
     // is the worst way to be wrong, so the size is judged here where it can be reported.

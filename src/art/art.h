@@ -154,81 +154,64 @@ namespace art {
  */
 int tree_destroy(art::tree *t);
 
-/**
- * inserts a new value into the art tree
- * a key cannot contain any embedded nulls. a terminating null char will
- * be added if it does not exist
- * TODO: no checks for embedded nulls are currently done
- * @arg t the tree
- * @arg key the key the key cannot have embedded 0 chars a terminating 0 char will be added if it does not exist
- * @arg key_len the length of the key
- * @arg value opaque value.
- * @return true was inserted or replaced, otherwise
- * The old value is captured in the callback
- * exceptions may happen
- */
-bool art_insert
-(art::tree *t
- , const art::key_options &options
- , art::value_type key
- , art::value_type value
- , const art::NodeResult &fc
-);
-
-bool art_insert
-(art::tree *t
- , const art::key_options &options
- , art::value_type key
- , art::value_type value
- , bool replace
- , const art::NodeResult &fc);
-
-/**
- * inserts a new value into the art tree (not replacing)
- * check above for notes on embedded nulls
- * @arg t the tree
- * @arg key the key
- * @arg key_len the length of the key
- * @arg value opaque value.
- * @return null if the item was newly inserted, otherwise
- * the old value pointer is returned.
- */
-void art_insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
-                           const art::NodeResult &fc);
-
-/**
- * Deletes a value from the ART tree
- * @arg t The tree
- * @arg key The key
- * @arg key_len The length of the key
- * @return NULL if the item was not found, otherwise
- * the value pointer is returned.
- */
-void art_delete(art::tree *t, art::value_type key);
-
-void art_delete(art::tree *t, art::value_type key, const art::NodeResult &fc);
-
-/**
- * Searches for a value in the ART tree
- * @arg t The tree
- * @arg key The key
- * @arg key_len The length of the key
- * @return NULL if the item was not found, otherwise
- * the value pointer is returned.
- */
-art::node_ptr art_search(const art::tree *t, art::value_type key);
-
-/**
- * Returns the minimum valued leaf
- * @return The minimum leaf or NULL
- */
-art::node_ptr art_minimum(const art::tree *t);
-
-/**
- * Returns the maximum valued leaf
- * @return The maximum leaf or NULL
- */
 namespace art {
+    /**
+     * inserts a new value into the art tree
+     * a key cannot contain any embedded nulls. a terminating null char will
+     * be added if it does not exist
+     * TODO: no checks for embedded nulls are currently done
+     * @arg t the tree
+     * @arg key the key the key cannot have embedded 0 chars a terminating 0 char will be added if it does not exist
+     * @arg key_len the length of the key
+     * @arg value opaque value.
+     * @return true was inserted or replaced, otherwise
+     * The old value is captured in the callback
+     * exceptions may happen
+     */
+    bool insert(tree *t, const key_options &options, value_type key, value_type value, const NodeResult &fc);
+
+    bool insert(tree *t, const key_options &options, value_type key, value_type value, bool replace, const NodeResult &fc);
+
+    /**
+     * inserts a new value into the art tree (not replacing)
+     * check above for notes on embedded nulls
+     * @arg t the tree
+     * @arg key the key
+     * @arg key_len the length of the key
+     * @arg value opaque value.
+     * @return null if the item was newly inserted, otherwise
+     * the old value pointer is returned.
+     */
+    void insert_no_replace(tree *t, const key_options &options, value_type key, value_type value, const NodeResult &fc);
+
+    /**
+     * Deletes a value from the ART tree
+     * @arg t The tree
+     * @arg key The key
+     * @arg key_len The length of the key
+     * @return NULL if the item was not found, otherwise
+     * the value pointer is returned.
+     */
+    void erase(tree *t, value_type key);
+
+    void erase(tree *t, value_type key, const NodeResult &fc);
+
+    /**
+     * Searches for a value in the ART tree
+     * @arg t The tree
+     * @arg key The key
+     * @arg key_len The length of the key
+     * @return NULL if the item was not found, otherwise
+     * the value pointer is returned.
+     */
+    node_ptr search(const tree *t, value_type key);
+
+    /**
+     * Returns the minimum valued leaf
+     * @return The minimum leaf or NULL
+     */
+    node_ptr minimum(const tree *t);
+
     /**
      * call 'updater' if key exists. updater can return a new leaf to replace the existing one.
      * if 'updater' returns null then nothing is updated
@@ -236,9 +219,13 @@ namespace art {
      * @param key key to find
      * @param updater function to call for supplying modified key
      */
-    bool update(art::tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
+    bool update(tree *t, value_type key, const std::function<node_ptr(const node_ptr &leaf)> &updater);
 
-    art::node_ptr maximum(const art::tree *t);
+    /**
+     * Returns the maximum valued leaf
+     * @return The maximum leaf or NULL
+     */
+    node_ptr maximum(const tree *t);
 
     /**
      * Returns the lower bound value of a given key
@@ -264,35 +251,36 @@ namespace art {
      * nothing else can refill it underneath.
      */
     node_ptr lower_bound(trace_list& trace, const art::tree *t, value_type key);
+
+#if 0
+    /**
+     * Iterates through the entries pairs in the map,
+     * invoking a callback for each. The call back gets a
+     * key, value for each and returns an integer stop value.
+     * If the callback returns non-zero, then the iteration stops.
+     * @arg t The tree to iterate over
+     * @arg cb The callback function to invoke
+     * @arg data Opaque handle passed to the callback
+     * @return 0 on success, or the return of the callback.
+     */
+    int iter(tree *t, CallBack cb, void *data);
+
+    /**
+     * Iterates through the entries pairs in the map,
+     * invoking a callback for each that matches a given prefix.
+     * The call back gets a key, value for each and returns an integer stop value.
+     * If the callback returns non-zero, then the iteration stops.
+     * @arg t The tree to iterate over
+     * @arg prefix The prefix of keys to read
+     * @arg prefix_len The length of the prefix
+     * @arg cb The callback function to invoke
+     * @arg data Opaque handle passed to the callback
+     * @return 0 on success, or the return of the callback.
+     */
+    int iter_prefix(tree *t, value_type prefix, CallBack cb, void *data);
+#endif
 }
 
-/**
- * Iterates through the entries pairs in the map,
- * invoking a callback for each. The call back gets a
- * key, value for each and returns an integer stop value.
- * If the callback returns non-zero, then the iteration stops.
- * @arg t The tree to iterate over
- * @arg cb The callback function to invoke
- * @arg data Opaque handle passed to the callback
- * @return 0 on success, or the return of the callback.
- */
-int art_iter(art::tree *t, art::CallBack cb, void *data);
-
-/**
- * Iterates through the entries pairs in the map,
- * invoking a callback for each that matches a given prefix.
- * The call back gets a key, value for each and returns an integer stop value.
- * If the callback returns non-zero, then the iteration stops.
- * @arg t The tree to iterate over
- * @arg prefix The prefix of keys to read
- * @arg prefix_len The length of the prefix
- * @arg cb The callback function to invoke
- * @arg data Opaque handle passed to the callback
- * @return 0 on success, or the return of the callback.
- */
-#if 0
-int art_iter_prefix(art::tree *t, art::value_type prefix, art::CallBack cb, void *data);
-#endif
 /**
  * iterates through a range from small to large from key to key_end
  * the first key is located in constant time

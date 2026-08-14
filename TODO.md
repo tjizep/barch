@@ -473,3 +473,26 @@
 68. [Done] A failed EXPORT leaves an empty file where the old one was [12-08-2026] Nr 64
 
 69. [Done] Per shard statistics, clear and load no longer rewrite the globals [12-08-2026] Nr 63
+
+70. `bloom_t` in `abstract_shard.h` is `std::vector<bool>`. Set it to `heap::vector<bool>`
+    and some of the tests fail.
+
+    The bloom is a presence filter on the shard: `add_bloom` / `is_bloom` hash a key and
+    set or read one bit. `create_bloom` replaces the vector and, when enabled, resizes it
+    to `static_bloom_size`. `std::vector<bool>` is the bit-packed specialization with
+    proxy references. `heap::vector<bool>` is used elsewhere (`acl`, command categories)
+    as a real sequence of bools, and it goes through the tracking allocator.
+
+    What is uncertain is why that substitution breaks tests: a different `operator[]`,
+    a size or resize that no longer matches `static_bloom_size`, a filter that then
+    answers "missing" for a key that is there, or something the allocator counts that
+    `std::vector<bool>` never did. Settle by reproducing with the typedef changed, noting
+    which tests fail, and tracing one failure through `is_bloom` / `add_bloom`.
+
+71. [Done] The command index in docs/index.html does not know the commands from DONE 65 [13-08-2026] Nr 66
+
+72. [Done] Claude-isms in docs/index.html [14-08-2026] Nr 67
+
+73. [Done] User and developer sections in docs/index.html [14-08-2026] Nr 68
+
+74. [Done] art_* tree functions moved into namespace art [14-08-2026] Nr 69

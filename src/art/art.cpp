@@ -173,7 +173,7 @@ static bool extend_trace_max
  * trace afterwards passes its own - see art::lower_bound's two arg overload. */
 static thread_local art::trace_list scratch_trace{};
 static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key);
-art::node_ptr art_search(const art::tree *t, art::value_type key) {
+art::node_ptr art::search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     try {
         if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
@@ -269,11 +269,11 @@ static art::node_ptr inner_maximum(art::node_ptr n) {
 
 
 // Find the minimum leaf under a node
-static art::node_ptr minimum(const art::node_ptr &n) {
+static art::node_ptr inner_minimum(const art::node_ptr &n) {
     // Handle base cases
     if (n.null()) return nullptr;
     if (n.is_leaf) return n;
-    return minimum(n->get_child(n->first_index().first));
+    return inner_minimum(n->get_child(n->first_index().first));
 }
 
 /**
@@ -388,7 +388,7 @@ static art::node_ptr inner_min_bound(art::trace_list& trace, const art::tree* t,
             auto l = n.const_leaf();
             if (l->expired())
             {
-                art_delete((art::tree*)t, l->get_key());
+                art::erase((art::tree*)t, l->get_key());
                 n = t->root;
                 continue;
             }
@@ -935,10 +935,10 @@ void art::iterator::log_trace() const {
 /**
  * Returns the minimum valued leaf
  */
-art::node_ptr art_minimum(const art::tree *t) {
+art::node_ptr art::minimum(const art::tree *t) {
     ++statistics::min_ops;
     try {
-        auto l = minimum(t->root);
+        auto l = inner_minimum(t->root);
         if (l.null()) return nullptr;
         return l;
     } catch (std::exception &e) {
@@ -993,7 +993,7 @@ static int prefix_mismatch(const art::node_ptr &n, art::value_type key, unsigned
     // If the prefix is short we can avoid finding a leaf
     if (dat.partial_len > art::max_prefix_llength) {
         // Prefix is longer than what we've checked, find a leaf
-        const art::leaf *l = minimum(n).const_leaf();
+        const art::leaf *l = inner_minimum(n).const_leaf();
         max_cmp = std::min<unsigned>(l->key_len(), key.length()) - depth; // may be negative
         for (; idx < max_cmp; idx++) {
             if (l->key()[idx + depth] != key[depth + idx])
@@ -1149,7 +1149,7 @@ static art::node_ptr recursive_insert(
                     std::min<int>(art::max_prefix_llength, modn.partial_len));
         } else {
             modn.partial_len -= (prefix_diff + 1);
-            const auto *l = minimum(n).const_leaf();
+            const auto *l = inner_minimum(n).const_leaf();
             auto ck = l->get_key()[depth + prefix_diff];
             ref.modify()->add_child(ck, ref, n);
             memcpy(modn.partial, l->key() + depth + prefix_diff + 1,
@@ -1203,7 +1203,7 @@ RECURSE_SEARCH:;
  * the old value pointer is returned.
  * exceptions may happen
  */
-bool art_insert
+bool art::insert
 ( art::tree *t
  , const art::key_options &options
  , art::value_type key
@@ -1243,9 +1243,9 @@ bool art_insert
     return false;
 }
 
-bool art_insert(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
+bool art::insert(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                 const art::NodeResult &fc) {
-    return art_insert(t, options, key, value, true, fc);
+    return insert(t, options, key, value, true, fc);
 }
 
 /**
@@ -1257,7 +1257,7 @@ bool art_insert(art::tree *t, const art::key_options &options, art::value_type k
  * @return null if the item was newly inserted, otherwise
  * the old value pointer is returned.
  */
-void art_insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
+void art::insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                            const art::NodeResult &fc) {
     ++statistics::insert_ops;
     try {
@@ -1352,12 +1352,12 @@ static const art::node_ptr recursive_delete(art::tree *t, art::node_ptr n, art::
  * @return nullptr if the item was not found, otherwise
  * the value pointer is returned.
  */
-void art_delete(art::tree *t, art::value_type key) {
-    art_delete(t, key, [](const art::node_ptr & unused(n)) {
+void art::erase(art::tree *t, art::value_type key) {
+    erase(t, key, [](const art::node_ptr & unused(n)) {
     });
 }
 
-void art_delete(art::tree *t, art::value_type key, const art::NodeResult &fc) {
+void art::erase(art::tree *t, art::value_type key, const art::NodeResult &fc) {
     ++statistics::delete_ops;
     try {
         if (key.size > maximum_allocation_size) {
@@ -1442,7 +1442,7 @@ static int recursive_iter(art::node_ptr n, art::CallBack cb, void *data) {
  * @return 0 on success, or the return of the callback.
  */
 #if 0
-int art_iter(art::tree *t, art::CallBack cb, void *data) {
+int art::iter(art::tree *t, art::CallBack cb, void *data) {
     ++statistics::iter_start_ops;
     try {
         if (!t) {
@@ -1481,7 +1481,7 @@ static int leaf_prefix_compare(const art::leaf *n, art::value_type prefix) {
  * @return 0 on success, or the return of the callback.
  */
 #if 0 // replaced by iterator in iterator.h
-int art_iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *data) {
+int art::iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *data) {
     ++statistics::iter_start_ops;
     try {
         if (!t) {
@@ -1506,7 +1506,7 @@ int art_iter_prefix(art::tree *t, art::value_type key, art::CallBack cb, void *d
 
             // If the depth matches the prefix, we need to handle this node
             if (depth == key.length()) {
-                const art::leaf *l = minimum(n).const_leaf();
+                const art::leaf *l = inner_minimum(n).const_leaf();
                 if (0 == leaf_prefix_compare(l, key))
                     return recursive_iter(n, cb, data);
                 return 0;

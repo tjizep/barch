@@ -2931,3 +2931,110 @@ list.tcl: barch agrees with valkey on all 24 faithful cases. The `$type` bodies 
 still stubs. zset.tcl's new `ZMPOP` cases pass; the one remaining zset difference is
 `ZUNIONSTORE` writing `-nan` where valkey writes `0` for opposite infinities, which
 predates this work.
+
+## 66. The command index did not know the commands from DONE 65 [13-08-2026]
+
+*Was `TODO.md` entry 71.*
+
+The nine names were registered and the list.tcl differential already agreed with
+valkey. The family tables and the `CMDS` blob in `docs/index.html` still stopped at
+`LRANGE` and `ZPOPMAX`. Clicking a new name would have shown nothing.
+
+There is no generator in the tree. The blob was produced once (entry 35) and is a
+single JSON object in the page script. The nine entries were added to that object
+and a row was added for each name in its family. Replies and arity errors were taken
+from a live server. None of the nine has a SWIG method, so the Python and Lua lines
+go through `execute`, as EXPORT does.
+
+The index chip now reads 163 names and 160 handlers. Each of the nine names is in
+its family table and in `CMDS`. Nothing on the page still lists them as missing.
+
+## 67. Claude-isms in docs/index.html [14-08-2026]
+
+*Was `TODO.md` entry 72.*
+
+The command tables and the `CMDS` blob were left alone. The tics sat where the
+entry said they would: ledes, design-context blocks, and notices. The memory
+article was the densest. The limitations lede restated its first design-context
+paragraph almost word for word, so the duplicate paragraph was dropped.
+
+The real contrasts stayed. `DBSIZE` still counts stored keys, not names. An
+over-ceiling insert still fails silently instead of raising. Range sharding
+still routes by range, not by hash. A layered delete still leaves a tombstone.
+Expiry is still against the system clock, not a monotonic one. A too-large
+reply still fails the call instead of growing the buffer. A bad prefix still
+errors instead of falling back. An unset space option still takes the server
+default, not whatever the data was written with. The 409 notice still says
+those outcomes are data, not faults. The range-sharding branch note still
+starts "This page documents", because it names which branch the article
+describes.
+
+The cadence went. Headings and openers that told the reader what they were
+about to learn, or sold the sentence before stating it:
+
+- "What this site covers" / "Per project decision"
+- "For teams fronting BARCH with an HTTP gateway"
+- "What is extended is the interpretation of the command name"
+- "Why it is worth using"
+- "This site documents each command once"
+- "This page covers how to design keys"
+- "the headline consequence, as measured by the project"
+- "Why this is a design lever, not just a property"
+- "the single highest-leverage decision"
+- "this is the X use case" / "the standard overlay/copy-on-write shape"
+- "Training is optional but leverage is not"
+- "a superset rather than a departure"
+- "disagree on purpose rather than by oversight"
+- "process boundaries are the L1 security perimeter"
+
+Decorative "rather than" was rewritten as the fact plus the thing it is not,
+in its own sentence, when that second thing was a refusal the caller can hit.
+The remaining "rather than" in the file are table notes and `CMDS` summaries,
+which this pass did not touch.
+
+## 68. User and developer sections in docs/index.html [14-08-2026]
+
+*Was `TODO.md` entry 73.*
+
+The mix was an audience problem, not a missing article type. Callers of barch
+are users even when they are technical. Developers are people who work on the
+tree. Platform and Interfaces did not say that, and Interfaces sat between
+the getting-started pages and the command reference, so the binding write-ups
+read as a step on the way to SET.
+
+Renaming the group was not enough on its own. The three pages moved below
+Reference. Platform became User. Interfaces became Developer. Article ids
+stayed, so existing `#resp` links still work. The three pages kept the
+three-block spine: they still document a surface, they just are not where a
+caller starts.
+
+RESP belongs with the two SWIG pages. Against the command index, that
+article's job is the listener, dispatch, and the prefix on argument zero.
+A caller connects from Quickstart and looks up commands in Reference. The
+prefix form stays on the RESP page; the keyspaces table still points at it.
+
+`DOCUMENTATION-STANDARD.md` now states the split and forbids the old group
+names. The overview's access-surfaces paragraph points callers at Quickstart
+and the command index, and at Developer for how the surfaces are bound.
+
+## 69. art_* tree functions moved into namespace art [14-08-2026]
+
+*Was `TODO.md` entry 74.*
+
+The guess was right. The live leftovers were the functions declared in `art.h`
+and defined in `art.cpp`. `art_statistics`, `art_ops_statistics`,
+`art_repl_statistics`, `art_evict_lru`, `art_sessions` and `art_fun` are
+structs, a shard helper, a counter and an RPC type. They stayed. `tree_destroy`
+is the same old C entry point but is not an `art_*` name, so it stayed too.
+
+The names dropped the prefix to match `art::maximum`. `delete` is a keyword, so
+`art_delete` became `art::erase`. The rest are `art::insert`,
+`art::insert_no_replace`, `art::search` and `art::minimum`. `art_iter` and
+`art_iter_prefix` already had `#if 0` definitions; their declarations went
+behind `#if 0` as well so they are not a live `art::iter` with no body.
+
+`art::minimum` collided with a file-static `minimum` that walks a node. That
+helper is now `inner_minimum`, next to the existing `inner_maximum`.
+
+Call sites were only in `shard.cpp`. They now say `art::insert`, `art::erase`,
+`art::search` and `art::minimum`. No `using art;` was added. `lbarch` built.

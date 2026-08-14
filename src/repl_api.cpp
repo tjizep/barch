@@ -67,16 +67,20 @@ int RELOAD(caller& call, const arg_t& argv) {
 
     if (argv.size() != 1)
         return call.wrong_arity();
-    size_t errors = 0;
+    std::atomic<size_t> errors = 0;
     barch::sharded_store store(call.kspace());
-    store.each_shard_parallel([](const barch::shard_ptr& shard) {
-        shard->reload();
+    // exclusive on every shard, then the per-shard reload does not take the latch
+    // itself. a range sweep needs two write locks to move a key, so it waits,
+    // and a key cannot leave a shard that has already been replaced from disk
+    // for one that has not. the table is rebuilt before any of those locks drop
+    auto held = store.lock_space_write();
+    store.each_shard_parallel([&errors](const barch::shard_ptr& shard) {
+        if (!shard->reload()) ++errors;
     });
     if (call.kspace()->is_range_sharded()) {
         // the routing table describes the shards, and the shards were just replaced by
         // what was on disk. Rebuilding is what a load does anyway - the table is never
         // written down, only derived - so this is the same step, at the same point
-        auto lock = store.lock_space_write();
         call.kspace()->routes().rebuild(store.shards());
     }
     return errors>0 ? call.push_error("some shards did not reload") : call.push_simple("OK");

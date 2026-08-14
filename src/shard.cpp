@@ -490,8 +490,12 @@ bool barch::shard::send(std::ostream& unused(out)) {
     return true;
 }
 bool barch::shard::reload() {
+    // the caller holds the shard write lock. RELOAD takes the whole space so a
+    // range sweep cannot move a key between two shards while one is already
+    // the snapshot and the other is still live. taking the latch here would
+    // wait on that space lock from a worker thread and never return.
     try {
-        unique_latch release(this->latch);
+        std::unique_lock guard(save_load_mutex);
         _save(true);
         _clear();
         _load(true);

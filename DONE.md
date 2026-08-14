@@ -3038,3 +3038,50 @@ helper is now `inner_minimum`, next to the existing `inner_maximum`.
 
 Call sites were only in `shard.cpp`. They now say `art::insert`, `art::erase`,
 `art::search` and `art::minimum`. No `using art;` was added. `lbarch` built.
+
+## 70. SAVE and RELOAD raced the range rebalancer [14-08-2026]
+
+*Was `TODO.md` entry 75.*
+
+CI failed `rangeroutetest.py` on one worker at
+
+    assert shard_sizes(r, "rs_route", SHARDS) == before_reload
+
+The log had no sizes, so the later GET and RANGE checks never ran. The question
+the assertion was meant to answer - did reload restore the same partition - was
+not answered either.
+
+DONE 31 already said shard sizes read one at a time do not add up while a sweep
+is running, and blamed the test. That is still true. It is not the whole of this.
+SAVE and RELOAD took no space lock. The sweep moves a key under write locks on
+two neighbouring shards. A parallel save that has already written shard A and
+has not yet written shard B will persist that key twice, or not at all, if the
+sweep crosses the pair in between. RELOAD does `_save`, `_clear`, `_load` per
+shard the same way, then rebuilds the table from whatever is left. The assertion
+compared the vector captured before that window with the vector read after it.
+
+`settle()` returned at 1.30x. The sweep stops at a band around the average,
+1.25x above and 1/1.25x below. Anything between those two is a space the test
+called done and the sweep still worked on. The next maintenance tick is 440ms
+later. A loaded worker that settled at 1.26-1.30x and whose tick landed on save
+or reload is exactly one CI failure.
+
+SAVE of a range-sharded space now takes a space read lock for the snapshot. The
+sweep waits. Hash-sharded spaces do not pay for that lock; their keys do not
+move. RELOAD takes a space write lock for the reload and the table rebuild.
+`shard::reload` no longer takes the latch itself: a worker waiting on a lock
+the command thread already holds never returns. Failed shard reloads increment
+the error count. They did not, before, so RELOAD always answered OK.
+
+The test still allows 1.30x. It now waits for two identical size readings so a
+return is between ticks. After reload it compares, and if a tick landed in the
+gap it settles again and checks that every key is still there and no shard is
+empty. Tightening settle to the sweep's 1.25 band timed out on the post-delete
+`rs_rand` space: the live sweep often sits a little above the target once
+inserts have stopped, which is why 1.30 was there.
+
+Left alone: LOAD still replaces shards in parallel without a space lock and
+does not rebuild the table. SAVEALL still walks every shard of every space the
+same way. Neither is on the path the test takes. That is TODO 76.
+
+Measured: `rangeroutetest.py` four times green, `rangeshardtest.py` once.

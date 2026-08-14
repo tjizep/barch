@@ -45,6 +45,15 @@ extern "C" {
 static size_t save(caller& call) {
     std::atomic<size_t> errors = 0;
     barch::sharded_store store(call.kspace());
+    // a range sweep moves keys under write locks on two shards. holding every
+    // shard shared stops that for the snapshot, so a key cannot land in two
+    // shards' files or in neither. hash-sharded spaces never move keys, so
+    // they do not pay for the space lock. save() takes its own shared latch
+    // on a worker thread, which is allowed to share with this one.
+    barch::sharded_store::read_guard held;
+    if (store.space()->is_range_sharded()) {
+        held = store.lock_space_read();
+    }
     store.each_shard_parallel([&](const barch::shard_ptr& shard) {
         if (!shard->save(true)) {
             barch::err({"could not save", shard->get_shard_number()});

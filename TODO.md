@@ -496,3 +496,12 @@
 73. [Done] User and developer sections in docs/index.html [14-08-2026] Nr 68
 
 74. [Done] art_* tree functions moved into namespace art [14-08-2026] Nr 69
+
+75. [Done] SAVE and RELOAD raced the range rebalancer [14-08-2026] Nr 70
+
+76. LOAD and SAVEALL still race the range rebalancer the way SAVE and RELOAD did
+    (DONE 70). LOAD also does not rebuild the routing table after it replaces the
+    shards, so a range-sharded space that is LOADed routes by the table it had
+    before the files were read. The test uses RELOAD, so neither path is seen.
+    Settle by running the reload section of rangeroutetest.py as LOAD, and by
+    SAVEALL of a range-sharded space while a sweep is still working.

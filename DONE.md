@@ -3263,3 +3263,19 @@ count holes.
 
 VALUES still builds the reply as Variables and does not use the list.
 `test/keysstreamtest.py` and `asyncpipelinetest.py` stay green.
+
+## 78. Chaos test for KEYS under restart and memory pressure [15-08-2026]
+
+*Was `TODO.md` entry 82.*
+
+`test/chaostest.py` runs many threads (32 on this box) mixing SET, GET,
+DEL, INCR, KEYS, VALUES COUNT, SCAN, hashes, lists, ordered sets and a
+pipelined GET+KEYS. A second thread flips `max_memory_bytes` and
+`pre_evict_thresh`. A third stops the server while those calls are in
+flight and starts it again.
+
+Disconnects and WRONGTYPE during the storm are allowed. After a quiet
+period SET, GET and KEYS have to answer. Seed 1, two restarts, six
+seconds: the process did not hang or abort. KEYS hit the memory ceiling
+on the tight limits, which is the short-reply path. `CMakeLists.txt`
+registers it as TestChaos.

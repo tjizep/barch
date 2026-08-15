@@ -574,6 +574,10 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/keysstreamtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestChaos
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/chaostest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # the content gauges are per shard, so clearing one key space must not zero them
         add_test(NAME TestShardStats
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/shardstatstest.py

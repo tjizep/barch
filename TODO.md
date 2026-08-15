@@ -478,3 +478,5 @@
     `size_t` list is actually the cost. Do not change the walk.
     Settled when `test/keysstreamtest.py` still answers the same keys
     for an empty match, a selective pattern, and `KEYS *`.
+
+82. [Done] Chaos test for KEYS under restart and memory pressure [15-08-2026] Nr 78 caf3daf

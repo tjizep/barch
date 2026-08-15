@@ -1487,7 +1487,7 @@ redis::cmd(<span class="s">"SET"</span>).arg(<span class="s">"user:00017:name"</
 txt:SET "his_i 1"
 txt:SET "is_is 2"
 txt:SET "s_is_a 3"</pre>
-<p>Put the frames in <code>txt</code> and the source document in another space. <code>RANGE "is_is" "is_is~"</code> then sees every offset of that gram, because the number sits after it.</p>
+<p>Put the frames in <code>txt</code> and the source document in another space. <code>RANGE "is_is 0" "is_is 999999"</code> then sees every offset of that gram, because the number sits after it.</p>
 <div class="notice note"><b>The space is the composite separator.</b> It is not a type tag and not a lead byte. The parser sees <code>0</code>, <code>1</code>, <code>2</code> as integers because they are the token after that space.</div>
 <div class="notice warning"><b>Delete the frames when the source goes.</b> <code>REM</code> of the document does not know about the index. Drop each <code>&lt;gram&gt; &lt;offset&gt;</code> key you wrote for it, or the next range still names a frame whose source is gone.</div>
 </div>
@@ -1500,7 +1500,7 @@ txt:SET "s_is_a 3"</pre>
 <thead><tr><th>Surface</th><th>Arguments</th><th>Requirement</th><th>Returns / Behaviour</th></tr></thead>
 <tbody>
 <tr><td><code>txt:SET</code></td><td><code>"&lt;gram&gt; &lt;offset&gt;"</code> [value]</td><td class="req y">REQUIRED</td><td>writes one frame. The key is one RESP argument. <code>&lt;gram&gt;</code> is text with <code>_</code> for spaces; <code>&lt;offset&gt;</code> is a decimal integer. A repeat overwrites the value</td></tr>
-<tr><td><code>txt:RANGE</code></td><td><code>"&lt;gram&gt;" "&lt;gram&gt;~" count</code></td><td class="req y">REQUIRED</td><td>every frame of that gram, all offsets. Empty array when none match</td></tr>
+<tr><td><code>txt:RANGE</code></td><td><code>"&lt;gram&gt; 0" "&lt;gram&gt; 999999" count</code></td><td class="req y">REQUIRED</td><td>every frame of that gram, all offsets. Both bounds need the numeric second component — a lone <code>&lt;gram&gt;</code> is a different encoding. Empty array when none match</td></tr>
 <tr><td><code>txt:COUNT</code></td><td>same two bounds as <code>RANGE</code></td><td class="req n">OPTIONAL</td><td>how many frames sit in the prefix</td></tr>
 <tr><td><code>txt:REM</code></td><td>the same key <code>SET</code> wrote</td><td class="req n">OPTIONAL</td><td>drops one frame</td></tr>
 <tr><td><code>USE txt</code></td><td>—</td><td class="req n">OPTIONAL</td><td>same space without the <code>txt:</code> prefix on every call</td></tr>
@@ -1524,12 +1524,12 @@ width = <span class="n">5</span>
     gram = text[i:i + width].replace(<span class="s">" "</span>, <span class="s">"_"</span>)
     kv.set(<span class="s">"%s %d"</span> % (gram, i), <span class="s">"1"</span>)
 
-<span class="k">print</span>(kv.range(<span class="s">"is_is"</span>, <span class="s">"is_is~"</span>, <span class="n">100</span>))</pre></div>
+<span class="k">print</span>(kv.range(<span class="s">"is_is 0"</span>, <span class="s">"is_is 999999"</span>, <span class="n">100</span>))</pre></div>
 <div class="pane"><pre>txt:SET "This 0"
 txt:SET "his_i 1"
 txt:SET "is_is 2"
 txt:SET "s_is_a 3"
-txt:RANGE "is_is" "is_is~" 100</pre></div>
+txt:RANGE "is_is 0" "is_is 999999" 100</pre></div>
 <div class="pane"><pre><span class="k">import</span> redis
 
 r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
@@ -1539,7 +1539,7 @@ width = <span class="n">5</span>
     gram = text[i:i + width].replace(<span class="s">" "</span>, <span class="s">"_"</span>)
     r.execute_command(<span class="s">"txt:SET"</span>, <span class="s">"%s %d"</span> % (gram, i), <span class="s">"1"</span>)
 
-<span class="k">print</span>(r.execute_command(<span class="s">"txt:RANGE"</span>, <span class="s">"is_is"</span>, <span class="s">"is_is~"</span>, <span class="n">100</span>))</pre></div>
+<span class="k">print</span>(r.execute_command(<span class="s">"txt:RANGE"</span>, <span class="s">"is_is 0"</span>, <span class="s">"is_is 999999"</span>, <span class="n">100</span>))</pre></div>
 </div>
 </div>
 </div>

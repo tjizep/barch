@@ -1,10 +1,13 @@
 # Mix as many concurrent RESP calls as the box will reasonably hold, flip
 # memory limits under them, and stop the server while calls are still in
-# flight. KEYS walks pages on worker threads and writes the socket as it
-# goes, so a restart mid-KEYS is the case this is for.
+# flight. The mix is strings and TTL, hashes, lists, ordered sets,
+# RANGE/COUNT, n-gram composite keys (docs/NGRAM.md), and H3-style
+# numeric composites. KEYS still writes the socket as it walks, so a
+# restart mid-KEYS is the original case.
 #
 # Disconnects, timeouts and WRONGTYPE during the storm are allowed.
-# After a quiet period the server has to answer SET, GET and KEYS again.
+# After a quiet period the server has to answer SET, GET, KEYS and a
+# gram RANGE again.
 import os
 import random
 import threading
@@ -79,43 +82,111 @@ def worker(tid):
     local = random.Random(SEED + tid * 7919)
     r = connect()
     n = 80
+    sk = lambda i: "t%d:s:%d" % (tid, i)
+    hk = "t%d:h" % tid
+    lk = "t%d:l" % tid
+    zk = "t%d:z" % tid
+    ck = "t%d:c" % tid
+    fk = "t%d:f" % tid
+    grams = ("This", "his_i", "is_is", "s_is_a", "is_a_", "_a_do")
+
+    def fire():
+        i = local.randrange(n)
+        j = local.randrange(n)
+        gram = grams[local.randrange(len(grams))]
+        h3 = 600000000000000000 + tid * 1000 + i
+        ops = (
+            lambda: r.set(sk(i), "v%d" % i),
+            lambda: r.get(sk(i)),
+            lambda: r.delete(sk(i)),
+            lambda: r.exists(sk(i)),
+            lambda: r.append(sk(i), "x"),
+            lambda: r.strlen(sk(i)),
+            lambda: r.getrange(sk(i), 0, 3),
+            lambda: r.setrange(sk(i), 0, "V"),
+            lambda: r.setnx(sk(i), "nx"),
+            lambda: r.getset(sk(i), "gs"),
+            lambda: r.mset({sk(i): "m", sk(j): "n"}),
+            lambda: r.mget(sk(i), sk(j)),
+            lambda: r.incr(ck),
+            lambda: r.incrby(ck, 2),
+            lambda: r.decr(ck),
+            lambda: r.decrby(ck, 2),
+            lambda: r.incrbyfloat(fk, 0.5),
+            lambda: r.expire(sk(i), 30),
+            lambda: r.ttl(sk(i)),
+            lambda: r.pttl(sk(i)),
+            lambda: r.persist(sk(i)),
+            lambda: r.execute_command("GETDEL", sk(i)),
+            lambda: r.execute_command("GETEX", sk(i), "EX", 20),
+            lambda: r.execute_command("SETEX", sk(i), 20, "ex"),
+            lambda: r.execute_command("PREPEND", sk(i), "p"),
+            lambda: r.execute_command("LENGTH", sk(i)),
+            lambda: r.execute_command("RANGE", sk(0), sk(n - 1), 20),
+            lambda: r.execute_command("COUNT", sk(0), sk(n - 1)),
+            lambda: r.execute_command("MIN"),
+            lambda: r.execute_command("MAX"),
+            lambda: r.execute_command("LB", sk(i)),
+            lambda: r.execute_command("UB", sk(i)),
+            lambda: r.keys("t%d:s:*" % tid),
+            lambda: r.execute_command("KEYS", "t*:*", "COUNT"),
+            lambda: r.execute_command("VALUES", "v*", "COUNT"),
+            lambda: r.scan(0, match="t%d:*" % tid, count=20),
+            lambda: r.dbsize(),
+            lambda: r.ping(),
+            lambda: r.execute_command("INFO", "memory"),
+            lambda: r.execute_command("STATS"),
+            lambda: r.execute_command("SIZE"),
+            lambda: r.execute_command("RANDOMKEY"),
+            lambda: r.hset(hk, "f%d" % i, "v%d" % i),
+            lambda: r.hget(hk, "f%d" % i),
+            lambda: r.hmget(hk, "f%d" % i, "f%d" % j),
+            lambda: r.hgetall(hk),
+            lambda: r.hdel(hk, "f%d" % j),
+            lambda: r.hexists(hk, "f%d" % i),
+            lambda: r.hlen(hk),
+            lambda: r.hkeys(hk),
+            lambda: r.hvals(hk),
+            lambda: r.hincrby(hk, "n", 1),
+            lambda: r.hincrbyfloat(hk, "nf", 0.25),
+            lambda: r.hsetnx(hk, "x%d" % i, "1"),
+            lambda: r.hstrlen(hk, "f%d" % i),
+            lambda: r.rpush(lk, "x%d" % i),
+            lambda: r.lpush(lk, "y%d" % i),
+            lambda: r.rpop(lk),
+            lambda: r.lpop(lk),
+            lambda: r.llen(lk),
+            lambda: r.lrange(lk, 0, 4),
+            lambda: r.zadd(zk, {"m%d" % i: i}),
+            lambda: r.zrange(zk, 0, 4),
+            lambda: r.zcard(zk),
+            lambda: r.zscore(zk, "m%d" % i),
+            lambda: r.zrank(zk, "m%d" % i),
+            lambda: r.zrem(zk, "m%d" % j),
+            lambda: r.zcount(zk, 0, n),
+            lambda: r.zincrby(zk, 1, "m%d" % i),
+            lambda: r.execute_command("txt:SET", "%s %d" % (gram, i), "1"),
+            lambda: r.execute_command("txt:RANGE", gram + " 0", gram + " 999999", 20),
+            lambda: r.execute_command("txt:COUNT", gram + " 0", gram + " 999999"),
+            lambda: r.execute_command("txt:REM", "%s %d" % (gram, j)),
+            lambda: r.execute_command("spatial_data:SET", "%d p%d" % (h3, tid), "1"),
+            lambda: r.execute_command(
+                "spatial_data:RANGE",
+                "%d 0" % (h3 - 50),
+                "%d 99999999999999" % (h3 + 50),
+                10,
+            ),
+            lambda: r.execute_command("COPY", sk(i), "t%d:cp:%d" % (tid, i)),
+            lambda: r.execute_command("RENAMENX", sk(i), "t%d:rn:%d" % (tid, i)),
+        )
+        ops[local.randrange(len(ops))]()
+
     while not done.is_set():
         if restarting.is_set():
             time.sleep(0.02)
             continue
-        op = local.randrange(12)
-        i = local.randrange(n)
         try:
-            if op == 0:
-                r.set("t%d:s:%d" % (tid, i), "v%d" % i)
-            elif op == 1:
-                r.get("t%d:s:%d" % (tid, i))
-            elif op == 2:
-                r.delete("t%d:s:%d" % (tid, i))
-            elif op == 3:
-                r.incr("t%d:c" % tid)
-            elif op == 4:
-                r.keys("t%d:s:*" % tid)
-            elif op == 5:
-                r.execute_command("KEYS", "t*:*", "COUNT")
-            elif op == 6:
-                r.execute_command("VALUES", "v*", "COUNT")
-            elif op == 7:
-                r.scan(0, match="t%d:*" % tid, count=20)
-            elif op == 8:
-                r.hset("t%d:h" % tid, "f%d" % i, "v%d" % i)
-                r.hget("t%d:h" % tid, "f%d" % i)
-            elif op == 9:
-                r.rpush("t%d:l" % tid, "x%d" % i)
-                r.lrange("t%d:l" % tid, 0, 4)
-            elif op == 10:
-                r.zadd("t%d:z" % tid, {"m%d" % i: i})
-                r.zrange("t%d:z" % tid, 0, 4)
-            else:
-                pipe = r.pipeline(transaction=False)
-                pipe.get("t%d:s:%d" % (tid, i))
-                pipe.keys("t%d:s:%d" % (tid, i))
-                pipe.execute()
+            fire()
         except TRANSIENT:
             r = reconnect(r)
         except redis.exceptions.ResponseError:
@@ -179,6 +250,8 @@ ctl = connect()
 ctl.execute_command("FLUSHDB")
 for i in range(SEED_KEYS):
     ctl.set("seed:%05d" % i, "s%d" % i)
+for i, gram in enumerate(("This", "his_i", "is_is", "s_is_a")):
+    ctl.execute_command("txt:SET", "%s %d" % (gram, i), "1")
 ctl.close()
 
 threads = [threading.Thread(target=worker, args=(i,), name="chaos-%d" % i)
@@ -223,6 +296,9 @@ assert quiet.get("chaos:final") == b"ok", quiet.get("chaos:final")
 got = quiet.keys("chaos:*")
 names = [k.decode() if isinstance(k, bytes) else k for k in got]
 assert "chaos:final" in names, names
+quiet.execute_command("txt:SET", "is_is 2", "1")
+grams = quiet.execute_command("txt:RANGE", "is_is 0", "is_is 999999", 100)
+assert grams, "txt:RANGE after the storm answered empty"
 quiet.close()
 
 assert not failures, "chaos failures: %s" % failures[:12]

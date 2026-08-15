@@ -3302,3 +3302,16 @@ Same recipe as the n-gram index. `geo.py` and `overture.py` write
 `int(latlng_to_cell(...), 16)` so `SET` encodes it as an integer. A
 search RANGEs the first child of a resolution-8 parent to its last
 child. Documented in `docs/H3.md` and `docs/index.html` (`#ref-h3`).
+
+## 81. Chaos test covers a larger RESP subset, including n-grams [15-08-2026]
+
+*Was `TODO.md` entry 85.*
+
+Workers now pick from strings and TTL, hashes, lists, ordered sets,
+RANGE/COUNT/MIN/MAX/LB/UB, INFO/STATS, n-gram `txt:SET`/`txt:RANGE`
+as in `docs/NGRAM.md`, and H3-style `spatial_data` composites.
+`RANGE "is_is" "is_is~"` does not find `is_is 2`: a lone gram is a
+different encoding from gram-plus-integer. The bounds are
+`"is_is 0"` … `"is_is 999999"`. The n-gram docs were corrected.
+Seed 2, two restarts, six seconds: SET/GET/KEYS and a gram RANGE
+still answer after the storm.

@@ -727,11 +727,21 @@ bool sharded_store::scan(scan_cursor& cursor, const art::scan_spec& spec, const 
 }
 
 void sharded_store::glob(const art::keys_spec& spec, art::value_type pattern, bool by_value,
-                         const leaf_cb& cb) const {
+                         const leaf_cb& cb, const glob_pages *only, glob_pages *hits) const {
     // deliberately unlocked - each shard copies the page it is matching into a working
     // buffer first, so a leaf is only valid inside cb, and cb runs on worker threads
-    for (const auto& t : shards()) {
-        t->glob(spec, pattern, by_value, cb);
+    auto all = shards();
+    if (hits) {
+        hits->clear();
+        hits->resize(all.size());
+    }
+    static const art::glob_page_list none{};
+    for (size_t i = 0; i < all.size(); ++i) {
+        const art::glob_page_list *shard_only = nullptr;
+        if (only)
+            shard_only = (i < only->size()) ? &(*only)[i] : &none;
+        art::glob_page_list *shard_hits = hits ? &(*hits)[i] : nullptr;
+        all[i]->glob(spec, pattern, by_value, cb, shard_only, shard_hits);
     }
 }
 

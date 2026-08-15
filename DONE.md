@@ -3245,3 +3245,21 @@ drains `ctx->stream` for the same reason.
 `test/keysstreamtest.py` checks an empty match, COUNT, 200 keys, a
 pattern, VALUES, and a pipelined GET after KEYS. `asyncpipelinetest.py`
 and `configtest.py` stay green.
+
+## 77. KEYS second walk loads only pages that hit [15-08-2026]
+
+*Was `TODO.md` entry 80.*
+
+`art::glob` takes an optional page-id list and can fill one. The first
+KEYS pass records every page that produced a callback. The second pass
+loads only those ids, through a new `iterate_pages` that copies listed
+pages and does not walk the arena. Pull sources keep their own page
+ids, so `shard::glob` does not forward the list to them.
+
+The list is `vector<size_t>` per shard. A `vector<bool>` or a compressed
+bitmap can replace that later without changing the walk: page ids are
+arena keys, not `0..occupied`, so a bitset sized by max page id would
+count holes.
+
+VALUES still builds the reply as Variables and does not use the list.
+`test/keysstreamtest.py` and `asyncpipelinetest.py` stay green.

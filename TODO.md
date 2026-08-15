@@ -465,3 +465,16 @@
 78. [Done] Git hash on done lines, and a TODO for every code-changing instruction [14-08-2026] Nr 74 a98494b
 
 79. [Done] KEYS writes each key to the socket; auto-flush rolled back [15-08-2026] Nr 76 a98494b
+
+80. [Done] KEYS second walk loads only pages that hit [15-08-2026] Nr 77 29f9160
+
+81. `glob_page_list` is `vector<size_t>` of the page ids that hit. A
+    later `vector<bool>` only wins if it can be indexed by page id.
+    Those ids are arena keys, not `0..occupied`. They run up to
+    `max_allocated_page` and have holes, so a bit per id also counts
+    free and never-used pages. Dense shards shrink; sparse ones can
+    grow past the `size_t` list. A compressed bitmap is the thing that
+    stays small in both cases. Put it behind the typedef when the
+    `size_t` list is actually the cost. Do not change the walk.
+    Settled when `test/keysstreamtest.py` still answers the same keys
+    for an empty match, a selective pattern, and `KEYS *`.

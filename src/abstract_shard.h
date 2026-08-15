@@ -176,7 +176,8 @@ namespace barch {
          * @param value for searching values instead of keys
          * @param cb callback when matching data is found
          */
-        virtual void glob(const art::keys_spec &spec, art::value_type pattern, bool value, const std::function<bool(const art::leaf &)> &cb)  = 0;
+        virtual void glob(const art::keys_spec &spec, art::value_type pattern, bool value, const std::function<bool(const art::leaf &)> &cb,
+                          const art::glob_page_list *only = nullptr, art::glob_page_list *hits = nullptr)  = 0;
         virtual shard_ptr sources() = 0;
         virtual void depends(const std::shared_ptr<abstract_shard> & source) = 0;
         virtual void release(const std::shared_ptr<abstract_shard> & source) = 0;

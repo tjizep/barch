@@ -314,7 +314,8 @@ namespace barch {
         uint64_t bytes_in_free_list() final;
         void depends(const std::shared_ptr<abstract_shard> & source) final;
         void release(const std::shared_ptr<abstract_shard> & source) final;
-        void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  final ;
+        void glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb,
+                  const glob_page_list *only = nullptr, glob_page_list *hits = nullptr)  final ;
         alloc_pair& get_ap() final {
             return *this;
         };

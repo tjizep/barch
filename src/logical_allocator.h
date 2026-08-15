@@ -974,6 +974,40 @@ public:
         }
         for (auto &worker: workers) worker.join();
     }
+    /**
+     * copy and visit only these page ids. used by KEYS for the second walk,
+     * after the first walk recorded which pages matched.
+     */
+    void iterate_pages(barch::latch_t& latch, const heap::vector<size_t>& only,
+                       const std::function<bool(size_t, size_t, const heap::buffer<uint8_t> &)> &found_page) {
+        if (only.empty()) return;
+        opt_iterate_workers = barch::get_iteration_worker_count();
+        unsigned n = opt_iterate_workers ? opt_iterate_workers : 1;
+        std::vector<std::thread> workers{n};
+        std::atomic<bool> stop = false;
+        for (unsigned iwork = 0; iwork < n; iwork++) {
+            workers[iwork] = std::thread([this, &latch, &only, &found_page, &stop, iwork, n]() {
+                for (size_t i = iwork; i < only.size(); i += n) {
+                    if (stop) return;
+                    size_t page = only[i];
+                    if (is_null_base(page)) continue;
+                    unsigned wp = 0;
+                    heap::buffer<uint8_t> pdata;
+                    {
+                        std::shared_lock guard(latch);
+                        if (!is_free(page)) {
+                            wp = retrieve_page(page).write_position;
+                            pdata = heap::buffer{get_page_data({page,0,this->ap}), wp};
+                        }
+                    }
+                    if (wp) {
+                        stop = !found_page(wp, page, pdata);
+                    }
+                }
+            });
+        }
+        for (auto &worker: workers) worker.join();
+    }
 
 public:
     bool save_extra(const arena::hash_arena &copy, const std::string &filename,

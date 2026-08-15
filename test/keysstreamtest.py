@@ -1,5 +1,6 @@
 # KEYS over RESP writes each matching key to the socket as it is found, so the
 # reply does not sit in Variables. The answers still have to be the same keys.
+# A later bitmap behind glob_page_list (TODO 81) must still pass this file.
 import redis
 import barch
 

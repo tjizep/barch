@@ -1031,12 +1031,15 @@ art::node_ptr barch::shard::lower_bound(art::trace_list &trace, art::value_type 
     return art::lower_bound(trace, this, key);
 }
 
-void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb)  {
+void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb,
+                        const glob_page_list *only, glob_page_list *hits)  {
 
     if (dependencies) {
+        // pull sources have their own page ids. a list from this shard
+        // must not constrain or collect theirs.
         dependencies->glob(spec, pattern, value, cb);
     }
-    art::glob(this, spec, pattern, value, cb);
+    art::glob(this, spec, pattern, value, cb, only, hits);
 }
 
 bool barch::shard::is_present(value_type unfiltered_key) {

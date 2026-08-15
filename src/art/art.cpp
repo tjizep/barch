@@ -1597,19 +1597,21 @@ void art::tree::update_trace(int direction) {
 static std::mutex glob_queue{};
 
 void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
-               const std::function<bool(const leaf &l)> &cb) {
+               const std::function<bool(const leaf &l)> &cb,
+               const glob_page_list *only, glob_page_list *hits) {
     try {
         // make sure only one call can use the intensive KEYS without blocking other requests
         std::unique_lock guard(glob_queue);
         int64_t counter = 0;
+        std::mutex hit_lock{};
         // this is a multi-threaded iterator and care should be taken
-        t->get_leaves().iterate_pages(t->latch,
-            [&](size_t size, size_t unused(padd), const heap::buffer<uint8_t> &page)-> bool {
+        auto on_page = [&](size_t size, size_t page, const heap::buffer<uint8_t> &data)-> bool {
                 if (!size) return true;
-                auto i = page.begin();
+                auto i = data.begin();
                 auto e = i + size;
                 uint64_t misses = 0;
                 std::string tmp;
+                bool page_hit = false;
                 while (i != e) {
                     const leaf *l = (const leaf *) i;
                     if (l->key_len() > size) {
@@ -1655,7 +1657,12 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                             }
                         }
                         if (1 == glob::stringmatchlen(pattern, td, 0)) {
+                            page_hit = true;
                             if (!cb(*l)) {
+                                if (hits) {
+                                    std::lock_guard lk(hit_lock);
+                                    hits->push_back(page);
+                                }
                                 return false;
                             }
                         } else {
@@ -1665,8 +1672,16 @@ void art::glob(tree * t, const keys_spec &spec, value_type pattern, bool value,
                     i += l->next_leaf();
                 }
 
+                if (hits && page_hit) {
+                    std::lock_guard lk(hit_lock);
+                    hits->push_back(page);
+                }
                 return true;
-            });
+            };
+        if (only)
+            t->get_leaves().iterate_pages(t->latch, *only, on_page);
+        else
+            t->get_leaves().iterate_pages(t->latch, on_page);
     } catch (std::exception &e) {
         barch::err({e.what(), __FILE__, __LINE__});
         ++statistics::exceptions_raised;

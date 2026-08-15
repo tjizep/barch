@@ -258,8 +258,9 @@ namespace barch {
          * before matching, so a leaf handed to cb is valid only inside the callback.
          * cb runs on worker threads and must serialise itself.
          */
+        typedef heap::vector<art::glob_page_list> glob_pages;
         void glob(const art::keys_spec& spec, art::value_type pattern, bool by_value,
-                  const leaf_cb& cb) const;
+                  const leaf_cb& cb, const glob_pages *only = nullptr, glob_pages *hits = nullptr) const;
 
         // ---- scan ----
 

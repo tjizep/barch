@@ -233,6 +233,7 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     const uint64_t memory_ceiling = barch::get_max_module_memory();
     bool stopped_early = false;
     auto count_one = [&](const art::leaf& l) -> bool {
+
         auto key = l.get_key();
         if (!key.size || !art::is_container_lead(*key.bytes)) {
             ++replies;
@@ -265,7 +266,8 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     // runs twice: once to count, then once to send. VALUES stays on the
     // result stack until it gets the same path.
     if (!by_value && call.can_write_socket()) {
-        store.glob(spec, pattern, by_value, count_one);
+        barch::sharded_store::glob_pages pages;
+        store.glob(spec, pattern, by_value, count_one, nullptr, &pages);
         if (stopped_early) {
             barch::err({"KEYS stopped at the memory ceiling; the count is short",
                         __FILE__, __LINE__});
@@ -300,7 +302,7 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
                 return false;
             }
             return true;
-        });
+        }, &pages, nullptr);
         Variable pad{nullptr};
         while (replies < n) {
             if (!call.write_socket(pad)) {

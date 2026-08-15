@@ -300,8 +300,14 @@ namespace art {
     /**
      * glob match all the key's except the deleted ones
      * This is a multi threaded iterator and care should be taken
+     *
+     * only: walk these page ids on this tree. null walks every page.
+     * hits: append each page that produced a callback. size_t for now;
+     * a bitmap can replace this later without changing the walk - TODO 81.
      */
-    void glob(tree *t, const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb);
+    typedef heap::vector<size_t> glob_page_list;
+    void glob(tree *t, const keys_spec &spec, value_type pattern, bool value, const std::function<bool(const leaf &)> &cb,
+              const glob_page_list *only = nullptr, glob_page_list *hits = nullptr);
 
     /**
      * match all values agains the

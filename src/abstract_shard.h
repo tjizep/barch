@@ -23,7 +23,9 @@ namespace barch {
         typedef std::shared_ptr<abstract_shard> shard_ptr;
         typedef abstract_shard* shard_ref;
 
-        typedef std::vector<bool> bloom_t;
+        // bit-packed, same specialization as std::vector<bool>, through the
+        // tracking allocator. four million bits, 512 KiB, when the filter is on.
+        typedef heap::vector<bool> bloom_t;
         bloom_t bloom{};
         void add_bloom(art::value_type key) {
             if (static_bloom_size != bloom.size()) return;
@@ -40,15 +42,14 @@ namespace barch {
             return bloom[ash % static_bloom_size] ;
         }
         void create_bloom(bool enable) {
-            bloom_t ebl;
-            bloom = std::move(ebl);
+            opt_static_bloom_filter = enable;
             if (enable) {
-                opt_static_bloom_filter = true;
-                bloom.resize(static_bloom_size);
-            }else {
-                opt_static_bloom_filter = false;
+                if (bloom.size() != static_bloom_size)
+                    bloom.resize(static_bloom_size);
+            } else if (!bloom.empty()) {
+                bloom_t ebl;
+                bloom = std::move(ebl);
             }
-
         }
     private:
         bool opt_static_bloom_filter = barch::get_static_bloom_filter();

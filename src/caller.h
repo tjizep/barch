@@ -133,6 +133,20 @@ public:
     virtual int start_array() = 0;
     virtual int end_array() = 0;
     /**
+     * KEYS (and later VALUES) can send one RESP value to the connection now
+     * instead of keeping it on the result stack. false means there is no
+     * socket: keep using push().
+     */
+    [[nodiscard]] virtual bool can_write_socket() const {
+        return false;
+    }
+    virtual bool write_socket(const Variable&) {
+        return false;
+    }
+    virtual bool write_socket_array(size_t) {
+        return false;
+    }
+    /**
      * a map and a set are arrays that carry their own RESP3 wire type. On a RESP2
      * connection they are written as a flat array, so the default just opens one and
      * a reply builder that cannot tell them apart stays correct.

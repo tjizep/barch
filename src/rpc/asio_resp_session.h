@@ -5,6 +5,7 @@
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
 #include <cctype>
+#include <mutex>
 #include <utility>
 
 #include "abstract_session.h"
@@ -35,6 +36,7 @@ namespace barch {
             caller.info_fun = [this]() -> std::string {
                 return get_info(socket_);
             };
+            bind_socket_writer();
             //asio::socket_base::send_buffer_size option(65536); // or larger
             //socket_.set_option(option);
 
@@ -48,6 +50,7 @@ namespace barch {
             caller.info_fun = [this]() -> std::string {
                 return get_info(socket_);
             };
+            bind_socket_writer();
             ++statistics::repl::redis_sessions;
         }
 
@@ -143,7 +146,7 @@ namespace barch {
                     redis::rwrite(local_stream, error{local_caller.errors[0]});
                 else
                     redis::rwrite(local_stream, error{"null error"});
-            } else {
+            } else if (!local_caller.reply_sent) {
                 redis::rwrite(local_stream, local_caller.results, local_caller.get_protocol());
             }
         }
@@ -325,6 +328,39 @@ namespace barch {
                 resume_after_blocks();
             });
         }
+        /**
+         * KEYS writes each encoded item through here. asio::write puts the
+         * bytes on the socket now, which is what keeps the reply off the
+         * result stack. The mutex is the glob workers: they call in together
+         * and one write must finish before the next starts.
+         *
+         * Anything already encoded for this connection (a GET that ran in
+         * the same pipeline, before KEYS) has to leave first, or KEYS
+         * overtakes it on the wire.
+         */
+        bool write_socket_now(const char* data, size_t n) {
+            if (!n) return true;
+            std::error_code ec;
+            asio::write(socket_, asio::buffer(data, n), ec);
+            if (ec) return false;
+            net_stat stat;
+            stream_write_ctr += n;
+            bytes_sent += n;
+            return true;
+        }
+        void drain_stream(vector_stream& s) {
+            if (s.empty()) return;
+            write_socket_now((const char*) s.buf.data(), s.buf.size());
+            s.clear();
+        }
+        void bind_socket_writer() {
+            caller.write_socket_bytes = [this](const char* data, size_t n) -> bool {
+                std::lock_guard lk(socket_write_mutex);
+                drain_stream(stream);
+                return write_socket_now(data, n);
+            };
+        }
+
         void do_write(const vector_stream& local_stream) {
 
             if (local_stream.empty()) return;
@@ -359,6 +395,13 @@ namespace barch {
             }
             asio::post(workers, [this, batch, at]() { // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
                 auto ctx = (*batch)[at];
+                // replies encoded before this call (a sync GET in the same
+                // pipeline) live on ctx->stream. they have to hit the socket
+                // before KEYS writes, or the client sees KEYS first.
+                if (!ctx->stream.empty()) {
+                    std::lock_guard lk(socket_write_mutex);
+                    drain_stream(ctx->stream);
+                }
                 auto fn = barch_functions->find(ctx->cn); // not `ic`: that is a member
                 if (fn != barch_functions->end()) {
                     auto current = now();
@@ -472,6 +515,7 @@ namespace barch {
         redis::redis_parser parser{};
         rpc_caller caller{};
         vector_stream stream{};
+        std::mutex socket_write_mutex{};
         // an asynchronous batch that stopped on a blocking command, and how far it got.
         // Set while the chain is suspended and cleared as it is picked back up.
         asynch_batch_ptr pending_batch{};

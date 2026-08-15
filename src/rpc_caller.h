@@ -16,6 +16,8 @@
 #include "sastam.h"
 #include "auth_api.h"
 #include "rpc/barch_functions.h"
+#include "rpc/redis_parser.h"
+#include "vector_stream.h"
 
 struct rpc_caller : caller {
     barch::key_space_ptr ks {get_default_ks()};
@@ -41,6 +43,46 @@ struct rpc_caller : caller {
     // the RESP version this connection settled on with HELLO. the caller lives for the
     // life of the session, so the negotiation sticks for every command that follows
     int protocol {2};
+
+    // the session sets this to a blocking write on its socket. null means the
+    // reply stays in results and is written after the call, as it always was.
+    std::function<bool(const char*, size_t)> write_socket_bytes;
+    // true once write_socket* has put bytes on the socket. write_result must
+    // not emit a second reply (an empty results vector is a RESP null).
+    bool reply_sent{false};
+    // EXEC collects inner replies as Variables. KEYS must not write the socket
+    // then, or the items leave the EXEC array.
+    bool collecting_exec{false};
+
+    [[nodiscard]] bool can_write_socket() const override {
+        return (bool) write_socket_bytes && !call_buffering && !collecting_exec;
+    }
+
+    bool write_encoded(const vector_stream& encoded) {
+        if (encoded.empty()) {
+            reply_sent = true;
+            return true;
+        }
+        if (!write_socket_bytes((const char*) encoded.buf.data(), encoded.buf.size())) {
+            return false;
+        }
+        reply_sent = true;
+        return true;
+    }
+
+    bool write_socket(const Variable& v) override {
+        if (!can_write_socket()) return false;
+        vector_stream encoded;
+        redis::rwrite(encoded, v, protocol);
+        return write_encoded(encoded);
+    }
+
+    bool write_socket_array(size_t n) override {
+        if (!can_write_socket()) return false;
+        vector_stream encoded;
+        redis::rwrite_header(encoded, '*', n);
+        return write_encoded(encoded);
+    }
 
     void create(const std::string& h, uint_least16_t port) {
         this->host = barch::repl::create(h,port);
@@ -497,6 +539,7 @@ struct rpc_caller : caller {
         errors.clear();
         results.clear();
         temp.clear();
+        reply_sent = false;
         auto cr = call_route(params);
         if (cr.net_error == 0) {
             return cr.call_error;
@@ -638,6 +681,7 @@ struct rpc_caller : caller {
 
     void finish_call_buffer() override {
         call_buffering = false;
+        collecting_exec = true;
         buffered_results.clear();
         buffered_errors.clear();
         auto original = ks;
@@ -662,6 +706,7 @@ struct rpc_caller : caller {
         results = std::move(buffered_results);
         ks = original;
         commands.clear();
+        collecting_exec = false;
     }
     void sort_pushed_results() override {
         std::sort(results.begin(), results.end());

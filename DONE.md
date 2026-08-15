@@ -3140,3 +3140,108 @@ sharded, because the table belongs to that method.
 A later method that can move a key returns true here and inherits the four
 freezes. `routes_move()` stays the route-then-lock-then-route-again check.
 The two happen to agree today. They answer different questions.
+
+## 73. bloom_t is heap::vector<bool>; the substitution does not break tests [14-08-2026]
+
+*Was `TODO.md` entry 70.*
+
+The entry said set `bloom_t` to `heap::vector<bool>` and some of the tests fail,
+and asked which and why: a different `operator[]`, a size that no longer matches
+`static_bloom_size`, a filter that answers missing for a live key, or memory
+the allocator counts that `std::vector<bool>` never did.
+
+None of those happened. `heap::vector<bool>` is `std::vector<bool, heap::allocator<bool>>`.
+That is still the bit-packed specialization. `operator[]` is still a proxy over a
+word. `size()` is still a bit count. `create_bloom` still resizes to
+`static_bloom_size` (4 194 304 bits, 512 KiB per shard). `hash_arena` already
+stores the same thing as `heap::std_vector<bool>`.
+
+The allocator rebinds to `unsigned long` for the packed words. `heap::allocate`
+and `heap::free` see matching sizes, so the canaries in `heap_checks` survive
+turning the filter on and off. The bytes are now in `heap::allocated`. They
+were not, with `std::allocator`. That is the point of the switch: a filter
+that is on is 512 KiB per shard, and the tracker should see it.
+
+`configtest.py` turns the filter on and off. A probe of a thousand keys with
+the filter on read every one of them back and rejected a miss. `rangeroutetest.py`,
+`rangeshardtest.py`, `envconfigtest.py`, `shardstatstest.py` and `redisinfotest.py`
+were green. The failures the entry remembered were not reproduced. The typedef
+stays on `heap::vector<bool>`.
+
+## 74. Git hash on done lines, and a TODO for every code-changing instruction [14-08-2026]
+
+*Was `TODO.md` entry 78.*
+
+Two rules, written into the TODO/DONE section of `CLAUDE.md`.
+
+A `[Done]` line now carries `git rev-parse --short HEAD` after the DONE number.
+Nothing is committed here, so that hash is the tree the working copy sits on
+when the entry is closed, not a commit of the change. Older done lines have
+no hash and are left as they are.
+
+A new `TODO.md` entry is opened for every instruction that will change the
+tree, unless one already covers that work. It is written before the edits.
+Questions, reviews, and planning that do not change the tree do not get one.
+
+## 75. Auto-flush of the current RESP array level [14-08-2026]
+
+*Was `TODO.md` entry 67.*
+
+The entry wanted `flush()` on `caller` so a reply did not have to sit in
+Variables until the command finished. The first cut encoded into another
+buffer on the caller and only copied it at `write_result`. That is not a
+flush. A flush puts the bytes on the path `write_result` already sends:
+the session stream.
+
+RESP2 still needs `*N` first. The open array reserves a fixed-width header
+on that stream, appends encoded elements as it hits the limit, and patches
+the count when the level closes. Nested arrays write the parent's pending
+items first so the child cannot overtake them. SCAN's cursor stays in
+`results` and is prepended after the array has already gone out.
+
+`flush_interface` is the place those bytes go. Auto-flush is off when the
+pointer is null, which is why SWIG and the valkey module never encode early.
+`asio_resp_session` implements it and points it at the buffer that
+`write_result` already uses. An asynchronous call gets its own flusher on
+its own stream. The limit is read at the start of each `call()` and is not
+changed by a CONFIG SET mid-call. MULTI/EXEC turns the limit off for the
+inner calls, so their replies stay as Variables for the EXEC array.
+
+The default is 64. 0 disables it. A flush also runs when
+`heap::allocated` is above `pre_evict_thresh` of max memory. Only the open
+array is flushed, not the top-level `results` vector: SCAN keeps the cursor
+there and patches it with `set_string(0)` after the array closes.
+
+`test/autoflushtest.py` checks KEYS at 64, 0 and 1, HGETALL at 1, and SCAN
+at 1. `configtest.py` and `rangeroutetest.py` stay green with the default
+on.
+
+## 76. KEYS writes each key to the socket [15-08-2026]
+
+*Was `TODO.md` entry 79.*
+
+Auto-flush (DONE 75) encoded into the session `vector_stream` and still
+only called `asio::async_write` after the command. That is not a flush.
+The mechanism was also general: every `push` on every command, a reserved
+`*N` header, SCAN cursor patching, MULTI suppression. It was rolled back
+in full. `flush_interface.h`, `resp_max_auto_flush`, the rpc_caller flush
+stack, `caller::flush`, and `test/autoflushtest.py` are gone.
+
+KEYS now asks the caller whether it can write the socket. `rpc_caller`
+does that only when the RESP session has given it a function that calls
+`asio::write` on the connection. SWIG and the valkey module still build
+the reply as Variables.
+
+RESP2 needs `*N` first, so the walk runs twice: count, write the header,
+then write each key as it is found. One Variable lives at a time. If the
+second walk finds fewer keys than the count, the missing slots are null,
+so the client is not left waiting on a short array. VALUES is unchanged.
+
+A pipeline that has a GET before KEYS already has that GET encoded in the
+session stream. KEYS has to write that stream to the socket before it
+writes its own header, or the client sees KEYS first. `run_asynch_batch`
+drains `ctx->stream` for the same reason.
+
+`test/keysstreamtest.py` checks an empty match, COUNT, 200 keys, a
+pattern, VALUES, and a pipelined GET after KEYS. `asyncpipelinetest.py`
+and `configtest.py` stay green.

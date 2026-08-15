@@ -232,32 +232,88 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     heap::string_set named;
     const uint64_t memory_ceiling = barch::get_max_module_memory();
     bool stopped_early = false;
-    if (spec.count) {
-        store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
-            auto key = l.get_key();
-            if (!key.size || !art::is_container_lead(*key.bytes)) {
-                ++replies;
-                return true;
-            }
-            std::string name = encoded_container_name(key);
-            if (name.empty()) return true;          // an ordered set's member index
-            std::lock_guard lk(vklock);
-            if (named.emplace(std::move(name)).second) {
-                ++replies;
-                // only a new name grows the set, so that is the only place the ceiling can
-                // be crossed by this walk
-                if (get_total_memory() >= memory_ceiling) {
-                    stopped_early = true;
-                    return false;
-                }
-            }
+    auto count_one = [&](const art::leaf& l) -> bool {
+        auto key = l.get_key();
+        if (!key.size || !art::is_container_lead(*key.bytes)) {
+            ++replies;
             return true;
-        });
+        }
+        std::string name = encoded_container_name(key);
+        if (name.empty()) return true;          // an ordered set's member index
+        std::lock_guard lk(vklock);
+        if (named.emplace(std::move(name)).second) {
+            ++replies;
+            // only a new name grows the set, so that is the only place the ceiling can
+            // be crossed by this walk
+            if (get_total_memory() >= memory_ceiling) {
+                stopped_early = true;
+                return false;
+            }
+        }
+        return true;
+    };
+    if (spec.count) {
+        store.glob(spec, pattern, by_value, count_one);
         if (stopped_early) {
             barch::err({"KEYS stopped at the memory ceiling; the count is short",
                         __FILE__, __LINE__});
         }
         return call.push_ll(replies);
+    }
+    // KEYS over RESP writes each key to the socket as it is found, so the
+    // reply does not sit in Variables. RESP2 needs *N first, so the walk
+    // runs twice: once to count, then once to send. VALUES stays on the
+    // result stack until it gets the same path.
+    if (!by_value && call.can_write_socket()) {
+        store.glob(spec, pattern, by_value, count_one);
+        if (stopped_early) {
+            barch::err({"KEYS stopped at the memory ceiling; the count is short",
+                        __FILE__, __LINE__});
+        }
+        const int64_t n = replies.load();
+        if (!call.write_socket_array((size_t) n)) {
+            return call.push_error("failed to write KEYS header");
+        }
+        named.clear();
+        replies = 0;
+        stopped_early = false;
+        store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
+            if (replies >= n) return false;
+            auto key = l.get_key();
+            if (!key.size || !art::is_container_lead(*key.bytes)) {
+                Variable item = encoded_key_as_variant(key);
+                std::lock_guard lk(vklock);
+                if (!call.write_socket(item)) return false;
+                ++replies;
+                return true;
+            }
+            std::string name = encoded_container_name(key);
+            if (name.empty()) return true;
+            std::lock_guard lk(vklock);
+            if (!named.emplace(name).second) return true;
+            std::string bulk = "$";
+            bulk += name;
+            if (!call.write_socket(Variable{std::move(bulk)})) return false;
+            ++replies;
+            if (get_total_memory() >= memory_ceiling) {
+                stopped_early = true;
+                return false;
+            }
+            return true;
+        });
+        Variable pad{nullptr};
+        while (replies < n) {
+            if (!call.write_socket(pad)) {
+                // a header already went out; an error here would be a second reply
+                return call.ok();
+            }
+            ++replies;
+        }
+        if (stopped_early) {
+            barch::err({"KEYS stopped at the memory ceiling; the reply is short",
+                        __FILE__, __LINE__});
+        }
+        return call.ok();
     }
     /* Reply with the matching items. */
     call.start_array();

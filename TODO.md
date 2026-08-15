@@ -440,54 +440,13 @@
 
 66. [Done] The member index had no empty component, so it collided with a real name [10-08-2026] Nr 62
 
-67. A flush() on the caller interface, so a reply does not have to fit in memory.
-
-    Every reply is assembled whole before any of it is sent. That is behind most of the
-    memory limits barch has: KEYS and SCAN buffer the entire answer, HRANDFIELD and
-    ZRANDMEMBER cap a negative count at a million because the reply would be built before
-    it was written, LCS holds its whole table, and the glob's memory ceiling (DONE 63)
-    exists to stop a walk that would otherwise be bounded only by the key space. redis has
-    none of these because it writes as it goes.
-
-    What is wanted is `flush()` on `caller`: push what has accumulated to the socket and
-    carry on. The rpc_caller writes to a socket and can do it; vk_caller hands its reply to
-    valkey and probably cannot, so the interface has to allow a flush that does nothing.
-
-    The obstacle is the array length, and it is worth understanding before starting. RESP2
-    prefixes an aggregate with its element count, so nothing inside an array can be sent
-    until the count is known - which is exactly what these commands do not know until they
-    finish. Three ways out, in the order they are worth trying:
-
-      - **RESP3 streamed aggregates.** `*?` opens an array of unknown length and `.` closes
-        it. A connection that has said HELLO 3 can be streamed to today, and one that has
-        not cannot - so this is per connection and the buffering path stays for RESP2.
-      - **Flush between top level replies.** Commands that answer with many independent
-        items rather than one array - the export, replication catch up - can flush at each
-        boundary with no protocol change at all.
-      - **Count first, then stream.** Two passes over the data: one to count, one to send.
-        Doubles the walk and is only sane where the walk is cheap relative to the reply.
-
-    Whichever lands, `caller::flush()` is the thing to add first, because the commands can
-    then be converted one at a time and the ones that are not converted keep working.
+67. [Done] Auto-flush of the current RESP array level [14-08-2026] Nr 75 a98494b
 
 68. [Done] A failed EXPORT leaves an empty file where the old one was [12-08-2026] Nr 64
 
 69. [Done] Per shard statistics, clear and load no longer rewrite the globals [12-08-2026] Nr 63
 
-70. `bloom_t` in `abstract_shard.h` is `std::vector<bool>`. Set it to `heap::vector<bool>`
-    and some of the tests fail.
-
-    The bloom is a presence filter on the shard: `add_bloom` / `is_bloom` hash a key and
-    set or read one bit. `create_bloom` replaces the vector and, when enabled, resizes it
-    to `static_bloom_size`. `std::vector<bool>` is the bit-packed specialization with
-    proxy references. `heap::vector<bool>` is used elsewhere (`acl`, command categories)
-    as a real sequence of bools, and it goes through the tracking allocator.
-
-    What is uncertain is why that substitution breaks tests: a different `operator[]`,
-    a size or resize that no longer matches `static_bloom_size`, a filter that then
-    answers "missing" for a key that is there, or something the allocator counts that
-    `std::vector<bool>` never did. Settle by reproducing with the typedef changed, noting
-    which tests fail, and tracing one failure through `is_bloom` / `add_bloom`.
+70. [Done] bloom_t is heap::vector<bool>; the substitution does not break tests [14-08-2026] Nr 73
 
 71. [Done] The command index in docs/index.html does not know the commands from DONE 65 [13-08-2026] Nr 66
 
@@ -502,3 +461,7 @@
 76. [Done] LOAD and SAVEALL raced the range rebalancer [14-08-2026] Nr 71
 
 77. [Done] Stateful sharding is a key space check, not a range-sharding special case [14-08-2026] Nr 72
+
+78. [Done] Git hash on done lines, and a TODO for every code-changing instruction [14-08-2026] Nr 74 a98494b
+
+79. [Done] KEYS writes each key to the socket; auto-flush rolled back [15-08-2026] Nr 76 a98494b

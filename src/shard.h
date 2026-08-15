@@ -199,6 +199,8 @@ namespace barch {
             abstract_shard::opt_evict_all_keys_lru = get_evict_allkeys_lru();
             abstract_shard::opt_evict_volatile_keys_lru = get_evict_volatile_lru();
             barch::repl::clear_route(shard_number);
+            if (has_static_bloom_filter())
+                create_bloom(true);
             start_maintain();
 
         }
@@ -206,6 +208,8 @@ namespace barch {
         shard(const std::string& name, uint64_t size, size_t shard_number) :
         tree{name, shard_number, root,size}{
             barch::repl::clear_route(shard_number);
+            if (has_static_bloom_filter())
+                create_bloom(true);
             start_maintain();
 
         }

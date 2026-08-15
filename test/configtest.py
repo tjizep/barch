@@ -81,7 +81,7 @@ NEW_VALUE = {
     "rpc_client_max_wait_ms": "15000",
     "rpc_max_buffer": "262144",
     "save_interval": "600000",
-    "static_bloom_filter": "on",
+    "static_bloom_filter": "off",
     "tls_pem_certificate_chain_file": "other.crt",
     "tls_private_key_file": "other.key",
     "tls_tmp_dh_file": "other.dh",
@@ -142,6 +142,8 @@ assert not missing_value, f"no test value chosen for {sorted(missing_value)}"
 for name in sorted(EXPECTED - NOT_WRITTEN):
     original = everything[name]
     wanted = NEW_VALUE[name]
+    if wanted == original and wanted in ("on", "off"):
+        wanted = "off" if original == "on" else "on"
     assert wanted != original, \
         f"the test value for {name} is already its current value, so it proves nothing"
 

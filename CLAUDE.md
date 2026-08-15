@@ -49,6 +49,12 @@ problem even when the changes happen to be harmless.
 `TODO.md` holds open questions and unverified assumptions as a numbered list. Each
 entry says what is uncertain and what would settle it.
 
+Open a new `TODO.md` entry for every instruction from the user that will change
+the tree, unless an existing entry already covers that work. Write the entry
+before the edits: what was asked, and what would settle it. Questions, reviews,
+and planning that do not change the tree do not get one. Do not open a second
+entry for work that already has a number.
+
 When an entry is finished, do not delete it and do not leave the detail in `TODO.md`:
 
 1. Append the full write up to `DONE.md` as the next numbered entry. Record what was
@@ -57,14 +63,18 @@ When an entry is finished, do not delete it and do not leave the detail in `TODO
 2. Replace the `TODO.md` entry, keeping its original number, with a single line:
 
    ```
-   N. [Done] <short description> [DD-MM-YYYY] Nr <number in DONE.md>
+   N. [Done] <short description> [DD-MM-YYYY] Nr <number in DONE.md> <git hash>
    ```
 
    for example:
 
    ```
-   5. [Done] Out of bounds read in both glob matchers [26-07-2026] Nr 1
+   5. [Done] Out of bounds read in both glob matchers [26-07-2026] Nr 1 a98494b
    ```
+
+   The hash is `git rev-parse --short HEAD` at the moment the entry is closed.
+   Nothing is committed here, so that is the tree the working copy sits on, not
+   a commit of the change. Older done lines have no hash; do not backfill them.
 
 Numbers in `TODO.md` stay put once assigned, so the remaining entries are never
 renumbered and references to them keep working. `DONE.md` numbering is independent

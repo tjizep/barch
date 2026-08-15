@@ -323,7 +323,7 @@ sudo cmake --install build --component barchlua   <span class="c"># luajit → /
 </tbody>
 </table>
 
-<div class="notice warning"><b>Eviction and OOM behaviour are configuration-coupled.</b> With no eviction policy and <code>max_memory_bytes</code> reached, inserts are rejected and counted in <code>oom_avoided_inserts</code>. They do not raise a client error. Watch that counter; see <a href="#errors">Error Model</a>.</div>
+<div class="notice warning"><b>Eviction and OOM behaviour are configuration-coupled.</b> With no eviction policy and <code>max_memory_bytes</code> reached, inserts throw <code>not enough memory</code> and increment <code>oom_avoided_inserts</code>. The RESP session and the valkey caller turn that into an error reply. See <a href="#errors">Error Model</a>.</div>
 <div class="notice note"><b>Per-space options are read once.</b> See <a href="#ref-keyspaces">Named Key Spaces</a> for the full per-space model. A keyspace reads its <code>&lt;name&gt;.*</code> options when first built in a process and caches them for the process lifetime. Set them before constructing the first handle to the space; changing <code>shards</code> or <code>range_sharded</code> for an open space requires a restart.</div>
 
 <div class="tabs">
@@ -381,13 +381,13 @@ conf:set(<span class="s">"test.ordered"</span>, <span class="s">"1"</span>)</pre
 <tr><td>Command denied by ACL category</td><td><code>-ERR</code> permission denied</td><td>n/a</td><td><code>403 Forbidden</code></td></tr>
 <tr><td>Conditional write lost (<code>ADD</code> on existing key, <code>NX</code>/<code>XX</code>/<code>GT</code>/<code>LT</code> flag not satisfied)</td><td><code>(nil)</code> / <code>0</code> — not an error reply</td><td>false-y <code>Value</code></td><td><code>409 Conflict</code></td></tr>
 <tr><td>Client exceeding RPC buffer or call deadline (<code>rpc_client_max_wait_ms</code>)</td><td>timeout / connection error</td><td>exception after deadline</td><td><code>429 Rate Limited</code> — apply exponential backoff; do not tighten the deadline</td></tr>
-<tr><td>Memory ceiling reached, no eviction policy</td><td>write silently rejected; <code>oom_avoided_inserts</code> increments</td><td>write rejected; counter increments</td><td><code>503 Overloaded</code> — shed writes, keep serving reads</td></tr>
+<tr><td>Memory ceiling reached, no eviction policy</td><td><code>-ERR not enough memory</code>; <code>oom_avoided_inserts</code> increments</td><td>exception / error <code>Value</code>; counter increments</td><td><code>503 Overloaded</code> — shed writes, keep serving reads</td></tr>
 <tr><td>Replication route unreachable</td><td>counted in <code>attempted_routes</code> − <code>routes_succeeded</code>; local write proceeds</td><td>same</td><td><code>503</code> at the peer, invisible to the caller</td></tr>
 </tbody>
 </table>
 
 <div class="notice warning"><b>409-class outcomes are data, not faults.</b> A failed <code>NX</code> write and an <code>ADD</code> against an existing key return nil/zero by design. Gateways must translate on reply shape. Matching on RESP error strings alone will miss every conflict.</div>
-<div class="notice warning"><b>503-class outcomes are silent at the call site.</b> An over-ceiling insert without an eviction policy does not raise. Alert on <code>oom_avoided_inserts</code> and <code>request_errors</code> (see <a href="#ref-stats">Statistics</a>). Client exceptions will not show it.</div>
+<div class="notice warning"><b>503-class outcomes are errors at the call site.</b> An over-ceiling insert without an eviction policy raises <code>not enough memory</code>. Alert on that reply and on <code>oom_avoided_inserts</code> (see <a href="#ref-stats">Statistics</a>).</div>
 
 <h2>Retry discipline</h2>
 <ul>
@@ -1390,7 +1390,7 @@ kv.set(<span class="s">"k"</span>, <span class="s">"v"</span>)
 <li><code>-ERR invalid integer or overflow</code> / <code>-ERR not a valid integer</code> — counter on non-numeric value → 400.</li>
 <li>nil from <code>ADD</code>, <code>0</code> from a flagged <code>EXPIRE</code> — conditional lost → 409-class, not a RESP error.</li>
 <li>Timeout past <code>rpc_client_max_wait_ms</code> on huge <code>RANGE</code>/<code>KEYS</code> replies → 429-class; narrow the glob or paginate with <code>UB</code>.</li>
-<li>Silent write rejection at the memory ceiling → 503-class; watch <code>oom_avoided_inserts</code>.</li>
+<li><code>-ERR not enough memory</code> at the memory ceiling → 503-class; watch <code>oom_avoided_inserts</code>.</li>
 </ul>
 </div>
 </div>
@@ -2439,7 +2439,7 @@ after, s = r.execute_command(<span class="s">"HEAPBYTES"</span>), stats()
 <tr><td>—</td><td><code>calls(name)</code></td><td>invocation count of one named api function</td></tr>
 </tbody>
 </table>
-<div class="notice warning"><b>Alert set.</b> Page on: <code>oom_avoided_inserts</code> increasing (503-class silent write shedding), <code>out_queue_size</code> growth (replication lag), <code>attempted_routes − routes_succeeded</code> (dead peers), <code>request_errors</code> and <code>exceptions_raised</code> deltas.</div>
+<div class="notice warning"><b>Alert set.</b> Page on: <code>oom_avoided_inserts</code> increasing (503-class write shedding, now a client error), <code>out_queue_size</code> growth (replication lag), <code>attempted_routes − routes_succeeded</code> (dead peers), <code>request_errors</code> and <code>exceptions_raised</code> deltas.</div>
 </div>
 </div>
 

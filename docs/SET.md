@@ -7,7 +7,9 @@ SET key value [[NX|nx] | [XX|xx]] [GET|get] [[EX|ex] seconds | [PX|px] milliseco
 #### Time Complexity O(1) (O(k) where k represents keylength)
 
 Set a key in floating point, integer or string format. If the key exists the value is updated. 
-If the key does not it is added.
+If the key does not it is added. If `max_memory_bytes` is reached and nothing is
+evicted, SET raises `not enough memory` instead of answering OK and storing
+nothing.
 
 #### Options 
 The SET command supports a set of options that modify its behavior:

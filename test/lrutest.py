@@ -17,7 +17,10 @@ for i in range(1):
     print(barch.size())
 assert(barch.size() < MAXK)
 for i in range(MAXK+1,MAXK + 100000):
-    k.set(str(i),str(i))
+    try:
+        k.set(str(i),str(i))
+    except Exception:
+        pass
 
 stats = barch.stats()
 print(stats.oom_avoided_inserts)

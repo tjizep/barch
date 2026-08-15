@@ -1199,9 +1199,8 @@ RECURSE_SEARCH:;
  * @arg key the key
  * @arg value opaque value.
  * @arg fc os the callback when node is replaced
- * @return true if the item was inserted or replaced, false if no memory
- * the old value pointer is returned.
- * exceptions may happen
+ * @return true if the item was inserted or replaced
+ * throws on not enough memory or a value that does not fit
  */
 bool art::insert
 ( art::tree *t
@@ -1210,7 +1209,6 @@ bool art::insert
  , art::value_type value
  , bool replace
  , const art::NodeResult &fc) {
-    try {
         int old_val = 0;
         if (key.size + value.size > maximum_allocation_size) {
             throw_exception<std::runtime_error>("value too large");
@@ -1236,11 +1234,6 @@ bool art::insert
             free_leaf_node(old);
         }
         return true;
-    } catch (std::exception &e) {
-        barch::err({e.what(), __FILE__, __LINE__});
-        ++statistics::exceptions_raised;
-    }
-    return false;
 }
 
 bool art::insert(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
@@ -1260,18 +1253,13 @@ bool art::insert(art::tree *t, const art::key_options &options, art::value_type 
 void art::insert_no_replace(art::tree *t, const art::key_options &options, art::value_type key, art::value_type value,
                            const art::NodeResult &fc) {
     ++statistics::insert_ops;
-    try {
-        if (key.size + value.size > maximum_allocation_size) {
-            throw_exception<std::runtime_error>("value too large");
-        }
-        int old_val = 0;
-        art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0,fc);
-        if (r.null()) {
-            t->size++;
-        }
-    } catch (std::exception &e) {
-        barch::err({e.what(), __FILE__, __LINE__});
-        ++statistics::exceptions_raised;
+    if (key.size + value.size > maximum_allocation_size) {
+        throw_exception<std::runtime_error>("value too large");
+    }
+    int old_val = 0;
+    art::node_ptr r = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, 0,fc);
+    if (r.null()) {
+        t->size++;
     }
 }
 

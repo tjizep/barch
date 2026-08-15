@@ -756,9 +756,8 @@ bool barch::shard::hash_erase(logical_address lad) {
 
 bool barch::shard::hash_insert(const key_options &options, value_type key, value_type value, bool update, const NodeResult &fc) {
     if (statistics::logical_allocated > get_max_module_memory()) {
-        // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
-        return false;
+        throw_exception<std::runtime_error>("not enough memory");
     }
     ++inserts;
     ++statistics::insert_ops;
@@ -797,10 +796,8 @@ bool barch::shard::hash_insert(const key_options &options, value_type key, value
 
 bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfiltered_key, value_type value, bool update, const NodeResult &fc) {
     if (statistics::logical_allocated > get_max_module_memory()) {
-        // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
-        throw_exception<std::runtime_error>("could not add key because of low memory");
-        return false;
+        throw_exception<std::runtime_error>("not enough memory");
     }
 
     std::string tk;
@@ -826,10 +823,8 @@ bool barch::shard::insert(value_type key, value_type value, bool update) {
 }
 bool barch::shard::update(value_type unfiltered_key, const std::function<node_ptr(const node_ptr &leaf)> &updater) {
     if (statistics::logical_allocated > get_max_module_memory()) {
-        // do not add data if memory limit is reached
         ++statistics::oom_avoided_inserts;
-        throw_exception<std::runtime_error>("could not update key because of low memory");
-        return false;
+        throw_exception<std::runtime_error>("not enough memory");
     }
     // own the filtered bytes: the updater is caller supplied and the ordered path
     // below re-enters the tree, either of which could otherwise reuse a shared buffer

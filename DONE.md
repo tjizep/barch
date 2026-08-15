@@ -3315,3 +3315,16 @@ different encoding from gram-plus-integer. The bounds are
 `"is_is 0"` … `"is_is 999999"`. The n-gram docs were corrected.
 Seed 2, two restarts, six seconds: SET/GET/KEYS and a gram RANGE
 still answer after the storm.
+
+## 82. SET at the memory ceiling raises not enough memory [15-08-2026]
+
+*Was `TODO.md` entry 86.*
+
+`hash_insert` used to return false when `logical_allocated` was over
+`max_memory_bytes`, and `art::insert` used to catch the failure and
+return false. SET ignored that false and answered OK. Both paths now
+throw `not enough memory`. `opt_rpc_insert` and `update` use the same
+words. `rpc_caller` and `vk_caller` already catch it and turn it into
+an error reply. `oom_avoided_inserts` still increments. The error
+model and `SET.md` no longer call this silent. `lrutest.py` ignores
+the exception on the post-eviction writes.

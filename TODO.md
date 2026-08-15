@@ -486,3 +486,5 @@
 84. [Done] H3 geospatial index is composite keys, documented [15-08-2026] Nr 80 75e8474
 
 85. [Done] Chaos test covers a larger RESP subset, including n-grams [15-08-2026] Nr 81 56cd394
+
+86. [Done] SET at the memory ceiling raises not enough memory [15-08-2026] Nr 82 aaa5449

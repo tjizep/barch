@@ -187,6 +187,8 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
   <div class="grp">Reference</div>
   <a href="#ref-commands" data-nav="ref-commands">RESP Command Index</a>
   <a href="#ref-keyvalue" data-nav="ref-keyvalue">Key/Value + Ordered Ops</a>
+  <a href="#ref-ngram" data-nav="ref-ngram">N-gram Text Index</a>
+  <a href="#ref-h3" data-nav="ref-h3">H3 Geospatial Index</a>
   <a href="#ref-range-sharding" data-nav="ref-range-sharding">Ordered Range Sharding</a>
   <a href="#ref-hash" data-nav="ref-hash">HashSet <code>H*</code></a>
   <a href="#ref-ordered" data-nav="ref-ordered">OrderedSet <code>Z*</code></a>
@@ -1347,7 +1349,7 @@ kv.set(<span class="s">"k"</span>, <span class="s">"v"</span>)
 <ul>
 <li><b>Point ops</b> (<code>SET</code>/<code>GET</code>/<code>ADD</code>/<code>REM</code>/<code>EXISTS</code>/<code>TTL</code>/<code>EXPIRE</code>/<code>APPEND</code>/counters): one trie descent, <code>O(k)</code> in key length; the key hashes to exactly one shard, so a write takes exactly one shard write lock.</li>
 <li><b>Ordered navigation</b> (<code>MIN</code>, <code>MAX</code>, <code>LB</code>/<code>FIRST</code>, <code>UB</code>/<code>NEXT</code>): a single root-to-boundary descent, <code>O(k)</code>, independent of key count. Requires an ordered keyspace.</li>
-<li><b>Ranges</b> (<code>RANGE K1 K2 count</code>, <code>COUNT K1 K2</code>): seek to <code>K1</code> then in-order walk — <code>O(k + m)</code>. Under hash sharding, a range fans out to every shard, collects up to <code>limit × shard_count</code> candidates, and merge-sorts. With <code>&lt;space&gt;.range_sharded</code> enabled (<code>ordered-sharding</code> branch), the walk starts at the shard owning <code>K1</code>, streams results in key order, and stops at the first key ≥ <code>K2</code> — nothing collected, nothing sorted; <code>MIN</code>/<code>MAX</code>/<code>LB</code>/<code>UB</code>/<code>COUNT</code> likewise stop at the first shard that can answer. See <a href="#ref-range-sharding">Ordered Range Sharding</a>.</li>
+<li><b>Ranges</b> (<code>RANGE K1 K2 count</code>, <code>COUNT K1 K2</code>): seek to <code>K1</code> then in-order walk — <code>O(k + m)</code>. Under hash sharding, a range fans out to every shard, collects up to <code>limit × shard_count</code> candidates, and merge-sorts. With <code>&lt;space&gt;.range_sharded</code> enabled (<code>ordered-sharding</code> branch), the walk starts at the shard owning <code>K1</code>, streams results in key order, and stops at the first key ≥ <code>K2</code> — nothing collected, nothing sorted; <code>MIN</code>/<code>MAX</code>/<code>LB</code>/<code>UB</code>/<code>COUNT</code> likewise stop at the first shard that can answer. See <a href="#ref-range-sharding">Ordered Range Sharding</a>. The same walk is the n-gram lookup and the H3 lookup — see <a href="#ref-ngram">N-gram Text Index</a> and <a href="#ref-h3">H3 Geospatial Index</a>.</li>
 <li><b>Scans</b> (<code>KEYS</code>, <code>VALUES</code> with glob): executed by <code>iteration_worker_count</code> workers, non-blocking to concurrent writers. <code>KEYS</code> is not classified <code>dangerous</code> in the ACL model.</li>
 <li><b>Allocation:</b> a <code>SET</code> replacing a value reuses or replaces one leaf (<code>leaf_nodes_replaced</code> counts these); inserts may grow one interior node along the path (<code>node4→16→48→256</code>). <code>APPEND</code>/<code>PREPEND</code> reallocate the value in the arena.</li>
 </ul>
@@ -1463,6 +1465,162 @@ redis::cmd(<span class="s">"SET"</span>).arg(<span class="s">"user:00017:name"</
 <span class="k">let</span> n: i64 = redis::cmd(<span class="s">"COUNT"</span>)
     .arg(<span class="s">"user:00000"</span>).arg(<span class="s">"user:00050"</span>)
     .query_async(&amp;<span class="k">mut</span> con).<span class="k">await</span>?;</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== N-GRAM TEXT INDEX =============== -->
+<article id="ref-ngram">
+<div class="crumb">Reference / N-gram Text Index</div>
+<h1>N-gram Text Index</h1>
+<p class="lede">There is no n-gram command. A sliding window over text is ordinary composite keys in a keyspace you name — usually <code>txt</code>. The gram is the first component; the window offset is a number after a space, so the parser encodes it as an integer.</p>
+<div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">composite SET + RANGE</span><span class="chip o">offset is a number</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Gram, space, offset</h2></header>
+<div class="bd">
+<p><code>SET</code> splits a key on spaces. A frame is therefore one argument: the gram, a space, then the offset. The offset token is a number (<code>0</code>, <code>1</code>, <code>2</code>…), so <code>as_composite</code> encodes it with the same (base 128)+1 integer order every numeric key already uses. Shared gram prefixes live once in the trie.</p>
+<p>A space inside the window would also split the key. Write those as <code>_</code> so the only space left is the one before the offset.</p>
+<p>For <code>This is a doc. This is a dog</code>:</p>
+<pre class="solo">txt:SET "This 0"
+txt:SET "his_i 1"
+txt:SET "is_is 2"
+txt:SET "s_is_a 3"</pre>
+<p>Put the frames in <code>txt</code> and the source document in another space. <code>RANGE "is_is" "is_is~"</code> then sees every offset of that gram, because the number sits after it.</p>
+<div class="notice note"><b>The space is the composite separator.</b> It is not a type tag and not a lead byte. The parser sees <code>0</code>, <code>1</code>, <code>2</code> as integers because they are the token after that space.</div>
+<div class="notice warning"><b>Delete the frames when the source goes.</b> <code>REM</code> of the document does not know about the index. Drop each <code>&lt;gram&gt; &lt;offset&gt;</code> key you wrote for it, or the next range still names a frame whose source is gone.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands used as-is</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Surface</th><th>Arguments</th><th>Requirement</th><th>Returns / Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>txt:SET</code></td><td><code>"&lt;gram&gt; &lt;offset&gt;"</code> [value]</td><td class="req y">REQUIRED</td><td>writes one frame. The key is one RESP argument. <code>&lt;gram&gt;</code> is text with <code>_</code> for spaces; <code>&lt;offset&gt;</code> is a decimal integer. A repeat overwrites the value</td></tr>
+<tr><td><code>txt:RANGE</code></td><td><code>"&lt;gram&gt;" "&lt;gram&gt;~" count</code></td><td class="req y">REQUIRED</td><td>every frame of that gram, all offsets. Empty array when none match</td></tr>
+<tr><td><code>txt:COUNT</code></td><td>same two bounds as <code>RANGE</code></td><td class="req n">OPTIONAL</td><td>how many frames sit in the prefix</td></tr>
+<tr><td><code>txt:REM</code></td><td>the same key <code>SET</code> wrote</td><td class="req n">OPTIONAL</td><td>drops one frame</td></tr>
+<tr><td><code>USE txt</code></td><td>—</td><td class="req n">OPTIONAL</td><td>same space without the <code>txt:</code> prefix on every call</td></tr>
+</tbody>
+</table>
+<p>No new command. The <code>space:CMD</code> prefix is the same one every other command already accepts.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Index a line, then find a gram</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">python-swig</button><button>redis-cli</button><button>redis-python</button></div>
+<div class="pane on"><pre><span class="k">import</span> barch
+
+kv = barch.KeyValue(<span class="s">"txt"</span>)
+text = <span class="s">"This is a doc. This is a dog"</span>
+width = <span class="n">5</span>
+<span class="k">for</span> i <span class="k">in</span> range(len(text) - width + <span class="n">1</span>):
+    gram = text[i:i + width].replace(<span class="s">" "</span>, <span class="s">"_"</span>)
+    kv.set(<span class="s">"%s %d"</span> % (gram, i), <span class="s">"1"</span>)
+
+<span class="k">print</span>(kv.range(<span class="s">"is_is"</span>, <span class="s">"is_is~"</span>, <span class="n">100</span>))</pre></div>
+<div class="pane"><pre>txt:SET "This 0"
+txt:SET "his_i 1"
+txt:SET "is_is 2"
+txt:SET "s_is_a 3"
+txt:RANGE "is_is" "is_is~" 100</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+text = <span class="s">"This is a doc. This is a dog"</span>
+width = <span class="n">5</span>
+<span class="k">for</span> i <span class="k">in</span> range(len(text) - width + <span class="n">1</span>):
+    gram = text[i:i + width].replace(<span class="s">" "</span>, <span class="s">"_"</span>)
+    r.execute_command(<span class="s">"txt:SET"</span>, <span class="s">"%s %d"</span> % (gram, i), <span class="s">"1"</span>)
+
+<span class="k">print</span>(r.execute_command(<span class="s">"txt:RANGE"</span>, <span class="s">"is_is"</span>, <span class="s">"is_is~"</span>, <span class="n">100</span>))</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== H3 GEOSPATIAL INDEX =============== -->
+<article id="ref-h3">
+<div class="crumb">Reference / H3 Geospatial Index</div>
+<h1>H3 Geospatial Index</h1>
+<p class="lede">There is no geo command. A point is an ordinary composite key in a keyspace you name — usually <code>spatial_data</code>. The Uber H3 cell is the first component, as a decimal integer; a unique id sits after a space, so the parser encodes the cell as a number and nearby cells sit nearby in the trie.</p>
+<div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">composite SET + RANGE</span><span class="chip o">H3 cell is a number</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Cell, space, id</h2></header>
+<div class="bd">
+<p><code>SET</code> splits a key on spaces. A point is therefore one argument: the H3 cell as a decimal integer, a space, then an id (a name, or a counter). The cell token is a number, so <code>as_composite</code> encodes it with the same (base 128)+1 integer order every numeric key already uses. That is what makes a parent cell's children one <code>RANGE</code>.</p>
+<p><code>examples/flask/geo.py</code> writes <code>{int(h3_index, 16)} {name}</code> at resolution 12. <code>examples/flask/overture.py</code> writes the same shape as <code>{h3_index} {counter}</code> when it loads Overture addresses. Both keep the space ordered.</p>
+<pre class="solo">spatial_data:SET "599686042433355775 place" {"lat":37.8,"long":-122.4,"name":"place"}</pre>
+<p>A search does not RANGE the whole world. Convert the query lat/long to a resolution-12 cell, take its resolution-8 parent, then RANGE from that parent's first child to its last child. Those two integers are contiguous in H3's child order, so they are one numeric range. <code>geo.py</code> builds them with <code>h3.child_pos_to_cell</code> and calls:</p>
+<pre class="solo">RANGE "&lt;first_child&gt; 0" "&lt;last_child&gt; 99999999999999" 10</pre>
+<p>The second component <code>0</code> … <code>99999999999999</code> covers every id under those cells.</p>
+<div class="notice note"><b>The space is the composite separator.</b> It is not a type tag. The parser sees the H3 cell as an integer because it is the token before that space. Keep the space ordered (<code>spatial_data.ordered</code>) so numeric order is the trie order.</div>
+<div class="notice warning"><b>Delete the composite key when the point goes.</b> <code>REM</code> of a document in another space does not know about this index.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands used as-is</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Surface</th><th>Arguments</th><th>Requirement</th><th>Returns / Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>spatial_data:SET</code></td><td><code>"&lt;h3&gt; &lt;id&gt;" value</code></td><td class="req y">REQUIRED</td><td>writes one point. <code>&lt;h3&gt;</code> is <code>int(h3.latlng_to_cell(lat, lng, 12), 16)</code>. <code>&lt;id&gt;</code> is a unique name or counter. A repeat of the same pair overwrites the value</td></tr>
+<tr><td><code>spatial_data:RANGE</code></td><td><code>"&lt;first_child&gt; 0" "&lt;last_child&gt; 99999999999999" count</code></td><td class="req y">REQUIRED</td><td>points whose cell lies in that parent’s child span. Empty array when none match</td></tr>
+<tr><td><code>spatial_data:COUNT</code></td><td>same two bounds as <code>RANGE</code></td><td class="req n">OPTIONAL</td><td>how many points sit in the span</td></tr>
+<tr><td><code>spatial_data:REM</code></td><td>the same key <code>SET</code> wrote</td><td class="req n">OPTIONAL</td><td>drops one point</td></tr>
+<tr><td><code>USE spatial_data</code></td><td>—</td><td class="req n">OPTIONAL</td><td>same space without the <code>spatial_data:</code> prefix on every call</td></tr>
+</tbody>
+</table>
+<p>No new command. Working loaders: <code>examples/flask/geo.py</code> and <code>examples/flask/overture.py</code>.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Write a point, then RANGE its parent cell</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">python-swig</button><button>redis-cli</button><button>redis-python</button></div>
+<div class="pane on"><pre><span class="k">import</span> h3
+<span class="k">import</span> barch
+
+kv = barch.KeyValue(<span class="s">"spatial_data"</span>)
+kv.setOrdered(<span class="k">True</span>)
+res, parent_res = <span class="n">12</span>, <span class="n">8</span>
+lat, lng, name = <span class="n">37.8</span>, <span class="n">-122.4</span>, <span class="s">"place"</span>
+cell = <span class="k">int</span>(h3.latlng_to_cell(lat, lng, res), <span class="n">16</span>)
+kv.set(<span class="s">"%d %s"</span> % (cell, name), <span class="s">"1"</span>)
+
+parent = h3.cell_to_parent(h3.latlng_to_cell(lat, lng, res), parent_res)
+n = h3.cell_to_children_size(parent, res)
+lo = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, <span class="n">0</span>), <span class="n">16</span>)
+hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span class="n">1</span>), <span class="n">16</span>)
+<span class="k">print</span>(kv.range(<span class="s">"%d 0"</span> % lo, <span class="s">"%d 99999999999999"</span> % hi, <span class="n">10</span>))</pre></div>
+<div class="pane"><pre>spatial_data:SET "599686042433355775 place" 1
+spatial_data:RANGE "&lt;first_child&gt; 0" "&lt;last_child&gt; 99999999999999" 10</pre></div>
+<div class="pane"><pre><span class="k">import</span> h3
+<span class="k">import</span> redis
+
+r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+res, parent_res = <span class="n">12</span>, <span class="n">8</span>
+lat, lng, name = <span class="n">37.8</span>, <span class="n">-122.4</span>, <span class="s">"place"</span>
+cell = <span class="k">int</span>(h3.latlng_to_cell(lat, lng, res), <span class="n">16</span>)
+r.execute_command(<span class="s">"spatial_data:SET"</span>, <span class="s">"%d %s"</span> % (cell, name), <span class="s">"1"</span>)
+
+parent = h3.cell_to_parent(h3.latlng_to_cell(lat, lng, res), parent_res)
+n = h3.cell_to_children_size(parent, res)
+lo = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, <span class="n">0</span>), <span class="n">16</span>)
+hi = <span class="k">int</span>(h3.child_pos_to_cell(parent, res, n - <span class="n">1</span>), <span class="n">16</span>)
+<span class="k">print</span>(r.execute_command(
+    <span class="s">"spatial_data:RANGE"</span>,
+    <span class="s">"%d 0"</span> % lo, <span class="s">"%d 99999999999999"</span> % hi, <span class="n">10</span>))</pre></div>
 </div>
 </div>
 </div>

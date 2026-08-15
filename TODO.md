@@ -480,3 +480,7 @@
     for an empty match, a selective pattern, and `KEYS *`.
 
 82. [Done] Chaos test for KEYS under restart and memory pressure [15-08-2026] Nr 78 caf3daf
+
+83. [Done] N-gram text index is composite keys, documented [15-08-2026] Nr 79 75e8474
+
+84. [Done] H3 geospatial index is composite keys, documented [15-08-2026] Nr 80 75e8474

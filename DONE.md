@@ -3279,3 +3279,26 @@ period SET, GET and KEYS have to answer. Seed 1, two restarts, six
 seconds: the process did not hang or abort. KEYS hit the memory ceiling
 on the tight limits, which is the short-reply path. `CMakeLists.txt`
 registers it as TestChaos.
+
+## 79. N-gram text index is composite keys, documented [15-08-2026]
+
+*Was `TODO.md` entry 83.*
+
+The index is not a new ART leaf type. A caller puts frames in a
+keyspace (`txt`) as `<gram> <offset>`: `txt:SET "This 0"`,
+`txt:SET "his_i 1"`. The space splits the key; the offset token is a
+number, so `as_composite` encodes it as an integer. Spaces inside the
+gram are written `_` so they do not split. `RANGE "is_is" "is_is~"`
+is the lookup.
+
+Documented in `docs/NGRAM.md` and `docs/index.html` (`#ref-ngram`).
+
+## 80. H3 geospatial index is composite keys, documented [15-08-2026]
+
+*Was `TODO.md` entry 84.*
+
+Same recipe as the n-gram index. `geo.py` and `overture.py` write
+`<h3> <id>` into `spatial_data`, with the cell as
+`int(latlng_to_cell(...), 16)` so `SET` encodes it as an integer. A
+search RANGEs the first child of a resolution-8 parent to its last
+child. Documented in `docs/H3.md` and `docs/index.html` (`#ref-h3`).

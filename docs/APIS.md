@@ -10,7 +10,7 @@ Api's with the same signature as VALKEY or REDIS works the same
 4. `B.REM K` removes a key, returns value if success [more](https://tjizep.github.io/barch/REM)
 5. `B.MAX` returns largest key  (or nil) - numbers are less than text
 6. `B.MIN` returns smallest key (or nil) if there are no keys
-7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://tjizep.github.io/barch/USECASE)
+7. `B.RANGE K1 K2 count` returns an array of maximum `count` containing the keys [see example](https://tjizep.github.io/barch/USECASE). An n-gram text index and an H3 geospatial index are the same walk over composite keys — [NGRAM](NGRAM.md), [H3](H3.md)
 8. `B.COUNT K1 K2` returns count of keys within a range [see example](https://tjizep.github.io/barch/USECASE)
 9. `B.LB K1` lower bound: first key not less than K1
 10. `B.SIZE` returns keys held by `BARCH` this may include expired or evicted volatile keys

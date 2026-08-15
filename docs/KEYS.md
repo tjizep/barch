@@ -11,9 +11,15 @@ Returns all keys matching pattern in an array.
 While the time complexity for this operation is O(N), the constant times are fairly low. 
 For example, *BARCH* running on an older laptop can scan a 1 million key database in 5 milliseconds (as opposed to the valkey hash table that blocks and takes 20 ms).
 
-*Note*: Unlike valkey this command will not block any other access to the database, it will run in it's own thread. 
-However, each reply does take some memory so care should be taken to not choose a pattern to return to many results. 
-The COUNT argument can be added to return only a count
+*Note*: Unlike valkey, KEYS and VALUES do not block other access. They only
+wait on each other: one KEYS or VALUES at a time, while GET, SET and the rest
+keep running. The scan uses a worker pool; its size is
+`iteration_worker_count` (`CONFIG SET iteration_worker_count n`, default 4).
+
+KEYS and VALUES do not cause OOM. Matching keys are written to the socket as
+they are found, and a walk that would cross `max_memory_bytes` stops and
+returns what it has. Use COUNT to return only a count, or MAX n to cap the
+reply.
 
 #### Options
 - Use the COUNT option to return a count only.

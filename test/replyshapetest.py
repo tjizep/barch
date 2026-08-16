@@ -79,10 +79,9 @@ mget_one = raw(r, "MGET", "shape:a")
 assert isinstance(mget_one, list) and len(mget_one) == 1, \
     f"MGET of one key should be a one element array, got {type(mget_one).__name__}: {mget_one!r}"
 
-# VALUES globs over the values rather than the keys - it is matched against the
-# "1".."4" stored above - but it answers with the keys that hold them. That is the
-# intended behaviour, not just what it happens to do, so these expectations are a
-# specification rather than a record of the status quo.
+# VALUES matches the glob against each key's value, then replies with the key.
+# VALUES 3 replies with the key that holds "3", not with "3" itself. These
+# expectations are a specification.
 vals = raw(r, "VALUES", "*")
 assert isinstance(vals, list) and len(vals) == 4, f"VALUES gave {vals!r}"
 one_val = raw(r, "VALUES", "3")

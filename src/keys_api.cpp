@@ -182,7 +182,7 @@ int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 /* B.KEYS
 *
-* match against all keys using a glob pattern
+* match a glob against key names and reply with the matching keys.
 * */
 static int glob_command(caller& call, const arg_t& argv, bool by_value) {
 
@@ -362,12 +362,9 @@ int cmd_KEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 /* B.VALUES
 * i.e. VALUES *ZZZ* COUNT
-* match against all values using a glob pattern
-*
-* the pattern is matched against the values, but the reply is the keys that hold
-* them - VALUES 3 answers with the key whose value is "3", not with "3". this is
-* intended: it is the inverse lookup KEYS cannot do. COUNT replaces the reply with
-* the number of matches.
+* match a glob against each key's value, then reply with the key.
+* VALUES 3 replies with the key that holds "3", not with "3" itself.
+* COUNT replaces the reply with the number of matches.
 * */
 int VALUES(caller& call, const arg_t& argv) {
     return glob_command(call, argv, true);

@@ -3328,3 +3328,31 @@ words. `rpc_caller` and `vk_caller` already catch it and turn it into
 an error reply. `oom_avoided_inserts` still increments. The error
 model and `SET.md` no longer call this silent. `lrutest.py` ignores
 the exception on the post-eviction writes.
+
+## 83. Luau instruction budget is a slice, not a kill [17-08-2026]
+
+*Was `TODO.md` entry 87.*
+
+`foreign_script_insns` is still the same number. Hitting it no longer
+raises `-ERR FOREIGN script budget`. The interrupt yields instead,
+and the job goes back on the four-thread foreign pool so another
+fetch can run. The query timeout is what stops a runaway.
+
+`lua_yield` from the interrupt only works if `resolve` is running
+under `lua_resume`. `lua_pcall` is a C boundary and is not yieldable.
+The script is loaded as before, then `resolve` is started on a
+`lua_newthread`. `sql.query` is still a blocking C call: a slice
+that expires in the middle of one waits for the query, then yields
+at the next Lua safepoint.
+
+Yielding inside `fetch()` would have kept the worker parked on that
+call. `run_fetch` now uses `fetch_async`. Fake, MySQL and Postgres
+still run `fetch` on the same job and then complete. Luau returns
+after a slice and the write-back runs when the script actually
+finishes.
+
+A 20 000-iteration loop with a 200-instruction slice still returns
+the value. An infinite loop with a 400 ms query timeout is
+`-ERR FOREIGN timeout`. Four infinite scripts on the four workers
+do not hold a cheap GET on another space: that GET came back in
+under a second while the hogs ran 2.5 s each.

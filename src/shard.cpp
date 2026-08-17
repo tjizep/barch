@@ -803,6 +803,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
     std::string tk;
     value_type key = s_filter_key(tk,unfiltered_key);
     add_bloom(key);
+    cancel_flight(key);
 
     size_t before = size;
     if (options.is_hashed()) {
@@ -810,6 +811,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
     }else {
         art::insert(this, options, key, value, update, fc);
     }
+    call_unblock(std::string(key.chars(), key.size));
     return size+h.size() > before;
 }
 
@@ -830,6 +832,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
     // below re-enters the tree, either of which could otherwise reuse a shared buffer
     std::string kbuf;
     auto key = s_filter_key(kbuf, unfiltered_key);
+    cancel_flight(key);
     auto repl_updateresult = [&](const node_ptr &leaf) {
         auto value = updater(leaf);
         if (value.null()) {
@@ -855,7 +858,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
             node_ptr n = repl_updateresult(old);
 
             if (n == old) {
-
+                call_unblock(std::string(key.chars(), key.size));
                 return false; // nothing to do
             }
             if (!n.null()) {
@@ -864,11 +867,15 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
                 h.insert(n);
                 old.free_from_storage();// ok if old is null - nothing will happen
             }
+            call_unblock(std::string(key.chars(), key.size));
             return !n.null();
         }
+        call_unblock(std::string(key.chars(), key.size));
         return false;
     }
-    return barch::update(this, key, repl_updateresult);
+    bool r = barch::update(this, key, repl_updateresult);
+    call_unblock(std::string(key.chars(), key.size));
+    return r;
 }
 bool barch::shard::evict(const leaf* l) {
     if (l->deleted()) return false;
@@ -930,6 +937,12 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     // filters again, and is still used afterwards by h.erase and the tree paths
     std::string kbuf;
     auto key = s_filter_key(kbuf, unfiltered_key);
+    cancel_flight(key);
+    struct wake_on_exit {
+        shard* s;
+        std::string k;
+        ~wake_on_exit() { s->call_unblock(k); }
+    } wake{this, std::string(key.chars(), key.size)};
     node_ptr old = from_unordered_set(key);
     if (!old.null()) {
         if (dependencies) {
@@ -1037,6 +1050,86 @@ void barch::shard::glob(const keys_spec &spec, value_type pattern, bool value, c
     art::glob(this, spec, pattern, value, cb, only, hits);
 }
 
+art::node_ptr barch::shard::local_leaf(value_type unfiltered_key) {
+    std::string kbuf;
+    value_type key = s_filter_key(kbuf, unfiltered_key);
+    if (!opt_ordered_keys) {
+        return from_unordered_set(key);
+    }
+    return art::search(this, key);
+}
+
+void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms, bool hashed) {
+    std::string kbuf;
+    value_type key = s_filter_key(kbuf, unfiltered_key);
+    add_bloom(key);
+
+    node_ptr existing = hashed ? from_unordered_set(key) : art::search(this, key);
+    const bool was_tomb = !existing.null() && existing.cl()->is_tomb();
+    const bool valid_tomb = was_tomb && !existing.cl()->expired();
+    const bool live = !existing.null() && !existing.cl()->is_tomb() && !existing.cl()->expired();
+    if (live) {
+        call_unblock(std::string(key.chars(), key.size));
+        return;
+    }
+    if (valid_tomb && ttl_ms && existing.cl()->is_expiry()) {
+        existing.l()->set_expiry(art::now() + static_cast<leaf::ExpiryType>(ttl_ms));
+        call_unblock(std::string(key.chars(), key.size));
+        return;
+    }
+    if (valid_tomb && !ttl_ms) {
+        call_unblock(std::string(key.chars(), key.size));
+        return;
+    }
+
+    art::key_options opts;
+    opts.set_keep_ttl(false);
+    opts.set_hashed(hashed);
+    if (ttl_ms)
+        opts.set_expiry(art::now() + static_cast<int64_t>(ttl_ms));
+    art::value_type empty{};
+    if (hashed)
+        hash_insert(opts, key, empty, true, [](const node_ptr&) {});
+    else
+        art::insert(this, opts, key, empty, true, [](const node_ptr&) {});
+    node_ptr n = hashed ? from_unordered_set(key) : art::search(this, key);
+    if (n.null()) {
+        call_unblock(std::string(key.chars(), key.size));
+        return;
+    }
+    n.l()->set_tomb();
+    if (!was_tomb)
+        ++tomb_stones;
+    call_unblock(std::string(key.chars(), key.size));
+}
+
+void barch::shard::cancel_flight(value_type key) {
+    std::string k(key.chars(), key.size);
+    auto it = flights.find(k);
+    if (it == flights.end())
+        return;
+    auto& fl = *it->second;
+    if (fl.state != foreign_flight::state::pending)
+        return;
+    ++fl.generation;
+    fl.state = foreign_flight::state::cancelled;
+    fl.finished = true;
+    fl.swig_cv.notify_all();
+}
+
+void barch::shard::fail_foreign(const char* msg, heap::vector<abstract_session_ptr>& sessions) {
+    for (auto& [k, fl] : flights) {
+        fl->state = foreign_flight::state::failed;
+        fl->error = msg;
+        fl->finished = true;
+        fl->swig_cv.notify_all();
+    }
+    for (auto& [k, vec] : blocked_sessions) {
+        sessions.insert(sessions.end(), vec.begin(), vec.end());
+    }
+    blocked_sessions.clear();
+}
+
 bool barch::shard::is_present(value_type unfiltered_key) {
     std::string kbuf;
     value_type key = s_filter_key(kbuf, unfiltered_key);
@@ -1056,11 +1149,8 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
 
     if (!opt_ordered_keys) {
         auto n = from_unordered_set(key);
-        // TODO: check tomb stone flag for dependant deletes
-        if (!n.null()) {
-            if (dependencies && n.cl()->is_tomb()) {
-                return nullptr;
-            }
+        if (!n.null() && n.cl()->is_tomb()) {
+            return nullptr;
         }
         return n;
     }

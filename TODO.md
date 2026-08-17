@@ -488,3 +488,5 @@
 85. [Done] Chaos test covers a larger RESP subset, including n-grams [15-08-2026] Nr 81 56cd394
 
 86. [Done] SET at the memory ceiling raises not enough memory [15-08-2026] Nr 82 aaa5449
+
+87. [Done] Luau instruction budget is a slice, not a kill [17-08-2026] Nr 83 78a270e

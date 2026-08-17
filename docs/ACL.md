@@ -85,3 +85,9 @@ OK
 (nil)
 
 ```
+
+### Foreign credentials
+
+Do not store a database password in the `configuration` space if you can avoid it. That space replicates under PUBLISH. Put the DSN in `<name>.foreign_dsn` as `file:/path` or `env:VAR` instead. ACL does not hide those keys from a client that can read `configuration`. The server never logs the resolved DSN.
+
+How to configure a miss fill, including the query macros and the waiter, is in [Coalesced Foreign Sources](index.html#ref-foreign).

@@ -194,6 +194,7 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
   <a href="#ref-ordered" data-nav="ref-ordered">OrderedSet <code>Z*</code></a>
   <a href="#ref-list" data-nav="ref-list">List <code>L*</code></a>
   <a href="#ref-keyspaces" data-nav="ref-keyspaces">Named Key Spaces</a>
+  <a href="#ref-foreign" data-nav="ref-foreign">Coalesced Foreign Sources</a>
   <a href="#ref-memory" data-nav="ref-memory">Memory &amp; Prefix Elimination</a>
   <a href="#ref-replication" data-nav="ref-replication">Replication &amp; Routing</a>
   <a href="#ref-stats" data-nav="ref-stats">Statistics &amp; Introspection</a>
@@ -315,15 +316,29 @@ sudo cmake --install build --component barchlua   <span class="c"># luajit → /
 <tr><td><code>iteration_worker_count</code></td><td>int</td><td class="req n">OPTIONAL</td><td>≥ 1; size of the dedicated worker pool that <code>KEYS</code> and <code>VALUES</code> share, so other commands keep running</td><td><code>4</code></td></tr>
 <tr><td><code>rpc_max_buffer</code></td><td>bytes</td><td class="req n">OPTIONAL</td><td>per-connection RPC buffer</td><td><code>131072</code></td></tr>
 <tr><td><code>rpc_client_max_wait_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>client call deadline; drives timeout errors under load</td><td><code>30000</code></td></tr>
+<tr><td><code>foreign_timeout_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>how long a parked GET waits on a foreign miss. A named space can override with <code>&lt;name&gt;.foreign_timeout_ms</code></td><td><code>300000</code></td></tr>
+<tr><td><code>foreign_script_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>Luau instruction slice for one <code>resolve</code>. After this many instructions the script yields the foreign worker and is queued again, so the other three workers keep moving. The query timeout still stops a runaway. A named space can override with <code>&lt;name&gt;.foreign_script_insns</code></td><td><code>1000000</code></td></tr>
 <tr><td><code>bind_interface</code></td><td>string</td><td class="req n">OPTIONAL</td><td>IP or unix socket path</td><td><code>127.0.0.1</code></td></tr>
 <tr><td><code>external_host</code></td><td>string</td><td class="req n">OPTIONAL</td><td>host advertised to replication peers</td><td><code>localhost</code></td></tr>
 <tr><td><code>listen_port</code></td><td>int</td><td class="req n">OPTIONAL</td><td><code>1 – 65535</code>; <code>0</code> with a socket-path interface</td><td><code>12145</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.ordered</code></td><td>bool</td><td class="req c">PER-SPACE</td><td>overrides the global <code>ordered_keys</code> default for a named space. Needed for <code>MIN</code>/<code>MAX</code>/<code>LB</code>/<code>RANGE</code>, and required for range sharding. The default space has no such key; it follows <code>ordered_keys</code></td><td>inherits <code>ordered_keys</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.shards</code></td><td>int</td><td class="req c">PER-SPACE</td><td>shard count for the space; set explicitly in every process — unset falls back to the server default, not to what the data was written with</td><td>server default</td></tr>
 <tr><td><code>&lt;keyspace&gt;.range_sharded</code></td><td>bool</td><td class="req c">PER-SPACE</td><td>route keys to shards by range instead of hash, with maintenance-thread rebalancing (<code>ordered-sharding</code> branch); refused unless the space is also ordered — see <a href="#ref-range-sharding">Ordered Range Sharding</a></td><td><code>false</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign</code></td><td>enum</td><td class="req c">PER-SPACE</td><td><code>off</code> · <code>mysql</code> · <code>postgres</code> · <code>luau</code> · <code>fake</code>. Names a source that will fill a miss. Read once at first open. <code>mysql</code>/<code>postgres</code> without a DSN or host, and <code>luau</code> without a script, are left <code>off</code>. A source miss is stored as an empty tomb, so the next GET stays nil and does not ask again</td><td><code>off</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_dsn</code></td><td>string</td><td class="req c">PER-SPACE</td><td>DSN, or <code>file:/path</code>, or <code>env:VAR</code>. Prefer this over putting a password in the configuration space, which replicates under PUBLISH. The server does not log the resolved DSN</td><td>empty</td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_query</code></td><td>string</td><td class="req c">PER-SPACE</td><td>one column. <code>?</code> binds the whole user key. <code>$0</code>, <code>$1</code>, … bind that component of a composite key. <code>$$</code> binds the key reconstructed by <code>encoded_key_as_string</code> (the original <code>GET</code> string). <code>$k</code> is the keyspace name, written into the SQL as an identifier (a schema or table qualifier). <code>\$</code> is a literal <code>$</code>. Key macros are sent as a prepared statement</td><td>empty</td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_script</code></td><td>string</td><td class="req c">PER-SPACE</td><td>Luau file, or the script itself if it starts with <code>--</code>. Must define <code>resolve(key, space)</code> returning a string or nil. No <code>require</code>, no IO. <code>sql.query(sql, key)</code> runs against this space's MySQL or Postgres backend when a DSN is also set. Loaded once at first open</td><td>empty</td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_script_insns</code></td><td>int</td><td class="req c">PER-SPACE</td><td>instruction slice for this space. Unset inherits <code>foreign_script_insns</code></td><td>inherits global</td></tr>
+<tr><td><code>&lt;keyspace&gt;.missing_ttl</code></td><td>int</td><td class="req c">PER-SPACE</td><td>seconds a source-miss tomb will live; <code>0</code> keeps it until DEL</td><td><code>0</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_timeout_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>parked GET wait for this space. Unset inherits <code>foreign_timeout_ms</code></td><td>inherits global</td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_query_timeout_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>driver / script deadline</td><td><code>1000</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_max_inflight</code></td><td>int</td><td class="req c">PER-SPACE</td><td>cap of running foreign queries for this space</td><td><code>32</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_pool_size</code></td><td>int</td><td class="req c">PER-SPACE</td><td>MySQL/PG connections for this space</td><td><code>8</code></td></tr>
 </tbody>
 </table>
 
+<div class="notice warning"><b>A foreign DSN is a secret.</b> Put it in <code>file:/path</code> or <code>env:VAR</code>. Do not put a database password in the <code>configuration</code> space: that space replicates under <code>PUBLISH</code>, and ACL does not hide those keys from a client that can read it. The server never logs the resolved DSN.</div>
+<div class="notice note"><b>Foreign fill is not <code>PULL</code>.</b> <code>&lt;name&gt;.foreign</code> asks MySQL, Postgres, or Luau on a local miss. It does not subscribe to another barch. <code>PULL</code> is still the unfinished remote-barch path. See <a href="#ref-foreign">Coalesced Foreign Sources</a> for how to configure a query so a GET waits on one shared load.</div>
 <div class="notice warning"><b>Eviction and OOM behaviour are configuration-coupled.</b> With no eviction policy and <code>max_memory_bytes</code> reached, inserts throw <code>not enough memory</code> and increment <code>oom_avoided_inserts</code>. The RESP session and the valkey caller turn that into an error reply. See <a href="#errors">Error Model</a>.</div>
 <div class="notice note"><b><code>ordered_keys</code> picks the default store.</b> <code>true</code> (the default) keeps keys in the ordered ART, so <code>MIN</code>, <code>MAX</code>, <code>LB</code>, <code>UB</code>, <code>RANGE</code> and <code>COUNT</code> work. <code>false</code> keeps them in an unordered hash instead. New named spaces inherit this unless they set <code>&lt;name&gt;.ordered</code> before they are first opened. The default space follows the global option; it has no <code>&lt;name&gt;.ordered</code>. Changing the flag does not convert keys already stored the other way. <code>INFO SHARD #n</code> reports <code>index_physical</code> as <code>ART</code> or <code>HASH</code>.</div>
 <div class="notice note"><b>Per-space options are read once.</b> See <a href="#ref-keyspaces">Named Key Spaces</a> for the full per-space model. A keyspace reads its <code>&lt;name&gt;.*</code> options when first built in a process and caches them for the process lifetime. Unset <code>&lt;name&gt;.ordered</code> falls back to <code>ordered_keys</code>. Set the per-space options before constructing the first handle; changing <code>shards</code> or <code>range_sharded</code> for an open space requires a restart.</div>
@@ -356,6 +371,7 @@ barch.setConfiguration(<span class="s">"ordered_keys"</span>, <span class="s">"f
 conf = barch.KeyValue(<span class="s">"configuration"</span>)
 conf.set(<span class="s">"telemetry.ordered"</span>, <span class="s">"1"</span>)
 conf.set(<span class="s">"telemetry.range_sharded"</span>, <span class="s">"1"</span>)
+conf.save()
 
 cfg = barch.config()          <span class="c"># read-back struct</span>
 <span class="k">print</span>(cfg.compression, cfg.listen_port)</pre></div>
@@ -364,7 +380,8 @@ barch.setConfiguration(<span class="s">"compression"</span>, <span class="s">"zs
 barch.setConfiguration(<span class="s">"ordered_keys"</span>, <span class="s">"false"</span>)
 
 <span class="k">local</span> conf = barch.KeyValue(<span class="s">"configuration"</span>)
-conf:set(<span class="s">"test.ordered"</span>, <span class="s">"1"</span>)</pre></div>
+conf:set(<span class="s">"test.ordered"</span>, <span class="s">"1"</span>)
+conf:save()</pre></div>
 </div>
 </article>
 
@@ -2044,6 +2061,7 @@ q:push(<span class="s">"jobs"</span>, {<span class="s">'{"id":17}'</span>})
 <ul>
 <li><b>Push replication (<code>publish</code>):</b> local writes are queued (<code>out_queue_size</code>) and streamed to the peer's RESP endpoint asynchronously. The local write path never waits on the network — a dead peer degrades to counter drift (<code>attempted_routes</code> vs <code>routes_succeeded</code>), never to write latency.</li>
 <li><b>Pull replication (<code>pull</code>):</b> the inverse subscription; two nodes publishing to each other form the multi-writer pair shown below.</li>
+<li><b>Foreign fill is not <code>PULL</code>.</b> A space with <code>&lt;name&gt;.foreign</code> set to <code>mysql</code>, <code>postgres</code>, or <code>luau</code> asks that source on a local miss. It does not subscribe to another barch and it does not implement <code>PULL</code>. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</li>
 <li><b>Block load (<code>load(host, port)</code> / <code>RETRIEVE</code>):</b> a bulk snapshot transfer that warms a cold embedded node against a standalone server. Faster than replaying a write stream.</li>
 <li><b>Shard routing (<code>setRoute</code>):</b> pins a shard index to a remote host; operations on keys owned by a routed shard execute remotely. This is horizontal partitioning at shard granularity, orthogonal to replication.</li>
 <li><b>Memory:</b> the outbound queue is the main replication allocation; it grows with peer lag and is bounded operationally by monitoring <code>out_queue_size</code>.</li>
@@ -2140,7 +2158,7 @@ redis-cli -p 14000 REMROUTE 3</pre></div>
 <li><code>configuration</code> is a real, replicated space used to carry per-space options; it and the default space are not themselves configurable through those options and are always single-shard in the configuration case.</li>
 </ul>
 <h3>Construction and caching</h3>
-<p>A space is built on first reference and cached for the life of the process. Construction is when it reads <code>&lt;name&gt;.shards</code>, <code>&lt;name&gt;.ordered</code>, and <code>&lt;name&gt;.range_sharded</code> out of the <code>configuration</code> space, loads its shards in parallel, and (if range sharded) builds its routing index. Memory allocated during that build is attributed to startup memory.</p>
+<p>A space is built on first reference and cached for the life of the process. Construction is when it reads <code>&lt;name&gt;.shards</code>, <code>&lt;name&gt;.ordered</code>, <code>&lt;name&gt;.range_sharded</code>, and the <code>&lt;name&gt;.foreign*</code> keys out of the <code>configuration</code> space, loads its shards in parallel, and (if range sharded) builds its routing index. Memory allocated during that build is attributed to startup memory. A foreign source is stored on the space. A miss fills from that source; a source miss is an empty tomb, so GET, EXISTS, MGET and TTL treat it as absent and do not ask again. See <a href="#ref-foreign">Coalesced Foreign Sources</a>.</p>
 <div class="notice warning"><b>Options are read once, at first reference.</b> Writing <code>&lt;name&gt;.shards</code> or <code>&lt;name&gt;.range_sharded</code> after a handle to that space exists in the process has no effect until restart. Provision the <code>configuration</code> space <i>before</i> constructing the first handle, and re-provision in every process that opens the space. The configuration space is not carried between processes. An unset option falls back to the server default, not to whatever the data was written with.</div>
 <div class="notice warning"><b><code>range_sharded</code> without <code>ordered</code> leaves the space hash routed.</b> The server logs an error. <code>getRangeSharded()</code> reports what the space is actually doing.</div>
 <h3>Dependent spaces (layering)</h3>
@@ -2195,7 +2213,9 @@ A name may also be given directly - <code>SELECT events</code> - which redis has
 <tr><td><code>KSPACE OPTION SET|GET ORDERED [ON|OFF]</code></td><td><code>ON</code> / <code>OFF</code></td><td class="req y">REQUIRED for SET</td><td>ART or hash for this space, saved in its shards. Overrides the global <code>ordered_keys</code> default for the current space only</td></tr>
 <tr><td><code>KSPACE OPTION SET|GET LRU [ON|OFF|VOLATILE]</code></td><td><code>ON</code> / <code>OFF</code> / <code>VOLATILE</code></td><td class="req y">REQUIRED for SET</td><td>per-space eviction; <code>setLru()</code> in SWIG</td></tr>
 <tr><td><code>KSPACE OPTION SET|GET RANDOM [ON|OFF|VOLATILE]</code></td><td><code>ON</code> / <code>OFF</code> / <code>VOLATILE</code></td><td class="req y">REQUIRED for SET</td><td>per-space random eviction</td></tr>
-<tr><td><code>configuration</code> space keys</td><td><code>&lt;name&gt;.shards</code> · <code>&lt;name&gt;.ordered</code> · <code>&lt;name&gt;.range_sharded</code></td><td class="req c">read at first reference only</td><td>see <a href="#configuration">Configuration</a></td></tr>
+<tr><td><code>KSPACE OPTION GET FOREIGN</code></td><td><code>off</code> / <code>mysql</code> / <code>postgres</code> / <code>luau</code> / <code>fake</code></td><td class="req n">GET only</td><td>the foreign source named when the space was built. SET is a syntax error</td></tr>
+<tr><td><code>KSPACE OPTION GET MISSING_TTL</code> · <code>FOREIGN_TIMEOUT</code> · <code>FOREIGN_QUERY_TIMEOUT</code> · <code>FOREIGN_INFLIGHT</code></td><td>integers</td><td class="req n">GET only</td><td>seconds a source-miss tomb lives; waiter timeout (space or global); driver deadline; running / cap</td></tr>
+<tr><td><code>configuration</code> space keys</td><td><code>&lt;name&gt;.shards</code> · <code>&lt;name&gt;.ordered</code> · <code>&lt;name&gt;.range_sharded</code> · <code>&lt;name&gt;.foreign*</code></td><td class="req c">read at first reference only</td><td>see <a href="#configuration">Configuration</a></td></tr>
 </tbody>
 </table>
 
@@ -2284,6 +2304,160 @@ catalog:set(<span class="s">"sku:00001"</span>, <span class="s">"widget"</span>)
 <span class="k">local</span> h = barch.KeyValue()
 h:use(<span class="s">"catalog"</span>)
 <span class="k">print</span>(h:get(<span class="s">"sku:00001"</span>))</pre></div>
+</div>
+</div>
+</div>
+</article>
+
+<!-- =============== COALESCED FOREIGN SOURCES =============== -->
+<article id="ref-foreign">
+<div class="crumb">Reference / Coalesced Foreign Sources</div>
+<h1>Coalesced Foreign Sources</h1>
+<p class="lede">A named space can fill a local miss from MySQL, Postgres, or a Luau script. The caller of GET (or EXISTS, MGET) waits for that fill. Concurrent callers of the same missing key park on one query. The source sees one trip, not a stampede.</p>
+<div class="chips"><span class="chip l1">L1 · SWIG waits</span><span class="chip l2">L2 · RESP parks</span><span class="chip o">one query per missing key</span><span class="chip lock">shard lock dropped across the network</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>What a miss does</h2></header>
+<div class="bd">
+<p>Write the foreign options into the <code>configuration</code> space, then open the named space. The space reads those keys once, at first reference, and keeps the source for the life of the process. A later GET that does not find the key locally starts at most one outbound query for that key. The handler drops the shard lock, parks the caller, and returns when the fill lands.</p>
+<ul>
+<li><b>One flight per key.</b> The first miss creates a flight and runs the driver. A second GET of the same key finds that flight, parks beside it, and increments <code>foreign_coalesced</code>. It does not open a second MySQL or Postgres session.</li>
+<li><b>The client waits.</b> From redis-cli or redis-py the GET does not return until the value is stored, the source miss is cached, the waiter timeout fires, or the driver errors. That is the synchronous load. SWIG <code>KeyValue.get</code> / <code>exists</code> wait the same way.</li>
+<li><b>A hit is stored locally.</b> The driver returns one column as the value. The server writes it as an ordinary SET. The next GET is a local hit and does not ask the source again.</li>
+<li><b>A source miss is a tomb.</b> The source saying “no such row” is stored as an empty tomb (optional TTL from <code>&lt;name&gt;.missing_ttl</code>). GET, EXISTS, MGET and TTL treat it as absent. The next GET does not query again until the tomb expires or someone DELs it.</li>
+<li><b>A driver error is not cached.</b> <code>-ERR FOREIGN …</code> leaves the key missing. The next GET asks again.</li>
+</ul>
+<div class="notice warning"><b>This is not <code>PULL</code>.</b> <code>PULL</code> is the unfinished remote-barch path. A foreign source does not subscribe to another barch and does not stream writes. See <a href="#ref-replication">Replication &amp; Routing</a>.</div>
+<div class="notice note"><b>Set the options before the first <code>USE</code>.</b> A space reads <code>&lt;name&gt;.foreign*</code> when it is built. Changing the DSN or the query after that has no effect until <code>UNLOAD</code> (or a restart) and a new open. Provision every process that will open the space. See <a href="#ref-keyspaces">Named Key Spaces</a>.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Configure a database and a query</h2></header>
+<div class="bd">
+<p>Pick a space name. Put a DSN where the configuration space will not replicate a password. Write a query that returns one column. Name the source. Call <code>save()</code> on the configuration handle (RESP <code>SAVE</code>) so the options are on disk. Then open the space.</p>
+<h3>Minimum keys</h3>
+<table>
+<thead><tr><th>Key</th><th>What to put there</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;name&gt;.foreign</code></td><td><code>mysql</code> or <code>postgres</code>. <code>luau</code> if the miss runs a script instead. Without a DSN/host (SQL) or a script (Luau) the space stays <code>off</code></td></tr>
+<tr><td><code>&lt;name&gt;.foreign_dsn</code></td><td>the DSN, or <code>file:/path</code>, or <code>env:VAR</code>. Prefer file or env over <code>&lt;name&gt;.foreign_password</code>, which lives in the replicated configuration space</td></tr>
+<tr><td><code>&lt;name&gt;.foreign_query</code></td><td>one <code>SELECT</code>, one result column. Must contain <code>?</code>, <code>$n</code>, or <code>$$</code> or the space stays off</td></tr>
+</tbody>
+</table>
+<p>Optional knobs on the same space: <code>foreign_host</code> / <code>port</code> / <code>user</code> / <code>password</code> / <code>database</code> when the DSN is empty; <code>foreign_pool_size</code> (default 8 connections); <code>foreign_max_inflight</code> (default 32 running queries); <code>foreign_query_timeout_ms</code> (driver deadline, default 1000); <code>foreign_timeout_ms</code> (how long a parked GET waits, default the global 300000); <code>missing_ttl</code> (seconds a tomb lives, 0 keeps it until DEL).</p>
+<h3>Query macros</h3>
+<p>The server never concatenates the key into the SQL string. It rewrites the macros into a prepared statement and binds the values.</p>
+<table>
+<thead><tr><th>Macro</th><th>What is bound or written</th></tr></thead>
+<tbody>
+<tr><td><code>?</code></td><td>the whole user key (type prefix stripped)</td></tr>
+<tr><td><code>$0</code>, <code>$1</code>, …</td><td>that component of a composite key. <code>GET Smith 42</code> binds <code>$0=Smith</code> and <code>$1=42</code></td></tr>
+<tr><td><code>$$</code></td><td>the key reconstructed by <code>encoded_key_as_string</code> — the original GET string</td></tr>
+<tr><td><code>$k</code></td><td>the keyspace name, written into the SQL as an identifier (a schema or table qualifier). Not a bind</td></tr>
+<tr><td><code>\$</code></td><td>a literal <code>$</code>, so a query can mention <code>$0</code> as text</td></tr>
+</tbody>
+</table>
+<p>A missing <code>$n</code> is <code>-ERR FOREIGN key has no component $n</code>, not a tomb. MySQL sees <code>?</code> placeholders; Postgres sees <code>$1</code>, <code>$2</code>, … in bind order.</p>
+<h3>Worked example</h3>
+<p>A space named <code>catalog</code> should answer <code>GET sku</code> from <code>items.v</code>, and <code>GET Smith 42</code> from a person table qualified by the space name. Write the options, then open the space, then GET. The first GET of each key runs the query. The second is local.</p>
+<pre><span class="c"># DSN lives in the environment, not in configuration</span>
+<span class="c"># export CATALOG_DSN='host=127.0.0.1 port=5432 user=barch dbname=shop'</span>
+
+USE configuration
+SET catalog.foreign_dsn env:CATALOG_DSN
+SET catalog.foreign_query "SELECT v FROM items WHERE sku = ?"
+SET catalog.foreign postgres
+SAVE
+USE catalog
+GET sku
+<span class="c"># miss → one SELECT v FROM items WHERE sku = $1 → store → reply</span>
+GET sku
+<span class="c"># local hit</span></pre>
+<p>A second space can use components and the space name as a schema:</p>
+<pre>USE configuration
+SET people.foreign_dsn env:CATALOG_DSN
+SET people.foreign_query "SELECT name FROM $k.person WHERE surname = $0 AND age = $1"
+SET people.foreign postgres
+SAVE
+USE people
+GET Smith 42
+<span class="c"># SELECT name FROM people.person WHERE surname = $1 AND age = $2</span></pre>
+<p>Build the table (or schema <code>people</code>) before the first GET. The query returns one column; extra columns are ignored. The bound values are never interpolated into the SQL.</p>
+<h3>Luau instead of a fixed query</h3>
+<p>Set <code>&lt;name&gt;.foreign</code> to <code>luau</code> and put a script in <code>&lt;name&gt;.foreign_script</code> (a path, or the script itself if it starts with <code>--</code>). The script must define <code>resolve(key, space)</code> and return a string or nil. Nil is a cached miss. A thrown error or a script that runs past the query timeout is <code>-ERR FOREIGN</code>, not a tomb. <code>foreign_script_insns</code> is a slice, not a kill: when it runs out the script pauses and the foreign pool takes other work, then the script continues. <code>sql.query</code> is a blocking C call, so a slice cannot yield in the middle of one. Give the space a DSN as well if <code>resolve</code> calls <code>sql.query</code>; that call uses the same macros and the same pool. There is no <code>require</code> and no IO.</p>
+<h3>Caps and timeouts</h3>
+<ul>
+<li><code>foreign_query_timeout_ms</code> is the driver deadline. A job waits up to that long for a pooled connection, then the statement itself is cut off.</li>
+<li><code>foreign_timeout_ms</code> is how long the parked GET waits. It can be longer than the driver deadline. Unset, it inherits the global <code>foreign_timeout_ms</code> (five minutes).</li>
+<li><code>foreign_max_inflight</code> is the cap of running queries for the space. A miss above the cap is <code>-ERR FOREIGN overloaded</code>, not a queue that grows without bound.</li>
+<li><code>foreign_pool_size</code> is the MySQL or Postgres connection pool for the space. Do not open one connection per query.</li>
+</ul>
+<h3>Introspection</h3>
+<table>
+<thead><tr><th>Surface</th><th>Returns</th></tr></thead>
+<tbody>
+<tr><td><code>KSPACE OPTION GET FOREIGN</code></td><td><code>off</code> / <code>mysql</code> / <code>postgres</code> / <code>luau</code> / <code>fake</code> — what the space actually built. SET of this name is a syntax error</td></tr>
+<tr><td><code>KSPACE OPTION GET FOREIGN_TIMEOUT</code> · <code>FOREIGN_QUERY_TIMEOUT</code> · <code>FOREIGN_INFLIGHT</code> · <code>MISSING_TTL</code></td><td>waiter timeout; driver deadline; running / cap; tomb lifetime in seconds</td></tr>
+<tr><td><code>INFO FOREIGN</code></td><td><code>foreign_queries</code>, <code>foreign_misses</code>, <code>foreign_errors</code>, <code>foreign_waiters</code>, <code>foreign_coalesced</code>, <code>foreign_overloaded</code>, <code>foreign_cancelled</code>, <code>foreign_inflight</code></td></tr>
+</tbody>
+</table>
+<h3>Error tree</h3>
+<ul>
+<li>SQL source without a DSN or host, or without a query that contains <code>?</code> / <code>$n</code> / <code>$$</code> → space stays <code>off</code>, server log says so, GET of a missing key is still nil.</li>
+<li>Driver not linked at build time → same: space stays off, log says mysql or postgres was not built.</li>
+<li>Source has no row → nil, tomb stored, no error.</li>
+<li>Driver failure, timeout, or a <code>$n</code> the key does not have → <code>-ERR FOREIGN …</code>. The key is not cached. The next GET asks again.</li>
+<li>Too many running queries → <code>-ERR FOREIGN overloaded</code>.</li>
+<li>Luau past the query timeout → <code>-ERR FOREIGN timeout</code>, not a tomb. Running out of the instruction slice just pauses the script.</li>
+<li><code>GET</code> inside <code>MULTI</code> on a foreign miss → <code>-ERR FOREIGN GET inside MULTI is not supported</code>.</li>
+</ul>
+<div class="notice warning"><b>A foreign DSN is a secret.</b> Put it in <code>file:/path</code> or <code>env:VAR</code>. Do not put a database password in the <code>configuration</code> space. The server never logs the resolved DSN. ACL does not hide those keys from a client that can read <code>configuration</code>.</div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag code">Code matrix</span><h2>Provision, then GET</h2></header>
+<div class="bd">
+<div class="tabs">
+<div class="tabbar"><button class="on">RESP (redis-cli)</button><button>redis-python</button><button>python-swig</button><button>lua-swig</button></div>
+<div class="pane on"><pre>USE configuration
+SET catalog.foreign_dsn env:CATALOG_DSN
+SET catalog.foreign_query "SELECT v FROM items WHERE sku = ?"
+SET catalog.foreign_query_timeout_ms 2000
+SET catalog.missing_ttl 60
+SET catalog.foreign postgres
+SAVE
+USE catalog
+GET sku
+INFO FOREIGN
+KSPACE OPTION GET FOREIGN</pre></div>
+<div class="pane"><pre><span class="k">import</span> redis
+r = redis.Redis(host=<span class="s">"127.0.0.1"</span>, port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+r.execute_command(<span class="s">"USE"</span>, <span class="s">"configuration"</span>)
+r.set(<span class="s">"catalog.foreign_dsn"</span>, <span class="s">"env:CATALOG_DSN"</span>)
+r.set(<span class="s">"catalog.foreign_query"</span>, <span class="s">"SELECT v FROM items WHERE sku = ?"</span>)
+r.set(<span class="s">"catalog.foreign"</span>, <span class="s">"postgres"</span>)
+r.execute_command(<span class="s">"SAVE"</span>)
+r.execute_command(<span class="s">"USE"</span>, <span class="s">"catalog"</span>)
+<span class="k">print</span>(r.get(<span class="s">"sku"</span>))          <span class="c"># waits on the fill</span>
+<span class="k">print</span>(r.execute_command(<span class="s">"INFO"</span>, <span class="s">"FOREIGN"</span>))</pre></div>
+<div class="pane"><pre><span class="k">import</span> barch
+conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf.set(<span class="s">"catalog.foreign_dsn"</span>, <span class="s">"env:CATALOG_DSN"</span>)
+conf.set(<span class="s">"catalog.foreign_query"</span>, <span class="s">"SELECT v FROM items WHERE sku = ?"</span>)
+conf.set(<span class="s">"catalog.foreign"</span>, <span class="s">"postgres"</span>)
+conf.save()
+kv = barch.KeyValue(<span class="s">"catalog"</span>)   <span class="c"># first open reads the options</span>
+<span class="k">print</span>(kv.get(<span class="s">"sku"</span>))             <span class="c"># waits on the fill</span></pre></div>
+<div class="pane"><pre><span class="k">require</span>(<span class="s">"barch"</span>)
+<span class="k">local</span> conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf:set(<span class="s">"catalog.foreign_dsn"</span>, <span class="s">"env:CATALOG_DSN"</span>)
+conf:set(<span class="s">"catalog.foreign_query"</span>, <span class="s">"SELECT v FROM items WHERE sku = ?"</span>)
+conf:set(<span class="s">"catalog.foreign"</span>, <span class="s">"postgres"</span>)
+conf:save()
+<span class="k">local</span> kv = barch.KeyValue(<span class="s">"catalog"</span>)
+<span class="k">print</span>(kv:get(<span class="s">"sku"</span>))</pre></div>
 </div>
 </div>
 </div>
@@ -2444,6 +2618,7 @@ after, s = r.execute_command(<span class="s">"HEAPBYTES"</span>), stats()
 <tr><td><code>SPACE</code></td><td>—</td><td>keyspace listing</td></tr>
 <tr><td><code>INFO SHARD #n</code></td><td>—</td><td>per-shard info incl. <code>size:</code>; the <code>#</code> addresses a shard by number — omitting it hashes the argument as a key. Per-shard sizes read while a rebalance sweep runs may not sum to the space total (<code>ordered-sharding</code> branch)</td></tr>
 <tr><td><code>INFO</code> · <code>CLIENT INFO</code></td><td>—</td><td>redis-style info text incl. <code>barch_oom_avoided_inserts</code></td></tr>
+<tr><td><code>INFO FOREIGN</code></td><td>—</td><td>miss-fill counters — <code>foreign_queries</code>, <code>foreign_coalesced</code>, <code>foreign_inflight</code>; see <a href="#ref-foreign">Coalesced Foreign Sources</a></td></tr>
 <tr><td>—</td><td><code>calls(name)</code></td><td>invocation count of one named api function</td></tr>
 </tbody>
 </table>

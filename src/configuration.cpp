@@ -63,6 +63,8 @@ struct config_state {
     heap::string listen_port{};
     heap::string rpc_max_buffer{};
     heap::string rpc_client_max_wait_ms{};
+    heap::string foreign_timeout_ms{};
+    heap::string foreign_script_insns{};
     heap::string jump_factor{};
     heap::string ordered_keys{};
     heap::string server_port{};
@@ -184,6 +186,62 @@ static int SetRPCClientMaxWait(const char *unused_arg, ValkeyModuleString *val, 
     return SetRPCClientMaxWait(test_rpc_client_max_wait_ms);
 }
 static int ApplyRPCClientMaxWait(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetForeignTimeoutMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().foreign_timeout_ms.c_str(),
+                                     state().foreign_timeout_ms.length());
+}
+
+static int SetForeignTimeoutMs(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().foreign_timeout_ms = val;
+    char *end = nullptr;
+    config().foreign_timeout_ms = std::strtoull(val.c_str(), &end, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int SetForeignTimeoutMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetForeignTimeoutMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyForeignTimeoutMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetForeignScriptInsns(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().foreign_script_insns.c_str(),
+                                     state().foreign_script_insns.length());
+}
+
+static int SetForeignScriptInsns(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().foreign_script_insns = val;
+    char *end = nullptr;
+    uint64_t n = std::strtoull(val.c_str(), &end, 10);
+    if (n == 0) n = 1;
+    config().foreign_script_insns = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetForeignScriptInsns(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetForeignScriptInsns(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyForeignScriptInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -1109,6 +1167,14 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetRPCClientMaxWait, SetRPCClientMaxWait,
                                                  ApplyRPCClientMaxWait, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "foreign_timeout_ms", "300000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetForeignTimeoutMs, SetForeignTimeoutMs,
+                                                 ApplyForeignTimeoutMs, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "foreign_script_insns", "1000000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetForeignScriptInsns, SetForeignScriptInsns,
+                                                 ApplyForeignScriptInsns, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetOrderedKeys, SetOrderedKeys,
                                                      ApplyOrderedKeys, nullptr);
@@ -1402,6 +1468,18 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyRPCClientMaxWait(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "foreign_timeout_ms") {
+        auto r = SetForeignTimeoutMs(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyForeignTimeoutMs(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "foreign_script_insns") {
+        auto r = SetForeignScriptInsns(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyForeignScriptInsns(nullptr, nullptr, nullptr);
+        }
+        return r;
     }else if (name == "ordered_keys") {
         auto r = SetOrderedKeys(val);
         if (r == VALKEYMODULE_OK) {
@@ -1586,6 +1664,16 @@ uint64_t barch::get_rpc_max_client_wait_ms() {
     return config().rpc_client_max_wait_ms;
 }
 
+uint64_t barch::get_foreign_timeout_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return config().foreign_timeout_ms;
+}
+
+uint64_t barch::get_foreign_script_insns() {
+    std::lock_guard lock(state().config_mutex);
+    return config().foreign_script_insns;
+}
+
 bool barch::get_log_page_access_trace() {
     //std::lock_guard lock(state().config_mutex);
     return config().log_page_access_trace;
@@ -1681,7 +1769,7 @@ static std::string cfg_float(F v) {
 const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "compression", "db_number_prefix", "eviction_policy",
-        "external_host",
+        "external_host", "foreign_script_insns", "foreign_timeout_ms",
         "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -1702,6 +1790,8 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "db_number_prefix")            value = state().db_number_prefix.c_str();
     else if (name == "eviction_policy")             value = state().eviction_type.c_str();
     else if (name == "external_host")               value = c.external_host;
+    else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
+    else if (name == "foreign_timeout_ms")          value = std::to_string(c.foreign_timeout_ms);
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);
     else if (name == "listen_port")                 value = std::to_string(c.listen_port);
     else if (name == "log_page_access_trace")       value = cfg_bool(c.log_page_access_trace);

@@ -13,7 +13,8 @@
 enum contexts {
     ctx_resp = 1,
     ctx_valkey,
-    ctx_rpc
+    ctx_rpc,
+    ctx_swig
 };
 
 struct block_data {
@@ -95,6 +96,9 @@ public:
     }
     [[nodiscard]] int get_context() const {
         return this->ctx;
+    }
+    [[nodiscard]] virtual bool is_collecting_exec() const {
+        return false;
     }
     [[nodiscard]] virtual size_t results_count() const = 0;
     [[nodiscard]] virtual size_t errors_count() const = 0;

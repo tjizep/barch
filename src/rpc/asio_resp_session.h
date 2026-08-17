@@ -17,6 +17,7 @@
 #include "constants.h"
 #include "time_conversion.h"
 #include "rpc/proto_info.h"
+#include "foreign/foreign.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
     template<typename TSock>
@@ -37,6 +38,7 @@ namespace barch {
                 return get_info(socket_);
             };
             bind_socket_writer();
+            caller.set_context(ctx_resp);
             //asio::socket_base::send_buffer_size option(65536); // or larger
             //socket_.set_option(option);
 
@@ -51,6 +53,7 @@ namespace barch {
                 return get_info(socket_);
             };
             bind_socket_writer();
+            caller.set_context(ctx_resp);
             ++statistics::repl::redis_sessions;
         }
 
@@ -110,8 +113,8 @@ namespace barch {
             if (caller.has_blocks()) {
                 auto self(this->shared_from_this());
                 this->socket_.get_executor().execute([this,self]() {
-                    caller.call_blocks();
-                    write_result(caller, stream, 0);
+                    int r = caller.call_blocks();
+                    write_result(caller, stream, r);
                     erase_blocks();
                     // the reply has to be out before anything else starts writing, so
                     // the rest of an interrupted batch waits on this one completing
@@ -254,34 +257,7 @@ namespace barch {
 
                     try {
 
-                        stream.clear();
-                        heap::vector<asynch_call_context_ptr> asynch_calls;
-                        // collect the call results into the "stream" buffer
-                        while (parser.remaining() > 0) {
-                            auto &params = parser.read_new_request();
-                            if (!params.empty()) {
-                                ++calls_recv;
-                                run_params(stream, params, asynch_calls);
-                            }else {
-                                break;
-                            }
-                        }
-                        if (!asynch_calls.empty()) {
-                            // The batch owns this connection from here. Its calls run in
-                            // the order they were read, each reply is on the wire before
-                            // the next call starts, and the read chain is resumed once,
-                            // by the last of them. Resuming it here as well would leave
-                            // two async_read_some chains filling one data_ buffer and
-                            // driving one parser, which comes apart on the next sizeable
-                            // pipelined request - the connection then stops answering
-                            // and the client waits on a reply that never arrives.
-                            auto batch = std::make_shared<heap::vector<asynch_call_context_ptr>>(
-                                std::move(asynch_calls));
-                            run_asynch_batch(batch, 0);
-                        } else if (caller.has_blocks()) {
-                            start_block_to();
-                            add_caller_blocks();
-                        } else {
+                        if (!consume_available()) {
                             do_write(stream);
                             do_read();
                         }
@@ -290,6 +266,8 @@ namespace barch {
                         barch::err({"error", e.what()});
                     }
                 }else {
+                    if (caller.has_blocks())
+                        erase_blocks();
                     //if (ec.category())
                      //barch::err({ec.message().c_str()});
                 }
@@ -312,6 +290,36 @@ namespace barch {
         }
         void add_caller_blocks() {
             caller.transfer_rpc_blocks(this->shared_from_this());
+            for (auto& d : caller.get_blocks()) {
+                if (d.space && d.space->has_foreign())
+                    barch::foreign::kick(d.space, d.key);
+            }
+        }
+        /** parse already-buffered requests. true if the connection is parked. */
+        bool consume_available() {
+            stream.clear();
+            heap::vector<asynch_call_context_ptr> asynch_calls;
+            while (parser.remaining() > 0) {
+                auto &params = parser.read_new_request();
+                if (params.empty())
+                    break;
+                ++calls_recv;
+                run_params(stream, params, asynch_calls);
+                if (caller.has_blocks())
+                    break;
+            }
+            if (!asynch_calls.empty()) {
+                auto batch = std::make_shared<heap::vector<asynch_call_context_ptr>>(
+                    std::move(asynch_calls));
+                run_asynch_batch(batch, 0);
+                return true;
+            }
+            if (caller.has_blocks()) {
+                start_block_to();
+                add_caller_blocks();
+                return true;
+            }
+            return false;
         }
         void erase_blocks() {
             caller.erase_blocks(this->shared_from_this());
@@ -319,8 +327,8 @@ namespace barch {
         }
         void do_block_to() {
             erase_blocks();
-            caller.call_blocks();
-            write_result(caller, stream, 0);
+            int r = caller.call_blocks();
+            write_result(caller, stream, r);
             auto self(this->shared_from_this());
             auto out = std::make_shared<vector_stream>(std::move(stream));
             stream.clear();
@@ -453,7 +461,10 @@ namespace barch {
                 run_asynch_batch(batch, at + 1);
                 return;
             }
-            do_read();
+            if (!consume_available()) {
+                do_write(stream);
+                do_read();
+            }
         }
         /**
          * write a standalone buffer and carry on once it is out, keeping it alive in the

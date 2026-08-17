@@ -144,7 +144,9 @@ namespace art {
                 }
                 if (has("GET",spos)) {
                     is_get = true;
-                    if (has_enum({"ORDERED","LRU","RANDOM"},++spos) < 3) {
+                    if (has_enum({"ORDERED","LRU","RANDOM",
+                                  "FOREIGN","MISSING_TTL","FOREIGN_TIMEOUT",
+                                  "FOREIGN_QUERY_TIMEOUT","FOREIGN_INFLIGHT"},++spos) < 8) {
                         name = tos(spos);
                     }else {
                         return -1;

@@ -121,7 +121,8 @@ int INFO(caller& call, const arg_t& argv) {
         "sharding:"+std::string(ks->opt_range_sharded ? "range" : "hash")+"\n"
         "size:"+tos(s->get_size())+"\n"
         "bytes_allocated:"+tos(s->get_ap().get_leaves().get_bytes_allocated() + s->get_ap().get_nodes().get_bytes_allocated()) + "\n"
-        "virtual_allocated:"+tos(s->get_ap().get_leaves().get_allocated() + s->get_ap().get_nodes().get_allocated()) + "\n";
+        "virtual_allocated:"+tos(s->get_ap().get_leaves().get_allocated() + s->get_ap().get_nodes().get_allocated()) + "\n"
+        "foreign_flights:"+tos(static_cast<const barch::shard*>(s.get())->flights.size())+"\n";
 
         call.push_vt(response);
         return 0;
@@ -347,6 +348,24 @@ int INFO(caller& call, const arg_t& argv) {
         call.push_vt(response);
         return 0;
     }
+    if (argv.size() == 2 && lower(text, argv[1].to_string()) == "foreign") {
+        uint64_t inflight = 0;
+        barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {
+            inflight += ks->foreign_inflight.load();
+        });
+        std::string response =
+        "# Foreign\n\n"
+        "foreign_queries:"+tos(statistics::foreign_queries.load())+"\n"
+        "foreign_misses:"+tos(statistics::foreign_misses.load())+"\n"
+        "foreign_errors:"+tos(statistics::foreign_errors.load())+"\n"
+        "foreign_waiters:"+tos(statistics::foreign_waiters.load())+"\n"
+        "foreign_coalesced:"+tos(statistics::foreign_coalesced.load())+"\n"
+        "foreign_overloaded:"+tos(statistics::foreign_overloaded.load())+"\n"
+        "foreign_cancelled:"+tos(statistics::foreign_cancelled.load())+"\n"
+        "foreign_inflight:"+tos(inflight)+"\n";
+        call.push_vt(response);
+        return 0;
+    }
     return call.push_error("not implemented");
 }
 }
@@ -390,6 +409,14 @@ int STATS(caller& call, const arg_t& argv) {
     call.push_values({"bytes_in_free_lists", as.bytes_in_free_lists});
     call.push_values({"oom_avoided_inserts", as.oom_avoided_inserts});
     call.push_values({"keys_found", as.keys_found});
+    call.push_values({"foreign_queries", statistics::foreign_queries.load()});
+    call.push_values({"foreign_misses", statistics::foreign_misses.load()});
+    call.push_values({"foreign_errors", statistics::foreign_errors.load()});
+    call.push_values({"foreign_waiters", statistics::foreign_waiters.load()});
+    call.push_values({"foreign_coalesced", statistics::foreign_coalesced.load()});
+    call.push_values({"foreign_overloaded", statistics::foreign_overloaded.load()});
+    call.push_values({"foreign_cancelled", statistics::foreign_cancelled.load()});
+    call.push_values({"foreign_slow", statistics::foreign_slow.load()});
     call.end_array();
     return 0;
 }
@@ -417,6 +444,14 @@ int OPS(caller& call, const arg_t& argv) {
     call.push_values({"range_ops", as.range_ops});
     call.push_values({"set_ops", as.set_ops});
     call.push_values({"size_ops", as.size_ops});
+    call.push_values({"foreign_queries", statistics::foreign_queries.load()});
+    call.push_values({"foreign_misses", statistics::foreign_misses.load()});
+    call.push_values({"foreign_errors", statistics::foreign_errors.load()});
+    call.push_values({"foreign_waiters", statistics::foreign_waiters.load()});
+    call.push_values({"foreign_coalesced", statistics::foreign_coalesced.load()});
+    call.push_values({"foreign_overloaded", statistics::foreign_overloaded.load()});
+    call.push_values({"foreign_cancelled", statistics::foreign_cancelled.load()});
+    call.push_values({"foreign_slow", statistics::foreign_slow.load()});
     call.end_array();
     return 0;
 }

@@ -54,6 +54,10 @@ struct rpc_caller : caller {
     // then, or the items leave the EXEC array.
     bool collecting_exec{false};
 
+    [[nodiscard]] bool is_collecting_exec() const override {
+        return collecting_exec;
+    }
+
     [[nodiscard]] bool can_write_socket() const override {
         return (bool) write_socket_bytes && !call_buffering && !collecting_exec;
     }
@@ -89,12 +93,12 @@ struct rpc_caller : caller {
     }
     rpc_caller(const rpc_caller& caller) = default;
     rpc_caller() {
+        set_context(ctx_swig);
         update_routes();
         std::vector<std::string_view> auth = {"AUTH","default","empty"};
         if (this->call( auth,::AUTH) != 0) {
             barch::err({"could not authenticate `default`"});
         }
-
     }
     Variable retval(int r, Variable def) {
         if (!errors.empty()) {
@@ -576,11 +580,14 @@ struct rpc_caller : caller {
     Variable callv(const VT& params, TC&& f, Variable def = nullptr) {
         return retval(call(params, f),def);
     }
-    void call_blocks() {
+    // write_result treats r >= 0 as results. An empty results vector is a RESP
+    // null, so a continue that only push_error'd has to return -1 here.
+    int call_blocks() {
         results.clear();
         errors.clear();
         args.clear();
         block_fun(*this, blocks);
+        return errors.empty() ? 0 : -1;
     }
     std::string get_info() const override {
         if (!info_fun) return "";

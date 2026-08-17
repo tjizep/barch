@@ -28,6 +28,7 @@
 #include "keys.h"
 #include "keyspec.h"
 #include "keyspace_locks.h"
+#include "foreign/foreign.h"
 #include <unordered_set>
 #include <chrono>
 #include "key_type.h"
@@ -1765,7 +1766,8 @@ int GET(caller& call, const arg_t& argv) {
         return call.push_error(barch::wrong_type_message());
     }
     int r = call.ok();
-    bool found = store.search(converted.get_value(), [&](const art::node_ptr& n) {
+    auto key = converted.get_value();
+    bool found = store.search(key, [&](const art::node_ptr& n) {
         auto cl = n.const_leaf();
         auto vt = cl->get_value();
         if (cl->is_compressed()) {
@@ -1773,7 +1775,20 @@ int GET(caller& call, const arg_t& argv) {
         }
         r = call.push_vt(vt);
     });
-    return found ? r : call.push_null();
+    if (found) return r;
+    if (!call.kspace()->has_foreign())
+        return call.push_null();
+    if (call.is_collecting_exec())
+        return call.push_error("FOREIGN GET inside MULTI is not supported");
+    art::node_ptr leaf;
+    store.with_key_read(key, [&](const barch::shard_ptr& t) {
+        leaf = t->local_leaf(key);
+    });
+    if (!leaf.null() && leaf.cl()->is_tomb() && !leaf.cl()->expired()) {
+        ++statistics::foreign_misses;
+        return call.push_null();
+    }
+    return barch::foreign::point_get(call, key);
 }
 /* B.SCAN <key>
  *
@@ -2022,10 +2037,30 @@ int EXISTS(caller& call, const arg_t& argv) {
         // a name holding a collection has no plain key, so looking only for that answered
         // 0 for a hash - and EXISTS is the command redis expects a caller to ask with
         auto converted = conversion::as_composite(k);
-        if (store.exists(converted.get_value())
+        auto key = converted.get_value();
+        if (store.exists(key)
             || barch::kind_of_container(store, k) != barch::container_kind::none) {
             ++found;
+            continue;
         }
+        if (argv.size() == 2 && call.kspace()->has_foreign()) {
+            if (call.is_collecting_exec())
+                return call.push_error("FOREIGN EXISTS inside MULTI is not supported");
+            art::node_ptr leaf;
+            store.with_key_read(key, [&](const barch::shard_ptr& t) {
+                leaf = t->local_leaf(key);
+            });
+            if (!leaf.null() && leaf.cl()->is_tomb() && !leaf.cl()->expired()) {
+                ++statistics::foreign_misses;
+                return call.push_ll(0);
+            }
+            return barch::foreign::point_exists(call, key);
+        }
+    }
+    if (argv.size() > 2 && call.kspace()->has_foreign()) {
+        if (call.is_collecting_exec())
+            return call.push_error("FOREIGN EXISTS inside MULTI is not supported");
+        return barch::foreign::exists_many(call, argv);
     }
     return call.push_ll(found);
 }
@@ -2142,6 +2177,11 @@ int MGET(caller& call, const arg_t& argv) {
 
     if (argv.size() < 2)
         return call.wrong_arity();
+    if (call.kspace()->has_foreign()) {
+        if (call.is_collecting_exec())
+            return call.push_error("FOREIGN MGET inside MULTI is not supported");
+        return barch::foreign::mget(call, argv);
+    }
     int responses = 0;
     barch::sharded_store store(call.kspace());
     call.start_array();
@@ -2456,7 +2496,7 @@ void register_keys_api(function_map& r) {
     r["DECRBY"] = {::DECRBY,{"write","keys","data"}};
     r["UDECRBY"] = {::UDECRBY,{"write","keys","data"}};
     r["COUNT"] = {::COUNT,{"read","keys","data"}};
-    r["EXISTS"] = {::EXISTS,{"read","keys","data"}};
+    r["EXISTS"] = {::EXISTS,{"read","keys","data"}, true};
     r["EXPIRE"] = {::EXPIRE,{"write","keys","data"}};
     r["PEXPIRE"] = {::PEXPIRE,{"write","keys","data"}};
     r["EXPIREAT"] = {::EXPIREAT,{"write","keys","data"}};
@@ -2464,9 +2504,11 @@ void register_keys_api(function_map& r) {
     r["MSET"] = {::MSET,{"write","keys","data"}};
     r["ADD"] = {::ADD,{"write","keys","data"}};
     r["GET"] = {::GET,{"read","keys","data"}};
+    r["FOREIGN"] = {barch::foreign::FAKE,{"write","keys","data"}};
+    r["FOREIGN_MISS"] = {barch::foreign::MISS,{"write","keys","data"}};
     r["SCAN"] = {::SCAN,{"read","keys","data"}};
     r["LENGTH"] = {::LENGTH,{"read","keys","data"}};
-    r["MGET"] = {::MGET,{"read","keys","data"}};
+    r["MGET"] = {::MGET,{"read","keys","data"}, true};
     r["MIN"] = {::MIN,{"read","keys","data"}};
     r["MAX"] = {::MAX,{"read","keys","data"}};
     r["LB"] = {::LB,{"read","keys","data"}};

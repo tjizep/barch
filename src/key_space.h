@@ -4,7 +4,11 @@
 
 #ifndef BARCH_KEY_SPACE_H
 #define BARCH_KEY_SPACE_H
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include "../external/include/valkeymodule.h"
 #include "abstract_shard.h"
 #include "merge_options.h"
@@ -12,6 +16,7 @@
 #include "value_type.h"
 
 namespace barch {
+    namespace foreign { struct sql_backend; }
     class key_space {
     public:
         typedef std::shared_ptr<key_space> key_space_ptr;
@@ -35,6 +40,39 @@ namespace barch {
          * route_moved.
          */
         bool opt_range_sharded = false;
+
+        enum class foreign_kind { off, mysql, postgres, luau, fake };
+        foreign_kind opt_foreign = foreign_kind::off;
+        std::string foreign_dsn{};
+        std::string foreign_host{};
+        std::string foreign_user{};
+        std::string foreign_password{};
+        std::string foreign_database{};
+        std::string foreign_query{};
+        std::string foreign_script{};
+        std::string luau_bytecode{};
+        uint64_t foreign_script_insns{0};
+        uint64_t foreign_port{0};
+        uint64_t missing_ttl{0};
+        uint64_t foreign_timeout_ms{0};
+        uint64_t foreign_query_timeout_ms{1000};
+        uint64_t foreign_max_inflight{32};
+        uint64_t foreign_pool_size{8};
+        std::atomic<uint32_t> foreign_inflight{0};
+        std::shared_ptr<foreign::sql_backend> sql{};
+
+        std::mutex fake_mu{};
+        std::unordered_map<std::string, std::string> fake_source{};
+        bool fake_fail{false};
+        uint64_t fake_delay_ms{0};
+        std::atomic<uint64_t> fake_queries{0};
+
+        [[nodiscard]] bool has_foreign() const { return opt_foreign != foreign_kind::off; }
+        [[nodiscard]] const char *foreign_kind_name() const;
+        [[nodiscard]] uint64_t waiter_timeout_ms() const;
+        [[nodiscard]] uint64_t script_insns() const;
+        /** fail in-flight fills and wake waiters before the shards go. */
+        void fail_foreign_flights();
     private:
         heap::vector<barch::shard_ptr> shards{};
         /** only read when opt_range_sharded; see range_index.h */

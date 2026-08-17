@@ -81,6 +81,7 @@ static size_t save(caller& call) {
     - `KSPACE OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
     - `KSPACE OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
     - `KSPACE OPTION [SET|GET] RANDOM [ON|OFF|VOLATILE]` sets the current key space to evict randomly
+    - `KSPACE OPTION GET FOREIGN|MISSING_TTL|FOREIGN_TIMEOUT|FOREIGN_QUERY_TIMEOUT|FOREIGN_INFLIGHT` reports the foreign-source options read when the space was built. SET of those names is a syntax error.
     - `KSPACE EXIST {key space name} return `1` if space exists else `0`
  */
 int KSPACE(caller& call, const arg_t& argv) {
@@ -181,6 +182,24 @@ int KSPACE(caller& call, const arg_t& argv) {
             barch::shard_ptr ptr = spc->get(0ul);
             call.push_bool(ptr->opt_evict_all_keys_random);
             return 0;
+        }
+        if (parser.name == "FOREIGN") {
+            return call.push_vt(art::value_type{spc->foreign_kind_name()});
+        }
+        if (parser.name == "MISSING_TTL") {
+            return call.push_ll(static_cast<int64_t>(spc->missing_ttl));
+        }
+        if (parser.name == "FOREIGN_TIMEOUT") {
+            return call.push_ll(static_cast<int64_t>(spc->waiter_timeout_ms()));
+        }
+        if (parser.name == "FOREIGN_QUERY_TIMEOUT") {
+            return call.push_ll(static_cast<int64_t>(spc->foreign_query_timeout_ms));
+        }
+        if (parser.name == "FOREIGN_INFLIGHT") {
+            call.start_array();
+            call.push_ll(0);
+            call.push_ll(static_cast<int64_t>(spc->foreign_max_inflight));
+            return call.end_array();
         }
         return call.push_simple("OK");
     }

@@ -59,6 +59,9 @@ endif ()
 if (NOT GEN_JNI)
     set(GEN_JNI ON)
 endif ()
+if (NOT ADD_LUAU)
+    set(ADD_LUAU ON)
+endif ()
 option(COVERAGE "Enable code coverage reporting" OFF)
 
 set(CMAKE_CPP_STANDARD 20)
@@ -225,8 +228,63 @@ if (ADD_ZSTD_COMPRESSION)
     include_directories(${zstd_SOURCE_DIR}/lib)
 endif ()
 
+if (ADD_LUAU)
+    message("Using Luau for foreign miss scripts")
+    set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
+    set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE)
+    set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+    FetchContent_Declare(
+            luau
+            GIT_REPOSITORY https://github.com/luau-lang/luau.git
+            GIT_TAG 0.734
+            GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(luau)
+    set(BARCH_HAS_LUAU ON)
+else ()
+    message("Luau not used; foreign=luau spaces stay off")
+    set(BARCH_HAS_LUAU OFF)
+endif ()
+
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
 #-Weffc++ is removed else fmtlib does not compile - because it's a little ...s
+
+if (NOT DEFINED ADD_MYSQL)
+    set(ADD_MYSQL ON)
+endif ()
+if (NOT DEFINED ADD_POSTGRES)
+    set(ADD_POSTGRES ON)
+endif ()
+
+if (ADD_MYSQL)
+    find_package(MySQL)
+    if (MySQL_FOUND)
+        message("Using MySQL client for foreign=mysql")
+        set(BARCH_HAS_MYSQL ON)
+    else ()
+        message("MySQL client not found; foreign=mysql spaces stay off")
+        set(BARCH_HAS_MYSQL OFF)
+    endif ()
+else ()
+    message("MySQL client not used; foreign=mysql spaces stay off")
+    set(BARCH_HAS_MYSQL OFF)
+endif ()
+
+if (ADD_POSTGRES)
+    find_package(PostgreSQL)
+    if (PostgreSQL_FOUND)
+        message("Using PostgreSQL client for foreign=postgres")
+        set(BARCH_HAS_POSTGRES ON)
+    else ()
+        message("PostgreSQL client not found; foreign=postgres spaces stay off")
+        set(BARCH_HAS_POSTGRES OFF)
+    endif ()
+else ()
+    message("PostgreSQL client not used; foreign=postgres spaces stay off")
+    set(BARCH_HAS_POSTGRES OFF)
+endif ()
+
 
 include_directories(src)
 include_directories(external/include)
@@ -251,7 +309,7 @@ else()
 endif ()
 
 file(GLOB SOURCES
-    "src/*.c" "src/*.cpp" "src/*.cxx" "src/rpc/*.cpp" "src/art/*.cpp" "src/io/*.cpp" "src/keys/*.cpp" "src/shard/*.cpp" "src/parsers/*.cpp"
+    "src/*.c" "src/*.cpp" "src/*.cxx" "src/rpc/*.cpp" "src/art/*.cpp" "src/io/*.cpp" "src/keys/*.cpp" "src/shard/*.cpp" "src/parsers/*.cpp" "src/foreign/*.cpp"
 )
 if (ADD_SWIG)
     find_package (Python3 COMPONENTS Interpreter Development)
@@ -419,6 +477,39 @@ if (ADD_FMT)
     target_link_libraries(barch PRIVATE fmt::fmt)
     target_link_libraries(lbarch PRIVATE fmt::fmt)
 endif ()
+
+if (BARCH_HAS_LUAU)
+    foreach (tgt barch lbarch barchlua barchjni)
+        if (TARGET ${tgt})
+            target_compile_definitions(${tgt} PRIVATE BARCH_HAS_LUAU)
+            target_include_directories(${tgt} BEFORE PRIVATE
+                ${luau_SOURCE_DIR}/VM/include
+                ${luau_SOURCE_DIR}/Compiler/include)
+            target_link_libraries(${tgt} PRIVATE Luau.Compiler Luau.VM)
+        endif ()
+    endforeach ()
+endif ()
+
+if (BARCH_HAS_MYSQL)
+    foreach (tgt barch lbarch barchlua barchjni)
+        if (TARGET ${tgt})
+            target_compile_definitions(${tgt} PRIVATE BARCH_HAS_MYSQL)
+            target_include_directories(${tgt} PRIVATE ${MySQL_INCLUDE_DIR})
+            target_link_libraries(${tgt} PRIVATE ${MySQL_LIBRARIES})
+        endif ()
+    endforeach ()
+endif ()
+
+if (BARCH_HAS_POSTGRES)
+    foreach (tgt barch lbarch barchlua barchjni)
+        if (TARGET ${tgt})
+            target_compile_definitions(${tgt} PRIVATE BARCH_HAS_POSTGRES)
+            target_include_directories(${tgt} PRIVATE ${PostgreSQL_INCLUDE_DIRS})
+            target_link_libraries(${tgt} PRIVATE ${PostgreSQL_LIBRARIES})
+        endif ()
+    endforeach ()
+endif ()
+
 
 if (NOT TEST_OD)
     message("Testing not enabled tests not generated :Use -DTEST_OD=ON")
@@ -592,6 +683,22 @@ else()
         # the per key space range sharding option and its plumbing
         add_test(NAME TestRangeShardConfig
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/rangeshardtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestForeign
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/foreigntest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestForeignLuau
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/foreign_luau.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestForeignMysql
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/foreign_mysql.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        add_test(NAME TestForeignPostgres
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/foreign_postgres.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         # the ordered routing the option selects, and the rebalancer behind it

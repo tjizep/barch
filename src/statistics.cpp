@@ -55,6 +55,14 @@ alignas(Alignment) std::atomic<uint64_t> statistics::max_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::incr_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::decr_ops = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::update_ops = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_queries = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_misses = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_errors = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_waiters = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_coalesced = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_overloaded = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_cancelled = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::foreign_slow = 0;
 
 /**
 * queue stats
@@ -120,6 +128,14 @@ void statistics::reset_statistics() {
     incr_ops = 0;
     decr_ops = 0;
     update_ops = 0;
+
+    foreign_queries = 0;
+    foreign_misses = 0;
+    foreign_errors = 0;
+    foreign_coalesced = 0;
+    foreign_overloaded = 0;
+    foreign_cancelled = 0;
+    foreign_slow = 0;
 
     queue_failures = 0;
     queue_added = 0;

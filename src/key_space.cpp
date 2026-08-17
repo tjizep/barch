@@ -13,7 +13,58 @@
 #include "thread_pool.h"
 #include "rpc/server.h"
 #include "a5hash.h"
+#include "configuration.h"
+#include "foreign/driver.h"
+#include "foreign/sql.h"
+#include <algorithm>
+#include <cctype>
 namespace barch {
+
+    static std::string lower_copy(std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return s;
+    }
+
+    static key_space::foreign_kind parse_foreign_kind(const std::string& raw) {
+        auto v = lower_copy(raw);
+        if (v.empty() || v == "off" || v == "none" || v == "no" || v == "false")
+            return key_space::foreign_kind::off;
+        if (v == "mysql") return key_space::foreign_kind::mysql;
+        if (v == "postgres" || v == "postgresql") return key_space::foreign_kind::postgres;
+        if (v == "luau") return key_space::foreign_kind::luau;
+        if (v == "fake") return key_space::foreign_kind::fake;
+        return key_space::foreign_kind::off;
+    }
+
+    const char *key_space::foreign_kind_name() const {
+        switch (opt_foreign) {
+            case foreign_kind::mysql: return "mysql";
+            case foreign_kind::postgres: return "postgres";
+            case foreign_kind::luau: return "luau";
+            case foreign_kind::fake: return "fake";
+            case foreign_kind::off:
+            default: return "off";
+        }
+    }
+
+    uint64_t key_space::waiter_timeout_ms() const {
+        if (foreign_timeout_ms != 0) return foreign_timeout_ms;
+        return get_foreign_timeout_ms();
+    }
+
+    uint64_t key_space::script_insns() const {
+        if (foreign_script_insns != 0) return foreign_script_insns;
+        return get_foreign_script_insns();
+    }
+
+    static void read_u64(KeyValue& kv, const std::string& key, uint64_t& dest) {
+        auto s = kv.get(key);
+        if (!s.empty())
+            conversion::to(s, dest);
+    }
+
     struct key_spaces {
         key_spaces() {
             barch::log({"Starting Barch",
@@ -142,14 +193,18 @@ namespace barch {
             throw_exception<std::invalid_argument>(get_ks_pattern_error().c_str());
         }
         std::string name = decorate(name_);
+        key_space_ptr held;
         {
             std::unique_lock l(ksp().lock);
             auto s = ksp().spaces.find(name);
             if (s != ksp().spaces.end()) {
+                held = s->second;
                 ksp().spaces.erase(s);
                 r = true;
             }
         }
+        if (held)
+            held->fail_foreign_flights();
         return r; // destruction happens in callers thread - so hopefully no dl because shared ptr
     }
 
@@ -174,6 +229,64 @@ namespace barch {
                 auto ranged = kv.get(real+".range_sharded");
                 if (!ranged.empty())
                     opt_range_sharded = ranged != "0";
+                auto foreign = kv.get(real+".foreign");
+                if (!foreign.empty()) {
+                    auto kind = lower_copy(foreign);
+                    bool explicit_off = kind == "off" || kind == "none" || kind == "no" || kind == "false";
+                    opt_foreign = parse_foreign_kind(foreign);
+                    if (opt_foreign == foreign_kind::off && !explicit_off) {
+                        barch::err({"unknown foreign source - ignoring it for space", name, foreign});
+                    }
+                }
+                foreign_dsn = kv.get(real+".foreign_dsn");
+                foreign_host = kv.get(real+".foreign_host");
+                foreign_user = kv.get(real+".foreign_user");
+                foreign_password = kv.get(real+".foreign_password");
+                foreign_database = kv.get(real+".foreign_database");
+                foreign_query = kv.get(real+".foreign_query");
+                foreign_script = kv.get(real+".foreign_script");
+                read_u64(kv, real+".foreign_port", foreign_port);
+                read_u64(kv, real+".missing_ttl", missing_ttl);
+                read_u64(kv, real+".foreign_timeout_ms", foreign_timeout_ms);
+                read_u64(kv, real+".foreign_query_timeout_ms", foreign_query_timeout_ms);
+                read_u64(kv, real+".foreign_max_inflight", foreign_max_inflight);
+                read_u64(kv, real+".foreign_pool_size", foreign_pool_size);
+                read_u64(kv, real+".foreign_script_insns", foreign_script_insns);
+                if (opt_foreign == foreign_kind::mysql || opt_foreign == foreign_kind::postgres) {
+                    if (foreign_dsn.empty() && foreign_host.empty()) {
+                        barch::err({"foreign source needs a dsn or host - ignoring it for space", name});
+                        opt_foreign = foreign_kind::off;
+                    } else if (foreign_query.empty()) {
+                        barch::err({"foreign source needs a query - ignoring it for space", name});
+                        opt_foreign = foreign_kind::off;
+                    } else if (!foreign::query_has_placeholder(foreign_query)) {
+                        barch::err({"foreign query needs ? or $n or $$ - ignoring it for space", name});
+                        opt_foreign = foreign_kind::off;
+                    } else if (opt_foreign == foreign_kind::mysql
+                               && !foreign::prepare_mysql(*this)) {
+                        opt_foreign = foreign_kind::off;
+                    } else if (opt_foreign == foreign_kind::postgres
+                               && !foreign::prepare_postgres(*this)) {
+                        opt_foreign = foreign_kind::off;
+                    }
+                } else if (opt_foreign == foreign_kind::luau) {
+                    if (foreign_script.empty()) {
+                        barch::err({"luau foreign source needs a script - ignoring it for space", name});
+                        opt_foreign = foreign_kind::off;
+                    } else if (!foreign::prepare_luau(*this)) {
+                        opt_foreign = foreign_kind::off;
+                    } else if (!foreign_dsn.empty() || !foreign_host.empty()) {
+                        std::string err;
+                        auto resolved = foreign::resolve_dsn(*this, err);
+                        auto look = resolved.empty() ? foreign_dsn : resolved;
+                        auto dsn_looks_pg = look.find("postgres") != std::string::npos
+                            || look.find("dbname=") != std::string::npos;
+                        if (dsn_looks_pg)
+                            foreign::prepare_postgres(*this);
+                        else
+                            foreign::prepare_mysql(*this);
+                    }
+                }
             }
             if (opt_range_sharded && !opt_ordered_keys) {
                 // a range only means something where the keys are in order. Refused
@@ -294,12 +407,31 @@ namespace barch {
             thread_exit.signal(1);
         });
     }
+    void key_space::fail_foreign_flights() {
+        heap::vector<abstract_session_ptr> sessions;
+        for (auto& sh : shards) {
+            if (!sh) continue;
+            std::unique_lock lck(sh->get_latch());
+            auto* s = static_cast<shard*>(sh.get());
+            s->fail_foreign("FOREIGN space unloaded", sessions);
+            for (auto& [k, fl] : s->flights) {
+                if (!fl->owns_inflight) continue;
+                fl->owns_inflight = false;
+                if (foreign_inflight > 0)
+                    --foreign_inflight;
+            }
+        }
+        for (auto& sess : sessions)
+            sess->do_block_continue();
+    }
+
     key_space::~key_space() {
         exiting = true;
         thread_control.signal(1);
         thread_exit.wait();
         if (tmaintain.joinable())
             tmaintain.join();
+        fail_foreign_flights();
         shards.clear();
     }
 

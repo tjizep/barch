@@ -60,6 +60,17 @@ namespace statistics {
     extern std::atomic<uint64_t> decr_ops;
     extern std::atomic<uint64_t> update_ops;
     /**
+     * foreign fill
+     */
+    extern std::atomic<uint64_t> foreign_queries;
+    extern std::atomic<uint64_t> foreign_misses;
+    extern std::atomic<uint64_t> foreign_errors;
+    extern std::atomic<uint64_t> foreign_waiters;
+    extern std::atomic<uint64_t> foreign_coalesced;
+    extern std::atomic<uint64_t> foreign_overloaded;
+    extern std::atomic<uint64_t> foreign_cancelled;
+    extern std::atomic<uint64_t> foreign_slow;
+    /**
      * queue stats
      */
     extern std::atomic<uint64_t> queue_failures;
@@ -104,9 +115,9 @@ namespace statistics {
      *    statistic, it would make the server misreport its own state until the numbers
      *    drifted back.
      *  - read_locks_active, write_locks_active, redis_sessions, art_sessions,
-     *    push_connections_open and out_queue_size are incremented and later
-     *    decremented. Zeroing one while it is non zero means the matching decrements
-     *    wrap it to near UINT64_MAX, which is worse than merely wrong.
+     *    push_connections_open, out_queue_size and foreign_waiters are incremented
+     *    and later decremented. Zeroing one while it is non zero means the matching
+     *    decrements wrap it to near UINT64_MAX, which is worse than merely wrong.
      *  - last_vacuum_time is a timestamp and max_leaf_size is a property of the data,
      *    not of activity.
      */

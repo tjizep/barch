@@ -163,6 +163,7 @@ namespace barch {
          * @return not null key if it exists (incl. pull sources)
          */
         virtual art::node_ptr search(art::value_type key) = 0;
+        virtual art::node_ptr local_leaf(art::value_type key) = 0;
         virtual bool is_present(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) = 0;

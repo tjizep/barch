@@ -12,6 +12,10 @@
 #include "merge_options.h"
 #include "overflow_hash.h"
 #include "vector_stream.h"
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 
 namespace barch {
     using namespace art;
@@ -232,6 +236,28 @@ namespace barch {
         void clear_hash() ;
         bool remove_leaf_from_uset(value_type key) override;
         node_ptr from_unordered_set(value_type key) const;
+        /** leaf in this shard only; tombs stay visible. does not walk DEPENDS. */
+        node_ptr local_leaf(value_type key) override;
+        /** empty tomb for a source miss. hashed path uses the hash table. */
+        void insert_cached_miss(value_type key, uint64_t ttl_ms, bool hashed);
+        /** a write or DEL of an in-flight key; the fetch must discard. */
+        void cancel_flight(value_type key);
+        /** UNLOAD/DROP: fail every flight. Stolen sessions are woken after the lock drops. */
+        void fail_foreign(const char* msg, heap::vector<abstract_session_ptr>& sessions);
+
+        struct foreign_flight {
+            uint64_t generation{1};
+            enum class state { pending, cancelled, failed } state{state::pending};
+            std::string error{};
+            bool enqueued{false};
+            bool owns_inflight{true};
+            std::mutex swig_mu{};
+            std::condition_variable swig_cv{};
+            uint32_t swig_waiters{0};
+            uint32_t resp_pending{0};
+            bool finished{false};
+        };
+        std::unordered_map<std::string, std::shared_ptr<foreign_flight>> flights;
         node_ptr first() const final ; // can return nullptr
         size_t page(size_t page, heap::vector<uint8_t>&)const final; // can return nullptr
         size_t next_page(size_t page ) const final; // can return nullptr

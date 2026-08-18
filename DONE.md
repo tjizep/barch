@@ -3436,6 +3436,18 @@ write lock. TestForeign completes.
 spaces. No more `_`. RANGE `"is is|0"` … `"is is|999999"` finds
 those offsets.
 
+## 89. FOREIGN waiter uses a millisecond clock [18-08-2026]
+
+*Was `TODO.md` entry 93.*
+
+The parked-GET timer was `time_t_timer`. Its clock is `std::time`,
+which only moves once a second. `expires_after(200ms)` stayed in
+the future until the next whole second, so a 500ms fake fill always
+answered the GET. The timer is `asio::steady_timer`. If the fetch
+still lands after the waiter deadline, that GET is a timeout and
+the next GET is the stored value. TestForeign's `fx_to` case
+passes; the isolated GET timed out in 200ms.
+
 A one-character `key_split` is a literal separator. Compiling `|`
 as a regex is alternation and matches empty strings, which smashed
 the gram. RANGE joins components with that same character, so the

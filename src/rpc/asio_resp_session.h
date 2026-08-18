@@ -46,7 +46,7 @@ namespace barch {
         }
         template<typename sock_T>
         resp_session(sock_T socket, asio::io_context &workers, char init_char)
-            : socket_(std::move(socket)), timer( socket_.get_executor()), workers(workers)
+            : socket_(std::move(socket)), timer(socket_.get_executor()), workers(workers)
         {
             parser.init(init_char);
             caller.info_fun = [this]() -> std::string {
@@ -113,10 +113,19 @@ namespace barch {
             if (caller.has_blocks()) {
                 timer.cancel();
                 auto self(this->shared_from_this());
+                // the fetch landed after the waiter deadline: this GET is
+                // still a timeout. the value is already stored for the next one.
+                if (waiter_deadline && art::now() >= waiter_deadline) {
+                    asio::post(this->socket_.get_executor(), [this,self]() {
+                        do_block_to();
+                    });
+                    return;
+                }
                 // post, not execute: SET/FOREIGN_MISS/finish_fetch call this
                 // while the shard write lock is still held. execute can run
                 // the waiter on this thread, and reply_after_wait takes the
                 // same lock.
+                waiter_deadline = 0;
                 asio::post(this->socket_.get_executor(), [this,self]() {
                     int r = caller.call_blocks();
                     write_result(caller, stream, r);
@@ -281,9 +290,11 @@ namespace barch {
 
         void start_block_to() {
             if (caller.block_to_ms == 0 || caller.block_to_ms >= std::numeric_limits<long>::max()) {
+                waiter_deadline = 0;
                 return;
             }
             timer.cancel();
+            waiter_deadline = art::now() + static_cast<int64_t>(caller.block_to_ms);
             timer.expires_after(std::chrono::milliseconds(caller.block_to_ms));
             auto self(this->shared_from_this());
             timer.async_wait([this,self](const std::error_code& ec)
@@ -331,6 +342,7 @@ namespace barch {
 
         }
         void do_block_to() {
+            waiter_deadline = 0;
             erase_blocks();
             int r = caller.call_blocks();
             write_result(caller, stream, r);
@@ -544,7 +556,10 @@ namespace barch {
         uint64_t calls_recv = 0;
         uint64_t created = art::now();
 
-        time_t_timer timer;
+        // millisecond waiter. time_t_timer only ticks once a second, so a
+        // 200ms FOREIGN timeout never beat a 500ms fetch.
+        asio::steady_timer timer;
+        int64_t waiter_deadline{0};
         asio::io_context& workers;
         std::shared_ptr<function_map> barch_functions = functions_by_name(); // take a snapshot
 

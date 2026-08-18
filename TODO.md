@@ -500,3 +500,5 @@
 91. [Done] TestForeign no longer aborts on the write lock [18-08-2026] Nr 87 371d7a9
 
 92. [Done] N-gram frames split on | so the gram keeps its spaces [18-08-2026] Nr 88 4a4b73f
+
+93. [Done] FOREIGN waiter uses a millisecond clock [18-08-2026] Nr 89 10233c2

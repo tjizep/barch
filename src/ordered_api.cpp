@@ -299,7 +299,7 @@ int ZREM(caller& call, const arg_t& argv) {
     auto container = conversion::convert(key);
     query q1, qmember;
     q1->create(art::ts_ordered_map, {container});
-    auto member_prefix = qmember->create(art::ts_ordered_map, {IX_MEMBER, container});
+    qmember->create(art::ts_ordered_map, {IX_MEMBER, container});
     for (size_t n = 2; n < argv.size(); ++n) {
         auto mem = argv[n];
 

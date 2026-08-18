@@ -30,6 +30,8 @@ struct compiled_query {
 
 std::string user_key(std::string_view internal);
 std::vector<std::string> key_parts(std::string_view internal);
+/** `$n` parts. Uses `<name>.key_split` when set, otherwise spaces / the composite. */
+std::vector<std::string> key_parts(std::string_view internal, const key_space* ks);
 std::string key_encoded(std::string_view internal);
 /** file:/path, env:VAR, the raw DSN, or host=… from the space fields. Never log the return. */
 std::string resolve_dsn(const key_space& ks, std::string& err);
@@ -41,7 +43,8 @@ bool compile_query(std::string_view sql, bool postgres, compiled_query& out,
 bool query_has_placeholder(std::string_view sql);
 bool query_has_one_placeholder(std::string_view sql);
 bool bind_key(std::string_view internal, const compiled_query& q,
-              std::vector<std::string>& values, std::string& err);
+              std::vector<std::string>& values, std::string& err,
+              const key_space* ks = nullptr);
 std::string postgres_placeholders(std::string_view sql);
 
 bool mysql_available();

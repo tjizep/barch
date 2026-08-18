@@ -492,3 +492,7 @@
 87. [Done] Luau instruction budget is a slice, not a kill [17-08-2026] Nr 83 78a270e
 
 88. [Done] CI MULTI, DROP deadlock, and foreign write-back [18-08-2026] Nr 84 561b393
+
+89. [Done] Incoming keys can split on a per-space regex [18-08-2026] Nr 85 e668501
+
+90. [Done] key_split feeds $n [18-08-2026] Nr 86 e668501

@@ -146,7 +146,8 @@ namespace art {
                     is_get = true;
                     if (has_enum({"ORDERED","LRU","RANDOM",
                                   "FOREIGN","MISSING_TTL","FOREIGN_TIMEOUT",
-                                  "FOREIGN_QUERY_TIMEOUT","FOREIGN_INFLIGHT"},++spos) < 8) {
+                                  "FOREIGN_QUERY_TIMEOUT","FOREIGN_INFLIGHT",
+                                  "KEY_SPLIT"},++spos) < 9) {
                         name = tos(spos);
                     }else {
                         return -1;

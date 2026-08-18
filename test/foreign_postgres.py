@@ -148,6 +148,17 @@ if dsn and built:
                 assert r.get("Smith 42") == "Jane"
                 assert r.get("Smith 42") == "Jane"
                 assert r.get("Jones 1") is None
+                conf.set("fp_colon.key_split", ":")
+                conf.set("fp_colon.foreign_dsn", "env:BARCH_POSTGRES_LIVE")
+                conf.set(
+                    "fp_colon.foreign_query",
+                    "SELECT name FROM person WHERE surname = $0 AND age = $1",
+                )
+                conf.set("fp_colon.foreign", "postgres")
+                conf.save()
+                assert option(r, "fp_colon", "FOREIGN") == "postgres"
+                r.execute_command("USE", "fp_colon")
+                assert r.get("Smith:42") == "Jane"
                 conf.set("fp_enc.foreign_dsn", "env:BARCH_POSTGRES_LIVE")
                 conf.set("fp_enc.foreign_query", "SELECT v FROM t WHERE k = $$")
                 conf.set("fp_enc.foreign", "postgres")

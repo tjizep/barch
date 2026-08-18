@@ -66,7 +66,7 @@ static int BarchModifyInteger(caller& call,const arg_t& argv, IntT by) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
 
     int r = -1;
     IntT l = IntT();
@@ -138,8 +138,8 @@ int RANGE(caller& call, const arg_t& argv) {
     if (key_ok(k2) != 0)
         return call.key_check_error(k2);
 
-    auto c1 = conversion::as_composite(k1);
-    auto c2 = conversion::as_composite(k2);
+    auto c1 = call.kspace()->encode_key(k1);
+    auto c2 = call.kspace()->encode_key(k2);
 
     barch::sharded_store store(call.kspace());
     call.start_array();
@@ -169,8 +169,8 @@ int COUNT(caller& call, const arg_t& argv) {
     if (key_ok(k2) != 0)
         return call.key_check_error(k2);
 
-    auto c1 = conversion::as_composite(k1);
-    auto c2 = conversion::as_composite(k2);
+    auto c1 = call.kspace()->encode_key(k1);
+    auto c2 = call.kspace()->encode_key(k2);
     barch::sharded_store store(call.kspace());
     return call.push_int(store.count(c1.get_value(), c2.get_value()));
 }
@@ -392,11 +392,11 @@ int SET(caller& call,const arg_t& argv) {
     // answers false - but SET never looked at that answer, so an oversized value was
     // acknowledged with OK and stored nothing. Silent loss on a write that said it worked
     // is the worst way to be wrong, so the size is judged here where it can be reported.
-    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+    if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
     }
     auto sp = call.kspace();
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     auto key = converted.get_value();
     art::key_spec spec(argv);
     if (spec.parse_options() != call.ok()) {
@@ -504,7 +504,7 @@ static int BarchModifyDouble(caller& call,const arg_t& argv, double by) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     auto t = store.write_locked(converted.get_value());
     int r = -1;
@@ -583,7 +583,7 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
     long long r = v.size;
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     auto fc = [&](art::node_ptr) -> void {
     };
     // read-modify-write on one key: the whole body holds a single write lock
@@ -684,7 +684,7 @@ int SETRANGE(caller& call, const arg_t& argv) {
         return call.push_error("string exceeds maximum allowed size");
     }
 
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     auto fc = [&](art::node_ptr) -> void {
     };
     int reply = call.ok();
@@ -765,7 +765,7 @@ int GETRANGE(caller& call, const arg_t& argv) {
     if (!conversion::to_ll(argv[2], start) || !conversion::to_ll(argv[3], end)) {
         return call.push_error("value is not an integer or out of range");
     }
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     if (wrong_type_here(store, k)) {
         return call.push_error(barch::wrong_type_message());
@@ -810,7 +810,7 @@ int GETDEL(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int reply = call.ok();
     bool had = false;
@@ -878,7 +878,7 @@ int GETEX(caller& call, const arg_t& argv) {
         }
     }
 
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     bool had = false;
     std::string held;
@@ -935,10 +935,10 @@ static int SETEX_(caller& call, const arg_t& argv, bool millis) {
     if (given <= 0 || !art::expiry_ms(given, !millis, true, deadline)) {
         return call.push_error("invalid expire time in 'setex' command");
     }
-    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+    if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
     }
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     art::key_options opts;
     opts.set_expiry(deadline);
     auto fc = [&](const art::node_ptr &) -> void {};
@@ -1007,7 +1007,7 @@ int LCS(caller& call, const arg_t& argv) {
     barch::sharded_store store(call.kspace());
     auto read_one = [&](art::value_type key, std::string& into) -> void {
         if (key_ok(key) != 0) return;
-        auto converted = conversion::as_composite(key);
+        auto converted = call.kspace()->encode_key(key);
         store.search(converted.get_value(), [&](const art::node_ptr& n) {
             auto cl = n.const_leaf();
             auto vt = cl->get_value();
@@ -1115,10 +1115,10 @@ int SETNX(caller& call, const arg_t& argv) {
     auto v = argv[2];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+    if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
     }
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     bool stored = false;
     auto fc = [&](const art::node_ptr &) -> void {};
     art::key_options opts;
@@ -1153,10 +1153,10 @@ int GETSET(caller& call, const arg_t& argv) {
     auto v = argv[2];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    if (!fits_in_leaf(conversion::as_composite(k).get_value().size, v.size)) {
+    if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
     }
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     bool had = false;
     std::string previous;
     auto fc = [&](const art::node_ptr &) -> void {};
@@ -1202,7 +1202,7 @@ int STRLEN(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     if (wrong_type_here(store, k)) {
         return call.push_error(barch::wrong_type_message());
@@ -1242,7 +1242,7 @@ int MSETNX(caller& call, const arg_t& argv) {
         for (size_t n = 1; n < argv.size(); n += 2) {
             auto k = argv[n];
             if (key_ok(k) != 0) continue;
-            auto converted = conversion::as_composite(k);
+            auto converted = call.kspace()->encode_key(k);
             if (store.shard_for(converted.get_value()) != t) continue;
             if (!t->search(converted.get_value()).null()) {
                 any_present = true;
@@ -1258,7 +1258,7 @@ int MSETNX(caller& call, const arg_t& argv) {
         for (size_t n = 1; n < argv.size(); n += 2) {
             auto k = argv[n];
             if (key_ok(k) != 0) continue;
-            auto converted = conversion::as_composite(k);
+            auto converted = call.kspace()->encode_key(k);
             if (store.shard_for(converted.get_value()) != t) continue;
             art::key_options opts;
             t->insert(opts, converted.get_value(), argv[n + 1], true, fc);
@@ -1372,8 +1372,8 @@ int RENAME(caller& call, const arg_t& argv) {
     auto to = argv[2];
     if (key_ok(from) != 0) return call.key_check_error(from);
     if (key_ok(to) != 0) return call.key_check_error(to);
-    auto cf = conversion::as_composite(from);
-    auto ct = conversion::as_composite(to);
+    auto cf = call.kspace()->encode_key(from);
+    auto ct = call.kspace()->encode_key(to);
     barch::sharded_store store(call.kspace());
     int r = move_value(store, cf.get_value(), ct.get_value(), true, false);
     if (r < 0) {
@@ -1394,8 +1394,8 @@ int RENAMENX(caller& call, const arg_t& argv) {
     auto to = argv[2];
     if (key_ok(from) != 0) return call.key_check_error(from);
     if (key_ok(to) != 0) return call.key_check_error(to);
-    auto cf = conversion::as_composite(from);
-    auto ct = conversion::as_composite(to);
+    auto cf = call.kspace()->encode_key(from);
+    auto ct = call.kspace()->encode_key(to);
     barch::sharded_store store(call.kspace());
     int r = move_value(store, cf.get_value(), ct.get_value(), false, false);
     if (r < 0) {
@@ -1439,8 +1439,8 @@ int COPY(caller& call, const arg_t& argv) {
             return call.syntax_error();
         }
     }
-    auto cf = conversion::as_composite(from);
-    auto ct = conversion::as_composite(to);
+    auto cf = call.kspace()->encode_key(from);
+    auto ct = call.kspace()->encode_key(to);
 
     if (db < 0) {
         barch::sharded_store store(call.kspace());
@@ -1505,7 +1505,7 @@ int MOVE(caller& call, const arg_t& argv) {
     if (here == there) {
         return call.push_error("source and destination objects are the same");
     }
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     ks_two held(here, ks_mode::unique, there, ks_mode::unique);
     barch::sharded_store src(here);
     barch::sharded_store dst(there);
@@ -1559,7 +1559,7 @@ int INCRBYFLOAT(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
 
     barch::sharded_store store(call.kspace());
     if (wrong_type_here(store, k)) {
@@ -1689,7 +1689,7 @@ int MSET(caller& call, const arg_t& argv) {
     // command rather than leaving the caller with a success and a gap
     for (size_t n = 1; n + 1 < argv.size(); n += 2) {
         if (key_ok(argv[n]) == 0
-            && !fits_in_leaf(conversion::as_composite(argv[n]).get_value().size, argv[n + 1].size)) {
+            && !fits_in_leaf(call.kspace()->encode_key(argv[n]).get_value().size, argv[n + 1].size)) {
             return call.push_error(too_large_message());
         }
     }
@@ -1702,7 +1702,7 @@ int MSET(caller& call, const arg_t& argv) {
             continue;
         }
 
-        auto converted = conversion::as_composite(k);
+        auto converted = call.kspace()->encode_key(k);
         art::key_spec spec; //(argv, argc);
         auto fc = [&](art::node_ptr) -> void {
         };
@@ -1735,7 +1735,7 @@ int ADD(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     auto fc = [](art::node_ptr) -> void {
     };
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
 
     art::key_spec spec(argv);
     barch::sharded_store store(call.kspace());
@@ -1758,7 +1758,7 @@ int GET(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     // a collection is not a string to read. STRLEN and GETRANGE said so already; GET did
     // not, and answered nil as though the name were free - see TODO 59
@@ -1861,7 +1861,7 @@ int LENGTH(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int r = call.ok();
     bool found = store.search(converted.get_value(), [&](const art::node_ptr& n) {
@@ -1885,7 +1885,7 @@ int TTL(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int reply = call.ok();
     bool answered = false;
@@ -1927,7 +1927,7 @@ static int ttl_query(caller& call, const arg_t& argv, ttl_report form) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int reply = call.ok();
     bool answered = false;
@@ -1995,7 +1995,7 @@ int PERSIST(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     bool removed = false;
     store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
@@ -2036,7 +2036,7 @@ int EXISTS(caller& call, const arg_t& argv) {
             return call.key_check_error(k);
         // a name holding a collection has no plain key, so looking only for that answered
         // 0 for a hash - and EXISTS is the command redis expects a caller to ask with
-        auto converted = conversion::as_composite(k);
+        auto converted = call.kspace()->encode_key(k);
         auto key = converted.get_value();
         if (store.exists(key)
             || barch::kind_of_container(store, k) != barch::container_kind::none) {
@@ -2082,7 +2082,7 @@ static int expire_command(caller& call, const arg_t& argv, bool millis, bool abs
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int reply = call.ok();
     bool answered = false;
@@ -2190,7 +2190,7 @@ int MGET(caller& call, const arg_t& argv) {
         if (key_ok(k) != 0) {
             call.push_null();
         } else {
-            auto converted = conversion::as_composite(k);
+            auto converted = call.kspace()->encode_key(k);
             // not store.search: MGET has never decompressed, nor skipped tombstones,
             // the way GET does. left as it was rather than quietly aligned
             store.with_key_read(converted.get_value(), [&](const barch::shard_ptr& t) {
@@ -2258,7 +2258,7 @@ int LB(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int ok = call.ok();
     if (!store.lower_bound(converted.get_value(), [&](art::value_type f) { ok = call.push_encoded_key(f); })) {
@@ -2284,7 +2284,7 @@ int UB(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int ok = call.ok();
     if (!store.upper_bound(converted.get_value(), [&](art::value_type f) { ok = call.push_encoded_key(f); })) {
@@ -2308,7 +2308,7 @@ int REM(caller& call, const arg_t& argv) {
     if (key_ok(k) != 0)
         return call.key_check_error(k);
 
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     int r = 0;
     auto fc = [&r,&call](art::node_ptr n) -> void {
         if (n.null()) {
@@ -2340,7 +2340,7 @@ int DEL(caller& call, const arg_t& argv) {
         auto k = argv[i];
         if (key_ok(k) != 0)
             return call.key_check_error(k);
-        auto converted = conversion::as_composite(k);
+        auto converted = call.kspace()->encode_key(k);
         bool gone = false;
         auto fc = [&gone](art::node_ptr n) -> void {
             if (!n.null()) gone = true;

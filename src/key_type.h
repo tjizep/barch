@@ -90,7 +90,7 @@ namespace barch {
      * run until one answers, so a name that holds a string costs a single lookup.
      */
     inline key_kind kind_of(sharded_store& store, art::value_type name) {
-        auto plain = conversion::as_composite(name);
+        auto plain = store.space()->encode_key(name);
         if (store.exists(plain.get_value())) {
             return key_kind::string;
         }
@@ -239,7 +239,7 @@ namespace barch {
      * must already exist do not need it; the ones that bring a collection into being do.
      */
     inline bool container_writable(sharded_store& store, art::value_type name, container_kind want) {
-        auto plain = conversion::as_composite(name);
+        auto plain = store.space()->encode_key(name);
         if (store.exists(plain.get_value())) {
             return false;
         }

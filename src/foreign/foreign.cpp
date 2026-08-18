@@ -434,7 +434,7 @@ int mget(caller& call, const arg_t& argv) {
     for (size_t arg = 1; arg < argv.size(); ++arg) {
         if (key_ok(argv[arg]) != 0)
             continue;
-        auto converted = conversion::as_composite(argv[arg]);
+        auto converted = call.kspace()->encode_key(argv[arg]);
         auto key = converted.get_value();
         bool found = store.search(key, [](const art::node_ptr&) {});
         if (!found)
@@ -449,7 +449,7 @@ int mget(caller& call, const arg_t& argv) {
             call.push_null();
             continue;
         }
-        auto converted = conversion::as_composite(argv[arg]);
+        auto converted = call.kspace()->encode_key(argv[arg]);
         auto key = converted.get_value();
         store.with_key_read(key, [&](const shard_ptr& t) {
             art::node_ptr r = t->search(key);
@@ -474,7 +474,7 @@ int exists_many(caller& call, const arg_t& argv) {
     for (size_t i = 1; i < argv.size(); ++i) {
         if (key_ok(argv[i]) != 0)
             return call.key_check_error(argv[i]);
-        auto converted = conversion::as_composite(argv[i]);
+        auto converted = call.kspace()->encode_key(argv[i]);
         auto key = converted.get_value();
         if (store.exists(key)
             || barch::kind_of_container(store, argv[i]) != barch::container_kind::none)
@@ -486,7 +486,7 @@ int exists_many(caller& call, const arg_t& argv) {
         return w;
     int64_t found = 0;
     for (size_t i = 1; i < argv.size(); ++i) {
-        auto converted = conversion::as_composite(argv[i]);
+        auto converted = call.kspace()->encode_key(argv[i]);
         auto key = converted.get_value();
         if (store.exists(key)
             || barch::kind_of_container(store, argv[i]) != barch::container_kind::none)
@@ -542,7 +542,7 @@ int FAKE(caller& call, const arg_t& argv) {
     for (auto& c : sub) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     if (sub == "SET") {
         if (argv.size() != 5) return call.wrong_arity();
-        auto converted = conversion::as_composite(argv[3]);
+        auto converted = call.kspace()->encode_key(argv[3]);
         std::string k = key_bytes(converted.get_value());
         std::string v = argv[4].to_string();
         std::lock_guard lk(space->fake_mu);
@@ -551,7 +551,7 @@ int FAKE(caller& call, const arg_t& argv) {
     }
     if (sub == "DEL") {
         if (argv.size() != 4) return call.wrong_arity();
-        auto converted = conversion::as_composite(argv[3]);
+        auto converted = call.kspace()->encode_key(argv[3]);
         std::string k = key_bytes(converted.get_value());
         std::lock_guard lk(space->fake_mu);
         space->fake_source.erase(k);
@@ -575,6 +575,15 @@ int FAKE(caller& call, const arg_t& argv) {
     if (sub == "QUERIES") {
         if (argv.size() != 3) return call.wrong_arity();
         return call.push_ll(static_cast<int64_t>(space->fake_queries.load()));
+    }
+    if (sub == "PARTS") {
+        if (argv.size() != 4) return call.wrong_arity();
+        auto converted = space->encode_key(argv[3]);
+        auto parts = key_parts(key_bytes(converted.get_value()), space.get());
+        call.start_array();
+        for (auto& p : parts)
+            call.push_string(p);
+        return call.end_array();
     }
     if (sub == "RESET") {
         if (argv.size() != 3) return call.wrong_arity();
@@ -609,7 +618,7 @@ int MISS(caller& call, const arg_t& argv) {
         auto left = deadline - art::now();
         ttl_ms = left > 0 ? static_cast<uint64_t>(left) : 1;
     }
-    auto converted = conversion::as_composite(k);
+    auto converted = call.kspace()->encode_key(k);
     auto key = converted.get_value();
     const bool hashed = !call.kspace()->opt_ordered_keys;
     sharded_store store(call.kspace());

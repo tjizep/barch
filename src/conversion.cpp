@@ -124,6 +124,32 @@ conversion::comparable_key conversion::as_composite(art::value_type v, bool noin
         return tuple.create();
     }
 }
+
+conversion::comparable_key conversion::as_composite(art::value_type v, bool noint, const std::regex* split) {
+    if (!split)
+        return as_composite(v, noint, ' ');
+    const char* first = v.chars();
+    const char* last = first + v.size;
+    if (!std::regex_search(first, last, *split))
+        return convert(first, v.size, noint);
+
+    thread_local composite tuple;
+    tuple.begin_plain();
+    using it = std::regex_token_iterator<const char*>;
+    it tok(first, last, *split, -1);
+    it end;
+    bool any = false;
+    for (; tok != end; ++tok) {
+        if (tok->length() == 0)
+            continue;
+        tuple.push(convert(tok->first, static_cast<size_t>(tok->length()), noint));
+        any = true;
+    }
+    if (!any)
+        return convert(first, v.size, noint);
+    return tuple.create();
+}
+
 conversion::comparable_key conversion::convert(const char *v, size_t vlen, bool noint) {
     int64_t i;
     double d;

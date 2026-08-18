@@ -689,6 +689,10 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/foreigntest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestKeySplit
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/keysplittest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestForeignLuau
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/foreign_luau.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

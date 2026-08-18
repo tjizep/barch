@@ -61,6 +61,29 @@ namespace barch {
         return get_foreign_script_insns();
     }
 
+    static bool literal_split_char(const std::string& pat, char& ch) {
+        if (pat.size() != 1)
+            return false;
+        switch (pat[0]) {
+            case '.': case '^': case '$': case '*': case '+': case '?':
+            case '(': case ')': case '[': case ']': case '{': case '}':
+            case '|': case '\\':
+                return false;
+            default:
+                ch = pat[0];
+                return true;
+        }
+    }
+
+    conversion::comparable_key key_space::encode_key(art::value_type v, bool noint) const {
+        char ch = 0;
+        if (literal_split_char(key_split, ch))
+            return conversion::as_composite(v, noint, ch);
+        if (key_split_re)
+            return conversion::as_composite(v, noint, key_split_re.get());
+        return conversion::as_composite(v, noint);
+    }
+
     static void read_u64(KeyValue& kv, const std::string& key, uint64_t& dest) {
         auto s = kv.get(key);
         if (!s.empty())
@@ -254,6 +277,17 @@ namespace barch {
                 read_u64(kv, real+".foreign_max_inflight", foreign_max_inflight);
                 read_u64(kv, real+".foreign_pool_size", foreign_pool_size);
                 read_u64(kv, real+".foreign_script_insns", foreign_script_insns);
+                key_split = kv.get(real+".key_split");
+                if (!key_split.empty()) {
+                    try {
+                        key_split_re = std::make_shared<std::regex>(
+                            key_split, std::regex::ECMAScript | std::regex::optimize);
+                    } catch (const std::regex_error& e) {
+                        barch::err({"key_split is not a regex - ignoring it for space",
+                                    name, key_split, e.what()});
+                        key_split_re.reset();
+                    }
+                }
                 if (opt_foreign == foreign_kind::mysql || opt_foreign == foreign_kind::postgres) {
                     if (foreign_dsn.empty() && foreign_host.empty()) {
                         barch::err({"foreign source needs a dsn or host - ignoring it for space", name});
@@ -582,7 +616,7 @@ namespace barch {
     bool key_space::buffer_insert(const std::string &key, const std::string &value) {
         try {
             auto fc = [&](const art::node_ptr &) -> void {};
-            auto k = conversion::as_composite(key);
+            auto k = encode_key(art::value_type{key});
             auto v = art::value_type{value};
             auto t = this->get(v);
             key_options spec;

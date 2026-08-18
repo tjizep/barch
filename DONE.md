@@ -3381,3 +3381,35 @@ worker is logged instead of `terminate`.
 
 `redispytest.py` (RESP2 and RESP3), `mergetest.py`, `foreigntest.py`,
 and `foreign_luau.py` pass.
+
+## 85. Incoming keys can split on a per-space regex [18-08-2026]
+
+*Was `TODO.md` entry 89.*
+
+`as_composite` still splits on a space when the space has no
+`key_split`. Set `<name>.key_split` to an ECMAScript regex and
+incoming keys break on that instead. `:` and `,` and `[:,]` all
+work. An invalid regex is logged and ignored; the space split
+stays. The compiled regex lives on the key space and is applied
+through `encode_key` on GET/SET and the other user-key commands,
+so `$0`/`$1` see the same parts.
+
+`KSPACE OPTION GET KEY_SPLIT` returns the pattern, or empty when
+unset. `test/keysplittest.py` covers colon, comma, a character
+class, a bad pattern, and a fake foreign fill.
+
+## 86. key_split feeds $n [18-08-2026]
+
+*Was `TODO.md` entry 90.*
+
+`$0` and `$1` now come from the same cut as the incoming key.
+`bind_key` takes the space and calls `key_parts(internal, ks)`. A
+one-character pattern (`:` or `,`) is a separator, not a regex —
+compiling `:` as ECMAScript was giving one part `dept:` and
+`encoded_key_as_string` aborted on that composite. A real regex
+still goes through `std::regex`.
+
+`FOREIGN FAKE PARTS` returns the parts a query would bind, so the
+test does not need MySQL. `dept:42` on a `:` space is `dept` and
+`42`. `Smith 42` on a space with no split is still two parts.
+Live MySQL/Postgres tests also GET `Smith:42` with `$0`/`$1`.

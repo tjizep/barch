@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <regex>
 
 namespace barch {
 namespace foreign {
@@ -165,6 +166,98 @@ std::vector<std::string> key_parts(std::string_view k) {
     return out;
 }
 
+static std::vector<std::string> split_text(std::string_view text, const std::regex* re) {
+    std::vector<std::string> out;
+    if (text.empty())
+        return out;
+    const char* first = text.data();
+    const char* last = first + text.size();
+    if (re) {
+        if (!std::regex_search(first, last, *re)) {
+            out.emplace_back(text);
+            return out;
+        }
+        using it = std::regex_token_iterator<const char*>;
+        it tok(first, last, *re, -1);
+        it end;
+        for (; tok != end; ++tok) {
+            if (tok->length() == 0)
+                continue;
+            out.emplace_back(tok->first, tok->length());
+        }
+        if (out.empty())
+            out.emplace_back(text);
+        return out;
+    }
+    size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && text[i] == ' ')
+            ++i;
+        size_t j = i;
+        while (j < text.size() && text[j] != ' ')
+            ++j;
+        if (j > i)
+            out.emplace_back(text.substr(i, j - i));
+        i = j;
+    }
+    if (out.empty())
+        out.emplace_back(text);
+    return out;
+}
+
+static bool literal_split_char(const std::string& pat, char& ch) {
+    if (pat.size() != 1)
+        return false;
+    switch (pat[0]) {
+        case '.': case '^': case '$': case '*': case '+': case '?':
+        case '(': case ')': case '[': case ']': case '{': case '}':
+        case '|': case '\\':
+            return false;
+        default:
+            ch = pat[0];
+            return true;
+    }
+}
+
+static std::vector<std::string> split_on_char(std::string_view text, char ch) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < text.size()) {
+        if (text[i] == ch) {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < text.size() && text[j] != ch)
+            ++j;
+        out.emplace_back(text.substr(i, j - i));
+        i = j;
+    }
+    return out;
+}
+
+std::vector<std::string> key_parts(std::string_view k, const key_space* ks) {
+    auto from_enc = key_parts(k);
+    if (from_enc.size() > 1)
+        return from_enc;
+    std::string text;
+    if (!k.empty() && is_type_lead(static_cast<unsigned char>(k[0])))
+        text = user_key(k);
+    else
+        text.assign(k.begin(), k.end());
+    std::vector<std::string> from_split;
+    char ch = 0;
+    if (ks && literal_split_char(ks->key_split, ch))
+        from_split = split_on_char(text, ch);
+    else if (ks && ks->key_split_re)
+        from_split = split_text(text, ks->key_split_re.get());
+    else
+        from_split = split_on_char(text, ' ');
+    if (from_split.size() > 1)
+        return from_split;
+    return from_enc.empty() ? from_split : from_enc;
+}
+
 std::string key_encoded(std::string_view k) {
     if (k.empty())
         return {};
@@ -247,7 +340,8 @@ bool query_has_one_placeholder(std::string_view sql) {
 }
 
 bool bind_key(std::string_view internal, const compiled_query& q,
-              std::vector<std::string>& values, std::string& err) {
+              std::vector<std::string>& values, std::string& err,
+              const key_space* ks) {
     values.clear();
     values.reserve(q.binds.size());
     std::vector<std::string> parts;
@@ -257,7 +351,7 @@ bool bind_key(std::string_view internal, const compiled_query& q,
             need_parts = true;
     }
     if (need_parts)
-        parts = key_parts(internal);
+        parts = key_parts(internal, ks);
     for (auto& b : q.binds) {
         switch (b.kind) {
             case bind_kind::user:

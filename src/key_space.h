@@ -7,10 +7,12 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <unordered_map>
 #include "../external/include/valkeymodule.h"
 #include "abstract_shard.h"
+#include "conversion.h"
 #include "merge_options.h"
 #include "range_index.h"
 #include "value_type.h"
@@ -58,6 +60,8 @@ namespace barch {
         uint64_t foreign_query_timeout_ms{1000};
         uint64_t foreign_max_inflight{32};
         uint64_t foreign_pool_size{8};
+        std::string key_split{};
+        std::shared_ptr<std::regex> key_split_re{};
         std::atomic<uint32_t> foreign_inflight{0};
         std::shared_ptr<foreign::sql_backend> sql{};
 
@@ -71,6 +75,8 @@ namespace barch {
         [[nodiscard]] const char *foreign_kind_name() const;
         [[nodiscard]] uint64_t waiter_timeout_ms() const;
         [[nodiscard]] uint64_t script_insns() const;
+        /** encode a user key with this space's split. unset split is still a space. */
+        [[nodiscard]] conversion::comparable_key encode_key(art::value_type v, bool noint = false) const;
         /** fail in-flight fills and wake waiters before the shards go. */
         void fail_foreign_flights();
     private:

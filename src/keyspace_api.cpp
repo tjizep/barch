@@ -205,6 +205,9 @@ int KSPACE(caller& call, const arg_t& argv) {
             call.push_ll(static_cast<int64_t>(spc->foreign_max_inflight));
             return call.end_array();
         }
+        if (parser.name == "KEY_SPLIT") {
+            return call.push_vt(art::value_type{spc->key_split});
+        }
         return call.push_simple("OK");
     }
 

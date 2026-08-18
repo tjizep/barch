@@ -111,6 +111,7 @@ namespace barch {
 
         void do_block_continue() override {
             if (caller.has_blocks()) {
+                timer.cancel();
                 auto self(this->shared_from_this());
                 this->socket_.get_executor().execute([this,self]() {
                     int r = caller.call_blocks();

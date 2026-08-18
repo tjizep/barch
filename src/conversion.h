@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <regex>
 #include "art/nodes.h"
 #include <fast_float/fast_float.h>
 #include "sastam.h"
@@ -348,6 +349,8 @@ namespace conversion {
     }
 
     comparable_key as_composite(art::value_type v, bool noint = false, char sep = ' ');
+    /** split on `split` instead of a single character. null keeps the space split. */
+    comparable_key as_composite(art::value_type v, bool noint, const std::regex* split);
     comparable_key convert(const std::string &str, bool noint = false);
 
     inline int64_t enc_bytes_to_int(const uint8_t *bytes, size_t len) {

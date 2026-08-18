@@ -132,7 +132,8 @@ struct postgres_pool : sql_backend {
             return {result::status::error, "FOREIGN query needs ? or $n or $$"};
         std::string err;
         std::vector<std::string> vals;
-        if (!bind_key(key, q, vals, err))
+        auto ks = get_keyspace(space_name);
+        if (!bind_key(key, q, vals, err, ks.get()))
             return {result::status::error, err};
         auto c = checkout(deadline_ms);
         if (!c)

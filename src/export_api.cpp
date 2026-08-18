@@ -168,7 +168,7 @@ namespace {
         heap::std_vector<std::string> args;
         switch (kind) {
             case barch::container_kind::none: {
-                auto converted = conversion::as_composite(art::value_type{name});
+                auto converted = store.space()->encode_key(art::value_type{name});
                 std::string held;
                 bool had = false;
                 long long deadline = 0;

@@ -113,7 +113,11 @@ namespace barch {
             if (caller.has_blocks()) {
                 timer.cancel();
                 auto self(this->shared_from_this());
-                this->socket_.get_executor().execute([this,self]() {
+                // post, not execute: SET/FOREIGN_MISS/finish_fetch call this
+                // while the shard write lock is still held. execute can run
+                // the waiter on this thread, and reply_after_wait takes the
+                // same lock.
+                asio::post(this->socket_.get_executor(), [this,self]() {
                     int r = caller.call_blocks();
                     write_result(caller, stream, r);
                     erase_blocks();

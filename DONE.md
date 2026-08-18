@@ -3413,3 +3413,16 @@ still goes through `std::regex`.
 test does not need MySQL. `dept:42` on a `:` space is `dept` and
 `42`. `Smith 42` on a space with no split is still two parts.
 Live MySQL/Postgres tests also GET `Smith:42` with `$0`/`$1`.
+
+## 87. TestForeign no longer aborts on the write lock [18-08-2026]
+
+*Was `TODO.md` entry 91.*
+
+CI has two RESP threads. `call_unblock` used `executor.execute`, which
+can run the waiter on the same thread that still holds the shard
+write lock. `reply_after_wait` then takes that lock again.
+`try_lock_for` fails at once and the process `terminate`s.
+
+`do_block_continue` now `asio::post`s, so the waiter runs after the
+lock is gone. `finish_fetch` also wakes sessions after it drops the
+write lock. TestForeign completes.

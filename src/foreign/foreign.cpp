@@ -103,14 +103,15 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
 
     art::value_type key{kstr};
     sharded_store store(space);
+    shard_ptr wake;
     try {
     store.with_key_write(key, [&](const shard_ptr& t) {
         auto finish = [&] {
             fl->finished = true;
             fl->swig_cv.notify_all();
-            t->call_unblock(kstr);
             release_inflight(space, *fl);
             maybe_erase(t, kstr, fl);
+            wake = t;
         };
         if (fl->generation != generation || fl->state == shard::foreign_flight::state::cancelled) {
             ++statistics::foreign_cancelled;
@@ -149,6 +150,8 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
         }
         finish();
     });
+    if (wake)
+        wake->call_unblock(kstr);
     } catch (const std::exception& e) {
         fl->state = shard::foreign_flight::state::failed;
         fl->error = e.what();

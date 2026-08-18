@@ -496,3 +496,5 @@
 89. [Done] Incoming keys can split on a per-space regex [18-08-2026] Nr 85 e668501
 
 90. [Done] key_split feeds $n [18-08-2026] Nr 86 e668501
+
+91. [Done] TestForeign no longer aborts on the write lock [18-08-2026] Nr 87 371d7a9

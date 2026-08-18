@@ -1,4 +1,5 @@
 #include "pool.h"
+#include "lzr_log.h"
 
 #include <condition_variable>
 #include <mutex>
@@ -33,7 +34,13 @@ void worker() {
             job = std::move(s.jobs.front());
             s.jobs.pop();
         }
-        if (job) job();
+        if (job) {
+            try {
+                job();
+            } catch (const std::exception& e) {
+                barch::err({"foreign worker", e.what()});
+            }
+        }
     }
 }
 

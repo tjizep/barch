@@ -18,6 +18,8 @@
 #include "foreign/sql.h"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <mutex>
 namespace barch {
 
     static std::string lower_copy(std::string s) {
@@ -411,7 +413,12 @@ namespace barch {
         heap::vector<abstract_session_ptr> sessions;
         for (auto& sh : shards) {
             if (!sh) continue;
-            std::unique_lock lck(sh->get_latch());
+            // DROP used to hold these already; try_lock_for then fails at once
+            // (EDEADLK / false) on a non-recursive mutex. Still fail the
+            // flights: the space is going away either way.
+            std::unique_lock lck(sh->get_latch(), std::defer_lock);
+            if (!lck.try_lock_for(std::chrono::milliseconds(sh->lock_to_ms)))
+                barch::warn({"foreign unload lock busy", name});
             auto* s = static_cast<shard*>(sh.get());
             s->fail_foreign("FOREIGN space unloaded", sessions);
             for (auto& [k, fl] : s->flights) {

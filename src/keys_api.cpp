@@ -2496,7 +2496,9 @@ void register_keys_api(function_map& r) {
     r["DECRBY"] = {::DECRBY,{"write","keys","data"}};
     r["UDECRBY"] = {::UDECRBY,{"write","keys","data"}};
     r["COUNT"] = {::COUNT,{"read","keys","data"}};
-    r["EXISTS"] = {::EXISTS,{"read","keys","data"}, true};
+    // park via has_blocks, like GET. is_asynch would copy the caller and
+    // take EXEC off the MULTI that queued it.
+    r["EXISTS"] = {::EXISTS,{"read","keys","data"}};
     r["EXPIRE"] = {::EXPIRE,{"write","keys","data"}};
     r["PEXPIRE"] = {::PEXPIRE,{"write","keys","data"}};
     r["EXPIREAT"] = {::EXPIREAT,{"write","keys","data"}};
@@ -2508,7 +2510,7 @@ void register_keys_api(function_map& r) {
     r["FOREIGN_MISS"] = {barch::foreign::MISS,{"write","keys","data"}};
     r["SCAN"] = {::SCAN,{"read","keys","data"}};
     r["LENGTH"] = {::LENGTH,{"read","keys","data"}};
-    r["MGET"] = {::MGET,{"read","keys","data"}, true};
+    r["MGET"] = {::MGET,{"read","keys","data"}};
     r["MIN"] = {::MIN,{"read","keys","data"}};
     r["MAX"] = {::MAX,{"read","keys","data"}};
     r["LB"] = {::LB,{"read","keys","data"}};

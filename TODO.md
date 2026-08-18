@@ -490,3 +490,5 @@
 86. [Done] SET at the memory ceiling raises not enough memory [15-08-2026] Nr 82 aaa5449
 
 87. [Done] Luau instruction budget is a slice, not a kill [17-08-2026] Nr 83 78a270e
+
+88. [Done] CI MULTI, DROP deadlock, and foreign write-back [18-08-2026] Nr 84 561b393

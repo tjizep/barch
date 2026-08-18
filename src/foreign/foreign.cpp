@@ -103,6 +103,7 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
 
     art::value_type key{kstr};
     sharded_store store(space);
+    try {
     store.with_key_write(key, [&](const shard_ptr& t) {
         auto finish = [&] {
             fl->finished = true;
@@ -148,6 +149,14 @@ static void finish_fetch(key_space_ptr space, std::string kstr, uint64_t generat
         }
         finish();
     });
+    } catch (const std::exception& e) {
+        fl->state = shard::foreign_flight::state::failed;
+        fl->error = e.what();
+        fl->finished = true;
+        fl->swig_cv.notify_all();
+        release_inflight(space, *fl);
+        barch::err({"foreign write-back", space->get_canonical_name(), e.what()});
+    }
 }
 
 static void run_fetch(key_space_ptr space, std::string kstr, uint64_t generation,
@@ -182,6 +191,8 @@ static int park_or_wait(caller& call, art::value_type key, bool as_exists) {
         return call.push_error("FOREIGN not supported on this path");
 
     std::shared_ptr<shard::foreign_flight> fl;
+    std::shared_ptr<shard::foreign_flight> start_fl;
+    uint64_t start_gen = 0;
     bool created = false;
     bool overloaded = false;
     sharded_store store(space);
@@ -242,11 +253,13 @@ static int park_or_wait(caller& call, art::value_type key, bool as_exists) {
             ++statistics::foreign_waiters;
             if (created && !fl->enqueued) {
                 fl->enqueued = true;
-                uint64_t gen = fl->generation;
-                enqueue([space, kstr, gen, fl]() { run_fetch(space, kstr, gen, fl); });
+                start_gen = fl->generation;
+                start_fl = fl;
             }
         }
     });
+    if (start_fl)
+        enqueue([space, kstr, start_gen, start_fl]() { run_fetch(space, kstr, start_gen, start_fl); });
 
     if (overloaded)
         return call.push_error("FOREIGN overloaded");
@@ -302,6 +315,8 @@ struct join_handle {
 static join_handle start_or_join(const key_space_ptr& space, art::value_type key) {
     join_handle h;
     h.kstr = key_bytes(key);
+    std::shared_ptr<shard::foreign_flight> start_fl;
+    uint64_t start_gen = 0;
     sharded_store store(space);
     store.with_key_write(key, [&](const shard_ptr& t) {
         auto leaf = t->local_leaf(key);
@@ -336,12 +351,14 @@ static join_handle start_or_join(const key_space_ptr& space, art::value_type key
         h.status = join_handle::status::waiting;
         if (!h.fl->enqueued) {
             h.fl->enqueued = true;
-            uint64_t gen = h.fl->generation;
-            auto fl = h.fl;
-            auto kstr = h.kstr;
-            enqueue([space, kstr, gen, fl]() { run_fetch(space, kstr, gen, fl); });
+            start_gen = h.fl->generation;
+            start_fl = h.fl;
         }
     });
+    if (start_fl)
+        enqueue([space, kstr = h.kstr, start_gen, start_fl]() {
+            run_fetch(space, kstr, start_gen, start_fl);
+        });
     return h;
 }
 
@@ -482,6 +499,8 @@ void kick(const key_space_ptr& space, const std::string& kstr) {
     if (!space || !space->has_foreign())
         return;
     art::value_type key{kstr};
+    std::shared_ptr<shard::foreign_flight> start_fl;
+    uint64_t start_gen = 0;
     sharded_store store(space);
     store.with_key_write(key, [&](const shard_ptr& t) {
         auto it = as_shard(t)->flights.find(kstr);
@@ -502,10 +521,12 @@ void kick(const key_space_ptr& space, const std::string& kstr) {
             return;
         if (fl->state == shard::foreign_flight::state::pending) {
             fl->enqueued = true;
-            uint64_t gen = fl->generation;
-            enqueue([space, kstr, gen, fl]() { run_fetch(space, kstr, gen, fl); });
+            start_gen = fl->generation;
+            start_fl = fl;
         }
     });
+    if (start_fl)
+        enqueue([space, kstr, start_gen, start_fl]() { run_fetch(space, kstr, start_gen, start_fl); });
 }
 
 int FAKE(caller& call, const arg_t& argv) {

@@ -154,12 +154,16 @@ int KSPACE(caller& call, const arg_t& argv) {
     }
     if (parser.is_drop) {
         auto source = parser.source.empty() ? call.kspace() : barch::get_keyspace(parser.source);
-        ks_unique shl(source);
-        source->depends(nullptr);
-        barch::sharded_store dropped(source);
-        dropped.each_shard([](const barch::shard_ptr& shrd) {
-            shrd->opt_drop_on_release = true;
-        });
+        {
+            ks_unique shl(source);
+            source->depends(nullptr);
+            barch::sharded_store dropped(source);
+            dropped.each_shard([](const barch::shard_ptr& shrd) {
+                shrd->opt_drop_on_release = true;
+            });
+        }
+        // unload takes the shard locks again to fail foreign flights. holding
+        // them here is EDEADLK on a mutex that is not recursive.
         source = nullptr;
         if (barch::unload_keyspace(parser.source))
             return call.push_simple("OK");

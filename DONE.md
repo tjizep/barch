@@ -3356,3 +3356,28 @@ the value. An infinite loop with a 400 ms query timeout is
 `-ERR FOREIGN timeout`. Four infinite scripts on the four workers
 do not hold a cheap GET on another space: that GET came back in
 under a second while the hogs ran 2.5 s each.
+
+## 84. CI MULTI, DROP deadlock, and foreign write-back [18-08-2026]
+
+*Was `TODO.md` entry 88.*
+
+EXISTS and MGET were marked `is_asynch` so a miss could leave the
+ASIO thread. A redis-py pipeline is MULTI plus EXISTS plus EXEC.
+The first async call copies the caller, so EXEC ran on a copy that
+had no queued commands. The client saw the wrong number of replies.
+They park the same way GET does, on `has_blocks`. They are not
+asynch.
+
+`SPACES DROP` held a unique lock on every shard, then
+`unload_keyspace` called `fail_foreign_flights`, which locked them
+again. On the Ubuntu 22 runner that is `Resource deadlock avoided`.
+DROP now drops the locks before unload. The fail path uses
+`try_lock_for` so a leftover holder does not hang or abort.
+
+`kick` and the SWIG start path used to `enqueue` while still holding
+the shard write lock. The worker can finish the fetch and try the
+same lock. That is now after the unlock. A throw on the foreign
+worker is logged instead of `terminate`.
+
+`redispytest.py` (RESP2 and RESP3), `mergetest.py`, `foreigntest.py`,
+and `foreign_luau.py` pass.

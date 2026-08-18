@@ -1500,22 +1500,25 @@ redis::cmd(<span class="s">"SET"</span>).arg(<span class="s">"user:00017:name"</
 <article id="ref-ngram">
 <div class="crumb">Reference / N-gram Text Index</div>
 <h1>N-gram Text Index</h1>
-<p class="lede">There is no n-gram command. A sliding window over text is ordinary composite keys in a keyspace you name — usually <code>txt</code>. The gram is the first component; the window offset is a number after a space, so the parser encodes it as an integer.</p>
+<p class="lede">There is no n-gram command. A sliding window over text is ordinary composite keys in a keyspace you name — usually <code>txt</code>. The gram is the first component; the window offset is a number after a <code>|</code>, so the parser encodes it as an integer. The gram keeps its spaces.</p>
 <div class="chips"><span class="chip l1">L1</span><span class="chip l2">L2 · RESP</span><span class="chip o">composite SET + RANGE</span><span class="chip o">offset is a number</span></div>
 
 <div class="block">
-<header><span class="tag ctx">Design context</span><h2>Gram, space, offset</h2></header>
+<header><span class="tag ctx">Design context</span><h2>Gram, pipe, offset</h2></header>
 <div class="bd">
-<p><code>SET</code> splits a key on spaces. A frame is therefore one argument: the gram, a space, then the offset. The offset token is a number (<code>0</code>, <code>1</code>, <code>2</code>…), so <code>as_composite</code> encodes it with the same (base 128)+1 integer order every numeric key already uses. Shared gram prefixes live once in the trie.</p>
-<p>A space inside the window would also split the key. Write those as <code>_</code> so the only space left is the one before the offset.</p>
+<p>Set <code>txt.key_split</code> to <code>|</code> before the first <code>USE txt</code>. A frame is then one argument: the gram, a pipe, then the offset. The offset token is a number (<code>0</code>, <code>1</code>, <code>2</code>…), so it is encoded with the same (base 128)+1 integer order every numeric key already uses. Shared gram prefixes live once in the trie.</p>
+<p>A space inside the window is just text. Do not rewrite it as <code>_</code>.</p>
 <p>For <code>This is a doc. This is a dog</code>:</p>
-<pre class="solo">txt:SET "This 0"
-txt:SET "his_i 1"
-txt:SET "is_is 2"
-txt:SET "s_is_a 3"</pre>
-<p>Put the frames in <code>txt</code> and the source document in another space. <code>RANGE "is_is 0" "is_is 999999"</code> then sees every offset of that gram, because the number sits after it.</p>
-<div class="notice note"><b>The space is the composite separator.</b> It is not a type tag and not a lead byte. The parser sees <code>0</code>, <code>1</code>, <code>2</code> as integers because they are the token after that space.</div>
-<div class="notice warning"><b>Delete the frames when the source goes.</b> <code>REM</code> of the document does not know about the index. Drop each <code>&lt;gram&gt; &lt;offset&gt;</code> key you wrote for it, or the next range still names a frame whose source is gone.</div>
+<pre class="solo">USE configuration
+SET txt.key_split |
+SAVE
+txt:SET "This |0"
+txt:SET "his i|1"
+txt:SET "is is|2"
+txt:SET "s is |3"</pre>
+<p>Put the frames in <code>txt</code> and the source document in another space. <code>RANGE "is is|0" "is is|999999"</code> then sees every offset of that gram, because the number sits after the pipe.</p>
+<div class="notice note"><b>The pipe is the composite separator.</b> It is not a type tag and not a lead byte. The parser sees <code>0</code>, <code>1</code>, <code>2</code> as integers because they are the token after that <code>|</code>. Unset <code>key_split</code>, a space still splits the key and a gram cannot contain one.</div>
+<div class="notice warning"><b>Delete the frames when the source goes.</b> <code>REM</code> of the document does not know about the index. Drop each <code>&lt;gram&gt;|&lt;offset&gt;</code> key you wrote for it, or the next range still names a frame whose source is gone.</div>
 </div>
 </div>
 
@@ -1525,8 +1528,8 @@ txt:SET "s_is_a 3"</pre>
 <table>
 <thead><tr><th>Surface</th><th>Arguments</th><th>Requirement</th><th>Returns / Behaviour</th></tr></thead>
 <tbody>
-<tr><td><code>txt:SET</code></td><td><code>"&lt;gram&gt; &lt;offset&gt;"</code> [value]</td><td class="req y">REQUIRED</td><td>writes one frame. The key is one RESP argument. <code>&lt;gram&gt;</code> is text with <code>_</code> for spaces; <code>&lt;offset&gt;</code> is a decimal integer. A repeat overwrites the value</td></tr>
-<tr><td><code>txt:RANGE</code></td><td><code>"&lt;gram&gt; 0" "&lt;gram&gt; 999999" count</code></td><td class="req y">REQUIRED</td><td>every frame of that gram, all offsets. Both bounds need the numeric second component — a lone <code>&lt;gram&gt;</code> is a different encoding. Empty array when none match</td></tr>
+<tr><td><code>txt:SET</code></td><td><code>"&lt;gram&gt;|&lt;offset&gt;"</code> [value]</td><td class="req y">REQUIRED</td><td>writes one frame. The key is one RESP argument. <code>&lt;gram&gt;</code> is the window as it appeared, spaces included; <code>&lt;offset&gt;</code> is a decimal integer. Needs <code>txt.key_split</code> set to <code>|</code> before the space opens. A repeat overwrites the value</td></tr>
+<tr><td><code>txt:RANGE</code></td><td><code>"&lt;gram&gt;|0" "&lt;gram&gt;|999999" count</code></td><td class="req y">REQUIRED</td><td>every frame of that gram, all offsets. Both bounds need the numeric second component — a lone <code>&lt;gram&gt;</code> is a different encoding. Empty array when none match</td></tr>
 <tr><td><code>txt:COUNT</code></td><td>same two bounds as <code>RANGE</code></td><td class="req n">OPTIONAL</td><td>how many frames sit in the prefix</td></tr>
 <tr><td><code>txt:REM</code></td><td>the same key <code>SET</code> wrote</td><td class="req n">OPTIONAL</td><td>drops one frame</td></tr>
 <tr><td><code>USE txt</code></td><td>—</td><td class="req n">OPTIONAL</td><td>same space without the <code>txt:</code> prefix on every call</td></tr>
@@ -1543,29 +1546,36 @@ txt:SET "s_is_a 3"</pre>
 <div class="tabbar"><button class="on">python-swig</button><button>redis-cli</button><button>redis-python</button></div>
 <div class="pane on"><pre><span class="k">import</span> barch
 
+conf = barch.KeyValue(<span class="s">"configuration"</span>)
+conf.set(<span class="s">"txt.key_split"</span>, <span class="s">"|"</span>)
+conf.save()
 kv = barch.KeyValue(<span class="s">"txt"</span>)
 text = <span class="s">"This is a doc. This is a dog"</span>
 width = <span class="n">5</span>
 <span class="k">for</span> i <span class="k">in</span> range(len(text) - width + <span class="n">1</span>):
-    gram = text[i:i + width].replace(<span class="s">" "</span>, <span class="s">"_"</span>)
-    kv.set(<span class="s">"%s %d"</span> % (gram, i), <span class="s">"1"</span>)
+    kv.set(<span class="s">"%s|%d"</span> % (text[i:i + width], i), <span class="s">"1"</span>)
 
-<span class="k">print</span>(kv.range(<span class="s">"is_is 0"</span>, <span class="s">"is_is 999999"</span>, <span class="n">100</span>))</pre></div>
-<div class="pane"><pre>txt:SET "This 0"
-txt:SET "his_i 1"
-txt:SET "is_is 2"
-txt:SET "s_is_a 3"
-txt:RANGE "is_is 0" "is_is 999999" 100</pre></div>
+<span class="k">print</span>(kv.range(<span class="s">"is is|0"</span>, <span class="s">"is is|999999"</span>, <span class="n">100</span>))</pre></div>
+<div class="pane"><pre>USE configuration
+SET txt.key_split |
+SAVE
+txt:SET "This |0"
+txt:SET "his i|1"
+txt:SET "is is|2"
+txt:SET "s is |3"
+txt:RANGE "is is|0" "is is|999999" 100</pre></div>
 <div class="pane"><pre><span class="k">import</span> redis
 
 r = redis.Redis(port=<span class="n">14000</span>, decode_responses=<span class="k">True</span>)
+r.execute_command(<span class="s">"USE"</span>, <span class="s">"configuration"</span>)
+r.set(<span class="s">"txt.key_split"</span>, <span class="s">"|"</span>)
+r.execute_command(<span class="s">"SAVE"</span>)
 text = <span class="s">"This is a doc. This is a dog"</span>
 width = <span class="n">5</span>
 <span class="k">for</span> i <span class="k">in</span> range(len(text) - width + <span class="n">1</span>):
-    gram = text[i:i + width].replace(<span class="s">" "</span>, <span class="s">"_"</span>)
-    r.execute_command(<span class="s">"txt:SET"</span>, <span class="s">"%s %d"</span> % (gram, i), <span class="s">"1"</span>)
+    r.execute_command(<span class="s">"txt:SET"</span>, <span class="s">"%s|%d"</span> % (text[i:i + width], i), <span class="s">"1"</span>)
 
-<span class="k">print</span>(r.execute_command(<span class="s">"txt:RANGE"</span>, <span class="s">"is_is 0"</span>, <span class="s">"is_is 999999"</span>, <span class="n">100</span>))</pre></div>
+<span class="k">print</span>(r.execute_command(<span class="s">"txt:RANGE"</span>, <span class="s">"is is|0"</span>, <span class="s">"is is|999999"</span>, <span class="n">100</span>))</pre></div>
 </div>
 </div>
 </div>

@@ -48,9 +48,9 @@ int reply_encoded_key(ValkeyModuleCtx *ctx, art::value_type key);
 int reply_variable(ValkeyModuleCtx *ctx, const Variable var) ;
 
 Variable param_as_variant(art::value_type param);
-Variable encoded_key_as_variant(art::value_type key);
+Variable encoded_key_as_variant(art::value_type key, char sep = ' ');
 
-std::string encoded_key_as_string(art::value_type key);
+std::string encoded_key_as_string(art::value_type key, char sep = ' ');
 /** the decoded name a container key belongs to, empty when the key is not a container's */
 std::string encoded_container_name(art::value_type key);
 /** true for a container's internal bookkeeping keys, which name nothing a caller wrote */

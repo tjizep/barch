@@ -73,4 +73,16 @@ assert option(r, "ks_sp", "FOREIGN") == "fake"
 got = r.execute_command("FOREIGN", "FAKE", "PARTS", "Smith 42")
 assert got == ["Smith", "42"], got
 
+# --- n-gram frames: gram keeps its spaces, offset after | ----------------------
+conf.set("ng.key_split", "|")
+conf.save()
+r.execute_command("USE", "ng")
+r.set("his i|1", "1")
+r.set("is is|2", "1")
+r.set("is is|7", "1")
+got = r.execute_command("RANGE", "is is|0", "is is|999999", 100)
+assert got == ["is is|2", "is is|7"], got
+assert r.get("is is|2") == "1"
+assert r.get("is_is 2") is None
+
 print("complete key split test")

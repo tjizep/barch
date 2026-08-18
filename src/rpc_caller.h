@@ -425,7 +425,10 @@ struct rpc_caller : caller {
         protocol = version;
     }
     int push_encoded_key(art::value_type key) override {
-        emplace_impl(encoded_key_as_variant(key));
+        char sep = ' ';
+        if (ks && ks->key_split.size() == 1)
+            sep = ks->key_split[0];
+        emplace_impl(encoded_key_as_variant(key, sep));
         return 0;
     }
 

@@ -208,15 +208,8 @@ static std::vector<std::string> split_text(std::string_view text, const std::reg
 static bool literal_split_char(const std::string& pat, char& ch) {
     if (pat.size() != 1)
         return false;
-    switch (pat[0]) {
-        case '.': case '^': case '$': case '*': case '+': case '?':
-        case '(': case ')': case '[': case ']': case '{': case '}':
-        case '|': case '\\':
-            return false;
-        default:
-            ch = pat[0];
-            return true;
-    }
+    ch = pat[0];
+    return true;
 }
 
 static std::vector<std::string> split_on_char(std::string_view text, char ch) {

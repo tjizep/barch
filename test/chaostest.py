@@ -1,7 +1,7 @@
 # Mix as many concurrent RESP calls as the box will reasonably hold, flip
 # memory limits under them, and stop the server while calls are still in
 # flight. The mix is strings and TTL, hashes, lists, ordered sets,
-# RANGE/COUNT, n-gram composite keys (docs/NGRAM.md), and H3-style
+# RANGE/COUNT, n-gram composite keys (docs/index.html #ref-ngram), and H3-style
 # numeric composites. KEYS still writes the socket as it walks, so a
 # restart mid-KEYS is the original case.
 #
@@ -88,7 +88,7 @@ def worker(tid):
     zk = "t%d:z" % tid
     ck = "t%d:c" % tid
     fk = "t%d:f" % tid
-    grams = ("This", "his_i", "is_is", "s_is_a", "is_a_", "_a_do")
+    grams = ("This ", "his i", "is is", "s is ", " is a", " a do")
 
     def fire():
         i = local.randrange(n)
@@ -165,10 +165,10 @@ def worker(tid):
             lambda: r.zrem(zk, "m%d" % j),
             lambda: r.zcount(zk, 0, n),
             lambda: r.zincrby(zk, 1, "m%d" % i),
-            lambda: r.execute_command("txt:SET", "%s %d" % (gram, i), "1"),
-            lambda: r.execute_command("txt:RANGE", gram + " 0", gram + " 999999", 20),
-            lambda: r.execute_command("txt:COUNT", gram + " 0", gram + " 999999"),
-            lambda: r.execute_command("txt:REM", "%s %d" % (gram, j)),
+            lambda: r.execute_command("txt:SET", "%s|%d" % (gram, i), "1"),
+            lambda: r.execute_command("txt:RANGE", gram + "|0", gram + "|999999", 20),
+            lambda: r.execute_command("txt:COUNT", gram + "|0", gram + "|999999"),
+            lambda: r.execute_command("txt:REM", "%s|%d" % (gram, j)),
             lambda: r.execute_command("spatial_data:SET", "%d p%d" % (h3, tid), "1"),
             lambda: r.execute_command(
                 "spatial_data:RANGE",
@@ -248,10 +248,14 @@ def restarter():
 start_server()
 ctl = connect()
 ctl.execute_command("FLUSHDB")
+ctl.execute_command("USE", "configuration")
+ctl.set("txt.key_split", "|")
+ctl.execute_command("SAVE")
+ctl.execute_command("USE")
 for i in range(SEED_KEYS):
     ctl.set("seed:%05d" % i, "s%d" % i)
-for i, gram in enumerate(("This", "his_i", "is_is", "s_is_a")):
-    ctl.execute_command("txt:SET", "%s %d" % (gram, i), "1")
+for i, gram in enumerate(("This ", "his i", "is is", "s is ")):
+    ctl.execute_command("txt:SET", "%s|%d" % (gram, i), "1")
 ctl.close()
 
 threads = [threading.Thread(target=worker, args=(i,), name="chaos-%d" % i)
@@ -296,8 +300,8 @@ assert quiet.get("chaos:final") == b"ok", quiet.get("chaos:final")
 got = quiet.keys("chaos:*")
 names = [k.decode() if isinstance(k, bytes) else k for k in got]
 assert "chaos:final" in names, names
-quiet.execute_command("txt:SET", "is_is 2", "1")
-grams = quiet.execute_command("txt:RANGE", "is_is 0", "is_is 999999", 100)
+quiet.execute_command("txt:SET", "is is|2", "1")
+grams = quiet.execute_command("txt:RANGE", "is is|0", "is is|999999", 100)
 assert grams, "txt:RANGE after the storm answered empty"
 quiet.close()
 

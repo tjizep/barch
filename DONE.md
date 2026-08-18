@@ -3426,3 +3426,18 @@ write lock. `reply_after_wait` then takes that lock again.
 `do_block_continue` now `asio::post`s, so the waiter runs after the
 lock is gone. `finish_fetch` also wakes sessions after it drops the
 write lock. TestForeign completes.
+
+## 88. N-gram frames split on | so the gram keeps its spaces [18-08-2026]
+
+*Was `TODO.md` entry 92.*
+
+`txt.key_split` set to `|` before the first open. A frame is
+`<gram>|<offset>`. The gram is the window as it appeared, including
+spaces. No more `_`. RANGE `"is is|0"` … `"is is|999999"` finds
+those offsets.
+
+A one-character `key_split` is a literal separator. Compiling `|`
+as a regex is alternation and matches empty strings, which smashed
+the gram. RANGE joins components with that same character, so the
+reply is `is is|2` and not `is is 2`. The n-gram page, the chaos
+n-gram keys, and `keysplittest.py` follow this.

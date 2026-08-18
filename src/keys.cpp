@@ -165,7 +165,7 @@ int reply_variable(ValkeyModuleCtx *ctx, const Variable var) {
  * @param key
  * @return
  */
-Variable encoded_key_as_variant(art::value_type key) {
+Variable encoded_key_as_variant(art::value_type key, char sep) {
     double dk;
     float fk;
     int64_t ik;
@@ -192,7 +192,7 @@ Variable encoded_key_as_variant(art::value_type key) {
         } else {
             return sk;
         }
-    } else if (key_len >= 1 && *enck == art::tstring) {
+    } else if (key_len >= 2 && *enck == art::tstring) {
         k = (const char *) &enck[1];
         // kl = key_len - 2;
         std::string s = "$";
@@ -200,40 +200,50 @@ Variable encoded_key_as_variant(art::value_type key) {
         return s;
 
     } else if (key_len >= 1 && art::is_composite_lead(*enck)) {
-        // not recurrent composites yet
         unsigned kl = 2;
-        const char *ptr = (const char *) &enck[2];
         std::string r = "$";
         size_t cnt = 0;
         while (kl < key_len) {
+            const unsigned char* ptr = enck + kl;
+            unsigned left = key_len - kl;
             unsigned len = 0;
-
+            std::string part;
             switch (*ptr) {
                 case art::tinteger:
                 case art::tdouble:
                     len = numeric_key_size;
+                    if (len > left)
+                        return r;
+                    part = encoded_key_as_variant({ptr, len}, sep).s();
                     break;
                 case art::tfloat:
                 case art::tshort:
                     len = num32_key_size;
+                    if (len > left)
+                        return r;
+                    part = encoded_key_as_variant({ptr, len}, sep).s();
                     break;
                 case art::tstring: {
-                    len = encoded_str_len(ptr + 1,key_len - kl) + 2;
-                }
+                    size_t n = encoded_str_len(reinterpret_cast<const char*>(ptr + 1),
+                                              left > 0 ? left - 1 : 0);
+                    len = static_cast<unsigned>(n + 2);
+                    if (len > left)
+                        return r;
+                    part.assign(reinterpret_cast<const char*>(ptr + 1), n);
                     break;
+                }
                 default:
                     return r;
             }
-            if (!r.empty() && cnt > 0)
-                r += " ";
-            r += encoded_key_as_variant(key.sub(kl, len)).s();
-            ptr += len;
+            if (cnt > 0)
+                r += sep;
+            r += part;
             kl += len;
             ++cnt;
         }
         return r;
     } else {
-        abort();
+        return std::string{};
     }
     return "";
 }
@@ -321,8 +331,8 @@ bool is_container_internal(art::value_type key) {
     return encoded_container_name_len(key) == 0;
 }
 
-std::string encoded_key_as_string(art::value_type key) {
-    Variable v = encoded_key_as_variant(key);
+std::string encoded_key_as_string(art::value_type key, char sep) {
+    Variable v = encoded_key_as_variant(key, sep);
     return v.s();
 }
 unsigned log_encoded_key(art::value_type key, bool start) {

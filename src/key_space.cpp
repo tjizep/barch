@@ -64,15 +64,8 @@ namespace barch {
     static bool literal_split_char(const std::string& pat, char& ch) {
         if (pat.size() != 1)
             return false;
-        switch (pat[0]) {
-            case '.': case '^': case '$': case '*': case '+': case '?':
-            case '(': case ')': case '[': case ']': case '{': case '}':
-            case '|': case '\\':
-                return false;
-            default:
-                ch = pat[0];
-                return true;
-        }
+        ch = pat[0];
+        return true;
     }
 
     conversion::comparable_key key_space::encode_key(art::value_type v, bool noint) const {

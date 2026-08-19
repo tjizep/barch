@@ -3,6 +3,7 @@
 # can start a mysql container, and the client library was linked.
 import os
 import tempfile
+import time
 import redis
 import barch
 import foreign_sql
@@ -166,6 +167,24 @@ if dsn and built:
                 assert option(r, "fm_enc", "FOREIGN") == "mysql"
                 r.execute_command("USE", "fm_enc")
                 assert r.get("Smith 42") == "whole"
+                conf.set("fm_age.foreign_dsn", "env:BARCH_MYSQL_LIVE")
+                conf.set(
+                    "fm_age.foreign_query",
+                    "SELECT CONNECTION_ID() FROM t WHERE ? IS NOT NULL LIMIT 1",
+                )
+                conf.set("fm_age.foreign_pool_max_age_ms", "200")
+                conf.set("fm_age.foreign", "mysql")
+                conf.save()
+                assert option(r, "fm_age", "FOREIGN") == "mysql"
+                assert option(r, "fm_age", "FOREIGN_POOL_MAX_AGE") == 200
+                r.execute_command("USE", "fm_age")
+                id1 = r.get("age_a")
+                time.sleep(0.05)
+                id2 = r.get("age_b")
+                assert id1 == id2, (id1, id2)
+                time.sleep(0.35)
+                id3 = r.get("age_c")
+                assert id3 != id1, (id1, id3)
                 conf.set(
                     "fm_luau.foreign_script",
                     "-- fill\n"

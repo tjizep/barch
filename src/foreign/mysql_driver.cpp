@@ -1,4 +1,5 @@
 #include "sql.h"
+#include "configuration.h"
 #include "key_space.h"
 #include "keyspec.h"
 #include "lzr_log.h"
@@ -22,6 +23,7 @@ namespace foreign {
 
 struct mysql_conn {
     MYSQL* m{nullptr};
+    int64_t idle_since{0};
     ~mysql_conn() {
         if (m)
             mysql_close(m);
@@ -116,10 +118,25 @@ struct mysql_pool : sql_backend {
     std::string db;
     std::string space_name;
     size_t cap{8};
+    uint64_t max_age_override_ms{0};
     std::mutex mu;
     std::condition_variable cv;
     std::vector<std::unique_ptr<mysql_conn>> idle;
     size_t live{0};
+
+    uint64_t max_age_ms() const {
+        if (max_age_override_ms)
+            return max_age_override_ms;
+        return get_foreign_pool_max_age_ms();
+    }
+
+    void drop_idle() override {
+        std::lock_guard lk(mu);
+        auto n = idle.size();
+        drop_idle_older_than(idle, live, max_age_ms(), art::now());
+        if (idle.size() != n)
+            cv.notify_all();
+    }
 
     std::unique_ptr<mysql_conn> connect(uint64_t deadline_ms) {
         auto c = std::make_unique<mysql_conn>();
@@ -168,9 +185,10 @@ struct mysql_pool : sql_backend {
 
     void checkin(std::unique_ptr<mysql_conn> c) {
         std::lock_guard lk(mu);
-        if (c)
+        if (c) {
+            c->idle_since = art::now();
             idle.push_back(std::move(c));
-        else if (live > 0)
+        } else if (live > 0)
             --live;
         cv.notify_one();
     }
@@ -267,6 +285,7 @@ bool prepare_mysql(key_space& ks) {
     }
     auto pool = std::make_shared<mysql_pool>();
     pool->cap = ks.foreign_pool_size ? ks.foreign_pool_size : 8;
+    pool->max_age_override_ms = ks.foreign_pool_max_age_ms;
     if (!parse_mysql_dsn(dsn, *pool) && ks.foreign_host.empty()) {
         barch::err({"mysql foreign source - ignoring it for space", ks.get_name(), "bad dsn"});
         return false;

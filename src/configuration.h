@@ -32,6 +32,7 @@ namespace barch {
         uint64_t rpc_max_buffer{32768*4};
         uint64_t rpc_client_max_wait_ms{30000};
         uint64_t foreign_timeout_ms{300000};
+        uint64_t foreign_pool_max_age_ms{30000};
         uint64_t foreign_script_insns{1000000};
         uint64_t rpc_connect_to_s{30};
         uint64_t rpc_read_to_s{30};
@@ -131,6 +132,7 @@ namespace barch {
 
     uint64_t get_rpc_max_client_wait_ms();
     uint64_t get_foreign_timeout_ms();
+    uint64_t get_foreign_pool_max_age_ms();
     uint64_t get_foreign_script_insns();
     uint64_t get_server_port();
     std::string get_server_binding();

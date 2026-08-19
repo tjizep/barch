@@ -792,9 +792,7 @@ static double rnd(float f) {
 	return std::round((double)f * 100000.0) / 100000.0;
 }
 #endif
-static double rnd(double f) {
-    return f;
-}
+
 
 /**
  * Is `member` in this ordered set, and at what score?

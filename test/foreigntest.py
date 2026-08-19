@@ -28,6 +28,7 @@ assert option(r, "fx_default", "FOREIGN") == "off"
 assert option(r, "fx_default", "MISSING_TTL") == 0
 assert option(r, "fx_default", "FOREIGN_TIMEOUT") == 300000
 assert option(r, "fx_default", "FOREIGN_QUERY_TIMEOUT") == 1000
+assert option(r, "fx_default", "FOREIGN_POOL_MAX_AGE") == 30000
 inflight = option(r, "fx_default", "FOREIGN_INFLIGHT")
 assert inflight == [0, 32], inflight
 r.execute_command("USE", "fx_default")
@@ -44,6 +45,7 @@ assert option(r, "fx_fake", "FOREIGN") == "fake"
 assert option(r, "fx_fake", "MISSING_TTL") == 30
 assert option(r, "fx_fake", "FOREIGN_TIMEOUT") == 300000
 assert option(r, "fx_fake", "FOREIGN_QUERY_TIMEOUT") == 2500
+assert option(r, "fx_fake", "FOREIGN_POOL_MAX_AGE") == 30000
 assert option(r, "fx_fake", "FOREIGN_INFLIGHT") == [0, 8]
 r.execute_command("USE", "fx_fake")
 assert r.get("still-missing") is None
@@ -51,8 +53,10 @@ assert r.get("still-missing") is None
 # --- a space can override the waiter timeout -------------------------------------
 conf.set("fx_wait.foreign", "fake")
 conf.set("fx_wait.foreign_timeout_ms", "45000")
+conf.set("fx_wait.foreign_pool_max_age_ms", "5000")
 conf.save()
 assert option(r, "fx_wait", "FOREIGN_TIMEOUT") == 45000
+assert option(r, "fx_wait", "FOREIGN_POOL_MAX_AGE") == 5000
 
 # --- mysql without a dsn or host is left off -------------------------------------
 conf.set("fx_mysql.foreign", "mysql")
@@ -109,6 +113,18 @@ if isinstance(got, dict):
     assert got.get("foreign_timeout_ms") == "180000", got
 else:
     assert got[1] == "180000", got
+got = r.execute_command("CONFIG", "GET", "foreign_pool_max_age_ms")
+if isinstance(got, dict):
+    assert got.get("foreign_pool_max_age_ms") == "30000", got
+else:
+    assert got[1] == "30000", got
+r.execute_command("CONFIG", "SET", "foreign_pool_max_age_ms", "12000")
+got = r.execute_command("CONFIG", "GET", "foreign_pool_max_age_ms")
+if isinstance(got, dict):
+    assert got.get("foreign_pool_max_age_ms") == "12000", got
+else:
+    assert got[1] == "12000", got
+r.execute_command("CONFIG", "SET", "foreign_pool_max_age_ms", "30000")
 
 print("complete foreign config test")
 

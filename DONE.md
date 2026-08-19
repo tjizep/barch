@@ -3453,3 +3453,48 @@ as a regex is alternation and matches empty strings, which smashed
 the gram. RANGE joins components with that same character, so the
 reply is `is is|2` and not `is is 2`. The n-gram page, the chaos
 n-gram keys, and `keysplittest.py` follow this.
+
+## 90. Idle MySQL and Postgres pool connections have a maximum age [19-08-2026]
+
+*Was `TODO.md` entry 94.*
+
+Each SQL pool kept idle connections forever. Checkout now drops any
+idle connection whose age is past `foreign_pool_max_age_ms` (global
+default 30000) and opens a new one. Checkin stamps the idle time and
+does the same walk, so a quiet pool does not keep a stack of stale
+sockets until the next miss. Global 0 keeps idle connections. A
+space that sets `<name>.foreign_pool_max_age_ms` uses that instead
+of the global; unset still inherits, including a later `CONFIG SET`.
+
+`KSPACE OPTION GET FOREIGN_POOL_MAX_AGE` reports the resolved value.
+TestConfig round-trips the global. TestForeign checks inherit and
+override. The live MySQL and Postgres tests (docker) assert that two
+misses within the age reuse a backend id and a miss after it does not.
+
+## 91. cmake --build . failed on barchlua's Lua headers [19-08-2026]
+
+*Was `TODO.md` entry 95.*
+
+A full RelWithDebInfo build died compiling `barchLUA_wrap.cxx`.
+Luau's `lua.h` was on the include path ahead of LuaJIT's, so
+`lua_pushcclosure` was the four-argument Luau macro and the SWIG
+wrap still called the three-argument LuaJIT form. The wrap file
+needs LuaJIT. `luau_driver.cpp` needs Luau. They cannot share an
+include path.
+
+`luau_driver.cpp` is no longer in the barchlua source list. It is
+compiled as `barch_luau_driver` with Luau first, then linked in.
+The other targets are unchanged. `cmake --build .` in
+`cmake-build-relwithdebinfo` now finishes.
+
+## 92. Idle SQL pool drop moved to the key space maintenance thread [19-08-2026]
+
+*Was `TODO.md` entry 96.*
+
+Checkout and checkin no longer walk the idle list. Each pool
+implements `sql_backend::drop_idle`, which takes the pool lock and
+calls `drop_idle_older_than`. `key_space::drop_idle_sql` is the
+wrapper the maintenance thread runs once per cycle, after the shard
+sweep. Checkin still stamps `idle_since`. The live MySQL and
+Postgres age tests still pass: reuse inside 200 ms, a new backend
+id after it.

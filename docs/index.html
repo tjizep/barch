@@ -317,6 +317,7 @@ sudo cmake --install build --component barchlua   <span class="c"># luajit → /
 <tr><td><code>rpc_max_buffer</code></td><td>bytes</td><td class="req n">OPTIONAL</td><td>per-connection RPC buffer</td><td><code>131072</code></td></tr>
 <tr><td><code>rpc_client_max_wait_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>client call deadline; drives timeout errors under load</td><td><code>30000</code></td></tr>
 <tr><td><code>foreign_timeout_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>how long a parked GET waits on a foreign miss. A named space can override with <code>&lt;name&gt;.foreign_timeout_ms</code></td><td><code>300000</code></td></tr>
+<tr><td><code>foreign_pool_max_age_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>how long an idle MySQL or Postgres pool connection may sit before it is closed. <code>0</code> keeps idle connections. A named space can override with <code>&lt;name&gt;.foreign_pool_max_age_ms</code></td><td><code>30000</code></td></tr>
 <tr><td><code>foreign_script_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>Luau instruction slice for one <code>resolve</code>. After this many instructions the script yields the foreign worker and is queued again, so the other three workers keep moving. The query timeout still stops a runaway. A named space can override with <code>&lt;name&gt;.foreign_script_insns</code></td><td><code>1000000</code></td></tr>
 <tr><td><code>bind_interface</code></td><td>string</td><td class="req n">OPTIONAL</td><td>IP or unix socket path</td><td><code>127.0.0.1</code></td></tr>
 <tr><td><code>external_host</code></td><td>string</td><td class="req n">OPTIONAL</td><td>host advertised to replication peers</td><td><code>localhost</code></td></tr>
@@ -335,6 +336,7 @@ sudo cmake --install build --component barchlua   <span class="c"># luajit → /
 <tr><td><code>&lt;keyspace&gt;.foreign_query_timeout_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>driver / script deadline</td><td><code>1000</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_max_inflight</code></td><td>int</td><td class="req c">PER-SPACE</td><td>cap of running foreign queries for this space</td><td><code>32</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_pool_size</code></td><td>int</td><td class="req c">PER-SPACE</td><td>MySQL/PG connections for this space</td><td><code>8</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_pool_max_age_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>idle MySQL/PG connection max age for this space. Unset inherits <code>foreign_pool_max_age_ms</code>. <code>0</code> is inherit, not “keep forever”</td><td>inherits global</td></tr>
 </tbody>
 </table>
 
@@ -2225,7 +2227,7 @@ A name may also be given directly - <code>SELECT events</code> - which redis has
 <tr><td><code>KSPACE OPTION SET|GET LRU [ON|OFF|VOLATILE]</code></td><td><code>ON</code> / <code>OFF</code> / <code>VOLATILE</code></td><td class="req y">REQUIRED for SET</td><td>per-space eviction; <code>setLru()</code> in SWIG</td></tr>
 <tr><td><code>KSPACE OPTION SET|GET RANDOM [ON|OFF|VOLATILE]</code></td><td><code>ON</code> / <code>OFF</code> / <code>VOLATILE</code></td><td class="req y">REQUIRED for SET</td><td>per-space random eviction</td></tr>
 <tr><td><code>KSPACE OPTION GET FOREIGN</code></td><td><code>off</code> / <code>mysql</code> / <code>postgres</code> / <code>luau</code> / <code>fake</code></td><td class="req n">GET only</td><td>the foreign source named when the space was built. SET is a syntax error</td></tr>
-<tr><td><code>KSPACE OPTION GET MISSING_TTL</code> · <code>FOREIGN_TIMEOUT</code> · <code>FOREIGN_QUERY_TIMEOUT</code> · <code>FOREIGN_INFLIGHT</code></td><td>integers</td><td class="req n">GET only</td><td>seconds a source-miss tomb lives; waiter timeout (space or global); driver deadline; running / cap</td></tr>
+<tr><td><code>KSPACE OPTION GET MISSING_TTL</code> · <code>FOREIGN_TIMEOUT</code> · <code>FOREIGN_QUERY_TIMEOUT</code> · <code>FOREIGN_INFLIGHT</code> · <code>FOREIGN_POOL_MAX_AGE</code></td><td>integers</td><td class="req n">GET only</td><td>seconds a source-miss tomb lives; waiter timeout (space or global); driver deadline; running / cap; idle pool connection max age in ms</td></tr>
 <tr><td><code>configuration</code> space keys</td><td><code>&lt;name&gt;.shards</code> · <code>&lt;name&gt;.ordered</code> · <code>&lt;name&gt;.range_sharded</code> · <code>&lt;name&gt;.foreign*</code></td><td class="req c">read at first reference only</td><td>see <a href="#configuration">Configuration</a></td></tr>
 </tbody>
 </table>
@@ -2356,7 +2358,7 @@ h:use(<span class="s">"catalog"</span>)
 <tr><td><code>&lt;name&gt;.foreign_query</code></td><td>one <code>SELECT</code>, one result column. Must contain <code>?</code>, <code>$n</code>, or <code>$$</code> or the space stays off</td></tr>
 </tbody>
 </table>
-<p>Optional knobs on the same space: <code>foreign_host</code> / <code>port</code> / <code>user</code> / <code>password</code> / <code>database</code> when the DSN is empty; <code>foreign_pool_size</code> (default 8 connections); <code>foreign_max_inflight</code> (default 32 running queries); <code>foreign_query_timeout_ms</code> (driver deadline, default 1000); <code>foreign_timeout_ms</code> (how long a parked GET waits, default the global 300000); <code>missing_ttl</code> (seconds a tomb lives, 0 keeps it until DEL); <code>key_split</code> (regex that breaks an incoming key into <code>$0</code>/<code>$1</code>/… — unset still splits on spaces).</p>
+<p>Optional knobs on the same space: <code>foreign_host</code> / <code>port</code> / <code>user</code> / <code>password</code> / <code>database</code> when the DSN is empty; <code>foreign_pool_size</code> (default 8 connections); <code>foreign_pool_max_age_ms</code> (idle connection max age, default the global 30000); <code>foreign_max_inflight</code> (default 32 running queries); <code>foreign_query_timeout_ms</code> (driver deadline, default 1000); <code>foreign_timeout_ms</code> (how long a parked GET waits, default the global 300000); <code>missing_ttl</code> (seconds a tomb lives, 0 keeps it until DEL); <code>key_split</code> (regex that breaks an incoming key into <code>$0</code>/<code>$1</code>/… — unset still splits on spaces).</p>
 <h3>Query macros</h3>
 <p>The server never concatenates the key into the SQL string. It rewrites the macros into a prepared statement and binds the values.</p>
 <table>
@@ -2403,13 +2405,14 @@ GET Smith 42
 <li><code>foreign_timeout_ms</code> is how long the parked GET waits. It can be longer than the driver deadline. Unset, it inherits the global <code>foreign_timeout_ms</code> (five minutes).</li>
 <li><code>foreign_max_inflight</code> is the cap of running queries for the space. A miss above the cap is <code>-ERR FOREIGN overloaded</code>, not a queue that grows without bound.</li>
 <li><code>foreign_pool_size</code> is the MySQL or Postgres connection pool for the space. Do not open one connection per query.</li>
+<li><code>foreign_pool_max_age_ms</code> is how long an idle pooled connection may sit before the key space maintenance thread closes it. The next miss then opens a new one. Unset, it inherits the global <code>foreign_pool_max_age_ms</code> (thirty seconds). The global <code>0</code> keeps idle connections.</li>
 </ul>
 <h3>Introspection</h3>
 <table>
 <thead><tr><th>Surface</th><th>Returns</th></tr></thead>
 <tbody>
 <tr><td><code>KSPACE OPTION GET FOREIGN</code></td><td><code>off</code> / <code>mysql</code> / <code>postgres</code> / <code>luau</code> / <code>fake</code> — what the space actually built. SET of this name is a syntax error</td></tr>
-<tr><td><code>KSPACE OPTION GET FOREIGN_TIMEOUT</code> · <code>FOREIGN_QUERY_TIMEOUT</code> · <code>FOREIGN_INFLIGHT</code> · <code>MISSING_TTL</code> · <code>KEY_SPLIT</code></td><td>waiter timeout; driver deadline; running / cap; tomb lifetime in seconds; incoming-key split regex (empty means spaces)</td></tr>
+<tr><td><code>KSPACE OPTION GET FOREIGN_TIMEOUT</code> · <code>FOREIGN_QUERY_TIMEOUT</code> · <code>FOREIGN_INFLIGHT</code> · <code>FOREIGN_POOL_MAX_AGE</code> · <code>MISSING_TTL</code> · <code>KEY_SPLIT</code></td><td>waiter timeout; driver deadline; running / cap; idle pool max age in ms; tomb lifetime in seconds; incoming-key split regex (empty means spaces)</td></tr>
 <tr><td><code>INFO FOREIGN</code></td><td><code>foreign_queries</code>, <code>foreign_misses</code>, <code>foreign_errors</code>, <code>foreign_waiters</code>, <code>foreign_coalesced</code>, <code>foreign_overloaded</code>, <code>foreign_cancelled</code>, <code>foreign_inflight</code></td></tr>
 </tbody>
 </table>

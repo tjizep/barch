@@ -1,4 +1,5 @@
 #include "sql.h"
+#include "configuration.h"
 #include "key_space.h"
 #include "keyspec.h"
 #include "lzr_log.h"
@@ -21,6 +22,7 @@ namespace foreign {
 
 struct pg_conn {
     PGconn* c{nullptr};
+    int64_t idle_since{0};
     ~pg_conn() {
         if (c)
             PQfinish(c);
@@ -31,10 +33,25 @@ struct postgres_pool : sql_backend {
     std::string conninfo;
     std::string space_name;
     size_t cap{8};
+    uint64_t max_age_override_ms{0};
     std::mutex mu;
     std::condition_variable cv;
     std::vector<std::unique_ptr<pg_conn>> idle;
     size_t live{0};
+
+    uint64_t max_age_ms() const {
+        if (max_age_override_ms)
+            return max_age_override_ms;
+        return get_foreign_pool_max_age_ms();
+    }
+
+    void drop_idle() override {
+        std::lock_guard lk(mu);
+        auto n = idle.size();
+        drop_idle_older_than(idle, live, max_age_ms(), art::now());
+        if (idle.size() != n)
+            cv.notify_all();
+    }
 
     std::unique_ptr<pg_conn> connect() {
         auto c = std::make_unique<pg_conn>();
@@ -75,9 +92,10 @@ struct postgres_pool : sql_backend {
 
     void checkin(std::unique_ptr<pg_conn> c) {
         std::lock_guard lk(mu);
-        if (c)
+        if (c) {
+            c->idle_since = art::now();
             idle.push_back(std::move(c));
-        else if (live > 0)
+        } else if (live > 0)
             --live;
         cv.notify_one();
     }
@@ -169,6 +187,7 @@ bool prepare_postgres(key_space& ks) {
     }
     auto pool = std::make_shared<postgres_pool>();
     pool->cap = ks.foreign_pool_size ? ks.foreign_pool_size : 8;
+    pool->max_age_override_ms = ks.foreign_pool_max_age_ms;
     pool->conninfo = with_connect_timeout(dsn, ks.foreign_query_timeout_ms);
     pool->space_name = ks.get_canonical_name();
     ks.sql = std::move(pool);

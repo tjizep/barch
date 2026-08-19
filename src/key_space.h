@@ -60,6 +60,7 @@ namespace barch {
         uint64_t foreign_query_timeout_ms{1000};
         uint64_t foreign_max_inflight{32};
         uint64_t foreign_pool_size{8};
+        uint64_t foreign_pool_max_age_ms{0};
         std::string key_split{};
         std::shared_ptr<std::regex> key_split_re{};
         std::atomic<uint32_t> foreign_inflight{0};
@@ -75,6 +76,10 @@ namespace barch {
         [[nodiscard]] const char *foreign_kind_name() const;
         [[nodiscard]] uint64_t waiter_timeout_ms() const;
         [[nodiscard]] uint64_t script_insns() const;
+        /** idle MySQL/PG connection max age. Unset inherits the global. */
+        [[nodiscard]] uint64_t pool_max_age_ms() const;
+        /** close idle SQL pool connections that have sat past the max age. */
+        void drop_idle_sql();
         /** encode a user key with this space's split. unset split is still a space. */
         [[nodiscard]] conversion::comparable_key encode_key(art::value_type v, bool noint = false) const;
         /** fail in-flight fills and wake waiters before the shards go. */

@@ -17,7 +17,8 @@ PORT = 14000
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
     "active_defrag", "compression", "db_number_prefix", "eviction_policy",
-    "external_host", "foreign_script_insns", "foreign_timeout_ms",
+    "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
+    "foreign_timeout_ms",
     "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
     "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -66,6 +67,7 @@ NEW_VALUE = {
     "db_number_prefix": "database",
     "eviction_policy": "allkeys-lru",
     "external_host": "someotherhost",
+    "foreign_pool_max_age_ms": "15000",
     "foreign_script_insns": "2000000",
     "foreign_timeout_ms": "120000",
     "iteration_worker_count": "6",

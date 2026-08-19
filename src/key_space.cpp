@@ -61,6 +61,16 @@ namespace barch {
         return get_foreign_script_insns();
     }
 
+    uint64_t key_space::pool_max_age_ms() const {
+        if (foreign_pool_max_age_ms != 0) return foreign_pool_max_age_ms;
+        return get_foreign_pool_max_age_ms();
+    }
+
+    void key_space::drop_idle_sql() {
+        if (sql)
+            sql->drop_idle();
+    }
+
     static bool literal_split_char(const std::string& pat, char& ch) {
         if (pat.size() != 1)
             return false;
@@ -269,6 +279,7 @@ namespace barch {
                 read_u64(kv, real+".foreign_query_timeout_ms", foreign_query_timeout_ms);
                 read_u64(kv, real+".foreign_max_inflight", foreign_max_inflight);
                 read_u64(kv, real+".foreign_pool_size", foreign_pool_size);
+                read_u64(kv, real+".foreign_pool_max_age_ms", foreign_pool_max_age_ms);
                 read_u64(kv, real+".foreign_script_insns", foreign_script_insns);
                 key_split = kv.get(real+".key_split");
                 if (!key_split.empty()) {
@@ -427,6 +438,12 @@ namespace barch {
                            barch::err({"exception in maintenance:",e.what()});
                        }
                        if (exiting) break;
+                   }
+
+                   try {
+                       drop_idle_sql();
+                   } catch (std::exception& e) {
+                       barch::err({"exception dropping idle sql:", e.what()});
                    }
 
                 }

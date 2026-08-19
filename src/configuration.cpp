@@ -64,6 +64,7 @@ struct config_state {
     heap::string rpc_max_buffer{};
     heap::string rpc_client_max_wait_ms{};
     heap::string foreign_timeout_ms{};
+    heap::string foreign_pool_max_age_ms{};
     heap::string foreign_script_insns{};
     heap::string jump_factor{};
     heap::string ordered_keys{};
@@ -213,6 +214,33 @@ static int SetForeignTimeoutMs(const char *unused_arg, ValkeyModuleString *val, 
 }
 
 static int ApplyForeignTimeoutMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetForeignPoolMaxAgeMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().foreign_pool_max_age_ms.c_str(),
+                                     state().foreign_pool_max_age_ms.length());
+}
+
+static int SetForeignPoolMaxAgeMs(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().foreign_pool_max_age_ms = val;
+    char *end = nullptr;
+    config().foreign_pool_max_age_ms = std::strtoull(val.c_str(), &end, 10);
+    return VALKEYMODULE_OK;
+}
+
+static int SetForeignPoolMaxAgeMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                  ValkeyModuleString **unused_arg) {
+    return SetForeignPoolMaxAgeMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyForeignPoolMaxAgeMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 
@@ -1171,6 +1199,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetForeignTimeoutMs, SetForeignTimeoutMs,
                                                  ApplyForeignTimeoutMs, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "foreign_pool_max_age_ms", "30000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetForeignPoolMaxAgeMs, SetForeignPoolMaxAgeMs,
+                                                 ApplyForeignPoolMaxAgeMs, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "foreign_script_insns", "1000000", VALKEYMODULE_CONFIG_DEFAULT,
                                                  GetForeignScriptInsns, SetForeignScriptInsns,
                                                  ApplyForeignScriptInsns, nullptr);
@@ -1474,6 +1506,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyForeignTimeoutMs(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "foreign_pool_max_age_ms") {
+        auto r = SetForeignPoolMaxAgeMs(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyForeignPoolMaxAgeMs(nullptr, nullptr, nullptr);
+        }
+        return r;
     } else if (name == "foreign_script_insns") {
         auto r = SetForeignScriptInsns(val);
         if (r == VALKEYMODULE_OK) {
@@ -1669,6 +1707,11 @@ uint64_t barch::get_foreign_timeout_ms() {
     return config().foreign_timeout_ms;
 }
 
+uint64_t barch::get_foreign_pool_max_age_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return config().foreign_pool_max_age_ms;
+}
+
 uint64_t barch::get_foreign_script_insns() {
     std::lock_guard lock(state().config_mutex);
     return config().foreign_script_insns;
@@ -1769,7 +1812,8 @@ static std::string cfg_float(F v) {
 const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "compression", "db_number_prefix", "eviction_policy",
-        "external_host", "foreign_script_insns", "foreign_timeout_ms",
+        "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
+        "foreign_timeout_ms",
         "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -1790,6 +1834,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "db_number_prefix")            value = state().db_number_prefix.c_str();
     else if (name == "eviction_policy")             value = state().eviction_type.c_str();
     else if (name == "external_host")               value = c.external_host;
+    else if (name == "foreign_pool_max_age_ms")     value = std::to_string(c.foreign_pool_max_age_ms);
     else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
     else if (name == "foreign_timeout_ms")          value = std::to_string(c.foreign_timeout_ms);
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);

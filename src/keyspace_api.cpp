@@ -81,7 +81,7 @@ static size_t save(caller& call) {
     - `KSPACE OPTION [SET|GET] ORDERED [ON|OFF]` sets the current key space to ordered or unordered, option is saved in key space shards
     - `KSPACE OPTION [SET|GET] LRU [ON|OFF|VOLATILE]` sets the current key space to evict lru
     - `KSPACE OPTION [SET|GET] RANDOM [ON|OFF|VOLATILE]` sets the current key space to evict randomly
-    - `KSPACE OPTION GET FOREIGN|MISSING_TTL|FOREIGN_TIMEOUT|FOREIGN_QUERY_TIMEOUT|FOREIGN_INFLIGHT` reports the foreign-source options read when the space was built. SET of those names is a syntax error.
+    - `KSPACE OPTION GET FOREIGN|MISSING_TTL|FOREIGN_TIMEOUT|FOREIGN_QUERY_TIMEOUT|FOREIGN_INFLIGHT|FOREIGN_POOL_MAX_AGE` reports the foreign-source options read when the space was built. SET of those names is a syntax error.
     - `KSPACE EXIST {key space name} return `1` if space exists else `0`
  */
 int KSPACE(caller& call, const arg_t& argv) {
@@ -204,6 +204,9 @@ int KSPACE(caller& call, const arg_t& argv) {
             call.push_ll(0);
             call.push_ll(static_cast<int64_t>(spc->foreign_max_inflight));
             return call.end_array();
+        }
+        if (parser.name == "FOREIGN_POOL_MAX_AGE") {
+            return call.push_ll(static_cast<int64_t>(spc->pool_max_age_ms()));
         }
         if (parser.name == "KEY_SPLIT") {
             return call.push_vt(art::value_type{spc->key_split});

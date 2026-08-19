@@ -502,3 +502,9 @@
 92. [Done] N-gram frames split on | so the gram keeps its spaces [18-08-2026] Nr 88 4a4b73f
 
 93. [Done] FOREIGN waiter uses a millisecond clock [18-08-2026] Nr 89 10233c2
+
+94. [Done] Idle MySQL and Postgres pool connections have a maximum age [19-08-2026] Nr 90 662969a
+
+95. [Done] cmake --build . failed on barchlua's Lua headers [19-08-2026] Nr 91 662969a
+
+96. [Done] Idle SQL pool drop moved to the key space maintenance thread [19-08-2026] Nr 92 662969a

@@ -2,6 +2,7 @@
 #define BARCH_FOREIGN_SQL_H
 
 #include "driver.h"
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -14,6 +15,8 @@ namespace foreign {
 struct sql_backend {
     virtual ~sql_backend() = default;
     virtual result query(std::string_view sql, std::string_view key, uint64_t deadline_ms) = 0;
+    /** close idle connections older than the pool max age. default is nothing. */
+    virtual void drop_idle() {}
 };
 
 enum class bind_kind { user, encoded, part };
@@ -46,6 +49,26 @@ bool bind_key(std::string_view internal, const compiled_query& q,
               std::vector<std::string>& values, std::string& err,
               const key_space* ks = nullptr);
 std::string postgres_placeholders(std::string_view sql);
+
+/** drop idle MySQL/PG connections older than max_age_ms. 0 means keep them. */
+template<typename Conn>
+void drop_idle_older_than(std::vector<std::unique_ptr<Conn>>& idle, size_t& live,
+                          uint64_t max_age_ms, int64_t now) {
+    if (!max_age_ms)
+        return;
+    size_t keep = 0;
+    for (size_t i = 0; i < idle.size(); ++i) {
+        if (now - idle[i]->idle_since >= static_cast<int64_t>(max_age_ms)) {
+            if (live > 0)
+                --live;
+        } else {
+            if (keep != i)
+                idle[keep] = std::move(idle[i]);
+            ++keep;
+        }
+    }
+    idle.resize(keep);
+}
 
 bool mysql_available();
 bool postgres_available();

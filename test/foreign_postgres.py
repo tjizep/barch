@@ -3,6 +3,7 @@
 # can start a postgres container, and libpq was linked.
 import os
 import tempfile
+import time
 import redis
 import barch
 import foreign_sql
@@ -166,6 +167,24 @@ if dsn and built:
                 assert option(r, "fp_enc", "FOREIGN") == "postgres"
                 r.execute_command("USE", "fp_enc")
                 assert r.get("Smith 42") == "whole"
+                conf.set("fp_age.foreign_dsn", "env:BARCH_POSTGRES_LIVE")
+                conf.set(
+                    "fp_age.foreign_query",
+                    "SELECT pg_backend_pid() FROM t WHERE k = ? OR true LIMIT 1",
+                )
+                conf.set("fp_age.foreign_pool_max_age_ms", "200")
+                conf.set("fp_age.foreign", "postgres")
+                conf.save()
+                assert option(r, "fp_age", "FOREIGN") == "postgres"
+                assert option(r, "fp_age", "FOREIGN_POOL_MAX_AGE") == 200
+                r.execute_command("USE", "fp_age")
+                id1 = r.get("age_a")
+                time.sleep(0.05)
+                id2 = r.get("age_b")
+                assert id1 == id2, (id1, id2)
+                time.sleep(0.35)
+                id3 = r.get("age_c")
+                assert id3 != id1, (id1, id3)
                 conf.set(
                     "fp_luau.foreign_script",
                     "-- fill\n"

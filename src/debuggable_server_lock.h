@@ -54,8 +54,11 @@ struct LockDiagnostics {
 #endif
 
 /**
- * Reader/writer lock with per-thread reader slots. Timeout dumps, labels,
- * and writer backtraces are compiled in when BARCH_LOCK_DEBUG is defined.
+ * Reader/writer lock with per-thread reader slots. Upgradable holds are
+ * readers plus the exclusive right to become unique later, so compress
+ * can run without blocking other readers and without letting a writer
+ * replace the value. Timeout dumps, labels, and writer backtraces are
+ * compiled in when BARCH_LOCK_DEBUG is defined.
  */
 class debuggable_server_lock {
 public:
@@ -104,10 +107,51 @@ private:
 
     bool holds_this_shared() const noexcept {
         for (int i = held_n - 1; i >= 0; --i) {
-            if (held[i].lk == this && held[i].mode == 'R')
+            if (held[i].lk == this && (held[i].mode == 'R' || held[i].mode == 'U'))
                 return true;
         }
         return false;
+    }
+
+    char our_hold() const noexcept {
+        for (int i = held_n - 1; i >= 0; --i) {
+            if (held[i].lk == this)
+                return held[i].mode;
+        }
+        return 0;
+    }
+
+    void strip_our_holds() noexcept {
+        int w = 0;
+        for (int i = 0; i < held_n; ++i) {
+            if (held[i].lk != this)
+                held[w++] = held[i];
+        }
+        held_n = w;
+    }
+
+    void set_our_hold(char mode) noexcept {
+        strip_our_holds();
+        push_hold(mode);
+    }
+
+    void bump_reader_hold() noexcept {
+        for (int i = held_n - 1; i >= 0; --i) {
+            if (held[i].lk == this && (held[i].mode == 'R' || held[i].mode == 'U')) {
+                ++held[i].rec;
+                return;
+            }
+        }
+        push_hold('R');
+    }
+
+    void take_upgradable_reader() noexcept {
+        const size_t s = slot();
+        core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
+#ifdef BARCH_LOCK_DEBUG
+        mark_reader(s);
+#endif
+        set_our_hold('U');
     }
 
     void push_hold(char mode) noexcept {
@@ -370,7 +414,7 @@ public:
         // nested shared on a lock this thread already holds must not wait
         // on write_intent: that is the DEPENDS / storage_release self-deadlock.
         if (holds_this_shared()) {
-            push_hold('R');
+            bump_reader_hold();
             return true;
         }
 
@@ -439,7 +483,7 @@ public:
 
     void lock_shared() {
         if (holds_this_shared()) {
-            push_hold('R');
+            bump_reader_hold();
             return;
         }
         const size_t s = slot();
@@ -610,51 +654,174 @@ public:
         upgrade_write_mtx.unlock();
     }
 
+    // Upgradable is a reader plus the exclusive right to become unique later.
+    // Other readers continue. Writers wait on the mutex, so the value cannot
+    // be replaced during compress. write_intent is not set until upgrade.
     template <typename Rep, typename Period>
     bool try_lock_upgradable_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
-        std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
+        char have = our_hold();
+        if (have == 'U' || have == 'W')
+            return true;
+
 #ifdef BARCH_LOCK_DEBUG
         int64_t started = now_ns();
+#endif
+        std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
+        // already a shared reader: must not block on the mutex. a unique
+        // waiter already holds it and is draining us — waiting would deadlock.
+        if (have == 'R') {
+            if (!lock.try_lock())
+                return false;
+            set_our_hold('U');
+#ifdef BARCH_LOCK_DEBUG
+            diags.active_upgrader_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
+#endif
+            lock.release();
+            return true;
+        }
+
         if (!lock.try_lock_for(timeout_duration)) {
+#ifdef BARCH_LOCK_DEBUG
             log_if_slow_timeout(timeout_duration, "Upgrade Mutex Contention", started);
+#endif
             return false;
         }
-#else
-        if (!lock.try_lock_for(timeout_duration))
-            return false;
-#endif
-
+        take_upgradable_reader();
 #ifdef BARCH_LOCK_DEBUG
         diags.active_upgrader_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
 #endif
-        write_intent.store(true, std::memory_order_seq_cst);
-        push_hold('U');
         lock.release();
         return true;
     }
 
+    void lock_upgradable() {
+        if (our_hold() == 'U' || our_hold() == 'W')
+            return;
+        // already shared: only try_lock the mutex. a unique waiter may
+        // already hold it and be draining us.
+        if (our_hold() == 'R') {
+            try_lock_upgradable_for(std::chrono::nanoseconds(0));
+            return;
+        }
+        std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx);
+        take_upgradable_reader();
+#ifdef BARCH_LOCK_DEBUG
+        diags.active_upgrader_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
+#endif
+        lock.release();
+    }
+
     template <typename Rep, typename Period>
     bool try_upgrade_to_write_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
-        auto deadline = std::chrono::steady_clock::now() + timeout_duration;
-        std::unique_lock<std::mutex> cv_lock(cv_mtx);
-
-        if (!cv.wait_until(cv_lock, deadline, [this] { return readers_drained(); })) {
-#ifdef BARCH_LOCK_DEBUG
-            log_if_slow_timeout(timeout_duration, "Draining Readers During Upgrade Escalation", now_ns());
-            diags.active_upgrader_id.store(std::thread::id(), std::memory_order_relaxed);
-#endif
-            write_intent.store(false, std::memory_order_seq_cst);
-            pop_hold();
-            cv.notify_all();
-            upgrade_write_mtx.unlock();
+        char have = our_hold();
+        if (have == 'W')
+            return true;
+        if (have != 'U' && have != 'R')
             return false;
+
+        auto deadline = std::chrono::steady_clock::now() + timeout_duration;
+#ifdef BARCH_LOCK_DEBUG
+        int64_t started = now_ns();
+#endif
+
+        if (have == 'R') {
+            std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
+            if (!lock.try_lock_until(deadline)) {
+#ifdef BARCH_LOCK_DEBUG
+                log_if_slow_timeout(timeout_duration, "Upgrade Mutex Contention", started);
+#endif
+                return false;
+            }
+            set_our_hold('U');
+#ifdef BARCH_LOCK_DEBUG
+            diags.active_upgrader_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
+#endif
+            lock.release();
+        }
+
+        write_intent.store(true, std::memory_order_seq_cst);
+        backoff_reader(slot());
+
+        std::unique_lock<std::mutex> cv_lock(cv_mtx);
+        while (!readers_drained()) {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                write_intent.store(false, std::memory_order_seq_cst);
+                cv.notify_all();
+                cv_lock.unlock();
+                // still upgradable: put our reader count back
+                const size_t s = slot();
+                core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
+#ifdef BARCH_LOCK_DEBUG
+                mark_reader(s);
+                log_if_slow_timeout(timeout_duration, "Draining Readers During Upgrade Escalation", started);
+#endif
+                return false;
+            }
+#ifdef BARCH_LOCK_DEBUG
+            auto slice = now + dump_every;
+            if (slice > deadline)
+                slice = deadline;
+            if (!cv.wait_until(cv_lock, slice, [this] { return readers_drained(); })) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    write_intent.store(false, std::memory_order_seq_cst);
+                    cv.notify_all();
+                    cv_lock.unlock();
+                    const size_t s = slot();
+                    core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
+                    mark_reader(s);
+                    log_if_slow_timeout(timeout_duration, "Draining Readers During Upgrade Escalation", started);
+                    return false;
+                }
+                log_if_slow_timeout(dump_every, "Draining Readers During Upgrade Escalation", started);
+            }
+#else
+            if (!cv.wait_until(cv_lock, deadline, [this] { return readers_drained(); })) {
+                write_intent.store(false, std::memory_order_seq_cst);
+                cv.notify_all();
+                cv_lock.unlock();
+                core_slots[slot()].reader_count.fetch_add(1, std::memory_order_seq_cst);
+                return false;
+            }
+#endif
         }
 
 #ifdef BARCH_LOCK_DEBUG
         note_writer();
         diags.active_upgrader_id.store(std::thread::id(), std::memory_order_relaxed);
 #endif
+        set_our_hold('W');
         return true;
+    }
+
+    void upgrade_to_write() {
+        if (our_hold() == 'W')
+            return;
+        if (our_hold() == 'R')
+            try_lock_upgradable_for(std::chrono::nanoseconds(0));
+        if (our_hold() != 'U')
+            return;
+#ifdef BARCH_LOCK_DEBUG
+        int64_t started = now_ns();
+#endif
+        write_intent.store(true, std::memory_order_seq_cst);
+        backoff_reader(slot());
+        {
+            std::unique_lock<std::mutex> cv_lock(cv_mtx);
+#ifdef BARCH_LOCK_DEBUG
+            while (!readers_drained()) {
+                if (!cv.wait_for(cv_lock, dump_every, [this] { return readers_drained(); }))
+                    log_if_slow_timeout(dump_every, "Draining Readers During Upgrade Escalation", started);
+            }
+#else
+            cv.wait(cv_lock, [this] { return readers_drained(); });
+#endif
+        }
+#ifdef BARCH_LOCK_DEBUG
+        note_writer();
+        diags.active_upgrader_id.store(std::thread::id(), std::memory_order_relaxed);
+#endif
+        set_our_hold('W');
     }
 
     void unlock_write() noexcept {
@@ -663,10 +830,10 @@ public:
 
     void unlock_upgrade_without_writing() noexcept {
         pop_hold();
+        backoff_reader(slot());
 #ifdef BARCH_LOCK_DEBUG
         diags.active_upgrader_id.store(std::thread::id(), std::memory_order_relaxed);
 #endif
-        write_intent.store(false, std::memory_order_seq_cst);
         {
             std::lock_guard<std::mutex> lock(cv_mtx);
             cv.notify_all();

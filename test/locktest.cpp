@@ -297,6 +297,86 @@ void test_snapshot() {
     expect(after.find("(nothing)") != std::string::npos, "held list empty after unlock");
 }
 
+void test_upgradable_allows_readers() {
+    debuggable_server_lock lk;
+    lk.lock_upgradable();
+    std::atomic<int> seen{0};
+    std::thread r([&] {
+        lk.lock_shared();
+        seen.store(1, std::memory_order_relaxed);
+        lk.unlock_shared();
+    });
+    r.join();
+    expect(seen.load() == 1, "readers run while a thread holds upgradable");
+    lk.unlock_upgrade_without_writing();
+}
+
+void test_writer_blocked_during_upgradable() {
+    debuggable_server_lock lk;
+    lk.lock_upgradable();
+    std::atomic<bool> writer_in{false};
+    std::thread w([&] {
+        lk.lock();
+        writer_in.store(true, std::memory_order_relaxed);
+        lk.unlock();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    expect(!writer_in.load(), "unique waiter cannot replace data during upgradable");
+    lk.unlock_upgrade_without_writing();
+    w.join();
+    expect(writer_in.load(), "unique ran after upgradable was dropped");
+}
+
+void test_upgrade_to_write_excludes_readers() {
+    debuggable_server_lock lk;
+    lk.lock_upgradable();
+    expect(lk.try_upgrade_to_write_for(std::chrono::milliseconds(50)),
+           "upgrade to unique with no other readers");
+    expect(!lk.try_lock_shared(), "readers refused after upgrade to unique");
+    lk.unlock();
+}
+
+void test_upgrade_from_shared() {
+    debuggable_server_lock lk;
+    lk.lock_shared();
+    std::atomic<int> other{0};
+    std::thread r([&] {
+        lk.lock_shared();
+        other.store(1, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        other.store(2, std::memory_order_relaxed);
+        lk.unlock_shared();
+    });
+    while (other.load() == 0)
+        std::this_thread::yield();
+    expect(lk.try_upgrade_to_write_for(std::chrono::seconds(1)),
+           "shared upgraded to unique after the other reader left");
+    expect(other.load() == 2, "the other reader finished before upgrade");
+    expect(!lk.try_lock_shared(), "readers refused after upgrade from shared");
+    lk.unlock();
+    r.join();
+}
+
+void test_upgrade_from_shared_does_not_deadlock_with_writer() {
+    // unique already waiting to drain us: try_upgrade must fail, not wait
+    // on the mutex we are keeping busy as a reader.
+    debuggable_server_lock lk;
+    lk.lock_shared();
+    std::atomic<bool> writer_in{false};
+    std::thread w([&] {
+        lk.lock();
+        writer_in.store(true, std::memory_order_relaxed);
+        lk.unlock();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    expect(!lk.try_upgrade_to_write_for(std::chrono::milliseconds(20)),
+           "upgrade from shared fails while a unique waiter holds the mutex");
+    expect(!writer_in.load(), "unique still waiting on our reader");
+    lk.unlock_shared();
+    w.join();
+    expect(writer_in.load(), "unique ran after the reader unlocked");
+}
+
 void test_perf() {
     constexpr int ms = 400;
     debuggable_server_lock ours;
@@ -335,7 +415,14 @@ int main() {
     test_nested_shared_while_writer_waits();
     test_lock_keeps_write_intent();
     test_lock_wins_reader_stream();
+    test_upgradable_allows_readers();
+    test_writer_blocked_during_upgradable();
+    test_upgrade_to_write_excludes_readers();
+    test_upgrade_from_shared();
+    test_upgrade_from_shared_does_not_deadlock_with_writer();
+#ifdef BARCH_LOCK_DEBUG
     test_snapshot();
+#endif
 
     debuggable_server_lock mix;
     run_mix(mix, 6, 2, 300);

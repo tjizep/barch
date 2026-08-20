@@ -3644,3 +3644,25 @@ Measured here, 400 ms lock/unlock loops:
 
 The remaining unique gap is the writer-preference drain, not the
 debug path.
+
+## 99. Shared-to-unique upgrade for compress-under-read [20-08-2026]
+
+*Was `TODO.md` entry 106.*
+
+Upgradable used to set `write_intent` immediately, so new readers
+stopped during compress, and upgrading from a live shared hold
+deadlocked on this thread's own reader count.
+
+It is now a reader plus the exclusive right to become unique later.
+Other readers continue. Writers wait on the mutex, so the value
+cannot be replaced. `write_intent` is set only at upgrade, after
+this thread has dropped its own reader slot, then it drains the
+others.
+
+`lock_upgradable` / `try_lock_upgradable_for` take that hold.
+`try_upgrade_to_write_for` / `upgrade_to_write` escalate. From a
+plain shared hold, upgrade tries the mutex without blocking: if a
+unique waiter is already draining us, it returns false instead of
+deadlocking. locktest covers readers during upgradable, a blocked
+writer, upgrade excluding readers, upgrade from shared, and that
+deadlock case.

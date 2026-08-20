@@ -508,3 +508,131 @@
 95. [Done] cmake --build . failed on barchlua's Lua headers [19-08-2026] Nr 91 662969a
 
 96. [Done] Idle SQL pool drop moved to the key space maintenance thread [19-08-2026] Nr 92 662969a
+
+100. [Done] latch_t is now debuggable_server_lock [20-08-2026] Nr 93 7fa7f38
+
+101. [Done] Deadlock dumps name the latch, holders, and held list [20-08-2026] Nr 94 7fa7f38
+
+97. LRU compress, and LRU compress-then-evict.
+
+    Two new eviction policies, next to the existing `allkeys-lru` /
+    `volatile-lru` ones. The first compresses the LRU victim instead of
+    deleting it. The second only deletes a victim that is already
+    compressed, so an uncompressed hot-but-aging value gets compressed
+    first and only leaves memory on a later pass. Compression itself
+    should run without the shard lock: copy the value, compress off the
+    lock, then swap it back under the lock if the key has not been
+    rewritten in between. `dictionary::compress` already answers empty
+    when compression does not pay, so that case keeps the uncompressed
+    value.
+
+    Related to 51 (a walk that compresses what partial writes left
+    behind) but not the same job. 51 is a bulk reclaim. This is the
+    memory-pressure path, driven by the LRU list the way eviction
+    already is.
+
+    Open questions, the access one first:
+
+      - when a GET (or anything else that reads the value) hits a
+        compressed key under either policy, should it be stored back
+        uncompressed, left compressed, or only inflated for the reply?
+        Inflating and storing uncompressed is the current SETRANGE
+        habit and makes the next GET cheap, but it fights the policy:
+        the same key will be compressed again as soon as it ages.
+        Leaving it compressed keeps memory down and makes every GET pay
+        the inflate. A third option is to inflate into the reply only
+        and not rewrite the leaf. Settle by measuring GET latency and
+        the compress/inflate churn on a space that actually sits near
+        `pre_evict_thresh`, not by guessing.
+      - `lru-compress-evict` needs a rule for a victim that will not
+        compress (too small, or `dictionary::compress` said no). Evict
+        it anyway, skip it, or treat it as already "compressed" for
+        the purpose of the second pass? Skipping can livelock the
+        sweeper on a space full of incompressible values.
+      - names. Redis has no such policy, so these are barch's own.
+        `allkeys-lru-compress` / `allkeys-lru-compress-evict` (and the
+        volatile pair) would sit next to the existing spellings. Or a
+        single `allkeys-lru` with a side switch for what the victim
+        does. The first is easier to CONFIG GET. Settle when the
+        CONFIG SET / `KSPACE OPTION` surface is designed, not before.
+      - the off-lock compress still has to notice a concurrent SET.
+        The swap-back is a compare of generation or of the leaf
+        pointer; if it lost, the compressed copy is discarded. That
+        is the same shape as a lost CAS, and it has to be true or
+        this is just eviction with extra copies.
+
+    Not urgent until 51 has a number for how much of a space is
+    uncompressed under a real workload. If almost everything is
+    already compressed, these policies have nothing to do.
+
+98. User-defined Luau RESP functions.
+
+    Register a RESP command whose body is a Luau script, so a client
+    can call `MYTHING a b` and the script sees those arguments and
+    answers through the same reply path as a built-in. This is not
+    `foreign=luau`, which only fills a miss. It is a command.
+
+    Points to settle before writing one:
+
+      - how it is registered. A `FUNCTION LOAD`-shaped command, a
+        file named from the configuration space, or both. Redis
+        functions persist in the RDB; barch's nearest equivalent is
+        a key in `configuration` read when the space (or the process)
+        is built. A command that can be redefined while the server
+        runs is more useful and harder, because in-flight calls and
+        ACL both have to see one version.
+      - the sandbox. Foreign Luau already forbids `require` and IO
+        and slices on `foreign_script_insns`. A RESP function that
+        can call back into SET/GET is a different power and a
+        different deadlock: the script must not take a shard lock
+        the command path already holds. Settle by listing the APIs
+        the script actually gets (arguments, reply, maybe a
+        lock-free GET) and refusing the rest.
+      - ACL and arity. A user-defined name has to appear in COMMAND
+        LIST and in the ACL categories or it is invisible to every
+        client that checks those. Arity can be declared at
+        registration; a wrong count should be `-ERR` before the
+        script runs.
+      - the instruction slice. The foreign path already yields the
+        worker and requeues. A RESP call that parks the client for
+        a slice is fine; one that holds the worker until the script
+        finishes is not, for the same reason as a long KEYS.
+
+    A single command, one script, no callbacks into the store, would
+    settle the registration and the reply shape. The rest can wait
+    until that one works.
+
+99. HTTP as a foreign source, on an asynchronous client.
+
+    A new `<name>.foreign` kind, next to `mysql` / `postgres` /
+    `luau`, that fills a miss with an HTTP GET (or a configured
+    method) rather than a SQL query. Same coalescing and waiter as
+    the existing sources: one in-flight request per key, parked
+    GET, tomb on a 404, `-ERR FOREIGN` on a transport error. The
+    client has to be asynchronous so it does not occupy a foreign
+    worker for the whole round trip the way `sql.query` does today.
+
+    httplib is already in `external/include` and is synchronous.
+    Asio is already the RPC stack. Those are the two obvious
+    libraries; a third would need a reason. Settle the library by
+    writing one GET against a local test server and seeing whether
+    the waiter, the query timeout, and cancellation on UNLOAD all
+    still mean what they mean for SQL.
+
+    Other points, once the library is picked:
+
+      - the request. URL template with the same `?` / `$n` / `$$`
+        macros as `foreign_query`, plus optional headers. A password
+        in a header is the same secret problem as `foreign_dsn`:
+        `file:` or `env:`, never the replicated configuration
+        space.
+      - which status codes are a miss (tomb) and which are an error.
+        404 is the obvious miss. 204, 410, 301, 5xx are not obvious.
+        A source that returns 200 with an empty body is another.
+      - TLS. The RPC path already has certificates. Reuse them, or
+        give the space its own, or talk HTTP only. Talking HTTP only
+        is not acceptable for anything that carries a token.
+      - pooling. SQL has `foreign_pool_size` and idle max age.
+        HTTP/1.1 connections and HTTP/2 streams are a different
+        pool, but the same knobs should still mean "how many
+        concurrent calls" and "do not keep a dead socket".

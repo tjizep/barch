@@ -17,6 +17,7 @@
 #include <ankerl/unordered_dense.h>
 #include <jg/dense_hash_map.hpp>
 #include "shared_mutex.h"
+#include "debuggable_server_lock.h"
 #define unused_arg
 #define unused(x)
 
@@ -29,7 +30,8 @@
 #    endif
 namespace barch {
     //typedef rh_shared::shared_mutex latch_t;
-    typedef std::shared_timed_mutex latch_t;
+    //typedef std::shared_timed_mutex latch_t;
+    typedef debuggable_server_lock latch_t;
 }
 namespace heap {
 

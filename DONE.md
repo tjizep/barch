@@ -3498,3 +3498,45 @@ wrapper the maintenance thread runs once per cycle, after the shard
 sweep. Checkin still stamps `idle_since`. The live MySQL and
 Postgres age tests still pass: reuse inside 200 ms, a new backend
 id after it.
+
+## 93. `latch_t` is now `debuggable_server_lock` [20-08-2026]
+
+*Was `TODO.md` entry 100.*
+
+The new lock was not a drop-in `shared_timed_mutex`. It named the
+write path `try_lock_write_for` / `unlock_write`, used `std::mutex`
+with `try_lock_for` (that does not compile), drained reader slots
+one core at a time so a reader could sneak back onto an earlier
+slot, and keyed reader counts by `sched_getcpu()` so a migrating
+thread decremented the wrong slot. Timeout rollback also unlocked
+the upgrade mutex twice.
+
+Those are fixed: SharedMutex names, `std::timed_mutex`, one
+predicate over all slots, thread-pinned slots, and the unique_lock
+owns the upgrade mutex until success. Isolated `locktest` covers
+reader/writer exclusion, timeouts, `std::shared_lock` /
+`std::unique_lock`, nested shared, a mixed load, and read-heavy
+throughput. Four readers scale ~3.8x vs one; `shared_timed_mutex`
+did not (it got slower). A 64-byte `alignas` on a member of the
+lock itself crashed shard construction, because shards are
+`malloc`'d. That alignment stays on the reader-slot vector only.
+
+`latch_t` is the new type. `testbarch.py` starts and SET/GET
+under it.
+
+## 94. Deadlock dumps name the latch, holders, and held list [20-08-2026]
+
+*Was `TODO.md` entry 101.*
+
+A timeout of a second or more now prints the lock label (`node#17`),
+Linux tids, how long the waiter waited and the writer has held, the
+waiter's held-lock list (the ABBA clue), last reader tid per slot,
+the writer's stack from acquire, and the waiter's stack. The same
+text is written to `barch-lock-timeout-<pid>-<tid>-<n>.txt` in the
+cwd so CI keeps it if stderr is truncated. Blocking `lock()` /
+`lock_shared()` dump every 15s instead of waiting forever.
+
+Shard construction labels the latch `name#shard`. The extra stores
+on the read path are a tid and a two-word TLS push; four-reader
+throughput is still ~3.8x one reader. `locktest` checks the snapshot
+contents. `testbarch.py` still runs.

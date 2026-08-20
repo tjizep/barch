@@ -681,6 +681,11 @@ else()
                 COMMAND globdifftest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_executable(locktest test/locktest.cpp)
+        add_test(NAME TestDebuggableServerLock
+                COMMAND locktest
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestAsyncPipeline
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/asyncpipelinetest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

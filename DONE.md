@@ -3666,3 +3666,15 @@ unique waiter is already draining us, it returns false instead of
 deadlocking. locktest covers readers during upgradable, a blocked
 writer, upgrade excluding readers, upgrade from shared, and that
 deadlock case.
+
+## 100. Coverage CI killed mid-compile (exit 143) [20-08-2026]
+
+*Was `TODO.md` entry 107.*
+
+The ubuntu24-sanitize log is not a compiler or linker diagnostic.
+gcc never printed `error:`. The job hit 100% of compiling barch
+with RelWithDebInfo+COVERAGE and gmake was SIGTERM'd (`Terminated`
+on abstract_shard.cpp.o, exit 143). Unlimited `--parallel` plus
+coverage instrumentation is the usual way that runner runs out of
+memory. The workflow now builds with `-j2` and skips lbarch, which
+is a second compile of the same sources; ctest only needs `_barch.so`.

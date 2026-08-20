@@ -26,10 +26,12 @@ jobs:
              -DTEST_OD=ON \
              -DCOVERAGE=ON \
              -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build --target barch --parallel
-          cmake --build build --target lbarch --parallel
-          cmake --build build --target globdifftest --parallel
-          cmake --build build --target locktest --parallel
+          # coverage instrumentation is fat; unlimited --parallel has
+          # SIGTERM'd this job mid-compile (exit 143) with no gcc error.
+          # ctest uses _barch.so, so skip lbarch (a second copy of the
+          # same sources). locktest is already a dependency of barch.
+          cmake --build build --target barch --parallel 2
+          cmake --build build --target globdifftest --parallel 2
           ( cd build ; ctest --output-on-failure )
       - name: Generate Coverage Badge
         run: |

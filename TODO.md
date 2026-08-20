@@ -523,6 +523,8 @@
 
 106. [Done] Shared-to-unique upgrade for compress-under-read [20-08-2026] Nr 99 9b33fcb
 
+107. [Done] Coverage CI killed mid-compile (exit 143) [20-08-2026] Nr 100 2612f00
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

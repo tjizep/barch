@@ -25,6 +25,7 @@ jobs:
           cmake --build build --target barch --parallel
           cmake --build build --target lbarch --parallel
           cmake --build build --target globdifftest --parallel
+          cmake --build build --target locktest --parallel
           ( cd build ; ctest --output-on-failure )
       - name: Log in to Docker Hub
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772

@@ -9,6 +9,7 @@ cmake_install.cmake
 install_manifest.txt
 compile_commands.json
 dump.rdb
+full_error.txt
 
 # the host server's append only file, written wherever it was started
 appendonlydir/

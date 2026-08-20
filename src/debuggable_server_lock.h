@@ -55,12 +55,17 @@ struct LockDiagnostics {
  */
 class debuggable_server_lock {
 public:
-    static constexpr int max_held = 16;
+    // DEPENDS takes every shard of two spaces, then storage_release
+    // nested-shared-locks the source again. 16 hid most of the list.
+    static constexpr int max_held = 2048;
     static constexpr int label_cap = 80;
+    // blocking lock()/lock_shared() dump this often without giving the lock up
+    static constexpr auto dump_every = std::chrono::seconds(15);
 
     struct hold_rec {
         const debuggable_server_lock* lk;
         char mode;
+        int rec;
     };
 
 private:
@@ -138,23 +143,42 @@ private:
         diags.writer_nframes.store(0, std::memory_order_relaxed);
     }
 
+    bool holds_this_shared() const noexcept {
+        for (int i = held_n - 1; i >= 0; --i) {
+            if (held[i].lk == this && held[i].mode == 'R')
+                return true;
+        }
+        return false;
+    }
+
     void push_hold(char mode) noexcept {
+        for (int i = held_n - 1; i >= 0; --i) {
+            if (held[i].lk == this && held[i].mode == mode) {
+                ++held[i].rec;
+                return;
+            }
+        }
         if (held_n >= max_held)
             return;
         held[held_n].lk = this;
         held[held_n].mode = mode;
+        held[held_n].rec = 1;
         ++held_n;
     }
 
-    void pop_hold() noexcept {
+    // true when the outer hold is gone and the slot count should drop
+    bool pop_hold() noexcept {
         for (int i = held_n - 1; i >= 0; --i) {
             if (held[i].lk != this)
                 continue;
+            if (--held[i].rec > 0)
+                return false;
             for (int j = i; j < held_n - 1; ++j)
                 held[j] = held[j + 1];
             --held_n;
-            return;
+            return true;
         }
+        return true;
     }
 
     bool readers_drained() const noexcept {
@@ -298,8 +322,13 @@ public:
         for (int i = 0; i < held_n; ++i) {
             const auto* h = held[i].lk;
             ss << "  " << held[i].mode << "  " << (h ? h->label() : "?")
-               << "  " << static_cast<const void*>(h) << "\n";
+               << "  " << static_cast<const void*>(h);
+            if (held[i].rec > 1)
+                ss << "  rec=" << held[i].rec;
+            ss << "\n";
         }
+        if (held_n >= max_held)
+            ss << "  (held list full, further locks were not recorded)\n";
 
         ss << "reader slots (count, last tid):\n";
         bool any = false;
@@ -323,6 +352,13 @@ public:
     // --- READ PATH ---
     template <typename Rep, typename Period>
     bool try_lock_shared_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
+        // nested shared on a lock this thread already holds must not wait
+        // on write_intent: that is the DEPENDS / storage_release self-deadlock.
+        if (holds_this_shared()) {
+            push_hold('R');
+            return true;
+        }
+
         const size_t s = slot();
         auto deadline = std::chrono::steady_clock::now() + timeout_duration;
         int64_t started = now_ns();
@@ -338,12 +374,24 @@ public:
 
             backoff_reader(s);
 
-            std::unique_lock<std::mutex> lock(cv_mtx);
-            if (!cv.wait_until(lock, deadline, [this] {
-                    return !write_intent.load(std::memory_order_seq_cst);
-                })) {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
                 log_if_slow_timeout(timeout_duration, "Shared Read Acquisition", started);
                 return false;
+            }
+            auto slice = now + dump_every;
+            if (slice > deadline)
+                slice = deadline;
+
+            std::unique_lock<std::mutex> lock(cv_mtx);
+            if (!cv.wait_until(lock, slice, [this] {
+                    return !write_intent.load(std::memory_order_seq_cst);
+                })) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    log_if_slow_timeout(timeout_duration, "Shared Read Acquisition", started);
+                    return false;
+                }
+                log_if_slow_timeout(dump_every, "Shared Read Acquisition", started);
             }
         }
     }
@@ -361,6 +409,10 @@ public:
     }
 
     void lock_shared() {
+        if (holds_this_shared()) {
+            push_hold('R');
+            return;
+        }
         const size_t s = slot();
         while (true) {
             core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
@@ -372,45 +424,65 @@ public:
             backoff_reader(s);
             int64_t started = now_ns();
             std::unique_lock<std::mutex> lock(cv_mtx);
-            if (!cv.wait_for(lock, std::chrono::seconds(15), [this] {
+            if (!cv.wait_for(lock, dump_every, [this] {
                     return !write_intent.load(std::memory_order_seq_cst);
                 })) {
-                log_if_slow_timeout(std::chrono::seconds(15), "Blocking Shared Read", started);
+                log_if_slow_timeout(dump_every, "Blocking Shared Read", started);
             }
         }
     }
 
     void unlock_shared() noexcept {
-        pop_hold();
-        backoff_reader(slot());
+        if (pop_hold())
+            backoff_reader(slot());
     }
 
     // --- WRITE PATH ---
     template <typename Rep, typename Period>
     bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
-        auto start_time = std::chrono::steady_clock::now();
+        auto deadline = std::chrono::steady_clock::now() + timeout_duration;
         int64_t started = now_ns();
 
         std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
-        if (!lock.try_lock_for(timeout_duration)) {
-            log_if_slow_timeout(timeout_duration, "Write Mutex Contention", started);
-            return false;
-        }
-
-        auto elapsed = std::chrono::steady_clock::now() - start_time;
-        if (elapsed >= timeout_duration) {
-            log_if_slow_timeout(timeout_duration, "Write Mutex Deadline Expired", started);
-            return false;
+        while (true) {
+            auto now = std::chrono::steady_clock::now();
+            auto slice = now + dump_every;
+            if (slice > deadline)
+                slice = deadline;
+            // try at least once, including a zero timeout (try_lock_until(now)
+            // is try_lock). checking the deadline first made try_lock() always fail.
+            if (lock.try_lock_until(slice))
+                break;
+            if (std::chrono::steady_clock::now() >= deadline) {
+                log_if_slow_timeout(timeout_duration, "Write Mutex Contention", started);
+                return false;
+            }
+            log_if_slow_timeout(dump_every, "Write Mutex Contention", started);
         }
 
         write_intent.store(true, std::memory_order_seq_cst);
 
         std::unique_lock<std::mutex> cv_lock(cv_mtx);
-        if (!cv.wait_until(cv_lock, start_time + timeout_duration, [this] { return readers_drained(); })) {
-            write_intent.store(false, std::memory_order_seq_cst);
-            cv.notify_all();
-            log_if_slow_timeout(timeout_duration, "Draining Readers During Write", started);
-            return false;
+        while (!readers_drained()) {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                write_intent.store(false, std::memory_order_seq_cst);
+                cv.notify_all();
+                log_if_slow_timeout(timeout_duration, "Draining Readers During Write", started);
+                return false;
+            }
+            auto slice = now + dump_every;
+            if (slice > deadline)
+                slice = deadline;
+            if (!cv.wait_until(cv_lock, slice, [this] { return readers_drained(); })) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    write_intent.store(false, std::memory_order_seq_cst);
+                    cv.notify_all();
+                    log_if_slow_timeout(timeout_duration, "Draining Readers During Write", started);
+                    return false;
+                }
+                log_if_slow_timeout(dump_every, "Draining Readers During Write", started);
+            }
         }
 
         note_writer();
@@ -432,8 +504,29 @@ public:
     }
 
     void lock() {
-        while (!try_lock_for(std::chrono::seconds(15))) {
+        // keep write_intent and the upgrade mutex across dumps. looping
+        // try_lock_for() used to drop both every 15s, so readers flooded
+        // back in and the writer never drained.
+        int64_t started = now_ns();
+        std::unique_lock<std::timed_mutex> ul(upgrade_write_mtx, std::defer_lock);
+        while (!ul.try_lock_for(dump_every)) {
+            log_if_slow_timeout(dump_every, "Write Mutex Contention", started);
         }
+
+        write_intent.store(true, std::memory_order_seq_cst);
+
+        {
+            std::unique_lock<std::mutex> cv_lock(cv_mtx);
+            while (!readers_drained()) {
+                if (!cv.wait_for(cv_lock, dump_every, [this] { return readers_drained(); })) {
+                    log_if_slow_timeout(dump_every, "Draining Readers During Write", started);
+                }
+            }
+        }
+
+        note_writer();
+        push_hold('W');
+        ul.release();
     }
 
     void unlock() noexcept {

@@ -3540,3 +3540,66 @@ Shard construction labels the latch `name#shard`. The extra stores
 on the read path are a tid and a two-word TLS push; four-reader
 throughput is still ~3.8x one reader. `locktest` checks the snapshot
 contents. `testbarch.py` still runs.
+
+## 95. CI locktest missing and SpaceThread lock livelock [20-08-2026]
+
+*Was `TODO.md` entry 102.*
+
+Two CI failures, two different causes.
+
+TestDebuggableServerLock was Not Run because the Ubuntu workflows
+only build `barch`, `lbarch`, and `globdifftest`. CMake registered
+`locktest`, ctest looked for `build/locktest`, and the binary was
+never compiled. `locktest` is now a dependency of `barch` so the
+existing `--target barch` line produces it, and the three workflow
+files also name `--target locktest` next to globdifftest. It links
+pthread. The isolated tests still pass, including a new one that
+`try_lock()` actually succeeds when the lock is free (a zero-timeout
+deadline check used to make that always fail) and that `lock()`
+refuses new readers while a writer is waiting.
+
+TestSpaceThread segfaulted at 61s after a pile of lock-timeout
+dumps. `lock()` was `while (!try_lock_for(15s)) {}`. Every failed
+try dropped `write_intent` and the upgrade mutex, so readers
+flooded back in and defrag never drained. SIZE then waited 60s,
+threw `read lock wait time exceeded`, and `read_lock_t`'s
+destructor `unlock_shared`d a latch it had never acquired, which
+drives the reader count negative so the writer wait never ends.
+
+`lock()` now keeps write intent and the upgrade mutex across the
+15s dumps. `try_lock_for` dumps on the same interval without
+releasing until the real deadline. `read_lock_t` only unlocks
+itself if `lock_shared` succeeded, the same flag `storage_release`
+already had for unique. Defrag uses a 100ms try-lock and skips
+the cycle when the shard is busy, so maintenance does not sit
+behind DEPENDS holding 347+347 latches.
+
+SpaceThread now finishes in about five seconds here with no dumps
+and no crash. Four-reader throughput is still ~3.8x one reader.
+
+## 96. Nested shared self-deadlock under write_intent [20-08-2026]
+
+*Was `TODO.md` entry 103.*
+
+The full CI log made the SpaceThread dump complete enough to see
+the hold list. `SPACES DEPENDS tN ON g` already held `g_#0` through
+`g_#15` (and the rest, but `max_held` was 16 so they were dropped)
+and was waiting 60s for `g_#281` shared. `write_intent` was 1,
+writer was none. The python threads timed out on that DEPENDS.
+
+After the first DEPENDS, tN's source is g. The next one takes every
+g shard shared, then unique on each tN shard. `storage_release`
+nested-shared-locks the matching g shard. If defrag has set
+`write_intent` on that shard, the nested `lock_shared` used to wait
+instead of counting as a recursive reader. The outer hold never
+dropped, the writer never drained, SIZE threw, the process died.
+
+A thread that already holds a latch as a reader now `lock_shared`s
+it again without touching the slot count or waiting on write
+intent. The matching unlock only drops the slot on the last nest.
+`max_held` is 2048 so a whole space fits in the dump. locktest
+covers nested shared while a writer waits; a different thread is
+still refused. SpaceThread still passes, about three seconds.
+
+The coverage job's exit 143 was the runner getting killed during
+the compile, not a compiler error.

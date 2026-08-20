@@ -513,6 +513,10 @@
 
 101. [Done] Deadlock dumps name the latch, holders, and held list [20-08-2026] Nr 94 7fa7f38
 
+102. [Done] CI locktest missing and SpaceThread lock livelock [20-08-2026] Nr 95 8ec4a95
+
+103. [Done] Nested shared self-deadlock under write_intent [20-08-2026] Nr 96 8ec4a95
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

@@ -682,6 +682,14 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_executable(locktest test/locktest.cpp)
+        set(THREADS_PREFER_PTHREAD_FLAG ON)
+        find_package(Threads REQUIRED)
+        target_link_libraries(locktest PRIVATE Threads::Threads)
+        # CI builds --target barch and used to skip this binary, so ctest
+        # reported TestDebuggableServerLock as Not Run. Pull it in with barch.
+        if (TARGET barch)
+            add_dependencies(barch locktest)
+        endif()
         add_test(NAME TestDebuggableServerLock
                 COMMAND locktest
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

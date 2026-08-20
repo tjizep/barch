@@ -181,6 +181,104 @@ void test_nested_shared() {
     lk.unlock_shared();
 }
 
+void test_nested_shared_while_writer_waits() {
+    // DEPENDS holds g shared, then storage_release nested-shared-locks
+    // the same shard. a writer waiting with write_intent must not
+    // turn that nest into a self-deadlock.
+    debuggable_server_lock lk;
+    lk.lock_shared();
+    std::atomic<bool> writer_in{false};
+    std::thread w([&] {
+        lk.lock();
+        writer_in.store(true, std::memory_order_relaxed);
+        lk.unlock();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    expect(!writer_in.load(), "writer is still waiting on the outer reader");
+    expect(lk.try_lock_shared(), "nested shared succeeds while a writer waits");
+    lk.unlock_shared();
+    expect(!writer_in.load(), "nested unlock did not release the outer reader");
+    lk.unlock_shared();
+    w.join();
+    expect(writer_in.load(), "writer ran after the outer reader left");
+}
+
+void test_try_lock_when_free() {
+    debuggable_server_lock lk;
+    expect(lk.try_lock(), "try_lock succeeds on a free lock");
+    expect(!lk.try_lock(), "try_lock fails while already held");
+    expect(!lk.try_lock_shared(), "try_lock_shared fails while uniquely held");
+    lk.unlock();
+    expect(lk.try_lock_shared(), "try_lock_shared succeeds after unlock");
+    lk.unlock_shared();
+}
+
+void test_lock_keeps_write_intent() {
+    // a live reader, a blocked lock(), and a third thread that must not
+    // sneak in as a reader while the writer is waiting. that is the
+    // write_intent contract lock() used to break every 15s.
+    debuggable_server_lock lk;
+    lk.lock_shared();
+    std::atomic<bool> writer_in{false};
+    std::thread w([&] {
+        lk.lock();
+        writer_in.store(true, std::memory_order_relaxed);
+        lk.unlock();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    expect(!writer_in.load(), "writer is still waiting on the live reader");
+    std::atomic<bool> sneaked{false};
+    std::thread r2([&] {
+        bool got = lk.try_lock_shared();
+        sneaked.store(got, std::memory_order_relaxed);
+        if (got)
+            lk.unlock_shared();
+    });
+    r2.join();
+    expect(!sneaked.load(), "a different thread is refused while a writer waits");
+    lk.unlock_shared();
+    w.join();
+    expect(writer_in.load(), "writer ran after the reader left");
+}
+
+void test_lock_wins_reader_stream() {
+    debuggable_server_lock lk;
+    std::atomic<bool> stop{false};
+    std::atomic<int> readers_in{0};
+    std::vector<std::thread> ts;
+    for (int i = 0; i < 4; ++i) {
+        ts.emplace_back([&] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                if (lk.try_lock_shared()) {
+                    readers_in.fetch_add(1, std::memory_order_relaxed);
+                    std::this_thread::yield();
+                    readers_in.fetch_sub(1, std::memory_order_relaxed);
+                    lk.unlock_shared();
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    std::atomic<bool> writer_got{false};
+    std::thread w([&] {
+        lk.lock();
+        expect(readers_in.load() == 0, "writer is exclusive against the reader stream");
+        writer_got.store(true, std::memory_order_relaxed);
+        lk.unlock();
+    });
+    auto t0 = std::chrono::steady_clock::now();
+    while (!writer_got.load(std::memory_order_relaxed) &&
+           std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stop.store(true, std::memory_order_relaxed);
+    w.join();
+    for (auto& t : ts)
+        t.join();
+    expect(writer_got.load(), "lock() acquired under a reader stream");
+}
+
 void test_snapshot() {
     debuggable_server_lock a, b;
     a.set_label("space#3");
@@ -230,9 +328,13 @@ void test_perf() {
 int main() {
     test_shared_exclusive();
     test_timeout();
+    test_try_lock_when_free();
     test_std_guards();
     test_many_readers();
     test_nested_shared();
+    test_nested_shared_while_writer_waits();
+    test_lock_keeps_write_intent();
+    test_lock_wins_reader_stream();
     test_snapshot();
 
     debuggable_server_lock mix;

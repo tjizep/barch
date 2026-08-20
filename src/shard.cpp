@@ -1348,9 +1348,12 @@ void barch::shard::run_defrag() {
     if (this->get_size() == 0) return;
 
     auto &lc = get_leaves();
+    constexpr auto defrag_lock_to = std::chrono::milliseconds(100);
 
     {
-        unique_latch releaser(this->latch);
+        try_unique_latch releaser(this->latch, defrag_lock_to);
+        if (!releaser)
+            return;
         this->shrink();
     }
 
@@ -1361,12 +1364,16 @@ void barch::shard::run_defrag() {
         {
             heap::vector<size_t> fl;
             {
-                unique_latch releaser(this->latch);
+                try_unique_latch releaser(this->latch, defrag_lock_to);
+                if (!releaser)
+                    return;
                 fl = lc.create_fragmentation_list(get_max_defrag_page_count());
             }
 
             for (auto p: fl) {
-                unique_latch releaser(this->latch);
+                try_unique_latch releaser(this->latch, defrag_lock_to);
+                if (!releaser)
+                    return;
                 // for some reason we have to not do this while a transaction is active
                 if (transacted) return; // try later
                 auto page = lc.get_page_buffer(p);

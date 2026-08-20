@@ -297,24 +297,30 @@ struct read_lock_t {
     ShardRef t{};
     barch::shard_ptr sources_locked{};
     bool lock = true;
+    bool is_locked = false;
     void clear() {
         t = nullptr;
         sources_locked = nullptr;
+        is_locked = false;
     }
     read_lock_t() = default;
     read_lock_t(const read_lock_t&) = delete;
     read_lock_t(read_lock_t&& r)  noexcept {
         t = r.t;
         sources_locked = r.sources_locked;
-        r.clear();
         lock = r.lock;
+        is_locked = r.is_locked;
+        r.clear();
+        r.lock = false;
 
     };
     read_lock_t& operator=(read_lock_t&& r)  noexcept {
         t = r.t;
         lock = r.lock;
         sources_locked = r.sources_locked;
+        is_locked = r.is_locked;
         r.clear();
+        r.lock = false;
         return *this;
     }
     read_lock_t& operator=(const read_lock_t&) = delete;
@@ -330,15 +336,18 @@ struct read_lock_t {
             ++statistics::read_locks_active;
             s = s->sources();
         }
-        t->lock_shared();
+        t->lock_shared(); // can throw; destructor must not unlock self if it did
+        is_locked = true;
         ++statistics::read_locks_active;
     }
 
     ~read_lock_t() {
         if (!t) return;
         if (!lock) return;
-        t->unlock_shared();
-        --statistics::read_locks_active;
+        if (is_locked) {
+            t->unlock_shared();
+            --statistics::read_locks_active;
+        }
         // TODO: this may cause deadlock we've got to at least test
         auto s = sources_locked;
         while (s) {

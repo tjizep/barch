@@ -8,17 +8,18 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#ifdef BARCH_LOCK_DEBUG
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <sstream>
 #ifdef __linux__
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -26,17 +27,20 @@
 #include <execinfo.h>
 #endif
 #endif
-
 #if __has_include(<stacktrace>) && __cplusplus >= 202302L
 #include <stacktrace>
 #define HAS_NATIVE_STACKTRACE 1
 #endif
+#endif
 
 struct alignas(64) CoreReaderSlot {
     std::atomic<int32_t> reader_count{0};
+#ifdef BARCH_LOCK_DEBUG
     std::atomic<uint32_t> last_tid{0};
+#endif
 };
 
+#ifdef BARCH_LOCK_DEBUG
 // Write-path diagnostics only. Not over-aligned: shards are malloc'd.
 struct LockDiagnostics {
     std::atomic<std::thread::id> active_writer_id{};
@@ -47,20 +51,21 @@ struct LockDiagnostics {
     void* writer_frames[max_frames]{};
     std::atomic<int> writer_nframes{0};
 };
+#endif
 
 /**
- * Reader/writer lock with per-thread reader slots and timeout dumps aimed
- * at slow CI: named latch, Linux tids, last reader per slot, writer
- * acquire stack, and the waiter's held-lock list.
+ * Reader/writer lock with per-thread reader slots. Timeout dumps, labels,
+ * and writer backtraces are compiled in when BARCH_LOCK_DEBUG is defined.
  */
 class debuggable_server_lock {
 public:
     // DEPENDS takes every shard of two spaces, then storage_release
     // nested-shared-locks the source again. 16 hid most of the list.
     static constexpr int max_held = 2048;
+#ifdef BARCH_LOCK_DEBUG
     static constexpr int label_cap = 80;
-    // blocking lock()/lock_shared() dump this often without giving the lock up
     static constexpr auto dump_every = std::chrono::seconds(15);
+#endif
 
     struct hold_rec {
         const debuggable_server_lock* lk;
@@ -77,40 +82,16 @@ private:
     std::condition_variable cv;
     size_t num_cores{1};
     mutable std::atomic<size_t> slot_ticket{0};
-    char label_[label_cap]{"(unnamed)"};
 
+#ifdef BARCH_LOCK_DEBUG
+    char label_[label_cap]{"(unnamed)"};
     LockDiagnostics diags;
+    static inline std::atomic<uint32_t> dump_seq{0};
+#endif
 
     static inline thread_local int tls_slot = -1;
     static inline thread_local hold_rec held[max_held];
     static inline thread_local int held_n = 0;
-    static inline std::atomic<uint32_t> dump_seq{0};
-
-    static uint32_t native_tid() noexcept {
-        static thread_local uint32_t cached = 0;
-        if (cached)
-            return cached;
-#ifdef __linux__
-        cached = static_cast<uint32_t>(syscall(SYS_gettid));
-#else
-        cached = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-#endif
-        return cached;
-    }
-
-    static int64_t now_ns() noexcept {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    }
-
-    static void fmt_ns(std::ostream& os, int64_t ns) {
-        if (ns <= 0) {
-            os << "n/a";
-            return;
-        }
-        os << (ns / 1000000) << " ms";
-    }
 
     size_t slot() const noexcept {
         int s = tls_slot;
@@ -119,28 +100,6 @@ private:
             tls_slot = s;
         }
         return static_cast<size_t>(s) % num_cores;
-    }
-
-    void capture_writer_stack() noexcept {
-        diags.writer_nframes.store(0, std::memory_order_relaxed);
-#if defined(__linux__) && defined(__GLIBC__)
-        int n = backtrace(diags.writer_frames, LockDiagnostics::max_frames);
-        diags.writer_nframes.store(n, std::memory_order_relaxed);
-#endif
-    }
-
-    void note_writer() noexcept {
-        diags.active_writer_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
-        diags.writer_tid.store(native_tid(), std::memory_order_relaxed);
-        diags.writer_since_ns.store(now_ns(), std::memory_order_relaxed);
-        capture_writer_stack();
-    }
-
-    void clear_writer() noexcept {
-        diags.active_writer_id.store(std::thread::id(), std::memory_order_relaxed);
-        diags.writer_tid.store(0, std::memory_order_relaxed);
-        diags.writer_since_ns.store(0, std::memory_order_relaxed);
-        diags.writer_nframes.store(0, std::memory_order_relaxed);
     }
 
     bool holds_this_shared() const noexcept {
@@ -195,6 +154,55 @@ private:
             std::lock_guard<std::mutex> lock(cv_mtx);
             cv.notify_all();
         }
+    }
+
+#ifdef BARCH_LOCK_DEBUG
+    static uint32_t native_tid() noexcept {
+        static thread_local uint32_t cached = 0;
+        if (cached)
+            return cached;
+#ifdef __linux__
+        cached = static_cast<uint32_t>(syscall(SYS_gettid));
+#else
+        cached = static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+        return cached;
+    }
+
+    static int64_t now_ns() noexcept {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+
+    static void fmt_ns(std::ostream& os, int64_t ns) {
+        if (ns <= 0) {
+            os << "n/a";
+            return;
+        }
+        os << (ns / 1000000) << " ms";
+    }
+
+    void capture_writer_stack() noexcept {
+        diags.writer_nframes.store(0, std::memory_order_relaxed);
+#if defined(__linux__) && defined(__GLIBC__)
+        int n = backtrace(diags.writer_frames, LockDiagnostics::max_frames);
+        diags.writer_nframes.store(n, std::memory_order_relaxed);
+#endif
+    }
+
+    void note_writer() noexcept {
+        diags.active_writer_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
+        diags.writer_tid.store(native_tid(), std::memory_order_relaxed);
+        diags.writer_since_ns.store(now_ns(), std::memory_order_relaxed);
+        capture_writer_stack();
+    }
+
+    void clear_writer() noexcept {
+        diags.active_writer_id.store(std::thread::id(), std::memory_order_relaxed);
+        diags.writer_tid.store(0, std::memory_order_relaxed);
+        diags.writer_since_ns.store(0, std::memory_order_relaxed);
+        diags.writer_nframes.store(0, std::memory_order_relaxed);
     }
 
     void mark_reader(size_t s) noexcept {
@@ -266,6 +274,7 @@ private:
             return;
         emit_dump(debug_snapshot(phase, wait_start_ns));
     }
+#endif
 
 public:
     explicit debuggable_server_lock(size_t /*hierarchy_id*/ = 0) {
@@ -278,6 +287,7 @@ public:
     debuggable_server_lock(const debuggable_server_lock&) = delete;
     debuggable_server_lock& operator=(const debuggable_server_lock&) = delete;
 
+#ifdef BARCH_LOCK_DEBUG
     void set_label(std::string_view s) noexcept {
         size_t n = s.size();
         if (n >= label_cap)
@@ -348,6 +358,11 @@ public:
         ss << "==================================================\n";
         return ss.str();
     }
+#else
+    void set_label(std::string_view) noexcept {}
+    const char* label() const noexcept { return ""; }
+    std::string debug_snapshot(const char* = "snapshot", int64_t = 0) const { return {}; }
+#endif
 
     // --- READ PATH ---
     template <typename Rep, typename Period>
@@ -361,11 +376,15 @@ public:
 
         const size_t s = slot();
         auto deadline = std::chrono::steady_clock::now() + timeout_duration;
+#ifdef BARCH_LOCK_DEBUG
         int64_t started = now_ns();
+#endif
 
         while (true) {
             core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
+#ifdef BARCH_LOCK_DEBUG
             mark_reader(s);
+#endif
 
             if (!write_intent.load(std::memory_order_seq_cst)) {
                 push_hold('R');
@@ -376,22 +395,32 @@ public:
 
             auto now = std::chrono::steady_clock::now();
             if (now >= deadline) {
+#ifdef BARCH_LOCK_DEBUG
                 log_if_slow_timeout(timeout_duration, "Shared Read Acquisition", started);
+#endif
                 return false;
             }
+#ifdef BARCH_LOCK_DEBUG
             auto slice = now + dump_every;
             if (slice > deadline)
                 slice = deadline;
+#else
+            auto slice = deadline;
+#endif
 
             std::unique_lock<std::mutex> lock(cv_mtx);
             if (!cv.wait_until(lock, slice, [this] {
                     return !write_intent.load(std::memory_order_seq_cst);
                 })) {
                 if (std::chrono::steady_clock::now() >= deadline) {
+#ifdef BARCH_LOCK_DEBUG
                     log_if_slow_timeout(timeout_duration, "Shared Read Acquisition", started);
+#endif
                     return false;
                 }
+#ifdef BARCH_LOCK_DEBUG
                 log_if_slow_timeout(dump_every, "Shared Read Acquisition", started);
+#endif
             }
         }
     }
@@ -416,19 +445,25 @@ public:
         const size_t s = slot();
         while (true) {
             core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
+#ifdef BARCH_LOCK_DEBUG
             mark_reader(s);
+#endif
             if (!write_intent.load(std::memory_order_seq_cst)) {
                 push_hold('R');
                 return;
             }
             backoff_reader(s);
-            int64_t started = now_ns();
             std::unique_lock<std::mutex> lock(cv_mtx);
+#ifdef BARCH_LOCK_DEBUG
+            int64_t started = now_ns();
             if (!cv.wait_for(lock, dump_every, [this] {
                     return !write_intent.load(std::memory_order_seq_cst);
                 })) {
                 log_if_slow_timeout(dump_every, "Blocking Shared Read", started);
             }
+#else
+            cv.wait(lock, [this] { return !write_intent.load(std::memory_order_seq_cst); });
+#endif
         }
     }
 
@@ -441,23 +476,33 @@ public:
     template <typename Rep, typename Period>
     bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
         auto deadline = std::chrono::steady_clock::now() + timeout_duration;
+#ifdef BARCH_LOCK_DEBUG
         int64_t started = now_ns();
+#endif
 
         std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
         while (true) {
             auto now = std::chrono::steady_clock::now();
+#ifdef BARCH_LOCK_DEBUG
             auto slice = now + dump_every;
             if (slice > deadline)
                 slice = deadline;
+#else
+            auto slice = deadline;
+#endif
             // try at least once, including a zero timeout (try_lock_until(now)
             // is try_lock). checking the deadline first made try_lock() always fail.
             if (lock.try_lock_until(slice))
                 break;
             if (std::chrono::steady_clock::now() >= deadline) {
+#ifdef BARCH_LOCK_DEBUG
                 log_if_slow_timeout(timeout_duration, "Write Mutex Contention", started);
+#endif
                 return false;
             }
+#ifdef BARCH_LOCK_DEBUG
             log_if_slow_timeout(dump_every, "Write Mutex Contention", started);
+#endif
         }
 
         write_intent.store(true, std::memory_order_seq_cst);
@@ -468,9 +513,12 @@ public:
             if (now >= deadline) {
                 write_intent.store(false, std::memory_order_seq_cst);
                 cv.notify_all();
+#ifdef BARCH_LOCK_DEBUG
                 log_if_slow_timeout(timeout_duration, "Draining Readers During Write", started);
+#endif
                 return false;
             }
+#ifdef BARCH_LOCK_DEBUG
             auto slice = now + dump_every;
             if (slice > deadline)
                 slice = deadline;
@@ -483,9 +531,18 @@ public:
                 }
                 log_if_slow_timeout(dump_every, "Draining Readers During Write", started);
             }
+#else
+            if (!cv.wait_until(cv_lock, deadline, [this] { return readers_drained(); })) {
+                write_intent.store(false, std::memory_order_seq_cst);
+                cv.notify_all();
+                return false;
+            }
+#endif
         }
 
+#ifdef BARCH_LOCK_DEBUG
         note_writer();
+#endif
         push_hold('W');
         lock.release();
         return true;
@@ -504,6 +561,7 @@ public:
     }
 
     void lock() {
+#ifdef BARCH_LOCK_DEBUG
         // keep write_intent and the upgrade mutex across dumps. looping
         // try_lock_for() used to drop both every 15s, so readers flooded
         // back in and the writer never drained.
@@ -527,11 +585,23 @@ public:
         note_writer();
         push_hold('W');
         ul.release();
+#else
+        std::unique_lock<std::timed_mutex> ul(upgrade_write_mtx);
+        write_intent.store(true, std::memory_order_seq_cst);
+        {
+            std::unique_lock<std::mutex> cv_lock(cv_mtx);
+            cv.wait(cv_lock, [this] { return readers_drained(); });
+        }
+        push_hold('W');
+        ul.release();
+#endif
     }
 
     void unlock() noexcept {
         pop_hold();
+#ifdef BARCH_LOCK_DEBUG
         clear_writer();
+#endif
         write_intent.store(false, std::memory_order_seq_cst);
         {
             std::lock_guard<std::mutex> lock(cv_mtx);
@@ -542,22 +612,21 @@ public:
 
     template <typename Rep, typename Period>
     bool try_lock_upgradable_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
-        auto start_time = std::chrono::steady_clock::now();
-        int64_t started = now_ns();
         std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
-
+#ifdef BARCH_LOCK_DEBUG
+        int64_t started = now_ns();
         if (!lock.try_lock_for(timeout_duration)) {
             log_if_slow_timeout(timeout_duration, "Upgrade Mutex Contention", started);
             return false;
         }
-
-        auto elapsed = std::chrono::steady_clock::now() - start_time;
-        if (elapsed >= timeout_duration) {
-            log_if_slow_timeout(timeout_duration, "Upgrade Mutex Deadline Expired", started);
+#else
+        if (!lock.try_lock_for(timeout_duration))
             return false;
-        }
+#endif
 
+#ifdef BARCH_LOCK_DEBUG
         diags.active_upgrader_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
+#endif
         write_intent.store(true, std::memory_order_seq_cst);
         push_hold('U');
         lock.release();
@@ -566,22 +635,25 @@ public:
 
     template <typename Rep, typename Period>
     bool try_upgrade_to_write_for(const std::chrono::duration<Rep, Period>& timeout_duration) {
-        int64_t started = now_ns();
         auto deadline = std::chrono::steady_clock::now() + timeout_duration;
         std::unique_lock<std::mutex> cv_lock(cv_mtx);
 
         if (!cv.wait_until(cv_lock, deadline, [this] { return readers_drained(); })) {
-            log_if_slow_timeout(timeout_duration, "Draining Readers During Upgrade Escalation", started);
-            write_intent.store(false, std::memory_order_seq_cst);
+#ifdef BARCH_LOCK_DEBUG
+            log_if_slow_timeout(timeout_duration, "Draining Readers During Upgrade Escalation", now_ns());
             diags.active_upgrader_id.store(std::thread::id(), std::memory_order_relaxed);
+#endif
+            write_intent.store(false, std::memory_order_seq_cst);
             pop_hold();
             cv.notify_all();
             upgrade_write_mtx.unlock();
             return false;
         }
 
+#ifdef BARCH_LOCK_DEBUG
         note_writer();
         diags.active_upgrader_id.store(std::thread::id(), std::memory_order_relaxed);
+#endif
         return true;
     }
 
@@ -591,7 +663,9 @@ public:
 
     void unlock_upgrade_without_writing() noexcept {
         pop_hold();
+#ifdef BARCH_LOCK_DEBUG
         diags.active_upgrader_id.store(std::thread::id(), std::memory_order_relaxed);
+#endif
         write_intent.store(false, std::memory_order_seq_cst);
         {
             std::lock_guard<std::mutex> lock(cv_mtx);

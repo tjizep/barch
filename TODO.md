@@ -519,6 +519,8 @@
 
 104. [Done] CI fails compiling Luau on unused parameters [20-08-2026] Nr 97 20ee740
 
+105. [Done] Latch dumps and writer backtraces behind BARCH_LOCK_DEBUG [20-08-2026] Nr 98 bf19ae0
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

@@ -97,6 +97,20 @@ set(CMAKE_CXX_FLAGS_RELEASE
 if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     message("Using debuggable optimizations")
 endif ()
+
+# timeout dumps and writer backtraces on the shard latch. the backtrace
+# on every unique acquire is the expensive part, so Release leaves it
+# off. Debug / RelWithDebInfo keep it. -DBARCH_LOCK_DEBUG=ON for a
+# Release build that still dumps (slow CI).
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
+    option(BARCH_LOCK_DEBUG "Latch timeout dumps and writer backtraces" OFF)
+else ()
+    option(BARCH_LOCK_DEBUG "Latch timeout dumps and writer backtraces" ON)
+endif ()
+if (BARCH_LOCK_DEBUG)
+    add_compile_definitions(BARCH_LOCK_DEBUG)
+    message("Latch timeout dumps enabled")
+endif ()
 # maybe one day we may want boost
 #find_package(Boost REQUIRED)
 # include boost for all targets
@@ -703,6 +717,8 @@ else()
         set(THREADS_PREFER_PTHREAD_FLAG ON)
         find_package(Threads REQUIRED)
         target_link_libraries(locktest PRIVATE Threads::Threads)
+        # snapshot tests need the dump path even when the server is Release
+        target_compile_definitions(locktest PRIVATE BARCH_LOCK_DEBUG)
         # CI builds --target barch and used to skip this binary, so ctest
         # reported TestDebuggableServerLock as Not Run. Pull it in with barch.
         if (TARGET barch)

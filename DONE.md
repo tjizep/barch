@@ -3621,3 +3621,26 @@ fetch, every Luau target gets `-Wno-unused` /
 `-Wno-unused-parameter` and matching `-Wno-error=` so a later
 flag cannot promote them. `Luau.Compiler` rebuilds here with
 none of those diagnostics.
+
+## 98. Latch dumps and writer backtraces behind BARCH_LOCK_DEBUG [20-08-2026]
+
+*Was `TODO.md` entry 105.*
+
+Every unique acquire was capturing a `backtrace()`, which made
+uncontended writes ~100× slower than `shared_timed_mutex`. Dumps,
+labels, last-reader tids, and writer stacks are now under
+`#ifdef BARCH_LOCK_DEBUG`. Nested shared and the lock itself stay
+in every build.
+
+CMake turns the define on for Debug and RelWithDebInfo, off for
+Release. `-DBARCH_LOCK_DEBUG=ON` enables it in Release (slow CI).
+locktest always compiles with it so the snapshot checks still run.
+
+Measured here, 400 ms lock/unlock loops:
+
+- with dumps: unique 0.55M vs std 69M
+- without: unique 16M vs std 70M (~4×, the timed mutex and drain)
+- shared 4 threads still ~3.3× one reader, std still gets slower
+
+The remaining unique gap is the writer-preference drain, not the
+debug path.

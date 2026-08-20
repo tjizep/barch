@@ -233,7 +233,13 @@ if (ADD_LUAU)
     set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
     set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE)
+    set(LUAU_WERROR OFF CACHE BOOL "" FORCE)
     set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+    # our -Wextra / -Werror must not leak into Luau. Compiler and Bytecode
+    # never get Luau's own -Wno-unused, so unused parameters there have
+    # failed CI.
+    set(_barch_cxx_flags_saved "${CMAKE_CXX_FLAGS}")
+    set(CMAKE_CXX_FLAGS "")
     FetchContent_Declare(
             luau
             GIT_REPOSITORY https://github.com/luau-lang/luau.git
@@ -241,6 +247,18 @@ if (ADD_LUAU)
             GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(luau)
+    set(CMAKE_CXX_FLAGS "${_barch_cxx_flags_saved}")
+    unset(_barch_cxx_flags_saved)
+    foreach (_luau_tgt IN ITEMS
+            Luau.Common Luau.Ast Luau.Bytecode Luau.Compiler Luau.VM
+            Luau.Config Luau.Analysis Luau.CodeGen Luau.Inliner
+            Luau.Require Luau.CLI.lib isocline)
+        if (TARGET ${_luau_tgt})
+            target_compile_options(${_luau_tgt} PRIVATE
+                    -Wno-unused -Wno-unused-parameter -Wno-unused-variable
+                    -Wno-error=unused-parameter -Wno-error=unused-variable)
+        endif ()
+    endforeach ()
     set(BARCH_HAS_LUAU ON)
 else ()
     message("Luau not used; foreign=luau spaces stay off")

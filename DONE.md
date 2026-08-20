@@ -3603,3 +3603,21 @@ still refused. SpaceThread still passes, about three seconds.
 
 The coverage job's exit 143 was the runner getting killed during
 the compile, not a compiler error.
+
+## 97. CI fails compiling Luau on unused parameters [20-08-2026]
+
+*Was `TODO.md` entry 104.*
+
+Luau's CMake puts `-Wno-unused` on Ast/VM/Analysis, but not on
+Compiler or Bytecode. Those two were compiling under our
+`-Wextra`, so unused parameters in Types.cpp, Compiler.cpp,
+CostModel.cpp, BytecodeBuilder.cpp, and Ast.h inlined into them
+showed up as errors on the instance that treats warnings as
+errors.
+
+`LUAU_WERROR` is forced off. Our `CMAKE_CXX_FLAGS` are cleared
+around the Luau fetch so `-Wextra` does not leak in. After
+fetch, every Luau target gets `-Wno-unused` /
+`-Wno-unused-parameter` and matching `-Wno-error=` so a later
+flag cannot promote them. `Luau.Compiler` rebuilds here with
+none of those diagnostics.

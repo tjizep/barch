@@ -517,6 +517,8 @@
 
 103. [Done] Nested shared self-deadlock under write_intent [20-08-2026] Nr 96 8ec4a95
 
+104. [Done] CI fails compiling Luau on unused parameters [20-08-2026] Nr 97 20ee740
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

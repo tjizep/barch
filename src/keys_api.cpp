@@ -2091,7 +2091,10 @@ static int expire_command(caller& call, const arg_t& argv, bool millis, bool abs
     // read, decide, then write: has to hold one lock across all three
     store.with_key_write(converted.get_value(), [&](const barch::shard_ptr& t) {
         art::node_ptr r = t->search(converted.get_value());
+        // redis answers 0 or 1. A missing key is 0, not the -1 TTL uses for "no expire"
         if (r.null()) {
+            answered = true;
+            reply = call.push_ll(0);
             return;
         }
         art::key_expire_spec spec(argv);
@@ -2108,6 +2111,10 @@ static int expire_command(caller& call, const arg_t& argv, bool millis, bool abs
         }
 
         auto l = r.const_leaf();
+        auto refuse = [&]() {
+            answered = true;
+            reply = call.push_ll(0);
+        };
         // a deadline that has already passed removes the key, which is what redis does
         // with EXPIRE k -1 and with any EXPIREAT in the past
         if (spec.ttl <= art::now()) {
@@ -2116,16 +2123,14 @@ static int expire_command(caller& call, const arg_t& argv, bool millis, bool abs
             return;
         }
         if (spec.nx) {
-            if (l->is_expiry()) return;
+            if (l->is_expiry()) { refuse(); return; }
         } else if (spec.xx) {
-            if (!l->is_expiry()) return;
+            if (!l->is_expiry()) { refuse(); return; }
         } else if (spec.gt) {
-            // spec.ttl is the deadline itself, not a duration - expiry_ms folded now() in
-            // when it parsed the argument. Adding it again here dated the key from twice
-            // the current clock, so EXPIRE e 100 answered a TTL of six minutes
-            if (spec.ttl < l->expiry_ms()) return;
+            // no expire is an infinite TTL, so GT never applies and LT always does
+            if (!l->is_expiry() || spec.ttl <= l->expiry_ms()) { refuse(); return; }
         } else if (spec.lt) {
-            if (spec.ttl > l->expiry_ms()) return;
+            if (l->is_expiry() && spec.ttl >= l->expiry_ms()) { refuse(); return; }
         }
         auto updater = [&t,spec](const art::node_ptr &leaf) -> art::node_ptr {
             if (leaf.null()) {
@@ -2138,9 +2143,9 @@ static int expire_command(caller& call, const arg_t& argv, bool millis, bool abs
                 l->is_compressed());
         };
         answered = true;
-        reply = t->update(l->get_key(), updater) ? call.push_ll(1) : call.push_ll(-2);
+        reply = t->update(l->get_key(), updater) ? call.push_ll(1) : call.push_ll(0);
     });
-    return answered ? reply : call.push_ll(-1);
+    return answered ? reply : call.push_ll(0);
 }
 
 int EXPIRE(caller& call, const arg_t& argv) {

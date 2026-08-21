@@ -10,11 +10,15 @@
 #
 #     test {name} { body } {expected}      the value of the last command, glob matched
 #     assert_equal {expected} [r cmd ...]
+#     assert_equal [r cmd ...] expected    either argument order
+#     assert {[r cmd] eq ...} / == ...     a single equality
 #     assert_error {pattern} {r cmd ...}   the command must fail, matching pattern
 #     catch {r cmd ...} err ; format $err  the error text, glob matched
+#     set v [r cmd ...] ; list $v1 $v2     captured replies, optionally mixed with [r cmd]
 #     list [r cmd ...] [r cmd ...]         several results as one list
 #     set res {} ; append res [r cmd ...]  several results concatenated with no separator
 #     roundFloat [r cmd ...]               the reply rounded, as valkey's helper does
+#     create_default_zset / create_zset    the zset.tcl helpers, expanded to ZADD
 #
 # Anything it cannot read becomes a skipped case carrying the original tcl, so the output
 # says what was not translated instead of quietly covering less than it appears to. Those
@@ -127,9 +131,18 @@ def find_tests(text):
                 continue
             e = find_brace(text, k)
             body = text[k + 1:e - 1]
-            rest = text[e:e + 200]
-            mexp = re.match(r'\s*\{([^{}]*)\}', rest)
-            expected = mexp.group(1) if mexp else None
+            t = e
+            while t < len(text) and text[t] in " \t\n":
+                t += 1
+            # `{OK {} 1}` is a real expectation; a regex that stops at the first
+            # nested brace used to drop those tests' expected value entirely
+            expected = None
+            if t < len(text) and text[t] == "{":
+                u = find_brace(text, t)
+                expected = text[t + 1:u - 1]
+            elif t < len(text) and text[t] == '"':
+                u = find_quote(text, t)
+                expected = tcl_unescape(text[t + 1:u - 1])
         except ValueError:
             continue
         out.append({"name": name.strip(), "body": body, "expected": expected})
@@ -143,23 +156,89 @@ UNTRANSLATABLE = re.compile(
     r'foreach|while|proc|for\s*\{|if\s*\{|lsort|lappend|llength|lindex|expr|'
     r'assert_morethan|assert_lessthan|assert_range|debug_sleep|reconnect|'
     r'binary\s+format|binary\s+scan|string\s+repeat|randomInt|randstring|'
-    r'wait_for_sync|assert_type|memory_usage)\b')
+    r'wait_for_sync|assert_type|memory_usage|LPOS)\b')
+
+
+def expand_known_helpers(line):
+    """
+    zset.tcl's create_zset helpers are a DEL plus a ZADD. Expanding the call
+    keeps the test and leaves the foreach inside the proc untranslated.
+    """
+    try:
+        words = split_words(line)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    name = words[0][1]
+    if name == "create_default_zset" and len(words) == 1:
+        return [
+            "r del zset",
+            "r zadd zset -inf a 1 b 2 c 3 d 4 e 5 f +inf g",
+        ]
+    if name == "create_default_lex_zset" and len(words) == 1:
+        return [
+            "r del zset",
+            "r zadd zset 0 alpha 0 bar 0 cool 0 down 0 elephant 0 foo "
+            "0 great 0 hill 0 omega",
+        ]
+    if name == "create_long_lex_zset" and len(words) == 1:
+        return [
+            "r del zset",
+            "r zadd zset 0 alpha 0 bar 0 cool 0 down 0 elephant 0 foo "
+            "0 great 0 hill 0 island 0 jacket 0 key 0 lip 0 max 0 null "
+            "0 omega 0 point 0 query 0 result 0 sea 0 tree",
+        ]
+    if name == "create_zset" and len(words) == 3:
+        key, items = words[1][1], words[2][1]
+        return [
+            "r del %s" % key,
+            "r zadd %s %s" % (key, " ".join(items.split())),
+        ]
+    return None
+
+
+def parse_simple_assert(expr):
+    """[r cmd] eq value, or [r cmd] == value. Anything else stays a stub."""
+    try:
+        words = split_words(expr.strip())
+    except ValueError:
+        return None
+    if len(words) != 3 or words[0][0] != "bracket":
+        return None
+    if words[1] != ("bare", "eq") and words[1] != ("bare", "=="):
+        return None
+    m = re.match(r'^\s*r\s+(.*)$', words[0][1])
+    if not m:
+        return None
+    return {"op": "expect", "args": tcl_args(m.group(1)),
+            "value": expected_value(words[2][0], words[2][1])}
 
 
 def parse_body(body):
     """
     the commands a body runs and what it is checked against.
 
-    Returns (steps, mode) or None when something in the body is outside what this
-    understands. `mode` says how the expectation is applied:
+    Returns a dict {steps, mode, vars?, bind?} or None when something in the
+    body is outside what this understands. `mode` says how the expectation is
+    applied:
       last    - the last command's reply is compared
       err     - the text of an error raised by a caught command is compared
       asserts - the body carries its own assert_equal lines and there is nothing else
       list    - several replies are compared as one space separated list
+      bind    - the reply stored in `bind` is compared, after later cleanup ran
     """
     body = re.sub(r'\\\s*\n\s*', ' ', body)   # tcl line continuations
-    lines = [l.strip() for l in body.split("\n")]
-    lines = [l for l in lines if l and not l.startswith("#")]
+    raw = [l.strip() for l in body.split("\n")]
+    lines = []
+    for l in raw:
+        if not l or l.startswith("#"):
+            continue
+        expanded = expand_known_helpers(l)
+        if expanded:
+            lines.extend(expanded)
+        else:
+            lines.append(l)
     if not lines:
         return None
     if any(UNTRANSLATABLE.search(l) for l in lines):
@@ -167,6 +246,8 @@ def parse_body(body):
 
     steps = []
     mode = "last"
+    bind = None
+    list_vars = None
     for line in lines:
         # `set res {}` and friends only initialise an accumulator; the value is built by
         # the `append` lines that follow
@@ -179,6 +260,11 @@ def parse_body(body):
             continue
         if re.match(r'^format\s+\$\w+$', line) or re.match(r'^set\s+\w+$', line):
             mode = "err"
+            continue
+        m = re.match(r'^set\s+_\s+\$(\w+)$', line)
+        if m:
+            if mode != "err":
+                bind = m.group(1)
             continue
         m = re.match(r'^append\s+\w+\s+\[\s*r\s+(.*?)\s*\]$', line)
         if m:
@@ -200,42 +286,58 @@ def parse_body(body):
             continue
         m = re.match(r'^assert_equal\s+(.*)$', line)
         if m:
-            parsed = parse_assert_equal(m.group(1))
+            parsed = parse_assert_equal_or_bound(m.group(1), steps)
             if parsed is None:
                 return None
-            steps.append(parsed)
-            mode = "asserts" if mode != "err" else mode
+            if parsed is not True:
+                steps.append(parsed)
+            if mode == "last":
+                mode = "asserts"
             continue
         m = re.match(r'^assert\s*\{(.*)\}$', line)
         if m:
-            return None  # a tcl expression, not a command
+            parsed = parse_simple_assert(m.group(1))
+            if parsed is None:
+                return None
+            steps.append(parsed)
+            if mode == "last":
+                mode = "asserts"
+            continue
         m = re.match(r'^r\s+(.*)$', line)
         if m:
             steps.append({"op": "cmd", "args": tcl_args(m.group(1))})
             continue
+        m = re.match(r'^set\s+([A-Za-z_][A-Za-z0-9_]*)\s+\[\s*r\s+(.*?)\s*\]$', line)
+        if m:
+            steps.append({"op": "cmd", "args": tcl_args(m.group(2)),
+                          "as": m.group(1), "collect": True})
+            continue
         m = re.match(r'^list\s+(.*)$', line)
         if m:
-            rounded = re.findall(r'\[\s*roundFloat\s+\[\s*r\s+([^\]]*?)\s*\]\s*\]', m.group(1))
-            plain = re.findall(r'(?<!roundFloat )\[\s*r\s+([^\]]*?)\s*\]', m.group(1))
-            # only the commands inside the `list` make up the value. A plain `r ...`
-            # line before it is setup - folding it in made `r del k` count as a result
-            # and the case compare one element too long, which then failed on valkey and
-            # was dropped as an unfaithful translation
-            if rounded:
-                for one in rounded:
-                    steps.append({"op": "cmd", "args": tcl_args(one),
-                                  "round": True, "collect": True})
-            elif plain:
-                for one in plain:
-                    steps.append({"op": "cmd", "args": tcl_args(one), "collect": True})
-            else:
+            parsed_list = parse_list_line(m.group(1), steps)
+            if parsed_list is None:
                 return None
+            extra, vars_ = parsed_list
+            steps.extend(extra)
+            if vars_:
+                list_vars = vars_
             mode = "list"
             continue
         return None
     if not steps:
         return None
-    return steps, mode
+    # assert_equal inside a body that still has a last command (the `{expected}`
+    # clause) must not swallow that last reply
+    if mode == "asserts" and steps[-1]["op"] in ("cmd", "catch"):
+        mode = "last"
+    if bind and mode != "err":
+        mode = "bind"
+    out = {"steps": steps, "mode": mode}
+    if list_vars:
+        out["vars"] = list_vars
+    if bind and mode == "bind":
+        out["bind"] = bind
+    return out
 
 
 
@@ -304,17 +406,105 @@ def expected_value(kind, word):
 
 
 def parse_assert_equal(rest):
-    """assert_equal {expected} [r cmd ...] -> a step that checks one reply"""
+    """
+    assert_equal {expected} [r cmd ...] or assert_equal [r cmd ...] expected.
+    valkey uses both orders.
+    """
     words = split_words(rest)
     if len(words) != 2:
         return None
     (k1, w1), (k2, w2) = words
-    if k2 != "bracket":
+    if k2 == "bracket":
+        m = re.match(r'^\s*r\s+(.*)$', w2)
+        if not m:
+            return None
+        return {"op": "expect", "args": tcl_args(m.group(1)),
+                "value": expected_value(k1, w1)}
+    if k1 == "bracket":
+        m = re.match(r'^\s*r\s+(.*)$', w1)
+        if not m:
+            return None
+        return {"op": "expect", "args": tcl_args(m.group(1)),
+                "value": expected_value(k2, w2)}
+    return None
+
+
+def parse_assert_equal_or_bound(rest, steps):
+    """
+    assert_equal as a command, or assert_equal $var expected against a reply
+    already stored by `set var [r cmd]`. Returns True when the existing step
+    was rewritten, a new step, or None.
+    """
+    try:
+        words = split_words(rest)
+    except ValueError:
         return None
-    m = re.match(r'^\s*r\s+(.*)$', w2)
-    if not m:
+    if len(words) == 2 and words[0][0] == "bare" and re.match(
+            r'^\$[A-Za-z_][A-Za-z0-9_]*$', words[0][1]):
+        var = words[0][1][1:]
+        value = expected_value(words[1][0], words[1][1])
+        for s in reversed(steps):
+            if s.get("as") == var:
+                s["op"] = "expect"
+                s["value"] = value
+                return True
         return None
-    return {"op": "expect", "args": tcl_args(m.group(1)), "value": expected_value(k1, w1)}
+    return parse_assert_equal(rest)
+
+
+def parse_list_line(rest, steps):
+    """
+    list [r cmd] [r cmd], or list $v1 $v2 [[r cmd] ...].
+    Returns (extra_steps, vars_or_None), or None if the line is out of reach.
+    """
+    try:
+        words = split_words(rest)
+    except ValueError:
+        words = None
+    pieces = []
+    if words:
+        ok = True
+        for kind, w in words:
+            if kind == "bare" and re.match(r'^\$[A-Za-z_][A-Za-z0-9_]*$', w):
+                pieces.append(("var", w[1:]))
+            elif kind == "bracket":
+                pieces.append(("cmd", w))
+            else:
+                ok = False
+                break
+        if ok and pieces and any(t == "var" for t, _ in pieces):
+            extra = []
+            vars_ = []
+            for typ, val in pieces:
+                if typ == "var":
+                    vars_.append(val)
+                    continue
+                m = re.match(r'^\s*r\s+(.*)$', val)
+                if not m:
+                    return None
+                name = "_l%d" % len(vars_)
+                extra.append({"op": "cmd", "args": tcl_args(m.group(1)),
+                              "as": name, "collect": True})
+                vars_.append(name)
+            return extra, vars_
+
+    rounded = re.findall(r'\[\s*roundFloat\s+\[\s*r\s+([^\]]*?)\s*\]\s*\]', rest)
+    plain = re.findall(r'(?<!roundFloat )\[\s*r\s+([^\]]*?)\s*\]', rest)
+    # only the commands inside the `list` make up the value. A plain `r ...`
+    # line before it is setup - folding it in made `r del k` count as a result
+    # and the case compare one element too long, which then failed on valkey and
+    # was dropped as an unfaithful translation
+    extra = []
+    if rounded:
+        for one in rounded:
+            extra.append({"op": "cmd", "args": tcl_args(one),
+                          "round": True, "collect": True})
+    elif plain:
+        for one in plain:
+            extra.append({"op": "cmd", "args": tcl_args(one), "collect": True})
+    else:
+        return None
+    return extra, None
 
 
 def parse_assert_error(rest):
@@ -337,6 +527,10 @@ def tcl_args(text):
             raise Unsupported("nested command substitution: [%s]" % w)
         if "$" in w:
             raise Unsupported("variable reference: %s" % w)
+        # quoted and bare words resolve backslashes; braces do not. `\[b` is the
+        # lex bound `[b`, and sending the backslash made valkey refuse ZRANGE BYLEX
+        if kind in ("quote", "bare"):
+            w = tcl_unescape(w)
         out.append(w)
     return out
 
@@ -367,9 +561,12 @@ def translate_file(path):
             entry.setdefault("why", "body uses tcl this translator does not read")
             entry["tcl"] = raw["body"].strip()
         else:
-            steps, mode = parsed
-            entry["steps"] = steps
-            entry["mode"] = mode
+            entry["steps"] = parsed["steps"]
+            entry["mode"] = parsed["mode"]
+            if parsed.get("vars"):
+                entry["vars"] = parsed["vars"]
+            if parsed.get("bind"):
+                entry["bind"] = parsed["bind"]
         cases.append(entry)
     return cases
 

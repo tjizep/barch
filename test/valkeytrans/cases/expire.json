@@ -4,9 +4,69 @@
   {
    "name": "EXPIRE - set timeouts multiple times",
    "expected": "1 [45] 1 10",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r set x foobar\n        set v1 [r expire x 5]\n        set v2 [r ttl x]\n        set v3 [r expire x 10]\n        set v4 [r ttl x]\n        r expire x 2\n        list $v1 $v2 $v3 $v4"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "foobar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expire",
+      "x",
+      "5"
+     ],
+     "as": "v1",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "x"
+     ],
+     "as": "v2",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expire",
+      "x",
+      "10"
+     ],
+     "as": "v3",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "ttl",
+      "x"
+     ],
+     "as": "v4",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "expire",
+      "x",
+      "2"
+     ]
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "v1",
+    "v2",
+    "v3",
+    "v4"
+   ]
   },
   {
    "name": "EXPIRE - It should be still possible to read 'x'",
@@ -24,7 +84,7 @@
   },
   {
    "name": "EXPIRE - After 2.1 seconds the key should no longer be here",
-   "expected": null,
+   "expected": "{} 0",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "after 2100\n            list [r get x] [r exists x]"
@@ -153,9 +213,18 @@
   {
    "name": "SETEX - Wrong time parameter",
    "expected": "*invalid expire*",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "catch {r setex z -10 foo} e\n        set _ $e"
+   "steps": [
+    {
+     "op": "catch",
+     "args": [
+      "setex",
+      "z",
+      "-10",
+      "foo"
+     ]
+    }
+   ],
+   "mode": "err"
   },
   {
    "name": "PERSIST can undo an EXPIRE",
@@ -252,21 +321,21 @@
   },
   {
    "name": "PSETEX can set sub-second expires",
-   "expected": null,
+   "expected": "somevalue {}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "# This test is very likely to do a false positive if the server is\n        # under pressure, so if it does not work give it a few more chances.\n        for {set j 0} {$j < 50} {incr j} {\n            r del x\n            r psetex x 100 somevalue\n            set a [r get x]\n            after 101\n            set b [r get x]\n\n            if {$a eq {somevalue} && $b eq {}} break\n        }\n        if {$::verbose} { puts \"PSETEX sub-second expire test attempts: $j\" }\n        list $a $b"
   },
   {
    "name": "PEXPIRE can set sub-second expires",
-   "expected": null,
+   "expected": "somevalue {}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "# This test is very likely to do a false positive if the server is\n        # under pressure, so if it does not work give it a few more chances.\n        for {set j 0} {$j < 50} {incr j} {\n            r set x somevalue\n            r pexpire x 100\n            set c [r get x]\n            after 101\n            set d [r get x]\n\n            if {$c eq {somevalue} && $d eq {}} break\n        }\n        if {$::verbose} { puts \"PEXPIRE sub-second expire test attempts: $j\" }\n        list $c $d"
   },
   {
    "name": "PEXPIREAT can set sub-second expires",
-   "expected": null,
+   "expected": "somevalue {}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "# This test is very likely to do a false positive if the server is\n        # under pressure, so if it does not work give it a few more chances.\n        for {set j 0} {$j < 50} {incr j} {\n            r set x somevalue\n            set now [r time]\n            r pexpireat x [expr ([lindex $now 0]*1000)+([lindex $now 1]/1000)+200]\n            set e [r get x]\n            after 201\n            set f [r get x]\n\n            if {$e eq {somevalue} && $f eq {}} break\n        }\n        if {$::verbose} { puts \"PEXPIREAT sub-second expire test attempts: $j\" }\n        list $e $f"
@@ -659,7 +728,7 @@
      ]
     }
    ],
-   "mode": "asserts"
+   "mode": "last"
   },
   {
    "name": "PEXPIREAT with big integer works",
@@ -906,9 +975,35 @@
   {
    "name": "EXPIRE with XX option on a key without ttl",
    "expected": "",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 200 XX] 0\n        assert_equal [r TTL foo] -1"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "SET",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "XX"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "TTL",
+      "foo"
+     ],
+     "value": "-1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "EXPIRE with GT option on a key with lower ttl",
@@ -927,9 +1022,35 @@
   {
    "name": "EXPIRE with GT option on a key without ttl",
    "expected": "",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 200 GT] 0\n        assert_equal [r TTL foo] -1"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "SET",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "GT"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "TTL",
+      "foo"
+     ],
+     "value": "-1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "EXPIRE with LT option on a key with higher ttl",
@@ -962,9 +1083,36 @@
   {
    "name": "EXPIRE with LT and XX option on a key without ttl",
    "expected": "",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo 200 LT XX] 0\n        assert_equal [r TTL foo] -1"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "SET",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "200",
+      "LT",
+      "XX"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "TTL",
+      "foo"
+     ],
+     "value": "-1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "EXPIRE with conflicting options: LT GT",
@@ -1070,23 +1218,117 @@
   {
    "name": "EXPIRE with negative expiry",
    "expected": "",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r SET foo bar EX 100\n        assert_equal [r EXPIRE foo -10 LT] 1\n        assert_equal [r TTL foo] -2"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "SET",
+      "foo",
+      "bar",
+      "EX",
+      "100"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "-10",
+      "LT"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "TTL",
+      "foo"
+     ],
+     "value": "-2"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "EXPIRE with negative expiry on a non-valitale key",
    "expected": "",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r SET foo bar\n        assert_equal [r EXPIRE foo -10 LT] 1\n        assert_equal [r TTL foo] -2"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "SET",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "foo",
+      "-10",
+      "LT"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "TTL",
+      "foo"
+     ],
+     "value": "-2"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "EXPIRE with non-existed key",
    "expected": "",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "assert_equal [r EXPIRE none 100 NX] 0\n        assert_equal [r EXPIRE none 100 XX] 0\n        assert_equal [r EXPIRE none 100 GT] 0\n        assert_equal [r EXPIRE none 100 LT] 0"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "none",
+      "100",
+      "NX"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "none",
+      "100",
+      "XX"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "none",
+      "100",
+      "GT"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "EXPIRE",
+      "none",
+      "100",
+      "LT"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "Server should not propagate the read command on lazy expire",

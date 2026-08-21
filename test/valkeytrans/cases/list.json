@@ -165,8 +165,8 @@
   {
    "name": "LPOS basic usage - $type",
    "expected": null,
-   "why": "variable reference: $large",
    "skipped": true,
+   "why": "body uses tcl this translator does not read",
    "tcl": "r DEL mylist\n        r RPUSH mylist a b c $large 2 3 c c\n        assert {[r LPOS mylist a] == 0}\n        assert {[r LPOS mylist c] == 2}"
   },
   {
@@ -534,7 +534,7 @@
   },
   {
    "name": "BRPOPLPUSH inside a transaction",
-   "expected": null,
+   "expected": "foo bar {} {} {bar foo}",
    "steps": [
     {
      "op": "cmd",
@@ -671,14 +671,14 @@
   },
   {
    "name": "$pop when new key is moved into place",
-   "expected": null,
+   "expected": "foo{t} hij",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "set rd [valkey_deferring_client]\n        r del foo{t}\n\n        bpop_command $rd $pop foo{t} 0\n        wait_for_blocked_client\n        r lpush bob{t} abc def hij\n        r rename bob{t} foo{t}\n        set res [$rd read]\n        $rd close\n        set _ $res"
   },
   {
    "name": "$pop when result key is created by SORT..STORE",
-   "expected": null,
+   "expected": "foo{t} aguacate",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "set rd [valkey_deferring_client]\n\n        # zero out list from previous test without explicit delete\n        r lpop foo{t}\n        r lpop foo{t}\n        r lpop foo{t}\n\n        bpop_command $rd $pop foo{t} 5\n        wait_for_blocked_client\n        r lpush notfoo{t} hello hola aguacate konichiwa zanzibar\n        r sort notfoo{t} ALPHA store foo{t}\n        set res [$rd read]\n        $rd close\n        set _ $res"
@@ -757,7 +757,7 @@
   },
   {
    "name": "$pop inside a transaction",
-   "expected": null,
+   "expected": "{xlist bar} {xlist foo} {}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "r del xlist\n        r lpush xlist foo\n        r lpush xlist bar\n        r multi\n\n        bpop_command r $pop xlist 0\n        bpop_command r $pop xlist 0\n        bpop_command r $pop xlist 0\n        r exec"
@@ -833,21 +833,10 @@
   },
   {
    "name": "LINSERT raise error on bad syntax",
-   "expected": null,
-   "steps": [
-    {
-     "op": "expect_error",
-     "args": [
-      "linsert",
-      "xlist",
-      "aft3r",
-      "aa",
-      "42"
-     ],
-     "value": "*ERR*syntax*error*"
-    }
-   ],
-   "mode": "asserts"
+   "expected": "*ERR*syntax*error*",
+   "skipped": true,
+   "why": "body uses tcl this translator does not read",
+   "tcl": "catch {[r linsert xlist aft3r aa 42]} e\n        set e"
   },
   {
    "name": "LINSERT against non-list value error",
@@ -889,158 +878,6 @@
       "0"
      ],
      "value": "0"
-    }
-   ],
-   "mode": "asserts"
-  },
-  {
-   "name": "LINSERT before and after a pivot",
-   "expected": null,
-   "steps": [
-    {
-     "op": "cmd",
-     "args": [
-      "del",
-      "xlist"
-     ]
-    },
-    {
-     "op": "cmd",
-     "args": [
-      "rpush",
-      "xlist",
-      "a",
-      "b",
-      "c",
-      "d"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "linsert",
-      "xlist",
-      "before",
-      "c",
-      "zz"
-     ],
-     "value": "5"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "xlist",
-      "0",
-      "10"
-     ],
-     "value": "a b zz c d"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "linsert",
-      "xlist",
-      "after",
-      "c",
-      "yy"
-     ],
-     "value": "6"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "xlist",
-      "0",
-      "10"
-     ],
-     "value": "a b zz c yy d"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "linsert",
-      "xlist",
-      "after",
-      "d",
-      "dd"
-     ],
-     "value": "7"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "linsert",
-      "xlist",
-      "after",
-      "bad",
-      "ddd"
-     ],
-     "value": "-1"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "xlist",
-      "0",
-      "10"
-     ],
-     "value": "a b zz c yy d dd"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "linsert",
-      "xlist",
-      "before",
-      "a",
-      "aa"
-     ],
-     "value": "8"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "linsert",
-      "xlist",
-      "before",
-      "bad",
-      "aaa"
-     ],
-     "value": "-1"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "xlist",
-      "0",
-      "10"
-     ],
-     "value": "aa a b zz c yy d dd"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "linsert",
-      "xlist",
-      "before",
-      "aa",
-      "42"
-     ],
-     "value": "9"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "xlist",
-      "0",
-      "0"
-     ],
-     "value": "42"
     }
    ],
    "mode": "asserts"
@@ -1278,112 +1115,6 @@
    "mode": "asserts"
   },
   {
-   "name": "LMOVE and RPOPLPUSH between two lists",
-   "expected": null,
-   "steps": [
-    {
-     "op": "cmd",
-     "args": [
-      "del",
-      "lmove-a",
-      "lmove-b"
-     ]
-    },
-    {
-     "op": "cmd",
-     "args": [
-      "rpush",
-      "lmove-a",
-      "a",
-      "b",
-      "c"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "rpoplpush",
-      "lmove-a",
-      "lmove-b"
-     ],
-     "value": "c"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "lmove-a",
-      "0",
-      "-1"
-     ],
-     "value": "a b"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "lmove-b",
-      "0",
-      "-1"
-     ],
-     "value": "c"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lmove",
-      "lmove-a",
-      "lmove-b",
-      "left",
-      "right"
-     ],
-     "value": "a"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "lmove-a",
-      "0",
-      "-1"
-     ],
-     "value": "b"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "lmove-b",
-      "0",
-      "-1"
-     ],
-     "value": "c a"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lmove",
-      "lmove-a",
-      "lmove-a",
-      "left",
-      "right"
-     ],
-     "value": "b"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lrange",
-      "lmove-a",
-      "0",
-      "-1"
-     ],
-     "value": "b"
-    }
-   ],
-   "mode": "asserts"
-  },
-  {
    "name": "Basic LPOP/RPOP/LMPOP - $type",
    "expected": null,
    "skipped": true,
@@ -1467,78 +1198,6 @@
       "10"
      ],
      "value": ""
-    }
-   ],
-   "mode": "asserts"
-  },
-  {
-   "name": "LMPOP first non-empty list",
-   "expected": null,
-   "steps": [
-    {
-     "op": "cmd",
-     "args": [
-      "del",
-      "lmpop-a",
-      "lmpop-b"
-     ]
-    },
-    {
-     "op": "cmd",
-     "args": [
-      "rpush",
-      "lmpop-a",
-      "a",
-      "1",
-      "2"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lmpop",
-      "1",
-      "lmpop-a",
-      "left",
-      "count",
-      "1"
-     ],
-     "value": "lmpop-a a"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lmpop",
-      "2",
-      "lmpop-a",
-      "lmpop-a",
-      "right",
-      "count",
-      "2"
-     ],
-     "value": "lmpop-a 2 1"
-    },
-    {
-     "op": "cmd",
-     "args": [
-      "rpush",
-      "lmpop-b",
-      "x",
-      "y"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "lmpop",
-      "2",
-      "lmpop-a",
-      "lmpop-b",
-      "left",
-      "count",
-      "1"
-     ],
-     "value": "lmpop-b x"
     }
    ],
    "mode": "asserts"

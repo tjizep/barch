@@ -53,6 +53,8 @@ ACCEPTED = {
     "ZUNIONSTORE with a regular set*": "the case sets up with SADD. See TODO 52",
     "ZINTERSTORE #516*": "the case sets up with SADD. See TODO 52",
     "ZINTERSTORE regression with two sets*": "the case sets up with SADD. See TODO 52",
+    "ZRANGESTORE*": "ZRANGESTORE is not implemented. See TODO 52",
+    "ZADD XX option without key*": "TYPE is not implemented. See TODO 52",
     "Extended SET GET with incorrect type*": "the case sets up with LPUSH and then reads "
                                              "the list back with LRANGE after a failed "
                                              "SET, which needs LMOVE. See TODO 63",
@@ -152,6 +154,7 @@ def run_case(conn, case):
     last = None
     err = None
     collected = []
+    named = {}
     for step in case.get("steps", []):
         args = step["args"]
         try:
@@ -179,9 +182,14 @@ def run_case(conn, case):
             if not matches(step["value"], got):
                 return False, "%s: expected %r got %r" % (
                     " ".join(args), step["value"], got)
+            if step.get("as"):
+                named[step["as"]] = reply
+            continue
         if step.get("round"):
             reply = round_float(render(reply))
         last = reply
+        if step.get("as"):
+            named[step["as"]] = reply
         # only tagged steps form the value in list and concat modes; anything else on
         # those lines is setup. `collected` is not used by the other modes, and the
         # translator always tags when it sets one of these, so untagged means setup
@@ -199,8 +207,13 @@ def run_case(conn, case):
     elif mode == "concat":
         # tcl's `append` joins with no separator at all
         got = "".join(render(x) for x in collected)
+    elif mode == "bind":
+        got = render(named.get(case.get("bind")))
     elif mode == "list":
-        got = render(collected)
+        if case.get("vars"):
+            got = render([named.get(v) for v in case["vars"]])
+        else:
+            got = render(collected)
     else:
         got = render(last)
     if matches(case.get("expected"), got):

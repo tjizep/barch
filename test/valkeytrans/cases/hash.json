@@ -171,7 +171,7 @@
   },
   {
    "name": "HGET against non existing key",
-   "expected": null,
+   "expected": "{} {}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "set rv {}\n        lappend rv [r hget smallhash __123123123__]\n        lappend rv [r hget bighash __123123123__]\n        set _ $rv"
@@ -210,9 +210,37 @@
   {
    "name": "HSETNX target key exists - small hash",
    "expected": "foo",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r hsetnx smallhash __123123123__ bar\n        set result [r hget smallhash __123123123__]\n        r hdel smallhash __123123123__\n        set _ $result"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "hsetnx",
+      "smallhash",
+      "__123123123__",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hget",
+      "smallhash",
+      "__123123123__"
+     ],
+     "as": "result",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hdel",
+      "smallhash",
+      "__123123123__"
+     ]
+    }
+   ],
+   "mode": "bind",
+   "bind": "result"
   },
   {
    "name": "HSETNX target key missing - big hash",
@@ -241,9 +269,37 @@
   {
    "name": "HSETNX target key exists - big hash",
    "expected": "foo",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r hsetnx bighash __123123123__ bar\n        set result [r hget bighash __123123123__]\n        r hdel bighash __123123123__\n        set _ $result"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "hsetnx",
+      "bighash",
+      "__123123123__",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hget",
+      "bighash",
+      "__123123123__"
+     ],
+     "as": "result",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hdel",
+      "bighash",
+      "__123123123__"
+     ]
+    }
+   ],
+   "mode": "bind",
+   "bind": "result"
   },
   {
    "name": "HSET/HMSET wrong number of args",
@@ -290,7 +346,7 @@
   },
   {
    "name": "HMGET against non existing key and fields",
-   "expected": null,
+   "expected": "{{} {}} {{} {}} {{} {}}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "set rv {}\n        lappend rv [r hmget doesntexist __123123123__ __456456456__]\n        lappend rv [r hmget smallhash __123123123__ __456456456__]\n        lappend rv [r hmget bighash __123123123__ __456456456__]\n        set _ $rv"
@@ -536,7 +592,7 @@
   },
   {
    "name": "HDEL and return value",
-   "expected": null,
+   "expected": "0 0 1 0 {} 1 0 {}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "set rv {}\n        lappend rv [r hdel smallhash nokey]\n        lappend rv [r hdel bighash nokey]\n        set k [lindex [array names smallhash *] 0]\n        lappend rv [r hdel smallhash $k]\n        lappend rv [r hdel smallhash $k]\n        lappend rv [r hget smallhash $k]\n        unset smallhash($k)\n        set k [lindex [array names bighash *] 0]\n        lappend rv [r hdel bighash $k]\n        lappend rv [r hdel bighash $k]\n        lappend rv [r hget bighash $k]\n        unset bighash($k)\n        set _ $rv"
@@ -594,7 +650,7 @@
      ]
     }
    ],
-   "mode": "asserts"
+   "mode": "last"
   },
   {
    "name": "HDEL - hash becomes empty before deleting all specified fields",
@@ -891,9 +947,37 @@
   {
    "name": "HINCRBY can detect overflows",
    "expected": "*overflow*",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set e {}\n        r hset hash n -9223372036854775484\n        assert {[r hincrby hash n -1] == -9223372036854775485}\n        catch {r hincrby hash n -10000} e\n        set e"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "hset",
+      "hash",
+      "n",
+      "-9223372036854775484"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "hincrby",
+      "hash",
+      "n",
+      "-1"
+     ],
+     "value": "-9223372036854775485"
+    },
+    {
+     "op": "catch",
+     "args": [
+      "hincrby",
+      "hash",
+      "n",
+      "-10000"
+     ]
+    }
+   ],
+   "mode": "err"
   },
   {
    "name": "HINCRBYFLOAT against non existing database key",
@@ -1183,9 +1267,46 @@
   {
    "name": "Test HINCRBYFLOAT for correct float representation (issue #2846)",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del myhash\n            assert {[r hincrbyfloat myhash float 1.23] eq {1.23}}\n            assert {[r hincrbyfloat myhash float 0.77] eq {2}}\n            assert {[r hincrbyfloat myhash float -0.1] eq {1.9}}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myhash"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "hincrbyfloat",
+      "myhash",
+      "float",
+      "1.23"
+     ],
+     "value": "1.23"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "hincrbyfloat",
+      "myhash",
+      "float",
+      "0.77"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "hincrbyfloat",
+      "myhash",
+      "float",
+      "-0.1"
+     ],
+     "value": "1.9"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "Hash ziplist of various encodings",

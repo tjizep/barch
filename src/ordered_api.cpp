@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <optional>
+#include <utility>
 #include "sharded_store.h"
 #include <map>
 #include <cmath>
@@ -165,6 +166,8 @@ void remove_ordered(caller& call, ordered_keys &thing) {
  * conversion::to_double is stricter than that and rejects "inf", which made ZINCRBY refuse
  * an increment redis stores happily.
  */
+static bool score_bound(art::value_type v, double& out);
+
 static bool read_score(art::value_type v, double& out) {
     std::string t(v.chars(), v.size);
     if (t.empty()) return false;
@@ -212,8 +215,16 @@ int ZADD(caller& call, const arg_t &argv) {
         --fkadded;
     };
 
-    auto before = t->get_size();
     auto container = conversion::convert(key);
+    query pfxq;
+    auto score_prefix = pfxq->create(art::ts_ordered_map, {container}, false);
+    bool incr_skipped = false;
+    double incr_result = 0;
+    int64_t added = 0;
+    int64_t changed = 0;
+    if (zspec.INCR && (argv.size() - zspec.fields_start) != 2) {
+        return call.syntax_error();
+    }
     for (size_t n = zspec.fields_start; n < argv.size(); n += 2) {
         auto k = argv[n];
         if (n + 1 >= argv.size()) {
@@ -234,13 +245,58 @@ int ZADD(caller& call, const arg_t &argv) {
             continue;
         }
 
+        auto member = conversion::convert(v);
+        auto member_ix = cmd_ZADD_qindex.create(art::ts_ordered_map, {IX_MEMBER, container, member});
+        bool exists = false;
+        double old_score = 0;
+        auto found = t->search(member_ix);
+        if (!found.null() && found.is_leaf) {
+            auto fl = found.const_leaf();
+            if (!fl->is_tomb() && !fl->deleted() && !fl->expired()) {
+                auto sk = fl->get_value();
+                if (sk.size >= score_prefix.size + numeric_key_size) {
+                    old_score = conversion::enc_bytes_to_dbl(
+                        sk.sub(score_prefix.size, numeric_key_size));
+                    exists = true;
+                }
+            }
+        }
+        if (zspec.INCR) {
+            double next = (exists ? old_score : 0) + sc;
+            if (std::isnan(next)) {
+                return call.push_error("resulting score is not a number (NaN)");
+            }
+            sc = next;
+            incr_result = sc;
+        }
+        if (exists) {
+            if (zspec.NX) {
+                if (zspec.INCR) incr_skipped = true;
+                continue;
+            }
+            if (zspec.GT && !(sc > old_score)) {
+                if (zspec.INCR) incr_skipped = true;
+                continue;
+            }
+            if (zspec.LT && !(sc < old_score)) {
+                if (zspec.INCR) incr_skipped = true;
+                continue;
+            }
+            if (sc != old_score) ++changed;
+        } else if (zspec.XX) {
+            if (zspec.INCR) incr_skipped = true;
+            continue;
+        } else {
+            ++added;
+            ++changed;
+        }
+
         // the score is encoded from the number already parsed rather than from the text
         // again. The text reader does not accept "inf", so a positive infinity was being
         // stored as the string "inf" - a component of a different shape - and every read
         // of that member afterwards missed it. -inf happened to survive, which is why the
         // two behaved differently
         auto score = conversion::comparable_key(sc);
-        auto member = conversion::convert(v);
         if (score.ctype() != art::tfloat && score.ctype() != art::tdouble) {
             r |= call.push_null();
             ++responses;
@@ -248,33 +304,21 @@ int ZADD(caller& call, const arg_t &argv) {
         }
 
         art::value_type qkey = cmd_ZADD_q1.create(art::ts_ordered_map, {container, score, member});
-        if (zspec.XX) {
-            t->update(qkey, [&](const art::node_ptr &old) -> art::node_ptr {
-                if (old.null()) return nullptr;
-
-                auto l = old.const_leaf();
-                return art::make_leaf(t->get_ap(), qkey, {}, l->expiry_ms(), l->is_volatile());
-            });
-        } else {
-            if (zspec.LFI) {
-                auto member_key = cmd_ZADD_qindex.create(art::ts_ordered_map, {IX_MEMBER, container, member}); //, score
-                t->insert({}, member_key, qkey, true, fcfk);
-                ++fkadded;
-            }
-
-            t->insert({}, qkey, {}, !zspec.NX, fc);
+        if (zspec.LFI) {
+            t->insert({}, member_ix, qkey, true, fcfk);
+            ++fkadded;
         }
+        t->insert({}, qkey, {}, true, fc);
         ++responses;
     }
     // a waiter on BZMPOP needs to know the set now has a member. Cheap when nobody is
     // waiting, and the only way a blocking pop on a zset ever wakes
     t->call_unblock(key.to_string());
-    auto current = t->get_tree_size();
-    if (zspec.CH) {
-        call.push_ll(current - before + updated - fkadded);
-    } else {
-        call.push_ll(current - before - fkadded);
+    if (zspec.INCR) {
+        if (incr_skipped) return call.push_null();
+        return call.push_double(incr_result);
     }
+    call.push_ll(zspec.CH ? changed : added);
 
     return call.ok();
 }
@@ -459,18 +503,29 @@ int ZCOUNT(caller& call, const arg_t& argv) {
     }
 
     auto container = conversion::convert(n, nlen);
-    auto mn = conversion::convert(smin, minlen, true);
-    auto mx = conversion::convert(smax, maxlen, true);
+    std::string min_s(smin, minlen), max_s(smax, maxlen);
+    bool open_min = false, open_max = false;
+    if (!min_s.empty() && min_s[0] == '(') { open_min = true; min_s.erase(0, 1); }
+    if (!max_s.empty() && max_s[0] == '(') { open_max = true; max_s.erase(0, 1); }
+    double lo = 0, hi = 0;
+    if (!read_score(art::value_type{min_s}, lo) || !read_score(art::value_type{max_s}, hi)) {
+        return call.push_error("min or max is not a float");
+    }
+    auto mn = conversion::convert(min_s, true);
+    auto mx = conversion::convert(max_s, true);
     query lq, uq, pq;
     auto lower = lq->create(art::ts_ordered_map, {container, mn});
-    auto prefix = pq->create(art::ts_ordered_map, {container});
-    auto upper = uq->create(art::ts_ordered_map, {container, mx});
+    auto prefix = pq->create(art::ts_ordered_map, {container}, false);
+    auto upper = uq->create(art::ts_ordered_map, {container, mx}, false);
     long long count = 0;
     art::iterator ai(t, lower);
     while (ai.ok()) {
         auto ik = ai.key();
-        if (!ik.starts_with(prefix.pref(1))) break;
+        if (!ik.starts_with(prefix)) break;
         if (ik.sub(0, prefix.size + numeric_key_size) <= upper) {
+            double sc = conversion::enc_bytes_to_dbl(ik.sub(prefix.size, numeric_key_size));
+            if (open_min && sc == lo) { ai.next(); continue; }
+            if (open_max && sc == hi) break;
             ++count;
         } else {
             break;
@@ -569,6 +624,8 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
     bool lex_open_start = false, lex_open_stop = false;
     // `-` and `+` are the ends of the range rather than members, so they bound nothing
     bool lex_from_start = false, lex_to_end = false;
+    bool score_open_start = false, score_open_stop = false;
+    std::string score_start(spec.start), score_stop(spec.stop);
     if (spec.BYLEX) {
         auto strip = [](std::string v, bool& open) -> std::string {
             if (v.empty()) return v;
@@ -582,9 +639,25 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         lex_to_end = (lex_stop == "+");
         if (!lex_from_start) lex_start = strip(lex_start, lex_open_start);
         if (!lex_to_end) lex_stop = strip(lex_stop, lex_open_stop);
+        // `+` as min or `-` as max is an empty range
+        if (lex_start == "+" || lex_stop == "-") {
+            if (spec.CARD || spec.REMOVE) return call.push_ll(0);
+            call.start_array();
+            call.end_array();
+            return call.ok();
+        }
+    } else {
+        if (!score_start.empty() && score_start[0] == '(') {
+            score_open_start = true;
+            score_start.erase(0, 1);
+        }
+        if (!score_stop.empty() && score_stop[0] == '(') {
+            score_open_stop = true;
+            score_stop.erase(0, 1);
+        }
     }
-    auto mn = conversion::convert(spec.BYLEX ? lex_start : std::string(spec.start), true);
-    auto mx = conversion::convert(spec.BYLEX ? lex_stop : std::string(spec.stop), true);
+    auto mn = conversion::convert(spec.BYLEX ? lex_start : score_start, true);
+    auto mx = conversion::convert(spec.BYLEX ? lex_stop : score_stop, true);
     query lq, uq, pq, tq, xq;
     art::value_type upper_exact;
     art::value_type lower;
@@ -615,7 +688,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
     heap::std_vector<std::pair<art::value_type, art::value_type> > bylex;
     heap::std_vector<art::value_type> rev;
     heap::vector<ordered_keys> removals;
-    if (!spec.REMOVE)
+    if (!spec.REMOVE && !spec.CARD)
         call.start_array();
 
     art::iterator ai(t,lower);
@@ -635,24 +708,60 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
             break;
         }
         art::value_type current_comp;
+        art::value_type score_key = v;
         if (spec.BYLEX) {
             current_comp = v.sub(0, prefix.size + mx.get_size() - 1);
-            v = ai.value(); // in case of bylex the value is a fk to by-score
+            score_key = ai.value();
         } else {
             current_comp = v.sub(0, prefix.size + numeric_key_size);
+            double sc = conversion::enc_bytes_to_dbl(v.sub(nprefix.size, numeric_key_size));
+            if (score_open_start) {
+                double lo = 0;
+                if (read_score(art::value_type{score_start}, lo) && sc == lo) {
+                    ai.next();
+                    continue;
+                }
+            }
+            if (score_open_stop) {
+                double hi = 0;
+                if (read_score(art::value_type{score_stop}, hi) && sc == hi) {
+                    break;
+                }
+            }
         }
-        // `+` has no upper bound to compare against, and an exclusive stop excludes the
-        // member it names rather than including it
         bool within = (spec.BYLEX && lex_to_end) || current_comp <= upper;
+        if (within && spec.BYLEX && (!lex_from_start || !lex_to_end)) {
+            auto member = score_key.sub(nprefix.size + numeric_key_size);
+            std::string mem = encoded_key_as_variant(member).s();
+            if (!mem.empty() && mem[0] == '$') mem.erase(0, 1);
+            if (!lex_from_start) {
+                int c = mem.compare(lex_start);
+                if (c < 0 || (lex_open_start && c == 0)) within = false;
+            }
+            if (within && !lex_to_end) {
+                int c = mem.compare(lex_stop);
+                if (c > 0) break;
+                if (lex_open_stop && c == 0) within = false;
+            }
+        }
         if (within) {
-            bool doprint = !spec.count;
-
-            if (spec.count && count >= spec.offset && (count - spec.offset < spec.count)) {
+            bool doprint = !spec.has_limit;
+            if (spec.CARD) {
                 doprint = true;
+            } else if (spec.REV && !spec.REMOVE) {
+                // collect the whole range; LIMIT is applied after reverse
+                if (spec.has_limit && spec.count == 0) doprint = false;
+                else doprint = true;
+            } else if (spec.has_limit) {
+                // COUNT 0 is empty, not "no limit". Negative COUNT is unlimited from OFFSET
+                if (spec.count == 0) doprint = false;
+                else if (spec.count < 0) doprint = count >= spec.offset;
+                else doprint = count >= spec.offset
+                               && (count - spec.offset < spec.count);
             }
             if (doprint) {
-                auto encoded_number = v.sub(nprefix.size, numeric_key_size);
-                auto member = v.sub(nprefix.size + numeric_key_size);
+                auto encoded_number = score_key.sub(nprefix.size, numeric_key_size);
+                auto member = score_key.sub(nprefix.size + numeric_key_size);
                 bool pushed = false;
 
                 if (spec.REV && !spec.REMOVE) {
@@ -660,7 +769,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                         bylex.push_back({member, encoded_number});
                         pushed = true;
                     } else {
-                        rev.push_back(v.sub(nprefix.size, numeric_key_size * 2));
+                        rev.push_back(score_key.sub(nprefix.size, numeric_key_size * 2));
                         pushed = true;
                     }
                 }
@@ -672,7 +781,9 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                     member_key.create(art::ts_ordered_map, {IX_MEMBER, container, member});
                     removals.push_back({score_key, member_key, art::value_type()});
                 }
-                if (!pushed && !spec.REMOVE) // bylex should be in correct order
+                if (!pushed && spec.CARD) {
+                    ++replies;
+                } else if (!pushed && !spec.REMOVE) // bylex should be in correct order
                 {
                     call.push_encoded_key(member);
                     ++replies;
@@ -688,14 +799,31 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         }
         ai.next();
     }
+    auto slice_begin = [&](size_t n) -> size_t {
+        if (!spec.has_limit) return 0;
+        if (spec.offset < 0) return 0;
+        return (size_t) spec.offset > n ? n : (size_t) spec.offset;
+    };
+    auto slice_end = [&](size_t n, size_t begin) -> size_t {
+        if (!spec.has_limit) return n;
+        if (spec.count == 0) return begin;
+        if (spec.count < 0) return n;
+        size_t want = begin + (size_t) spec.count;
+        return want > n ? n : want;
+    };
+    if (spec.CARD) {
+        return call.push_ll(replies);
+    }
     if (spec.BYLEX && !spec.REMOVE) {
         if (spec.REV) {
             std::sort(bylex.begin(), bylex.end(), [](auto &a, auto &b) {
                 return b < a;
             });
         }
-        for (auto &rec: bylex) {
-            /// TODO: min max filter
+        size_t b0 = slice_begin(bylex.size());
+        size_t b1 = slice_end(bylex.size(), b0);
+        for (size_t i = b0; i < b1; ++i) {
+            auto &rec = bylex[i];
             call.push_encoded_key(rec.first);
             ++replies;
             if (spec.has_withscores) {
@@ -707,7 +835,10 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         std::sort(rev.begin(), rev.end(), [](auto &a, auto &b) {
             return b < a;
         });
-        for (auto &rec: rev) {
+        size_t b0 = slice_begin(rev.size());
+        size_t b1 = slice_end(rev.size(), b0);
+        for (size_t i = b0; i < b1; ++i) {
+            auto &rec = rev[i];
             call.push_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
             ++replies;
             if (spec.has_withscores) {
@@ -739,6 +870,15 @@ int ZRANGE(caller& call, const arg_t& argv) {
     }
     if (!spec.BYSCORE && !spec.BYLEX) {
         return zrange_by_index(call, t, spec);
+    }
+    // ZRANGE ... BYSCORE REV writes the higher bound first. The walk is still
+    // low to high; REV only turns the reply around
+    if (spec.REV && spec.BYSCORE) {
+        double a = 0, b = 0;
+        if (score_bound(art::value_type{spec.start}, a)
+            && score_bound(art::value_type{spec.stop}, b) && a > b) {
+            std::swap(spec.start, spec.stop);
+        }
     }
     return zrange(call, t, spec);
 }
@@ -1671,6 +1811,8 @@ int ZREVRANGEBYSCORE(caller& call, const arg_t& argv) {
     // by score is in the name, so the index path never applies here - an earlier
     // edit to ZREVRANGE matched this function too and sent 3.01 down it
     spec.BYSCORE = true;
+    // the old command takes max then min; the walk is still low to high, then reversed
+    std::swap(spec.start, spec.stop);
     return zrange(call, t, spec);
 }
 int cmd_ZREVRANGEBYSCORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1720,6 +1862,28 @@ int cmd_ZRANGEBYLEX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, ZRANGEBYLEX);
 }
 extern "C"
+int ZLEXCOUNT(caller& call, const arg_t& argv) {
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.write_locked(argv[1]);
+    art::zrange_spec spec(argv);
+    if (spec.parse_options() != call.ok()) {
+        return call.push_error("syntax error");
+    }
+    if (!lex_bound(argv[2]) || !lex_bound(argv[3])) {
+        return call.push_error("min or max not valid string range item");
+    }
+    spec.REV = false;
+    spec.BYLEX = true;
+    spec.CARD = true;
+    return zrange(call, t, spec);
+}
+int cmd_ZLEXCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZLEXCOUNT);
+}
+extern "C"
 int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
     if (argv.size() < 4)
         return call.wrong_arity();
@@ -1731,6 +1895,8 @@ int ZREVRANGEBYLEX(caller& call, const arg_t& argv) {
     }
     spec.REV = true;
     spec.BYLEX = true;
+    // max then min, same as ZREVRANGEBYSCORE
+    std::swap(spec.start, spec.stop);
     return zrange(call, t, spec);
 }
 
@@ -1912,6 +2078,9 @@ int add_ordered_api(ValkeyModuleCtx *ctx) {
     if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGEBYLEX), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(ZLEXCOUNT), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(ZRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -1953,6 +2122,7 @@ void register_ordered_api(function_map& r) {
     r["ZREVRANGEBYSCORE"] = {::ZREVRANGEBYSCORE,{"read","orderedset","data"}};
     r["ZREMRANGEBYLEX"] = {::ZREMRANGEBYLEX,{"write","orderedset","data"}};
     r["ZRANGEBYLEX"] = {::ZRANGEBYLEX,{"read","orderedset","data"}};
+    r["ZLEXCOUNT"] = {::ZLEXCOUNT,{"read","orderedset","data"}};
     r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX,{"read","orderedset","data"}};
     r["ZRANK"] = {::ZRANK,{"read","orderedset","data"}};
     r["ZFASTRANK"] = {::ZFASTRANK,{"read","orderedset","data"}};

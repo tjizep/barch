@@ -606,6 +606,7 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
         bool GT{false};
         bool LT{false};
         bool CH{false};
+        bool INCR{false};
         bool LFI{true};
 
         int64_t which_flag_n{3};
@@ -618,47 +619,20 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
             if (argc < 3) {
                 return VALKEYMODULE_ERR;
             }
-            which_flag_n = has_enum({"nx", "xx"}, spos);
-            if (which_flag_n < 2) {
-                switch (which_flag_n) {
-                    case 0:
-                        NX = true;
-                        break;
-                    case 1:
-                        XX = true;
-                        break;
-                    default:
-                        break;
-                }
+            // redis takes these in any order before the first score
+            while (spos < argc) {
+                if (has("nx", spos)) NX = true;
+                else if (has("xx", spos)) XX = true;
+                else if (has("gt", spos)) GT = true;
+                else if (has("lt", spos)) LT = true;
+                else if (has("ch", spos)) CH = true;
+                else if (has("incr", spos)) INCR = true;
+                else if (has("lfi", spos)) LFI = true;
+                else break;
                 ++spos;
             }
-
-            which_flag_g = has_enum({"gt", "lt"}, spos);
-            if (which_flag_g < 2) {
-                switch (which_flag_g) {
-                    case 0:
-                        GT = true;
-                        break;
-                    case 1:
-                        LT = true;
-                        break;
-                    default:
-                        break;
-                }
-                ++spos;
-            }
-            while (true) {
-                unsigned lfi_ch = has_enum({"ch", "lfi"}, spos);
-                if (lfi_ch == 0) {
-                    CH = true;
-                    spos++;
-                }
-                if (lfi_ch == 1) {
-                    LFI = true;
-                    spos++;
-                }
-                if (lfi_ch == 2) break;
-            }
+            if (NX && XX) return VALKEYMODULE_ERR;
+            if (GT && LT) return VALKEYMODULE_ERR;
             fields_start = spos;
             return VALKEYMODULE_OK;
         }
@@ -828,7 +802,9 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
         bool REMOVE{false};
         bool BYSCORE{false};
         bool REV{false};
+        bool CARD{false};
         bool has_withscores{false};
+        bool has_limit{false};
         int64_t offset{0};
         int64_t count{0};
 
@@ -871,6 +847,7 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
                             return VALKEYMODULE_ERR;
                         }
                         count = tol(spos++);
+                        has_limit = true;
                         break;
                     case rev:
                         ++spos;

@@ -140,16 +140,77 @@
   {
    "name": "ZADD XX option without key - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            assert {[r zadd ztmp xx 10 x] == 0}\n            assert {[r type ztmp] eq {none}}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "xx",
+      "10",
+      "x"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "type",
+      "ztmp"
+     ],
+     "value": "none"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD XX existing key - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x\n            assert {[r zadd ztmp xx 20 y] == 0}\n            assert {[r zcard ztmp] == 1}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "xx",
+      "20",
+      "y"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD XX returns the number of elements actually added - $encoding",
@@ -161,37 +222,393 @@
   {
    "name": "ZADD XX updates existing elements score - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            r zadd ztmp xx 5 foo 11 x 21 y 40 zap\n            assert {[r zcard ztmp] == 3}\n            assert {[r zscore ztmp x] == 11}\n            assert {[r zscore ztmp y] == 21}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "xx",
+      "5",
+      "foo",
+      "11",
+      "x",
+      "21",
+      "y",
+      "40",
+      "zap"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "11"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "21"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD GT updates existing elements when new scores are greater - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp gt ch 5 foo 11 x 21 y 29 z] == 3}\n            assert {[r zcard ztmp] == 4}\n            assert {[r zscore ztmp x] == 11}\n            assert {[r zscore ztmp y] == 21}\n            assert {[r zscore ztmp z] == 30}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "ch",
+      "5",
+      "foo",
+      "11",
+      "x",
+      "21",
+      "y",
+      "29",
+      "z"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "11"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "21"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "z"
+     ],
+     "value": "30"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD LT updates existing elements when new scores are lower - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp lt ch 5 foo 11 x 21 y 29 z] == 2}\n            assert {[r zcard ztmp] == 4}\n            assert {[r zscore ztmp x] == 10}\n            assert {[r zscore ztmp y] == 20}\n            assert {[r zscore ztmp z] == 29}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "ch",
+      "5",
+      "foo",
+      "11",
+      "x",
+      "21",
+      "y",
+      "29",
+      "z"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "10"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "20"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "z"
+     ],
+     "value": "29"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD GT XX updates existing elements when new scores are greater and skips new elements - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp gt xx ch 5 foo 11 x 21 y 29 z] == 2}\n            assert {[r zcard ztmp] == 3}\n            assert {[r zscore ztmp x] == 11}\n            assert {[r zscore ztmp y] == 21}\n            assert {[r zscore ztmp z] == 30}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "xx",
+      "ch",
+      "5",
+      "foo",
+      "11",
+      "x",
+      "21",
+      "y",
+      "29",
+      "z"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "11"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "21"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "z"
+     ],
+     "value": "30"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD LT XX updates existing elements when new scores are lower and skips new elements - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp lt xx ch 5 foo 11 x 21 y 29 z] == 1}\n            assert {[r zcard ztmp] == 3}\n            assert {[r zscore ztmp x] == 10}\n            assert {[r zscore ztmp y] == 20}\n            assert {[r zscore ztmp z] == 29}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "xx",
+      "ch",
+      "5",
+      "foo",
+      "11",
+      "x",
+      "21",
+      "y",
+      "29",
+      "z"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "10"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "20"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "z"
+     ],
+     "value": "29"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD XX and NX are not compatible - $encoding",
@@ -221,16 +638,118 @@
   {
    "name": "ZADD NX with non existing key - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp nx 10 x 20 y 30 z\n            assert {[r zcard ztmp] == 3}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "nx",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "ztmp"
+     ],
+     "value": "3"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD NX only add new elements without updating old ones - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp nx 11 x 21 y 100 a 200 b] == 2}\n            assert {[r zscore ztmp x] == 10}\n            assert {[r zscore ztmp y] == 20}\n            assert {[r zscore ztmp a] == 100}\n            assert {[r zscore ztmp b] == 200}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "nx",
+      "11",
+      "x",
+      "21",
+      "y",
+      "100",
+      "a",
+      "200",
+      "b"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "10"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "20"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "a"
+     ],
+     "value": "100"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "b"
+     ],
+     "value": "200"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD GT and NX are not compatible - $encoding",
@@ -310,23 +829,306 @@
   {
    "name": "ZADD INCR LT/GT replies with nill if score not updated - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 28 x\n            assert {[r zadd ztmp lt incr 1 x] eq {}}\n            assert {[r zscore ztmp x] == 28}\n            assert {[r zadd ztmp gt incr -1 x] eq {}}\n            assert {[r zscore ztmp x] == 28}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "28",
+      "x"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "incr",
+      "1",
+      "x"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "28"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "incr",
+      "-1",
+      "x"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "28"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD INCR LT/GT with inf - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp +inf x -inf y\n\n            assert {[r zadd ztmp lt incr 1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n            assert {[r zadd ztmp gt incr -1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n            assert {[r zadd ztmp lt incr -1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n            assert {[r zadd ztmp gt incr 1 x] eq {}}\n            assert {[r zscore ztmp x] == inf}\n\n            assert {[r zadd ztmp lt incr 1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}\n            assert {[r zadd ztmp gt incr -1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}\n            assert {[r zadd ztmp lt incr -1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}\n            assert {[r zadd ztmp gt incr 1 y] eq {}}\n            assert {[r zscore ztmp y] == -inf}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "+inf",
+      "x",
+      "-inf",
+      "y"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "incr",
+      "1",
+      "x"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "inf"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "incr",
+      "-1",
+      "x"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "inf"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "incr",
+      "-1",
+      "x"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "inf"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "incr",
+      "1",
+      "x"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "inf"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "incr",
+      "1",
+      "y"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "-inf"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "incr",
+      "-1",
+      "y"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "-inf"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "lt",
+      "incr",
+      "-1",
+      "y"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "-inf"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "gt",
+      "incr",
+      "1",
+      "y"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "y"
+     ],
+     "value": "-inf"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD INCR works like ZINCRBY - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            r zadd ztmp INCR 15 x\n            assert {[r zscore ztmp x] == 25}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "INCR",
+      "15",
+      "x"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zscore",
+      "ztmp",
+      "x"
+     ],
+     "value": "25"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD INCR works with a single score-element pair - $encoding",
@@ -370,9 +1172,58 @@
   {
    "name": "ZADD CH option changes return value to all changed elements - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x 20 y 30 z\n            assert {[r zadd ztmp 11 x 21 y 30 z] == 0}\n            assert {[r zadd ztmp ch 12 x 22 y 30 z] == 2}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "11",
+      "x",
+      "21",
+      "y",
+      "30",
+      "z"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "ch",
+      "12",
+      "x",
+      "22",
+      "y",
+      "30",
+      "z"
+     ],
+     "value": "2"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZINCRBY calls leading to NaN result in error - $encoding",
@@ -435,7 +1286,7 @@
   },
   {
    "name": "ZADD - Variadic version base case - $encoding",
-   "expected": null,
+   "expected": "3 {a 10 b 20 c 30}",
    "steps": [
     {
      "op": "cmd",
@@ -474,7 +1325,7 @@
   },
   {
    "name": "ZADD - Return value is the number of actually added items - $encoding",
-   "expected": null,
+   "expected": "1 {x 5 a 10 b 20 c 30}",
    "steps": [
     {
      "op": "cmd",
@@ -707,7 +1558,7 @@
      ]
     }
    ],
-   "mode": "asserts"
+   "mode": "last"
   },
   {
    "name": "ZREM variadic version -- remove elements after key deletion - $encoding",
@@ -1354,16 +2205,450 @@
   {
    "name": "ZRANGEBYSCORE/ZREVRANGEBYSCORE/ZCOUNT basics - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "create_default_zset\n\n            # inclusive range\n            assert_equal {a b c} [r zrangebyscore zset -inf 2]\n            assert_equal {b c d} [r zrangebyscore zset 0 3]\n            assert_equal {d e f} [r zrangebyscore zset 3 6]\n            assert_equal {e f g} [r zrangebyscore zset 4 +inf]\n            assert_equal {c b a} [r zrevrangebyscore zset 2 -inf]\n            assert_equal {d c b} [r zrevrangebyscore zset 3 0]\n            assert_equal {f e d} [r zrevrangebyscore zset 6 3]\n            assert_equal {g f e} [r zrevrangebyscore zset +inf 4]\n            assert_equal 3 [r zcount zset 0 3]\n\n            # exclusive range\n            assert_equal {b}   [r zrangebyscore zset (-inf (2]\n            assert_equal {b c} [r zrangebyscore zset (0 (3]\n            assert_equal {e f} [r zrangebyscore zset (3 (6]\n            assert_equal {f}   [r zrangebyscore zset (4 (+inf]\n            assert_equal {b}   [r zrevrangebyscore zset (2 (-inf]\n            assert_equal {c b} [r zrevrangebyscore zset (3 (0]\n            assert_equal {f e} [r zrevrangebyscore zset (6 (3]\n            assert_equal {f}   [r zrevrangebyscore zset (+inf (4]\n            assert_equal 2 [r zcount zset (0 (3]\n\n            # test empty ranges\n            r zrem zset a\n            r zrem zset g\n\n            # inclusive\n            assert_equal {} [r zrangebyscore zset 4 2]\n            assert_equal {} [r zrangebyscore zset 6 +inf]\n            assert_equal {} [r zrangebyscore zset -inf -6]\n            assert_equal {} [r zrevrangebyscore zset +inf 6]\n            assert_equal {} [r zrevrangebyscore zset -6 -inf]\n\n            # exclusive\n            assert_equal {} [r zrangebyscore zset (4 (2]\n            assert_equal {} [r zrangebyscore zset 2 (2]\n            assert_equal {} [r zrangebyscore zset (2 2]\n            assert_equal {} [r zrangebyscore zset (6 (+inf]\n            assert_equal {} [r zrangebyscore zset (-inf (-6]\n            assert_equal {} [r zrevrangebyscore zset (+inf (6]\n            assert_equal {} [r zrevrangebyscore zset (-6 (-inf]\n\n            # empty inner range\n            assert_equal {} [r zrangebyscore zset 2.4 2.6]\n            assert_equal {} [r zrangebyscore zset (2.4 2.6]\n            assert_equal {} [r zrangebyscore zset 2.4 (2.6]\n            assert_equal {} [r zrangebyscore zset (2.4 (2.6]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "-inf",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f",
+      "+inf",
+      "g"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "-inf",
+      "2"
+     ],
+     "value": "a b c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "3"
+     ],
+     "value": "b c d"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "3",
+      "6"
+     ],
+     "value": "d e f"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "4",
+      "+inf"
+     ],
+     "value": "e f g"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "2",
+      "-inf"
+     ],
+     "value": "c b a"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "3",
+      "0"
+     ],
+     "value": "d c b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "6",
+      "3"
+     ],
+     "value": "f e d"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "+inf",
+      "4"
+     ],
+     "value": "g f e"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcount",
+      "zset",
+      "0",
+      "3"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(-inf",
+      "(2"
+     ],
+     "value": "b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(0",
+      "(3"
+     ],
+     "value": "b c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(3",
+      "(6"
+     ],
+     "value": "e f"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(4",
+      "(+inf"
+     ],
+     "value": "f"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "(2",
+      "(-inf"
+     ],
+     "value": "b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "(3",
+      "(0"
+     ],
+     "value": "c b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "(6",
+      "(3"
+     ],
+     "value": "f e"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "(+inf",
+      "(4"
+     ],
+     "value": "f"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcount",
+      "zset",
+      "(0",
+      "(3"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrem",
+      "zset",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrem",
+      "zset",
+      "g"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "4",
+      "2"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "6",
+      "+inf"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "-inf",
+      "-6"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "+inf",
+      "6"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "-6",
+      "-inf"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(4",
+      "(2"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "2",
+      "(2"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(2",
+      "2"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(6",
+      "(+inf"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(-inf",
+      "(-6"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "(+inf",
+      "(6"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "(-6",
+      "(-inf"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "2.4",
+      "2.6"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(2.4",
+      "2.6"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "2.4",
+      "(2.6"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "(2.4",
+      "(2.6"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGEBYSCORE with WITHSCORES - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "create_default_zset\n            assert_equal {b 1 c 2 d 3} [r zrangebyscore zset 0 3 withscores]\n            assert_equal {d 3 c 2 b 1} [r zrevrangebyscore zset 3 0 withscores]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "-inf",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f",
+      "+inf",
+      "g"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "3",
+      "withscores"
+     ],
+     "value": "b 1 c 2 d 3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "3",
+      "0",
+      "withscores"
+     ],
+     "value": "d 3 c 2 b 1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGEBYSCORE with LIMIT - $encoding",
@@ -1375,9 +2660,79 @@
   {
    "name": "ZRANGEBYSCORE with LIMIT and WITHSCORES - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "create_default_zset\n            assert_equal {e 4 f 5} [r zrangebyscore zset 2 5 LIMIT 2 3 WITHSCORES]\n            assert_equal {d 3 c 2} [r zrevrangebyscore zset 5 2 LIMIT 2 3 WITHSCORES]\n            assert_equal {} [r zrangebyscore zset 2 5 LIMIT 12 13 WITHSCORES]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "-inf",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f",
+      "+inf",
+      "g"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "2",
+      "5",
+      "LIMIT",
+      "2",
+      "3",
+      "WITHSCORES"
+     ],
+     "value": "e 4 f 5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "5",
+      "2",
+      "LIMIT",
+      "2",
+      "3",
+      "WITHSCORES"
+     ],
+     "value": "d 3 c 2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "2",
+      "5",
+      "LIMIT",
+      "12",
+      "13",
+      "WITHSCORES"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGEBYSCORE with non-value min or max - $encoding",
@@ -1419,23 +2774,772 @@
   {
    "name": "ZRANGEBYLEX/ZREVRANGEBYLEX/ZLEXCOUNT basics - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "create_default_lex_zset\n\n            # inclusive range\n            assert_equal {alpha bar cool} [r zrangebylex zset - \\[cool]\n            assert_equal {bar cool down} [r zrangebylex zset \\[bar \\[down]\n            assert_equal {great hill omega} [r zrangebylex zset \\[g +]\n            assert_equal {cool bar alpha} [r zrevrangebylex zset \\[cool -]\n            assert_equal {down cool bar} [r zrevrangebylex zset \\[down \\[bar]\n            assert_equal {omega hill great foo elephant down} [r zrevrangebylex zset + \\[d]\n            assert_equal 3 [r zlexcount zset \\[ele \\[h]\n\n            # exclusive range\n            assert_equal {alpha bar} [r zrangebylex zset - (cool]\n            assert_equal {cool} [r zrangebylex zset (bar (down]\n            assert_equal {hill omega} [r zrangebylex zset (great +]\n            assert_equal {bar alpha} [r zrevrangebylex zset (cool -]\n            assert_equal {cool} [r zrevrangebylex zset (down (bar]\n            assert_equal {omega hill} [r zrevrangebylex zset + (great]\n            assert_equal 2 [r zlexcount zset (ele (great]\n\n            # inclusive and exclusive\n            assert_equal {} [r zrangebylex zset (az (b]\n            assert_equal {} [r zrangebylex zset (z +]\n            assert_equal {} [r zrangebylex zset - \\[aaaa]\n            assert_equal {} [r zrevrangebylex zset \\[elez \\[elex]\n            assert_equal {} [r zrevrangebylex zset (hill (omega]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "-",
+      "[cool"
+     ],
+     "value": "alpha bar cool"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[bar",
+      "[down"
+     ],
+     "value": "bar cool down"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[g",
+      "+"
+     ],
+     "value": "great hill omega"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "[cool",
+      "-"
+     ],
+     "value": "cool bar alpha"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "[down",
+      "[bar"
+     ],
+     "value": "down cool bar"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[d"
+     ],
+     "value": "omega hill great foo elephant down"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "[ele",
+      "[h"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "-",
+      "(cool"
+     ],
+     "value": "alpha bar"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "(bar",
+      "(down"
+     ],
+     "value": "cool"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "(great",
+      "+"
+     ],
+     "value": "hill omega"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "(cool",
+      "-"
+     ],
+     "value": "bar alpha"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "(down",
+      "(bar"
+     ],
+     "value": "cool"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "(great"
+     ],
+     "value": "omega hill"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "(ele",
+      "(great"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "(az",
+      "(b"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "(z",
+      "+"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "-",
+      "[aaaa"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "[elez",
+      "[elex"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "(hill",
+      "(omega"
+     ],
+     "value": ""
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZLEXCOUNT advanced - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "create_default_lex_zset\n\n            assert_equal 9 [r zlexcount zset - +]\n            assert_equal 0 [r zlexcount zset + -]\n            assert_equal 0 [r zlexcount zset + \\[c]\n            assert_equal 0 [r zlexcount zset \\[c -]\n            assert_equal 8 [r zlexcount zset \\[bar +]\n            assert_equal 5 [r zlexcount zset \\[bar \\[foo]\n            assert_equal 4 [r zlexcount zset \\[bar (foo]\n            assert_equal 4 [r zlexcount zset (bar \\[foo]\n            assert_equal 3 [r zlexcount zset (bar (foo]\n            assert_equal 5 [r zlexcount zset - (foo]\n            assert_equal 1 [r zlexcount zset (maxstring +]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "-",
+      "+"
+     ],
+     "value": "9"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "+",
+      "-"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "+",
+      "[c"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "[c",
+      "-"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "[bar",
+      "+"
+     ],
+     "value": "8"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "[bar",
+      "[foo"
+     ],
+     "value": "5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "[bar",
+      "(foo"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "(bar",
+      "[foo"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "(bar",
+      "(foo"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "-",
+      "(foo"
+     ],
+     "value": "5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zlexcount",
+      "zset",
+      "(maxstring",
+      "+"
+     ],
+     "value": "1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGEBYLEX with LIMIT - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "create_default_lex_zset\n            assert_equal {alpha bar} [r zrangebylex zset - \\[cool LIMIT 0 2]\n            assert_equal {bar cool} [r zrangebylex zset - \\[cool LIMIT 1 2]\n            assert_equal {} [r zrangebylex zset \\[bar \\[down LIMIT 0 0]\n            assert_equal {} [r zrangebylex zset \\[bar \\[down LIMIT 2 0]\n            assert_equal {bar} [r zrangebylex zset \\[bar \\[down LIMIT 0 1]\n            assert_equal {cool} [r zrangebylex zset \\[bar \\[down LIMIT 1 1]\n            assert_equal {bar cool down} [r zrangebylex zset \\[bar \\[down LIMIT 0 100]\n            assert_equal {omega hill great foo elephant} [r zrevrangebylex zset + \\[d LIMIT 0 5]\n            assert_equal {omega hill great foo} [r zrevrangebylex zset + \\[d LIMIT 0 4]\n            assert_equal {great foo elephant} [r zrevrangebylex zset + \\[d LIMIT 2 3]\n            # zrangebylex uses different logic when offset > ZSKIPLIST_MAX_SEARCH\n            create_long_lex_zset\n            assert_equal {max null} [r zrangebylex zset - \\[tree LIMIT 12 2]\n            assert_equal {point query} [r zrangebylex zset - \\[tree LIMIT 15 2]\n            assert_equal {} [r zrangebylex zset \\[max \\[tree LIMIT 10 0]\n            assert_equal {} [r zrangebylex zset \\[max \\[tree LIMIT 12 0]\n            assert_equal {max} [r zrangebylex zset \\[max \\[null LIMIT 0 1]\n            assert_equal {null} [r zrangebylex zset \\[max \\[null LIMIT 1 1]\n            assert_equal {max null omega point} [r zrangebylex zset \\[max \\[point LIMIT 0 100]\n            assert_equal {tree sea result query point} [r zrevrangebylex zset + \\[o LIMIT 0 5]\n            assert_equal {tree sea result query} [r zrevrangebylex zset + \\[o LIMIT 0 4]\n            assert_equal {omega null max lip} [r zrevrangebylex zset + \\[l LIMIT 5 4]\n            assert_equal {elephant down} [r zrevrangebylex zset + \\[a LIMIT 15 2]\n            assert_equal {bar alpha} [r zrevrangebylex zset + - LIMIT 18 6]\n            assert_equal {hill great foo} [r zrevrangebylex zset + \\[c LIMIT 12 3]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "-",
+      "[cool",
+      "LIMIT",
+      "0",
+      "2"
+     ],
+     "value": "alpha bar"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "-",
+      "[cool",
+      "LIMIT",
+      "1",
+      "2"
+     ],
+     "value": "bar cool"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[bar",
+      "[down",
+      "LIMIT",
+      "0",
+      "0"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[bar",
+      "[down",
+      "LIMIT",
+      "2",
+      "0"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[bar",
+      "[down",
+      "LIMIT",
+      "0",
+      "1"
+     ],
+     "value": "bar"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[bar",
+      "[down",
+      "LIMIT",
+      "1",
+      "1"
+     ],
+     "value": "cool"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[bar",
+      "[down",
+      "LIMIT",
+      "0",
+      "100"
+     ],
+     "value": "bar cool down"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[d",
+      "LIMIT",
+      "0",
+      "5"
+     ],
+     "value": "omega hill great foo elephant"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[d",
+      "LIMIT",
+      "0",
+      "4"
+     ],
+     "value": "omega hill great foo"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[d",
+      "LIMIT",
+      "2",
+      "3"
+     ],
+     "value": "great foo elephant"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "island",
+      "0",
+      "jacket",
+      "0",
+      "key",
+      "0",
+      "lip",
+      "0",
+      "max",
+      "0",
+      "null",
+      "0",
+      "omega",
+      "0",
+      "point",
+      "0",
+      "query",
+      "0",
+      "result",
+      "0",
+      "sea",
+      "0",
+      "tree"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "-",
+      "[tree",
+      "LIMIT",
+      "12",
+      "2"
+     ],
+     "value": "max null"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "-",
+      "[tree",
+      "LIMIT",
+      "15",
+      "2"
+     ],
+     "value": "point query"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[max",
+      "[tree",
+      "LIMIT",
+      "10",
+      "0"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[max",
+      "[tree",
+      "LIMIT",
+      "12",
+      "0"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[max",
+      "[null",
+      "LIMIT",
+      "0",
+      "1"
+     ],
+     "value": "max"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[max",
+      "[null",
+      "LIMIT",
+      "1",
+      "1"
+     ],
+     "value": "null"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebylex",
+      "zset",
+      "[max",
+      "[point",
+      "LIMIT",
+      "0",
+      "100"
+     ],
+     "value": "max null omega point"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[o",
+      "LIMIT",
+      "0",
+      "5"
+     ],
+     "value": "tree sea result query point"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[o",
+      "LIMIT",
+      "0",
+      "4"
+     ],
+     "value": "tree sea result query"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[l",
+      "LIMIT",
+      "5",
+      "4"
+     ],
+     "value": "omega null max lip"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[a",
+      "LIMIT",
+      "15",
+      "2"
+     ],
+     "value": "elephant down"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "-",
+      "LIMIT",
+      "18",
+      "6"
+     ],
+     "value": "bar alpha"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebylex",
+      "zset",
+      "+",
+      "[c",
+      "LIMIT",
+      "12",
+      "3"
+     ],
+     "value": "hill great foo"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGEBYLEX with invalid lex range specifiers - $encoding",
@@ -1456,7 +3560,7 @@
      "args": [
       "zrangebylex",
       "fooz",
-      "\\[foo",
+      "[foo",
       "bar"
      ],
      "value": "*not*string*"
@@ -1467,7 +3571,7 @@
       "zrangebylex",
       "fooz",
       "foo",
-      "\\[bar"
+      "[bar"
      ],
      "value": "*not*string*"
     },
@@ -1477,7 +3581,7 @@
       "zrangebylex",
       "fooz",
       "+x",
-      "\\[bar"
+      "[bar"
      ],
      "value": "*not*string*"
     },
@@ -1487,7 +3591,7 @@
       "zrangebylex",
       "fooz",
       "-x",
-      "\\[bar"
+      "[bar"
      ],
      "value": "*not*string*"
     }
@@ -2449,7 +4553,7 @@
      ]
     }
    ],
-   "mode": "asserts"
+   "mode": "last"
   },
   {
    "name": "ZINTERSTORE with weights - $encoding",
@@ -3420,87 +5524,6 @@
    "mode": "asserts"
   },
   {
-   "name": "ZMPOP first non-empty set",
-   "expected": null,
-   "steps": [
-    {
-     "op": "cmd",
-     "args": [
-      "del",
-      "zmpop-a",
-      "zmpop-b"
-     ]
-    },
-    {
-     "op": "cmd",
-     "args": [
-      "zadd",
-      "zmpop-a",
-      "1",
-      "a",
-      "2",
-      "b",
-      "3",
-      "c"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "zmpop",
-      "1",
-      "zmpop-a",
-      "min"
-     ],
-     "value": "zmpop-a a 1"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "zmpop",
-      "1",
-      "zmpop-a",
-      "max",
-      "count",
-      "1"
-     ],
-     "value": "zmpop-a c 3"
-    },
-    {
-     "op": "cmd",
-     "args": [
-      "zadd",
-      "zmpop-b",
-      "4",
-      "d"
-     ]
-    },
-    {
-     "op": "expect",
-     "args": [
-      "zmpop",
-      "2",
-      "zmpop-a",
-      "zmpop-b",
-      "min"
-     ],
-     "value": "zmpop-a b 2"
-    },
-    {
-     "op": "expect",
-     "args": [
-      "zmpop",
-      "2",
-      "zmpop-a",
-      "zmpop-b",
-      "min"
-     ],
-     "value": "zmpop-b d 4"
-    }
-   ],
-   "mode": "asserts"
-  },
-  {
    "name": "ZMPOP propagate as pop with count command to replica",
    "expected": "",
    "skipped": true,
@@ -3777,7 +5800,7 @@
   },
   {
    "name": "ZMSCORE retrieve from empty set",
-   "expected": null,
+   "expected": "{} {}",
    "steps": [
     {
      "op": "cmd",
@@ -3800,7 +5823,7 @@
   },
   {
    "name": "ZMSCORE retrieve with missing member",
-   "expected": null,
+   "expected": "10 {}",
    "steps": [
     {
      "op": "cmd",
@@ -4411,23 +6434,115 @@
   {
    "name": "ZRANGESTORE basic",
    "expected": "a 1 b 2 c 3 d 4",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r flushall\n        r zadd z1{t} 1 a 2 b 3 c 4 d\n        set res [r zrangestore z2{t} z1{t} 0 -1]\n        assert_equal $res 4\n        r zrange z2{t} 0 -1 withscores"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "flushall"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z1{t}",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "0",
+      "-1"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "4"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "z2{t}",
+      "0",
+      "-1",
+      "withscores"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE RESP3",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r hello 3\n        assert_equal [r zrange z2{t} 0 -1 withscores] {{a 1.0} {b 2.0} {c 3.0} {d 4.0}}\n        r hello 2"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "3"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "z2{t}",
+      "0",
+      "-1",
+      "withscores"
+     ],
+     "value": "{a 1.0} {b 2.0} {c 3.0} {d 4.0}"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "2"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE range",
    "expected": "b 2 c 3",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r zrangestore z2{t} z1{t} 1 2]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "1",
+      "2"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "2"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "z2{t}",
+      "0",
+      "-1",
+      "withscores"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE BYLEX",
@@ -4446,16 +6561,71 @@
   {
    "name": "ZRANGESTORE BYSCORE LIMIT",
    "expected": "a 1 b 2",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r zrangestore z2{t} z1{t} 0 5 BYSCORE LIMIT 0 2]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "0",
+      "5",
+      "BYSCORE",
+      "LIMIT",
+      "0",
+      "2"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "2"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "z2{t}",
+      "0",
+      "-1",
+      "withscores"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE BYSCORE REV LIMIT",
    "expected": "c 3 d 4",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r zrangestore z2{t} z1{t} 5 0 BYSCORE REV LIMIT 0 2]\n        assert_equal $res 2\n        r zrange z2{t} 0 -1 withscores"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "5",
+      "0",
+      "BYSCORE",
+      "REV",
+      "LIMIT",
+      "0",
+      "2"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "2"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zrange",
+      "z2{t}",
+      "0",
+      "-1",
+      "withscores"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGE BYSCORE REV LIMIT",
@@ -4482,9 +6652,29 @@
   {
    "name": "ZRANGESTORE - src key missing",
    "expected": "0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r zrangestore z2{t} missing{t} 0 -1]\n        assert_equal $res 0\n        r exists z2{t}"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "missing{t}",
+      "0",
+      "-1"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "0"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "z2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE - src key wrong type",
@@ -4528,28 +6718,90 @@
      ]
     }
    ],
-   "mode": "asserts"
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE - empty range",
    "expected": "0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r zrangestore z2{t} z1{t} 5 6]\n        assert_equal $res 0\n        r exists z2{t}"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "5",
+      "6"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "0"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "z2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE BYLEX - empty range",
    "expected": "0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r zrangestore z2{t} z1{t} \\[f \\[g BYLEX]\n        assert_equal $res 0\n        r exists z2{t}"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "[f",
+      "[g",
+      "BYLEX"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "0"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "z2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGESTORE BYSCORE - empty range",
    "expected": "0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r zrangestore z2{t} z1{t} 5 6 BYSCORE]\n        assert_equal $res 0\n        r exists z2{t}"
+   "steps": [
+    {
+     "op": "expect",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "5",
+      "6",
+      "BYSCORE"
+     ],
+     "as": "res",
+     "collect": true,
+     "value": "0"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "z2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZRANGE BYLEX",
@@ -4560,8 +6812,8 @@
      "args": [
       "zrange",
       "z1{t}",
-      "\\[b",
-      "\\[c",
+      "[b",
+      "[c",
       "BYLEX"
      ]
     }

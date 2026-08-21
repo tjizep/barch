@@ -4,13 +4,43 @@
   {
    "name": "DEL against a single item",
    "expected": "",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r set x foo\n        assert {[r get x] eq \"foo\"}\n        r del x\n        r get x"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "x",
+      "foo"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "x"
+     ],
+     "value": "foo"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "x"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "Vararg DEL",
-   "expected": null,
+   "expected": "3 {{} {} {}}",
    "steps": [
     {
      "op": "cmd",
@@ -98,7 +128,7 @@
      ]
     }
    ],
-   "mode": "asserts"
+   "mode": "last"
   },
   {
    "name": "KEYS with pattern",
@@ -204,9 +234,49 @@
   {
    "name": "Zero length value in key. SET/GET/EXISTS",
    "expected": "10",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r set emptykey {}\n        set res [r get emptykey]\n        append res [r exists emptykey]\n        r del emptykey\n        append res [r exists emptykey]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "emptykey",
+      ""
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "emptykey"
+     ],
+     "as": "res",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "emptykey"
+     ],
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "emptykey"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "emptykey"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "concat"
   },
   {
    "name": "Commands pipelining",
@@ -277,16 +347,104 @@
   {
    "name": "RENAME against already existing key",
    "expected": "b0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r set mykey{t} a\n        r set mykey2{t} b\n        r rename mykey2{t} mykey{t}\n        set res [r get mykey{t}]\n        append res [r exists mykey2{t}]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey{t}",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey2{t}",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "rename",
+      "mykey2{t}",
+      "mykey{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "mykey{t}"
+     ],
+     "as": "res",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "mykey2{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "concat"
   },
   {
    "name": "RENAMENX basic usage",
    "expected": "foobar0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del mykey{t}\n        r del mykey2{t}\n        r set mykey{t} foobar\n        r renamenx mykey{t} mykey2{t}\n        set res [r get mykey2{t}]\n        append res [r exists mykey{t}]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "mykey2{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey{t}",
+      "foobar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "renamenx",
+      "mykey{t}",
+      "mykey2{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "mykey2{t}"
+     ],
+     "as": "res",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "mykey{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "concat"
   },
   {
    "name": "RENAMENX against already existing key",
@@ -322,9 +480,26 @@
   {
    "name": "RENAMENX against already existing key (2)",
    "expected": "foobar",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set res [r get mykey{t}]\n        append res [r get mykey2{t}]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "mykey{t}"
+     ],
+     "as": "res",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "mykey2{t}"
+     ],
+     "collect": true
+    }
+   ],
+   "mode": "concat"
   },
   {
    "name": "RENAME against non existing source key",
@@ -543,9 +718,50 @@
   {
    "name": "COPY does not create an expire if it does not exist",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r set mykey{t} foobar\n        assert {[r ttl mykey{t}] == -1}\n        r copy mykey{t} mynewkey{t} REPLACE\n        assert {[r ttl mynewkey{t}] == -1}\n        assert {[r get mynewkey{t}] eq \"foobar\"}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey{t}",
+      "foobar"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "ttl",
+      "mykey{t}"
+     ],
+     "value": "-1"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "copy",
+      "mykey{t}",
+      "mynewkey{t}",
+      "REPLACE"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "ttl",
+      "mynewkey{t}"
+     ],
+     "value": "-1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mynewkey{t}"
+     ],
+     "value": "foobar"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "COPY basic usage for list - $type",
@@ -666,9 +882,83 @@
   {
    "name": "MOVE does not create an expire if it does not exist",
    "expected": "OK",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r select 10\n        r flushdb\n        r select 9\n        r set mykey foo\n        r move mykey 10\n        assert {[r ttl mykey] == -2}\n        r select 10\n        assert {[r ttl mykey] == -1}\n        assert {[r get mykey] eq \"foo\"}\n        r select 9"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "select",
+      "10"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "flushdb"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "select",
+      "9"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "mykey",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "move",
+      "mykey",
+      "10"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "ttl",
+      "mykey"
+     ],
+     "value": "-2"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "select",
+      "10"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "ttl",
+      "mykey"
+     ],
+     "value": "-1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "get",
+      "mykey"
+     ],
+     "value": "foo"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "select",
+      "9"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "SET/GET keys in different DBs",

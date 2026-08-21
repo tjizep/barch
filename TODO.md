@@ -535,6 +535,8 @@
 
 112. [Done] Empty bulk RESP parse timed out zadd empty score [21-08-2026] Nr 105 3ca7c3c
 
+113. [Done] More valkey cases, and the zset/expire bugs they found [21-08-2026] Nr 106 cb02f90
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

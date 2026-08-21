@@ -394,7 +394,7 @@
   },
   {
    "name": "MGET against non existing key",
-   "expected": null,
+   "expected": "BAR {} FOO",
    "steps": [
     {
      "op": "cmd",
@@ -410,7 +410,7 @@
   },
   {
    "name": "MGET against non-string key",
-   "expected": null,
+   "expected": "BAR {} FOO {}",
    "steps": [
     {
      "op": "cmd",
@@ -443,7 +443,7 @@
   },
   {
    "name": "GETSET (set new value)",
-   "expected": null,
+   "expected": "{} xyz",
    "steps": [
     {
      "op": "cmd",
@@ -517,7 +517,7 @@
       "y{t}",
       "foo bar",
       "z{t}",
-      "x x x x x x x\\n\\n\\r\\n"
+      "x x x x x x x\n\n\r\n"
      ]
     },
     {
@@ -1561,59 +1561,367 @@
   },
   {
    "name": "Extended SET NX option",
-   "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        set v1 [r set foo 1 nx]\n        set v2 [r set foo 2 nx]\n        list $v1 $v2 [r get foo]"
+   "expected": "OK {} 1",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "1",
+      "nx"
+     ],
+     "as": "v1",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "2",
+      "nx"
+     ],
+     "as": "v2",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "_l2",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "v1",
+    "v2",
+    "_l2"
+   ]
   },
   {
    "name": "Extended SET XX option",
-   "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        set v1 [r set foo 1 xx]\n        r set foo bar\n        set v2 [r set foo 2 xx]\n        list $v1 $v2 [r get foo]"
+   "expected": "{} OK 2",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "1",
+      "xx"
+     ],
+     "as": "v1",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "2",
+      "xx"
+     ],
+     "as": "v2",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "_l2",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "v1",
+    "v2",
+    "_l2"
+   ]
   },
   {
    "name": "Extended SET GET option",
    "expected": "bar bar2",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        r set foo bar\n        set old_value [r set foo bar2 GET]\n        set new_value [r get foo]\n        list $old_value $new_value"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar2",
+      "GET"
+     ],
+     "as": "old_value",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "new_value",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "old_value",
+    "new_value"
+   ]
   },
   {
    "name": "Extended SET GET option with no previous value",
-   "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        set old_value [r set foo bar GET]\n        set new_value [r get foo]\n        list $old_value $new_value"
+   "expected": "{} bar",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "GET"
+     ],
+     "as": "old_value",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "new_value",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "old_value",
+    "new_value"
+   ]
   },
   {
    "name": "Extended SET GET option with XX",
    "expected": "bar baz",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        r set foo bar\n        set old_value [r set foo baz GET XX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "baz",
+      "GET",
+      "XX"
+     ],
+     "as": "old_value",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "new_value",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "old_value",
+    "new_value"
+   ]
   },
   {
    "name": "Extended SET GET option with XX and no previous value",
-   "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        set old_value [r set foo bar GET XX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+   "expected": "{} {}",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "GET",
+      "XX"
+     ],
+     "as": "old_value",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "new_value",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "old_value",
+    "new_value"
+   ]
   },
   {
    "name": "Extended SET GET option with NX",
-   "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        set old_value [r set foo bar GET NX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+   "expected": "{} bar",
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar",
+      "GET",
+      "NX"
+     ],
+     "as": "old_value",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "new_value",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "old_value",
+    "new_value"
+   ]
   },
   {
    "name": "Extended SET GET option with NX and previous value",
    "expected": "bar bar",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del foo\n        r set foo bar\n        set old_value [r set foo baz GET NX]\n        set new_value [r get foo]\n        list $old_value $new_value"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "bar"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "foo",
+      "baz",
+      "GET",
+      "NX"
+     ],
+     "as": "old_value",
+     "collect": true
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "get",
+      "foo"
+     ],
+     "as": "new_value",
+     "collect": true
+    }
+   ],
+   "mode": "list",
+   "vars": [
+    "old_value",
+    "new_value"
+   ]
   },
   {
    "name": "Extended SET GET with incorrect type should result in wrong type error",
@@ -1977,21 +2285,21 @@
   },
   {
    "name": "LCS indexes",
-   "expected": null,
+   "expected": "{{238 238} {239 239}} {{236 236} {238 238}} {{229 230} {236 237}} {{224 224} {235 235}} {{1 222} {13 234}}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "dict get [r LCS virus1{t} virus2{t} IDX] matches"
   },
   {
    "name": "LCS indexes with match len",
-   "expected": null,
+   "expected": "{{238 238} {239 239} 1} {{236 236} {238 238} 1} {{229 230} {236 237} 2} {{224 224} {235 235} 1} {{1 222} {13 234} 222}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "dict get [r LCS virus1{t} virus2{t} IDX WITHMATCHLEN] matches"
   },
   {
    "name": "LCS indexes with match len and minimum match len",
-   "expected": null,
+   "expected": "{{1 222} {13 234} 222}",
    "skipped": true,
    "why": "body uses tcl this translator does not read",
    "tcl": "dict get [r LCS virus1{t} virus2{t} IDX WITHMATCHLEN MINMATCHLEN 5] matches"

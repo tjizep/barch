@@ -3794,3 +3794,42 @@ bytes. Size headers still use the short scan.
 
 Verified with TestValkeyDifferential (barch agrees with valkey on
 all 231 faithful cases), TestRespShapes, and TestCompression.
+
+## 106. More valkey cases, and the zset/expire bugs they found [21-08-2026]
+
+*Was `TODO.md` entry 113.*
+
+The translator only understood a slice of the tcl, so 416 of 669 cases
+were stubs. About fifty of those were ordinary command sequences it
+refused for small reasons.
+
+`assert_equal` now takes either argument order. `set v [r cmd]` stores
+the reply, `list $v1 $v2 [r get foo]` builds a list from those names,
+and `set _ $result` is the value after cleanup. `assert {[r cmd] eq …}`
+is a single equality. `create_default_zset` and friends expand to DEL
+plus ZADD. `{OK {} 1}` is a real expectation - a regex that stopped at
+the first nested brace used to drop it. Bare `\[b` unescapes to `[b`,
+which is why ZRANGE BYLEX was unfaithful.
+
+The new cases found real bugs, not just missing translations:
+
+- EXPIRE answered -1 when a condition refused, which is TTL's "no
+  expire", not EXPIRE's 0/1. GT on a key with no TTL is an infinite
+  current deadline, so it never applies.
+- ZADD options only worked in one order, XX updated the new score key
+  (which did not exist), GT/LT/INCR were ignored, and CH counted tree
+  size including the member index.
+- ZREVRANGEBYSCORE took max then min and walked high to low, which is
+  empty. LIMIT ran on the forward walk, so REV LIMIT took the wrong
+  end. COUNT 0 was treated as no limit.
+- Exclusive `(0` was left on the bound and compared as text. ZLEXCOUNT
+  did not exist.
+
+Those are fixed. LPOS stays a stub - it is not implemented and a
+partial run left `mylist` dirty for Variadic RPUSH. ZRANGESTORE is
+accepted the same way TYPE is.
+
+665 cases, 303 translated. valkey trusts 278 of 302, 24 dropped as
+before. barch agrees on all 279 faithful cases, up from 231.
+
+Verified with TestValkeyDifferential and TestRespShapes.

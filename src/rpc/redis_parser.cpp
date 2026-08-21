@@ -68,7 +68,13 @@ namespace redis {
         }
         ptrdiff_t rem = (ptrdiff_t)(buffer_size - buffer_start);
         ptrdiff_t end = rem + 1;
-        if (hint > 0 && hint < end) { // first check hint so that we can avoid large scans
+        if (hint >= 0) {
+            // payload length, including 0 for `$0\r\n\r\n`. wait for the
+            // terminator at that offset; an earlier CRLF is data.
+            if (hint + 1 >= rem) {
+                item.size = rem;
+                return false;
+            }
             if (item.bytes[hint] == '\r' &&
                 item.bytes[hint + 1] == '\n') {
                 item.size = hint + 2;
@@ -76,10 +82,8 @@ namespace redis {
                 ++parameters_processed;
                 return true;
             }
-        }
-        // *2\r\n, $3\r\n, $16\r\n: CRLF sits in the first few bytes.
-        // memchr over the rest of a pipelined buffer was the GET-path cost.
-        if (rem >= 4) {
+        } else if (rem >= 4) {
+            // *2\r\n, $3\r\n, $16\r\n: CRLF sits in the first few bytes.
             ptrdiff_t maxc = rem < 14 ? rem - 1 : 13;
             for (ptrdiff_t i = 2; i < maxc; ++i) {
                 if (item.bytes[i] == '\r' && item.bytes[i + 1] == '\n') {

@@ -3770,3 +3770,27 @@ hash `find`.
 Verified with TestContainerKinds, TestRespShapes, TestReplyShape,
 TestRespClientLocal, TestCompression, TestAsyncPipeline, TestBarchList,
 and TestBarchPy.
+
+## 105. Empty bulk RESP parse timed out zadd empty score [21-08-2026]
+
+*Was `TODO.md` entry 112.*
+
+CI TestValkeyDifferential had one difference after the short-header
+scan in 111: zset.tcl "ZSET commands don't accept the empty strings
+as valid score" timed out on `zadd myzset "" abc`. Locally the same
+request logged "Bulk string size does not match" and then the socket
+went quiet for 15s.
+
+`$0\r\n\r\n` is an empty bulk. After the size header is consumed, the
+payload is the remaining `\r\n`, and `read_next_item(0)` passed hint
+0. The new short scan only started at byte 2, so it skipped that
+terminator and took the next item's CRLF. Hint 0 was also the default
+for "no length", so size headers and empty payloads used the same
+path.
+
+`buffer_get_valid_item` now takes -1 as no hint. A payload hint,
+including 0, waits for CRLF at that offset and does not scan earlier
+bytes. Size headers still use the short scan.
+
+Verified with TestValkeyDifferential (barch agrees with valkey on
+all 231 faithful cases), TestRespShapes, and TestCompression.

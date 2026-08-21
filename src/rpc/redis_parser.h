@@ -25,7 +25,7 @@ namespace redis {
 
     class redis_parser {
     private:
-        bool buffer_get_valid_item(art::value_type &item, ptrdiff_t hint = 0);
+        bool buffer_get_valid_item(art::value_type &item, ptrdiff_t hint = -1);
         std::string_view read_next_item();
         std::string_view read_next_item(ptrdiff_t hint) ;
         bool validate_array_size(const std::string_view& size_item);

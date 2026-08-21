@@ -3693,3 +3693,25 @@ The perf check only requires multi-thread ops to beat one thread
 when `shared_timed_mutex` itself scales on that box. Overlapping
 readers are still `test_many_readers`. Locally four readers remain
 ~3.8x one.
+
+## 102. GET one lookup and vector_stream memcpy [21-08-2026]
+
+*Was `TODO.md` entry 109.*
+
+RelWithDebInfo perf on unordered 6-thread pipeline-50 90/10 GET/SET
+(1M preloaded keys, 100% GET hits) had GET at 40% inclusive, split as
+`kind_of`/`exists` 22% then `search` 15% on the same encoded key.
+`vector_stream::write` was the hottest `_barch.so` self sample at 3.2%,
+a byte loop that reloaded `pos` from memory every iteration.
+
+GET now searches first and returns the string. A collection lives under
+a different prefix and may sit on another shard, so the WRONGTYPE probe
+only runs on a miss, the same shape EXISTS already used. A hit no longer
+takes two shared locks.
+
+`vector_stream::write` copies with `memcpy` after the resize. The null
+and empty checks are unchanged.
+
+Verified with TestContainerKinds (GET WRONGTYPE, string, miss),
+TestRespShapes, TestReplyShape, TestRespClientLocal, TestCompression,
+TestBarchList, TestBindings, and TestBarchPy.

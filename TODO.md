@@ -527,6 +527,8 @@
 
 108. [Done] locktest four-reader throughput fails on 2-core CI [21-08-2026] Nr 101 cf5ae9a
 
+109. [Done] GET one lookup and vector_stream memcpy [21-08-2026] Nr 102 b67c1ea
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

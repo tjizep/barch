@@ -7,6 +7,7 @@
 #include "sastam.h"
 #include <vector>
 #include <algorithm>
+#include <cstring>
 
 #include "ioutil.h"
 
@@ -52,14 +53,8 @@ struct vector_stream  {
         if (buf.size() < pos + size)
             buf.resize(pos + size);
 
-        size_t at = pos;
-
-        for (; at < pos + size; ++at) {
-            buf[at] = *data;
-            ++data;
-        }
-
-        pos = at;
+        memcpy(buf.data() + pos, data, size);
+        pos += size;
         assert(pos <= buf.size());
     }
 

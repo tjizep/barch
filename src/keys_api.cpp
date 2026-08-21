@@ -1760,13 +1760,12 @@ int GET(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
-    // a collection is not a string to read. STRLEN and GETRANGE said so already; GET did
-    // not, and answered nil as though the name were free - see TODO 59
-    if (wrong_type_here(store, k)) {
-        return call.push_error(barch::wrong_type_message());
-    }
     int r = call.ok();
     auto key = converted.get_value();
+    // Search first. A live string is the common case, and kind_of used to lock
+    // and look the same key up again before we got here. A collection lives
+    // under a different prefix and may be on another shard, so that probe
+    // only runs on a miss - see TODO 59
     bool found = store.search(key, [&](const art::node_ptr& n) {
         auto cl = n.const_leaf();
         auto vt = cl->get_value();
@@ -1776,6 +1775,9 @@ int GET(caller& call, const arg_t& argv) {
         r = call.push_vt(vt);
     });
     if (found) return r;
+    if (barch::kind_of_container(store, k) != barch::container_kind::none) {
+        return call.push_error(barch::wrong_type_message());
+    }
     if (!call.kspace()->has_foreign())
         return call.push_null();
     if (call.is_collecting_exec())

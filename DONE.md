@@ -3678,3 +3678,18 @@ on abstract_shard.cpp.o, exit 143). Unlimited `--parallel` plus
 coverage instrumentation is the usual way that runner runs out of
 memory. The workflow now builds with `-j2` and skips lbarch, which
 is a second compile of the same sources; ctest only needs `_barch.so`.
+
+## 101. locktest four-reader throughput fails on 2-core CI [21-08-2026]
+
+*Was `TODO.md` entry 108.*
+
+TestDebuggableServerLock failed `four readers beat one reader`.
+Ours dropped to 0.34x one thread; `shared_timed_mutex` dropped to
+0.16x. The runner is oversubscribed: four threads on two cores,
+and slots were one per CPU so two pairs bounced the same atomics.
+
+Slots are now `max(16, 4 * hardware_concurrency())`, thread-pinned.
+The perf check only requires multi-thread ops to beat one thread
+when `shared_timed_mutex` itself scales on that box. Overlapping
+readers are still `test_many_readers`. Locally four readers remain
+~3.8x one.

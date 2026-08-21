@@ -525,6 +525,8 @@
 
 107. [Done] Coverage CI killed mid-compile (exit 143) [20-08-2026] Nr 100 2612f00
 
+108. [Done] locktest four-reader throughput fails on 2-core CI [21-08-2026] Nr 101 cf5ae9a
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

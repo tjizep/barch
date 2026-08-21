@@ -83,7 +83,7 @@ private:
 
     std::mutex cv_mtx;
     std::condition_variable cv;
-    size_t num_cores{1};
+    size_t num_slots{1};
     mutable std::atomic<size_t> slot_ticket{0};
 
 #ifdef BARCH_LOCK_DEBUG
@@ -99,10 +99,10 @@ private:
     size_t slot() const noexcept {
         int s = tls_slot;
         if (s < 0) {
-            s = static_cast<int>(slot_ticket.fetch_add(1, std::memory_order_relaxed) % num_cores);
+            s = static_cast<int>(slot_ticket.fetch_add(1, std::memory_order_relaxed) % num_slots);
             tls_slot = s;
         }
-        return static_cast<size_t>(s) % num_cores;
+        return static_cast<size_t>(s) % num_slots;
     }
 
     bool holds_this_shared() const noexcept {
@@ -185,7 +185,7 @@ private:
     }
 
     bool readers_drained() const noexcept {
-        for (size_t i = 0; i < num_cores; ++i) {
+        for (size_t i = 0; i < num_slots; ++i) {
             if (core_slots[i].reader_count.load(std::memory_order_seq_cst) != 0)
                 return false;
         }
@@ -322,10 +322,17 @@ private:
 
 public:
     explicit debuggable_server_lock(size_t /*hierarchy_id*/ = 0) {
-        num_cores = std::thread::hardware_concurrency();
-        if (num_cores == 0)
-            num_cores = 1;
-        core_slots = std::vector<CoreReaderSlot>(num_cores);
+        // thread-pinned slots, not one per CPU. four readers on a 2-core
+        // box otherwise share two atomics and look exclusive.
+        size_t hw = std::thread::hardware_concurrency();
+        if (hw == 0)
+            hw = 1;
+        num_slots = hw * 4;
+        if (num_slots < 16)
+            num_slots = 16;
+        if (num_slots > 256)
+            num_slots = 256;
+        core_slots = std::vector<CoreReaderSlot>(num_slots);
     }
 
     debuggable_server_lock(const debuggable_server_lock&) = delete;
@@ -386,7 +393,7 @@ public:
 
         ss << "reader slots (count, last tid):\n";
         bool any = false;
-        for (size_t i = 0; i < num_cores; ++i) {
+        for (size_t i = 0; i < num_slots; ++i) {
             int32_t c = core_slots[i].reader_count.load(std::memory_order_relaxed);
             uint32_t tid = core_slots[i].last_tid.load(std::memory_order_relaxed);
             if (c == 0 && tid == 0)

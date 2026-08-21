@@ -382,25 +382,31 @@ void test_perf() {
     debuggable_server_lock ours;
     std::shared_timed_mutex stdm;
 
+    unsigned hw = std::thread::hardware_concurrency();
+    int t = (hw >= 4) ? 4 : 2;
+
     uint64_t o1 = read_ops(ours, 1, ms);
-    uint64_t o4 = read_ops(ours, 4, ms);
+    uint64_t ot = read_ops(ours, t, ms);
     uint64_t s1 = read_ops(stdm, 1, ms);
-    uint64_t s4 = read_ops(stdm, 4, ms);
+    uint64_t st = read_ops(stdm, t, ms);
 
-    std::printf("read ops in %d ms\n", ms);
+    std::printf("read ops in %d ms (hw=%u, compare %d threads)\n", ms, hw, t);
     std::printf("  ours  1 thread: %llu\n", (unsigned long long)o1);
-    std::printf("  ours  4 threads: %llu (%.2fx vs 1)\n",
-                (unsigned long long)o4, o1 ? (double)o4 / (double)o1 : 0.0);
+    std::printf("  ours  %d threads: %llu (%.2fx vs 1)\n", t,
+                (unsigned long long)ot, o1 ? (double)ot / (double)o1 : 0.0);
     std::printf("  std   1 thread: %llu\n", (unsigned long long)s1);
-    std::printf("  std   4 threads: %llu (%.2fx vs 1)\n",
-                (unsigned long long)s4, s1 ? (double)s4 / (double)s1 : 0.0);
-    if (s4)
-        std::printf("  ours/std at 4 threads: %.2fx\n", (double)o4 / (double)s4);
+    std::printf("  std   %d threads: %llu (%.2fx vs 1)\n", t,
+                (unsigned long long)st, s1 ? (double)st / (double)s1 : 0.0);
+    if (st)
+        std::printf("  ours/std at %d threads: %.2fx\n", t, (double)ot / (double)st);
 
-    expect(o4 > o1, "four readers beat one reader (shared, not exclusive)");
-    // a 50x hole against the standard lock is a bug, not "a bit slower"
-    if (s4 > 0)
-        expect(o4 * 50 > s4, "four-reader throughput is within 50x of shared_timed_mutex");
+    // overlapping readers are already checked in test_many_readers. this
+    // only requires scaling when the machine itself scales (std does).
+    // 2-core CI oversubscribes 4 threads and std drops too (0.16x there).
+    if (st > s1)
+        expect(ot > o1, "readers scale when the machine does (shared, not exclusive)");
+    if (st > 0)
+        expect(ot * 50 > st, "reader throughput is within 50x of shared_timed_mutex");
 }
 
 }

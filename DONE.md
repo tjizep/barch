@@ -3715,3 +3715,58 @@ and empty checks are unchanged.
 Verified with TestContainerKinds (GET WRONGTYPE, string, miss),
 TestRespShapes, TestReplyShape, TestRespClientLocal, TestCompression,
 TestBarchList, TestBindings, and TestBarchPy.
+
+## 103. Parser views, shared-lock fast path, GET bulk write [21-08-2026]
+
+*Was `TODO.md` entry 110.*
+
+The second RelWithDebInfo profile had the parser at 9% (`fast_float`
+on tiny RESP integers, every bulk string copied into `std::string`),
+vdso `clock_gettime` at 2.3% on every shared acquire, and GET building
+a `$`-prefixed string then copying it again in `rwrite`.
+
+The parser now keeps offsets into the recv buffer and only builds
+`string_view`s when a request is complete. MULTI and async still copy
+to owned strings. Clearing the buffer between TCP reads had to wait
+until the parser is idle: a TRAIN with ~550 args spans two reads, and
+clearing mid-request made `params[0]` a slice of the next packet
+(`unknown command [NTIAL]`). Integers use a digit loop, not
+`fast_float`.
+
+`try_lock_shared()` does the uncontended increment without a clock.
+`abstract_shard::lock_shared` tries that first and only then the
+60s timed path. `try_lock_shared_for` also does one untimed attempt
+before `steady_clock::now()`.
+
+GET `push_bulk` writes `$<len>\r\n` + value + `\r\n` into the
+session stream from the leaf, under the lock. MULTI/EXEC still go
+through `push_vt`. Lengths use `std::to_chars` on the stack.
+
+Verified with locktest, TestContainerKinds, TestRespShapes,
+TestReplyShape, TestRespClientLocal, TestCompression (the TRAIN
+split), TestAsyncPipeline, TestBarchList, and TestBarchPy.
+
+## 104. Command cache, short headers, bulk header, skip empty repl [21-08-2026]
+
+*Was `TODO.md` entry 111.*
+
+Third RelWithDebInfo profile after 110 still had run_params at 2.5%
+self (a `std::string` and `toupper` on every GET),
+`buffer_get_valid_item` memchr-ing a pipelined buffer for `*2\r\n` /
+`$3\r\n`, `rwrite_bulk` as five `writep`s, and every SET copying the
+pipeline into strings for `repl::call` with no replicas.
+
+The same-command cache now compares the recv view to `prev_cn` and
+skips the string when memtier already sent `GET`. Size headers look
+for CRLF in the first 13 bytes before `memchr`. Bulk replies write
+`$len\r\n` in one stack buffer. `repl::call` only runs when
+`has_destinations()`.
+
+Release unordered 6t p50 90/10 stayed in the same band as 110
+(7.09M / 7.27M / 7.03M 20s vs 7.11M before). 80/20 6.88M vs 6.99M.
+The remaining CPU is the lookup: `basic_resolve`, `get_shard_index`,
+hash `find`.
+
+Verified with TestContainerKinds, TestRespShapes, TestReplyShape,
+TestRespClientLocal, TestCompression, TestAsyncPipeline, TestBarchList,
+and TestBarchPy.

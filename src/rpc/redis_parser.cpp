@@ -8,21 +8,53 @@
 #include "sastam.h"
 #include "statistics.h"
 #include "asio/buffer.hpp"
-#include <charconv>
-#include <fast_float/fast_float.h>
+#include <cstdint>
+#include <limits>
 namespace redis {
-    template<typename T>
-    bool to_t(const std::string_view& v, T &i) {
-
-        auto ianswer = fast_float::from_chars(v.data(), v.data() + v.size(), i);
-        return (ianswer.ec == std::errc() && ianswer.ptr == v.data() + v.size()) ;
+    enum {
+        state_start = 0,
+        state_array_size,
+        state_bstr_size,
+        state_bstr,
+        state_crlf,
+        state_end,
+        state_error,
+        state_max
+    };
+    // RESP array and bulk lengths are small integers. fast_float is for
+    // real numbers; a digit loop is enough here and showed up at ~2% self
+    static bool parse_resp_int32(std::string_view v, int32_t& out) {
+        if (v.empty()) return false;
+        const char* p = v.data();
+        const char* e = p + v.size();
+        bool neg = false;
+        if (*p == '-') {
+            neg = true;
+            ++p;
+            if (p == e) return false;
+        }
+        uint32_t acc = 0;
+        for (; p != e; ++p) {
+            unsigned d = (unsigned char)*p - '0';
+            if (d > 9) return false;
+            if (acc > (uint32_t)std::numeric_limits<int32_t>::max() / 10)
+                return false;
+            acc = acc * 10 + d;
+        }
+        if (neg) {
+            if (acc > (uint32_t)std::numeric_limits<int32_t>::max() + 1)
+                return false;
+            out = acc == (uint32_t)std::numeric_limits<int32_t>::max() + 1
+                      ? std::numeric_limits<int32_t>::min()
+                      : -(int32_t)acc;
+        } else {
+            if (acc > (uint32_t)std::numeric_limits<int32_t>::max())
+                return false;
+            out = (int32_t)acc;
+        }
+        return true;
     }
-    template<typename T>
-    bool to_ts(const std::string_view& sv, T &i) {
-
-        auto result = std::from_chars(sv.data(), sv.data() + sv.size(), i);
-        return !(result.ec == std::errc::invalid_argument) ;
-    }
+    static constexpr uint32_t k_null_bulk = std::numeric_limits<uint32_t>::max();
     /**
      * If there is a valid (CRLF terminated) item in buffer,
      * populate 'item' with it and return true.
@@ -34,7 +66,8 @@ namespace redis {
             item.size = buffer_size - buffer_start;
             return false;
         }
-        ptrdiff_t end = buffer_size - buffer_start + 1;
+        ptrdiff_t rem = (ptrdiff_t)(buffer_size - buffer_start);
+        ptrdiff_t end = rem + 1;
         if (hint > 0 && hint < end) { // first check hint so that we can avoid large scans
             if (item.bytes[hint] == '\r' &&
                 item.bytes[hint + 1] == '\n') {
@@ -42,6 +75,19 @@ namespace redis {
                 buffer_start += hint + 2;
                 ++parameters_processed;
                 return true;
+            }
+        }
+        // *2\r\n, $3\r\n, $16\r\n: CRLF sits in the first few bytes.
+        // memchr over the rest of a pipelined buffer was the GET-path cost.
+        if (rem >= 4) {
+            ptrdiff_t maxc = rem < 14 ? rem - 1 : 13;
+            for (ptrdiff_t i = 2; i < maxc; ++i) {
+                if (item.bytes[i] == '\r' && item.bytes[i + 1] == '\n') {
+                    item.size = i + 2;
+                    buffer_start += i + 2;
+                    ++parameters_processed;
+                    return true;
+                }
             }
         }
         item.size = 2;
@@ -63,8 +109,10 @@ namespace redis {
     }
 
     void redis_parser::add_data(const char * data, size_t len) {
-        //buffer.append(data, len);
-        if (buffer_size >= 2 && buffer_start >= buffer_size) {
+        // only drop a consumed buffer between requests. a partial parse
+        // holds offsets into full_buffer, so clearing here used to make
+        // params[0] a slice of the next packet
+        if (state == state_start && item_nr == 0 && buffer_start >= buffer_size) {
             buffer_start = 0;
             full_buffer.clear();
             buffer_size = 0;
@@ -158,16 +206,6 @@ namespace redis {
         return bstr[len-2] == '\r' && bstr[len-1] == '\n';
 
     }
-    enum {
-        state_start = 0,
-        state_array_size,
-        state_bstr_size,
-        state_bstr,
-        state_crlf,
-        state_end,
-        state_error,
-        state_max
-    };
 
     size_t redis_parser::get_max_buffer_size() const {
         return max_buffer_size;
@@ -186,19 +224,30 @@ namespace redis {
                         throw_exception<std::domain_error>("invalid array size");
                     }
                     auto sv = std::string_view{arr_size_item.data()+1, arr_size_item.length()-3};
-                    if (!to_t(sv, size)) {
+                    int32_t n = 0;
+                    if (!parse_resp_int32(sv, n) || n < 0) {
                         throw_exception<std::domain_error>("invalid array size");
                     }
+                    size = n;
                     state = state_array_size;
                 }
                     break;
                 case state_array_size:
-                    req.resize(size);
+                    spans.resize((size_t)size);
                     state = state_bstr;
                     item_nr = 0;
                     break;
                 case state_bstr: {
                     if (item_nr >= size) {
+                        req.resize((size_t)size);
+                        const char* base = full_buffer.data();
+                        for (int i = 0; i < size; ++i) {
+                            auto [off, len] = spans[(size_t)i];
+                            if (off == k_null_bulk)
+                                req[(size_t)i] = std::string_view{"NULL", 4};
+                            else
+                                req[(size_t)i] = std::string_view{base + off, len};
+                        }
                         state = state_start;
                         size = 0;
                         item_nr = 0;
@@ -216,14 +265,12 @@ namespace redis {
                     }
 
                     auto sv = std::string_view{bstr_size_item.data()+1, bstr_size_item.length()-3};
-                    if (!to_t(sv, bstr_size)) {
+                    if (!parse_resp_int32(sv, bstr_size)) {
                         throw_exception<std::domain_error>("invalid array size");
                     }
 
                     if (bstr_size == -1) {
-                        // null bulk string
-                        static const char null[] = "NULL";
-                        req[item_nr] = null;
+                        spans[(size_t)item_nr] = {k_null_bulk, 4};
                         ++item_nr;
                         continue;
                     }
@@ -234,8 +281,7 @@ namespace redis {
                 }
                     break;
                 case state_bstr_size: {
-                    // Read the bulk string
-                    bstr_item = read_next_item(bstr_size); // TODO: this could be more efficient if we have a length hint and check if the \r\n exists at that point (instead of scanning the entire string)
+                    bstr_item = read_next_item(bstr_size);
                     if (bstr_item.empty()) {
                         return empty;
                     }
@@ -246,8 +292,10 @@ namespace redis {
                     if (bstr.length() != (size_t)bstr_size) {
                         throw_exception<std::domain_error>("Bulk string size does not match");
                     }
-                    *(char*)(bstr.data()+bstr.size()) = 0x00; // we need to do this because string views are not null terminated
-                    req[item_nr++] = string_param_t{bstr.data(),bstr.length()};
+                    *(char*)(bstr.data()+bstr.size()) = 0x00;
+                    auto off = (uint32_t)(bstr.data() - full_buffer.data());
+                    spans[(size_t)item_nr] = {off, (uint32_t)bstr.length()};
+                    ++item_nr;
 
                     state = state_bstr;
                 }

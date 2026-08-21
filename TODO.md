@@ -529,6 +529,10 @@
 
 109. [Done] GET one lookup and vector_stream memcpy [21-08-2026] Nr 102 b67c1ea
 
+110. [Done] Parser views, shared-lock fast path, GET bulk write [21-08-2026] Nr 103 47d2f19
+
+111. [Done] Command cache, short headers, bulk header, skip empty repl [21-08-2026] Nr 104 47d2f19
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

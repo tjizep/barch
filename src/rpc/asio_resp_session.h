@@ -169,11 +169,12 @@ namespace barch {
         }
 
         struct asynch_call_context {
-            asynch_call_context(const rpc_caller& caller, barch_function f,std::vector<redis::string_param_t> params, const std::string &cn ): caller(caller), f(std::move(f)), params(std::move(params)), cn(cn) {}
+            asynch_call_context(const rpc_caller& caller, barch_function f, const std::vector<redis::string_param_t>& params, const std::string &cn )
+                : caller(caller), f(std::move(f)), params(params.begin(), params.end()), cn(cn) {}
             rpc_caller caller{};
             barch_function f{};
             vector_stream stream{}; // the stream buffer needs to stau alive while the call completes
-            std::vector<redis::string_param_t> params{};
+            std::vector<std::string> params{};
             std::string cn;
         };
         typedef std::shared_ptr<asynch_call_context> asynch_call_context_ptr;
@@ -181,42 +182,48 @@ namespace barch {
         template<typename Stream>
         void run_params(Stream& ostream, const std::vector<redis::string_param_t>& params,heap::vector<asynch_call_context_ptr> &asynch_calls) {
 
-            std::string cn{ params[0]};
-
-            auto colon = cn.find_last_of(':');
+            std::string_view raw = params[0];
+            std::string cn;
             key_space_ptr old_spc;
             bool should_reset_space = false;
             try {
-                if (colon != std::string::npos && colon < cn.size()-1) {
-                    old_spc = caller.kspace();
-                    std::string space = cn.substr(0,colon);
-                    cn = cn.substr(colon+1);
+                // memtier and redis-benchmark send GET already uppercased, so the
+                // same-command cache is a pointer compare against prev_cn and
+                // skips the string + toupper. Lowercase still folds below.
+                bool cached = raw.find(':') == std::string_view::npos && raw == prev_cn;
+                if (!cached) {
+                    cn.assign(raw);
+                    auto colon = cn.find_last_of(':');
+                    if (colon != std::string::npos && colon < cn.size()-1) {
+                        old_spc = caller.kspace();
+                        std::string space = cn.substr(0,colon);
+                        cn = cn.substr(colon+1);
 
-                    if (!old_spc || old_spc->get_canonical_name() != space) {
+                        if (!old_spc || old_spc->get_canonical_name() != space) {
 
-                        caller.set_kspace(barch::get_keyspace(space));
-                        should_reset_space = true;
+                            caller.set_kspace(barch::get_keyspace(space));
+                            should_reset_space = true;
+                        }
                     }
-                }
 
-
-                // command names are case insensitive, as they are in redis. The table is
-                // keyed in upper case and the lookup used to be an exact match on
-                // whatever arrived, so `set` and `Set` were unknown commands while `SET`
-                // worked. Every example in redis's own documentation is lower case, and
-                // so is the whole of valkey's test suite, which is how this was found.
-                // Folded here rather than above so the key space in a `space:CMD` prefix
-                // keeps the case it was given - space names are not case insensitive
-                for (auto& ch : cn) {
-                    ch = (char) toupper((unsigned char) ch);
-                }
-                if (prev_cn != cn) {
-                    ic = barch_functions->find(cn);
-                    prev_cn = cn;
-                    if (ic != barch_functions->end() &&
-                        !is_authorized(ic->second.cats,caller.get_acl())) {
-                        redis::rwrite(ostream, error{"not authorized"});
-                        return ;
+                    // command names are case insensitive, as they are in redis. The table is
+                    // keyed in upper case and the lookup used to be an exact match on
+                    // whatever arrived, so `set` and `Set` were unknown commands while `SET`
+                    // worked. Every example in redis's own documentation is lower case, and
+                    // so is the whole of valkey's test suite, which is how this was found.
+                    // Folded here rather than above so the key space in a `space:CMD` prefix
+                    // keeps the case it was given - space names are not case insensitive
+                    for (auto& ch : cn) {
+                        ch = (char) toupper((unsigned char) ch);
+                    }
+                    if (prev_cn != cn) {
+                        ic = barch_functions->find(cn);
+                        prev_cn = std::move(cn);
+                        if (ic != barch_functions->end() &&
+                            !is_authorized(ic->second.cats,caller.get_acl())) {
+                            redis::rwrite(ostream, error{"not authorized"});
+                            return ;
+                        }
                     }
                 }
                 if (ic == barch_functions->end()) {
@@ -224,8 +231,10 @@ namespace barch {
                 } else {
                     auto &f = ic->second.call;
                     ++ic->second.calls;
-                    if (ic->second.is_write() && ic->second.is_data()) {
-                        repl::call(params);
+                    if (ic->second.is_write() && ic->second.is_data()
+                        && barch::repl::has_destinations()) {
+                        std::vector<std::string> owned(params.begin(), params.end());
+                        repl::call(owned);
                     }
 
 
@@ -233,18 +242,20 @@ namespace barch {
                     if (ic->second.is_asynch || !asynch_calls.empty()) {
                         // this is relatively slow so only potentially long-running and expensive calls should be marked as asynch
                         if (!stream.empty()) {
-                            asynch_call_context_ptr ctx = std::make_shared<asynch_call_context>(caller,f,params,cn);
+                            asynch_call_context_ptr ctx = std::make_shared<asynch_call_context>(caller,f,params,prev_cn);
                             ctx->stream = std::move(stream); // move the current stream - it should be empty after the move
                             asynch_calls.push_back(ctx);
                         }else {
-                            asynch_calls.emplace_back(std::make_shared<asynch_call_context>(caller,f,params,cn));
+                            asynch_calls.emplace_back(std::make_shared<asynch_call_context>(caller,f,params,prev_cn));
                         }
 
                     }else {
 
                         // auto current = now(); // remove this for now since it has a measurable impact on performance
 
+                        caller.reply_out = &ostream;
                         int32_t r = caller.call(params,f);
+                        caller.reply_out = nullptr;
                         if (!caller.has_blocks())
                             write_result<Stream>(caller, ostream, r);
 
@@ -253,6 +264,7 @@ namespace barch {
                     }
                 }
             }catch (std::exception& e) {
+                caller.reply_out = nullptr;
                 redis::rwrite(ostream, error{e.what()});
             }
             if (should_reset_space)

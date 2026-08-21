@@ -6,12 +6,17 @@
 #define REDIS_PARSER_H
 #include <iostream>
 #include <vector>
+#include <string_view>
+#include <charconv>
+#include <cstdint>
 #include "variable.h"
 #include "ioutil.h"
 #include "sastam.h"
 
 namespace redis {
-    typedef std::string string_param_t;
+    // views into the recv buffer for the request being run. they are only
+    // valid until the next add_data; MULTI and async copy them to strings
+    typedef std::string_view string_param_t;
     enum {
         redis_max_item_len = 6400000
     };
@@ -41,6 +46,9 @@ namespace redis {
         int state = 0;
         int size = 0;
         std::vector<string_param_t> req{};
+        // offsets into full_buffer so a realloc during a partial parse
+        // does not dangle. UINT32_MAX is the static null bulk placeholder
+        std::vector<std::pair<uint32_t, uint32_t>> spans{};
         int item_nr = 0;
         int32_t bstr_size = 0;
         size_t buffer_start = 0l;
@@ -59,14 +67,27 @@ namespace redis {
         return item[0] == '$';
     }
     template<typename TS>
+    inline void rwrite_u64(TS& io, uint64_t n) {
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof(buf), n);
+        writep(io, buf, (size_t)(r.ptr - buf));
+    }
+    template<typename TS>
+    inline void rwrite_bulk(TS& io, const char* data, size_t len) {
+        char hdr[32];
+        hdr[0] = '$';
+        auto r = std::to_chars(hdr + 1, hdr + 30, len);
+        *r.ptr++ = '\r';
+        *r.ptr++ = '\n';
+        writep(io, hdr, (size_t)(r.ptr - hdr));
+        if (len)
+            writep(io, data, len);
+        writep(io, CRLF);
+    }
+    template<typename TS>
     inline void rwrite(TS& io, const std::string& v) {
         if (is_bulk(v)) {
-            writep(io,'$');
-            std::string size = std::to_string(v.size()-1);
-            writep(io, size.data(), size.size());
-            writep(io, CRLF);
-            writep(io, v.data()+1, v.size()-1);
-            writep(io, CRLF);
+            rwrite_bulk(io, v.data() + 1, v.size() - 1);
         }else {
             writep(io,'+');
             writep(io, v.data(), v.size());

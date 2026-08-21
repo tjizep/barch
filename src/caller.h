@@ -127,6 +127,10 @@ public:
     virtual int to_array(size_t at) = 0;
     virtual int push_double(double l) = 0;
     virtual int push_vt(art::value_type v) = 0;
+    // a GET value: RESP bulk, no `$` prefix hack. default is push_vt
+    virtual int push_bulk(art::value_type v) {
+        return push_vt(v);
+    }
     virtual int push_simple(art::value_type v) = 0;
     virtual int push_simple(const char * v) = 0;
     virtual int push_simple(const std::string& v) = 0;

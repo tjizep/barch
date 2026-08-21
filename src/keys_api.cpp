@@ -1772,7 +1772,7 @@ int GET(caller& call, const arg_t& argv) {
         if (cl->is_compressed()) {
             vt = dictionary::decompress(vt);
         }
-        r = call.push_vt(vt);
+        r = call.push_bulk(vt);
     });
     if (found) return r;
     if (barch::kind_of_container(store, k) != barch::container_kind::none) {

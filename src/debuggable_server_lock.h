@@ -426,6 +426,16 @@ public:
         }
 
         const size_t s = slot();
+        core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
+#ifdef BARCH_LOCK_DEBUG
+        mark_reader(s);
+#endif
+        if (!write_intent.load(std::memory_order_seq_cst)) {
+            push_hold('R');
+            return true;
+        }
+        backoff_reader(s);
+
         auto deadline = std::chrono::steady_clock::now() + timeout_duration;
 #ifdef BARCH_LOCK_DEBUG
         int64_t started = now_ns();
@@ -485,7 +495,21 @@ public:
     }
 
     bool try_lock_shared() {
-        return try_lock_shared_for(std::chrono::nanoseconds(0));
+        if (holds_this_shared()) {
+            bump_reader_hold();
+            return true;
+        }
+        const size_t s = slot();
+        core_slots[s].reader_count.fetch_add(1, std::memory_order_seq_cst);
+#ifdef BARCH_LOCK_DEBUG
+        mark_reader(s);
+#endif
+        if (!write_intent.load(std::memory_order_seq_cst)) {
+            push_hold('R');
+            return true;
+        }
+        backoff_reader(s);
+        return false;
     }
 
     void lock_shared() {

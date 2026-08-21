@@ -540,7 +540,8 @@ namespace barch {
     }
 #endif
     size_t key_space::get_shard_index(const char* key, size_t key_len) {
-        if (get_shard_count() == 1) {
+        const size_t n = get_shard_count();
+        if (n == 1) {
             return 0;
         }
         auto shard_key = art::value_type{key,key_len};
@@ -552,10 +553,7 @@ namespace barch {
             return rindex.route(shard_key);
         }
 
-        uint64_t hash = hash_fun(shard_key.chars(), shard_key.size);//
-
-        size_t hshard = hash % get_shard_count();
-        return hshard;
+        return hash_fun(shard_key.chars(), shard_key.size) % n;
     }
 
     bool key_space::is_stateful_sharding() const {

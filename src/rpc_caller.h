@@ -47,6 +47,9 @@ struct rpc_caller : caller {
     // the session sets this to a blocking write on its socket. null means the
     // reply stays in results and is written after the call, as it always was.
     std::function<bool(const char*, size_t)> write_socket_bytes;
+    // the session's reply buffer for this call. GET writes a bulk string
+    // here from the leaf so the value is not copied into results first
+    vector_stream* reply_out{nullptr};
     // true once write_socket* has put bytes on the socket. write_result must
     // not emit a second reply (an empty results vector is a RESP null).
     bool reply_sent{false};
@@ -320,6 +323,15 @@ struct rpc_caller : caller {
             push_vt_impl(temp.back(), v, true);
         else
             push_vt_impl(results, v, true);
+        return 0;
+    }
+
+    int push_bulk(art::value_type v) override {
+        if (!temp.empty() || collecting_exec || call_buffering || !reply_out) {
+            return push_vt(v);
+        }
+        redis::rwrite_bulk(*reply_out, v.chars(), v.size);
+        reply_sent = true;
         return 0;
     }
 

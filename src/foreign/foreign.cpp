@@ -474,25 +474,37 @@ int exists_many(caller& call, const arg_t& argv) {
     auto space = call.kspace();
     sharded_store store(space);
     std::vector<join_handle> hs;
+    // exists() asks about the plain key and kind_of_container asks about the three
+    // container lead bytes, so neither can answer for the other - but the pass that
+    // counts used to repeat both for every argument, including the ones this pass has
+    // already found. Keep what was learned instead. A key that is nowhere cost four
+    // lock-and-walk probes here and four more below to say the same thing twice.
+    struct probed {
+        conversion::comparable_key key{};
+        bool present{false};
+    };
+    std::vector<probed> probes;
+    probes.reserve(argv.size() - 1);
     for (size_t i = 1; i < argv.size(); ++i) {
         if (key_ok(argv[i]) != 0)
             return call.key_check_error(argv[i]);
-        auto converted = call.kspace()->encode_key(argv[i]);
-        auto key = converted.get_value();
-        if (store.exists(key)
-            || barch::kind_of_container(store, argv[i]) != barch::container_kind::none)
-            continue;
-        hs.push_back(start_or_join(space, key));
+        probed p{call.kspace()->encode_key(argv[i]), false};
+        p.present = store.exists(p.key.get_value())
+                    || barch::kind_of_container(store, argv[i]) != barch::container_kind::none;
+        probes.push_back(p);
+        if (!p.present)
+            hs.push_back(start_or_join(space, probes.back().key.get_value()));
     }
     int w = wait_joins(call, space, hs);
     if (w != 0)
         return w;
     int64_t found = 0;
-    for (size_t i = 1; i < argv.size(); ++i) {
-        auto converted = call.kspace()->encode_key(argv[i]);
-        auto key = converted.get_value();
-        if (store.exists(key)
-            || barch::kind_of_container(store, argv[i]) != barch::container_kind::none)
+    for (size_t i = 0; i < probes.size(); ++i) {
+        // only a key that was fetched can have arrived since; one that was already here
+        // stays here, and the reply is a snapshot either way
+        if (probes[i].present
+            || store.exists(probes[i].key.get_value())
+            || barch::kind_of_container(store, argv[i + 1]) != barch::container_kind::none)
             ++found;
     }
     return call.push_ll(found);

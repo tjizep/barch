@@ -3965,3 +3965,43 @@ TestBarchPy failed while checking this and it is not related: `barch.sizeAll()` 
 keyspaces on disk, so the `*.dat` left behind by running tests out of order pushes it past
 the 2 the test expects. `TestClean` (`rm -f *.dat`) runs before the python block in a full
 ordered run. With TestClean first, TestBarchPy passes.
+
+## 111. exists_many probed every key twice [22-08-2026]
+
+The question was whether the two lines
+
+    if (store.exists(key)
+        || barch::kind_of_container(store, argv[i]) != barch::container_kind::none)
+
+probe the store twice for the same thing. They do not. `exists` asks about the plain key -
+one shard, one lookup, and the bloom filter can rule it out without touching the tree.
+`kind_of_container` asks about the container key ranges, which is three `has_container_of`
+probes, one per lead byte, each on its own shard with its own lock and its own lower_bound
+and tombstone walk. `SET k v` leaves nothing under the container leads and `RPUSH k v`
+leaves nothing under the plain key, so neither can answer for the other, and `||` means the
+three container probes only run when the plain key is missing.
+
+The redundancy was one level up: the same pair ran again in the loop that counts, for every
+argument including the ones the first loop had already found. A key that is nowhere cost
+four probes to start the fetch and four more to count it. The encode_key was repeated too.
+
+Only a key that went through `start_or_join` can have changed state across `wait_joins`.
+One that was already present stays present, and the reply is a snapshot either way, so the
+first pass now records what it learned in a small vector and the second pass re-probes only
+the keys it did not find. Common case - EXISTS over keys that are already local - is one
+probe per key instead of two.
+
+`conversion::comparable_key` is safe to hold in a vector: it has a copy constructor and a
+copy assignment that re-point `data` at the new object's own storage, which matters because
+`data` can point into the object's own `integer` member. There is no move constructor, so
+the vector copies on growth, and `reserve` is there so it does not.
+
+Verified with the four foreign tests, and with a script that drives multi-key EXISTS
+directly, since nothing in the tree did - `foreigntest.py` only ever calls EXISTS with one
+key, and `exists_many` is the multi-key path. Two keys fetched from the source answer 2 and
+cost exactly two queries, a second EXISTS answers 2 and costs none, plain keys and all three
+container kinds answer 4, duplicates count separately the way valkey counts them, absent
+keys answer 0, and a mixed call answers what it should.
+
+`get_many` just above has the same repeated encode and an extra `search` on the first pass,
+but its second pass is a real read rather than a repeated probe, so it is left alone.

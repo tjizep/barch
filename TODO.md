@@ -545,6 +545,28 @@
 
 117. [Done] OrderedSet.revrange sent ZREVRANGE BYSCORE [22-08-2026] Nr 110 5f7ec85
 
+118. [Done] exists_many probed every key twice [22-08-2026] Nr 111 5f7ec85
+
+119. TTL floors the seconds where valkey rounds to nearest.
+
+    `TTL` at keys_api.cpp:1907 and the seconds arm of `ttl_query` at
+    1950 both answer `(expiry_ms - now())/1000`. Valkey answers
+    `(ttl+500)/1000` - nearest, not floor - so `SET x v PX 11000`
+    then `TTL x` says 11 there and 10 here, and `EXPIRE x 10`
+    followed by `TTL x` says 10 there and 9 here as soon as a
+    millisecond has gone by.
+
+    This is why TestValkeyDifferential fails intermittently on
+    "EXPIRE - set timeouts multiple times": it expects `1 [45] 1 10`
+    and gets `1 5 1 9` whenever the second TTL lands after the tick.
+    The `[45]` in the expectation is the same rounding showing up at
+    the earlier step, tolerated rather than fixed.
+
+    Two call sites, since TTL does not go through ttl_query. The
+    deadline forms are already right - valkey floors those. Settled
+    by changing both and running the differential enough times to
+    see the case stop flapping.
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

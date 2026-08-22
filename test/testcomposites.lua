@@ -98,17 +98,23 @@ assert(vk.call('B.SIZE')>=before+12)
 -- these are score bounds, so they say so. ZRANGE and ZREVRANGE read start and stop as
 -- positions by default now, the way redis does, and 3.01 is not a position - see TODO 38
 assert(#vk.call('B.ZRANGE', 'cbgame',1,3.01,'BYSCORE') == 3)
-assert(#vk.call('B.ZREVRANGE', 'cbgame',1,3,'BYSCORE') == 3)
+-- ZREVRANGE takes positions only - there is no BYSCORE on it, so 0 to -1 is the whole
+-- set. The score bound version of the same question is the ZREVRANGEBYSCORE below.
+assert(#vk.call('B.ZREVRANGE', 'cbgame',0,-1) == 3)
 assert(#vk.call('B.ZRANGEBYSCORE', 'cbgame',1,3.01) == 3)
 assert(#vk.call('B.ZRANGEBYSCORE', 'cbgame',1,3.01) == 3)
-assert(#vk.call('B.ZREVRANGEBYSCORE', 'cbgame',1,3.01) == 3)
+-- the REV forms read their bounds high end first, so this is max then min - see TODO 116
+assert(#vk.call('B.ZREVRANGEBYSCORE', 'cbgame',3.01,1) == 3)
 -- a lex bound says whether its end is open: [a is inclusive, (a is not, and - and + are
 -- the ends of the range. A bare `a` is refused now, as redis refuses it - see DONE 59
 assert(#vk.call('B.ZRANGEBYLEX', 'cbgame','[a','[z') == 3)
 assert(#vk.call('B.ZRANGEBYLEX', 'cbgame','[a','[z','WITHSCORES') == 6)
-assert(#vk.call('B.ZREVRANGEBYLEX', 'cbgame','[a','[z') == 3)
+-- max then min again, so [z comes first
+assert(#vk.call('B.ZREVRANGEBYLEX', 'cbgame','[z','[a') == 3)
 assert(#vk.call('B.ZRANGE', 'cbgame',1,3.01,'BYSCORE','WITHSCORES') == 6)
-assert(#vk.call('B.ZRANGE', 'cbgame','a','z','WITHSCORES','REV','BYLEX') == 6)
+-- a lex range has nowhere to put a score, so BYLEX with WITHSCORES is a syntax error and
+-- the reply is the three members - see TODO 116
+assert(#vk.call('B.ZRANGE', 'cbgame','a','z','REV','BYLEX') == 3)
 assert(#vk.call('B.ZRANGE', 'cbgame','a','z','BYLEX') == 3)
 assert(vk.call('B.ZCARD','cagame')==3)
 assert(#vk.call('B.ZPOPMIN','cagame')==2)

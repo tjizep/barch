@@ -53,7 +53,6 @@ ACCEPTED = {
     "ZUNIONSTORE with a regular set*": "the case sets up with SADD. See TODO 52",
     "ZINTERSTORE #516*": "the case sets up with SADD. See TODO 52",
     "ZINTERSTORE regression with two sets*": "the case sets up with SADD. See TODO 52",
-    "ZRANGESTORE*": "ZRANGESTORE is not implemented. See TODO 52",
     "ZADD XX option without key*": "TYPE is not implemented. See TODO 52",
     "Extended SET GET with incorrect type*": "the case sets up with LPUSH and then reads "
                                              "the list back with LRANGE after a failed "

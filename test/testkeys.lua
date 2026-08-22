@@ -30,8 +30,11 @@ local test = function()
     end
     assert(vk.call('B.TTL','a') > 0)
     assert(vk.call('B.TTL','a') < 12)
-    assert(vk.call('B.EXPIRE','a',9,'nx') == -1)
-    assert(vk.call('B.EXPIRE','a',9,'gt') == -1)
+    -- a is set with px 11000 above, so it already has a TTL. NX will not overwrite one
+    -- and 9s is not greater than the ~11s left, so both are refused - and a refused
+    -- condition answers 0, the way redis does. It used to answer -1 - see TODO 116
+    assert(vk.call('B.EXPIRE','a',9,'nx') == 0)
+    assert(vk.call('B.EXPIRE','a',9,'gt') == 0)
     assert(vk.call('B.EXPIRE','a',9,'lt') == 1)
 
     call = call + 1

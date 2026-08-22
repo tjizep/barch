@@ -158,6 +158,9 @@ void remove_ordered(caller& call, ordered_keys &thing) {
     remove_ordered(call, thing.score_key, thing.member_key);
 }
 
+// encoded member bytes plus score, copied out of the tree for ZRANGESTORE
+using zrange_row = std::pair<std::string, double>;
+
 
 /**
  * A score as redis reads one: the C library's parse, so inf and exponent forms are
@@ -167,6 +170,7 @@ void remove_ordered(caller& call, ordered_keys &thing) {
  * an increment redis stores happily.
  */
 static bool score_bound(art::value_type v, double& out);
+static bool refuse_if_not_zset(caller& call, barch::sharded_store& store, art::value_type name);
 
 static bool read_score(art::value_type v, double& out) {
     std::string t(v.chars(), v.size);
@@ -224,6 +228,17 @@ int ZADD(caller& call, const arg_t &argv) {
     int64_t changed = 0;
     if (zspec.INCR && (argv.size() - zspec.fields_start) != 2) {
         return call.syntax_error();
+    }
+    // refuse the whole call if any pair is short or a score is not a float, so a
+    // later bad score cannot leave the earlier pairs already written
+    if ((argv.size() - zspec.fields_start) % 2 != 0) {
+        return call.syntax_error();
+    }
+    for (size_t n = zspec.fields_start; n < argv.size(); n += 2) {
+        double probe = 0;
+        if (!read_score(argv[n], probe)) {
+            return call.push_error("value is not a valid float");
+        }
     }
     for (size_t n = zspec.fields_start; n < argv.size(); n += 2) {
         auto k = argv[n];
@@ -386,7 +401,7 @@ int cmd_ZREM(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 
 extern "C"
 int ZINCRBY(caller& call, const arg_t& argv) {
-    if (argv.size() < 4)
+    if (argv.size() != 4)
         return call.wrong_arity();
     int responses = 0;
     int64_t updated = 0;
@@ -553,7 +568,8 @@ int cmd_ZCOUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  * again as redis does, so 0 to -1 is the whole set whatever its size and an empty set
  * answers with an empty array rather than an error.
  */
-static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_spec &spec) {
+static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_spec &spec,
+                           heap::std_vector<zrange_row>* collect = nullptr) {
     auto parse = [](const std::string& text, int64_t& out) -> bool {
         if (text.empty()) return false;
         char* end = nullptr;
@@ -597,22 +613,32 @@ static int zrange_by_index(caller& call, barch::shard_ptr t, const art::zrange_s
     if (start < 0) start = 0;
     if (stop >= n) stop = n - 1;
 
-    call.start_array();
+    auto emit_one = [&](const scored& rec) {
+        if (collect) {
+            collect->push_back({std::string(rec.member.chars(), rec.member.size),
+                                conversion::enc_bytes_to_dbl(rec.score)});
+            return;
+        }
+        call.push_encoded_key(rec.member);
+        if (spec.has_withscores) {
+            call.push_encoded_key(rec.score);
+        }
+    };
+    if (!collect)
+        call.start_array();
     if (n > 0 && start <= stop && start < n) {
         for (int64_t i = start; i <= stop; ++i) {
             // REV counts positions from the high score end
-            const auto& rec = spec.REV ? found[(size_t) (n - 1 - i)] : found[(size_t) i];
-            call.push_encoded_key(rec.member);
-            if (spec.has_withscores) {
-                call.push_encoded_key(rec.score);
-            }
+            emit_one(spec.REV ? found[(size_t) (n - 1 - i)] : found[(size_t) i]);
         }
     }
-    call.end_array();
+    if (!collect)
+        call.end_array();
     return call.ok();
 }
 
-static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec) {
+static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec,
+                  heap::std_vector<zrange_row>* collect = nullptr) {
 
     auto container = conversion::convert(spec.key);
     // A lex bound carries the character that says whether its end is open - `[a` includes
@@ -688,7 +714,7 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
     heap::std_vector<std::pair<art::value_type, art::value_type> > bylex;
     heap::std_vector<art::value_type> rev;
     heap::vector<ordered_keys> removals;
-    if (!spec.REMOVE && !spec.CARD)
+    if (!spec.REMOVE && !spec.CARD && collect == nullptr)
         call.start_array();
 
     art::iterator ai(t,lower);
@@ -773,6 +799,11 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
                         pushed = true;
                     }
                 }
+                if (!pushed && collect && !spec.REMOVE) {
+                    collect->push_back({std::string(member.chars(), member.size),
+                                        conversion::enc_bytes_to_dbl(encoded_number)});
+                    pushed = true;
+                }
                 if (!pushed && spec.REMOVE) // scheduled for removal
                 {
                     composite score_key, member_key;
@@ -824,11 +855,16 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         size_t b1 = slice_end(bylex.size(), b0);
         for (size_t i = b0; i < b1; ++i) {
             auto &rec = bylex[i];
-            call.push_encoded_key(rec.first);
-            ++replies;
-            if (spec.has_withscores) {
-                call.push_encoded_key(rec.second);
+            if (collect) {
+                collect->push_back({std::string(rec.first.chars(), rec.first.size),
+                                    conversion::enc_bytes_to_dbl(rec.second)});
+            } else {
+                call.push_encoded_key(rec.first);
                 ++replies;
+                if (spec.has_withscores) {
+                    call.push_encoded_key(rec.second);
+                    ++replies;
+                }
             }
         }
     } else if (spec.REV && !spec.REMOVE) {
@@ -839,17 +875,24 @@ static int zrange(caller& call, barch::shard_ptr t, const art::zrange_spec &spec
         size_t b1 = slice_end(rev.size(), b0);
         for (size_t i = b0; i < b1; ++i) {
             auto &rec = rev[i];
-            call.push_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
-            ++replies;
-            if (spec.has_withscores) {
-                call.push_encoded_key(rec.sub(0, numeric_key_size));
+            if (collect) {
+                collect->push_back({
+                    std::string(rec.sub(numeric_key_size, rec.size - numeric_key_size).chars(),
+                                rec.size - numeric_key_size),
+                    conversion::enc_bytes_to_dbl(rec.sub(0, numeric_key_size))});
+            } else {
+                call.push_encoded_key(rec.sub(numeric_key_size, numeric_key_size));
                 ++replies;
+                if (spec.has_withscores) {
+                    call.push_encoded_key(rec.sub(0, numeric_key_size));
+                    ++replies;
+                }
             }
         }
     };
-    if (!spec.REMOVE) {
+    if (!spec.REMOVE && collect == nullptr) {
         call.end_array();
-    } else {
+    } else if (spec.REMOVE) {
         for (auto &r: removals) {
             remove_ordered(call, r.score_key, r.member_key);
         }
@@ -868,6 +911,10 @@ int ZRANGE(caller& call, const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
     }
+    if (spec.has_limit && !spec.BYSCORE && !spec.BYLEX)
+        return call.push_error("syntax error");
+    if (spec.BYLEX && spec.has_withscores)
+        return call.push_error("syntax error");
     if (!spec.BYSCORE && !spec.BYLEX) {
         return zrange_by_index(call, t, spec);
     }
@@ -886,6 +933,67 @@ int ZRANGE(caller& call, const arg_t& argv) {
 int cmd_ZRANGE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx,argv,argc,ZRANGE);
+}
+
+/**
+ * ZRANGESTORE dest src min max [BYSCORE|BYLEX] [REV] [LIMIT off count]
+ *
+ * A ZRANGE written into dest, counted. WITHSCORES has nowhere to go and is a
+ * syntax error. LIMIT without BYSCORE/BYLEX is too. An empty range deletes dest
+ * if it was there rather than leaving an empty set.
+ */
+extern "C"
+int ZRANGESTORE(caller& call, const arg_t& argv) {
+    if (argv.size() < 5)
+        return call.wrong_arity();
+    auto dest = argv[1];
+    auto src = argv[2];
+    if (key_ok(dest) != 0 || key_ok(src) != 0)
+        return call.push_error("invalid key");
+    art::zrange_spec spec(argv);
+    spec.key_pos = 2;
+    if (spec.parse_options() != call.ok()) {
+        return call.push_error("syntax error");
+    }
+    if (spec.has_withscores)
+        return call.syntax_error();
+    if (spec.has_limit && !spec.BYSCORE && !spec.BYLEX)
+        return call.syntax_error();
+    barch::sharded_store kstore(call.kspace());
+    if (refuse_if_not_zset(call, kstore, src))
+        return 0;
+    heap::std_vector<zrange_row> rows;
+    {
+        auto t = kstore.write_locked(src);
+        if (spec.REV && spec.BYSCORE) {
+            double a = 0, b = 0;
+            if (score_bound(art::value_type{spec.start}, a)
+                && score_bound(art::value_type{spec.stop}, b) && a > b) {
+                std::swap(spec.start, spec.stop);
+            }
+        }
+        if (!spec.BYSCORE && !spec.BYLEX)
+            zrange_by_index(call, t, spec, &rows);
+        else
+            zrange(call, t, spec, &rows);
+    }
+    barch::remove_container(kstore, dest);
+    for (const auto& row : rows) {
+        composite score_key, member_key;
+        auto d = conversion::convert(dest);
+        art::value_type member{row.first};
+        conversion::comparable_key sc(row.second);
+        conversion::comparable_key mk(member);
+        score_key.create(art::ts_ordered_map, {d, sc, mk});
+        member_key.create(art::ts_ordered_map, {IX_MEMBER, d, mk});
+        ordered_keys ok(score_key, member_key, {});
+        insert_ordered(call, ok);
+    }
+    return call.push_ll((long long) rows.size());
+}
+int cmd_ZRANGESTORE(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZRANGESTORE);
 }
 extern "C"
 int ZCARD(caller& call, const arg_t& argv) {
@@ -1734,6 +1842,8 @@ int ZREVRANGE(caller& call, const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
     }
+    if (spec.BYSCORE || spec.BYLEX || spec.has_limit)
+        return call.push_error("syntax error");
     spec.REV = true;
     spec.BYLEX = false;
     if (!spec.BYSCORE) {
@@ -1782,6 +1892,8 @@ int ZRANGEBYSCORE(caller& call, const arg_t& argv) {
     if (spec.parse_options() != call.ok()) {
         return call.push_error("syntax error");
     }
+    if (spec.REV || spec.BYLEX)
+        return call.push_error("syntax error");
     double lo = 0, hi = 0;
     if (!score_bound(argv[2], lo) || !score_bound(argv[3], hi)) {
         return call.push_error("min or max is not a float");
@@ -1975,6 +2087,133 @@ int cmd_ZRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     vk_caller call;
     return call.vk_call(ctx, argv, argc, ZRANK);
 }
+
+extern "C"
+int ZREVRANK(caller& call, const arg_t& argv) {
+    if (argv.size() < 3 || argv.size() > 4) {
+        return call.wrong_arity();
+    }
+    bool withscore = false;
+    if (argv.size() == 4) {
+        auto opt = argv[3].to_string();
+        for (auto& ch : opt) ch = (char) toupper((unsigned char) ch);
+        if (opt != "WITHSCORE") {
+            return call.syntax_error();
+        }
+        withscore = true;
+    }
+    auto c = argv[1];
+    if (c.empty() || argv[2].empty()) {
+        return call.wrong_arity();
+    }
+    auto wanted_key = conversion::convert(argv[2]);
+    art::value_type wanted = wanted_key.get_value();
+    barch::sharded_store kstore(call.kspace());
+    auto t = kstore.read_locked(c);
+
+    auto container = conversion::convert(c);
+    query lq, pq;
+    auto lower = lq->create(art::ts_ordered_map, {container});
+    auto prefix = pq->create(art::ts_ordered_map, {container}, false);
+
+    int64_t position = 0;
+    int64_t n = 0;
+    bool found = false;
+    art::value_type score{};
+    art::iterator ai(t, lower);
+    while (ai.ok()) {
+        auto v = ai.key();
+        if (!v.starts_with(prefix)) break;
+        auto member = v.sub(prefix.size + numeric_key_size);
+        if (member == wanted) {
+            score = v.sub(prefix.size, numeric_key_size);
+            found = true;
+            position = n;
+        }
+        ++n;
+        ai.next();
+    }
+    if (!found) {
+        return call.push_null();
+    }
+    int64_t rev = n - 1 - position;
+    if (withscore) {
+        call.start_array();
+        call.push_ll(rev);
+        call.push_encoded_key(score);
+        call.end_array();
+        return call.ok();
+    }
+    return call.push_ll(rev);
+}
+int cmd_ZREVRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZREVRANK);
+}
+
+extern "C"
+int ZREMRANGEBYRANK(caller& call, const arg_t& argv) {
+    if (argv.size() != 4)
+        return call.wrong_arity();
+    auto parse = [](const std::string& text, int64_t& out) -> bool {
+        if (text.empty()) return false;
+        char* end = nullptr;
+        long long v = std::strtoll(text.c_str(), &end, 10);
+        if (end == text.c_str() || *end != '\0') return false;
+        out = (int64_t) v;
+        return true;
+    };
+    int64_t start = 0, stop = 0;
+    if (!parse(argv[2].to_string(), start) || !parse(argv[3].to_string(), stop)) {
+        return call.push_error("value is not an integer or out of range");
+    }
+    if (key_ok(argv[1]) != 0)
+        return call.push_error("invalid key");
+    barch::sharded_store kstore(call.kspace());
+    if (refuse_if_not_zset(call, kstore, argv[1]))
+        return 0;
+    auto t = kstore.write_locked(argv[1]);
+    auto container = conversion::convert(argv[1]);
+    query lq, pq;
+    auto lower = lq->create(art::ts_ordered_map, {container});
+    auto prefix = pq->create(art::ts_ordered_map, {container}, false);
+    struct scored { std::string score, member; };
+    heap::std_vector<scored> found;
+    art::iterator ai(t, lower);
+    while (ai.ok()) {
+        auto v = ai.key();
+        if (!v.starts_with(prefix)) break;
+        if (v.size <= prefix.size + numeric_key_size) { ai.next(); continue; }
+        auto sc = v.sub(prefix.size, numeric_key_size);
+        auto mem = v.sub(prefix.size + numeric_key_size,
+                         v.size - prefix.size - numeric_key_size);
+        found.push_back({std::string(sc.chars(), sc.size),
+                         std::string(mem.chars(), mem.size)});
+        ai.next();
+    }
+    const int64_t n = (int64_t) found.size();
+    if (start < 0) start += n;
+    if (stop < 0) stop += n;
+    if (start < 0) start = 0;
+    if (stop >= n) stop = n - 1;
+    int64_t removed = 0;
+    if (n > 0 && start <= stop && start < n) {
+        for (int64_t i = start; i <= stop; ++i) {
+            composite score_key, member_key;
+            art::value_type sc{found[(size_t) i].score};
+            art::value_type mem{found[(size_t) i].member};
+            score_key.create(art::ts_ordered_map, {container, sc, mem});
+            member_key.create(art::ts_ordered_map, {IX_MEMBER, container, mem});
+            remove_ordered(call, score_key, member_key);
+            ++removed;
+        }
+    }
+    return call.push_ll(removed);
+}
+int cmd_ZREMRANGEBYRANK(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZREMRANGEBYRANK);
+}
 extern "C"
 int ZFASTRANK(caller& call, const arg_t& argv) {
     if (argv.size() != 4) {
@@ -2084,6 +2323,15 @@ int add_ordered_api(ValkeyModuleCtx *ctx) {
     if (ValkeyModule_CreateCommand(ctx, NAME(ZRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
+    if (ValkeyModule_CreateCommand(ctx, NAME(ZREVRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(ZREMRANGEBYRANK), "write deny-oom", 1, 1, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    if (ValkeyModule_CreateCommand(ctx, NAME(ZRANGESTORE), "write deny-oom", 1, 2, 1) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
     if (ValkeyModule_CreateCommand(ctx, NAME(ZFASTRANK), "readonly", 1, 1, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
@@ -2125,5 +2373,8 @@ void register_ordered_api(function_map& r) {
     r["ZLEXCOUNT"] = {::ZLEXCOUNT,{"read","orderedset","data"}};
     r["ZREVRANGEBYLEX"] = {::ZREVRANGEBYLEX,{"read","orderedset","data"}};
     r["ZRANK"] = {::ZRANK,{"read","orderedset","data"}};
+    r["ZREVRANK"] = {::ZREVRANK,{"read","orderedset","data"}};
+    r["ZREMRANGEBYRANK"] = {::ZREMRANGEBYRANK,{"write","orderedset","data"}};
+    r["ZRANGESTORE"] = {::ZRANGESTORE,{"write","orderedset","data"}};
     r["ZFASTRANK"] = {::ZFASTRANK,{"read","orderedset","data"}};
 }

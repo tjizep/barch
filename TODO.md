@@ -537,6 +537,14 @@
 
 113. [Done] More valkey cases, and the zset/expire bugs they found [21-08-2026] Nr 106 cb02f90
 
+114. [Done] ZREVRANK, ZREMRANGEBYRANK, and ZRANGESTORE [22-08-2026] Nr 107 5f7ec85
+
+115. [Done] Translator expansions for remaining zset stubs [22-08-2026] Nr 108 5f7ec85
+
+116. [Done] TestKeys and TestComposites asserted pre-compat answers [22-08-2026] Nr 109 5f7ec85
+
+117. [Done] OrderedSet.revrange sent ZREVRANGE BYSCORE [22-08-2026] Nr 110 5f7ec85
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /

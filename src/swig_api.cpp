@@ -867,9 +867,14 @@ std::vector<Value> OrderedSet::revrange(const std::string &k, double start, doub
     // to be told that. ZRANGE reads start and stop as positions by default now, the
     // way redis does, and without BYSCORE a score range is read as an index range.
     // See TODO 38
-    params = {"ZREVRANGE", k, std::to_string(start), std::to_string(stop), "BYSCORE"};
+    //
+    // This is ZRANGE with REV rather than ZREVRANGE, because ZREVRANGE has no BYSCORE
+    // - it takes positions and nothing else, the way valkey has it - and asking it for
+    // one is a syntax error. ZRANGE BYSCORE REV sorts the two bounds out itself, so
+    // revrange still takes them the same way round as range. See TODO 117
+    params = {"ZRANGE", k, std::to_string(start), std::to_string(stop), "BYSCORE", "REV"};
     params.insert(params.end(), flags.begin(), flags.end());
-    sc.call(params, ::ZREVRANGE);
+    sc.call(params, ::ZRANGE);
     if (sc.flat_empty()) return {nullptr};
     sc.append_flat(result);
     return result;

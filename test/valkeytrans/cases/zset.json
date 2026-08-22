@@ -215,9 +215,41 @@
   {
    "name": "ZADD XX returns the number of elements actually added - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            r zadd ztmp 10 x\n            set retval [r zadd ztmp 10 x 20 y 30 z]\n            assert {$retval == 2}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "ztmp",
+      "10",
+      "x",
+      "20",
+      "y",
+      "30",
+      "z"
+     ],
+     "as": "retval",
+     "collect": true,
+     "value": "2"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZADD XX updates existing elements score - $encoding",
@@ -1358,23 +1390,94 @@
   {
    "name": "ZADD - Variadic version does not add nothing on single parsing err - $encoding",
    "expected": "0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del myzset\n            catch {r zadd myzset 10 a 20 b 30.badscore c} e\n            assert_match {*ERR*not*float*} $e\n            r exists myzset"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myzset"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zadd",
+      "myzset",
+      "10",
+      "a",
+      "20",
+      "b",
+      "30.badscore",
+      "c"
+     ],
+     "value": "*ERR*not*float*"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exists",
+      "myzset"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZADD - Variadic version will raise error on missing arg - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del myzset\n            catch {r zadd myzset 10 a 20 b 30 c 40} e\n            assert_match {*ERR*syntax*} $e"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myzset"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zadd",
+      "myzset",
+      "10",
+      "a",
+      "20",
+      "b",
+      "30",
+      "c",
+      "40"
+     ],
+     "value": "*ERR*syntax*"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZINCRBY does not work variadic even if shares ZADD implementation - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del myzset\n            catch {r zincrby myzset 10 a 20 b 30 c} e\n            assert_match {*ERR*wrong*number*arg*} $e"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myzset"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zincrby",
+      "myzset",
+      "10",
+      "a",
+      "20",
+      "b",
+      "30",
+      "c"
+     ],
+     "value": "*ERR*wrong*number*arg*"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZCARD basics - $encoding",
@@ -2198,9 +2301,28 @@
   {
    "name": "ZINCRBY return value - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del ztmp\n            set retval [r zincrby ztmp 1.0 x]\n            assert {$retval == 1.0}"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "ztmp"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zincrby",
+      "ztmp",
+      "1.0",
+      "x"
+     ],
+     "as": "retval",
+     "collect": true,
+     "value": "1.0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGEBYSCORE/ZREVRANGEBYSCORE/ZCOUNT basics - $encoding",
@@ -2653,9 +2775,319 @@
   {
    "name": "ZRANGEBYSCORE with LIMIT - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "create_default_zset\n            assert_equal {b c}   [r zrangebyscore zset 0 10 LIMIT 0 2]\n            assert_equal {d e f} [r zrangebyscore zset 0 10 LIMIT 2 3]\n            assert_equal {d e f} [r zrangebyscore zset 0 10 LIMIT 2 10]\n            assert_equal {}      [r zrangebyscore zset 0 10 LIMIT 20 10]\n            assert_equal {f e}   [r zrevrangebyscore zset 10 0 LIMIT 0 2]\n            assert_equal {d c b} [r zrevrangebyscore zset 10 0 LIMIT 2 3]\n            assert_equal {d c b} [r zrevrangebyscore zset 10 0 LIMIT 2 10]\n            assert_equal {}      [r zrevrangebyscore zset 10 0 LIMIT 20 10]\n            # zrangebyscore uses different logic when offset > ZSKIPLIST_MAX_SEARCH\n            create_long_zset zset 30\n            assert_equal {i12 i13 i14} [r zrangebyscore zset 0 20 LIMIT 12 3]\n            assert_equal {i14 i15}     [r zrangebyscore zset 0 20 LIMIT 14 2]\n            assert_equal {i19 i20 i21} [r zrangebyscore zset 0 30 LIMIT 19 3]\n            assert_equal {i29}     [r zrangebyscore zset 10 30 LIMIT 19 2]\n            assert_equal {i17 i16 i15} [r zrevrangebyscore zset 30 10 LIMIT 12 3]\n            assert_equal {i6 i5}       [r zrevrangebyscore zset 20 0 LIMIT 14 2]\n            assert_equal {i2 i1 i0}    [r zrevrangebyscore zset 20 0 LIMIT 18 5]\n            assert_equal {i0}          [r zrevrangebyscore zset 20 0 LIMIT 20 5]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "-inf",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f",
+      "+inf",
+      "g"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "10",
+      "LIMIT",
+      "0",
+      "2"
+     ],
+     "value": "b c"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "10",
+      "LIMIT",
+      "2",
+      "3"
+     ],
+     "value": "d e f"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "10",
+      "LIMIT",
+      "2",
+      "10"
+     ],
+     "value": "d e f"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "10",
+      "LIMIT",
+      "20",
+      "10"
+     ],
+     "value": ""
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "10",
+      "0",
+      "LIMIT",
+      "0",
+      "2"
+     ],
+     "value": "f e"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "10",
+      "0",
+      "LIMIT",
+      "2",
+      "3"
+     ],
+     "value": "d c b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "10",
+      "0",
+      "LIMIT",
+      "2",
+      "10"
+     ],
+     "value": "d c b"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "10",
+      "0",
+      "LIMIT",
+      "20",
+      "10"
+     ],
+     "value": ""
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "i0",
+      "1",
+      "i1",
+      "2",
+      "i2",
+      "3",
+      "i3",
+      "4",
+      "i4",
+      "5",
+      "i5",
+      "6",
+      "i6",
+      "7",
+      "i7",
+      "8",
+      "i8",
+      "9",
+      "i9",
+      "10",
+      "i10",
+      "11",
+      "i11",
+      "12",
+      "i12",
+      "13",
+      "i13",
+      "14",
+      "i14",
+      "15",
+      "i15",
+      "16",
+      "i16",
+      "17",
+      "i17",
+      "18",
+      "i18",
+      "19",
+      "i19",
+      "20",
+      "i20",
+      "21",
+      "i21",
+      "22",
+      "i22",
+      "23",
+      "i23",
+      "24",
+      "i24",
+      "25",
+      "i25",
+      "26",
+      "i26",
+      "27",
+      "i27",
+      "28",
+      "i28",
+      "29",
+      "i29"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "20",
+      "LIMIT",
+      "12",
+      "3"
+     ],
+     "value": "i12 i13 i14"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "20",
+      "LIMIT",
+      "14",
+      "2"
+     ],
+     "value": "i14 i15"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "0",
+      "30",
+      "LIMIT",
+      "19",
+      "3"
+     ],
+     "value": "i19 i20 i21"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrangebyscore",
+      "zset",
+      "10",
+      "30",
+      "LIMIT",
+      "19",
+      "2"
+     ],
+     "value": "i29"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "30",
+      "10",
+      "LIMIT",
+      "12",
+      "3"
+     ],
+     "value": "i17 i16 i15"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "20",
+      "0",
+      "LIMIT",
+      "14",
+      "2"
+     ],
+     "value": "i6 i5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "20",
+      "0",
+      "LIMIT",
+      "18",
+      "5"
+     ],
+     "value": "i2 i1 i0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrevrangebyscore",
+      "zset",
+      "20",
+      "0",
+      "LIMIT",
+      "20",
+      "5"
+     ],
+     "value": "i0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGEBYSCORE with LIMIT and WITHSCORES - $encoding",
@@ -5896,9 +6328,42 @@
   {
    "name": "ZMSCORE retrieve requires one or more members",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r del zmscoretest\n        r zadd zmscoretest 10 x\n        r zadd zmscoretest 20 y\n\n        catch {r zmscore zmscoretest} e\n        assert_match {*ERR*wrong*number*arg*} $e"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zmscoretest"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmscoretest",
+      "10",
+      "x"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zmscoretest",
+      "20",
+      "y"
+     ]
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zmscore",
+      "zmscoretest"
+     ],
+     "value": "*ERR*wrong*number*arg*"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZSET commands don't accept the empty strings as valid score",
@@ -6823,9 +7288,35 @@
   {
    "name": "ZRANGESTORE invalid syntax",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "catch {r zrangestore z2{t} z1{t} 0 -1 limit 1 2} err\n        assert_match \"*syntax*\" $err\n        catch {r zrangestore z2{t} z1{t} 0 -1 WITHSCORES} err\n        assert_match \"*syntax*\" $err"
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "0",
+      "-1",
+      "limit",
+      "1",
+      "2"
+     ],
+     "value": "*syntax*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangestore",
+      "z2{t}",
+      "z1{t}",
+      "0",
+      "-1",
+      "WITHSCORES"
+     ],
+     "value": "*syntax*"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANGESTORE with zset-max-listpack-entries 0 #10767 case",
@@ -6844,9 +7335,56 @@
   {
    "name": "ZRANGE invalid syntax",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "catch {r zrange z1{t} 0 -1 limit 1 2} err\n        assert_match \"*syntax*\" $err\n        catch {r zrange z1{t} 0 -1 BYLEX WITHSCORES} err\n        assert_match \"*syntax*\" $err\n        catch {r zrevrange z1{t} 0 -1 BYSCORE} err\n        assert_match \"*syntax*\" $err\n        catch {r zrangebyscore z1{t} 0 -1 REV} err\n        assert_match \"*syntax*\" $err"
+   "steps": [
+    {
+     "op": "expect_error",
+     "args": [
+      "zrange",
+      "z1{t}",
+      "0",
+      "-1",
+      "limit",
+      "1",
+      "2"
+     ],
+     "value": "*syntax*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrange",
+      "z1{t}",
+      "0",
+      "-1",
+      "BYLEX",
+      "WITHSCORES"
+     ],
+     "value": "*syntax*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrevrange",
+      "z1{t}",
+      "0",
+      "-1",
+      "BYSCORE"
+     ],
+     "value": "*syntax*"
+    },
+    {
+     "op": "expect_error",
+     "args": [
+      "zrangebyscore",
+      "z1{t}",
+      "0",
+      "-1",
+      "REV"
+     ],
+     "value": "*syntax*"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZRANDMEMBER - $type",

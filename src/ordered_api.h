@@ -31,6 +31,9 @@ extern "C" {
     int ZREVRANGEBYLEX(caller& call, const arg_t& argv);
     int ZLEXCOUNT(caller& call, const arg_t& argv);
     int ZRANK(caller& call, const arg_t& argv);
+    int ZREVRANK(caller& call, const arg_t& argv);
+    int ZREMRANGEBYRANK(caller& call, const arg_t& argv);
+    int ZRANGESTORE(caller& call, const arg_t& argv);
     int ZFASTRANK(caller& call, const arg_t& argv);
 }
 

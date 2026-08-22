@@ -195,6 +195,21 @@ def expand_known_helpers(line):
             "r del %s" % key,
             "r zadd %s %s" % (key, " ".join(items.split())),
         ]
+    if name == "create_long_zset" and len(words) == 3:
+        key, nword = words[1][1], words[2][1]
+        try:
+            n = int(nword)
+        except ValueError:
+            return None
+        if n < 0 or n > 64:
+            return None
+        pairs = []
+        for i in range(n):
+            pairs.extend((str(i), "i%d" % i))
+        return [
+            "r del %s" % key,
+            "r zadd %s %s" % (key, " ".join(pairs)),
+        ]
     return None
 
 
@@ -213,6 +228,42 @@ def parse_simple_assert(expr):
         return None
     return {"op": "expect", "args": tcl_args(m.group(1)),
             "value": expected_value(words[2][0], words[2][1])}
+
+
+def parse_assert_var_eq(expr, steps):
+    """assert {$retval == 2} against a reply stored by set retval [r cmd]."""
+    m = re.match(r'^\$([A-Za-z_][A-Za-z0-9_]*)\s+==\s+(.+)$', expr.strip())
+    if not m:
+        return None
+    var, rhs = m.group(1), m.group(2).strip()
+    if not re.match(r'^-?\d+(\.\d+)?$', rhs):
+        return None
+    for s in reversed(steps):
+        if s.get("as") == var:
+            s["op"] = "expect"
+            s["value"] = rhs
+            return True
+    return None
+
+
+def parse_assert_match_caught(rest, steps):
+    """assert_match {*ERR*} $e after catch {r cmd} e -> expect_error."""
+    try:
+        words = split_words(rest)
+    except ValueError:
+        return None
+    if len(words) != 2:
+        return None
+    (k1, w1), (k2, w2) = words
+    if k2 != "bare" or not re.match(r'^\$[A-Za-z_]', w2):
+        return None
+    pattern = expected_value(k1, w1)
+    for s in reversed(steps):
+        if s["op"] == "catch":
+            s["op"] = "expect_error"
+            s["value"] = pattern
+            return True
+    return None
 
 
 def parse_body(body):
@@ -294,8 +345,23 @@ def parse_body(body):
             if mode == "last":
                 mode = "asserts"
             continue
+        m = re.match(r'^assert_match\s+(.*)$', line)
+        if m:
+            parsed = parse_assert_match_caught(m.group(1), steps)
+            if parsed is not True:
+                return None
+            if mode == "err":
+                mode = "asserts"
+            elif mode == "last":
+                mode = "asserts"
+            continue
         m = re.match(r'^assert\s*\{(.*)\}$', line)
         if m:
+            bound = parse_assert_var_eq(m.group(1), steps)
+            if bound is True:
+                if mode == "last":
+                    mode = "asserts"
+                continue
             parsed = parse_simple_assert(m.group(1))
             if parsed is None:
                 return None

@@ -786,6 +786,7 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
 
         int64_t fields_start{0};
         size_t numkeys{0};
+        unsigned key_pos{1};
         std::string key{};
         std::string start{};
         std::string stop{};
@@ -809,8 +810,8 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
         int64_t count{0};
 
         int parse_options() {
-            unsigned spos = 1; // the key is the first one
-            if (argc < 4) {
+            unsigned spos = key_pos; // the key; ZRANGESTORE puts dest in front
+            if (argc < key_pos + 3) {
                 return VALKEYMODULE_ERR;
             }
             key = tos(spos++);

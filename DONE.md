@@ -3833,3 +3833,135 @@ accepted the same way TYPE is.
 before. barch agrees on all 279 faithful cases, up from 231.
 
 Verified with TestValkeyDifferential and TestRespShapes.
+
+## 107. ZREVRANK, ZREMRANGEBYRANK, and ZRANGESTORE [22-08-2026]
+
+*Was `TODO.md` entry 114.*
+
+Phase 1 of the Z* plan. Three commands that were missing from the
+valkey sorted-set list, all built on walks we already had.
+
+ZREVRANK is ZRANK counted from the high end: walk the set once, then
+`n - 1 - position`. WITHSCORE is the same extra score ZRANK already
+answers. Nil when the member is not there.
+
+ZREMRANGEBYRANK copies the index slice ZRANGE uses, then deletes
+those members through both keys, the way ZREM does. Negative indexes
+and inverted ranges are the same rules as ZRANGE.
+
+ZRANGESTORE is a ZRANGE collected into owned member/score pairs, then
+written to dest. WITHSCORES is a syntax error. LIMIT without BYSCORE
+or BYLEX is too. An empty range deletes dest rather than leaving an
+empty set. Wrong-type src is WRONGTYPE and leaves dest alone.
+
+The already-translated ZRANGESTORE cases came off ACCEPTED. barch
+went from 255 of 302 live cases to 263. The differential still agrees
+on all 279 faithful cases.
+
+Verified with TestValkeyDifferential.
+
+## 108. Translator expansions for remaining zset stubs [22-08-2026]
+
+*Was `TODO.md` entry 115.*
+
+Phase 2 of the Z* plan. The translator now reads `assert {$retval == 2}`
+against a stored reply, turns `catch {r cmd} e` plus `assert_match`
+into expect_error, and expands `create_long_zset KEY N` (N up to 64)
+into one ZADD.
+
+That unlocked the variadic ZADD parse-error tests, ZINCRBY's arity,
+ZRANGEBYSCORE LIMIT, ZMSCORE missing members, and the ZRANGE /
+ZRANGESTORE syntax cases. Three of those were real bugs, not
+translation artefacts: ZADD wrote the good pairs before a bad score
+and left the key behind; ZINCRBY ignored extra arguments; ZRANGE
+accepted LIMIT without BYSCORE/BYLEX, and ZREVRANGE/ZRANGEBYSCORE
+silently swallowed options they do not have.
+
+zset.tcl is 114 translated of 168 (was 105). Overall 312 of 665.
+valkey trusts 286 of 311. barch agrees on all 287 faithful cases,
+up from 279.
+
+Verified with TestValkeyDifferential.
+
+## 109. TestKeys and TestComposites asserted pre-compatibility answers [22-08-2026]
+
+Both lua tests failed against the current server, and in both cases the server was right
+and the test was recording what barch used to answer.
+
+`testkeys.lua` line 33. `a` is set with `px 11000`, so it has a TTL, and then
+`B.EXPIRE a 9 nx` and `B.EXPIRE a 9 gt` are both refused - NX will not replace an existing
+expiry, and 9 seconds is not greater than the ~11 left. A refused condition answers 0, not
+-1; -1 is what TTL says for "no expiry" and EXPIRE never uses it. `expire_command` in
+keys_api.cpp has said 0 since the redis compatibility pass, with a comment saying so. The
+two assertions now read `== 0`, and the `lt` line below them was already correct.
+
+`testcomposites.lua` had four stale lines, not one. The script dies on the first, so the
+other three only appeared once it was fixed - worth knowing, because "one assertion is
+wrong" was the obvious reading of the first failure and it was wrong:
+
+  - `B.ZREVRANGE cbgame 1 3 BYSCORE`. ZREVRANGE takes positions and `[WITHSCORES]`, that
+    is all, and the new guard in ZREVRANGE refuses BYSCORE, BYLEX and LIMIT. Replaced with
+    `0, -1`, which is the whole set. The score bound version of the question is the
+    ZREVRANGEBYSCORE two lines down, so nothing is lost.
+  - `B.ZREVRANGEBYSCORE cbgame 1 3.01` answered empty. The REV forms read max first, then
+    min, so this asked for everything from 1 down to 3.01. Now `3.01, 1`.
+  - `B.ZREVRANGEBYLEX cbgame [a [z` answered empty for the same reason. Now `[z, [a`.
+  - `B.ZRANGE cbgame a z WITHSCORES REV BYLEX` is a syntax error - a lex range has nowhere
+    to put a score. Dropped WITHSCORES and the expected count went from 6 to 3.
+
+Verified by running each call against a server by hand before touching the tests, which is
+what turned up the other three, and then `ctest -R "TestKeys|TestComposites"` green. The
+nine other lua tests were run afterwards and all pass.
+
+Two things found on the way that are not fixed here, because neither breaks a test today:
+
+  - `B.ZRANGEBYLEX key [a [z WITHSCORES` still answers 6. Real valkey has no WITHSCORES on
+    ZRANGEBYLEX and rejects it; the guard that went into ZRANGE was not mirrored here. When
+    that is fixed, testcomposites line 111 breaks with it.
+  - `B.ZRANGE key a z REV BYLEX` answers 3 but `B.ZRANGE key z a REV BYLEX` answers empty,
+    which is backwards - valkey wants max first there - and inconsistent with
+    ZREVRANGEBYLEX, which already reads max first. So the replacement line above passes for
+    the wrong reason and will need its bounds swapped when this is corrected.
+
+## 110. OrderedSet.revrange sent a command the server no longer accepts [22-08-2026]
+
+TestBindings failed on `OrderedSet.revrange should answer 5 members, answered 1`. The one
+was not a member - it was the null that every binding in `swig_api.cpp` answers when
+`sc.flat_empty()` is true, which is what an errored call leaves behind.
+
+`revrange` built `ZREVRANGE k start stop BYSCORE`. ZREVRANGE takes positions and
+`[WITHSCORES]` and nothing else, the way valkey has it, and the guard added to it refuses
+BYSCORE, BYLEX and LIMIT - so the call was a syntax error and the binding quietly answered
+one null instead of five members. The same stale form that broke testcomposites line 101,
+except here it is in the C++ rather than in a test, so the test was right and the code was
+wrong.
+
+The signature takes doubles, so the bounds really are scores and the command has to say so
+some other way. It is now `ZRANGE k start stop BYSCORE REV`. ZRANGE BYSCORE REV sorts the
+two bounds out itself - `0 100` and `100 0` both answer m4 down to m0 - so revrange still
+takes them the same way round as range, which is what the comment above the assertion in
+bindingtest.py promises. `range` on the line above already used ZRANGE BYSCORE, so the two
+now differ only by the REV.
+
+`ZREVRANGE` is the only place in swig_api.cpp that was affected; the other thirteen zset
+forms it builds are all still accepted.
+
+Two things about running this that cost time and are worth writing down:
+
+  - **The python module has to be reinstalled before the test sees a rebuild.**
+    `cmake --build` refreshes `_barch.so` in the build directory, but bindingtest.py is run
+    as a script from `test/`, so `sys.path[0]` is `test/` and the import resolves to the
+    copy pip put in `venv/lib/python3.12/site-packages`. That copy is only refreshed by
+    the `TestBarchInstallPy` step (`venv/bin/pip install .`). Building and re-running the
+    test on its own reproduces the old failure exactly, which reads like the fix not
+    working. Run `ctest -R "TestBarchInstallPy|TestBindings"`.
+  - **A probe script has to live outside the build directory.** `python3 -c` and a heredoc
+    on stdin both put the current directory first on the path, and there is a `barch.so` in
+    the build directory which is not the python extension, so the import dies with
+    "does not define module export function (PyInit_barch)". Running a file from the
+    scratchpad avoids it.
+
+TestBarchPy failed while checking this and it is not related: `barch.sizeAll()` counts the
+keyspaces on disk, so the `*.dat` left behind by running tests out of order pushes it past
+the 2 the test expects. `TestClean` (`rm -f *.dat`) runs before the python block in a full
+ordered run. With TestClean first, TestBarchPy passes.

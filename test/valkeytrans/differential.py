@@ -254,9 +254,24 @@ def run_all(port, cases, label):
         return c
 
     results = {}
+    source = None
     for case in cases:
         if case.get("skipped"):
             continue
+        # every tcl file is written against an empty db. Running all eight into one
+        # server left state from one file breaking the setup of a case in the next, and
+        # a case valkey rejects is dropped as an unfaithful translation rather than
+        # compared - so the pollution did not show up as a failure, it quietly removed
+        # cases from the comparison. The ZUNIONSTORE NaN case was one of them: it failed
+        # on valkey with WRONGTYPE because `z{t}` already held a string by the time zset
+        # was reached, and it was hiding a real difference. See DONE 116
+        if case.get("source") != source:
+            source = case.get("source")
+            try:
+                conn.execute_command("FLUSHALL")
+            except Exception:                        # noqa: BLE001
+                conn = fresh()
+                conn.execute_command("FLUSHALL")
         try:
             ok, detail = run_case(conn, case)
         except Exception as e:                       # noqa: BLE001
@@ -272,7 +287,7 @@ def run_all(port, cases, label):
             except Exception:                        # noqa: BLE001
                 pass
             conn = fresh()
-        results[case["name"]] = (ok, detail)
+        results[case["uid"]] = (ok, detail)
         # HELLO does not fail - it succeeds, and leaves the connection speaking a protocol
         # the client is not parsing, so every reply after it is misread rather than
         # refused. That is worse than an error: the run carries on and reports the damage
@@ -316,8 +331,13 @@ def main(argv):
     all_cases = []
     for f in files:
         d = json.load(open(f))
-        for c in d["cases"]:
+        # results were keyed by case name, and two cases in expire.tcl share one - both
+        # are called "EXPIRE with unsupported options". The second overwrote the first,
+        # so one of them was run and then never compared. The position in its file is
+        # what makes a case unique
+        for i, c in enumerate(d["cases"]):
             c["source"] = d["source"]
+            c["uid"] = "%s#%d" % (d["source"], i)
         all_cases.extend(d["cases"])
     live = [c for c in all_cases if not c.get("skipped")]
     print("%d cases, %d translated, %d stubs" %
@@ -338,8 +358,8 @@ def main(argv):
         vproc.kill()
         vproc.wait()
 
-    trusted = [c for c in live if vres.get(c["name"], (False,))[0]]
-    dropped = [c for c in live if not vres.get(c["name"], (False,))[0]]
+    trusted = [c for c in live if vres.get(c["uid"], (False,))[0]]
+    dropped = [c for c in live if not vres.get(c["uid"], (False,))[0]]
     if dropped:
         # worth showing rather than counting: a case valkey rejects is usually a
         # dependant of one the translator skipped, and the state it needed never got
@@ -348,7 +368,7 @@ def main(argv):
         print("  %d dropped, valkey rejects them so the translation is not faithful:"
               % len(dropped))
         for c in dropped:
-            print("     %-52s %s" % (c["name"][:52], vres[c["name"]][1][:70]))
+            print("     %-52s %s" % (c["name"][:52], vres[c["uid"]][1][:70]))
     if not trusted:
         print("no faithful translations to compare")
         return 1
@@ -380,7 +400,7 @@ def main(argv):
 
     differences = []
     for case in trusted:
-        ok, detail = bres.get(case["name"], (False, "not run"))
+        ok, detail = bres.get(case["uid"], (False, "not run"))
         if ok:
             continue
         why = next((r for pat, r in ACCEPTED.items()

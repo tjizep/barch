@@ -1881,45 +1881,23 @@ int cmd_GET(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, GET);
 }
 
-int TTL(caller& call, const arg_t& argv) {
-    if (argv.size() != 2)
-        return call.wrong_arity();
-    auto k = argv[1];
-    if (key_ok(k) != 0)
-        return call.key_check_error(k);
-    auto converted = call.kspace()->encode_key(k);
-    barch::sharded_store store(call.kspace());
-    int reply = call.ok();
-    bool answered = false;
-    // not store.search: that treats a tombstone as absent, and TTL reports one as
-    // present with no expiry.
-    // the two negatives follow redis: -1 is present with no expiry, -2 is no such key.
-    // they used to be the other way round, which quietly inverted every client's check
-    store.with_key_read(converted.get_value(), [&](const barch::shard_ptr& t) {
-        art::node_ptr r = t->search(converted.get_value());
-        if (r.null()) {
-            return;
-        }
-        answered = true;
-        auto l = r.const_leaf();
-        if (l->is_expiry()) {
-            long long e = (l->expiry_ms() - art::now())/1000;
-            reply = call.push_ll(e);
-        } else {
-            reply = call.push_ll(-1);
-        }
-    });
-    return answered ? reply : call.push_ll(-2);
-
-}
 /**
  * TTL, PTTL, EXPIRETIME and PEXPIRETIME are one read with four ways of reporting it.
  *
  * The two negatives follow redis: -1 is present with no expiry, -2 is no such key.
  *
+ * not store.search: that treats a tombstone as absent, and TTL reports one as present
+ * with no expiry.
+ *
  * The deadline forms answer the stored number directly. They used to rebuild it from the
  * time remaining, because expiry was measured against a clock that started when the
  * machine did and the stored number was not a unix time; since DONE 55 it is one.
+ *
+ * Both second forms round to the nearest second rather than truncating, which is what
+ * redis does - `addReplyLongLong(c, output_ms ? ttl : ((ttl+500)/1000))`. PX 1600 then
+ * TTL answers 2, not 1, and a deadline at x.6 seconds reports x+1. Truncating made TTL
+ * one low as soon as any time at all had passed, which is why the valkey case that sets
+ * a timeout twice kept flapping. See DONE 113.
  */
 enum class ttl_report { seconds, millis, deadline_seconds, deadline_millis };
 
@@ -1945,15 +1923,19 @@ static int ttl_query(caller& call, const arg_t& argv, ttl_report form) {
             return;
         }
         long long left = l->expiry_ms() - art::now();
+        // an overdue key that is still here answers 0, not a negative - redis clamps
+        // before it reports, and without this a key one second past its deadline would
+        // answer -1, which means something else entirely
+        if (left < 0) left = 0;
         switch (form) {
             case ttl_report::seconds:
-                reply = call.push_ll(left / 1000);
+                reply = call.push_ll((left + 500) / 1000);
                 break;
             case ttl_report::millis:
                 reply = call.push_ll(left);
                 break;
             case ttl_report::deadline_seconds:
-                reply = call.push_ll(l->expiry_ms() / 1000);
+                reply = call.push_ll((l->expiry_ms() + 500) / 1000);
                 break;
             case ttl_report::deadline_millis:
                 reply = call.push_ll(l->expiry_ms());
@@ -1963,6 +1945,9 @@ static int ttl_query(caller& call, const arg_t& argv, ttl_report form) {
     return answered ? reply : call.push_ll(-2);
 }
 
+int TTL(caller& call, const arg_t& argv) {
+    return ttl_query(call, argv, ttl_report::seconds);
+}
 int PTTL(caller& call, const arg_t& argv) {
     return ttl_query(call, argv, ttl_report::millis);
 }

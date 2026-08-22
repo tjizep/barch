@@ -54,20 +54,29 @@ assert(vk.call('B.ZCARD', 'ygame') == 3)
 -- scores happened to coincide, which is a different question and gave 2 here where the
 -- sets share all three members; and AGGREGATE reduced the whole reply to a single number
 -- rather than combining each member's scores. Both were fixed together - see DONE 58
-assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3) == 3)
-assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 3, 'AGGREGATE','SUM') == 3)
+-- one weight per input, no more and no fewer. These used to pass three weights for two
+-- inputs and have the extra one ignored; redis reads exactly as many as there are inputs
+-- and the leftover is then read as an option, which is a syntax error - see TODO 124
+assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3) == 3)
+assert(#vk.call('B.ZINTER', 2, 'zgame', 'ygame', 'WEIGHTS', 3, 3, 'AGGREGATE','SUM') == 3)
 
 -- with WITHSCORES the reply is member, score, member, score - so twice the members - and
 -- the score is the sum of what the member scored in each input, after its weight
-local scored = vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 1, 2, 3, 'AGGREGATE','SUM', 'WITHSCORES')
+local scored = vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WEIGHTS', 1, 2, 'AGGREGATE','SUM', 'WITHSCORES')
 assert(#scored == 6)
 assert(math.abs(tonumber(scored[2]) - 3.3) < 0.001)   -- first: 1.1*1 + 1.1*2
 
 -- an input that does not exist leaves nothing to intersect with
-assert(#vk.call('B.ZINTER', 2, 'zgame', 'yzgame', 'WEIGHTS', 1, 1, 1, 'AGGREGATE','SUM') == 0)
-assert(#vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'WEIGHTS', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == 0)
--- the third named input is the word AGGREGATE, which is not a set, so nothing is shared
-assert(#vk.call('B.ZINTER', 3, 'zgame', 'zgame', 'AGGREGATE', 'WEIGHTS', 1, 'AGGREGATE', 'SUM') == 0)
+assert(#vk.call('B.ZINTER', 2, 'zgame', 'yzgame', 'WEIGHTS', 1, 1, 'AGGREGATE','SUM') == 0)
+
+-- a weight has to be a float, and these two name three inputs so three weights are read.
+-- The third is the word AGGREGATE, which is not one, and redis says so rather than
+-- calling it a syntax error. They used to answer an empty array because the weights were
+-- gathered loosely and the odd words ended up read as input names
+local e = vk.pcall('B.ZINTER', 3, 'zgame', 'zgame', 'WEIGHTS', 'WEIGHTS', 1, 'AGGREGATE', 'SUM')
+assert(e and e.err and string.find(e.err, 'not a float'), 'expected a weight error')
+e = vk.pcall('B.ZINTER', 3, 'zgame', 'zgame', 'AGGREGATE', 'WEIGHTS', 1, 'AGGREGATE', 'SUM')
+assert(e and e.err and string.find(e.err, 'not a float'), 'expected a weight error')
 assert(#vk.call('B.ZINTER', 2, 'zgame', 'zgame', 'WITHSCORES') == 6)
 assert(vk.call('B.ZINTERSTORE','storezegame', 2, 'zgame', 'zgame') == 3)
 assert(vk.call('B.ZCARD','storezegame') == 3)

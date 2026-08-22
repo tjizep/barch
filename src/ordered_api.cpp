@@ -1125,6 +1125,9 @@ static int ZOPER(
         if (spec.bad_limit) {
             return call.push_error("LIMIT can't be negative");
         }
+        if (spec.bad_weight) {
+            return call.push_error("weight value is not a float");
+        }
         if (spec.no_keys) {
             return call.push_error(("at least 1 input key is needed for '"
                                     + std::string(named) + "' command").c_str());
@@ -1145,11 +1148,25 @@ static int ZOPER(
     auto weight_of = [&](size_t which) -> double {
         return which < spec.weight_values.size() ? spec.weight_values[which] : 1.0;
     };
+    // an infinite score times a zero weight is NaN, and redis keeps the convention that
+    // the answer is 0 rather than storing the NaN - `if (isnan(score)) score = 0` at both
+    // the union walk and the intersection walk. A NaN in the store is worse than a wrong
+    // number: it is not equal to itself, so it sorts unpredictably and never compares
+    // equal to anything a later range asks for
+    auto weighted = [&](double score, size_t which) -> double {
+        double w = score * weight_of(which);
+        return std::isnan(w) ? 0.0 : w;
+    };
     auto combine = [&](double have, double add, size_t seen) -> double {
         switch (spec.aggr) {
             case art::zops_spec::min: return seen ? std::min(have, add) : add;
             case art::zops_spec::max: return seen ? std::max(have, add) : add;
-            default:                  return seen ? have + add : add;   // sum, and the default
+            default: {                                  // sum, and the default
+                if (!seen) return add;
+                // +inf and -inf add to NaN. Same convention, same reason
+                double total = have + add;
+                return std::isnan(total) ? 0.0 : total;
+            }
         }
     };
 
@@ -1164,9 +1181,9 @@ static int ZOPER(
         auto it = gathered.find(id);
         if (it == gathered.end()) {
             order.push_back(id);
-            gathered[id] = acc{score * weight_of(which), 1};
+            gathered[id] = acc{weighted(score, which), 1};
         } else {
-            it->second.score = combine(it->second.score, score * weight_of(which), it->second.seen);
+            it->second.score = combine(it->second.score, weighted(score, which), it->second.seen);
             ++it->second.seen;
         }
     };
@@ -1181,13 +1198,13 @@ static int ZOPER(
         // intersection and difference are both decided by the first set's members
         each_member(kstore, spec.keys[0], [&](art::value_type m, double sc) {
             size_t found = 0;
-            double total = sc * weight_of(0);
+            double total = weighted(sc, 0);
             size_t seen = 1;
             for (size_t k = 1; k < spec.keys.size(); ++k) {
                 double other = 0;
                 if (member_score(kstore, spec.keys[k], m, other)) {
                     ++found;
-                    total = combine(total, other * weight_of(k), seen);
+                    total = combine(total, weighted(other, k), seen);
                     ++seen;
                 }
             }

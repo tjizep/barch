@@ -13,6 +13,8 @@ extern "C" {
 #include <string>
 #include <regex>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <initializer_list>
 #include "sastam.h"
 #include "glob.h"
@@ -149,6 +151,22 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
 
             auto &scheck = tos(at);
             return std::regex_match(scheck, integer);
+        }
+
+        // any float redis would take: strtod's parse, so inf and the exponent forms work.
+        // The whole token has to be consumed - `1.5x` is not 1.5 - and NaN is refused,
+        // which is what getDoubleFromObject does
+        bool to_double(unsigned at, double& out) const {
+            if (at >= argc) return false;
+            auto &scheck = tos(at);
+            if (scheck.empty()) return false;
+            const char *b = scheck.c_str();
+            char *end = nullptr;
+            double v = std::strtod(b, &end);
+            if (end == b || *end != '\0') return false;
+            if (std::isnan(v)) return false;
+            out = v;
+            return true;
         }
 
         // integer
@@ -656,6 +674,8 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
         /** ZINTERCARD stops counting here; 0 means no limit, which is also the default */
         long long limit{0};
         bool bad_limit{false};
+        /** a weight that is not a float, which redis names rather than calling it syntax */
+        bool bad_weight{false};
         /** numkeys was zero, which redis names rather than calling a syntax error */
         bool no_keys{false};
 
@@ -743,10 +763,25 @@ inline bool expiry_ms(int64_t given, bool seconds, bool relative, int64_t& out) 
                         if (!weight_values.empty()) {
                             return VALKEYMODULE_ERR;
                         }
-                        while (is_integer(spos)) {
-                            weight_values.push_back(tol(spos++));
+                        // one weight per input, no more and no fewer, and each is any
+                        // float rather than only an integer. Redis will not read WEIGHTS
+                        // at all unless a weight for every input follows it, so a short
+                        // list is a plain syntax error; a long one leaves its extras to
+                        // be read as options, which fails the same way. Only a value in
+                        // the right place that is not a float gets named. See DONE 115
+                        // and DONE 117
+                        if ((size_t) spos + numkeys > (size_t) argc) {
+                            return VALKEYMODULE_ERR;
                         }
-
+                        for (size_t n = 0; n < numkeys; ++n) {
+                            double w = 0;
+                            if (!to_double(spos, w)) {
+                                bad_weight = true;
+                                return VALKEYMODULE_ERR;
+                            }
+                            weight_values.push_back(w);
+                            ++spos;
+                        }
                         break;
                     case aggregate:
                         if (aggr != agg_none) {

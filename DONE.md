@@ -4005,3 +4005,220 @@ keys answer 0, and a mixed call answers what it should.
 
 `get_many` just above has the same repeated encode and an extra `search` on the first pass,
 but its second pass is a real read rather than a repeated probe, so it is left alone.
+
+## 112. The Z* compatibility plan in Z-COMPAT-PLAN.md [22-08-2026]
+
+*Was `TODO.md` entry 122.*
+
+The four-phase plan from the earlier session, written into the repo root so it is not
+only in the chat. The file is the original plan with a short status at the top: phases 1
+and 2 are already done (DONE 107 and 108), zset.tcl is 114 of 168 translated, the
+differential agrees on 287 faithful cases, and phases 3 and 4 are what is left.
+
+Nothing else changed. Phase 3 (BZPOPMIN/BZPOPMAX and the ZPOP member-index remove) and
+phase 4 (remrange helpers and a second connection for blocking tests) are still not
+started.
+
+## 113. TTL truncated the seconds where redis rounds to nearest [22-08-2026]
+
+`ttlGenericCommand` in valkey's expire.c ends with
+
+    addReplyLongLong(c, output_ms ? ttl : ((ttl + 500) / 1000));
+
+so every second form rounds to the nearest second. barch divided by 1000 and truncated, so
+`SET x v PX 1600` then `TTL x` answered 1 where valkey answers 2, and TTL went one low as
+soon as any time at all had passed after an EXPIRE. That is what made
+TestValkeyDifferential flap on "EXPIRE - set timeouts multiple times": the case wants
+`1 [45] 1 10` and got `1 5 1 9` whenever the second TTL landed after the tick. The `[45]`
+already in that expectation is the same rounding at the earlier step, tolerated rather
+than chased down.
+
+**TODO 119 said the deadline forms were already right. They were not.** `output_abs` sets
+`ttl = expire` and then falls into the same `(ttl + 500) / 1000`, so EXPIRETIME rounds too.
+Checked against a real valkey rather than read off the source: a key whose PEXPIRETIME ends
+in .886 reports an EXPIRETIME one higher. Three call sites, not two.
+
+Also added the clamp valkey does before it reports, `if (ttl < 0) ttl = 0`. An overdue key
+that is still present answers 0. Without it a key a second past its deadline would answer
+-1, which already means "present, no expiry" - a wrong answer that looks like a valid one.
+
+**TTL had its own copy of the whole function.** It did not go through `ttl_query`; it
+repeated the with_key_read, the search, the answered flag and the two negatives, and then
+computed the seconds itself. That is why the drift was possible at all, and it is why the
+fix had two obvious call sites rather than one. TTL is now
+`ttl_query(call, argv, ttl_report::seconds)` like the other three, and the tombstone note
+that was sitting on it has moved to the shared doc comment where it applies to all four.
+
+Verified by probing all four commands against barch and against valkey side by side, by
+walking PEXPIRETIME through six deadlines .1 to .9 of a second apart and checking each
+EXPIRETIME is `(p + 500) / 1000`, and by running the differential six times in a row: six
+clean runs, and the trusted count is now a steady 287 where it used to alternate between
+286 and 287. Full suite, 66 of 66.
+
+The reinstall trap from DONE 110 caught me again and is worth repeating: a probe script
+imports the pip copy in the venv, so `cmake --build` alone leaves it reading the old
+module and the fix looks like it did nothing. Run TestBarchInstallPy first.
+
+## 114. ZUNIONSTORE and ZINTERSTORE stored NaN where redis stores 0 [22-08-2026]
+
+An infinite score times a zero weight is NaN in IEEE, and so is +inf plus -inf. Redis
+guards both and keeps the convention that the answer is 0. barch stored the NaN, so
+
+    zadd z -inf neginf
+    zunionstore out 1 z weights 0
+    zrange out 0 -1 withscores      ->  neginf -nan     (valkey: neginf 0)
+
+There are three guards in valkey's t_zset.c, not one: `if (isnan(score)) score = 0` after
+the weight multiply on the union walk (2702) and again on the intersection walk (2754), and
+`if (isnan(*target)) *target = 0.0` inside the SUM arm of zunionInterAggregate (2365). MIN
+and MAX are deliberately not guarded - once the multiply is clean neither operand can be
+NaN, and flattening an infinity there would be wrong.
+
+barch had the same three places, in `ZOPER`: the two `score * weight_of(which)` in `note`,
+the `sc * weight_of(0)` and `other * weight_of(k)` on the intersection walk, and the sum
+arm of `combine`. The multiplication is now a `weighted` lambda that zeroes a NaN, and the
+sum arm zeroes one too. MIN and MAX are left alone and still answer -inf and inf.
+
+A NaN in the store is worse than a wrong number, which is worth saying because "it is only
+a weird score" undersells it: NaN is not equal to itself, so it sorts unpredictably against
+the ordered keys and never compares equal to anything a later range asks for. The member
+becomes unreachable by score.
+
+Verified by probing every path - weight 0 against -inf and against +inf, in ZUNIONSTORE and
+ZINTERSTORE, and the same member scoring +inf in one input and -inf in another under SUM -
+all six answer 0 now, and MIN and MAX still answer -inf and inf. Then zset.json on its own,
+which is where the case is trusted: 106 of 106, where it used to be the one difference.
+Full suite, 66 of 66.
+
+Found while checking that ordinary weights still worked: **WEIGHTS only parses integers**.
+`keyspec.h:746` gathers them with `while (is_integer(spos)) weight_values.push_back(tol(spos++))`,
+so `ZUNIONSTORE o 1 n WEIGHTS 2.5` is a syntax error where valkey answers 2 and scores the
+members 5 and 7.5. A fraction part way along a list is worse - it ends the list early and
+the rest of the weights are read as though they were options. Not fixed here; it is TODO 123.
+
+## 115. WEIGHTS only parsed integers [22-08-2026]
+
+`keyspec.h` gathered the weights with
+
+    while (is_integer(spos)) weight_values.push_back(tol(spos++));
+
+so a weight had to be a whole number. `ZUNIONSTORE o 1 n WEIGHTS 2.5` was a syntax error
+where valkey answers 2 and scores the members 5 and 7.5, and the failure mode part way
+along a list was worse than a refusal: the loop ended at the first fraction and everything
+after it was read as though it were an option, so `WEIGHTS 1 2.5 3` weighted one input and
+then failed on the rest.
+
+`base_key_spec` now has a `to_double` next to `tol`: strtod's parse, the whole token has to
+be consumed so `1.5x` is not 1.5, and NaN is refused - which is what `getDoubleFromObject`
+does. The weights loop reads with that instead.
+
+Checked against a real valkey rather than against what the arithmetic ought to be, because
+weights and aggregates combine in an order that is easy to get plausibly wrong:
+
+  - `WEIGHTS 2.5` over {two 2, three 3} - both answer `two 5 three 7.5`
+  - `WEIGHTS 1 2.5` over two inputs - both answer `two 27 three 53`
+  - `WEIGHTS 1.5 2 AGGREGATE MIN` - both answer `two 3 three 4.5`
+
+and the forms that should still be refused are: `nan` and `1.5x` both error. Exponent forms
+and `inf` work. Integer weights are unchanged - the existing tests that pass `WEIGHTS 3 3 3`
+still pass.
+
+**What this deliberately does not fix.** Valkey takes exactly `numkeys` weights and errors
+if there are more, with "weight value is not a float"; barch reads as many numbers as
+follow. So `ZINTER 2 a b WEIGHTS 3 3 3` is a syntax error there and is accepted here. That
+is a second divergence in the same option and it is left alone on purpose: testcomposites
+has four assertions that pass more weights than inputs and expect them to be tolerated, so
+tightening it is a test change as well as a parser change, and it belongs in its own entry
+rather than being smuggled in behind a fix for the fraction. Barch's error wording for a bad
+weight is also the generic syntax error rather than redis's specific one. Both are TODO 124.
+
+Full suite 66 of 66, and zset.json and string.json on their own both agree with valkey on
+every trusted case.
+
+## 116. The differential ran every file into one server, and lost a case to its own keying [22-08-2026]
+
+Two ways the harness was quietly removing cases from the comparison. Neither showed up as
+a failure, which is what made them worth chasing: a dropped case reads as "the translation
+was not faithful", and that is indistinguishable from a case that really is untranslatable.
+
+**All eight files ran into one server session.** Every tcl file is written against an empty
+db, so state from one broke the setup of a case in the next. The ZUNIONSTORE NaN case was
+the expensive one: by the time zset was reached `z{t}` already held a string, so `zadd z{t}
+-inf neginf` failed on valkey with WRONGTYPE, the case was dropped as unfaithful, and the
+real difference it exists to catch - DONE 114 - was invisible in the combined run. It only
+showed up because zset.json was run on its own. `run_all` now issues a FLUSHALL when the
+source file changes, which is what the tcl suite does between files anyway.
+
+**Results were keyed by case name, and two cases share one.** expire.tcl has two tests
+called "EXPIRE with unsupported options" - `EXPIRE foo 200 AB` and `EXPIRE foo 200 XX AB`.
+Both ran; the second overwrote the first in the results dict, so one of them was never
+compared. That is the whole explanation for a number that had been sitting in the output
+unremarked: "312 translated" but "286 of 311 cases pass". Cases are keyed by source and
+position now.
+
+The effect, on the combined run:
+
+    before   312 translated, valkey: 286 of 311, 25 dropped, barch : 271 of 311
+    after    312 translated, valkey: 289 of 312, 23 dropped, barch : 274 of 312
+
+Three more cases compared: "KEYS with empty DB" and the ZUNIONSTORE NaN case, both
+recovered by the flush, and the second "EXPIRE with unsupported options", recovered by the
+keying. barch agrees with valkey on all 289, four runs in a row, and the NaN case is now a
+standing regression test for DONE 114 in the normal run rather than something only a
+per-file invocation would catch.
+
+Worth keeping in mind for the remaining 23 drops: they are still read as translation
+artefacts, and after this the reading is more trustworthy, but it is not proof. A case that
+valkey rejects because barch's translator skipped its setup and a case that valkey rejects
+because the translation is wrong still look identical from here.
+
+Full suite 66 of 66.
+
+## 117. WEIGHTS took any number of weights, and named a bad one badly [22-08-2026]
+
+The two leftovers from DONE 115. Redis reads exactly one weight per input:
+
+    if (remaining >= (setnum + 1) && !strcasecmp(c->argv[j]->ptr, "weights")) {
+        j++; remaining--;
+        for (i = 0; i < setnum; i++, j++, remaining--)
+            if (getDoubleFromObjectOrReply(c, c->argv[j], &src[i].weight,
+                                           "weight value is not a float") != C_OK) ...
+
+Three different outcomes come out of that, and it is worth being precise about which is
+which, because they are easy to collapse into one:
+
+  - too few, or none at all - the `remaining >= setnum + 1` guard means WEIGHTS is not
+    recognised as a keyword, and it falls through to a plain syntax error
+  - too many - the extras are left to be read as options, and fail as a syntax error
+  - the right count with a value that is not a float - and only this one gets the
+    specific "weight value is not a float"
+
+barch now does the same: the loop reads exactly `numkeys` weights, refuses early if that
+many do not follow, and sets a `bad_weight` flag that ZOPER turns into the wording, next to
+the `bad_limit` that already worked that way.
+
+Checked row for row against a real valkey rather than reasoned about, because the guard
+that makes a short list a syntax error rather than a weight error is not obvious from the
+loop:
+
+    ZINTER 2 a b WEIGHTS 3 3 3            syntax error                  both
+    ZINTER 2 a b WEIGHTS 1                syntax error                  both
+    ZINTER 2 a b WEIGHTS                  syntax error                  both
+    ZINTER 2 a b WEIGHTS 1 2 3 AGGREGATE MIN  syntax error              both
+    ZINTER 2 a b WEIGHTS 1 zz             weight value is not a float   both
+    ZINTER 2 a b WEIGHTS 1 2              x                             both
+    ZINTER 2 a b WEIGHTS 1 2 AGGREGATE MIN    x                         both
+
+and fractional weights still work, so DONE 115 is intact.
+
+**Six assertions in testcomposites.lua changed**, which is the reason this was not folded
+into DONE 115. Four passed three weights for two inputs and expected the extra to be
+ignored; they now pass two. The other two are more interesting: they name three inputs -
+one of the "inputs" being the word WEIGHTS or AGGREGATE - and used to answer an empty array
+because the loose gathering left the odd words to be read as input names. Under the strict
+count they read three weights, the third being the word AGGREGATE, and answer the float
+error. Valkey answers the same, so these two assertions test more than they did before;
+they use `vk.pcall` and check the message rather than counting an empty reply.
+
+Full suite 66 of 66, and the differential agrees with valkey on all 289 trusted cases,
+twice in a row.

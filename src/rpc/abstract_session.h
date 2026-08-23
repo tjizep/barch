@@ -9,8 +9,10 @@ namespace barch {
     class abstract_session {
     public:
         virtual ~abstract_session() = default;
-        // schedules a call to unblock on this sessions thread
-        virtual void do_block_continue() = 0;
+        // schedules a call to unblock on this session's thread. `key` is the name whose
+        // change caused the wake, so a waiter that takes something from it can hand the
+        // turn to whoever is next in that key's queue
+        virtual void do_block_continue(const std::string& key) = 0;
     };
 
     typedef std::shared_ptr<abstract_session> abstract_session_ptr;

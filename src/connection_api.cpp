@@ -167,7 +167,8 @@ int MULTI(caller& call, const arg_t& arg_v) {
         return call.wrong_arity();
     }
     call.start_call_buffer();
-    return call.ok();
+    // +OK, not the null an empty results vector is written as
+    return call.push_simple("OK");
 }
 int EXEC(caller& call, const arg_t& arg_v) {
     if (arg_v.size()!=1) {

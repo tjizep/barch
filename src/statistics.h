@@ -71,6 +71,13 @@ namespace statistics {
     extern std::atomic<uint64_t> foreign_cancelled;
     extern std::atomic<uint64_t> foreign_slow;
     /**
+     * how many callers are parked in a blocking command right now - BLPOP, BZPOPMIN,
+     * BZMPOP and the foreign waiter. Counted per parked session rather than per key,
+     * so a caller waiting on three names is one blocked client, which is what redis
+     * reports and what wait_for_blocked_client in the valkey suite reads
+     */
+    extern std::atomic<uint64_t> blocked_clients;
+    /**
      * queue stats
      */
     extern std::atomic<uint64_t> queue_failures;

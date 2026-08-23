@@ -736,6 +736,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # ACL key patterns are parsed and refused rather than silently dropped
+        add_test(NAME TestAclFilter
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aclfiltertest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestKeysStream
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/keysstreamtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

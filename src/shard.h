@@ -7,6 +7,7 @@
 /**
  * a barch shard
  */
+#include <algorithm>
 #include "art/art.h"
 #include "abstract_shard.h"
 #include "merge_options.h"
@@ -391,22 +392,47 @@ namespace barch {
                 add_rpc_block(k,ptr);;
             }
         }
+        /**
+         * Take one session off the list waiting on a key.
+         *
+         * Every occurrence goes, not the first: a pop names its keys as the caller wrote
+         * them, so `BZPOPMIN z1 z2 z2 z1 0` registers the same session against z2 twice
+         * and both entries have to come off together.
+         *
+         * This used to erase inside a range-for over the same vector, which invalidates
+         * the loop's own iterator and the one it was erasing with, and then stepped past
+         * the element that moved down into the gap. With a name repeated the second entry
+         * survived, and the next call_unblock on that key woke a session that had already
+         * been answered - so the following park on that connection was woken by nothing
+         * and answered nil, and the reply it should have had turned up one read later.
+         * See DONE 124.
+         */
         void unblock_key_(const std::string &k, const barch::abstract_session_ptr& ptr) {
             auto i = blocked_sessions.find(k);
-            if (i != blocked_sessions.end()) {
-                auto at = i->second.begin();
-                for (auto& p : i->second) {
-                    if (p == ptr) {
-                        i->second.erase(at,at+1);
-                    }
-                    ++at;
-                }
-            }
+            if (i == blocked_sessions.end()) return;
+            auto& waiting = i->second;
+            waiting.erase(std::remove(waiting.begin(), waiting.end(), ptr), waiting.end());
+            // an empty list is a key nobody waits on, and leaving it behind grows the map
+            // for the lifetime of the shard
+            if (waiting.empty()) blocked_sessions.erase(i);
         }
+        /**
+         * Register a session as waiting on a key. At most once, however many times the
+         * caller named that key.
+         *
+         * `BZPOPMIN z1 z2 z2 z1 0` used to put the session in z2's list twice, and
+         * call_unblock walks the list calling do_block_continue on every entry - so the
+         * session was signalled twice for one wake. The first signal posts the reply and
+         * clears the blocks, but it posts it: the second signal runs while has_blocks is
+         * still true and posts a second one. That reply finds the set already emptied by
+         * the first and answers nil, so the connection ends up one reply ahead and every
+         * second park on it reads the nil that belonged to nobody. See DONE 124.
+         */
         void add_rpc_block(const std::string& key, const abstract_session_ptr& ptr) final{
             auto i = blocked_sessions.find(key);
             if (i != blocked_sessions.end()) {
-                i->second.emplace_back(ptr);
+                if (std::find(i->second.begin(), i->second.end(), ptr) == i->second.end())
+                    i->second.emplace_back(ptr);
             }else {
                 blocked_sessions[key] = {ptr};
             }
@@ -422,16 +448,30 @@ namespace barch {
         }
 
         void call_unblock(const std::string& k) final {
-            heap::vector<barch::abstract_session_ptr> sessions;
+            // inside a transaction the wake is held until EXEC finishes, so a client
+            // waiting on this key does not get to see a half-run MULTI. See DONE 125
+            if (barch::wakes_deferred()) {
+                barch::defer_wake(this, k);
+                return;
+            }
+            // the first waiter only, and the rest stay queued.
+            //
+            // Every waiter used to be signalled at once, and each of them posts its own
+            // continuation, so which one got the data was whichever the executor happened
+            // to run - four clients on one key were served in no particular order and the
+            // second one was answered from the wrong key entirely. Redis serves them in
+            // the order they arrived, and the way to get that is to wake one, let it take
+            // what it wants, and have it pass the turn on. See DONE 127.
             auto i = blocked_sessions.find(k);
-            if (i != blocked_sessions.end()) {
-                sessions.swap(i->second);
+            if (i == blocked_sessions.end() || i->second.empty()) {
+                return;
+            }
+            auto first = i->second.front();
+            i->second.erase(i->second.begin());
+            if (i->second.empty()) {
                 blocked_sessions.erase(i);
             }
-
-            for (auto& s:sessions) {
-                s->do_block_continue();
-            }
+            first->do_block_continue(k);
         }
 
 

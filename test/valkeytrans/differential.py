@@ -33,32 +33,37 @@ REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 
 # Differences we have looked at and decided to keep. Each needs a reason; a bare entry
 # here is indistinguishable from a bug someone got tired of.
+#
+# The reasons used to cite TODO 52 and TODO 63. Both were closed months ago - 52 in
+# DONE 43 and 63 in DONE 65 - and neither was ever about most of what was hung on it, so
+# the pointers said "tracked and pending" about work that was finished. Two of the reasons
+# had also gone stale as facts: MULTI/EXEC do exist, and so does LMOVE. Checking the one
+# that blamed LMOVE turned up a real bug it had been sitting on top of - see TODO 129.
+# Reasons now state what was measured, and a pointer is only here when something is
+# genuinely open. See DONE 121.
 ACCEPTED = {
     # name pattern: why
-    # --- commands that are not implemented. See TODO 52 -------------------------
-    "SETBIT*": "the bit commands are not implemented. See TODO 52",
-    "GETBIT*": "the bit commands are not implemented. See TODO 52",
-    "MGET against non-string key": "the case sets up with SADD; there is no set type. "
-                                   "See TODO 52",
-    "SET with IFEQ*": "SET's IFEQ conditional is not implemented. See TODO 52",
+    # --- commands that are not implemented. Each checked against a running barch --
+    "SETBIT*": "SETBIT is an unknown command",
+    "GETBIT*": "GETBIT is an unknown command",
+    "MGET against non-string key": "the case sets up with SADD, which is an unknown "
+                                   "command; there is no set type",
+    "SET with IFEQ*": "SET's IFEQ conditional is a syntax error here",
 
-    # --- list/zset leftovers from TODO 63. The commands exist; these cases need
-    #     MULTI, replication, or a type the translator skipped. -----------------
-    "BRPOPLPUSH inside a transaction": "MULTI/EXEC is not implemented. See TODO 63",
+    # --- cases that need something other than the command under test ------------
+    # MULTI and EXEC do exist and this case's effect is right; what differs is the reply
+    # to a queued command, which is a nil here and +QUEUED there. DISCARD is unknown
+    "BRPOPLPUSH inside a transaction": "a queued command answers nil rather than +QUEUED",
 
     # --- cases whose setup uses a type or command barch does not have -------------
-    "ZDIFFSTORE with a regular set*": "the case sets up with SADD; there is no set type. "
-                                      "See TODO 52",
-    "ZINTERSTORE with a regular set*": "the case sets up with SADD. See TODO 52",
-    "ZUNIONSTORE with a regular set*": "the case sets up with SADD. See TODO 52",
-    "ZINTERSTORE #516*": "the case sets up with SADD. See TODO 52",
-    "ZINTERSTORE regression with two sets*": "the case sets up with SADD. See TODO 52",
-    "ZADD XX option without key*": "TYPE is not implemented. See TODO 52",
-    "Extended SET GET with incorrect type*": "the case sets up with LPUSH and then reads "
-                                             "the list back with LRANGE after a failed "
-                                             "SET, which needs LMOVE. See TODO 63",
+    "ZDIFFSTORE with a regular set*": "the case sets up with SADD; there is no set type",
+    "ZINTERSTORE with a regular set*": "the case sets up with SADD",
+    "ZUNIONSTORE with a regular set*": "the case sets up with SADD",
+    "ZINTERSTORE #516*": "the case sets up with SADD",
+    "ZINTERSTORE regression with two sets*": "the case sets up with SADD",
+    "ZADD XX option without key*": "TYPE is an unknown command",
     "PERSIST can undo an EXPIRE": "the case reads the value back with a command whose "
-                                  "setup uses TYPE, which is not implemented. See TODO 63",
+                                  "setup uses TYPE, which is an unknown command",
 
 
     # --- differences already decided about ---------------------------------------
@@ -96,7 +101,12 @@ def render(v, in_list=False):
     if isinstance(v, bytes):
         return v.decode("utf-8", "replace")
     if isinstance(v, (list, tuple)):
-        return " ".join(render(x, True) for x in v)
+        # a nested list is braced, the way tcl prints one. Flattening it made BZMPOP's
+        # reply - a key and a list of {member score} pairs - render the same as BZPOPMIN's
+        # flat one, so `zset {{a 0}}` compared as `zset a 0` and valkey rejected its own
+        # answer. Only nesting is braced; the outermost list is still bare
+        inner = " ".join(render(x, True) for x in v)
+        return "{%s}" % inner if in_list else inner
     if isinstance(v, float):
         # tcl prints a whole float without its fraction
         return ("%r" % v).rstrip("0").rstrip(".") if "." in ("%r" % v) else "%r" % v
@@ -147,14 +157,130 @@ def round_float(text):
     return repr(r)
 
 
-def run_case(conn, case):
+class Deferred:
+    """
+    A connection that sends without reading, so a command can be left parked while the
+    test does something else on the main one. redis-py has no deferring client, but its
+    Connection does exactly this: `send_command` writes and returns, `read_response`
+    collects when we are ready.
+
+    zset.tcl's blocking tests are written around this - park a BZPOPMIN, check the server
+    says a client is blocked, ZADD from the other connection, then read what came back.
+    """
+    def __init__(self, port):
+        import redis
+        self.client = redis.Redis(host="127.0.0.1", port=port, decode_responses=True,
+                                  socket_timeout=20)
+        self.client.response_callbacks = {}
+        try:
+            self.conn = self.client.connection_pool.get_connection("defer")
+        except TypeError:                            # redis-py 6 dropped the argument
+            self.conn = self.client.connection_pool.get_connection()
+
+    def send(self, args):
+        self.conn.send_command(*args)
+
+    def read(self):
+        return self.conn.read_response()
+
+    def close(self):
+        try:
+            self.conn.disconnect()
+        except Exception:                            # noqa: BLE001
+            pass
+
+
+def blocked_clients(conn):
+    """what `INFO clients` says is parked, which is what wait_for_blocked_client reads"""
+    try:
+        info = conn.execute_command("INFO", "clients")
+    except Exception:                                # noqa: BLE001
+        return None
+    if isinstance(info, bytes):
+        info = info.decode("utf-8", "replace")
+    for line in str(info).split("\n"):
+        if line.startswith("blocked_clients:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def wait_blocked(conn, count, timeout=5.0):
+    """poll until that many clients are parked. False if they never are"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        n = blocked_clients(conn)
+        if n is None:
+            return False
+        if n >= count:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def run_case(conn, case, port=None):
     """(ok, detail). Runs the case's steps in order against one connection."""
     import redis
     last = None
     err = None
     collected = []
     named = {}
+    # a case that parks a client opens its own connections, and they have to be shut at
+    # the end however the case leaves: a connection still parked when the next case runs
+    # keeps blocked_clients above zero and every wait_for_blocked_client after it passes
+    # for the wrong reason
+    deferred = {}
+    try:
+        return _run_steps(conn, case, port, deferred)
+    finally:
+        for d in deferred.values():
+            d.close()
+        # and wait for the server to notice. Closing the socket is not the same as the
+        # block being released, and a case that inherits a parked client from the one
+        # before it sees wait_for_blocked_client pass for the wrong reason and then has
+        # its wake stolen. That is DONE 116's lesson in a different costume
+        if deferred:
+            deadline = time.time() + 2.0
+            while time.time() < deadline and (blocked_clients(conn) or 0) > 0:
+                time.sleep(0.05)
+
+
+def _run_steps(conn, case, port, deferred):
+    import redis
+    last = None
+    err = None
+    collected = []
+    named = {}
     for step in case.get("steps", []):
+        if step["op"] == "sleep":
+            time.sleep(step["ms"] / 1000.0)
+            continue
+        if step["op"] == "wait_blocked":
+            if not wait_blocked(conn, step["count"]):
+                return False, "waited for %d blocked client(s), INFO clients says %s" % (
+                    step["count"], blocked_clients(conn))
+            continue
+        if step["op"] == "defer":
+            name = step["conn"]
+            if name not in deferred:
+                deferred[name] = Deferred(port)
+            deferred[name].send(step["args"])
+            continue
+        if step["op"] == "read":
+            name = step["conn"]
+            if name not in deferred:
+                return False, "read from %s before anything was sent on it" % name
+            try:
+                reply = deferred[name].read()
+            except Exception as e:                   # noqa: BLE001
+                return False, "deferred read on %s raised %s: %s" % (
+                    name, type(e).__name__, e)
+            got = render(reply)
+            if not matches(step["value"], got):
+                return False, "deferred read: expected %r got %r" % (step["value"], got)
+            continue
         args = step["args"]
         try:
             reply = conn.execute_command(*args)
@@ -273,7 +399,7 @@ def run_all(port, cases, label):
                 conn = fresh()
                 conn.execute_command("FLUSHALL")
         try:
-            ok, detail = run_case(conn, case)
+            ok, detail = run_case(conn, case, port)
         except Exception as e:                       # noqa: BLE001
             ok, detail = False, "%s: %s" % (type(e).__name__, e)
             # One case can break the connection for every case after it, and then the

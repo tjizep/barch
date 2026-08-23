@@ -1,8 +1,17 @@
 # Finish the Z* APIs against valkey's tests
 
-Status as of 22-08-2026: phases 1 and 2 are done (DONE 107 and 108).
-zset.tcl is 114 of 168 translated. The differential agrees on 287
-faithful cases. Phases 3 and 4 are what is left.
+Status as of 22-08-2026: all four phases are done - DONE 107, 108,
+118, 119, 120 and 122 - and so is everything the last of them
+turned up: TODO 131 to 134, written up as DONE 123, 124, 125 and
+127.
+
+zset.tcl is 138 of 177 translated. The differential agrees with
+valkey on all 315 faithful cases and not one zset case is in
+ACCEPTED. It was 279 faithful when this plan was written.
+
+The plan's own phase 4 text is wrong about the blocking half being
+harness work: it needed `blocked_clients` in `INFO clients` first,
+and then found four server bugs.
 
 ---
 
@@ -110,6 +119,11 @@ that should pass, and the differential still agrees.
 
 ## Phase 3 — BZPOPMIN / BZPOPMAX, and ZPOP's leftover index
 
+Done. See DONE 118. Both commands exist, the index leak is gone, and
+a second bug turned up next to it: ZPOPMIN's count check compared a
+bool against `ok()`, so every ZPOPMIN with a count was an error.
+The `foreach` expansion the phase calls optional was not done.
+
 BZMPOP already blocks, parses a timeout, and pops MIN/MAX with
 COUNT. BZPOPMIN is `BZPOPMIN key [key ...] timeout` and answers
 `{key member score}` rather than BZMPOP's nested array. Implement as
@@ -135,8 +149,11 @@ behind.
 
 ## Phase 4 — remrange helpers and blocking (only if 1–3 still look thin)
 
-**Remrange basics.** Three stubs, all "inner proc + create_zset +
-command". Either:
+**Remrange basics.** Done. See DONE 119 - inlined in the translator,
+and the first new case immediately caught ZREMRANGEBYSCORE refusing
+an exclusive `(1` bound.
+
+Three stubs, all "inner proc + create_zset + command". Either:
 
 - inline that proc shape in the translator (one-command helper, no
   loops), or
@@ -146,10 +163,10 @@ command". Either:
 Prefer inlining if the helper is literally `create_zset; r
 zremrange*;`. Hand JSON if it fights the translator.
 
-**Blocking.** `valkey_deferring_client` tests (same key twice,
-ZADD+DEL should not wake, multiple BZMPOP waiters) need a second
-redis-py connection in `differential.py`. That is harness work, not
-a Z* command. Do it after BZPOPMIN exists, as its own step.
+**Blocking.** Done - see DONE 120 and 122. It needed a server
+feature before the harness work: every one of these tests calls
+`wait_for_blocked_client`, which reads `blocked_clients` from
+`INFO clients`, and barch did not implement that section at all.
 
 ## Order, and what "done" looks like
 

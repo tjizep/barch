@@ -74,8 +74,8 @@ namespace art {
          * once the format is in the wild, and costs nothing at all today.
          */
         tcomposite_extend = 11u,
-
-        tlast_valid = 11u,
+        tfunction = 12u,
+        tlast_valid = 16u,
         tend = 255u,
         tnone = 65536
     };

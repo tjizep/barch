@@ -472,8 +472,11 @@ namespace barch {
                     --foreign_inflight;
             }
         }
+        // a space being unloaded wakes every waiter it has, and there is no key behind
+        // this one - the block is being failed, not satisfied, so there is no turn to
+        // pass on
         for (auto& sess : sessions)
-            sess->do_block_continue();
+            sess->do_block_continue(std::string());
     }
 
     key_space::~key_space() {

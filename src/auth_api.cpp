@@ -136,6 +136,13 @@ extern "C"
         if (spec.parse_options() != 0) {
             return call.push_error("ACL syntax error");
         }
+        // a `~pattern` parses into acl_spec::filters and nothing has ever read it, so
+        // key patterns used to be accepted and then quietly dropped - a client asking
+        // for key level rights got OK and no rights, along with whatever categories it
+        // sent in the same breath. Refused until key patterns mean something. TODO 136
+        if (spec.is_filter) {
+            return call.push_error("ACL key patterns are not supported");
+        }
         auto a = get_auth();
         if (spec.get) {
             read_lock read(a);

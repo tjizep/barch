@@ -348,6 +348,17 @@ int INFO(caller& call, const arg_t& argv) {
         call.push_vt(response);
         return 0;
     }
+    // only what barch actually knows. redis's Clients section carries sixteen fields and
+    // inventing the other fifteen would make INFO a worse source than no INFO at all -
+    // blocked_clients is the one the valkey suite reads, through wait_for_blocked_client,
+    // and it is the one that is real here. See DONE 120
+    if (argv.size() == 2 && lower(text, argv[1].to_string()) == "clients") {
+        std::string response =
+        "# Clients\n\n"
+        "blocked_clients:"+tos(statistics::blocked_clients.load())+"\n";
+        call.push_vt(response);
+        return 0;
+    }
     if (argv.size() == 2 && lower(text, argv[1].to_string()) == "foreign") {
         uint64_t inflight = 0;
         barch::all_spaces([&](const std::string&, const barch::key_space_ptr& ks) {

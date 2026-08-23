@@ -59,6 +59,7 @@ alignas(Alignment) std::atomic<uint64_t> statistics::foreign_queries = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_misses = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_errors = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_waiters = 0;
+alignas(Alignment) std::atomic<uint64_t> statistics::blocked_clients = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_coalesced = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_overloaded = 0;
 alignas(Alignment) std::atomic<uint64_t> statistics::foreign_cancelled = 0;

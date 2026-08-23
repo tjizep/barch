@@ -159,6 +159,138 @@ UNTRANSLATABLE = re.compile(
     r'wait_for_sync|assert_type|memory_usage|LPOS)\b')
 
 
+# the pop names zset.tcl loops over. Only these are expanded: `foreach encoding
+# {listpack skiplist}` wraps the whole file, and writing that one out would double every
+# test in it for no gain, which is why the plan says not to
+_POP_NAME = re.compile(r'^BZ(POP|MPOP)(MIN|MAX|_MIN|_MAX)$')
+_FOREACH_RE = re.compile(r'(?<![\w-])foreach\s+\{([^{}]*)\}\s+\{([^{}]*)\}\s*\{')
+
+
+def expand_foreach_pops(text):
+    """
+    `foreach {popmin popmax} {BZPOPMIN BZPOPMAX BZMPOP_MIN BZMPOP_MAX} { ... }` is a loop
+    over tuples of command names, and the tests inside differ only by which name got
+    substituted where. Writing the body out once per tuple turns one test the translator
+    cannot read into two it can.
+
+    Only a loop whose values are all pop names is touched, so the encoding loop around the
+    whole file is left alone.
+    """
+    while True:
+        for m in _FOREACH_RE.finditer(text):
+            names = m.group(1).split()
+            values = m.group(2).split()
+            if not names or not values:
+                continue
+            if len(values) % len(names) != 0:
+                continue
+            if not all(_POP_NAME.match(v) for v in values):
+                continue
+            open_brace = m.end() - 1
+            try:
+                end = find_brace(text, open_brace)
+            except ValueError:
+                continue
+            body = text[open_brace + 1:end - 1]
+            out = []
+            for base in range(0, len(values), len(names)):
+                copy = body
+                pairs = sorted(zip(names, values[base:base + len(names)]),
+                               key=lambda nv: -len(nv[0]))
+                for name, value in pairs:
+                    copy = copy.replace("$" + name, value)
+                out.append(copy)
+            text = text[:m.start()] + "\n".join(out) + text[end:]
+            break
+        else:
+            return text
+
+
+def _bzpop_call(pop, keys, timeout, count):
+    """the command `verify_bzpop_response` would have sent for this pop name"""
+    if pop.startswith("BZM"):
+        # lassign [split $pop "_"] pop where
+        name, _, where = pop.partition("_")
+        args = [name, timeout, str(len(keys))] + keys + [where]
+        if count != "0":
+            args += ["COUNT", count]
+        return args
+    return [pop] + keys + [timeout]
+
+
+def expand_deferred_pop_helpers(line):
+    """
+    The two helpers the parking tests use, both of which are an if on the command name
+    and nothing else:
+
+        bzpop_command $rd BZPOPMIN zset 0
+        verify_pop_response BZPOPMIN [$rd read] {zset foo -1} {zset {{foo -1}}}
+
+    The first becomes the send it would have made, on the same handle. The second becomes
+    an ordinary assert against whichever of the two expectations belongs to this pop name.
+    """
+    try:
+        words = split_words(line)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    name = words[0][1]
+    if name == "bzpop_command" and len(words) == 5:
+        handle, pop, key, timeout = [w[1] for w in words[1:]]
+        if not _POP_NAME.match(pop):
+            return None
+        if pop.startswith("BZM"):
+            cmd, _, where = pop.partition("_")
+            args = [cmd, timeout, "1", key, where, "COUNT", "1"]
+        else:
+            args = [pop, key, timeout]
+        return ["%s %s" % (handle, " ".join(args))]
+    if name == "verify_pop_response" and len(words) == 5:
+        pop = words[1][1]
+        kind, res = words[2]
+        zpop_exp, zmpop_exp = words[3][1], words[4][1]
+        if kind != "bracket" or not _POP_NAME.match(pop):
+            return None
+        expected = zmpop_exp if "ZM" in pop else zpop_exp
+        return ["assert_equal {%s} [%s]" % (expected, res)]
+    return None
+
+
+def expand_bzpop_verify(line):
+    """
+    verify_bzpop_response and its two key twin are an if on the command name, a send on
+    the deferring client and a compare of what comes back. Every use of them in zset.tcl
+    is against a set that already has members, so the pop answers at once and there is
+    nothing deferred about it - which is what makes them expandable into an ordinary
+    assert against the one connection.
+
+    The BZMPOP branch is mechanical too: `lassign [split $pop "_"] pop where` turns
+    BZMPOP_MIN into BZMPOP and MIN, and the arguments are numkeys then the names then
+    the direction.
+    """
+    try:
+        words = split_words(line)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    name = words[0][1]
+    if name == "verify_bzpop_response" and len(words) == 8:
+        _, pop, key, timeout, count, bzpop_exp, bzmpop_exp = [w[1] for w in words[1:]]
+        keys = [key]
+    elif name == "verify_bzpop_two_key_response" and len(words) == 9:
+        _, pop, key, key2, timeout, count, bzpop_exp, bzmpop_exp = [w[1] for w in words[1:]]
+        keys = [key, key2]
+    else:
+        return None
+    if not _POP_NAME.match(pop):
+        return None
+    expected = bzmpop_exp if pop.startswith("BZM") else bzpop_exp
+    args = _bzpop_call(pop, keys, timeout, count)
+    return ["assert_equal {%s} [r %s]" % (expected, " ".join(args))]
+
+
 def expand_known_helpers(line):
     """
     zset.tcl's create_zset helpers are a DEL plus a ZADD. Expanding the call
@@ -171,6 +303,12 @@ def expand_known_helpers(line):
     if not words:
         return None
     name = words[0][1]
+    verified = expand_bzpop_verify(line)
+    if verified:
+        return verified
+    deferredly = expand_deferred_pop_helpers(line)
+    if deferredly:
+        return deferredly
     if name == "create_default_zset" and len(words) == 1:
         return [
             "r del zset",
@@ -211,6 +349,107 @@ def expand_known_helpers(line):
             "r zadd %s %s" % (key, " ".join(pairs)),
         ]
     return None
+
+
+_PROC_RE = re.compile(r'^\s*proc\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}\s*\{', re.M)
+
+
+def inline_inner_proc(body):
+    """
+    zset.tcl's remrange tests define a helper inside the test and then call it a dozen
+    times:
+
+        proc remrangebyscore {min max} {
+            create_zset zset {1 a 2 b 3 c 4 d 5 e}
+            assert_equal 1 [r exists zset]
+            r zremrangebyscore zset $min $max
+        }
+        assert_equal 3 [remrangebyscore 2 4]
+
+    The body is a fixture, a check, and one command whose reply is the proc's value, so
+    a call can be written out where it stands. Only that shape is taken: the last line
+    has to be a single `r ...`, and nothing before it may be something the translator
+    would refuse anyway. No loops, no nested calls, no recursion - this is an expansion,
+    not a tcl interpreter, and the moment it starts guessing it stops being safe.
+
+    Has to run before the UNTRANSLATABLE check, which lists `proc`.
+    """
+    m = _PROC_RE.search(body)
+    if not m:
+        return body
+    open_brace = m.end() - 1
+    try:
+        end = find_brace(body, open_brace)
+    except ValueError:
+        return body
+    name = m.group(1)
+    params = m.group(2).split()
+    proc_lines = [l.strip() for l in body[open_brace + 1:end - 1].split("\n")]
+    proc_lines = [l for l in proc_lines if l and not l.startswith("#")]
+    if not proc_lines:
+        return body
+    tail = re.match(r'^r\s+(.*)$', proc_lines[-1])
+    if not tail:
+        return body
+    prelude = proc_lines[:-1]
+    if any(UNTRANSLATABLE.search(l) for l in prelude):
+        return body
+    if any(("[" + name) in l for l in prelude):
+        return body
+
+    rest = body[:m.start()] + body[end:]
+    call_re = re.compile(r'\[\s*' + re.escape(name) + r'\s+([^\]]*)\]')
+    out = []
+    for line in rest.split("\n"):
+        cm = call_re.search(line)
+        if not cm:
+            out.append(line)
+            continue
+        try:
+            args = split_words(cm.group(1).strip())
+        except ValueError:
+            return body
+        if len(args) != len(params):
+            return body
+        subs = {}
+        for p, (kind, text) in zip(params, args):
+            subs["$" + p] = ("{%s}" % text) if kind == "brace" else text
+
+        def fill(text, subs=subs):
+            # longest name first, or $min would also match the front of $minimum
+            for k, v in sorted(subs.items(), key=lambda kv: -len(kv[0])):
+                text = text.replace(k, v)
+            return text
+
+        out.extend(fill(p) for p in prelude)
+        out.append(line[:cm.start()] + "[r " + fill(tail.group(1)) + "]"
+                   + line[cm.end():])
+    return "\n".join(out)
+
+
+def parse_deferred_read(rest, deferred):
+    """
+    `assert_equal [$rd read] {z1{t} a 0}` and the same with the two words the other way
+    round. The tcl is written both ways in the same file, so both are taken - which of
+    the two words is the read is what says which is the expectation.
+    """
+    if not deferred:
+        return None
+    try:
+        words = split_words(rest)
+    except ValueError:
+        return None
+    if len(words) != 2:
+        return None
+    reads = [i for i, (kind, w) in enumerate(words)
+             if kind == "bracket" and re.match(r'^\$(\w+)\s+read$', w.strip())]
+    if len(reads) != 1:
+        return None
+    at = reads[0]
+    name = re.match(r'^\$(\w+)\s+read$', words[at][1].strip()).group(1)
+    if name not in deferred:
+        return None
+    return {"op": "read", "conn": name, "value": words[1 - at][1]}
 
 
 def parse_simple_assert(expr):
@@ -279,11 +518,16 @@ def parse_body(body):
       list    - several replies are compared as one space separated list
       bind    - the reply stored in `bind` is compared, after later cleanup ran
     """
+    body = inline_inner_proc(body)
     body = re.sub(r'\\\s*\n\s*', ' ', body)   # tcl line continuations
     raw = [l.strip() for l in body.split("\n")]
     lines = []
     for l in raw:
         if not l or l.startswith("#"):
+            continue
+        # `if {$::valgrind} {after 100}` is a pause for a slow build, not part of what
+        # the test checks - and it would trip the `if {` in UNTRANSLATABLE
+        if re.match(r'^if\s*\{\$::valgrind\}\s*\{\s*after\s+\d+\s*\}$', l):
             continue
         expanded = expand_known_helpers(l)
         if expanded:
@@ -299,7 +543,40 @@ def parse_body(body):
     mode = "last"
     bind = None
     list_vars = None
+    deferred = set()
     for line in lines:
+        # A deferring client sends and does not wait, which is how the blocking tests park
+        # a pop and then act on the other connection. The handle is remembered by name so
+        # `$rd bzpopmin ...` later can be told from an ordinary line, and closing it is
+        # the harness's job at the end of the case.
+        #
+        # Where the pop does not actually park - the set already has members -
+        # expand_bzpop_verify has already turned it into a plain call and the handle is
+        # simply never used again, which is harmless
+        m = re.match(r'^set\s+(\w+)\s+\[\s*valkey_deferring_client\s*\]$', line)
+        if m:
+            deferred.add(m.group(1))
+            continue
+        if re.match(r'^\$\w+\s+close$', line):
+            continue
+        if re.match(r'^wait_for_blocked_client$', line):
+            steps.append({"op": "wait_blocked", "count": 1})
+            continue
+        m = re.match(r'^wait_for_blocked_clients_count\s+(\d+)$', line)
+        if m:
+            steps.append({"op": "wait_blocked", "count": int(m.group(1))})
+            continue
+        m = re.match(r'^after\s+(\d+)$', line)
+        if m:
+            steps.append({"op": "sleep", "ms": int(m.group(1))})
+            continue
+        m = re.match(r'^\$(\w+)\s+(.*)$', line)
+        if m and m.group(1) in deferred:
+            steps.append({"op": "defer", "conn": m.group(1),
+                          "args": tcl_args(m.group(2))})
+            if mode == "last":
+                mode = "asserts"
+            continue
         # `set res {}` and friends only initialise an accumulator; the value is built by
         # the `append` lines that follow
         if re.match(r'^set\s+\w+\s*\{\}$', line) or line.startswith("set err"):
@@ -337,6 +614,12 @@ def parse_body(body):
             continue
         m = re.match(r'^assert_equal\s+(.*)$', line)
         if m:
+            read = parse_deferred_read(m.group(1), deferred)
+            if read is not None:
+                steps.append(read)
+                if mode == "last":
+                    mode = "asserts"
+                continue
             parsed = parse_assert_equal_or_bound(m.group(1), steps)
             if parsed is None:
                 return None
@@ -607,6 +890,7 @@ class Unsupported(Exception):
 
 def translate_file(path):
     text = open(path, encoding="utf-8", errors="replace").read()
+    text = expand_foreach_pops(text)
     cases = []
     for raw in find_tests(text):
         entry = {"name": raw["name"], "expected": raw["expected"]}

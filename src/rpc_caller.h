@@ -15,6 +15,7 @@
 #include "connection_api.h"
 #include "sastam.h"
 #include "auth_api.h"
+#include "statistics.h"
 #include "rpc/barch_functions.h"
 #include "rpc/redis_parser.h"
 #include "vector_stream.h"
@@ -34,6 +35,13 @@ struct rpc_caller : caller {
     std::function<std::string()> info_fun;
     bool call_buffering = false;
     keys_t blocks{};
+    /**
+     * whether this caller is counted in statistics::blocked_clients. The count is of
+     * parked sessions, not of the keys they are waiting on, and park and unpark are
+     * not perfectly paired - erase_blocks is called on the disconnect path too - so
+     * the flag is what keeps it from drifting either way
+     */
+    bool counted_blocked = false;
     Variable empty{nullptr};
     std::function<void(caller&, const keys_t&)> block_fun;
     uint64_t block_to_ms = 0;
@@ -543,15 +551,40 @@ struct rpc_caller : caller {
     }
     call_type fexec = EXEC;
     commands_t commands;
+    /**
+     * is this argument that command name, whatever case it was sent in?
+     *
+     * The dispatcher folds the name it looks the function up by, but the parameters keep
+     * the case the client wrote. Comparing them as they came meant `exec` in lower case
+     * was not EXEC, so it was queued into the transaction it was supposed to end - and
+     * every command after it was queued too, forever. Pipelining `EXEC` in upper case
+     * worked, which is why the wire tests looked fine. See DONE 125
+     */
+    template<typename P>
+    static bool name_is(const P& param, const char* name) {
+        size_t n = 0;
+        while (name[n]) ++n;
+        if (param.size() != n) return false;
+        for (size_t i = 0; i < n; ++i) {
+            if (std::toupper((unsigned char) param[i]) != (unsigned char) name[i]) return false;
+        }
+        return true;
+    }
     template<typename TC, typename VT>
     int call(const VT& params, TC&& f) {
         if (params.empty()) {
             barch::err({"invalid parameters"});
             return 0;
         }
-        if (is_buffering() && (params[0] != "EXEC" || params[0] == "MULTI")) {
+        if (is_buffering() && !name_is(params[0], "EXEC")) {
             commands.emplace_back(f, params, ks);
-            return 0;
+            // redis answers +QUEUED for a command it has taken into a transaction. This
+            // used to return with nothing pushed, and an empty results vector is written
+            // as a RESP null - so every queued command answered $-1, and a client that
+            // checks for QUEUED (redis-py's pipeline does) saw a transaction it could
+            // not believe in. See DONE 123
+            results.clear();
+            return push_simple("QUEUED");
         }
         ++statistics::local_calls;
         args.clear();
@@ -601,6 +634,7 @@ struct rpc_caller : caller {
         results.clear();
         errors.clear();
         args.clear();
+        block_retry = false;
         block_fun(*this, blocks);
         return errors.empty() ? 0 : -1;
     }
@@ -650,6 +684,10 @@ struct rpc_caller : caller {
         }
     }
     void transfer_rpc_blocks(const barch::abstract_session_ptr& session) override {
+        if (!counted_blocked && !blocks.empty()) {
+            counted_blocked = true;
+            ++statistics::blocked_clients;
+        }
         for (auto &d: blocks) {
             auto shard = d.shard();
             std::unique_lock lck(shard->get_latch());
@@ -658,6 +696,10 @@ struct rpc_caller : caller {
         //add_rpc_blocks(caller.get_blocks(),session);
     }
     void erase_blocks(const barch::abstract_session_ptr& session) override {
+        if (counted_blocked) {
+            counted_blocked = false;
+            --statistics::blocked_clients;
+        }
         for (auto &d: blocks) {
             auto shard = d.shard();
             std::unique_lock lck(shard->get_latch());
@@ -667,6 +709,15 @@ struct rpc_caller : caller {
     }
     bool has_blocks() override {
         return !this->blocks.empty();
+    }
+    bool block_retry = false;
+    void retry_block() override {
+        block_retry = true;
+    }
+    bool take_block_retry() override {
+        bool r = block_retry;
+        block_retry = false;
+        return r;
     }
     /**
      * take over the blocks another caller registered, and leave it with none.
@@ -702,6 +753,9 @@ struct rpc_caller : caller {
 
 
     void finish_call_buffer() override {
+        // every wake the queued commands raise waits until this scope ends, which is
+        // what makes a transaction invisible to a blocked client. See DONE 125
+        barch::defer_wakes hold_wakes;
         call_buffering = false;
         collecting_exec = true;
         buffered_results.clear();
@@ -725,7 +779,19 @@ struct rpc_caller : caller {
 
         }
 
-        results = std::move(buffered_results);
+        // EXEC answers one array of the queued replies, and it has to say so even when
+        // there is one of them or none. The writer renders a results vector of one as
+        // that value on its own and an empty one as a null, so `MULTI; PING; EXEC` used
+        // to answer a bare +PONG where redis answers *1 +PONG. Closing it as an
+        // aggregate keeps it an array of whatever length it is
+        results.clear();
+        temp.clear();
+        start_array();
+        for (auto& r: buffered_results) {
+            temp.back().emplace_back(r);
+        }
+        end_array();
+        buffered_results.clear();
         ks = original;
         commands.clear();
         collecting_exec = false;

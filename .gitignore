@@ -43,3 +43,5 @@ build/*
 **/.cmake/*
 *.so
 .claude/worktrees/
+**/_deps/valkey-src/src/*
+

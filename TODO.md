@@ -559,6 +559,27 @@
 
 124. [Done] WEIGHTS took any number of weights, and named a bad one badly [22-08-2026] Nr 117 367fe0a
 
+125. [Done] Phase 3: BZPOPMIN/BZPOPMAX, and ZPOP's leftover index [22-08-2026] Nr 118 1c17a23
+
+126. [Done] Phase 4 remrange helpers, and an exclusive-bound bug [22-08-2026] Nr 119 1c17a23
+
+127. [Done] blocked_clients, the pop-name foreach, and nested list rendering [22-08-2026] Nr 120 1c17a23
+
+
+128. [Done] The deferring client, and the two bugs it found [22-08-2026] Nr 122 1c17a23
+
+129. [Done] The string writers and a name that holds a collection [22-08-2026] Nr 126 1c17a23
+
+130. [Done] ACCEPTED reasons pointed at closed TODOs, two were wrong [22-08-2026] Nr 121 1c17a23
+
+131. [Done] MULTI's reply protocol [22-08-2026] Nr 123 1c17a23
+
+132. [Done] Repeated key name in a blocking pop, and the double signal [22-08-2026] Nr 124 1c17a23
+
+133. [Done] A parked client saw inside a transaction, and the lower case EXEC [22-08-2026] Nr 125 1c17a23
+
+134. [Done] Waiters on one key are served in arrival order [22-08-2026] Nr 127 1c17a23
+
 97. LRU compress, and LRU compress-then-evict.
 
     Two new eviction policies, next to the existing `allkeys-lru` /
@@ -618,35 +639,497 @@
     answers through the same reply path as a built-in. This is not
     `foreign=luau`, which only fills a miss. It is a command.
 
-    Points to settle before writing one:
+    A function is a stored value, not a configuration string. It
+    lives under `art::tfunction`, so it persists, replicates and
+    exports the way every other key does, and a space's functions
+    have the same lifetime as the space. Functions in the
+    `configuration` space are global: defined once, callable from any
+    client in any space, exactly like a built-in, which is the same
+    scope the barch module itself has. Functions in one space may
+    include each other. A cycle is an error, never a silent drop.
 
-      - how it is registered. A `FUNCTION LOAD`-shaped command, a
-        file named from the configuration space, or both. Redis
-        functions persist in the RDB; barch's nearest equivalent is
-        a key in `configuration` read when the space (or the process)
-        is built. A command that can be redefined while the server
-        runs is more useful and harder, because in-flight calls and
-        ACL both have to see one version.
-      - the sandbox. Foreign Luau already forbids `require` and IO
-        and slices on `foreign_script_insns`. A RESP function that
-        can call back into SET/GET is a different power and a
-        different deadlock: the script must not take a shard lock
-        the command path already holds. Settle by listing the APIs
-        the script actually gets (arguments, reply, maybe a
-        lock-free GET) and refusing the rest.
-      - ACL and arity. A user-defined name has to appear in COMMAND
-        LIST and in the ACL categories or it is invisible to every
-        client that checks those. Arity can be declared at
-        registration; a wrong count should be `-ERR` before the
-        script runs.
-      - the instruction slice. The foreign path already yields the
-        worker and requeues. A RESP call that parks the client for
-        a slice is fine; one that holds the worker until the script
-        finishes is not, for the same reason as a long KEYS.
+    A. Where a function lives: an ordinary key with a lead of its
+       own.
 
-    A single command, one script, no callbacks into the store, would
-    settle the registration and the reply shape. The rest can wait
-    until that one works.
+    A function key is a composite key like any other multi-part key,
+    with `art::tfunction` as its lead where a caller's key has
+    `art::tplain`: `composite{ts_function, "KS1", "PRINT_NAME"}`.
+    A composite component is `{lead, 0x00}` followed by the parts -
+    which is why every decoder starts reading at [2] - so this needs
+    a `ts_function` beside `ts_plain` in nodes.h and nothing else
+    new in the encoding.
+
+    `is_composite_lead` then has to say yes to 12, and explicitly
+    rather than by widening the range it already tests, because
+    `is_container_lead` shares that range and a function is not a
+    container: no kind is claimed for it and
+    `claim_container_kind` must never see one.
+
+    With that, the decode sites that delegate on the predicate come
+    free - keys.cpp:133, :202 and :382. Two do not:
+
+      - conversion.h:244, `comparable_key(art::value_type)`, throws
+        `invalid_argument` on any lead outside its list, so a
+        function key cannot be constructed until tfunction is in it.
+      - `script_key` in luau_driver.cpp strips a lead from a list it
+        keeps itself, and would quietly keep the 12.
+
+    The AOF and RDB writers, the exporter and replication all treat
+    it as an ordinary key, which is the whole point of doing it this
+    way: a SETF persists and reaches a replica with no machinery of
+    its own.
+
+    First class also means the ordinary commands answer for these
+    keys rather than hiding them:
+
+      - KEYS, SCAN, RANGE and the bounds see them. TYPE says
+        `function`. DBSIZE counts them, so a LOAD changes it.
+      - GET, SET and DEL cannot address them at all - see below,
+        it falls out of the encoding rather than being a rule.
+        SETF, GETF, REMF and KEYSF are the commands that can; see
+        K for why they are their own commands and not a flag.
+      - FLUSHDB drops a space's functions with the space. FLUSHALL
+        reaching `configuration` would drop the global ones, which
+        is either right or wants refusing.
+      - EXPIRE, and the whole TTL family, is refused on the range.
+        A function with a TTL is a coherent idea, but expiry is
+        lazy and would not bump the generation counter the session
+        cache checks, so a session would go on running a function
+        whose key is gone. Making the expiry path bump the
+        generation would work too and buys nothing anyone asked
+        for.
+
+    Writing one. The precedent is a container key: hash_api.cpp:60
+    builds `query.create(art::ts_hash, {container})` and inserts
+    through the store. A function is the same move with a different
+    lead:
+
+        composite q;
+        auto key = q.create(art::ts_function, {conversion::convert(name)});
+        store.insert(opts, key, source, ...);
+
+    with `fits_in_leaf(key.size, source.size)` checked first the way
+    HSET does. The ceiling is `maximum_allocation_size`, a little
+    under 256KB, which no sane script reaches - but that check is
+    where `too_large_message` comes from and it belongs there.
+
+    What makes the range safe is that nothing else can reach it. A
+    client's key goes through `key_space::encode_key` and
+    `conversion::as_composite`, which produce tstring, tinteger,
+    tplain and the rest, never tfunction. So SET cannot address a
+    function key and there is no guard to write for it: the refusal
+    is the encoding itself.
+
+    The same fact costs something, and the bullets above had it
+    wrong first time round: GET and DEL cannot reach the range
+    either, for exactly that reason. They do not read or delete a
+    function. `GETF` and `REMF` are the surface, and they build the
+    composite themselves - see K. KEYS and SCAN still
+    show function keys, since the reply path decodes any composite,
+    so the asymmetry to live with is that a name KEYS printed cannot
+    be handed back to GET. That wants saying in the docs rather than
+    being discovered.
+
+    Where a guard *is* needed is the paths that write an already
+    encoded key: replication, the AOF and RDB load, and
+    import/restore. A forged tfunction key from a peer or a crafted
+    dump is a function body nobody loaded, so those validate the
+    lead instead of trusting it.
+
+    Two more consequences of writing a new lead into a shard file:
+
+      - `storage_version` in constants.h is bumped, 15 to 16. The
+        comment there says why: an older binary reading a file with
+        tfunction keys in it does not misread them, it hits the
+        `comparable_key` throw or the keys.cpp abort. Refusing the
+        file is the better failure, and that is what the version
+        buys.
+      - the value is the source text, not bytecode. Bytecode is
+        tied to the Luau build, so storing it turns a Luau upgrade
+        into a migration, and the compiled instance already lives in
+        the session per C.
+
+    Last piece: is the key `{ts_function, space, name}` or
+    `{ts_function, name}`? The space component repeats what the
+    key's location already says - a function in KS1 lives in KS1's
+    shards - and adds a way to be inconsistent, a key in KS2 whose
+    first component says KS1. `{ts_function, name}` with the space
+    implied is the recommendation. The client-facing
+    `KS1.PRINT_NAME` reads the same either way; it just resolves to
+    space KS1, key `{ts_function, PRINT_NAME}`.
+
+    The ordering is the interesting part, and it cuts both ways.
+    tfunction is 12, after every other lead, so function keys sort
+    together at the end of an ordered space. In favour: FUNCTION
+    LIST is a range scan over one contiguous span rather than an
+    index that has to be kept in step, dropping every function in a
+    space is one range delete, and a session rebuilding its cache
+    reads them in a single walk. Against: MAX and `maximum()` now
+    answer with a function key, `KEYS *` includes them, RANDOMKEY
+    can hand one back, and on a range-sharded space every function
+    lands on the last shard. None of that is wrong, but each is a
+    change to a command that has nothing to do with functions, and
+    each wants a test saying which way it went.
+
+    B. Naming, scope and resolution.
+
+    A function is addressed `SPACE.NAME`, so `KS1.PRINT_NAME` is
+    PRINT_NAME as defined in KS1. An unqualified `PRINT_NAME`
+    resolves in the selected space first, then in `configuration`.
+
+    That sits next to the `space:CMD` prefix `run_params` already
+    parses, and the two are orthogonal rather than redundant: the
+    colon says which space the call *runs against* - what
+    `call.kspace()` returns - and the dot says where the definition
+    is *loaded from*. So `KS1:KS1.PRINT_NAME` is valid and says
+    both, and `KS2:KS1.PRINT_NAME` runs KS1's function against KS2,
+    which is worth having if the function is written against an
+    interface rather than against particular keys.
+
+    Parsing goes in the same place and in this order: split the
+    colon prefix, split at the first dot, then upper-case what is
+    left. It has to be that way round because a space name is case
+    sensitive and a command name is not, which is already why
+    `run_params` splits the colon before folding. It also assumes a
+    space name contains no dot - configuration keys are
+    `<name>.foreign`, so that is assumed elsewhere too, but it is
+    worth saying out loud rather than discovering.
+
+    Built-ins are never overloaded. A SETF that takes the name of a
+    built-in command is refused there and then, so dispatch
+    looks the built-in table up first and never has to arbitrate
+    between the two. A dotted name cannot collide by construction.
+
+    C. Where the compiled function lives: one state per session and
+       space.
+
+    Threading is solved by not sharing. A RESP session keeps a
+    `lua_State` per key space it has called into, and a string map
+    of the functions compiled in it. The first call to
+    `KS1.PRINT_NAME` on a session reads the tfunction key out of
+    KS1, compiles it into that session's state for KS1 and caches
+    it under that name; every later call on that session goes
+    straight to it. Nothing is shared between sessions, so there is
+    no mutex, no pool of states, and no state whose ownership moves
+    between threads.
+
+    The invariant this rests on is that one session never runs two
+    calls at once, and today it does not: `run_asynch_batch` posts
+    one call at a time and does not read again until the batch is
+    done, and a parked call resumes through the same chain. That is
+    worth writing down beside the cache, because the day something
+    runs two calls of one session in parallel this stops being safe
+    without looking any different.
+
+    The space keeps the definitions, which is the lifetime the entry
+    started with; the session keeps one compiled instance of them.
+    Three things follow:
+
+      - staleness. A session that compiled PRINT_NAME an hour ago
+        has to notice a redefinition. Cheapest is a generation
+        counter per space, bumped by any write to a tfunction key
+        and compared with the one the session's state for that
+        space was built at - an atomic read on the hot path, and a
+        mismatch closes that state and starts again. Per-key
+        versioning is finer and probably not worth what it costs,
+        and it would mean picking entries out of a state rather
+        than dropping the state.
+      - teardown. UNLOAD can take a space out from under a session
+        that has its functions compiled, and closes that session's
+        state for it the same way a generation bump does. The map
+        keys on space name, not on a held `key_space_ptr`, or a
+        dropped space stays alive in every session that ever called
+        into it.
+      - size. A client that calls a hundred functions has a hundred
+        of them compiled, a thousand connections have a thousand
+        copies of the popular ones, and a session that roams over
+        spaces holds a state for each. That wants a cap with LRU
+        eviction - on the states as well as on the functions in
+        them - and a line in the memory statistics, the same as the
+        scan cursors in caller.h already have.
+
+    Per session and space, rather than per function or one for the
+    whole session, because of what `require` costs and how memory
+    comes back. The three were:
+
+      - one per function. Hard isolation, and closing the state
+        frees everything exactly, which is what makes an LRU cap
+        and a per-function memory ceiling actually mean something.
+        But it defeats includes: two functions in different states
+        cannot share a module, so every function carries its own
+        copy of everything it requires, plus its own base
+        libraries and string table.
+      - one per session, holding every function that session has
+        called. Cheapest, one module cache, and `require` is free
+        after the first use. Isolation is `luaL_sandbox` plus a
+        per-call thread rather than a separate heap, which is
+        enough here - the functions all belong to the same client
+        and the same ACL. Reclaiming memory for one evicted
+        function is vaguer: it needs a collection, not a close.
+      - one per session and space. `require` resolves within a
+        space (and `configuration`), so this puts the module cache
+        exactly where the resolution already is. It also makes the
+        two awkward cases in the list above trivial: a generation
+        bump or an UNLOAD closes that space's state and nothing
+        has to be picked out of a map. The duplication it costs is
+        the `configuration` globals, once per space a session
+        touches.
+
+    The third is what this entry now assumes, with the second as
+    the fallback if per-space states turn out to cost more than the
+    bookkeeping they remove. Either way the *cache* stays keyed by
+    function name; the choice is only which heap the compiled thing
+    sits in, which is why falling back later is cheap.
+
+    Inside each of those states, globals are frozen once with
+    `luaL_sandbox` and each call runs on a `luaL_sandboxthread` with
+    its own writable global proxy, so one call cannot leave
+    anything behind for the next. Includes are natural here: a
+    required function compiles into the same session state and is
+    cached next to its caller.
+
+    The other contexts have no session to hang this on. SWIG, RPC
+    and the valkey module either grow an equivalent cache or answer
+    `-ERR FUNCTION not supported on this path`, which is the shape
+    of foreign's context check and is where the first cut should
+    start.
+
+    D. Includes, and cycles.
+
+    Include is `require("NAME")`, resolved against the same space
+    then `configuration`, with the result cached per state. That
+    gives back the global `open_safe` currently blocks outright,
+    restricted to a resolver that can only see functions.
+
+    Cycles are refused, at load, with the path in the message:
+    `-ERR FUNCTION cycle A -> B -> A`. The check is a DFS over the
+    declared edges, and it has to run on every LOAD and every
+    DELETE, not only the first, because A can include B today and B
+    can be redefined to include A tomorrow. Whether the edges can
+    be read off the source statically is a question: `require(x)`
+    with a computed name cannot be, so there is a runtime backstop
+    too - a "loading" mark on each module, which turns a cycle the
+    static pass could not see into an error instead of a stack
+    overflow.
+
+    Deleting a function that something else includes is refused,
+    with the dependents named. `FORCE` can override it and leave
+    them broken, which is at least visible.
+
+    E. Calling other commands.
+
+    `call("NAME", "p1", "p2")` with the same string-vector shape the
+    caller classes use everywhere else. The implementation is a
+    derivative of rpc_caller: `callv(params, f, def)` already runs a
+    command and hands back a `Variable`, which is one conversion
+    away from a Luau value.
+
+    It must be a *sub*-caller, not the caller that is answering the
+    client. `rpc_caller::call` clears `results`, `errors` and `args`
+    on entry, so calling through the outer one destroys the reply
+    being built. `finish_call_buffer` has the pattern already -
+    `collecting_exec` plus a buffer - and a script's nested call
+    wants the same treatment.
+
+    Things that need an answer before this ships, and the cheap
+    answer for the first cut is to refuse them:
+
+      - a blocking command inside a script. BLPOP parks the caller
+        through `add_block`; a script cannot park half way through
+        a Lua stack and still be resumable.
+      - an asynchronous command inside a script. KEYS is
+        `is_asynch` and expects to own a worker.
+      - a command that parks on a foreign fill - the same problem,
+        arriving by a different route.
+      - MULTI/EXEC from inside a script.
+
+    ACL is not optional here: the script runs as the calling user
+    and `call` checks that user's acl vector, or a function becomes
+    a way to launder a command past the check that would have
+    refused it. There is also a nesting depth limit, and the
+    instruction budget and deadline are shared across the whole
+    tree of nested calls rather than reset per call.
+
+    `_G["NAME"]` is a convenience on top of `call`, and it brings
+    its own questions, which is why `call` is the primitive and
+    stays available: a command name can collide with a base global
+    (barch has `KEYS`, which is also the name redis's own Lua API
+    uses), `_G` cannot express the `space:CMD` form, and the set of
+    names would have to be rebuilt whenever a function is loaded.
+    Populate the per-call global proxy, skip any name that would
+    shadow something already there, and say so in KEYSF.
+
+    F. The store interface.
+
+    `sharded_store` is the object to expose - it is already the
+    per-call, cheap-to-construct front door to the shards, the hash
+    and the art, and it already has the read and write scopes,
+    the container scopes, the bounds, `range`, `glob` and `scan`.
+    Plus a read-only view of the space's own configuration.
+
+    "Safe" has one rule behind it: script code never runs while a
+    shard lock is held. Two ways to keep that true, and they can
+    coexist:
+
+      - iteration hands back bounded batches. The cursor takes the
+        lock, copies n entries, drops the lock, returns them. That
+        is what `scan_cursor` already does.
+      - where a callback under a lock is genuinely wanted, mark the
+        region on the run context: no yield, no `call`, no
+        `sql.query`, and a hard instruction cap inside it, with the
+        interrupt raising an error rather than yielding. A yield
+        under a shard lock is the deadlock the first draft of this
+        entry was worried about, and this is what makes it
+        impossible rather than merely discouraged.
+
+    The goal being most of the built-ins re-implementable in Luau is
+    a good test of the interface: pick three of different shapes -
+    say GETRANGE, HRANDFIELD and ZRANGEBYSCORE - write them in Luau
+    against this interface, and see what is missing.
+
+    G. SQL, and later HTTP.
+
+    `sql.query` exists and is scoped to the space's driver; a
+    function gets it on the same terms. The asynchronous HTTP client
+    is entry 99, and when it lands the same object shows up here.
+    Both are calls that can take a while, which is the next section.
+
+    H. The slice, and what holds the worker.
+
+    `run_ctx`, `interrupt` and `pump` in luau_driver.cpp are the
+    machinery and should be lifted into something both callers share
+    rather than written twice. The budget is its own setting
+    (`function_script_insns`), not `foreign_script_insns`, because a
+    fill and a client-invoked command are not the same risk, plus a
+    wall-clock deadline as foreign has.
+
+    First cut registers the command with `is_asynch`, so it runs on
+    the worker pool out of the asynchronous batch and never on a
+    service thread. That still holds one worker for the whole
+    script, bounded by the budget and the deadline, which is the
+    deal KEYS already has. The proper answer is to park: pump on the
+    foreign pool with requeue and wake the session when it finishes.
+    A block with no key is never woken by the shard waiter registry -
+    `add_block` keys on (session, key) and `call_unblock` fires from
+    a write - so the completion holds the `abstract_session_ptr` and
+    calls `do_block_continue` itself, resuming through
+    `suspend_for_blocks` / `resume_after_blocks` so replies behind it
+    in a pipeline do not overtake.
+
+    I. Order to build it in.
+
+      1. tfunction as a key type: `ts_function`, the predicate, the
+         lead-byte audit, the `storage_version` bump, TYPE, the
+         lead check on the paths that write encoded keys, and what
+         KEYS / MAX / RANDOMKEY do now that the range exists. A
+         function key written and read back by hand, no Luau yet.
+         This is the part that is expensive to change later.
+      2. SETF / GETF / REMF / KEYSF writing those keys, compiling
+         through `compile_source`, refusing a script that will not
+         compile and refusing a built-in's name. Dispatch: the
+         colon-then-dot parsing, the resolution order, and the two
+         places in asio_resp_session.h that answer "unknown command"
+         - the cached `ic` iterator in `run_params`, which skips the
+         lookup entirely when the name repeats, so a name that
+         missed once stays unknown for the life of the session, and
+         the string re-lookup in `run_asynch_batch`. The per-session
+         table snapshot at :614 stops mattering, since functions
+         never enter that table.
+      3. Arguments in, value out, arity, ACL, the reply conversion.
+         No includes, no `call`, no store.
+      4. The session cache: the state, the generation check,
+         sandboxed globals, `require` and the cycle check.
+      5. `call` into other commands, with blocking and asynchronous
+         ones refused.
+      6. The sharded_store interface, and the three re-implemented
+         built-ins as its test.
+      7. Parking, replacing `is_asynch`.
+
+    J. Still open.
+
+      - whether `KS2:KS1.PRINT_NAME` - one space's function run
+        against another space - is allowed or refused. Refusing it
+        means the dotted form only ever repeats what the colon
+        already said.
+      - a generation counter per space against per-key versioning
+        for spotting a redefinition from a session.
+      - what the session cache costs at a thousand connections, and
+        where the cap goes.
+      - one `argv` table or varargs.
+      - `{ts_function, name}` with the space implied, or
+        `{ts_function, space, name}` spelling it out.
+      - whether globals in the `configuration` space may be
+        redefined by a space-local function of the same name, or
+        whether that is refused rather than shadowed.
+
+    K. The commands that address the range: SETF, GETF, REMF, KEYSF.
+
+    Functions get their own commands rather than a flag on the redis
+    ones. `SETEX fname "fbody" FUNCTION` and `REM keyname FUNCTION`
+    would work, but they change the arity and syntax of commands a
+    redis client thinks it knows, and the differential tests exist
+    to catch exactly that. Keeping the two sets apart means the
+    redis clones stay bit-compatible and nothing about functions has
+    to be argued for in terms of what redis does.
+
+    There is a second reason that matters more than compatibility:
+    rights. SET is `{"write","keys","data"}`, so a flag on SET would
+    make "may write a string" and "may define a function" the same
+    permission, and a function is code. Separate commands carry a
+    separate category, which is the only way that right can be
+    granted on its own.
+
+    So a `function` category is appended to `categories()` in
+    barch_apis.cpp - appended, never inserted, because
+    `get_category_map()` numbers them by position and
+    `is_authorized` compares by index. Stored ACLs are keyed by
+    name (`user:cat:<user>:<cat>`) and re-vectorised at AUTH, so a
+    name added at the end costs nothing and one added in the middle
+    silently reassigns everyone's rights.
+
+    The set, all of them building the composite themselves:
+
+      - `SETF <name> <source>` - compiles, refuses a built-in's
+        name, refuses a script that will not compile, writes the
+        key, bumps the space's generation.
+      - `GETF <name>` - the source back.
+      - `REMF <name>` - with the dependent check from D, and FORCE
+        to override it.
+      - `KEYSF [pattern]` - the range walk from A. Cheap because
+        the functions are contiguous.
+
+    Cats are `{"write","data","function"}` for SETF and REMF, and
+    `{"read","data","function"}` for GETF and KEYSF. `data` has to
+    be in there or the write never replicates - `run_params` only
+    calls `repl::call` when the command `is_write() && is_data()` -
+    and `data` is granted to every user anyway
+    (auth_api.cpp always emplaces it), so the category that
+    actually gates these is `function`.
+
+    That also settles what to do about redis's own FUNCTION command:
+    nothing. The name stays free, so a real redis-compatible
+    FUNCTION - libraries, shebang, `register_function` - can be
+    written later without having to unpick a barch-shaped one
+    squatting on it.
+
+    Reply conversion, which has to be decided once and then not
+    moved: nil is null; a string is a bulk string; an integral
+    number is an integer and anything else is a double on RESP3 and
+    a bulk string on RESP2; a boolean is 1 or null, as in redis; an
+    array table is an array converted the same way per element;
+    `{err = "..."}` is that error verbatim and `{ok = "..."}` that
+    simple string; anything else is `-ERR FUNCTION bad return`.
+
+    Tests follow test/foreign_luau.py, and the first of them are
+    about the key range rather than about Luau: a function key
+    through KEYS, SCAN and TYPE, MAX and RANDOMKEY on a space that
+    has one, SET and EXPIRE into the range refused, SETF then GETF
+    round-tripping, and the range surviving an export and a reload. Then: load and call, arity error,
+    redefinition while a call is in flight, the instruction budget,
+    the deadline, delete, the name going unknown again after delete,
+    a call refused by ACL, a cycle refused at load, a global in
+    `configuration` called from another space, and a function
+    surviving a restart and reaching a replica.
 
 99. HTTP as a foreign source, on an asynchronous client.
 
@@ -682,3 +1165,111 @@
         HTTP/1.1 connections and HTTP/2 streams are a different
         pool, but the same knobs should still mean "how many
         concurrent calls" and "do not keep a dead socket".
+
+135. ACL rights per key space, through KSPACE ACL.
+
+    An ACL is a set of categories and nothing else. `AUTH` walks
+    `user:cat:<user>:<cat>` out of the auth shard, `cats2vec` turns
+    it into a bitvector, and `is_authorized` at
+    asio_resp_session.h:188 compares that against the command's own
+    vector. No part of it mentions a key space, so a user who may
+    SET may SET in every space there is, and a space is not a
+    boundary anyone can be kept inside.
+
+    The surface is a KSPACE subcommand that varies a user's bitmap
+    for one space, taking the same flags `ACL SETUSER` already
+    takes:
+
+        KSPACE ACL [KSNAME] SETUSER default -read -write +function
+
+    which is anonymous users kept from writing or reading functions
+    in that space while still being allowed to run them. KSNAME
+    absent means the selected space.
+
+    Verb first, name after, because every other KSPACE subcommand
+    puts its verb at spos 1 and `kspace_spec::parse_options` reads
+    it there - `EXIST`, `OPTION`, `DEPENDS`. `KSPACE KS1 ACL ...`
+    with the name first is the other way round and would need a
+    look-ahead, and it is ambiguous against a space that is
+    actually called `acl`. With the verb first the optional name is
+    unambiguous, since what follows it is always SETUSER, GETUSER
+    or DEL.
+
+    Why this composes with the function categories in 98's K, which
+    is what makes the example above work at all:
+
+      - invoking a user-defined function needs `function` and
+        nothing else, because that is what its own declared cats
+        default to.
+      - SETF is `{"write","data","function"}` and GETF is
+        `{"read","data","function"}`.
+
+    So `-read -write +function` is exactly execute-only: SETF loses
+    `write`, GETF loses `read`, the function itself keeps the one
+    category it needs. Any nested `call` inside that function is
+    checked against the same user and the same space, so an
+    execute-only user running a function that calls GET is refused
+    at the GET - a function cannot be used to launder a right its
+    caller does not have.
+
+    How the two bitmaps combine. The per-space entry is a set of
+    explicit `+`/`-` overrides, not a replacement map: resolution
+    starts from the user's global vector and applies the space's
+    overrides on top. That falls out of what `acl_spec::parse_set`
+    already builds - `cat[name] = (*value == '+')` - and it answers
+    the default question the cheap way: a space with no entry
+    leaves the user exactly as they are today, so nothing that
+    works now breaks.
+
+    Worth being explicit that this means a space rule can widen as
+    well as narrow. `+function` on KS1 grants it there even if the
+    user is globally without it, which is what makes "execute
+    functions in KS1 only" expressible, and is the sort of thing a
+    reviewer should not have to infer.
+
+    Where it resolves. AUTH knows the user but not the space, so it
+    loads that user's per-space overrides at the same time as their
+    categories - spaces are few - into a small map on the caller
+    keyed by canonical space name, and the check picks the vector
+    out of it by `caller.kspace()`.
+
+    That fixes the hazard that would otherwise sink this: today
+    `run_params` caches the authorization result together with the
+    command lookup, keyed on the command name alone, `prev_cn` plus
+    `ic`, calling `is_authorized` only when the name changes. A
+    right that depends on the space makes that cache wrong -
+    `KS1:GET` then `KS2:GET` is one name and two answers. The fix is
+    small, because `run_params` already knows when the space
+    changed: it sets `should_reset_space` around a `space:CMD`
+    prefix. Drop the cached authorization whenever the space
+    changes, or key it on (name, space).
+
+    Storage follows the existing shape one level down -
+    `user:space:<user>:<space>:<cat>` - so the same prefix walk
+    reads it. `>secret` is refused in the KSPACE form: a secret
+    belongs to the user, not to their rights in one space.
+
+    Still to answer:
+
+      - `~pattern` filters, now refused rather than silently
+        dropped - see 136. Implementing key-level rights for real
+        is a separate job, and per-space rights should land first.
+      - spaces that come and go. A rule naming a space that does
+        not exist yet, and a space dropped by UNLOAD while a user
+        holds rules on it. Keeping the rule is probably right,
+        since the name can come back.
+      - replication. docs/ACL.md says outright that acl data is
+        stored separately and does not replicate, and the auth
+        store is a standalone `barch::shard` called "auth" built in
+        auth_api.cpp rather than a key space. Per-space rights are
+        worth little if a replica cannot see them, so that gap has
+        to be closed here or the limitation stated in the docs.
+      - GETUSER for a space, and whether plain `ACL GETUSER` should
+        show that space overrides exist. A right that is invisible
+        in the obvious place is a right nobody will remember.
+
+    Docs: docs/ACL.md says there are thirteen categories and lists
+    them. `function` from 98's K makes fourteen, and the KSPACE ACL
+    form wants its own section beside the `ACL` one.
+
+136. [Done] ACL SETUSER accepted ~pattern and dropped it [22-08-2026] Nr 128 1c17a23

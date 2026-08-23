@@ -406,6 +406,23 @@ int SET(caller& call,const arg_t& argv) {
     }
     spec.hash = !sp->opt_ordered_keys;
 
+    // What redis does with a name that holds a list, hash or ordered set is not one rule
+    // but two, and they were both wrong here. `SET k v` replaces the collection - that is
+    // an ordinary overwrite and it answers OK. `SET k v GET` refuses with WRONGTYPE and
+    // changes nothing, because the GET half has to return a string and there is not one.
+    // barch used to write the plain key either way and leave the collection sitting under
+    // the same name, so the name held both: LRANGE then answered WRONGTYPE and ZRANGE
+    // still answered the members. See DONE 126
+    {
+        barch::sharded_store type_store(call.kspace());
+        if (barch::kind_of_container(type_store, k) != barch::container_kind::none) {
+            if (spec.get) {
+                return call.push_error(barch::wrong_type_message());
+            }
+            barch::remove_container(type_store, k);
+        }
+    }
+
     // SET ... GET answers with the value that was there before, so the callback has to
     // read it off the node it is handed. It used to assign `key`, which meant GET
     // replied with the key being written rather than the old value. The bytes are
@@ -582,6 +599,17 @@ int _APPEND(caller& call, const arg_t& argv, bool pre) {
     art::key_spec spec;
     if (key_ok(k) != 0)
         return call.key_check_error(k);
+    // a name already holding a list, hash or ordered set is the wrong type for a string
+    // write, and redis refuses rather than replacing it. Without this SET answered OK and
+    // the collection was gone - silent data loss on a command that said it worked. GET
+    // had the check all along, which is why `SET k v` then `LRANGE k` answered WRONGTYPE
+    // and looked like the read was at fault. See DONE 126
+    {
+        barch::sharded_store type_store(call.kspace());
+        if (wrong_type_here(type_store, k)) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
     long long r = v.size;
     auto converted = call.kspace()->encode_key(k);
     auto fc = [&](art::node_ptr) -> void {
@@ -810,6 +838,14 @@ int GETDEL(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
+    // reads a string, so a name holding a collection is the wrong type rather than a
+    // miss - this used to answer nil. See DONE 126
+    {
+        barch::sharded_store type_store(call.kspace());
+        if (wrong_type_here(type_store, k)) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
     auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int reply = call.ok();
@@ -850,6 +886,14 @@ int GETEX(caller& call, const arg_t& argv) {
     auto k = argv[1];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
+    // reads a string, so a name holding a collection is the wrong type rather than a
+    // miss - this used to answer nil. See DONE 126
+    {
+        barch::sharded_store type_store(call.kspace());
+        if (wrong_type_here(type_store, k)) {
+            return call.push_error(barch::wrong_type_message());
+        }
+    }
 
     bool persist = false, change = false;
     int64_t when = 0;
@@ -937,6 +981,14 @@ static int SETEX_(caller& call, const arg_t& argv, bool millis) {
     }
     if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
+    }
+    // SETEX is a SET with a deadline, so it replaces a collection of the same name the
+    // same way - and has to take it away rather than write beside it. See DONE 126
+    {
+        barch::sharded_store type_store(call.kspace());
+        if (barch::kind_of_container(type_store, k) != barch::container_kind::none) {
+            barch::remove_container(type_store, k);
+        }
     }
     auto converted = call.kspace()->encode_key(k);
     art::key_options opts;
@@ -1115,6 +1167,14 @@ int SETNX(caller& call, const arg_t& argv) {
     auto v = argv[2];
     if (key_ok(k) != 0)
         return call.key_check_error(k);
+    // a name holding a collection is a name that is taken. NX means "only if absent", so
+    // this is 0 rather than an error or an overwrite - which is what redis answers
+    {
+        barch::sharded_store type_store(call.kspace());
+        if (barch::kind_of_container(type_store, k) != barch::container_kind::none) {
+            return call.push_ll(0);
+        }
+    }
     if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
     }
@@ -1155,6 +1215,12 @@ int GETSET(caller& call, const arg_t& argv) {
         return call.key_check_error(k);
     if (!fits_in_leaf(call.kspace()->encode_key(k).get_value().size, v.size)) {
         return call.push_error(too_large_message());
+    }
+    {
+        barch::sharded_store type_store(call.kspace());
+        if (wrong_type_here(type_store, k)) {
+            return call.push_error(barch::wrong_type_message());
+        }
     }
     auto converted = call.kspace()->encode_key(k);
     bool had = false;
@@ -1700,6 +1766,11 @@ int MSET(caller& call, const arg_t& argv) {
         if (key_ok(k) != 0) {
             r |= call.push_null();
             continue;
+        }
+        // MSET replaces whatever the name held, collections included, which is what redis
+        // does - it answers OK and the list is gone. See DONE 126
+        if (barch::kind_of_container(store, k) != barch::container_kind::none) {
+            barch::remove_container(store, k);
         }
 
         auto converted = call.kspace()->encode_key(k);

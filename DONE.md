@@ -4222,3 +4222,535 @@ they use `vk.pcall` and check the message rather than counting an empty reply.
 
 Full suite 66 of 66, and the differential agrees with valkey on all 289 trusted cases,
 twice in a row.
+
+## 118. Z-COMPAT-PLAN phase 3: BZPOPMIN/BZPOPMAX, and ZPOP's leftover index [22-08-2026]
+
+The plan says do the index bug first, and it was right to: the pop it fixes is the pop the
+new commands are built on.
+
+**ZPOPMIN and ZPOPMAX left the member index behind.** They removed the score-ordered key
+with `i.remove()` and nothing else, where ZREM removes both that and the `IX_MEMBER` entry.
+The index is what ZSCORE reads and what the BYLEX walks iterate, so a popped member kept
+answering ZSCORE and kept appearing in ZRANGEBYLEX. `zmpop_one` already did it properly for
+ZMPOP, so both now go through that instead of keeping their own loop, and the two commands
+are a line each on a shared `zpop_flat`.
+
+**A second bug fell out of reading them side by side.** ZPOPMIN checked its count with
+
+    if (call.ok() != conversion::to_ll(argv[2], count))
+
+and `to_ll` answers a bool while `ok()` is zero, so a count that parsed cleanly compared
+unequal and *every* ZPOPMIN with a count was an error. ZPOPMAX had written the same check
+correctly, which is why nobody noticed - and why sharing one helper is worth more than the
+duplicate lines it saves. Now `ZPOPMIN q 2` pops two, `ZPOPMIN q 0` is an empty array, and
+`-1` and `ab` both answer "value is out of range, must be positive", which is the one
+message redis gives for both.
+
+**BZPOPMIN and BZPOPMAX** are a parse and a reply in front of the machinery ZMPOP already
+has. They differ from BZMPOP in three ways and no more: the timeout is last rather than
+first, there is no count, and the reply is a flat `{key member score}` rather than a nested
+array. `parse_block_timeout` and `add_block` are unchanged.
+
+Checked against a running valkey and then against barch: `BZPOPMIN z 0.1` answers `z a 1`,
+BZPOPMAX answers `z b 2`, a name holding a string is WRONGTYPE rather than a wait that can
+never end, several names skip the empty ones, a missing key waits out its 0.3s and answers
+nil, and a ZADD from another connection wakes a parked waiter in 0.3s. Bad timeouts answer
+"timeout is not a float or out of range" and "timeout is negative", both valkey's wording.
+
+**They are registered in `register_ordered_api` only, not in `add_ordered_api`.** That is
+not an oversight to be tidied up later: the waiter is `add_block`, which belongs to the RESP
+side, and the module path has no way to park a call. BZMPOP has always been registered that
+way. Registering the two new names as module commands as well is what made the whole module
+fail to load - `Module initialization failed` and the server aborting, which surfaced as
+seventeen tests dying with "Subprocess aborted" and "server not started in time" rather than
+as anything mentioning BZPOPMIN. There is now a comment saying so where the registrations
+are, because the absence is the kind of thing that reads like a gap.
+
+Full suite 66 of 66. The differential agrees with valkey on all 289 trusted cases, twice.
+
+What phase 3 does not include: the translator's `foreach {ZPOPMIN ZPOPMAX ZMPOP_MIN ...}`
+expansion, which the plan calls optional and puts after the index bug. The zset stub count
+is unchanged at 114 of 168, so the count in Z-COMPAT-PLAN.md still stands. Phase 4 is what
+is left.
+
+## 119. Z-COMPAT-PLAN phase 4: the remrange helpers, and why the blocking half is not harness work [22-08-2026]
+
+**The remrange half is done.** The three "basics" stubs - ZREMRANGEBYSCORE, ZREMRANGEBYRANK
+and ZREMRANGEBYLEX - each define a helper inside the test and call it a dozen times:
+
+    proc remrangebyscore {min max} {
+        create_zset zset {1 a 2 b 3 c 4 d 5 e}
+        assert_equal 1 [r exists zset]
+        r zremrangebyscore zset $min $max
+    }
+    assert_equal 3 [remrangebyscore 2 4]
+
+That is a fixture, a check, and one command whose reply is the proc's value, which is the
+shape the plan said to inline rather than interpret. `inline_inner_proc` lifts the proc out
+of the body, substitutes the parameters into each call site, and writes the fixture lines
+out in front of the call. It runs before the UNTRANSLATABLE check, which lists `proc`.
+
+It only accepts that one shape: the last line has to be a single `r ...`, nothing before it
+may be something the translator would refuse anyway, and the helper may not call itself.
+The moment an expansion starts guessing it stops being safe, and a wrong translation is
+worse than no translation - that is the whole premise of the differential.
+
+zset.tcl goes from 114 to 117 translated, valkey trusts all three new cases, and the
+totals move 312 -> 315 translated and 289 -> 292 faithful.
+
+**The first thing a new case did was catch a bug.** ZREMRANGEBYSCORE read its bounds with
+`read_score`, which refuses a leading paren outright, so `ZREMRANGEBYSCORE zset (1 5`
+answered "min or max is not a float" - and the inclusive comparison meant it had no notion
+of an open end anyway. ZCOUNT and ZRANGEBYSCORE both handle `(` and have done all along.
+Fixed by reading the bounds the way ZCOUNT does and skipping a member whose score equals an
+open bound. All four combinations now match valkey: `(1 5` and `1 (5` remove 4, `(1 (5`
+removes 3, `-inf +inf` removes 5.
+
+**The blocking half is not what the plan thought it was.** It says a second redis-py
+connection in `differential.py`, "harness work, not a Z* command". A second connection is
+necessary and nowhere near sufficient. All 19 deferring-client tests in zset.tcl need three
+separate things:
+
+  - a deferring connection in the harness - issue, go and do something else, read later.
+    This is the part the plan described, and it is the easy one
+  - `foreach {popmin popmax} {BZPOPMIN BZPOPMAX BZMPOP_MIN BZMPOP_MAX}` around the test,
+    and an outer helper `verify_bzpop_response` that branches on which of the four names it
+    was handed. Pair-wise foreach expansion plus a proc with an `if` in it is a different
+    order of translator work from the one-command helper above
+  - `wait_for_blocked_client`, which every one of them calls, and which reads
+    `blocked_clients` from `INFO clients`. barch answers `INFO clients` with
+    "not implemented", and `blocked_clients` does not exist anywhere in src
+
+The third is a server feature, not harness work, and it gates the other two: without it the
+tests cannot tell a client that is parked from one that has not sent yet, so they would
+race rather than wait. Left open as TODO 127 with those three named, rather than started
+and left half done.
+
+Full suite 66 of 66. The differential agrees with valkey on all 292 trusted cases.
+
+## 120. The blocking half of phase 4: blocked_clients, and the pop-name foreach [22-08-2026]
+
+TODO 127 named three prerequisites. Two are done, the third turned out not to be needed
+for most of what it was blocking, and a fourth thing was found on the way that was worth
+more than any of them.
+
+**`INFO clients` now reports `blocked_clients`.** It is a `statistics::` atomic, raised in
+`rpc_caller::transfer_rpc_blocks` when a session parks and lowered in `erase_blocks` when
+it stops - both of which are per session, so a caller waiting on three names counts once,
+which is what redis reports. A `counted_blocked` flag on the caller keeps it from drifting,
+because the two are not perfectly paired: `erase_blocks` is also called on the disconnect
+path and on a timeout.
+
+Only that one field is reported. Redis's Clients section has sixteen and barch does not
+know fifteen of them; inventing `connected_clients:1` would make INFO a worse source than
+no INFO at all. Measured: 0 idle, 1 with a BZPOPMIN parked, 2 with two parked, back to 0
+after both are woken by a ZADD, 1 while one is waiting out its timeout and 0 after it
+expires, and 1 - not 3 - for a single waiter on three names.
+
+**The pop-name foreach is expanded, and the bzpop verify helpers are inlined.**
+`foreach {popmin popmax} {BZPOPMIN BZPOPMAX BZMPOP_MIN BZMPOP_MAX}` is written out once per
+tuple. Only a loop whose values are all pop names is touched - the encoding loop wraps the
+whole file and expanding that would double all 168 tests for nothing, which the plan says
+not to do. `verify_bzpop_response` and its two-key twin become an ordinary assert, with the
+BZMPOP branch's `lassign [split $pop "_"]` done at translate time: BZMPOP_MIN is BZMPOP
+plus MIN, and the arguments are numkeys, then the names, then the direction.
+
+**The deferring client turned out not to be needed for these.** Every use of those two
+helpers is against a set that already has members, so the pop answers at once and there is
+nothing deferred about it - it can run on the one connection the harness already has. So
+`set rd [valkey_deferring_client]` and `$rd close` are dropped as the dead handles they
+are. A body that really does park still refuses, because its `$rd read` and
+`bzpop_command $rd` lines are not understood, and that is the right outcome rather than a
+lucky one.
+
+**The thing that was worth more: `render` flattened nested lists.** A reply that is a list
+of lists came out looking exactly like a flat one, so BZMPOP's `{key {{member score}}}`
+rendered as `key member score` - identical to BZPOPMIN's reply, and unequal to the
+expectation. Valkey failed its own answer and the case was dropped as an unfaithful
+translation. Rendering a nested list braced, the way tcl prints one, recovered seven cases
+at once: the three BZMPOP ones this phase added, and four that had been quietly dropped all
+along - "Vararg DEL", both variadic ZADD cases, and "BRPOPLPUSH inside a transaction",
+which is a real divergence that now lands in ACCEPTED where it belongs rather than
+vanishing. Nothing was newly dropped.
+
+The numbers, against DONE 119's 315 translated and 292 faithful:
+
+    674 cases, 323 translated, 351 stubs
+    valkey: 302 of 323 cases pass, 21 dropped
+    barch : 286 of 323, agrees with valkey on all 302 faithful cases
+
+zset.tcl is 125 of 177 translated - 177 rather than 168 because the foreach expansion makes
+more tests out of the same file.
+
+**Still not done, and now the only thing left in phase 4:** the ten tests that genuinely
+park. Five of them also use MULTI. The other five need a deferring connection in
+`differential.py` plus `wait_for_blocked_client`, which can now be written because
+`blocked_clients` exists - the mechanism is proven, a redis-py
+`connection_pool.get_connection` sends without reading and `read_response` collects later,
+and it was measured against a parked BZPOPMIN while writing this. It is TODO 128. What
+stopped it here is that the tests around it also want `$rd read` interleaved with ordinary
+commands, which is a step model the case format does not have yet - `defer`, `wait_blocked`
+and `read` ops rather than one list of commands against one connection.
+
+Full suite 66 of 66, and the differential is stable across repeated runs.
+
+Corrected the same day: this entry first said the five MULTI tests were out because
+MULTI is not implemented, citing TODO 63. Both halves were wrong. MULTI and EXEC work,
+and TODO 63 was closed on 12-08-2026 and was about list commands, not transactions. Both
+mistakes came from repeating differential.py's ACCEPTED reasons without checking them -
+see DONE 121.
+
+## 121. Every reason in ACCEPTED pointed at closed work, and two of them were wrong [22-08-2026]
+
+Prompted by a fair question about DONE 120: it said five zset tests were out because MULTI
+is not implemented, "see TODO 63". TODO 63 is closed - 12-08-2026, DONE 65 - and it was
+about the list commands zset.tcl and list.tcl expect, never about transactions.
+
+Both halves of that sentence came from `differential.py`'s ACCEPTED list, repeated without
+checking. Looking properly, the whole list had the same problem: every reason in it cited
+TODO 52 or TODO 63, and both were closed months ago - 52 in DONE 43, 63 in DONE 65. A
+pointer to a closed entry reads as "tracked and pending" about work that is finished, which
+is worse than no pointer, and this is the file whose entire job is justifying differences.
+
+Checked each reason against a running barch rather than rewriting them from memory:
+
+  - **MULTI and EXEC exist.** Registered in connection_api.cpp; a queued ZADD and DEL run
+    and EXEC answers both replies, and the effect is right. What actually differs is the
+    reply to a *queued* command - nil here, +QUEUED there - and DISCARD is unknown. So the
+    reason was wrong, not just its reference
+  - **LMOVE exists too**, so "which needs LMOVE" was wrong about the only case it excused
+  - TYPE, SADD, SETBIT and GETBIT really are unknown commands, and SET's IFEQ really is a
+    syntax error. Those reasons were right; only their references were stale
+
+**Checking the LMOVE one turned up a real bug.** "Extended SET GET with incorrect type
+should result in wrong type error" does not fail over a missing command. `SET foo bar GET`
+where foo holds a list answers nil and *replaces the list with the string*. Redis refuses
+with WRONGTYPE and leaves the list alone - the RPOP the case ends with answers `waffle`
+there and raises WRONGTYPE here, because the list is gone. That is data loss sitting under
+an accepted difference, hidden by a reason that pointed somewhere else entirely. TODO 129.
+
+The reasons now say what was measured, and a pointer only appears where something is
+genuinely open. The header says why, so the next person does not have to rediscover that
+the numbers had rotted.
+
+Worth stating plainly, because it is the lesson rather than the changelog: an ACCEPTED
+entry is a claim that a difference has been understood. Two of these had stopped being
+that and become a way of not looking, and one of them was covering a bug that destroys
+data. The list needs the same scepticism as the code it excuses.
+
+## 122. The deferring client, and the two bugs the parking tests found [22-08-2026]
+
+TODO 128, the last of Z-COMPAT-PLAN phase 4. The ten tests that park a client now
+translate and run, and they immediately found two real bugs.
+
+**The harness can defer.** redis-py has no deferring client, but its Connection is one:
+`send_command` writes and returns, `read_response` collects later. `Deferred` wraps that,
+and a case gets three new step kinds - `defer` sends on a named connection, `wait_blocked`
+polls `INFO clients` until that many clients are parked, and `read` collects a deferred
+reply and compares it. `sleep` covers the tcl's `after`. Connections are closed when the
+case ends, and then the harness waits for `blocked_clients` to fall back to zero, because
+closing a socket is not the same as the block being released and a case that inherits a
+parked client has its wake stolen - DONE 116's lesson in a different costume.
+
+**The translator reads the shapes around it**: `set rd [valkey_deferring_client]` names a
+handle, `$rd <command>` sends on it, `bzpop_command` and `verify_pop_response` expand the
+same way the other pop helpers did, `wait_for_blocked_client` and
+`wait_for_blocked_clients_count` become waits, `assert_equal [$rd read] {x}` is a read
+either way round, and `if {$::valgrind} {after 100}` is dropped - it is a pause for a slow
+build, and it would trip the `if {` in UNTRANSLATABLE.
+
+zset.tcl goes from 125 to 138 of 177 translated. Overall 323 -> 336 translated, and valkey
+trusts 302 -> 315. All thirteen new cases are faithful translations.
+
+**Bug one: MULTI leaves the connection out of step.** Not a blocking bug at all - it
+reproduces with `MULTI; PING; EXEC` and no waiter anywhere. Queued commands answer nil
+where redis answers +QUEUED, EXEC's own reply lands misaligned, and commands sent after
+EXEC are swallowed rather than run. In the tests that means the ZADD after the transaction
+never happens, so the parked client is never woken and the read times out. Seven of the ten
+differences are this. TODO 131.
+
+**Bug two: a blocking pop whose key list repeats a name answers nil on every second park.**
+`BZPOPMIN z1 z2 z2 z1 0` woken by a ZADD answers correctly, then the next identical park
+answers nil, then the one after that is correct again - and the missed reply turns up on
+the following read, one behind. BZMPOP does it too, and BLPOP with distinct names does not,
+so it is in the shared block registration rather than in either command: the same name is
+registered twice and released once. TODO 132.
+
+Worth being explicit about how these were separated, because the first look was wrong. Nine
+differences appeared and two of them - the variadic ZADD pair - looked like a wake picking
+the wrong member, `zset {{bar 1}}` where `zset {{foo -1}}` was wanted. By hand, outside the
+harness, that case is correct every time. Running the parking cases without the MULTI ones
+made them pass. They are downstream of bug one, not a bug of their own, and treating them
+as one would have sent someone hunting in the wake path for something that is not there.
+
+**Ten cases are now in ACCEPTED, which is more than I would like.** Every one names what
+was measured and points at an open TODO, which is the contract DONE 121 just finished
+restating. The alternative was leaving TestValkeyDifferential red, which hides the same
+information behind a failing build rather than in a list that says why. When 131 and 132
+are fixed these six patterns come straight back out, and that is the test of whether this
+was the right call.
+
+Full suite 66 of 66. The differential agrees with valkey on all 315 faithful cases.
+
+## 123. MULTI's reply protocol, and the bug that was hiding behind it [22-08-2026]
+
+TODO 131 said three things: queued commands answer nil instead of +QUEUED, EXEC's reply
+lands misaligned, and a command after EXEC is swallowed. The first was right, the second
+was nearly right, and the third was wrong - and correcting it uncovered a different bug
+that the protocol noise had been masking.
+
+The way to see it was to stop using a client library and dump the bytes:
+
+    barch   MULTI | PING | EXEC -> $-1 $-1 +PONG
+    valkey  MULTI | PING | EXEC -> +OK +QUEUED *1 +PONG
+
+Three defects, all the same shape - a reply that was never pushed, written out as whatever
+an empty results vector renders as:
+
+  - **MULTI answered `$-1`.** It returned `call.ok()` with nothing pushed, and the writer
+    turns an empty results vector into a RESP null. Now it pushes `+OK`
+  - **A queued command answered `$-1`.** The buffering branch of `rpc_caller::call`
+    stored the command and returned 0 without a reply. Now it pushes `+QUEUED`
+  - **EXEC dropped its array header when the transaction held one command.** The writer
+    renders a results vector of one as that value alone and an empty one as a null, so
+    `MULTI; PING; EXEC` answered a bare `+PONG` and an empty transaction answered `$-1`.
+    finish_call_buffer now closes the collected replies as an aggregate, so EXEC answers
+    `*1 +PONG` and `*0` - which is what the writer's own comment says aggregates are for
+
+All three now match valkey byte for byte, including the empty transaction. The dead clause
+in `is_buffering() && (params[0] != "EXEC" || params[0] == "MULTI")` went too - the second
+half can never be true when the first is false.
+
+**The third claim was wrong and worth correcting.** Commands after EXEC are not swallowed:
+on the wire, `PING` after `EXEC` has always answered `+PONG`. That claim came from watching
+redis-py go out of step, which it did because the reply *contents* were wrong, not because
+replies were missing - the count was right all along. Reading it as a lost command sent me
+looking for a queueing bug that does not exist.
+
+**What was underneath.** With the protocol fixed the seven MULTI cases still failed, so the
+same raw socket, with a client parked on the key:
+
+    MULTI | ZADD zset 0 foo | DEL zset | EXEC  ->  +OK +QUEUED +QUEUED *2 :1 :0
+    the waiter got                            ->  zset foo 0
+
+The waiter is woken by the ZADD *inside* the transaction and pops the member the DEL is
+about to remove. That is precisely what the case called "ZADD + DEL should not awake
+blocked client" exists to catch, and it also explains the `:0` from the DEL: the member was
+already gone, popped by the waiter, so there was nothing left to delete. TODO 133.
+
+So the accepted entries stay, with reasons that now name the right bug. Seven cases moved
+from "MULTI leaves the connection out of step" to "woken by a write inside the transaction",
+which is the difference between a protocol defect and a broken isolation guarantee - and
+only the first of those was fixed here.
+
+Full suite 66 of 66, and the differential agrees with valkey on all 315 faithful cases.
+
+## 124. A blocking pop with a repeated key name, and the double signal behind it [22-08-2026]
+
+TODO 132: `BZPOPMIN z1 z2 z2 z1 0` answered correctly, then nil on the next identical park,
+then correctly again, with the missed reply turning up one read late. BZMPOP did it too.
+
+The entry guessed at the cause - "the same name is registered twice and released once,
+leaving a stale entry" - and that was half right about the registration and wrong about
+what went wrong with it.
+
+**The first fix was for a real bug that was not this one.** `shard.h`'s `unblock_key_`
+erased inside a range-for over the vector it was erasing from, which invalidates the loop's
+iterator and the one being erased with, and then stepped past whatever moved down into the
+gap. It is undefined behaviour and it does drop the wrong entries. It is now the
+remove-erase idiom, and an emptied key comes out of the map rather than sitting there for
+the life of the shard. Fixing it changed nothing about the symptom, which is worth saying:
+a bug found on the way to another bug is still worth fixing, but it is not evidence.
+
+**What it actually was.** The measurement that settled it: a fresh connection for every
+park always worked, the same connection alternated. So it was per session, not the shard's
+registry.
+
+`call_unblock` walks the list of sessions waiting on a key and calls `do_block_continue` on
+each. A pop names its keys as the caller wrote them, so `z2` twice put the session in z2's
+list twice, and one wake signalled it twice. The first signal *posts* the reply - it does
+not send it inline - so the second signal runs while `has_blocks` is still true and posts
+another. The second reply then finds the set already emptied by the first and answers nil.
+That is the extra reply: the connection is one ahead from then on, every second park reads
+a nil that belonged to nobody, and the real answer arrives one read later.
+
+The fix is that `add_rpc_block` registers a session against a key at most once, however
+many times the caller named it. That is what the wake semantics want anyway - the list is
+"who is waiting on this key", not "how many times did they ask".
+
+Worth keeping: the symptom looked like a lost reply and was an extra one. Alternating
+correct/nil/correct is the signature of a stream one ahead, not of a wake going missing,
+and reading it the other way is what put "released once" in the TODO.
+
+"BZPOPMIN with same key multiple times should work" is out of ACCEPTED and passing. The
+differential agrees with valkey on all 315 faithful cases and the full suite is 66 of 66.
+Nine cases are still accepted, all of them TODO 133.
+
+## 125. A parked client saw inside a transaction, and the lower case EXEC [22-08-2026]
+
+TODO 133. Three things had to change, and the third was not in the entry at all.
+
+**Wakes raised inside a transaction are held until it ends.** `defer_wakes` is an RAII
+scope around the EXEC loop; `call_unblock` checks it and puts the shard and key aside
+instead of signalling. When the scope ends the held wakes are sent, deduplicated, each
+under its shard's latch - which every other caller of call_unblock already holds, because
+they are inside a write when they wake somebody. Nesting is counted, so a transaction
+inside anything that already defers is harmless. The state is thread local: a transaction
+runs on the thread executing EXEC and nowhere else.
+
+**A wake that finds nothing keeps waiting.** Holding the wake is not enough on its own. The
+key really was written during the transaction, so the waiter is signalled once it ends,
+looks, and finds the member already deleted - and the pop callbacks answered nil, which
+unblocks a client redis leaves parked. `caller::retry_block` says "not for me", the session
+re-registers its blocks (call_unblock took it out of the key's list when it woke it) and
+stays parked. Only the timeout answers nil now. The foreign GET waiter is deliberately not
+changed: for it, a fetch that produced nothing is a miss and nil is the right answer.
+
+**And EXEC only worked in upper case.** With both of the above in place the tests still
+failed, and the hand-written reproduction still passed - because the reproduction pipelined
+`EXEC` and the tests send `exec`. `rpc_caller::call` compared `params[0] != "EXEC"` against
+the parameter as the client wrote it, while the dispatcher folds only the name it looks the
+function up by. So a lower case `exec` was queued into the transaction it was meant to end,
+and everything after it was queued too, for the life of the connection. There is now a
+`name_is` that folds the case.
+
+That one is worth dwelling on. The wire tests said the server was correct and the harness
+said it was not, and both were right: they were sending different bytes. Two rounds were
+spent looking for a difference between the harness and the socket before the difference
+turned out to be the case of four letters. When a reproduction disagrees with a test, the
+reproduction is a suspect too.
+
+Measured against valkey, same sequence, byte for byte identical on both:
+
+    MULTI | ZADD zset 0 foo | DEL zset | EXEC  ->  +OK +QUEUED +QUEUED *2 :1 :1
+    the waiter                                ->  stays parked, then gets zset bar 1
+
+The DEL answering :1 rather than :0 is the tell that nobody stole `foo` on the way past.
+
+Nine cases came out of ACCEPTED and eight of them pass. The differential goes from 290 to
+298 of 336, and agrees with valkey on all 315 faithful cases.
+
+**The ninth is a different property and got its own entry.** "BZMPOP with multiple blocked
+clients" parks four clients on two keys and one transaction wakes them all. Redis serves
+them first come first served; barch serves them in whatever order the posted wakes happen
+to run, so the second client was answered from the wrong key. TODO 134.
+
+Full suite 66 of 66.
+
+## 126. The string writers and a name that holds a collection [22-08-2026]
+
+TODO 129 said `SET ... GET` against a key holding a list answers nil and destroys the list.
+That was right, and it was one command out of ten with the same hole - and the entry's
+suggested fix, refusing the write, would have been wrong for four of them.
+
+The first change I made was to refuse a string write against any collection, in SET, APPEND,
+GETSET and SETNX. Then I checked what redis actually does, which is not one rule but two:
+
+    SET k v         OK, and the collection is replaced
+    SET k v GET     WRONGTYPE, and the collection is left alone
+    SETNX k v       0 - the name is taken, so NX declines. Not an error
+    SETEX k 100 v   OK, replaced
+    MSET k v        OK, replaced
+    APPEND          WRONGTYPE      GETSET     WRONGTYPE
+    SETRANGE        WRONGTYPE      GETDEL     WRONGTYPE      GETEX  WRONGTYPE
+
+A command that only writes replaces the name. A command that has to read a string first -
+GET's half of SET, APPEND, GETSET, SETRANGE, GETDEL, GETEX - refuses. SETNX answers "the
+key exists" because that is what it means. Refusing everything would have broken three
+commands that were behaving correctly, which is what checking first is for.
+
+Measured against a running valkey, one row per command, and then the same table against
+barch until every row matched.
+
+**Replacing had its own bug underneath.** In barch a collection and a plain key live in
+different key ranges, so writing the plain key never removed the collection - the name held
+both. That is why the symptom looked different per type: after `SET k v` on a list, LRANGE
+answered WRONGTYPE, and after the same on an ordered set, ZRANGE still answered its
+members. The three replacing commands now call `remove_container` first, so the name holds
+exactly one thing, and `GET k` after `SET k v` on a list answers the value.
+
+What changed, by command:
+
+  - **SET** refuses only when GET is present, otherwise removes the collection and writes
+  - **SETNX** answers 0
+  - **SETEX and MSET** remove the collection and write
+  - **APPEND and GETSET** refuse - these two were destroying data as badly as SET was
+  - **GETDEL and GETEX** refuse, where they used to answer nil
+  - **SETRANGE, GET and the increments** already had the check and are untouched
+
+"Extended SET GET with incorrect type should result in wrong type error" is out of ACCEPTED
+and passing, and it is the only case in the suite that covered any of this - the other nine
+commands were found by asking what else writes a string, not by a test.
+
+The differential goes to 299 of 336 and agrees with valkey on all 315 faithful cases. Full
+suite 66 of 66. One case is still accepted, TODO 134.
+
+## 127. Waiters on one key are served in the order they arrived [22-08-2026]
+
+TODO 134, and the last of what the parking tests turned up.
+
+`call_unblock` woke *every* session waiting on a key, and each of them posts its own
+continuation, so which one got the data was whichever the executor ran first. The valkey
+case parks four clients on two keys and wakes them with one transaction:
+
+    rd1  bzmpop 0 2 myzset{t} myzset2{t} min count 1
+    rd2  bzmpop 0 2 myzset{t} myzset2{t} max count 10
+    rd3  bzmpop 0 2 myzset{t} myzset2{t} min count 10
+    rd4  bzmpop 0 2 myzset{t} myzset2{t} max count 1
+
+Redis serves them first come first served: rd1 takes one member of myzset, rd2 takes the
+four that are left, rd3 takes all of myzset2, rd4 waits. barch answered rd2 from myzset2
+with all five of its members, because rd3 had run first and drained myzset.
+
+**One at a time, and the served waiter passes the turn on.** `call_unblock` now takes the
+first session off the key's queue and leaves the rest where they are. When that session has
+been answered it calls `call_unblock` again on the key it was woken by, so the next waiter
+gets its look - which is what a client asking for one member out of five has to do, since
+four are still there.
+
+The turn is passed only after a waiter is *served*. One that found nothing means the key is
+empty, and waking the next would send it round the same loop for nothing; a later write
+wakes them again. That is what keeps this from spinning, and it only works because DONE 125
+gave a woken waiter a way to say "not for me" instead of answering nil.
+
+The wake now carries the key that caused it - `do_block_continue(key)` - which the session
+needs to know which queue to hand on to. The one other caller, a key space being unloaded,
+passes an empty name: it is failing the blocks rather than satisfying them, so there is no
+turn to pass.
+
+One divergence left, written down rather than chased: a waiter that is woken and finds
+nothing re-registers, which puts it at the back of the queue, where redis would keep its
+place. It needs three waiters and a write that satisfies none of them to notice, and no
+case in the suite does that.
+
+All thirteen parking cases pass, "BZMPOP with multiple blocked clients" is out of ACCEPTED,
+and the differential is 300 of 336 with agreement on all 315 faithful cases - no zset case
+accepted at all now. Full suite 66 of 66, and the four tests that exercise blocking under
+threads were run three times over to check nothing hangs.
+
+## 128. `ACL SETUSER` accepted `~pattern` and threw it away [22-08-2026]
+
+TODO 136. Found while designing per key space ACLs (TODO 135), not by anything failing.
+
+`acl_spec::parse_set` in keyspec.h matches `~*` as `flag_filter`, inserts the pattern
+into `filters` and sets `is_filter`. A grep for both names finds the two lines in
+keyspec.h that write them and nothing anywhere that reads them: `ACL` in auth_api.cpp
+calls `add_cats` with the categories and the secret only.
+
+So `ACL SETUSER alice on >s ~key:*` answered OK and granted nothing of the kind. The
+worse case is the mixed one - `+read ~key:*` - where the categories were applied and the
+pattern was not, so the user came out with rights the caller never meant to give on their
+own. That is the syntax every redis client sends when it wants key level rights, so the
+failure mode is a client that believes it has confined a user to a key prefix.
+
+Refused rather than implemented. Key level rights are a real feature and belong with
+TODO 135, and an error cannot break anyone who was relying on the old behaviour because
+there was no behaviour to rely on. The check sits in `ACL` right after `parse_options`,
+so it catches the pattern before anything is written - which is what makes "nothing was
+stored on the way to refusing it" true and testable.
+
+test/aclfiltertest.py is new, registered as TestAclFilter: a pattern on its own is
+refused, a pattern mixed with categories is refused, `ACL GETUSER` shows nothing was
+written in either case, and a plain `+read` SETUSER still works and keeps its category.
+The test was run once against the previous build before the fix went in and failed on the
+first assertion, which is the negative control.

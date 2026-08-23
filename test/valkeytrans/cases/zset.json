@@ -4033,9 +4033,683 @@
   {
    "name": "ZREMRANGEBYSCORE basics - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "proc remrangebyscore {min max} {\n                create_zset zset {1 a 2 b 3 c 4 d 5 e}\n                assert_equal 1 [r exists zset]\n                r zremrangebyscore zset $min $max\n            }\n\n            # inner range\n            assert_equal 3 [remrangebyscore 2 4]\n            assert_equal {a e} [r zrange zset 0 -1]\n\n            # start underflow\n            assert_equal 1 [remrangebyscore -10 1]\n            assert_equal {b c d e} [r zrange zset 0 -1]\n\n            # end overflow\n            assert_equal 1 [remrangebyscore 5 10]\n            assert_equal {a b c d} [r zrange zset 0 -1]\n\n            # switch min and max\n            assert_equal 0 [remrangebyscore 4 2]\n            assert_equal {a b c d e} [r zrange zset 0 -1]\n\n            # -inf to mid\n            assert_equal 3 [remrangebyscore -inf 3]\n            assert_equal {d e} [r zrange zset 0 -1]\n\n            # mid to +inf\n            assert_equal 3 [remrangebyscore 3 +inf]\n            assert_equal {a b} [r zrange zset 0 -1]\n\n            # -inf to +inf\n            assert_equal 5 [remrangebyscore -inf +inf]\n            assert_equal {} [r zrange zset 0 -1]\n\n            # exclusive min\n            assert_equal 4 [remrangebyscore (1 5]\n            assert_equal {a} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebyscore (2 5]\n            assert_equal {a b} [r zrange zset 0 -1]\n\n            # exclusive max\n            assert_equal 4 [remrangebyscore 1 (5]\n            assert_equal {e} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebyscore 1 (4]\n            assert_equal {d e} [r zrange zset 0 -1]\n\n            # exclusive min and max\n            assert_equal 3 [remrangebyscore (1 (5]\n            assert_equal {a e} [r zrange zset 0 -1]\n\n            # destroy when empty\n            assert_equal 5 [remrangebyscore 1 5]\n            assert_equal 0 [r exists zset]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "2",
+      "4"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "-10",
+      "1"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "b c d e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "5",
+      "10"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a b c d"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "4",
+      "2"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a b c d e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "-inf",
+      "3"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "d e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "3",
+      "+inf"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a b"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "-inf",
+      "+inf"
+     ],
+     "value": "5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": ""
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "(1",
+      "5"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "(2",
+      "5"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a b"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "1",
+      "(5"
+     ],
+     "value": "4"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "1",
+      "(4"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "d e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "(1",
+      "(5"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyscore",
+      "zset",
+      "1",
+      "5"
+     ],
+     "value": "5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZREMRANGEBYSCORE with non-value min or max - $encoding",
@@ -4077,16 +4751,956 @@
   {
    "name": "ZREMRANGEBYRANK basics - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "proc remrangebyrank {min max} {\n                create_zset zset {1 a 2 b 3 c 4 d 5 e}\n                assert_equal 1 [r exists zset]\n                r zremrangebyrank zset $min $max\n            }\n\n            # inner range\n            assert_equal 3 [remrangebyrank 1 3]\n            assert_equal {a e} [r zrange zset 0 -1]\n\n            # start underflow\n            assert_equal 1 [remrangebyrank -10 0]\n            assert_equal {b c d e} [r zrange zset 0 -1]\n\n            # start overflow\n            assert_equal 0 [remrangebyrank 10 -1]\n            assert_equal {a b c d e} [r zrange zset 0 -1]\n\n            # end underflow\n            assert_equal 0 [remrangebyrank 0 -10]\n            assert_equal {a b c d e} [r zrange zset 0 -1]\n\n            # end overflow\n            assert_equal 5 [remrangebyrank 0 10]\n            assert_equal {} [r zrange zset 0 -1]\n\n            # destroy when empty\n            assert_equal 5 [remrangebyrank 0 4]\n            assert_equal 0 [r exists zset]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyrank",
+      "zset",
+      "1",
+      "3"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyrank",
+      "zset",
+      "-10",
+      "0"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "b c d e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyrank",
+      "zset",
+      "10",
+      "-1"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a b c d e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyrank",
+      "zset",
+      "0",
+      "-10"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "a b c d e"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyrank",
+      "zset",
+      "0",
+      "10"
+     ],
+     "value": "5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": ""
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebyrank",
+      "zset",
+      "0",
+      "4"
+     ],
+     "value": "5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZREMRANGEBYLEX basics - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "proc remrangebylex {min max} {\n                create_default_lex_zset\n                assert_equal 1 [r exists zset]\n                r zremrangebylex zset $min $max\n            }\n\n            # inclusive range\n            assert_equal 3 [remrangebylex - \\[cool]\n            assert_equal {down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebylex \\[bar \\[down]\n            assert_equal {alpha elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 3 [remrangebylex \\[g +]\n            assert_equal {alpha bar cool down elephant foo} [r zrange zset 0 -1]\n            assert_equal 6 [r zcard zset]\n\n            # exclusive range\n            assert_equal 2 [remrangebylex - (cool]\n            assert_equal {cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 1 [remrangebylex (bar (down]\n            assert_equal {alpha bar down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 2 [remrangebylex (great +]\n            assert_equal {alpha bar cool down elephant foo great} [r zrange zset 0 -1]\n            assert_equal 7 [r zcard zset]\n\n            # inclusive and exclusive\n            assert_equal 0 [remrangebylex (az (b]\n            assert_equal {alpha bar cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 0 [remrangebylex (z +]\n            assert_equal {alpha bar cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 0 [remrangebylex - \\[aaaa]\n            assert_equal {alpha bar cool down elephant foo great hill omega} [r zrange zset 0 -1]\n            assert_equal 9 [r zcard zset]\n\n            # destroy when empty\n            assert_equal 9 [remrangebylex - +]\n            assert_equal 0 [r zcard zset]\n            assert_equal 0 [r exists zset]"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "-",
+      "[cool"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "down elephant foo great hill omega"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "[bar",
+      "[down"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "alpha elephant foo great hill omega"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "[g",
+      "+"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "alpha bar cool down elephant foo"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "zset"
+     ],
+     "value": "6"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "-",
+      "(cool"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "cool down elephant foo great hill omega"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "(bar",
+      "(down"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "alpha bar down elephant foo great hill omega"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "(great",
+      "+"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "alpha bar cool down elephant foo great"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "zset"
+     ],
+     "value": "7"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "(az",
+      "(b"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "alpha bar cool down elephant foo great hill omega"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "(z",
+      "+"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "alpha bar cool down elephant foo great hill omega"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "-",
+      "[aaaa"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "alpha bar cool down elephant foo great hill omega"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "zset"
+     ],
+     "value": "9"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "alpha",
+      "0",
+      "bar",
+      "0",
+      "cool",
+      "0",
+      "down",
+      "0",
+      "elephant",
+      "0",
+      "foo",
+      "0",
+      "great",
+      "0",
+      "hill",
+      "0",
+      "omega"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zremrangebylex",
+      "zset",
+      "-",
+      "+"
+     ],
+     "value": "9"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "zset"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZUNIONSTORE against non-existing key doesn't set destination - $encoding",
@@ -5608,25 +7222,548 @@
    "tcl": "r del z1\n            verify_zpop_response r $popmin z1 2 {} {}\n\n            create_zset z1 {0 a 1 b 2 c 3 d}\n            verify_zpop_response r $popmin z1 2 {a 0 b 1} {z1 {{a 0} {b 1}}}\n            verify_zpop_response r $popmax z1 2 {d 3 c 2} {z1 {{d 3} {c 2}}}"
   },
   {
-   "name": "$popmin/$popmax with a single existing sorted set - $encoding",
+   "name": "BZPOPMIN/BZPOPMAX with a single existing sorted set - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            create_zset zset {0 a 1 b 2 c 3 d}\n\n            verify_bzpop_response $rd $popmin zset 5 0 {zset a 0} {zset {{a 0}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset d 3} {zset {{d 3}}}\n            verify_bzpop_response $rd $popmin zset 5 0 {zset b 1} {zset {{b 1}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset c 2} {zset {{c 2}}}\n            assert_equal 0 [r exists zset]\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "5"
+     ],
+     "value": "zset a 0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMAX",
+      "zset",
+      "5"
+     ],
+     "value": "zset d 3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "5"
+     ],
+     "value": "zset b 1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMAX",
+      "zset",
+      "5"
+     ],
+     "value": "zset c 2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
-   "name": "$popmin/$popmax with multiple existing sorted sets - $encoding",
+   "name": "BZPOPMIN/BZPOPMAX with multiple existing sorted sets - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            create_zset z1{t} {0 a 1 b 2 c}\n            create_zset z2{t} {3 d 4 e 5 f}\n\n            verify_bzpop_two_key_response $rd $popmin z1{t} z2{t} 5 0 {z1{t} a 0} {z1{t} {{a 0}}}\n            verify_bzpop_two_key_response $rd $popmax z1{t} z2{t} 5 0 {z1{t} c 2} {z1{t} {{c 2}}}\n            assert_equal 1 [r zcard z1{t}]\n            assert_equal 3 [r zcard z2{t}]\n\n            verify_bzpop_two_key_response $rd $popmax z2{t} z1{t} 5 0 {z2{t} f 5} {z2{t} {{f 5}}}\n            verify_bzpop_two_key_response $rd $popmin z2{t} z1{t} 5 0 {z2{t} d 3} {z2{t} {{d 3}}}\n            assert_equal 1 [r zcard z1{t}]\n            assert_equal 1 [r zcard z2{t}]\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z1{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z1{t}",
+      "0",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z2{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z2{t}",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMIN",
+      "z1{t}",
+      "z2{t}",
+      "5"
+     ],
+     "value": "z1{t} a 0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMAX",
+      "z1{t}",
+      "z2{t}",
+      "5"
+     ],
+     "value": "z1{t} c 2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z1{t}"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z2{t}"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMAX",
+      "z2{t}",
+      "z1{t}",
+      "5"
+     ],
+     "value": "z2{t} f 5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMIN",
+      "z2{t}",
+      "z1{t}",
+      "5"
+     ],
+     "value": "z2{t} d 3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z1{t}"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z2{t}"
+     ],
+     "value": "1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
-   "name": "$popmin/$popmax second sorted set has members - $encoding",
+   "name": "BZPOPMIN/BZPOPMAX second sorted set has members - $encoding",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            r del z1{t}\n            create_zset z2{t} {3 d 4 e 5 f}\n\n            verify_bzpop_two_key_response $rd $popmax z1{t} z2{t} 5 0 {z2{t} f 5} {z2{t} {{f 5}}}\n            verify_bzpop_two_key_response $rd $popmin z1{t} z2{t} 5 0 {z2{t} d 3} {z2{t} {{d 3}}}\n            assert_equal 0 [r zcard z1{t}]\n            assert_equal 1 [r zcard z2{t}]\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z1{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z2{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z2{t}",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMAX",
+      "z1{t}",
+      "z2{t}",
+      "5"
+     ],
+     "value": "z2{t} f 5"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMIN",
+      "z1{t}",
+      "z2{t}",
+      "5"
+     ],
+     "value": "z2{t} d 3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z1{t}"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z2{t}"
+     ],
+     "value": "1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP_MIN/BZMPOP_MAX with a single existing sorted set - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MIN"
+     ],
+     "value": "zset {{a 0}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MAX"
+     ],
+     "value": "zset {{d 3}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MIN"
+     ],
+     "value": "zset {{b 1}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MAX"
+     ],
+     "value": "zset {{c 2}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP_MIN/BZMPOP_MAX with multiple existing sorted sets - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z1{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z1{t}",
+      "0",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z2{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z2{t}",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "2",
+      "z1{t}",
+      "z2{t}",
+      "MIN"
+     ],
+     "value": "z1{t} {{a 0}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "2",
+      "z1{t}",
+      "z2{t}",
+      "MAX"
+     ],
+     "value": "z1{t} {{c 2}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z1{t}"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z2{t}"
+     ],
+     "value": "3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "2",
+      "z2{t}",
+      "z1{t}",
+      "MAX"
+     ],
+     "value": "z2{t} {{f 5}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "2",
+      "z2{t}",
+      "z1{t}",
+      "MIN"
+     ],
+     "value": "z2{t} {{d 3}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z1{t}"
+     ],
+     "value": "1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z2{t}"
+     ],
+     "value": "1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP_MIN/BZMPOP_MAX second sorted set has members - $encoding",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z1{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z2{t}"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z2{t}",
+      "3",
+      "d",
+      "4",
+      "e",
+      "5",
+      "f"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "2",
+      "z1{t}",
+      "z2{t}",
+      "MAX"
+     ],
+     "value": "z2{t} {{f 5}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "2",
+      "z1{t}",
+      "z2{t}",
+      "MIN"
+     ],
+     "value": "z2{t} {{d 3}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z1{t}"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zcard",
+      "z2{t}"
+     ],
+     "value": "1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "Basic $popmin/$popmax - $encoding RESP3",
@@ -5643,11 +7780,186 @@
    "tcl": "r hello 3\n            create_zset z1 {0 a 1 b 2 c 3 d}\n            verify_zpop_response r $popmin z1 2 {{a 0.0} {b 1.0}} {z1 {{a 0.0} {b 1.0}}}\n            verify_zpop_response r $popmax z1 2 {{d 3.0} {c 2.0}} {z1 {{d 3.0} {c 2.0}}}\n            r hello 2"
   },
   {
-   "name": "$popmin/$popmax - $encoding RESP3",
+   "name": "BZPOPMIN/BZPOPMAX - $encoding RESP3",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "r hello 3\n            set rd [valkey_deferring_client]\n            create_zset zset {0 a 1 b 2 c 3 d}\n\n            verify_bzpop_response $rd $popmin zset 5 0 {zset a 0} {zset {{a 0}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset d 3} {zset {{d 3}}}\n            verify_bzpop_response $rd $popmin zset 5 0 {zset b 1} {zset {{b 1}}}\n            verify_bzpop_response $rd $popmax zset 5 0 {zset c 2} {zset {{c 2}}}\n\n            assert_equal 0 [r exists zset]\n            r hello 2\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "3"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "5"
+     ],
+     "value": "zset a 0"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMAX",
+      "zset",
+      "5"
+     ],
+     "value": "zset d 3"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "5"
+     ],
+     "value": "zset b 1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZPOPMAX",
+      "zset",
+      "5"
+     ],
+     "value": "zset c 2"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "2"
+     ]
+    }
+   ],
+   "mode": "last"
+  },
+  {
+   "name": "BZMPOP_MIN/BZMPOP_MAX - $encoding RESP3",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "3"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "a",
+      "1",
+      "b",
+      "2",
+      "c",
+      "3",
+      "d"
+     ]
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MIN"
+     ],
+     "value": "zset {{a 0}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MAX"
+     ],
+     "value": "zset {{d 3}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MIN"
+     ],
+     "value": "zset {{b 1}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "BZMPOP",
+      "5",
+      "1",
+      "zset",
+      "MAX"
+     ],
+     "value": "zset {{c 2}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "exists",
+      "zset"
+     ],
+     "value": "0"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "hello",
+      "2"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "ZPOP/ZMPOP against wrong type",
@@ -6519,18 +8831,332 @@
    "tcl": "set err {}\n            r del myzset\n            for {set k 0} {$k < 2000} {incr k} {\n                set i [expr {$k % $elements}]\n                if {[expr rand()] < .2} {\n                    r zrem myzset $i\n                } else {\n                    set score [expr rand()]\n                    r zadd myzset $score $i\n                    assert_encoding $encoding myzset\n                }\n\n                set card [r zcard myzset]\n                if {$card > 0} {\n                    set index [randomInt $card]\n                    set ele [lindex [r zrange myzset $index $index] 0]\n                    set rank [r zrank myzset $ele]\n                    if {$rank != $index} {\n                        set err \"$ele RANK is wrong! ($rank != $index)\"\n                        break\n                    }\n                }\n            }\n            assert_equal {} $err"
   },
   {
-   "name": "$pop, ZADD + DEL should not awake blocked client",
+   "name": "BZPOPMIN, ZADD + DEL should not awake blocked client",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n\n            r multi\n            r zadd zset 0 foo\n            r del zset\n            r exec\n            r del zset\n            r zadd zset 1 bar\n\n            verify_pop_response $pop [$rd read] {zset bar 1} {zset {{bar 1}}}\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "0"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "bar"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset bar 1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
-   "name": "$pop, ZADD + DEL + SET should not awake blocked client",
+   "name": "BZPOPMIN, ZADD + DEL + SET should not awake blocked client",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n\n            r multi\n            r zadd zset 0 foo\n            r del zset\n            r set zset foo\n            r exec\n            r del zset\n            r zadd zset 1 bar\n\n            verify_pop_response $pop [$rd read] {zset bar 1} {zset {{bar 1}}}\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "0"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "zset",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "bar"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset bar 1"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP_MIN, ZADD + DEL should not awake blocked client",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZMPOP",
+      "0",
+      "1",
+      "zset",
+      "MIN",
+      "COUNT",
+      "1"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "bar"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset {{bar 1}}"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP_MIN, ZADD + DEL + SET should not awake blocked client",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZMPOP",
+      "0",
+      "1",
+      "zset",
+      "MIN",
+      "COUNT",
+      "1"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "set",
+      "zset",
+      "foo"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "bar"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset {{bar 1}}"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "BZPOPMIN unblock but the key is expired and then block again - reprocessing command",
@@ -6542,30 +9168,481 @@
   {
    "name": "BZPOPMIN with same key multiple times should work",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            r del z1{t} z2{t}\n\n            # Data arriving after the BZPOPMIN.\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            wait_for_blocked_client\n            r zadd z1{t} 0 a\n            assert_equal [$rd read] {z1{t} a 0}\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            wait_for_blocked_client\n            r zadd z2{t} 1 b\n            assert_equal [$rd read] {z2{t} b 1}\n\n            # Data already there.\n            r zadd z1{t} 0 a\n            r zadd z2{t} 1 b\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            assert_equal [$rd read] {z1{t} a 0}\n            $rd bzpopmin z1{t} z2{t} z2{t} z1{t} 0\n            assert_equal [$rd read] {z2{t} b 1}\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "z1{t}",
+      "z2{t}"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "bzpopmin",
+      "z1{t}",
+      "z2{t}",
+      "z2{t}",
+      "z1{t}",
+      "0"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z1{t}",
+      "0",
+      "a"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "z1{t} a 0"
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "bzpopmin",
+      "z1{t}",
+      "z2{t}",
+      "z2{t}",
+      "z1{t}",
+      "0"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z2{t}",
+      "1",
+      "b"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "z2{t} b 1"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z1{t}",
+      "0",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "z2{t}",
+      "1",
+      "b"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "bzpopmin",
+      "z1{t}",
+      "z2{t}",
+      "z2{t}",
+      "z1{t}",
+      "0"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "z1{t} a 0"
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "bzpopmin",
+      "z1{t}",
+      "z2{t}",
+      "z2{t}",
+      "z1{t}",
+      "0"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "z2{t} b 1"
+    }
+   ],
+   "mode": "asserts"
   },
   {
-   "name": "MULTI/EXEC is isolated from the point of view of $pop",
+   "name": "MULTI/EXEC is isolated from the point of view of BZPOPMIN",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n\n            r multi\n            r zadd zset 0 a\n            r zadd zset 1 b\n            r zadd zset 2 c\n            r exec\n\n            verify_pop_response $pop [$rd read] {zset a 0} {zset {{a 0}}}\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "0"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "2",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset a 0"
+    }
+   ],
+   "mode": "asserts"
   },
   {
-   "name": "$pop with variadic ZADD",
+   "name": "BZPOPMIN with variadic ZADD",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n            if {$::valgrind} {after 100}\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n            if {$::valgrind} {after 100}\n            assert_equal 2 [r zadd zset -1 foo 1 bar]\n            if {$::valgrind} {after 100}\n            verify_pop_response $pop [$rd read] {zset foo -1} {zset {{foo -1}}}\n            assert_equal {bar} [r zrange zset 0 -1]\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "0"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "zset",
+      "-1",
+      "foo",
+      "1",
+      "bar"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset foo -1"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "bar"
+    }
+   ],
+   "mode": "asserts"
   },
   {
-   "name": "$pop with zero timeout should block indefinitely",
+   "name": "BZPOPMIN with zero timeout should block indefinitely",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd [valkey_deferring_client]\n            r del zset\n            bzpop_command $rd $pop zset 0\n            wait_for_blocked_client\n            after 1000\n            r zadd zset 0 foo\n            verify_pop_response $pop [$rd read] {zset foo 0} {zset {{foo 0}}}\n            $rd close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZPOPMIN",
+      "zset",
+      "0"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "sleep",
+     "ms": 1000
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "foo"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset foo 0"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "MULTI/EXEC is isolated from the point of view of BZMPOP_MIN",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZMPOP",
+      "0",
+      "1",
+      "zset",
+      "MIN",
+      "COUNT",
+      "1"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "a"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "1",
+      "b"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "2",
+      "c"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset {{a 0}}"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP_MIN with variadic ZADD",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZMPOP",
+      "0",
+      "1",
+      "zset",
+      "MIN",
+      "COUNT",
+      "1"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zadd",
+      "zset",
+      "-1",
+      "foo",
+      "1",
+      "bar"
+     ],
+     "value": "2"
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset {{foo -1}}"
+    },
+    {
+     "op": "expect",
+     "args": [
+      "zrange",
+      "zset",
+      "0",
+      "-1"
+     ],
+     "value": "bar"
+    }
+   ],
+   "mode": "asserts"
+  },
+  {
+   "name": "BZMPOP_MIN with zero timeout should block indefinitely",
+   "expected": null,
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "zset"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd",
+     "args": [
+      "BZMPOP",
+      "0",
+      "1",
+      "zset",
+      "MIN",
+      "COUNT",
+      "1"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "sleep",
+     "ms": 1000
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "zset",
+      "0",
+      "foo"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd",
+     "value": "zset {{foo 0}}"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "BZPOP/BZMPOP against wrong type",
@@ -6871,9 +9948,176 @@
   {
    "name": "BZMPOP with multiple blocked clients",
    "expected": null,
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        set rd3 [valkey_deferring_client]\n        set rd4 [valkey_deferring_client]\n        r del myzset{t} myzset2{t}\n\n        $rd1 bzmpop 0 2 myzset{t} myzset2{t} min count 1\n        wait_for_blocked_clients_count 1\n        $rd2 bzmpop 0 2 myzset{t} myzset2{t} max count 10\n        wait_for_blocked_clients_count 2\n        $rd3 bzmpop 0 2 myzset{t} myzset2{t} min count 10\n        wait_for_blocked_clients_count 3\n        $rd4 bzmpop 0 2 myzset{t} myzset2{t} max count 1\n        wait_for_blocked_clients_count 4\n\n        r multi\n        r zadd myzset{t} 1 a 2 b 3 c 4 d 5 e\n        r zadd myzset2{t} 1 a 2 b 3 c 4 d 5 e\n        r exec\n\n        assert_equal {myzset{t} {{a 1}}} [$rd1 read]\n        assert_equal {myzset{t} {{e 5} {d 4} {c 3} {b 2}}} [$rd2 read]\n        assert_equal {myzset2{t} {{a 1} {b 2} {c 3} {d 4} {e 5}}} [$rd3 read]\n\n        r zadd myzset2{t} 1 a 2 b 3 c\n        assert_equal {myzset2{t} {{c 3}}} [$rd4 read]\n\n        r del myzset{t} myzset2{t}\n        $rd1 close\n        $rd2 close\n        $rd3 close\n        $rd4 close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myzset{t}",
+      "myzset2{t}"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd1",
+     "args": [
+      "bzmpop",
+      "0",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "min",
+      "count",
+      "1"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "defer",
+     "conn": "rd2",
+     "args": [
+      "bzmpop",
+      "0",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "max",
+      "count",
+      "10"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 2
+    },
+    {
+     "op": "defer",
+     "conn": "rd3",
+     "args": [
+      "bzmpop",
+      "0",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "min",
+      "count",
+      "10"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 3
+    },
+    {
+     "op": "defer",
+     "conn": "rd4",
+     "args": [
+      "bzmpop",
+      "0",
+      "2",
+      "myzset{t}",
+      "myzset2{t}",
+      "max",
+      "count",
+      "1"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 4
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "multi"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset{t}",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset2{t}",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+      "4",
+      "d",
+      "5",
+      "e"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "exec"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd1",
+     "value": "myzset{t} {{a 1}}"
+    },
+    {
+     "op": "read",
+     "conn": "rd2",
+     "value": "myzset{t} {{e 5} {d 4} {c 3} {b 2}}"
+    },
+    {
+     "op": "read",
+     "conn": "rd3",
+     "value": "myzset2{t} {{a 1} {b 2} {c 3} {d 4} {e 5}}"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset2{t}",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd4",
+     "value": "myzset2{t} {{c 3}}"
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myzset{t}",
+      "myzset2{t}"
+     ]
+    }
+   ],
+   "mode": "last"
   },
   {
    "name": "BZMPOP propagate as pop with count command to replica",
@@ -6885,9 +10129,135 @@
   {
    "name": "BZMPOP should not blocks on non key arguments - #10762",
    "expected": "0",
-   "skipped": true,
-   "why": "body uses tcl this translator does not read",
-   "tcl": "set rd1 [valkey_deferring_client]\n        set rd2 [valkey_deferring_client]\n        r del myzset myzset2 myzset3\n\n        $rd1 bzmpop 0 1 myzset min count 10\n        wait_for_blocked_clients_count 1\n        $rd2 bzmpop 0 2 myzset2 myzset3 max count 10\n        wait_for_blocked_clients_count 2\n\n        # These non-key keys will not unblock the clients.\n        r zadd 0 100 timeout_value\n        r zadd 1 200 numkeys_value\n        r zadd min 300 min_token\n        r zadd max 400 max_token\n        r zadd count 500 count_token\n        r zadd 10 600 count_value\n\n        r zadd myzset 1 zset\n        r zadd myzset3 1 zset3\n        assert_equal {myzset {{zset 1}}} [$rd1 read]\n        assert_equal {myzset3 {{zset3 1}}} [$rd2 read]\n\n        $rd1 close\n        $rd2 close"
+   "steps": [
+    {
+     "op": "cmd",
+     "args": [
+      "del",
+      "myzset",
+      "myzset2",
+      "myzset3"
+     ]
+    },
+    {
+     "op": "defer",
+     "conn": "rd1",
+     "args": [
+      "bzmpop",
+      "0",
+      "1",
+      "myzset",
+      "min",
+      "count",
+      "10"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 1
+    },
+    {
+     "op": "defer",
+     "conn": "rd2",
+     "args": [
+      "bzmpop",
+      "0",
+      "2",
+      "myzset2",
+      "myzset3",
+      "max",
+      "count",
+      "10"
+     ]
+    },
+    {
+     "op": "wait_blocked",
+     "count": 2
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "0",
+      "100",
+      "timeout_value"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "1",
+      "200",
+      "numkeys_value"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "min",
+      "300",
+      "min_token"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "max",
+      "400",
+      "max_token"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "count",
+      "500",
+      "count_token"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "10",
+      "600",
+      "count_value"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset",
+      "1",
+      "zset"
+     ]
+    },
+    {
+     "op": "cmd",
+     "args": [
+      "zadd",
+      "myzset3",
+      "1",
+      "zset3"
+     ]
+    },
+    {
+     "op": "read",
+     "conn": "rd1",
+     "value": "myzset {{zset 1}}"
+    },
+    {
+     "op": "read",
+     "conn": "rd2",
+     "value": "myzset3 {{zset3 1}}"
+    }
+   ],
+   "mode": "asserts"
   },
   {
    "name": "ZSET skiplist order consistency when elements are moved",

@@ -34,6 +34,8 @@ extern "C" {
     int ZREVRANK(caller& call, const arg_t& argv);
     int ZREMRANGEBYRANK(caller& call, const arg_t& argv);
     int ZRANGESTORE(caller& call, const arg_t& argv);
+    int BZPOPMIN(caller& call, const arg_t& argv);
+    int BZPOPMAX(caller& call, const arg_t& argv);
     int ZFASTRANK(caller& call, const arg_t& argv);
 }
 

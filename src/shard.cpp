@@ -148,6 +148,40 @@ art_repl_statistics barch::get_repl_statistics(){
 }
 #include "ioutil.h"
 
+namespace barch {
+    // the wakes a transaction has raised but not yet sent. Thread local because a
+    // transaction runs on the thread that is executing EXEC and nowhere else
+    static thread_local unsigned defer_depth = 0;
+    static thread_local std::vector<std::pair<abstract_shard*, std::string>> held_wakes;
+
+    bool wakes_deferred() {
+        return defer_depth > 0;
+    }
+
+    void defer_wake(abstract_shard* shard, const std::string& key) {
+        for (auto& h : held_wakes) {
+            if (h.first == shard && h.second == key) return;   // once is enough
+        }
+        held_wakes.emplace_back(shard, key);
+    }
+
+    defer_wakes::defer_wakes() {
+        ++defer_depth;
+    }
+
+    defer_wakes::~defer_wakes() {
+        if (--defer_depth > 0) return;
+        auto sending = std::move(held_wakes);
+        held_wakes.clear();
+        for (auto& h : sending) {
+            // the latch, because blocked_sessions is the shard's and every other caller
+            // of call_unblock holds it - they are inside a write when they wake somebody
+            std::unique_lock lock(h.first->get_latch());
+            h.first->call_unblock(h.second);
+        }
+    }
+}
+
 template<typename OutStream>
 static void stats_to_stream(OutStream &of, const owned_content_stats &o) {
     // what this shard holds, not what the process holds. the file used to carry the globals,

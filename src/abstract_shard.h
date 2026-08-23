@@ -387,4 +387,30 @@ size_t shard_thread_processor(size_t count, SFun && sfun ) {
     }
     return count;
 }
+
+namespace barch {
+    /**
+     * A transaction holds its wakes until it finishes.
+     *
+     * A blocked client must not see the inside of a MULTI. `MULTI; ZADD zset 0 foo;
+     * DEL zset; EXEC` used to wake a waiter on the ZADD, which popped `foo` before the
+     * DEL could remove it - so the DEL then answered 0 and the client was unblocked by a
+     * member that, from outside, never existed. Redis signals the key during the
+     * transaction and only acts on the signal once the whole thing is done, by which
+     * time the key is gone and the client is still waiting.
+     *
+     * `defer_wakes` is that hold, as an RAII scope around the EXEC loop. Wakes raised
+     * inside it are collected by shard and key, deduplicated, and sent when it ends.
+     * It nests, so a transaction inside anything else that already defers is harmless.
+     */
+    bool wakes_deferred();
+    void defer_wake(abstract_shard* shard, const std::string& key);
+    struct defer_wakes {
+        defer_wakes();
+        ~defer_wakes();
+        defer_wakes(const defer_wakes&) = delete;
+        defer_wakes& operator=(const defer_wakes&) = delete;
+    };
+}
+
 #endif //BARCH_ABSTRACT_SHARD_H

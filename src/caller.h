@@ -215,6 +215,17 @@ public:
     virtual void erase_blocks(const barch::abstract_session_ptr& ) {};
     virtual void add_block(const keys_t& blocks, uint64_t to_ms, std::function<void(caller&, const keys_t&)>) = 0;
     virtual bool has_blocks() = 0;
+    /**
+     * said by a block callback that was woken and found nothing to give.
+     *
+     * The waiter stays parked instead of answering. A wake is a hint that a key changed,
+     * not a promise that there is something there: a transaction can add and remove a
+     * member before anything is sent, and a key can be emptied by whoever got there
+     * first. Answering nil in that case unblocks a client that redis leaves waiting.
+     * Only the timeout answers nil. See DONE 125
+     */
+    virtual void retry_block() {}
+    virtual bool take_block_retry() { return false; }
     virtual void sort_pushed_results() = 0;
     [[nodiscard]] virtual size_t stack() const {
         return 0;

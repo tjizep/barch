@@ -109,7 +109,24 @@ namespace barch {
            return get_info_t( sock);
         }
 
-        void do_block_continue() override {
+        /**
+         * Hand the turn to whoever is next on this key.
+         *
+         * Called once a waiter has taken what it wanted, because there may be more left
+         * for the one behind it - a client that asked for one member out of five leaves
+         * four. Only after being served: a waiter that found nothing means the key is
+         * empty, and waking the next one would only send it round the same loop.
+         */
+        void pass_the_turn(const barch::key_space_ptr& space, size_t shard_index,
+                           const std::string& key) {
+            if (!space) return;
+            auto t = space->get(shard_index);
+            if (!t) return;
+            std::unique_lock lck(t->get_latch());
+            t->call_unblock(key);
+        }
+
+        void do_block_continue(const std::string& woken_by) override {
             if (caller.has_blocks()) {
                 timer.cancel();
                 auto self(this->shared_from_this());
@@ -126,10 +143,31 @@ namespace barch {
                 // the waiter on this thread, and reply_after_wait takes the
                 // same lock.
                 waiter_deadline = 0;
-                asio::post(this->socket_.get_executor(), [this,self]() {
+                // where to send the turn next, read before erase_blocks clears them
+                barch::key_space_ptr woken_space;
+                size_t woken_shard = 0;
+                for (auto& d : caller.get_blocks()) {
+                    if (d.key == woken_by) {
+                        woken_space = d.space;
+                        woken_shard = d.shard_index;
+                        break;
+                    }
+                }
+                asio::post(this->socket_.get_executor(),
+                           [this,self,woken_by,woken_space,woken_shard]() {
                     int r = caller.call_blocks();
+                    // the waiter looked and there was nothing for it. Stay parked: the
+                    // blocks are still on the caller, but call_unblock took this session
+                    // out of the key's list when it woke us, so it has to go back in.
+                    // Only the timeout answers a waiter that never got anything
+                    if (caller.take_block_retry()) {
+                        add_caller_blocks();
+                        start_block_to();
+                        return;
+                    }
                     write_result(caller, stream, r);
                     erase_blocks();
+                    pass_the_turn(woken_space, woken_shard, woken_by);
                     // the reply has to be out before anything else starts writing, so
                     // the rest of an interrupted batch waits on this one completing
                     auto out = std::make_shared<vector_stream>(std::move(stream));

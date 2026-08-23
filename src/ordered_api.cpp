@@ -1335,8 +1335,16 @@ int ZREMRANGEBYSCORE(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     if (key_ok(argv[1]) != 0)
         return call.push_null();
+    // `(1` is an exclusive bound here exactly as it is for ZCOUNT and ZRANGEBYSCORE.
+    // The bounds were read with read_score, which refuses the paren outright, so every
+    // exclusive ZREMRANGEBYSCORE answered "min or max is not a float". See DONE 119
+    std::string min_s(argv[2].chars(), argv[2].size);
+    std::string max_s(argv[3].chars(), argv[3].size);
+    bool open_min = false, open_max = false;
+    if (!min_s.empty() && min_s[0] == '(') { open_min = true; min_s.erase(0, 1); }
+    if (!max_s.empty() && max_s[0] == '(') { open_max = true; max_s.erase(0, 1); }
     double lo = 0, hi = 0;
-    if (!read_score(argv[2], lo) || !read_score(argv[3], hi)) {
+    if (!read_score(art::value_type{min_s}, lo) || !read_score(art::value_type{max_s}, hi)) {
         return call.push_error("min or max is not a float");
     }
     barch::sharded_store kstore(call.kspace());
@@ -1347,6 +1355,8 @@ int ZREMRANGEBYSCORE(caller& call, const arg_t& argv) {
     heap::std_vector<std::string> doomed;
     each_member(kstore, set, [&](art::value_type m, double sc) {
         if (sc < lo || sc > hi) return;
+        if (open_min && sc == lo) return;
+        if (open_max && sc == hi) return;
         doomed.emplace_back(m.chars(), m.size);
     });
     long long removed = 0;
@@ -1553,121 +1563,6 @@ static bool refuse_if_not_zset(caller& call, barch::sharded_store& store, art::v
     return false;
 }
 
-extern "C"
-int ZPOPMIN(caller& call, const arg_t& argv) {
-
-    if (argv.size() < 2)
-        return call.wrong_arity();
-    barch::sharded_store kstore(call.kspace());
-    // type before the count: `ZPOPMIN k 0` on a string is WRONGTYPE, not an empty array
-    if (refuse_if_not_zset(call, kstore, argv[1])) return 0;
-    auto t = kstore.write_locked(argv[1]);
-    long long count = 1;
-    long long replies = 0;
-    auto k = argv[1];
-    if (argv.size() == 3) {
-        if (call.ok() != conversion::to_ll(argv[2], count)) {
-            return call.push_error("invalid count");
-        }
-    }
-
-    if (key_ok(k) != 0) {
-        return call.push_null();
-    }
-    auto container = conversion::convert(k);
-    query l, u;
-    auto lower = l->create(art::ts_ordered_map, {container});
-    call.start_array();
-
-    for (long long c = 0; c < count; ++c) {
-        art::iterator i(t, lower);
-        if (!i.ok()) {
-            break;
-        }
-        auto v = i.key();
-        if (!v.starts_with(lower.pref(1))) break;
-        auto encoded_number = v.sub(lower.size, numeric_key_size);
-        auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-        // member first, then its score - redis's order. it used to be the other way
-        // round, which every client's ZPOPMIN/ZPOPMAX parser reads backwards
-        call.push_encoded_key(member);
-        call.push_encoded_key(encoded_number);
-        replies += 2;
-        if (!i.remove()) {
-            break;
-        };
-    }
-    call.end_array();
-    return call.ok();
-}
-int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, ZPOPMIN);
-}
-extern "C"
-int ZPOPMAX(caller& call, const arg_t& argv) {
-
-    if (argv.size() < 2)
-        return call.wrong_arity();
-    barch::sharded_store kstore(call.kspace());
-    if (refuse_if_not_zset(call, kstore, argv[1])) return 0;
-    auto t = kstore.write_locked(argv[1]);
-    long long count = 1;
-    long long replies = 0;
-    auto k = argv[1];
-    if (argv.size() == 3) {
-        if (!conversion::to_ll(argv[2], count)) {
-            return call.push_error("invalid count");
-        }
-    }
-
-    if (key_ok(k) != 0) {
-        return call.push_null();
-    }
-
-    auto container = conversion::convert(k);
-    query l, u;
-    auto lower = l->create(art::ts_ordered_map, {container},false);
-    auto upper = u->create(art::ts_ordered_map, {container, art::ts_end});
-    call.start_array();
-    for (long long c = 0; c < count; ++c) {
-        art::iterator i(t, upper);
-        if (!i.ok()) {
-            // this may be because upper > last item in tree and therefore there's none not less than
-            i.last();
-            if (!i.ok())
-                break;
-        }
-        auto v = i.key();
-        if (!v.starts_with(lower)) {
-            i.previous();
-            if (!i.ok()) {
-                break;
-            }
-            v = i.key();
-        };
-        if (!v.starts_with(lower)) break;
-        auto encoded_number = v.sub(lower.size, numeric_key_size);
-        auto member = v.sub(lower.size + numeric_key_size); // theres a 0 char and I'm not sure where it comes from
-        // member first, then its score - redis's order. it used to be the other way
-        // round, which every client's ZPOPMIN/ZPOPMAX parser reads backwards
-        call.push_encoded_key(member);
-        call.push_encoded_key(encoded_number);
-        replies += 2;
-
-        if (!i.remove()) {
-            barch::log({"Could not remove key"});
-        };
-    }
-    call.end_array();
-    return call.ok();
-}
-
-int cmd_ZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    vk_caller call;
-    return call.vk_call(ctx, argv, argc, ZPOPMAX);
-}
-
 struct zpopped {
     std::string member;
     std::string score;
@@ -1718,6 +1613,68 @@ static bool zmpop_one(const barch::shard_ptr& t, art::value_type name,
     return !out.empty();
 }
 
+/**
+ * ZPOPMIN key [count] and ZPOPMAX key [count].
+ *
+ * The reply is flat - member, score, member, score - which is redis's order and not the
+ * order this used to answer in.
+ *
+ * Removal goes through `zmpop_one`, the same helper ZMPOP uses, because these two had
+ * their own loop that removed the score-ordered key with `i.remove()` and left the member
+ * index behind. A member popped and then added again met a stale index. See DONE 118.
+ */
+static int zpop_flat(caller& call, const arg_t& argv, bool want_max) {
+    if (argv.size() < 2 || argv.size() > 3)
+        return call.wrong_arity();
+    auto k = argv[1];
+    if (key_ok(k) != 0)
+        return call.push_null();
+    barch::sharded_store kstore(call.kspace());
+    // type before the count: `ZPOPMIN k 0` on a string is WRONGTYPE, not an empty array
+    if (refuse_if_not_zset(call, kstore, k)) return 0;
+    long long count = 1;
+    if (argv.size() == 3) {
+        // `call.ok() != to_ll(...)` is what ZPOPMIN used to write, and to_ll answers a
+        // bool while ok() is zero - so a count that parsed cleanly compared unequal and
+        // every ZPOPMIN with a count was an error. ZPOPMAX had it right
+        // redis says the same thing about a word and about a negative number here -
+        // both are "not a count" - and a count of 0 is an empty array, not an error
+        if (!conversion::to_ll(argv[2], count) || count < 0) {
+            return call.push_error("value is out of range, must be positive");
+        }
+    }
+    heap::std_vector<zpopped> popped;
+    {
+        auto t = kstore.write_locked(k);
+        zmpop_one(t, k, want_max, count, popped);
+    }
+    call.start_array();
+    for (const auto& one : popped) {
+        call.push_encoded_key(art::value_type{one.member});
+        call.push_encoded_key(art::value_type{one.score});
+    }
+    call.end_array();
+    return call.ok();
+}
+
+extern "C"
+int ZPOPMIN(caller& call, const arg_t& argv) {
+    return zpop_flat(call, argv, false);
+}
+int cmd_ZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZPOPMIN);
+}
+extern "C"
+int ZPOPMAX(caller& call, const arg_t& argv) {
+    return zpop_flat(call, argv, true);
+}
+
+int cmd_ZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, ZPOPMAX);
+}
+
 static void reply_zmpop(caller& call, art::value_type name,
                         const heap::std_vector<zpopped>& popped) {
     call.start_array();
@@ -1730,6 +1687,14 @@ static void reply_zmpop(caller& call, art::value_type name,
         call.end_array();
     }
     call.end_array();
+    call.end_array();
+}
+
+static void reply_bzpop(caller& call, art::value_type name, const zpopped& one) {
+    call.start_array();
+    call.push_vt(name);
+    call.push_encoded_key(art::value_type{one.member});
+    call.push_encoded_key(art::value_type{one.score});
     call.end_array();
 }
 
@@ -1835,7 +1800,9 @@ static int zmpop(caller& call, const arg_t& argv, bool blocking) {
                         return;
                     }
                 }
-                cc.push_null();
+                // woken by a change that left nothing to take - keep waiting rather
+                // than answering nil, which only the timeout does
+                cc.retry_block();
             });
         return 0;
     }
@@ -1848,6 +1815,100 @@ int ZMPOP(caller& call, const arg_t& argv) {
 extern "C"
 int BZMPOP(caller& call, const arg_t& argv) {
     return zmpop(call, argv, true);
+}
+
+/**
+ * BZPOPMIN key [key ...] timeout, and BZPOPMAX.
+ *
+ * The older blocking pop, and the one clients still send. BZMPOP does the same job, but
+ * it takes a count, answers a nested array, and reads its timeout first rather than last -
+ * so these need their own parse and their own reply, and nothing else. The pop and the
+ * waiter are the ones ZMPOP already uses.
+ *
+ * A key holding something that is not a set is refused rather than waited on. Without
+ * that `BZPOPMIN notaset 0` waits for a set that can never arrive, and 0 means forever.
+ */
+static int bzpop(caller& call, const arg_t& argv, bool want_max) {
+    if (argv.size() < 3) {
+        return call.wrong_arity();
+    }
+    if (call.has_blocks()) {
+        return call.push_error("block already set");
+    }
+    uint64_t time_out = 0;
+    if (!parse_block_timeout(call, argv.back(), time_out)) {
+        return 0;
+    }
+    const size_t last = argv.size() - 1;   // where the timeout sits, so the keys stop here
+    barch::sharded_store store(call.kspace());
+    for (size_t i = 1; i < last; ++i) {
+        if (key_ok(argv[i]) != 0) {
+            return call.push_error("invalid key");
+        }
+        if (refuse_if_not_zset(call, store, argv[i])) return 0;
+    }
+    auto spc = call.kspace();
+    std::optional<barch::sharded_store::write_guard> space_lock;
+    // more than one name means more than one shard, so the whole space is held
+    if (last > 2) {
+        space_lock = store.lock_space_write();
+    }
+    caller::keys_t blocks;
+    for (size_t i = 1; i < last; ++i) {
+        auto name = argv[i];
+        barch::sharded_store::write_locked_shard one;
+        barch::shard_ptr t;
+        if (last == 2) {
+            one = store.write_locked(name);
+            t = one.ptr();
+        } else {
+            t = spc->get(name);
+        }
+        heap::std_vector<zpopped> popped;
+        if (zmpop_one(t, name, want_max, 1, popped)) {
+            reply_bzpop(call, name, popped.front());
+            return call.ok();
+        }
+        blocks.emplace_back(name.to_string(), t->get_shard_number());
+    }
+    if (!blocks.empty()) {
+        call.add_block(blocks, time_out,
+            [want_max](caller& cc, const caller::keys_t& keys) {
+                if (keys.empty()) {
+                    cc.push_null();
+                    return;
+                }
+                barch::sharded_store st(cc.kspace());
+                for (auto& k : keys) {
+                    art::value_type name{k.key};
+                    auto t = st.write_locked(name);
+                    heap::std_vector<zpopped> popped;
+                    if (zmpop_one(t, name, want_max, 1, popped)) {
+                        reply_bzpop(cc, name, popped.front());
+                        return;
+                    }
+                }
+                cc.retry_block();
+            });
+        return 0;
+    }
+    return call.push_null();
+}
+extern "C"
+int BZPOPMIN(caller& call, const arg_t& argv) {
+    return bzpop(call, argv, false);
+}
+int cmd_BZPOPMIN(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, BZPOPMIN);
+}
+extern "C"
+int BZPOPMAX(caller& call, const arg_t& argv) {
+    return bzpop(call, argv, true);
+}
+int cmd_BZPOPMAX(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, BZPOPMAX);
 }
 extern "C"
 int ZREVRANGE(caller& call, const arg_t& argv) {
@@ -2381,7 +2442,12 @@ void register_ordered_api(function_map& r) {
     r["ZPOPMIN"] = {::ZPOPMIN,{"write","orderedset","data"}};
     r["ZPOPMAX"] = {::ZPOPMAX,{"write","orderedset","data"}};
     r["ZMPOP"] = {::ZMPOP,{"write","orderedset","data"}};
+    // the blocking pops live here and not in add_ordered_api: the waiter is add_block,
+    // which is the RESP side's, and the module path has no way to park a call. BZMPOP has
+    // always been registered this way; BZPOPMIN and BZPOPMAX follow it
     r["BZMPOP"] = {::BZMPOP,{"write","orderedset","data"}};
+    r["BZPOPMIN"] = {::BZPOPMIN,{"write","orderedset","data"}};
+    r["BZPOPMAX"] = {::BZPOPMAX,{"write","orderedset","data"}};
     r["ZREVRANGE"] = {::ZREVRANGE,{"read","orderedset","data"}};
     r["ZRANGEBYSCORE"] = {::ZRANGEBYSCORE,{"read","orderedset","data"}};
     r["ZREVRANGEBYSCORE"] = {::ZREVRANGEBYSCORE,{"read","orderedset","data"}};

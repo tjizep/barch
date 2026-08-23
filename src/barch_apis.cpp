@@ -11,6 +11,7 @@
 #include "config_api.h"
 #include "auth_api.h"
 #include "export_api.h"
+#include "function_api.h"
 //
 // Created by teejip on 7/13/25.
 //
@@ -33,10 +34,14 @@ catmap& get_category_map() {
 
 
 heap::vector<std::string> categories() {
+    // appended, never inserted: get_category_map() numbers these by position and
+    // is_authorized compares by index, so a name added in the middle silently
+    // reassigns everyone's rights. Stored ACLs are keyed by name and re-vectorised
+    // at AUTH, which is what makes appending free
     heap::vector<std::string> r = {"read","write","data", "stats",
         "dangerous","acl", "keyspace",
         "keys", "orderedset","hash","list","auth",
-        "connection","config"};
+        "connection","config","function"};
 
     return r;
 }
@@ -74,6 +79,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         register_config_api(*r);
         register_auth_api(*r);
         register_export_api(*r);
+        register_function_api(*r);
     }
 
     return r;

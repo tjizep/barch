@@ -6,6 +6,7 @@
 #include "lzr_log.h"
 #include "art/nodes.h"
 
+#include <cmath>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -120,7 +121,16 @@ static bool load_source(const std::string& spec, std::string& source, std::strin
     return true;
 }
 
-static bool compile_source(const std::string& source, std::string& bytecode, std::string& err) {
+/*
+ * compile, load and run the chunk, then check it left `entry` behind as a function.
+ *
+ * The entry point is a parameter because the two callers do not share one. A foreign
+ * fill answers through `resolve`; a stored function answers through `call`. They were
+ * the same code with "resolve" written into it, which would have refused every stored
+ * function ever written.
+ */
+static bool compile_entry(const std::string& source, std::string& bytecode,
+                          const char* entry, std::string& err) {
     size_t n = 0;
     char* bc = luau_compile(source.data(), source.size(), nullptr, &n);
     if (!bc) {
@@ -134,7 +144,7 @@ static bool compile_source(const std::string& source, std::string& bytecode, std
         err = "luau state failed";
         return false;
     }
-    int rc = luau_load(L, "=foreign", bytecode.data(), bytecode.size(), 0);
+    int rc = luau_load(L, "=barch", bytecode.data(), bytecode.size(), 0);
     if (rc != 0) {
         err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "luau load failed";
         lua_close(L);
@@ -145,14 +155,18 @@ static bool compile_source(const std::string& source, std::string& bytecode, std
         lua_close(L);
         return false;
     }
-    lua_getglobal(L, "resolve");
+    lua_getglobal(L, entry);
     if (lua_type(L, -1) != LUA_TFUNCTION) {
-        err = "luau script has no resolve()";
+        err = std::string("luau script has no ") + entry + "()";
         lua_close(L);
         return false;
     }
     lua_close(L);
     return true;
+}
+
+static bool compile_source(const std::string& source, std::string& bytecode, std::string& err) {
+    return compile_entry(source, bytecode, "resolve", err);
 }
 
 struct luau_job {
@@ -296,6 +310,167 @@ bool prepare_luau(key_space& ks) {
     return true;
 }
 
+/*
+ * A stored function's interrupt. The foreign one yields so a slice can go back on the
+ * pool; this one has nowhere to yield to yet, so the budget and the deadline are both
+ * hard stops. Slicing is what turns this into a park - TODO 98 H.
+ */
+static void function_interrupt(lua_State* L, int gc) {
+    if (gc >= 0)
+        return;
+    auto* ctx = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    if (!ctx)
+        return;
+    if (ctx->deadline && art::now() > ctx->deadline)
+        luaL_error(L, "FUNCTION timeout");
+    if (ctx->left == 0)
+        luaL_error(L, "FUNCTION instruction budget exceeded");
+    --ctx->left;
+}
+
+/*
+ * What a function returned, as a Variable. The shapes are fixed here once and are not
+ * meant to move afterwards - a client that has to guess which of two encodings it is
+ * getting cannot be written against.
+ */
+static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, int depth) {
+    if (depth > 8) {
+        err = "FUNCTION return nests too deeply";
+        return false;
+    }
+    switch (lua_type(L, idx)) {
+        case LUA_TNIL:
+            out = Variable(nullptr);
+            return true;
+        case LUA_TBOOLEAN:
+            // redis answers 1 for true and nil for false, and a script written against
+            // redis will expect that rather than a RESP boolean
+            if (lua_toboolean(L, idx))
+                out = Variable((int64_t) 1);
+            else
+                out = Variable(nullptr);
+            return true;
+        case LUA_TNUMBER: {
+            double d = lua_tonumber(L, idx);
+            double whole = 0;
+            if (std::modf(d, &whole) == 0.0 && d >= -9.2233720368547758e18
+                && d <= 9.2233720368547758e18)
+                out = Variable((int64_t) d);
+            else
+                out = Variable(d);
+            return true;
+        }
+        case LUA_TSTRING: {
+            size_t n = 0;
+            const char* s = lua_tolstring(L, idx, &n);
+            out = Variable(std::string(s, n));
+            return true;
+        }
+        case LUA_TTABLE: {
+            // {err = "..."} and {ok = "..."} first, as redis does, so a script can
+            // answer an error without the host having to invent one
+            lua_getfield(L, idx, "err");
+            if (lua_type(L, -1) == LUA_TSTRING) {
+                size_t n = 0;
+                const char* s = lua_tolstring(L, -1, &n);
+                err.assign(s, n);
+                lua_pop(L, 1);
+                return false;
+            }
+            lua_pop(L, 1);
+            lua_getfield(L, idx, "ok");
+            if (lua_type(L, -1) == LUA_TSTRING) {
+                size_t n = 0;
+                const char* s = lua_tolstring(L, -1, &n);
+                out = Variable(std::string(s, n));
+                lua_pop(L, 1);
+                return true;
+            }
+            lua_pop(L, 1);
+            heap::vector<wrapped_variable_t> items;
+            for (int i = 1;; ++i) {
+                lua_rawgeti(L, idx, i);
+                if (lua_type(L, -1) == LUA_TNIL) {
+                    lua_pop(L, 1);
+                    break;
+                }
+                Variable item;
+                if (!to_variable(L, lua_gettop(L), item, err, depth + 1)) {
+                    lua_pop(L, 1);
+                    return false;
+                }
+                items.push_back(item);
+                lua_pop(L, 1);
+            }
+            out = Variable(items);
+            return true;
+        }
+        default:
+            err = "FUNCTION returned something that is not a value";
+            return false;
+    }
+}
+
+bool call_function(const std::string& space, const std::string& source,
+                   const heap::vector<std::string>& args, uint64_t insns,
+                   uint64_t deadline_ms, Variable& out, std::string& err) {
+    std::string bytecode;
+    if (!compile_entry(source, bytecode, "call", err))
+        return false;
+    lua_State* L = luaL_newstate();
+    if (!L) {
+        err = "FUNCTION luau state";
+        return false;
+    }
+    // sql.query reads the space out of the registry, so a function gets the same SQL
+    // its space is configured with, or the same error when there is none
+    lua_pushlstring(L, space.data(), space.size());
+    lua_setfield(L, LUA_REGISTRYINDEX, "barch.foreign.space");
+    open_safe(L);
+    run_ctx ctx;
+    ctx.slice = insns;
+    ctx.left = insns ? insns : 1;
+    if (deadline_ms)
+        ctx.deadline = art::now() + static_cast<int64_t>(deadline_ms);
+    lua_callbacks(L)->userdata = &ctx;
+    lua_callbacks(L)->interrupt = function_interrupt;
+    lua_singlestep(L, 1);
+    if (luau_load(L, "=function", bytecode.data(), bytecode.size(), 0) != 0) {
+        err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "FUNCTION luau load";
+        lua_close(L);
+        return false;
+    }
+    if (lua_pcall(L, 0, 0, 0) != 0) {
+        err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "FUNCTION luau script";
+        lua_close(L);
+        return false;
+    }
+    lua_getglobal(L, "call");
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+        err = "FUNCTION has no call()";
+        lua_close(L);
+        return false;
+    }
+    lua_createtable(L, (int) args.size(), 0);
+    for (size_t i = 0; i < args.size(); ++i) {
+        lua_pushlstring(L, args[i].data(), args[i].size());
+        lua_rawseti(L, -2, (int) i + 1);
+    }
+    if (lua_pcall(L, 1, 1, 0) != 0) {
+        err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "FUNCTION luau call";
+        lua_close(L);
+        return false;
+    }
+    bool ok = to_variable(L, lua_gettop(L), out, err, 0);
+    lua_close(L);
+    return ok;
+}
+
+bool compile_function(const std::string& source, std::string& err) {
+    std::string bytecode;
+    return compile_entry(source, bytecode, "call", err);
+}
+
 bool luau_available() {
     return true;
 }
@@ -309,6 +484,18 @@ driver& luau_driver() {
 
 bool prepare_luau(key_space& ks) {
     barch::err({"luau not built - ignoring it for space", ks.get_name()});
+    return false;
+}
+
+bool compile_function(const std::string&, std::string& err) {
+    err = "luau not built";
+    return false;
+}
+
+bool call_function(const std::string&, const std::string&,
+                   const heap::vector<std::string>&, uint64_t, uint64_t,
+                   Variable&, std::string& err) {
+    err = "luau not built";
     return false;
 }
 

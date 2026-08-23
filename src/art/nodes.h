@@ -96,7 +96,12 @@ namespace art {
     inline bool is_composite_lead(uint8_t lead) {
         return lead == tcomposite
             || lead == tplain
-            || (lead >= tcomposite_list && lead <= tcomposite_extend);
+            || (lead >= tcomposite_list && lead <= tcomposite_extend)
+            // tfunction sits next to tcomposite_extend and is deliberately not folded
+            // into the range above: is_container_lead tests the same span, and a
+            // function is not a container. Nothing claims a kind for one, so
+            // claim_container_kind must never see it.
+            || lead == tfunction;
     }
 
     /** the container kinds only, for deciding what a name is being used as */
@@ -114,6 +119,8 @@ namespace art {
     static composite_type ts_composite{tcomposite};
     /** the leading tag of a caller's multi part key - see tplain */
     static composite_type ts_plain{tplain};
+    /** the lead of a stored function's key - see tfunction */
+    static composite_type ts_function{tfunction};
     /** one lead per container kind - see tcomposite_list */
     static composite_type ts_list{tcomposite_list};
     static composite_type ts_hash{tcomposite_hash};

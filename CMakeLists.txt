@@ -736,6 +736,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # stored Luau functions: the key range, SETF/GETF/REMF/KEYSF
+        add_test(NAME TestFunctions
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functiontest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # ACL key patterns are parsed and refused rather than silently dropped
         add_test(NAME TestAclFilter
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/aclfiltertest.py

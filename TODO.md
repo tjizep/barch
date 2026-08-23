@@ -665,14 +665,20 @@
     container: no kind is claimed for it and
     `claim_container_kind` must never see one.
 
-    With that, the decode sites that delegate on the predicate come
-    free - keys.cpp:133, :202 and :382. Two do not:
+    That turned out to be the whole audit. Every site that reasons
+    about a lead byte asks the predicate: keys.cpp:133, :202 and
+    :382, `script_key` in luau_driver.cpp, the three in
+    foreign/sql.cpp, and - the one that looked like separate work -
+    conversion.h:244, where `is_composite_lead` is already one of
+    the disjuncts in `comparable_key`'s accept list. So the throw
+    and the abort both go away with the predicate, and the comment
+    at `is_composite_lead` that says "one predicate, so the next
+    type is one edit" turned out to be telling the truth.
 
-      - conversion.h:244, `comparable_key(art::value_type)`, throws
-        `invalid_argument` on any lead outside its list, so a
-        function key cannot be constructed until tfunction is in it.
-      - `script_key` in luau_driver.cpp strips a lead from a list it
-        keeps itself, and would quietly keep the 12.
+    `is_container_lead` is the one that must not change. It tests
+    the same span, and a function is not a container - nothing
+    claims a kind for one - so tfunction is named explicitly in
+    `is_composite_lead` rather than folded into the range.
 
     The AOF and RDB writers, the exporter and replication all treat
     it as an ordinary key, which is the whole point of doing it this
@@ -680,10 +686,17 @@
     its own.
 
     First class also means the ordinary commands answer for these
-    keys rather than hiding them:
+    keys rather than hiding them. All of this is now observed
+    rather than predicted - see test/functiontest.py:
 
-      - KEYS, SCAN, RANGE and the bounds see them. TYPE says
-        `function`. DBSIZE counts them, so a LOAD changes it.
+      - KEYS, SCAN, RANGE and the bounds see them. DBSIZE counts
+        them, so a SETF changes it.
+      - TYPE cannot say `function`, because barch has no TYPE
+        command - a grep finds no handler and no table entry, and
+        containers have no answer there either. Adding one is its
+        own job, redis-shaped, and it would have to answer for
+        lists, hashes and ordered sets before it answers for
+        functions. Nothing here depends on it.
       - GET, SET and DEL cannot address them at all - see below,
         it falls out of the encoding rather than being a rule.
         SETF, GETF, REMF and KEYSF are the commands that can; see
@@ -692,12 +705,12 @@
         reaching `configuration` would drop the global ones, which
         is either right or wants refusing.
       - EXPIRE, and the whole TTL family, is refused on the range.
-        A function with a TTL is a coherent idea, but expiry is
-        lazy and would not bump the generation counter the session
-        cache checks, so a session would go on running a function
-        whose key is gone. Making the expiry path bump the
-        generation would work too and buys nothing anyone asked
-        for.
+        The original reason was the generation counter, which is
+        gone - but the refusal stands on its own now: a session
+        holds what it compiled for as long as it is connected, so
+        a TTL would expire the key while every connected client
+        went on calling the function. A setting that visibly does
+        not do what it says is worse than not having it.
 
     Writing one. The precedent is a container key: hash_api.cpp:60
     builds `query.create(art::ts_hash, {container})` and inserts
@@ -738,25 +751,44 @@
 
     Two more consequences of writing a new lead into a shard file:
 
-      - `storage_version` in constants.h is bumped, 15 to 16. The
-        comment there says why: an older binary reading a file with
-        tfunction keys in it does not misread them, it hits the
-        `comparable_key` throw or the keys.cpp abort. Refusing the
-        file is the better failure, and that is what the version
-        buys.
+      - `storage_version` in constants.h is bumped, 15 to 16, but
+        with SETF rather than with the key type. The bump protects
+        an old binary from a new *file*, and no file can hold a
+        function key until something can write one - so it belongs
+        with the first write path, not with making the type
+        representable. Bumping it earlier only invalidates shard
+        files that contain nothing new.
       - the value is the source text, not bytecode. Bytecode is
         tied to the Luau build, so storing it turns a Luau upgrade
         into a migration, and the compiled instance already lives in
         the session per C.
 
-    Last piece: is the key `{ts_function, space, name}` or
-    `{ts_function, name}`? The space component repeats what the
-    key's location already says - a function in KS1 lives in KS1's
-    shards - and adds a way to be inconsistent, a key in KS2 whose
-    first component says KS1. `{ts_function, name}` with the space
-    implied is the recommendation. The client-facing
-    `KS1.PRINT_NAME` reads the same either way; it just resolves to
-    space KS1, key `{ts_function, PRINT_NAME}`.
+    The key is `{ts_function, name}`. The space is implied by the
+    space the command runs in - `space:SETF` or `USE space` then
+    `SETF` - so it is not in the key, and there is no way for a key
+    in KS2 to claim it belongs to KS1.
+
+    A stored function answers through a global `call`, where a
+    foreign fill answers through `resolve`. That is the first place
+    the two Luau contracts part company, and it cost a bug already:
+    `compile_source` in luau_driver.cpp had "resolve" written into
+    it, so pointing SETF at it would have refused every function
+    ever written. The entry point is a parameter now -
+    `compile_entry(source, bytecode, entry, err)` - and the two
+    callers pass their own.
+
+    SETF is SET with a different type byte: same name in, same
+    value, `ts_function` where `encode_key` would have picked
+    tstring or tinteger. At the byte level that is a one component
+    composite, `{0x0c, 0x00}` then the name, rather than a literal
+    swap of the lead on a tstring key. The two sort the same and
+    both render as the bare name through `reply_encoded_key`, so no
+    client can tell them apart - but the composite is already
+    handled by every decoder through `is_composite_lead`, where a
+    literal swap would need the tstring branch taught about
+    tfunction in keys.cpp three times over, in conversion.h, in
+    `script_key` and in sql.cpp. Same behaviour, none of the
+    work.
 
     The ordering is the interesting part, and it cuts both ways.
     tfunction is 12, after every other lead, so function keys sort
@@ -770,6 +802,13 @@
     lands on the last shard. None of that is wrong, but each is a
     change to a command that has nothing to do with functions, and
     each wants a test saying which way it went.
+
+    Measured once SETF existed, on a space holding one string and
+    one function: DBSIZE goes 1 to 2, `KEYS *` and `SCAN 0` both
+    name the function, and `MAX` answers with it rather than with
+    the string. `GET` on the same name answers null, which is the
+    encoding keeping the two ranges apart. So the prediction held
+    in both directions, including the awkward half.
 
     B. Naming, scope and resolution.
 
@@ -821,32 +860,38 @@
     runs two calls of one session in parallel this stops being safe
     without looking any different.
 
-    The space keeps the definitions, which is the lifetime the entry
-    started with; the session keeps one compiled instance of them.
-    Three things follow:
+    The space keeps the definitions; the session keeps one compiled
+    instance of them, and once compiled it keeps that one. A
+    session does not notice a redefinition: new code reaches new
+    sessions. Reconnecting is how a client picks up a change, and
+    that is the documented behaviour rather than a gap. Live
+    reload and versioning are 137.
 
-      - staleness. A session that compiled PRINT_NAME an hour ago
-        has to notice a redefinition. Cheapest is a generation
-        counter per space, bumped by any write to a tfunction key
-        and compared with the one the session's state for that
-        space was built at - an atomic read on the hot path, and a
-        mismatch closes that state and starts again. Per-key
-        versioning is finer and probably not worth what it costs,
-        and it would mean picking entries out of a state rather
-        than dropping the state.
-      - teardown. UNLOAD can take a space out from under a session
-        that has its functions compiled, and closes that session's
-        state for it the same way a generation bump does. The map
-        keys on space name, not on a held `key_space_ptr`, or a
-        dropped space stays alive in every session that ever called
-        into it.
-      - size. A client that calls a hundred functions has a hundred
-        of them compiled, a thousand connections have a thousand
-        copies of the popular ones, and a session that roams over
-        spaces holds a state for each. That wants a cap with LRU
-        eviction - on the states as well as on the functions in
-        them - and a line in the memory statistics, the same as the
-        scan cursors in caller.h already have.
+    That is worth what it saves. There is no generation counter, no
+    atomic on the call path, nothing that has to reach into a live
+    session from a write, and no rule about what happens to a call
+    already running when its definition changes underneath it.
+
+    Note what it does *not* cost: a function is compiled on first
+    use, so SETF followed by a call on the same connection works -
+    that session had nothing cached for the name and reads the key
+    fresh. Only a redefinition of something the session has already
+    run is stale.
+
+    Teardown is the leftover. A session must key its states on the
+    space name and never hold a `key_space_ptr`, or an UNLOADed
+    space stays alive in every session that ever called into it.
+    Size is the other one. A client that calls a hundred functions
+    has a hundred of them compiled, a thousand connections have a
+    thousand copies of the popular ones, and a session that roams
+    over spaces holds a state for each. That wants a cap with LRU
+    eviction - on the states as well as on the functions in them -
+    and a line in the memory statistics, the same as the scan
+    cursors in caller.h already have. Eviction is not invalidation:
+    an evicted function is compiled again from whatever the key
+    says now, so a long-lived session can pick up a redefinition by
+    accident. Either that is fine and it is written down, or the
+    cache keeps the source it compiled from.
 
     Per session and space, rather than per function or one for the
     whole session, because of what `require` costs and how memory
@@ -1018,15 +1063,37 @@
 
     I. Order to build it in.
 
-      1. tfunction as a key type: `ts_function`, the predicate, the
-         lead-byte audit, the `storage_version` bump, TYPE, the
-         lead check on the paths that write encoded keys, and what
-         KEYS / MAX / RANDOMKEY do now that the range exists. A
-         function key written and read back by hand, no Luau yet.
-         This is the part that is expensive to change later.
-      2. SETF / GETF / REMF / KEYSF writing those keys, compiling
-         through `compile_source`, refusing a script that will not
-         compile and refusing a built-in's name. Dispatch: the
+      1. [done] tfunction as a key type: `ts_function` beside
+         `ts_plain`, and `is_composite_lead` taught about the lead.
+         That was the whole audit - see A.
+      1b. [mostly done] SETF / GETF / REMF / KEYSF in
+         function_api.cpp, the `function` ACL category, and what
+         KEYS / MAX / DBSIZE do now the range exists, pinned in
+         test/functiontest.py. SETF compiles before it writes, so a
+         script that will not run is refused rather than stored.
+         Left: the `storage_version` bump, and the lead check on
+         the paths that write an already encoded key - replication,
+         AOF and RDB load, import/restore.
+      2. [part done] CALLF runs a stored function: arguments in as a
+         1-based array of strings, the reply conversion in J below,
+         a hard instruction cap and deadline, `is_asynch` so it
+         runs on the worker pool. Covered in test/functiontest.py,
+         including a spin being cut off with the connection still
+         usable afterwards.
+
+         Shortcuts taken, both deliberate and both wanting undoing
+         before this is called finished:
+           - the budget is `get_foreign_script_insns()`, a million
+             instructions, rather than the `function_script_insns`
+             of its own that H asks for, and the deadline is the
+             space's `foreign_query_timeout_ms`. A fill and a
+             client-invoked command are not the same risk.
+           - no session cache yet: every CALLF compiles the source
+             again. C is the design; this is correctness first, and
+             the cache is a measurable change on its own rather
+             than two hard things at once.
+
+      2b. Calling one by name. Dispatch: the
          colon-then-dot parsing, the resolution order, and the two
          places in asio_resp_session.h that answer "unknown command"
          - the cached `ic` iterator in `run_params`, which skips the
@@ -1034,7 +1101,11 @@
          missed once stays unknown for the life of the session, and
          the string re-lookup in `run_asynch_batch`. The per-session
          table snapshot at :614 stops mattering, since functions
-         never enter that table.
+         never enter that table. The negative result is the one to
+         be careful with: a name tried before it existed must not
+         stay unknown, or SETF followed by a call on the same
+         connection fails for a reason that has nothing to do with
+         the function.
       3. Arguments in, value out, arity, ACL, the reply conversion.
          No includes, no `call`, no store.
       4. The session cache: the state, the generation check,
@@ -1051,13 +1122,11 @@
         against another space - is allowed or refused. Refusing it
         means the dotted form only ever repeats what the colon
         already said.
-      - a generation counter per space against per-key versioning
-        for spotting a redefinition from a session.
       - what the session cache costs at a thousand connections, and
-        where the cap goes.
+        where the cap goes - and whether an evicted-then-recompiled
+        function picking up newer source is acceptable or has to be
+        prevented.
       - one `argv` table or varargs.
-      - `{ts_function, name}` with the space implied, or
-        `{ts_function, space, name}` spelling it out.
       - whether globals in the `configuration` space may be
         redefined by a space-local function of the same name, or
         whether that is refused rather than shadowed.
@@ -1112,13 +1181,20 @@
     written later without having to unpick a barch-shaped one
     squatting on it.
 
-    Reply conversion, which has to be decided once and then not
-    moved: nil is null; a string is a bulk string; an integral
+    Reply conversion, settled and asserted in test/functiontest.py
+    over both protocols: nil is null; a string is a bulk string; an integral
     number is an integer and anything else is a double on RESP3 and
     a bulk string on RESP2; a boolean is 1 or null, as in redis; an
-    array table is an array converted the same way per element;
-    `{err = "..."}` is that error verbatim and `{ok = "..."}` that
-    simple string; anything else is `-ERR FUNCTION bad return`.
+    array table is an array converted the same way per element and
+    nests up to eight deep; `{err = "..."}` is that error verbatim
+    and `{ok = "..."}` that simple string; anything else is an
+    error saying so.
+
+    The RESP2 double is the one that surprises: `return 2.5` comes
+    back as the bulk string "2.5" on a RESP2 connection and as a
+    real double on RESP3, which is the rule working rather than a
+    fault. Both halves are asserted, because a client that has to
+    guess which it is getting cannot be written against.
 
     Tests follow test/foreign_luau.py, and the first of them are
     about the key range rather than about Luau: a function key
@@ -1273,3 +1349,41 @@
     form wants its own section beside the `ACL` one.
 
 136. [Done] ACL SETUSER accepted ~pattern and dropped it [22-08-2026] Nr 128 1c17a23
+
+137. Live reload and versioning for Luau functions.
+
+    98 settles that a session compiles a function once and keeps
+    it, so a redefinition reaches new sessions and no others. That
+    is deliberate - it removes the generation counter, the atomic
+    on the call path, and every question about a call that is
+    already running when its definition changes. Reconnecting is
+    how a client picks up new code.
+
+    What it costs is worth writing down, because it is the reason
+    this entry exists:
+
+      - a long-lived connection pool never picks up a fix. That is
+        most production clients, so the practical answer to "I
+        deployed a new function" is "restart your clients", which
+        is not much of an answer.
+      - two connections can be running different versions of the
+        same function at the same time, indefinitely, with nothing
+        that reports it.
+      - eviction from the session cache recompiles from whatever
+        the key holds now, so a version can change by accident
+        under memory pressure while a redefinition on purpose does
+        nothing.
+
+    The shapes worth weighing when this is picked up: a generation
+    counter per space, checked on the call path and closing the
+    session's state for that space when it moves; per-key
+    versioning, which is finer and means picking entries out of a
+    state rather than dropping it; or an explicit command that
+    tells a session to drop what it has cached, which puts the
+    choice with the client rather than guessing.
+
+    Not urgent until functions are actually being used, and the
+    right time to decide is when there is a real script being
+    edited against a real client, since which of the three is
+    tolerable depends on how often that happens.
+

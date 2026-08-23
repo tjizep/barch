@@ -24,6 +24,22 @@ extern "C" {
     int CALLF(caller& call, const arg_t& argv);
 }
 
+namespace barch {
+namespace functions {
+    /**
+     * Find a stored function to answer for `name` and, if there is one, hand back
+     * something the caller can run like any other command.
+     *
+     * `from_space` is the part before the dot in `KS1.PRINT_NAME`, empty when the name
+     * carried none. An empty one resolves in the selected space and then in
+     * `configuration`, where the globals live. False means no such function, which the
+     * dispatcher answers as an unknown command exactly as it did before.
+     */
+    bool resolve(caller& call, const std::string& from_space, const std::string& name,
+                 barch_function& out);
+}
+}
+
 /** register the function commands for RESP, into the table functions_by_name() builds */
 void register_function_api(function_map& r);
 

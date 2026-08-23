@@ -201,7 +201,6 @@ int COMMAND(caller& call, const arg_t& params) {
         return call.wrong_arity();
     }
     if (params[1] == "DOCS") {
-        std::vector<Variable> results;
         call.start_array();
         for (auto& p: *functions_by_name()) {
             call.push_simple(p.first.c_str());

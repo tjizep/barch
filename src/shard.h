@@ -258,7 +258,7 @@ namespace barch {
             uint32_t resp_pending{0};
             bool finished{false};
         };
-        std::unordered_map<std::string, std::shared_ptr<foreign_flight>> flights;
+        heap::string_map<std::shared_ptr<foreign_flight>> flights;
         node_ptr first() const final ; // can return nullptr
         size_t page(size_t page, heap::vector<uint8_t>&)const final; // can return nullptr
         size_t next_page(size_t page ) const final; // can return nullptr
@@ -386,7 +386,7 @@ namespace barch {
 
         void queue_consume() final;
 
-        std::unordered_map<std::string, heap::vector<barch::abstract_session_ptr>> blocked_sessions;
+        heap::string_map<heap::vector<barch::abstract_session_ptr>> blocked_sessions;
         void add_rpc_blocks(const heap::vector<std::string>& keys, const barch::abstract_session_ptr& ptr) final {
             for (auto& k: keys) {
                 add_rpc_block(k,ptr);;

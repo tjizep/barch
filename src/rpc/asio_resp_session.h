@@ -18,6 +18,7 @@
 #include "time_conversion.h"
 #include "rpc/proto_info.h"
 #include "foreign/foreign.h"
+#include "function_api.h"
 namespace barch {
     extern std::atomic<uint64_t> client_id;
     template<typename TSock>
@@ -185,6 +186,17 @@ namespace barch {
         }
     private:
 
+        /** the category a stored function is gated on, as a vector to compare against */
+        static const heap::vector<bool>& function_cats() {
+            static heap::vector<bool> cats = [] {
+                catmap m;
+                m["function"] = true;
+                m["data"] = true;
+                return cats2vec(m);
+            }();
+            return cats;
+        }
+
         static bool is_authorized(const heap::vector<bool>& func,const heap::vector<bool>& user) {
             size_t s = std::min<size_t>(user.size(),func.size());
             if (s < func.size()) return false;
@@ -222,6 +234,7 @@ namespace barch {
 
             std::string_view raw = params[0];
             std::string cn;
+            std::string fn_space;
             key_space_ptr old_spc;
             bool should_reset_space = false;
             try {
@@ -249,6 +262,17 @@ namespace barch {
                     // whatever arrived, so `set` and `Set` were unknown commands while `SET`
                     // worked. Every example in redis's own documentation is lower case, and
                     // so is the whole of valkey's test suite, which is how this was found.
+                    // a dotted name says where the definition comes from: KS1.PRINT_NAME
+                    // is PRINT_NAME as defined in KS1. Split before folding for the same
+                    // reason the colon is - the space half keeps its case. A dotted name
+                    // never takes the cached path above, because prev_cn holds the folded
+                    // function name and the raw never equals it
+                    fn_space.clear();
+                    auto dot = cn.find('.');
+                    if (dot != std::string::npos && dot > 0 && dot + 1 < cn.size()) {
+                        fn_space = cn.substr(0, dot);
+                        cn = cn.substr(dot + 1);
+                    }
                     // Folded here rather than above so the key space in a `space:CMD` prefix
                     // keeps the case it was given - space names are not case insensitive
                     for (auto& ch : cn) {
@@ -265,7 +289,29 @@ namespace barch {
                     }
                 }
                 if (ic == barch_functions->end()) {
-                    redis::rwrite(ostream, error{"unknown command"});
+                    // not a built-in. It may still be a stored function - see TODO 98.
+                    // Deliberately not cached alongside `ic`: a name that missed once
+                    // would otherwise stay unknown for the life of the session, and
+                    // SETF followed by a call on the same connection would fail for a
+                    // reason that has nothing to do with the function
+                    barch_function fn;
+                    if (!is_authorized(function_cats(), caller.get_acl())) {
+                        redis::rwrite(ostream, error{"not authorized"});
+                    } else if (barch::functions::resolve(caller, fn_space, prev_cn, fn)) {
+                        // asynchronous like CALLF, so a script never runs on a service
+                        // thread. Ordering with the rest of the pipeline is the batch's
+                        // job, exactly as it is for a KEYS
+                        if (!stream.empty()) {
+                            auto ctx = std::make_shared<asynch_call_context>(caller, fn, params, prev_cn);
+                            ctx->stream = std::move(stream);
+                            asynch_calls.push_back(ctx);
+                        } else {
+                            asynch_calls.emplace_back(
+                                std::make_shared<asynch_call_context>(caller, fn, params, prev_cn));
+                        }
+                    } else {
+                        redis::rwrite(ostream, error{"unknown command"});
+                    }
                 } else {
                     auto &f = ic->second.call;
                     ++ic->second.calls;
@@ -486,6 +532,12 @@ namespace barch {
                     if (!ctx->caller.has_blocks())
                         write_result<vector_stream>(ctx->caller, ctx->stream, r);
                     fn->second.total_nanos += nanos(current);
+                } else if (ctx->f) {
+                    // a stored function: it is not in the table, so the context carries
+                    // the only handle to it
+                    int32_t r = ctx->caller.call(ctx->params, ctx->f);
+                    if (!ctx->caller.has_blocks())
+                        write_result<vector_stream>(ctx->caller, ctx->stream, r);
                 }
                 bool blocked = ctx->caller.has_blocks();
                 // an unknown command leaves ctx->stream holding whatever synchronous

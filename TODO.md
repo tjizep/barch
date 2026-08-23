@@ -743,21 +743,59 @@
     be handed back to GET. That wants saying in the docs rather than
     being discovered.
 
-    Where a guard *is* needed is the paths that write an already
-    encoded key: replication, the AOF and RDB load, and
-    import/restore. A forged tfunction key from a peer or a crafted
-    dump is a function body nobody loaded, so those validate the
-    lead instead of trusting it.
+    A guard was planned for the paths that write an already encoded
+    key, on the grounds that a forged tfunction key from a peer is a
+    function body nobody loaded. Tracing them says there is nothing
+    to guard, and the tracing found a real bug instead:
+
+      - replication ships the command. `run_params` calls
+        `repl::call(owned)` with the parameters, so a replica
+        replays `SETF name source` through the ordinary handler and
+        compiles it like anyone else.
+      - IMPORT replays RESP commands too, looked up in
+        `functions_by_name()`, and refuses a command the server does
+        not have.
+      - PULL and RETRIEVE move raw arena pages wholesale through
+        `shard::retrieve`, not individual keys. Checking a lead
+        there means nothing: a peer that can hand you pages can
+        hand you any tree it likes, and that path is gated on the
+        storage version anyway.
+
+    What was actually broken was the other direction. EXPORT dropped
+    functions silently. A tfunction key is not a container lead, so
+    it fell through to the plain branch, was recorded by its decoded
+    name, and `export_one` then re-encoded that name as a *string*
+    key, found nothing under it and wrote nothing at all. So an
+    export of a space holding one function and one ordinary key
+    reported 1 and contained only the key - a backup with a hole in
+    it, which is exactly what the comment beside the member index
+    branch warns about.
+
+    EXPORT now emits `SETF name source`, which IMPORT already knew
+    how to replay. Function names are collected in a set of their
+    own rather than in the `named` map, because a function and an
+    ordinary key can hold the same name at once and one map keyed
+    by name loses whichever is found second - asserted in
+    test/functiontest.py, which exports a `greet` function and a
+    `greet` string together and expects both back.
 
     Two more consequences of writing a new lead into a shard file:
 
-      - `storage_version` in constants.h is bumped, 15 to 16, but
-        with SETF rather than with the key type. The bump protects
-        an old binary from a new *file*, and no file can hold a
-        function key until something can write one - so it belongs
-        with the first write path, not with making the type
-        representable. Bumping it earlier only invalidates shard
-        files that contain nothing new.
+      - `storage_version` in constants.h is bumped, 15 to 16, and
+        it went in with SETF rather than with the key type. The
+        bump protects an old binary from a new *file*, and no file
+        could hold a function key until something could write one.
+        Note that 15 was bumped without a line in that comment
+        block; 16 has one.
+
+        Checked against the shard files already sitting in the
+        build directory: `arena_retrieve` in hash_arena.cpp:130
+        compares the stored version, logs "data format is invalid"
+        and answers false, so the space comes up empty rather than
+        reading old bytes as something they are not. It says so
+        once per shard file, which on 347 shards is 694 lines of
+        it - correct, and worth a thought if a version bump ever
+        needs to look like anything other than a wall of errors.
       - the value is the source text, not bytecode. Bytecode is
         tied to the Luau build, so storing it turns a Luau upgrade
         into a migration, and the compiled instance already lives in
@@ -1032,6 +1070,351 @@
     say GETRANGE, HRANDFIELD and ZRANGEBYSCORE - write them in Luau
     against this interface, and see what is missing.
 
+    F2. The space as a value, and iterating it.
+
+    Where F's first cut ended up - `barch.store.get(k)` - reads like
+    a C API in a language that does not need one. The shape to aim
+    for instead:
+
+        barch.space.sp1.key1              -- read
+        barch.space["sp1"]["key1"]        -- the same thing
+        barch.space.sp1.key1 = "value1"   -- write
+        barch.space.sp1.key1 = nil        -- remove
+
+    through `__index` and `__newindex`, so a key space reads as a
+    table and a script says what it means rather than which
+    function to call.
+
+    Points that decide whether it works:
+
+      - it survives the sandbox, but only just, and the reason is
+        worth knowing. `luaL_sandbox` walks the globals table and
+        sets readonly on the tables it finds *one level down* -
+        that is the whole loop in linit.cpp. So `barch` is frozen
+        and nobody can replace `barch.call`, while `barch.space`
+        and a space handle are nested and never touched, which is
+        exactly what leaves the writes working.
+      - userdata for the space table and for each handle, not
+        tables. `__index` on a table only fires when the key is
+        absent, so a table could be rawset past; userdata always
+        goes through the metamethods and can carry the space name
+        without a lookup.
+      - a number index is an integer key and a string index a
+        string key, which is what `encode_key` does with a client's
+        key already. So `barch.space.sp1[42]` and `SET 42` reach
+        the same place, and they have to, or a script cannot see
+        what a client wrote.
+      - touching a space must not build it. `get_keyspace` creates
+        one; `is_keyspace` asks. Same care `functions::resolve`
+        takes, and for the same reason: a name in a script is not
+        permission to make a key space.
+      - a missing key reads as nil, and a failed write raises. That
+        is the Lua split, and it matches what `store.get` already
+        answers.
+
+    This makes 135 urgent rather than nice to have. `barch.space.other.k
+    = v` is a cross-space write that no category can currently
+    describe: ACL categories are global, so a user who may write
+    anywhere may write everywhere, and a function makes that
+    trivial and implicit rather than something a client had to
+    spell out with a prefix. Per space rights want to exist before
+    the space table does.
+
+    Iteration, and why page copy is the right answer.
+
+    Copy a page under the read lock, drop the lock, walk the copy.
+    The lock is held for the copy and nothing else, and erasure
+    while iterating stops being a question - what is being walked
+    is nobody's live memory.
+
+    `scan_cursor` in sharded_store.h is already precisely this: a
+    shard index, a page index, a position, and `buffer` holding the
+    copy of the page being read. SCAN has worked this way all
+    along, and the glob path copies pages for the same reason. So
+    this is reuse rather than new machinery.
+
+    What it promises is what SCAN promises: everything present
+    throughout the iteration is seen at least once, repeats are
+    allowed, and a key written or erased after its page was copied
+    may or may not appear. That is worth saying in the docs next to
+    the loop, because a script that assumes a snapshot will be
+    wrong in a way that is hard to see.
+
+    Containers, as a triple.
+
+        for c, k, v in barch.space.sp1 do
+
+    where a plain key is `c == nil, k = key, v = value`, a
+    container member is `c = container, k = member, v = value`, and
+    a container header is `c = container, k == nil, v == nil`. One
+    loop covers a space holding both, and a script that only wants
+    plain keys skips on `c ~= nil` without needing a second call.
+
+    The row says what it is, rather than leaving it to be worked
+    out from which fields are nil:
+
+        row.type       "key", "list", "hash", "orderedset",
+                       "function"
+        row.container  nil for a plain key, the name otherwise
+        row.key        nil for a container header
+        row.value      nil for a container header
+
+    `type` costs nothing to provide - it is the lead byte, which
+    the walk has already read to know what it is looking at - and
+    naming the container kinds after the ACL categories keeps one
+    vocabulary rather than two.
+
+    It is not optional, for a reason that only appeared once
+    functions became keys: a space holds `tfunction` keys now, and
+    an iteration sees them exactly as KEYS does. A script walking a
+    space for data has to be able to skip them, and `row.type ==
+    "function"` is how. Without it every such loop would need to
+    know how a function key is encoded.
+
+    Adding it makes the flat form a four tuple - type, container,
+    key, value - and that incidentally fixes the generic for that
+    the three could not manage. `type` is never nil until the walk
+    is over, so
+
+        for t, c, k, v in barch.space.sp1 do
+
+    terminates when it should, where `for c, k, v` ended on the
+    first plain key. So both shapes are viable now and the choice
+    is only the eager against the lazy one that was measured above:
+    the tuple decodes all four every step, which is the 3.3x slower
+    case on a filter over 1KB values, and the row object is 30%
+    worse when every field is read. The row object still wins on
+    the loop people actually write, so it stays the recommendation
+    - but the tuple is no longer broken, only slower for filters,
+    and that is a much smaller reason to refuse it.
+
+    A header is still `key == nil`, which is one way of asking; the
+    type is the other and the better one, since a script that wants
+    "every hash member" says so directly instead of testing two
+    fields for nil.
+
+    Composite keys render as the caller wrote them - the components
+    rejoined with the space's split character, which is what
+    `push_encoded_key` does for KEYS and MIN, and the two have to
+    agree or a script and a client disagree about the same key.
+    That was a bug in F's first cut: `store_for` used the default
+    separator, so a space split on "." answered `a.b` through KEYS
+    and `a b` through the script. Fixed, with a test.
+
+    Two caveats belong beside it:
+
+      - a regex split has no single character to rejoin with and
+        falls back to a space, so a space configured that way
+        cannot round trip its keys exactly. True of KEYS today,
+        not made worse here, and worth documenting rather than
+        pretending.
+      - a composite sorts elsewhere. A key holding the split is
+        stored under tplain and a plain string under tstring, so a
+        range over string bounds does not contain it - bounds that
+        hold the split are composites too and bracket it properly.
+        The built-in RANGE behaves exactly the same way, so this is
+        the store's order showing through rather than the interface
+        being odd.
+
+    While pinning that, `barch.store.max()` came back with a
+    *function* name, because tfunction is 12 and sorts after
+    everything. That is the ordering trade in A arriving from a
+    third direction, and it is the concrete argument for
+    `row.type` - a script walking a space cannot avoid meeting
+    function keys and needs a way to say so.
+
+    Open, because it decides whether the two halves agree: a key
+    stored as an integer - `SET 42 x`, which encodes as tinteger,
+    not as the string "42" - should probably come back from
+    `row.key` as a Luau number, since `barch.space.sp1[42]` will
+    have to encode a number index as an integer key to reach the
+    same place. If the read hands back "42" and the write takes 42,
+    a script cannot round trip its own keys.
+
+    The details that follow from the storage:
+
+      - a container's members all live on one shard, because a
+        container routes by its name, so within a shard they are
+        contiguous. Plain keys interleave across shards, so
+        containers come out interrupted and out of order. That is
+        fine and is what the triple is for - the header is emitted
+        the first time a container name is seen, not in any
+        position that means anything.
+      - the internal bookkeeping keys must not surface as members.
+        `is_container_internal` already names them - the ordered
+        set's member index is the one that bit the exporter, which
+        wrote it out as a string key and imported a key nobody had
+        written.
+      - the header carries no value, so `v == nil` for it. A script
+        cannot tell a header from a member with a nil value that
+        way, which is fine because a member with no value does not
+        exist.
+
+    Measured, because the shape was worth testing before building
+    it. A benchmark driving the Luau VM directly over 200,000 rows,
+    counting through the same interrupt the budget uses, comparing
+    the triple against a reused userdata that decodes a field only
+    when it is read:
+
+                              insns    40 byte     1KB values
+      triple, key only       200002    29.0 ms       68.6 ms
+      row, key only          200002    25.3 ms       20.8 ms
+      triple, all three      200002    31.3 ms       76.4 ms
+      row, all three         200002    54.0 ms       99.3 ms
+
+    Three things come out of it.
+
+    The instruction counts are identical - 200002 in every case,
+    with singlestep on. The interrupt fires once per loop step
+    whatever the step does, so the budget cannot tell these shapes
+    apart at all, and the honest answer to "does the row object use
+    fewer instructions" is no, it uses exactly the same number. It
+    also means the wall clock deadline is the only thing bounding a
+    long iteration, and that a loop over a million keys costs less
+    budget than a thousand iterations of arithmetic. Worth deciding
+    separately whether the iterator should charge the budget per
+    key rather than per step.
+
+    What the row object actually saves is decoding and allocation,
+    which the budget never sees, and how much depends entirely on
+    how much of each row the script reads. Reading one field of
+    three it is 3.3x faster on 1KB values, because the value is
+    never turned into a Luau string at all. Reading all three it is
+    about 30% slower, because three metamethod dispatches cost more
+    than three values already sitting in registers. The crossover
+    moves with value size: at 40 bytes reading one field is barely
+    a win, at 1KB it is decisive.
+
+    An explicit cursor was the obvious next idea - a factory,
+    `barch.iterator("sp1")`, and `while it:next() do ... it.key`,
+    trading readability for speed. Measured against the generic for
+    holding the same lazy row object:
+
+                              insns    40 byte     1KB values
+      row, key only          200002    20.9 ms       24.5 ms
+      cursor, key only       400003    21.3 ms       20.7 ms
+      row, all three         200002    53.2 ms       96.8 ms
+      cursor, all three      400003    53.8 ms       97.1 ms
+
+    It buys nothing. The times are the same within noise, because
+    the laziness was already doing the work and the loop protocol
+    was never the cost - and it burns twice the instruction budget,
+    since a while loop has two interrupt points per turn (the
+    `:next()` call and the back edge) where a generic for has one.
+    So the readable shape is also the cheap one, and there is no
+    speed to trade readability for.
+
+    That leaves an explicit cursor worth adding only for control -
+    seeking, stopping and resuming across calls, handing a position
+    back to a client the way SCAN does - and if one is added it
+    should be sold on that rather than on speed, with the 2x budget
+    written next to it. `it:next()` with `__namecall` is the way to
+    write it when that day comes: a plain `it.next` has to return a
+    closure, and pushing one per access allocates.
+
+    A further speedup exists and is not needed yet:
+    `lua_registeruserdatadirectaccess` dispatches userdata fields on
+    an interned atom, an int compare rather than the strcmp the
+    benchmark used, so the row numbers above are a pessimistic
+    bound. Marked experimental in lua.h, which is reason enough to
+    leave it until there is a measurement asking for it.
+
+    So the row object is the right shape, on the grounds that the
+    iteration people actually write is a filter - walk the space,
+    look at keys, touch the value of the few that matter - and that
+    is exactly the case it is 3.3x faster in. A loop that reads
+    every field of every row pays about 30% for the privilege,
+    which is the right way round.
+
+    Two things fall out of it that are not about speed:
+
+      - `for c, k, v in barch.space.sp1 do` does not work. A
+        generic for stops when the first value is nil, and the
+        container is nil for every plain key, so the loop ends on
+        the first one. The benchmark found this by iterating once
+        and stopping. Either the key comes first - `for k, v, c` -
+        or the iterator hands back a row object, which is never nil
+        until the walk is over. The row object makes the problem
+        disappear rather than working around it, which is another
+        argument for it.
+      - a reused userdata is what makes it cheap - one object for
+        the whole loop rather than one per row - and that is a
+        footgun. A script that stashes rows in a table gets a table
+        of the same object, all reading the last row. It needs
+        either a copy on demand, or documenting loudly, and
+        probably both.
+
+    `barch.store` from F's first cut becomes sugar for the space
+    the call is running in, or goes. Two ways to read the same key
+    is one too many.
+
+    G2. Where a foreign retrieval happens, and what that means for
+        a script.
+
+    Traced because it decides what a function can reach. A foreign
+    fill is a *command* level thing, not a store level one. There
+    are four trigger points, all in keys_api.cpp - GET at :1864,
+    EXISTS single at :2115 and many at :2121, MGET at :2246 - and
+    `sharded_store` does not mention foreign anywhere. It has to be
+    that way round today, because `park_or_wait` needs a caller:
+    parking is `call.add_block`, and which parking it does depends
+    on `call.get_context()`.
+
+    So a script meets it twice, differently, and neither is right:
+
+      - `barch.store.get(k)` reads through `sharded_store::search`
+        and never fills. A key that lives in the source reads as
+        nil, silently. That is the store layer being honest about
+        what it is, and a script cannot tell that answer from an
+        absent key.
+      - `barch.call("GET", k)` does fill, and the way it does is an
+        accident. `rpc_caller`'s default constructor sets
+        `ctx_swig` (rpc_caller.h:118), so the sub-caller takes the
+        SWIG branch of `park_or_wait`, which waits on a condition
+        variable for `waiter_timeout_ms` - 300000 by default. That
+        is five minutes of an asynchronous batch worker held on an
+        external round trip, and when G's HTTP client lands it will
+        be five minutes of a worker held on someone else's server.
+        The instruction budget and the deadline have nothing to say
+        about it.
+
+    Both were found by writing a fake-source space and asking a
+    script for a key that only exists in the source: the store read
+    answered nil and the command read answered the value.
+
+    Decided: the store interface reads the cache and does not fill.
+    Ranges and iteration answer what is held locally, and that is
+    deliberate rather than pending.
+
+    It is not a compromise, for two reasons. A range over a foreign
+    source would mean asking the source for a *range*, and there is
+    no design for that - the whole foreign path is one key at a
+    time, one query per miss, coalesced and tombed, and what a
+    range even means against a SQL table or an HTTP endpoint is an
+    open question rather than an implementation detail.
+
+    And it costs nothing in consistency, which is the part worth
+    checking rather than assuming. The four trigger points are all
+    point lookups: GET, EXISTS single and many, MGET. No range
+    shaped command has ever consulted a foreign source - RANGE,
+    MIN, MAX, LB, UB and SCAN all answer from the cache today. So
+    `barch.store.range` matching them is the interface agreeing
+    with the commands, not falling short of them.
+
+    Left open and not urgent: the point read asymmetry above -
+    `store.get` answers nil where `barch.call("GET")` fills - and
+    the ctx_swig accident behind it. Both wait for H, where the
+    park makes the question answerable instead of a choice between
+    two bad options. The five minute worker hold is real today
+    whatever is decided later.
+
+    One more thing that fell out of the same trace: `rpc_caller`'s
+    constructor runs AUTH, so every `barch.call` authenticates
+    `default` before running its command. A script in a loop pays
+    that per call. It is not wrong, only wasteful, and a sub-caller
+    that is built once per function call rather than once per
+    command would not pay it at all.
+
     G. SQL, and later HTTP.
 
     `sql.query` exists and is scoped to the space's driver; a
@@ -1066,14 +1449,13 @@
       1. [done] tfunction as a key type: `ts_function` beside
          `ts_plain`, and `is_composite_lead` taught about the lead.
          That was the whole audit - see A.
-      1b. [mostly done] SETF / GETF / REMF / KEYSF in
+      1b. [done] SETF / GETF / REMF / KEYSF in
          function_api.cpp, the `function` ACL category, and what
          KEYS / MAX / DBSIZE do now the range exists, pinned in
          test/functiontest.py. SETF compiles before it writes, so a
          script that will not run is refused rather than stored.
-         Left: the `storage_version` bump, and the lead check on
-         the paths that write an already encoded key - replication,
-         AOF and RDB load, import/restore.
+         The `storage_version` bump is done, and so is EXPORT -
+         see below. Nothing outstanding here.
       2. [part done] CALLF runs a stored function: arguments in as a
          1-based array of strings, the reply conversion in J below,
          a hard instruction cap and deadline, `is_asynch` so it
@@ -1093,27 +1475,196 @@
              the cache is a measurable change on its own rather
              than two hard things at once.
 
-      2b. Calling one by name. Dispatch: the
-         colon-then-dot parsing, the resolution order, and the two
-         places in asio_resp_session.h that answer "unknown command"
-         - the cached `ic` iterator in `run_params`, which skips the
-         lookup entirely when the name repeats, so a name that
-         missed once stays unknown for the life of the session, and
-         the string re-lookup in `run_asynch_batch`. The per-session
-         table snapshot at :614 stops mattering, since functions
-         never enter that table. The negative result is the one to
-         be careful with: a name tried before it existed must not
-         stay unknown, or SETF followed by a call on the same
-         connection fails for a reason that has nothing to do with
-         the function.
-      3. Arguments in, value out, arity, ACL, the reply conversion.
-         No includes, no `call`, no store.
-      4. The session cache: the state, the generation check,
-         sandboxed globals, `require` and the cycle check.
-      5. `call` into other commands, with blocking and asynchronous
-         ones refused.
-      6. The sharded_store interface, and the three re-implemented
-         built-ins as its test.
+      2b. [done] Calling one by name. `barch::functions::resolve`
+         answers for a name the built-in table missed, and
+         `run_params` runs what it hands back through the
+         asynchronous batch, so a script still never touches a
+         service thread. `run_asynch_batch` falls back to the
+         `barch_function` its context carries, since a stored
+         function is not in the table to be looked up again.
+
+         Three things worth remembering out of doing it:
+
+           - the negative result was not the hazard it looked like.
+             The cached path skips only the *lookup*; it still
+             falls into the same "not a built-in" branch, so
+             resolution runs every time and SETF followed by a call
+             on the same connection works. The resolution is
+             deliberately not cached beside `ic`.
+           - function names fold. The dispatcher upper-cases a
+             command name before looking it up, so a name stored as
+             typed could never be found by it - `SETF greet` then
+             `greet` looked for GREET and missed. Names are stored
+             folded now, which also stops a space holding `greet`
+             and `GREET` as two functions no client can tell apart.
+             KEYSF answers the canonical form.
+           - the space half of a dotted name is not folded, for the
+             same reason the `space:` prefix is not.
+      3. [done] Arguments in, value out, the reply conversion, the
+         `function` category, and arity. The script declares its
+         own arity as a global - `arity = 2` for exactly two,
+         `arity = -2` for at least two, absent for anything -
+         which keeps it travelling with the source instead of
+         needing a second thing stored beside it. Checked before
+         the script runs, so a wrong count costs nothing.
+      4. [done, bar require] A `lua_State` per session and space,
+         held on rpc_caller. Each function is compiled once, on a
+         `luaL_sandboxthread` of its own, and pinned in the
+         registry with `lua_ref`; the base globals are frozen with
+         `luaL_sandbox`, so a global one function writes lands in
+         its own table and the next function cannot see it. The
+         source is read from the store only on a miss, so a warm
+         call does not touch it.
+
+         Two things worth knowing:
+
+           - the cache is allocated in rpc_caller's constructor
+             rather than on first use. An asynchronous call runs
+             against a *copy* of the caller, and since every
+             function call is asynchronous, a cache built lazily
+             inside that copy would be thrown away every single
+             time and never once be used.
+           - it is bounded by a crude cap - 64 functions per space,
+             8 spaces per session, and the state is thrown away and
+             rebuilt when either is passed. C asks for LRU; this is
+             what stops a roaming client holding everything open
+             until it disconnects, and it is honest about being
+             coarse.
+
+         Measured against a build that compiles every call: about
+         9us of the roughly 50us a round trip costs, so the cache
+         is real but the wire dominates at this size. A script that
+         is more than four lines long moves that number.
+
+      4b. [done] `require("NAME")` between functions in a space,
+         falling back to the globals in `configuration`, resolved
+         through the same loader a call uses. What comes back is
+         the required function's globals table, so a module can
+         offer helpers as well as its own `call`.
+
+         The part that changed the design while being built: SETF's
+         compile check used a bare `luaL_newstate` with no
+         libraries open, so `require` was nil there and *every*
+         script using one was refused with "attempt to call a nil
+         value". Fixed by compiling against a real state with the
+         loader installed, which is what D asked for anyway, and it
+         moves two failures from the first call to the write:
+
+           - requiring something that is not there is refused by
+             SETF. The price is that a function has to be stored
+             after the ones it requires.
+           - a cycle cannot be built at all. The first half would
+             require something that is not there yet, so a cycle
+             only appears through a redefinition - and that is
+             refused, with the path in the message, leaving the
+             previous definition standing.
+
+         The self-require, the two-step cycle and the missing
+         require are all in test/functiontest.py, along with a PING
+         afterwards: a wrong answer here is a stack overflow rather
+         than an error, so "the server is still there" is part of
+         what is being asserted.
+      5. [done] `barch.call("GET", "k")` into the ordinary commands.
+
+         Named on a `barch` table, not as a bare `call`, because
+         `call` is the name a script gives its own entry point and
+         the two would collide. A refusal or a failed command is
+         raised as a Lua error, so a script that wants to survive
+         one wraps it in pcall - the split redis has between
+         redis.call and redis.pcall, with the pcall half left to
+         Luau's own.
+
+         The sub-caller is the substance of it: `rpc_caller::call`
+         clears results, errors and args on the way in, so handing
+         a script the caller that is answering the client would
+         destroy the reply being built. IMPORT and EXEC both solve
+         that the same way and this follows them.
+
+         What it refuses, and how each is caught:
+
+           - a transaction, by name. MULTI on a caller nobody will
+             EXEC just swallows everything after it.
+           - an asynchronous command, from `is_asynch` in the
+             table. It expects to own a worker and answer later,
+             and there is nowhere for that answer to go.
+           - a blocking command, from `has_blocks()` *after* the
+             call rather than a list of names. That reads
+             backwards but is right: a command that parks has not
+             done anything yet, so refusing it afterwards is safe,
+             and it needs no list to be kept in step with the
+             blocking commands as they are added.
+           - a foreign fill, which refuses itself. `park_or_wait`
+             turns away ctx_valkey, and a sub-caller is one.
+
+         ACL is checked against the *outer* caller's rights, which
+         is what stops a function being a way round the check the
+         connection would have failed.
+
+         Stored functions are deliberately not reachable through
+         barch.call - they are not in `functions_by_name()`. A
+         function reaches another through `require`, which hands
+         back its globals table and calls it in process. That split
+         also means no recursion depth to bound here.
+
+         Found while testing: the test redefined one function per
+         refusal case and every case ran the first body, because
+         this connection keeps what it compiled. The caching
+         contract in C is real enough to trip its own test.
+      6. [first cut done] `barch.store` - get, exists, count, range,
+         min, max - and `barch.space()` for what the space is
+         configured as. Reads run against the space the call is
+         running in, not the one the function was defined in.
+
+         The lock rule is what shaped it. `sharded_store::range`
+         calls its callback under a shared lock, so calling into
+         Luau from there would be script code running under a lock.
+         The callback copies into a vector instead and the Luau
+         table is built once the lock has gone. Every entry point
+         is that shape.
+
+         `range` takes a required limit, capped at 10000. An
+         unbounded walk would copy a whole space into one table,
+         which is the thing KEYS was made asynchronous to avoid.
+
+         The three re-implementations F asks for are in
+         test/functiontest.py - GETRANGE on store.get, COUNT on
+         store.count, and a bounded KEYS-shaped walk on
+         store.range, with the first checked against the built-in
+         it copies. What they show is that the flat key half of the
+         interface is enough.
+
+         What is missing, which was the point of writing them:
+
+           - containers. HRANDFIELD and ZRANGEBYSCORE cannot be
+             written against this, because there is no way to reach
+             a hash's fields or an ordered set's members and scores
+             except through barch.call. Container keys are a
+             different lead and a different routing - the
+             with_container_read scope - so they want their own
+             entry points rather than a flag on these.
+           - writes. Everything here reads. A script writes through
+             barch.call, which is the slow path and cannot say
+             "insert under the lock I am already holding".
+           - the locked region F describes, where a callback runs
+             under a lock with yields and calls refused. Nothing
+             needs it yet, because every read here is a copy - it
+             becomes interesting when a script wants to read and
+             write one key without another connection getting in
+             between.
+
+         The space's own name is worth knowing about: the default
+         space's canonical name is empty, since `undecorate("node")`
+         is "" and there is no `space:` prefix for it, so a function
+         there sees `barch.space().name == ""`. That is the
+         vocabulary a client uses, not a gap.
+      6b. The space as a value - `barch.space.sp1.key1`, read,
+         written and removed through `__index` and `__newindex` -
+         and iteration by page copy, handing back a row object with
+         container, key, value and type that decodes on demand. See
+         F2, including why it is a row object rather than a triple
+         and what that is worth. Per space ACLs (135) want to
+         land first, or a function is a way to write any space the
+         user can write at all.
       7. Parking, replacing `is_asynch`.
 
     J. Still open.

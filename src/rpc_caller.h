@@ -22,6 +22,13 @@
 
 struct rpc_caller : caller {
     barch::key_space_ptr ks {get_default_ks()};
+    /**
+     * built here rather than on first use, because an asynchronous call runs against a
+     * *copy* of this caller. A cache made inside that copy would be thrown away with
+     * it, and since every function call is asynchronous the cache would never survive
+     * a single call. Allocated up front, both share the one holder.
+     */
+    barch::foreign::function_states_ptr luau_states {barch::foreign::make_function_states()};
     std::shared_ptr<barch::repl::rpc> host {};
     heap::vector<std::shared_ptr<barch::repl::rpc>> routes {};
     size_t valid_routes{};
@@ -64,6 +71,10 @@ struct rpc_caller : caller {
     // EXEC collects inner replies as Variables. KEYS must not write the socket
     // then, or the items leave the EXEC array.
     bool collecting_exec{false};
+
+    [[nodiscard]] const barch::foreign::function_states_ptr& function_states() const override {
+        return luau_states;
+    }
 
     [[nodiscard]] bool is_collecting_exec() const override {
         return collecting_exec;

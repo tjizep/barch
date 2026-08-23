@@ -9,6 +9,7 @@
 #include <initializer_list>
 #include <utility>
 #include "key_space.h"
+#include "foreign/driver.h"
 #include "sharded_store.h"
 enum contexts {
     ctx_resp = 1,
@@ -207,6 +208,15 @@ public:
     [[nodiscard]] virtual const std::string& get_user() const = 0;
     [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
+    /**
+     * the Luau states this connection has built, one per key space it has called a
+     * function in. Null where there is no session to hang them on - the swig and
+     * module paths - and a function there is compiled for the call and thrown away.
+     */
+    virtual const barch::foreign::function_states_ptr& function_states() const {
+        static const barch::foreign::function_states_ptr none{};
+        return none;
+    }
     virtual barch::key_space_ptr& kspace() = 0;
     virtual barch::key_space_ref ks_ref() = 0;
     virtual void set_kspace(const barch::key_space_ptr& ks) = 0;

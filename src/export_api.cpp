@@ -75,6 +75,15 @@ namespace {
     };
 
     /**
+     * Function names, kept apart from the names above rather than in with them.
+     *
+     * A function and an ordinary key can hold the same name at once - they are
+     * different key ranges - so a single map keyed by the name would drop whichever
+     * was found second. See TODO 98.
+     */
+    typedef heap::string_set function_names;
+
+    /**
      * Every name in the space, and what it holds.
      *
      * A container's keys all carry its name in the first component, so the name is the
@@ -82,7 +91,8 @@ namespace {
      * ordered set also keeps a member index whose first component is empty; those decode
      * to an empty name and are skipped, or every set would be exported twice.
      */
-    heap::string_map<named> names_in(barch::sharded_store& store, bool& hit_ceiling) {
+    heap::string_map<named> names_in(barch::sharded_store& store, bool& hit_ceiling,
+                                     function_names& functions) {
         // the tracking map, so what this costs is counted in get_total_memory() along with
         // everything else, and the ceiling below is measured against the real figure
         heap::string_map<named> found;
@@ -111,6 +121,16 @@ namespace {
                     // an export that stops early and still says it worked is a backup with
                     // a hole in it, so this is a refusal rather than a short file - see the
                     // check on the result below
+                    if (get_total_memory() >= memory_ceiling) {
+                        hit_ceiling = true;
+                        return;
+                    }
+                } else if (*k.bytes == art::tfunction) {
+                    // a stored function. It is not a container and it is not a string:
+                    // exporting it as one wrote SET name source, and re-encoding that
+                    // name to read the value found nothing, so the function was quietly
+                    // left out of the file altogether
+                    functions.insert(encoded_key_as_string(k.sub(composite_key_size)));
                     if (get_total_memory() >= memory_ceiling) {
                         hit_ceiling = true;
                         return;
@@ -161,6 +181,26 @@ namespace {
                 cb(k, l, plen);
             }
         });
+    }
+
+    /** a stored function goes out as the SETF that would put it back */
+    size_t export_function(std::ostream& out, barch::sharded_store& store,
+                           const std::string& name) {
+        composite q;
+        auto key = q.create(art::ts_function,
+                            {conversion::convert(art::value_type{name}, true)});
+        std::string source;
+        bool had = false;
+        store.with_key_read(key, [&](const barch::shard_ptr& t) {
+            auto n = t->search(key);
+            if (n.null() || !n.is_leaf) return;
+            source = value_of(n.const_leaf());
+            had = true;
+        });
+        if (!had) return 0;
+        heap::std_vector<std::string> args = {"SETF", name, source};
+        write_command(out, args);
+        return 1;
     }
 
     size_t export_one(std::ostream& out, barch::sharded_store& store,
@@ -260,7 +300,8 @@ int EXPORT(caller& call, const arg_t& argv) {
     barch::sharded_store store(call.kspace());
     size_t written = 0;
     bool hit_ceiling = false;
-    auto names = names_in(store, hit_ceiling);
+    function_names functions;
+    auto names = names_in(store, hit_ceiling, functions);
     if (hit_ceiling) {
         abandon();
         return call.push_error("not enough memory to export: raise max_memory_bytes, or "
@@ -268,6 +309,9 @@ int EXPORT(caller& call, const arg_t& argv) {
     }
     for (const auto& [name, what] : names) {
         written += export_one(out, store, name, what.kind);
+    }
+    for (const auto& name : functions) {
+        written += export_function(out, store, name);
     }
     out.flush();
     if (!out) {

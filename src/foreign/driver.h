@@ -68,6 +68,26 @@ typedef std::function<bool(const heap::vector<std::string>& argv, Variable& out,
  * runs under a shared lock. See TODO 98 F.
  */
 struct store_access {
+    /**
+     * whether the user this script is running as may read and write here.
+     *
+     * Decided once by whoever builds this, because it is their business to know the
+     * ACL and the driver's only to enforce it. Both default to false so a store_access
+     * that nobody filled in refuses rather than allows.
+     *
+     * When per space rights land (135) these stop being one pair and become a
+     * question asked per space the script touches.
+     */
+    bool may_read{false};
+    bool may_write{false};
+    /**
+     * whether this user may see stored functions at all.
+     *
+     * Function keys are ordinary keys in the space, so a walk meets them. Someone
+     * without the `function` category has no business knowing what functions exist,
+     * so for them the store behaves as though the range is not there. See TODO 98.
+     */
+    bool may_see_functions{false};
     std::function<bool(const std::string& key, std::string& value)> get{};
     std::function<bool(const std::string& key)> exists{};
     std::function<int64_t(const std::string& lo, const std::string& hi)> count{};

@@ -736,6 +736,12 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a stored function survives eviction. Its own process: it drops maxmemory
+        # far enough that the sweeper takes almost everything else
+        add_test(NAME TestFunctionEviction
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functionevicttest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # stored Luau functions: the key range, SETF/GETF/REMF/KEYSF
         add_test(NAME TestFunctions
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functiontest.py

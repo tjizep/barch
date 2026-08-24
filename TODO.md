@@ -704,6 +704,33 @@
       - FLUSHDB drops a space's functions with the space. FLUSHALL
         reaching `configuration` would drop the global ones, which
         is either right or wants refusing.
+      - eviction never takes one. A function is a command, not
+        data: losing one to memory pressure deletes a command, and
+        because a session keeps whatever it compiled, the
+        connections that already ran it would carry on while new
+        ones met "unknown command".
+
+        The guard sits at the policy level - the updater inside
+        `abstract_eviction`, which every policy funnels through,
+        and the else branch of `run_sweep_lru_keys` - and
+        deliberately *not* in `shard::evict`, which looks like the
+        one right place and is the wrong one. `erase_page` calls
+        evict to lift a key out of a fragmented page before adding
+        it back, and aborts with "key not marked as deleted but it
+        was not found" if the key does not go. So a guard there
+        would turn defragmenting a space holding a function into a
+        hard abort. Defrag has to keep working; eviction must not
+        happen.
+
+        test/functionevicttest.py has a process of its own, because
+        it drops maxmemory under what is already held to make the
+        sweeper run at all - eviction is gated on
+        `logical_allocated >= max_memory * pre_evict_thresh`, so
+        nothing happens until the ceiling is below the floor. It
+        waits for `keys_evicted` to actually move and fails if it
+        does not, so a run where eviction never fired cannot pass
+        by accident. It takes about 290 of 500 plain keys and
+        leaves the function stored, listed and runnable.
       - EXPIRE, and the whole TTL family, is refused on the range.
         The original reason was the generation counter, which is
         gone - but the refusal stands on its own now: a session
@@ -1069,6 +1096,115 @@
     a good test of the interface: pick three of different shapes -
     say GETRANGE, HRANDFIELD and ZRANGEBYSCORE - write them in Luau
     against this interface, and see what is missing.
+
+    F3. Rights, for reads that do not go through a command.
+
+    `barch.call` checks the command's categories against the outer
+    caller's ACL, which is what stops a function being a way round
+    a check the connection would have failed. `barch.store` had no
+    such check at all: it reads through `sharded_store` directly,
+    so a user holding `+function` and nothing else could read any
+    key in the space. That shipped, and is fixed now.
+
+    The shape it took, because 6b needs the same thing for writes:
+
+      - `store_access` carries `may_read` and `may_write`, decided
+        once by whoever builds it - function_api, which knows the
+        ACL - and enforced in the driver, which knows how to raise
+        a Lua error. Both default to false, so one that nobody
+        filled in refuses rather than allows.
+      - the categories are the equivalent command's: read, keys and
+        data for a read, write, keys and data for a write. So the
+        two routes to the same key answer to the same rights, which
+        is the property worth having and the one the test asserts -
+        the restricted user is refused the function *and* a plain
+        GET.
+
+    `barch.space.sp1.key1 = v` in 6b is a write and wants
+    `may_write`; the read wants `may_read`. Nothing new is needed
+    for it beyond what is now there.
+
+    Where it stops being enough is 135. This is one pair of flags
+    for the whole call because ACL categories are global, and
+    `barch.space.other.k = v` reaches a second space that the pair
+    knows nothing about. Per space rights turn it from a pair
+    decided once into a question asked per space touched, which is
+    another reason 135 belongs before 6b.
+
+    F4. Who may see that a function exists.
+
+    Asked because a walk meets function keys the way KEYS does, and
+    someone who may not read a function has no business learning
+    which ones there are. Checking it found the exposure is not
+    where it looked.
+
+    Inside a script there is nothing to fix, for two reasons that
+    are independent of each other:
+
+      - invoking any stored function needs the `function` category
+        before a line of Luau runs, so a walk inside a script
+        always belongs to someone who already holds it. A user with
+        `+read +keys` is refused the bare name, CALLF and GETF
+        alike - asserted in test/functiontest.py.
+      - a range cannot reach the function range anyway. Bounds go
+        through `encode_key`, which makes tstring, tinteger and the
+        rest and never tfunction, so every bound a script can name
+        sorts below the range. `range("", "\255")` answers plain
+        keys only.
+
+    So `min` and `max` are the only store entry points that can
+    surface a function name, and they filter their single answer on
+    a `may_see_functions` flag beside may_read and may_write. The
+    matching clamp on range and count cannot fire today, and says
+    so in a comment rather than looking load bearing.
+
+    Where it was real is the commands, and that is now filtered. A
+    `+read +keys` user with no `+function` used to see:
+
+        KEYS *   ->  ['SECRETFN', 'plainkey']
+        MAX      ->  b'SECRETFN'
+
+    and now sees `['plainkey']` and null. `visible_key` in
+    keys_api.cpp is the predicate - a function key is visible only
+    to a holder of the category - and it is applied at all eleven
+    places a key reaches a client: both of KEYS's passes, its
+    result-stack path, RANGE, SCAN, MIN, MAX, LB, UB and RANDOMKEY.
+
+    KEYS counts before it writes, so the count pass and the emit
+    pass have to skip on identical terms or the `*N` header stops
+    describing the body that follows. Same predicate in both, and
+    that is the reason it is a named function rather than an
+    inline test.
+
+    Two things about this that are not tidy:
+
+      - MAX needed a reverse walk and now has one.
+        `sharded_store::maximum_below(bound, cb)` is the largest
+        key strictly under a bound: the iterator constructor is a
+        lower bound, so it positions at where the functions start
+        and steps back once. MAX uses it for a user who may not see
+        the range, and answers the largest ordinary key rather than
+        a null.
+
+        MIN, LB and UB needed nothing. Functions are contiguous at
+        the top, so if the first key at or past a bound is one,
+        there really is nothing visible past it and null is the
+        true answer. Only MAX was wrong, because its answer is at
+        the end where the functions are.
+
+        RANDOMKEY still answers null when it lands on a function.
+        It is random, so a null now and then is not a wrong answer,
+        only an unhelpful one; retrying would be the fix if anyone
+        minds.
+      - KEYS now answers differently per user, which is a real
+        property to have taken on, and it is the price of A's
+        decision that functions are ordinary scannable keys. The
+        alternative was hiding them from the key space entirely,
+        which costs more.
+
+    DBSIZE is deliberately not filtered: a count that varies by who
+    asks confuses more than it protects, and the number it gives is
+    not a name.
 
     F2. The space as a value, and iterating it.
 
@@ -1610,7 +1746,7 @@
          refusal case and every case ran the first body, because
          this connection keeps what it compiled. The caching
          contract in C is real enough to trip its own test.
-      6. [first cut done] `barch.store` - get, exists, count, range,
+      6. [first cut done, rights added] `barch.store` - get, exists, count, range,
          min, max - and `barch.space()` for what the space is
          configured as. Reads run against the space the call is
          running in, not the one the function was defined in.
@@ -1938,3 +2074,4 @@
     edited against a real client, since which of the three is
     tolerable depends on how often that happens.
 
+138. [Done] art::iterator::last() finds nothing in a single key tree [24-08-2026] Nr 129 1fee45f

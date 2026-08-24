@@ -341,6 +341,54 @@ bool sharded_store::minimum(const key_cb& cb) const {
     return true;
 }
 
+bool sharded_store::maximum_below(art::value_type bound, const key_cb& cb) const {
+    // the candidate has to be copied: key() points into the page the iterator is
+    // reading, and both moving it and looking at the next shard can take that away
+    std::string best;
+    bool found = false;
+    ks_shared kss(spc->source());
+    ks_shared ksl(spc);
+    auto consider = [&](const shard_ptr& t) -> bool {
+        if (!t->get_tree_size()) return false;
+        art::iterator it(t, bound);
+        art::value_type cur;
+        if (it.ok()) {
+            // the constructor is a lower bound, so this landed on or past the bound
+            // and the one before it is what we want. A shard holding nothing but keys
+            // at or past the bound has no answer, which is what a false previous says
+            if (!it.previous() || !it.ok()) return false;
+            cur = it.key();
+        } else {
+            // nothing here is at or past the bound, so this shard's last key is the
+            // candidate. This is the only caller of last() that a thinly spread space
+            // exercises, so it is also what keeps TODO 138 fixed
+            if (!it.last() || !it.ok()) return false;
+            cur = it.key();
+        }
+        if (!(cur < bound)) return false;
+        if (!found || art::value_type{best} < cur) {
+            best.assign(cur.chars(), cur.size);
+            found = true;
+        }
+        return true;
+    };
+    if (ordered_shards()) {
+        // shards hold contiguous spans in order, so the first one from the top with
+        // anything below the bound holds the largest
+        const auto& all = shards();
+        for (size_t s = all.size(); s-- > 0;) {
+            if (consider(all[s])) break;
+        }
+    } else {
+        for (const auto& t : shards()) {
+            consider(t);
+        }
+    }
+    if (!found) return false;
+    cb(art::value_type{best});
+    return true;
+}
+
 bool sharded_store::maximum(const key_cb& cb) const {
     art::value_type the_max;
     ks_shared kss(spc->source());

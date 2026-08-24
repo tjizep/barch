@@ -441,6 +441,103 @@ try:
     for i in range(4):
         r.execute_command("DEL", "sk%d" % i)
 
+    # --- reading the store directly answers to the same rights as a command ---------
+    # a function must not be a way round the check a client would have failed. This
+    # is the barch.call check one layer down, where there is no command to read the
+    # categories off, so store_for decides them from the equivalent command's
+    r.execute_command("SET", "aclkey", "visible")
+    assert r.execute_command("SETF", "aclreads",
+                             'function call() return barch.store.get("aclkey") end') == b"OK"
+    # the default user holds every right, so it reads
+    assert r.execute_command("aclreads").decode() == "visible"
+
+    # a user with +function and nothing else may call a function, and must still be
+    # refused at the read inside it
+    r.execute_command("ACL", "SETUSER", "fnreader", "on", ">s3cret", "+function")
+    try:
+        restricted = redis.Redis(host="127.0.0.1", port=PORT, db=0)
+        # redis-py maps AUTH's +OK to True through its own response callback
+        assert restricted.execute_command("AUTH", "fnreader", "s3cret") is True
+        try:
+            got = restricted.execute_command("aclreads")
+            assert False, f"the read should have been refused, answered {got!r}"
+        except redis.exceptions.ResponseError as e:
+            assert "not authorized" in str(e), f"said: {e}"
+        # and the same user is refused the equivalent command, which is the point:
+        # the two routes to the same key answer to the same rights
+        try:
+            restricted.execute_command("GET", "aclkey")
+            assert False, "GET should have been refused too"
+        except redis.exceptions.ResponseError as e:
+            assert "authorized" in str(e), f"said: {e}"
+        restricted.close()
+    finally:
+        r.execute_command("ACL", "DEL", "fnreader")
+    r.execute_command("DEL", "aclkey")
+
+    # --- who can reach a function at all --------------------------------------------
+    # a walk inside a script always belongs to someone holding +function, because
+    # invoking one needs that category before a line of Luau runs. So the store's
+    # own may_see_functions guard is belt and braces rather than the gate. What is
+    # *not* covered is the command level - KEYS and MAX still name function keys to
+    # any reader - see TODO 98
+    # and a range cannot reach them anyway: bounds are encoded like any key, so they
+    # are tstring led and the function range is tfunction led, which sorts past every
+    # string bound there is. `max()` is the one entry point that can surface one
+    r.execute_command("SET", "walkkey", "v")
+    assert r.execute_command("SETF", "walker", '''
+        function call(argv)
+            local ks = barch.store.range("", "\255", 1000)
+            local top = barch.store.max()
+            return {#ks, top == nil and "nil" or top}
+        end
+    ''') == b"OK"
+    walked = r.execute_command("walker")
+    assert walked[0] >= 1, f"the walk should see plain keys, got {walked}"
+    # the default user holds +function, so the top of the space is visible to it
+    assert walked[1] == b"WALKER", f"max should reach the function range, got {walked}"
+    r.execute_command("DEL", "walkkey")
+
+    r.execute_command("SET", "blindkey", "v")
+    r.execute_command("ACL", "SETUSER", "fnblind", "on", ">s3cret", "+read", "+keys")
+    try:
+        blind = redis.Redis(host="127.0.0.1", port=PORT, db=0)
+        assert blind.execute_command("AUTH", "fnblind", "s3cret") is True
+        for attempt in (("walker",), ("CALLF", "walker"), ("GETF", "walker")):
+            try:
+                blind.execute_command(*attempt)
+                assert False, f"{attempt[0]} should need +function"
+            except redis.exceptions.ResponseError as e:
+                assert "authorized" in str(e), f"{attempt}: {e}"
+
+        # and the commands do not name them either: a walk for this user behaves as
+        # though the function range is not there
+        blind_keys = {k.decode() for k in blind.execute_command("KEYS", "*")}
+        assert "blindkey" in blind_keys, f"ordinary keys are still answered: {blind_keys}"
+        assert not any(k in blind_keys for k in ("WALKER", "GREET", "COUNTER")), \
+            f"a user without +function saw function keys: {sorted(blind_keys)}"
+        _, scanned = blind.execute_command("SCAN", "0")
+        assert not any(s.decode() in ("WALKER", "GREET") for s in scanned), \
+            "SCAN named a function key"
+        # MAX answers the largest key below the function range rather than a null.
+        # The range is the top of the key order, so the unfiltered maximum always
+        # lands in it once a space holds a function
+        top = blind.execute_command("MAX")
+        assert top is not None, "MAX should answer a real key, not null"
+        assert top.decode() == "blindkey", f"MAX gave {top!r}"
+        # and the holder still gets the true maximum, which is a function
+        assert r.execute_command("MAX").decode() in ("WALKER", "GREET", "COUNTER",
+                                                     "EXACTLY2", "SURVIVOR", "VERSION",
+                                                     "ACLREADS", "MYCOMPOSITE"), \
+            f"the holder should see the function range: {r.execute_command('MAX')!r}"
+        # the default user, holding +function, still sees them
+        assert any(k in {k.decode() for k in r.execute_command("KEYS", "*")}
+                   for k in ("WALKER", "GREET")), "the holder should still see them"
+        blind.close()
+    finally:
+        r.execute_command("ACL", "DEL", "fnblind")
+    r.execute_command("DEL", "blindkey")
+
     # --- an export carries functions, and puts them back as functions --------------
     # they used to be dropped: a function is not a container and not a string, so it
     # fell through to the plain branch, where re-encoding the name found no key and
@@ -474,7 +571,7 @@ finally:
               "roundtrip", "counterup", "readsmany", "survives",
               "ref_block", "ref_async", "ref_multi", "ref_unknown",
               "myGetrange", "myCount", "myKeys", "myBounds", "mySpace", "myHuge",
-              "myComposite"):
+              "myComposite", "aclreads", "walker"):
         try:
             r.execute_command("REMF", n)
             r.execute_command("fspace:REMF", n)

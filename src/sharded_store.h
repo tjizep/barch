@@ -238,6 +238,16 @@ namespace barch {
         bool minimum(const key_cb& cb) const;
         /** largest key in the space */
         bool maximum(const key_cb& cb) const;
+        /**
+         * largest key strictly less than bound.
+         *
+         * `maximum` cannot answer this: it takes each shard's tree maximum, and if
+         * that is past the bound there is no way back from it. An iterator can, being
+         * a lower bound - position at the bound and step back once. See TODO 98 F4,
+         * where it is what lets MAX answer a user who may not see the function range,
+         * which sits at the top of the key order.
+         */
+        bool maximum_below(art::value_type bound, const key_cb& cb) const;
         /** first key not less than key */
         bool lower_bound(art::value_type key, const key_cb& cb) const;
         /** first key greater than key */

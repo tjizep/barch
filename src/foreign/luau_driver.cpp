@@ -448,10 +448,15 @@ static void push_variable(lua_State* L, const Variable& v) {
  * of Luau runs again, which is the rule in TODO 98 F. Nothing here calls into the
  * script from inside a locked scope.
  */
-static const store_access* store_of(lua_State* L, const char* what) {
+static const store_access* store_of(lua_State* L, const char* what, bool writing = false) {
     space_state* st = state_of(L);
     if (!st || !st->store)
         luaL_error(L, "FUNCTION barch.store.%s is not available here", what);
+    // the script runs as whoever called it. Reading the store directly must not be a
+    // way round the rights a client would have been refused at the command - the same
+    // check barch.call makes, one layer down where there is no command to read it off
+    if (writing ? !st->store->may_write : !st->store->may_read)
+        luaL_error(L, "FUNCTION not authorized to %s here", writing ? "write" : "read");
     return st->store;
 }
 

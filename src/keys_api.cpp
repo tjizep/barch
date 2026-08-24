@@ -119,6 +119,25 @@ extern "C" {
 *
 * Return a list of matching keys, lexicographically between startkey
 * and endkey. No more than 'count' items are emitted. */
+/**
+ * May this connection be told that this key exists?
+ *
+ * A stored function is an ordinary key, so every walk meets one - KEYS, SCAN, RANGE,
+ * the bounds and RANDOMKEY all would. Someone who cannot call a function or read its
+ * source has no business learning which ones there are, so for them the range is not
+ * there at all. See TODO 98.
+ *
+ * Anything that is not a function key is visible on the terms it always was; this
+ * decides nothing else.
+ */
+static bool visible_key(caller& call, art::value_type key) {
+    if (!key.size || key.bytes[0] != art::tfunction)
+        return true;
+    static const size_t fn = get_category_map().at("function");
+    const auto& acl = call.get_acl();
+    return fn < acl.size() && acl[fn];
+}
+
 
 int RANGE(caller& call, const arg_t& argv) {
 
@@ -145,7 +164,8 @@ int RANGE(caller& call, const arg_t& argv) {
     call.start_array();
     // TODO: replace this with streaming api to reduce memory
     store.range(c1.get_value(), c2.get_value(), count, [&](art::value_type k) {
-        call.push_encoded_key(k);
+        if (visible_key(call, k))
+            call.push_encoded_key(k);
     });
     call.end_array();
     return 0;
@@ -185,6 +205,7 @@ int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 *
 * match a glob against key names and reply with the matching keys.
 * */
+
 static int glob_command(caller& call, const arg_t& argv, bool by_value) {
 
     if (argv.size() < 2 || argv.size() > 4)
@@ -236,6 +257,10 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     auto count_one = [&](const art::leaf& l) -> bool {
 
         auto key = l.get_key();
+        // skipped here and in the emit passes below on exactly the same terms, or the
+        // *N header and the body it introduces stop agreeing
+        if (!visible_key(call, key))
+            return true;
         if (!key.size || !art::is_container_lead(*key.bytes)) {
             ++replies;
             return true;
@@ -283,6 +308,8 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
         store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
             if (replies >= n) return false;
             auto key = l.get_key();
+            if (!visible_key(call, key))
+                return true;
             if (!key.size || !art::is_container_lead(*key.bytes)) {
                 Variable item = encoded_key_as_variant(key);
                 std::lock_guard lk(vklock);
@@ -322,6 +349,8 @@ static int glob_command(caller& call, const arg_t& argv, bool by_value) {
     call.start_array();
     store.glob(spec, pattern, by_value, [&](const art::leaf& l) -> bool {
         auto key = l.get_key();
+        if (!visible_key(call, key))
+            return true;
         if (!key.size || !art::is_container_lead(*key.bytes)) {
             std::lock_guard lk(vklock); // worker threads call in here concurrently
             if (0 != call.push_encoded_key(key)) {
@@ -1383,7 +1412,7 @@ int RANDOMKEY(caller& call, const arg_t& argv) {
     if (found.empty()) {
         return call.push_null();
     }
-    reply = call.push_encoded_key(found);
+    reply = visible_key(call, found) ? call.push_encoded_key(found) : call.push_null();
     return reply;
 }
 
@@ -1907,6 +1936,8 @@ int SCAN(caller& call, const arg_t& argv) {
         } else if (key.size && art::is_container_lead(*key.bytes)) {
             return call.results_count() < spec.count;   // the member index
         } else {
+            if (!visible_key(call, key))
+                return call.results_count() < spec.count;
             call.push_encoded_key(key); // it throws so it's ok
         }
         return call.results_count() < spec.count;
@@ -2284,7 +2315,9 @@ int MIN(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (!store.minimum([&](art::value_type k) { ok = call.push_encoded_key(k); })) {
+    if (!store.minimum([&](art::value_type k) {
+            ok = visible_key(call, k) ? call.push_encoded_key(k) : call.push_null();
+        })) {
         ok = call.push_null();
     }
     return ok;
@@ -2301,7 +2334,16 @@ int cmd_MIN(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
 int MAX(caller& call, const arg_t& ) {
     barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (!store.maximum([&](art::value_type k) { ok = call.push_encoded_key(k); })) {
+    // a user who may not see functions gets the largest key below the range rather
+    // than a null: the range is the top of the key order, so `maximum` always lands
+    // in it when the space holds one. See TODO 98 F4
+    static const uint8_t fn_start[] = {art::tfunction, 0x00};
+    const bool hide = !visible_key(call, art::value_type{fn_start, sizeof fn_start});
+    bool any = hide
+        ? store.maximum_below(art::value_type{fn_start, sizeof fn_start},
+                              [&](art::value_type k) { ok = call.push_encoded_key(k); })
+        : store.maximum([&](art::value_type k) { ok = call.push_encoded_key(k); });
+    if (!any) {
         ok = call.push_null();
     }
     return ok;
@@ -2324,7 +2366,9 @@ int LB(caller& call, const arg_t& argv) {
     auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (!store.lower_bound(converted.get_value(), [&](art::value_type f) { ok = call.push_encoded_key(f); })) {
+    if (!store.lower_bound(converted.get_value(), [&](art::value_type f) {
+            ok = visible_key(call, f) ? call.push_encoded_key(f) : call.push_null();
+        })) {
         ok = call.push_null();
     }
     return ok;
@@ -2350,7 +2394,9 @@ int UB(caller& call, const arg_t& argv) {
     auto converted = call.kspace()->encode_key(k);
     barch::sharded_store store(call.kspace());
     int ok = call.ok();
-    if (!store.upper_bound(converted.get_value(), [&](art::value_type f) { ok = call.push_encoded_key(f); })) {
+    if (!store.upper_bound(converted.get_value(), [&](art::value_type f) {
+            ok = visible_key(call, f) ? call.push_encoded_key(f) : call.push_null();
+        })) {
         ok = call.push_null();
     }
     return ok;

@@ -1440,13 +1440,32 @@ void abstract_eviction(const std::function<void(const barch::leaf *l)> &fupdate,
     });
 
 }
+/**
+ * Keys no eviction policy may take, whatever it says.
+ *
+ * A stored function is a command, not data: evicting one deletes a command under
+ * memory pressure, and since a session keeps whatever it compiled, the connections
+ * that already ran it would carry on while new ones met "unknown command". See
+ * TODO 98.
+ *
+ * This sits at the policy level rather than in `shard::evict`, which would be the
+ * obvious single place and is the wrong one: `erase_page` calls evict to lift a key
+ * out of a fragmented page before adding it back, and aborts if the key does not go.
+ * Defragmenting a function is fine and has to keep working - it is eviction that must
+ * not happen.
+ */
+static bool may_evict(const barch::leaf *l) {
+    auto k = l->get_key();
+    return !(k.size && k.bytes[0] == art::tfunction);
+}
+
 void abstract_eviction(barch::shard *t,
                        const std::function<bool(const barch::leaf *l)> &predicate,
                        const std::function<std::pair<heap::buffer<uint8_t>, size_t> ()> &src) {
     auto fc = [](const art::node_ptr & unused(n)) -> void {
     };
     auto updater = [predicate,fc,t](const barch::leaf *l) {
-        if (!l->deleted() && predicate(l)) {
+        if (!l->deleted() && may_evict(l) && predicate(l)) {
            t->evict(l);
         }
     };
@@ -1538,7 +1557,7 @@ void run_sweep_lru_keys(barch::shard *t) {
             auto n = t->search(l->get_key());
             if (!n.null())
                 n.l()->unset_lru();
-        }else {
+        }else if (may_evict(l)) {
             t->evict(l); // will get cleaned up by defrag
         }
     });

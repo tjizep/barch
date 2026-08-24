@@ -4754,3 +4754,38 @@ refused, a pattern mixed with categories is refused, `ACL GETUSER` shows nothing
 written in either case, and a plain `+read` SETUSER still works and keeps its category.
 The test was run once against the previous build before the fix went in and failed on the
 first assertion, which is the negative control.
+
+## 129. `art::iterator::last()` found nothing in a single key tree [24-08-2026]
+
+TODO 138. Found while writing `sharded_store::maximum_below` for the function
+visibility work in TODO 98: MAX answered null for every user it was meant to filter,
+on a space holding 21 keys. 347 shards and 21 keys is one key per shard for the ones
+that hold anything, which turned out to be the whole story.
+
+`last_child_off` answers an empty trace element for a leaf. A tree holding one key
+keeps that leaf *as* its root, so `extend_trace_max` pushed the empty element, looked
+at its null child, asked `last_child_off` about that, got another empty element and
+returned false. `last()` treated that as "nothing here" and answered false, on a tree
+that plainly had something in it.
+
+The other two places that touch a trace already knew about this shape. The lower bound
+constructor ends with `c = t->get_tree_size() == 1 ? lb : last_node(tl)`, and `end()`
+only calls an empty trace the end when `get_tree_size() > 1`. `last()` was the third
+and only one that did not, which is why it read as a deliberate design everywhere else
+and a bug here.
+
+Fixed by giving it the same case: if the root is a leaf, that leaf is the answer and
+the trace stays empty. An empty trace is correct rather than a compromise - there is
+nothing before the only key, so a later `previous()` answers false, which is true.
+
+`next()` and `previous()` were checked on the same shape and are fine, for a better
+reason than luck: both move *from* a position by walking the trace and treat a false
+return as "no more". With one key the trace is empty, so both answer false, which is
+the true answer. The bug was specific to `last()` because it is the one that has to
+construct a position out of nothing rather than move from one.
+
+No test of its own. `sharded_store::maximum_below` is the only caller a thinly spread
+space exercises, and the MAX assertion in test/functiontest.py - a user without the
+function category getting the largest ordinary key rather than null - fails if this
+regresses. The workaround that was in `maximum_below` (taking `tree_maximum()` for the
+below-the-bound case) has been removed, so that path now runs on `last()` alone.

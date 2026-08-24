@@ -727,7 +727,25 @@ art::value_type art::iterator::key() const {
 bool art::iterator::last() {
     if (!t || !t->get_tree_size()) return false;
     tl.clear();
-    if (!extend_trace_max(t->get_root(), tl)) {
+    /*
+     * A tree holding one key keeps that leaf *as* its root, and the trace walkers
+     * cannot describe it: `last_child_off` answers an empty element for a leaf, so
+     * `extend_trace_max` pushes that, finds the child null and gives up. The result
+     * was that `last()` answered false on a shard holding exactly one key - which on
+     * a space spread over hundreds of shards is most of the ones that hold anything.
+     *
+     * The other two places that touch a trace already know: the lower bound
+     * constructor picks `lb` over `last_node(tl)` when the size is 1, and `end()`
+     * only calls an empty trace the end when the size is greater than 1. This is the
+     * third. An empty trace is right here - there is nothing before the only key, so
+     * a later `previous()` correctly answers false. See TODO 138.
+     */
+    auto root = t->get_root();
+    if (root.is_leaf) {
+        c = root;
+        return true;
+    }
+    if (!extend_trace_max(root, tl)) {
         tl.clear();
         return false;
     }

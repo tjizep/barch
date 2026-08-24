@@ -206,9 +206,51 @@ namespace functions {
         return ' ';
     }
 
-    static barch::foreign::store_access store_for(const key_space_ptr& space) {
+    /** the categories an equivalent command would ask for */
+    static const heap::vector<bool>& cats_of(const char* a, const char* b) {
+        static heap::string_map<heap::vector<bool>> built;
+        std::string k = std::string(a) + "|" + b;
+        auto it = built.find(k);
+        if (it != built.end())
+            return it->second;
+        catmap m;
+        m[a] = true;
+        m[b] = true;
+        m["data"] = true;
+        return built.emplace(k, cats2vec(m)).first->second;
+    }
+
+    static barch::foreign::store_access store_for(const key_space_ptr& space,
+                                                  const heap::vector<bool>& acl) {
         barch::foreign::store_access s;
+        // what GET and SET ask for. Reading through barch.store is reading, whatever
+        // route it took, so it answers to the same categories
+        s.may_read = allowed(cats_of("read", "keys"), acl);
+        s.may_write = allowed(cats_of("write", "keys"), acl);
+        s.may_see_functions = allowed(cats_of("read", "function"), acl);
         const char sep = split_char(space);
+        // functions are the top of the key order - tfunction is 12 and sorts after
+        // every other lead - so hiding them is a bound rather than a filter: stop the
+        // walk where the range begins. Held by value because the composite that built
+        // it does not outlive this function.
+        //
+        // As things stand this clamp cannot fire: a caller's bounds go through
+        // encode_key, which produces tstring, tinteger and the rest but never
+        // tfunction, so every bound a script can name already sorts below the range.
+        // It is here for the day something hands these bounds that were not built
+        // from a client's string - min and max are the two that reach the range
+        // today, and they filter their single answer below
+        composite fq;
+        auto fn_start_v = fq.create(art::ts_function, {}, false);
+        const std::string fn_start(fn_start_v.chars(), fn_start_v.size);
+        const bool hide = !s.may_see_functions;
+        /** the caller's upper bound, or where the functions begin, whichever is lower */
+        auto clamp_hi = [hide, fn_start](art::value_type hi) -> art::value_type {
+            if (!hide)
+                return hi;
+            art::value_type limit{fn_start.data(), fn_start.size()};
+            return hi < limit ? hi : limit;
+        };
         s.get = [space](const std::string& key, std::string& value) -> bool {
             auto converted = space->encode_key(art::value_type{key.data(), key.size()});
             barch::sharded_store store(space);
@@ -228,29 +270,45 @@ namespace functions {
             barch::sharded_store store(space);
             return store.exists(converted.get_value());
         };
-        s.count = [space](const std::string& lo, const std::string& hi) -> int64_t {
+        s.count = [space, clamp_hi](const std::string& lo, const std::string& hi) -> int64_t {
             auto l = space->encode_key(art::value_type{lo.data(), lo.size()});
             auto h = space->encode_key(art::value_type{hi.data(), hi.size()});
             barch::sharded_store store(space);
-            return store.count(l.get_value(), h.get_value());
+            return store.count(l.get_value(), clamp_hi(h.get_value()));
         };
-        s.range = [space, sep](const std::string& lo, const std::string& hi, int64_t limit,
+        s.range = [space, sep, clamp_hi](const std::string& lo, const std::string& hi, int64_t limit,
                           heap::vector<std::string>& out) {
             auto l = space->encode_key(art::value_type{lo.data(), lo.size()});
             auto h = space->encode_key(art::value_type{hi.data(), hi.size()});
             barch::sharded_store store(space);
             // the callback runs under the lock, so it only copies - no Luau here
-            store.range(l.get_value(), h.get_value(), limit, [&](art::value_type key) {
+            store.range(l.get_value(), clamp_hi(h.get_value()), limit, [&](art::value_type key) {
                 out.push_back(encoded_key_as_string(key, sep));
             });
         };
-        s.min = [space, sep](std::string& key) -> bool {
+        s.min = [space, sep, hide](std::string& key) -> bool {
             barch::sharded_store store(space);
-            return store.minimum([&](art::value_type k) { key = encoded_key_as_string(k, sep); });
+            bool found = false;
+            store.minimum([&](art::value_type k) {
+                // functions sort last, so the smallest key is only ever one of them in
+                // a space that holds nothing else
+                if (hide && k.size && k.bytes[0] == art::tfunction)
+                    return;
+                key = encoded_key_as_string(k, sep);
+                found = true;
+            });
+            return found;
         };
-        s.max = [space, sep](std::string& key) -> bool {
+        s.max = [space, sep, hide](std::string& key) -> bool {
             barch::sharded_store store(space);
-            return store.maximum([&](art::value_type k) { key = encoded_key_as_string(k, sep); });
+            bool found = false;
+            store.maximum([&](art::value_type k) {
+                if (hide && k.size && k.bytes[0] == art::tfunction)
+                    return;
+                key = encoded_key_as_string(k, sep);
+                found = true;
+            });
+            return found;
         };
         s.config = [space](heap::vector<std::pair<std::string, std::string>>& out) {
             out.emplace_back("name", space->get_canonical_name());
@@ -291,7 +349,7 @@ namespace functions {
         auto run_command = runner_for(call);
         // reads go against the space the call is running in, not the one the function
         // was defined in - a function is written against an interface, not a space
-        auto store_reads = store_for(call.kspace());
+        auto store_reads = store_for(call.kspace(), call.get_acl());
         if (!barch::foreign::call_function(defined_in, folded, load, run_command,
                                            store_reads, args,
                                            barch::get_foreign_script_insns(),

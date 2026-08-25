@@ -37,6 +37,21 @@ struct rpc_caller : caller {
     heap::vector<heap::vector<wrapped_variable_t>> temp{};
     heap::vector<std::string> errors{};
     heap::vector<bool> acl{get_all_acl()};
+    /**
+     * per space rights, and the one worked out for the space in use.
+     *
+     * Resolved when the space changes rather than per command: it is a map lookup and
+     * a vector copy, and a pipeline of commands in one space should pay for it once.
+     */
+    barch::space_overrides space_acl{};
+    std::string acl_space{"\x01none"};
+    heap::vector<bool> effective_acl{};
+    heap::vector<bool> named_acl{};
+    /** see caller::script_interface */
+    barch::foreign::call_interface_ptr script_iface{};
+    /** see caller::resolutions - names already known to be functions here */
+    heap::string_map<caller::resolved_fn> resolved{};
+    std::string resolved_space{"\x01none"};
     arg_t args{};
     std::string user = "default";
     std::function<std::string()> info_fun;
@@ -51,6 +66,8 @@ struct rpc_caller : caller {
     bool counted_blocked = false;
     Variable empty{nullptr};
     std::function<void(caller&, const keys_t&)> block_fun;
+    /** see caller::after_blocks_registered */
+    std::function<void()> blocks_registered_fun;
     uint64_t block_to_ms = 0;
     heap::vector<Variable> buffered_results{};
     heap::vector<std::string> buffered_errors{};
@@ -662,7 +679,51 @@ struct rpc_caller : caller {
     void set_acl(const std::string& user,const heap::vector<bool>& acl) override {
         this->user = user;
         this->acl = acl;
+        this->space_acl = barch::read_space_overrides(user);
+        // built from the rights that just changed
+        this->script_iface.reset();
+        this->resolved.clear();
+        // whatever was worked out for the old rights is stale
+        this->acl_space = "\x01none";
     };
+
+    heap::string_map<caller::resolved_fn>* resolutions(const std::string& space) override {
+        if (resolved_space != space) {
+            resolved.clear();          // a different space resolves differently
+            resolved_space = space;
+        }
+        return &resolved;
+    }
+
+    barch::foreign::call_interface_ptr& script_interface() override {
+        return script_iface;
+    }
+
+    [[nodiscard]] const heap::vector<bool>& acl_for(const std::string& space) override {
+        if (space_acl.empty())
+            return acl;
+        auto o = space_acl.find(space);
+        if (o == space_acl.end())
+            return acl;
+        // not cached: this is the cross-space path, which is rarer than the one the
+        // connection is actually working in
+        named_acl = barch::apply_overrides(acl, o->second);
+        return named_acl;
+    }
+
+    [[nodiscard]] const heap::vector<bool>& get_space_acl() override {
+        if (space_acl.empty())
+            return acl;                    // no overrides: the global rights, as before
+        const std::string& in = ks ? ks->get_canonical_name() : acl_space;
+        if (in != acl_space) {
+            auto o = space_acl.find(in);
+            effective_acl = (o == space_acl.end())
+                ? acl                       // nothing said about this space
+                : barch::apply_overrides(acl, o->second);
+            acl_space = in;
+        }
+        return effective_acl;
+    }
     barch::key_space_ptr& kspace() override {
 
         if (!ks ) {
@@ -694,6 +755,18 @@ struct rpc_caller : caller {
             d.space = ks;
         }
     }
+    void set_blocks_registered(std::function<void()> fn) override {
+        blocks_registered_fun = std::move(fn);
+    }
+
+    void after_blocks_registered() override {
+        if (blocks_registered_fun) {
+            auto fn = blocks_registered_fun;
+            blocks_registered_fun = nullptr;
+            fn();
+        }
+    }
+
     void transfer_rpc_blocks(const barch::abstract_session_ptr& session) override {
         if (!counted_blocked && !blocks.empty()) {
             counted_blocked = true;

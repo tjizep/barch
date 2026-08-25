@@ -281,12 +281,18 @@ namespace barch {
                     if (prev_cn != cn) {
                         ic = barch_functions->find(cn);
                         prev_cn = std::move(cn);
-                        if (ic != barch_functions->end() &&
-                            !is_authorized(ic->second.cats,caller.get_acl())) {
-                            redis::rwrite(ostream, error{"not authorized"});
-                            return ;
-                        }
                     }
+                }
+                // Authorization is checked per command, not per new command name.
+                //
+                // It used to sit inside the lookup above, which meant a repeated name
+                // was never checked again - harmless while rights were global, and
+                // wrong the moment they vary by key space: `KS1:GET` then `KS2:GET`
+                // is one name and two answers. See TODO 135.
+                if (ic != barch_functions->end()
+                    && !is_authorized(ic->second.cats, caller.get_space_acl())) {
+                    redis::rwrite(ostream, error{"not authorized"});
+                    return;
                 }
                 if (ic == barch_functions->end()) {
                     // not a built-in. It may still be a stored function - see TODO 98.
@@ -294,20 +300,28 @@ namespace barch {
                     // would otherwise stay unknown for the life of the session, and
                     // SETF followed by a call on the same connection would fail for a
                     // reason that has nothing to do with the function
-                    barch_function fn;
-                    if (!is_authorized(function_cats(), caller.get_acl())) {
+                    const barch_function* fn = nullptr;
+                    if (!is_authorized(function_cats(), caller.get_space_acl())) {
                         redis::rwrite(ostream, error{"not authorized"});
-                    } else if (barch::functions::resolve(caller, fn_space, prev_cn, fn)) {
-                        // asynchronous like CALLF, so a script never runs on a service
-                        // thread. Ordering with the rest of the pipeline is the batch's
-                        // job, exactly as it is for a KEYS
-                        if (!stream.empty()) {
-                            auto ctx = std::make_shared<asynch_call_context>(caller, fn, params, prev_cn);
-                            ctx->stream = std::move(stream);
+                    } else if ((fn = barch::functions::resolve(caller, fn_space, prev_cn))) {
+                        // a function parks rather than running here, so it costs this
+                        // thread nothing to start - the script goes on the foreign pool
+                        // in slices and the reply is written when it wakes.
+                        //
+                        // Unless the batch is already asynchronous, in which case this
+                        // has to queue behind it like everything else does, or its
+                        // reply overtakes the ones in front of it
+                        if (!asynch_calls.empty()) {
+                            auto ctx = std::make_shared<asynch_call_context>(caller, *fn, params, prev_cn);
+                            if (!stream.empty())
+                                ctx->stream = std::move(stream);
                             asynch_calls.push_back(ctx);
                         } else {
-                            asynch_calls.emplace_back(
-                                std::make_shared<asynch_call_context>(caller, fn, params, prev_cn));
+                            caller.reply_out = &ostream;
+                            int32_t r = caller.call(params, *fn);
+                            caller.reply_out = nullptr;
+                            if (!caller.has_blocks())
+                                write_result<Stream>(caller, ostream, r);
                         }
                     } else {
                         redis::rwrite(ostream, error{"unknown command"});
@@ -402,6 +416,9 @@ namespace barch {
         }
         void add_caller_blocks() {
             caller.transfer_rpc_blocks(this->shared_from_this());
+            // anything that parked and then started its own work gets told the waiter
+            // exists now, so work that already finished is not left unwoken
+            caller.after_blocks_registered();
             for (auto& d : caller.get_blocks()) {
                 if (d.space && d.space->has_foreign())
                     barch::foreign::kick(d.space, d.key);

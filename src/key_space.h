@@ -90,6 +90,7 @@ namespace barch {
         range_index rindex{};
         decltype(std::chrono::high_resolution_clock::now) start_time;
         std::string name{};
+        std::string canonical_name{};
         key_space_ptr src;
 
         moodycamel::LightweightSemaphore thread_control{};
@@ -114,6 +115,14 @@ namespace barch {
         shard_ref get_ref(ValkeyModuleString **argv) ;
         [[nodiscard]] std::string get_name() const;
         [[nodiscard]] std::string get_canonical_name() const;
+        /**
+         * the same name without building a string for it.
+         *
+         * `get_canonical_name` undecorates and returns by value, which is two
+         * allocations per call on a path that asks twice. The name never changes
+         * after the space is built, so it is worked out once. See TODO 98 F5.
+         */
+        [[nodiscard]] const std::string& canonical() const { return canonical_name; }
         const heap::vector<shard_ptr>& get_shards() ;
         size_t get_shard_index(const char* key, size_t key_len);
         size_t get_shard_index(art::value_type key);

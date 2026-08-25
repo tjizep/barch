@@ -4789,3 +4789,46 @@ space exercises, and the MAX assertion in test/functiontest.py - a user without 
 function category getting the largest ordinary key rather than null - fails if this
 regresses. The workaround that was in `maximum_below` (taking `tree_maximum()` for the
 below-the-bound case) has been removed, so that path now runs on `last()` alone.
+
+## 130. `foreign_script` kept Luau source in the configuration space [25-08-2026]
+
+TODO 139, and the same mistake TODO 98 J had already settled for globals - left in the
+foreign path only because it predates functions being keys at all.
+
+`<name>.foreign_script` is a configuration key, and `load_source` took the value itself
+as the script when it began with `--`. So a fill script lived in `configuration`, a
+store whose job is settings, and test/foreign_luau.py set it that way in all eight of
+its cases.
+
+It names a function now: SETF the script, point `foreign_script` at the name, and it is
+looked up in the space and then in the global one - the same order a call resolves in.
+That gets replication, persistence, protection from eviction and the ACL category for
+free.
+
+Three things had to move together, and two of them were forced rather than chosen.
+
+The entry point is unified on `call`. A fill defined `resolve(key, space)` while SETF
+refuses anything without `call()`, so storing a fill as a function was impossible
+without picking one of them. Every stored Luau function now answers `call`, and a fill
+is invoked as `call(key, space)`, which reads naturally since arguments became varargs.
+
+Compilation defers to the first fill. `prepare_luau` runs from the key_space
+constructor at key_space.cpp:316, before `shards_out.resize` at 340, so the space has
+no shards and a tfunction key cannot be read there at all. What looked like an obstacle
+is an improvement: a script stored *after* its space was built now starts working,
+where before the space had to be rebuilt. The rewritten test relies on it - `install()`
+does USE, which builds the space with foreign=luau and no script yet, and only then
+stores the script.
+
+The file path form stays. A path is a reference rather than code in the settings store,
+so it is not the mistake, and it is tried after the name. The inline form is refused
+with a message saying to SETF it and name it.
+
+The rewrite of foreign_luau.py needed a second pass: extracting the script text out of
+the Python source kept the escapes as written, so the first attempt stored scripts whose
+newlines were literal backslash-n. The whole script was then one comment line and every
+case failed with "luau script has no call()" - which is at least the error it should
+have been.
+
+Not covered: a fill surviving a restart. The script is an ordinary key so it persists
+the way any other does, but nothing asserts it.

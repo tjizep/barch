@@ -14,6 +14,17 @@ static const std::string SECRET_PREFIX = "user:secret:";
 static std::string user_cats(std::string user) {
     return CAT_PREFIX + user + ":";
 }
+/*
+ * `user:space:<user>:<space>:<cat>` - one level below the categories, so the same
+ * prefix walk reads it. See TODO 135.
+ */
+static const std::string SPACE_PREFIX = "user:space:";
+static std::string user_space_cats(const std::string& user, const std::string& space) {
+    return SPACE_PREFIX + user + ":" + space + ":";
+}
+static std::string user_space_prefix(const std::string& user) {
+    return SPACE_PREFIX + user + ":";
+}
 static std::string user_secret(std::string user) {
     return SECRET_PREFIX + user;
 }
@@ -88,6 +99,72 @@ static void add_cats(barch::shard_ptr a, const std::string& user,const std::stri
         a->insert(key, secret, true);
     }
 }
+namespace barch {
+space_overrides read_space_overrides(const std::string& user) {
+    barch::space_overrides out;
+    auto a = get_auth();
+    read_lock read(a);
+    std::string prefix = user_space_prefix(user);
+    barch::iterator it(a, prefix);
+    while (it.ok()) {
+        auto k = it.key();
+        if (!k.starts_with(prefix))
+            break;
+        // <space>:<cat> - the space name cannot hold a colon, so the last one splits
+        std::string rest = k.sub(prefix.size()).pref(1).to_string();
+        auto colon = rest.find_last_of(':');
+        if (colon != std::string::npos) {
+            out[rest.substr(0, colon)][rest.substr(colon + 1)] = it.value() == "true";
+        }
+        it.next();
+    }
+    return out;
+}
+
+heap::vector<bool> apply_overrides(const heap::vector<bool>& global,
+                                   const heap::string_map<bool>& over) {
+    heap::vector<bool> r = global;
+    auto& catm = get_category_map();
+    for (const auto& c : over) {
+        if (c.first == "all") {
+            for (size_t i = 0; i < r.size(); ++i) {
+                r[i] = c.second;
+            }
+            continue;
+        }
+        auto i = catm.find(c.first);
+        if (i != catm.end() && i->second < r.size()) {
+            r[i->second] = c.second;
+        }
+    }
+    return r;
+}
+
+void write_space_overrides(const std::string& user, const std::string& space,
+                           const heap::string_map<bool>& cats) {
+    auto a = get_auth();
+    unique_latch write(a->get_latch());
+    std::string prefix = user_space_cats(user, space);
+    // whatever was there goes first, so a SETUSER states the whole rule for this
+    // space rather than adding to one nobody can see
+    heap::vector<art::value_type> to_del;
+    barch::iterator it(a, prefix);
+    while (it.ok()) {
+        auto k = it.key();
+        if (!k.starts_with(prefix))
+            break;
+        to_del.push_back(k);
+        it.next();
+    }
+    for (auto& k : to_del) {
+        a->remove(k);
+    }
+    for (const auto& c : cats) {
+        a->insert(prefix + c.first, c.second ? "true" : "false", true);
+    }
+}
+}
+
 extern "C"
 {
     int AUTH(caller& call, const arg_t& argv) {

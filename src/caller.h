@@ -209,6 +209,44 @@ public:
     [[nodiscard]] virtual const heap::vector<bool>& get_acl() const = 0;
     virtual void set_acl(const std::string& user, const heap::vector<bool>& acl) = 0;
     /**
+     * the rights this connection holds *in the space it is working in*.
+     *
+     * The same as get_acl() where the user has no per-space overrides, which is every
+     * user until someone writes one. See TODO 135.
+     */
+    [[nodiscard]] virtual const heap::vector<bool>& get_space_acl() {
+        return get_acl();
+    }
+    /**
+     * the rights this connection holds in a *named* space, which may not be the one
+     * it is working in - a script reaching `barch.space.other` needs them there.
+     */
+    [[nodiscard]] virtual const heap::vector<bool>& acl_for(const std::string&) {
+        return get_acl();
+    }
+    /**
+     * the interface a script gets, kept between calls. Null where nothing caches, and
+     * whoever builds it stores it here. Dropped when the rights change - see set_acl.
+     */
+    /**
+     * where a resolved function name is remembered, per connection.
+     *
+     * Only *hits* go in here. A miss must never be cached: a name tried before it
+     * existed has to resolve once it does, or SETF followed by a call on the same
+     * connection fails for a reason that has nothing to do with the function. A hit
+     * has no such hazard - the session already keeps whatever it compiled. See
+     * TODO 98 C and F5.
+     */
+    typedef std::function<int(caller&, const arg_t&)> resolved_fn;
+    virtual heap::string_map<resolved_fn>* resolutions(const std::string&) {
+        return nullptr;
+    }
+    virtual barch::foreign::call_interface_ptr& script_interface() {
+        static barch::foreign::call_interface_ptr none{};
+        none.reset();
+        return none;
+    }
+    /**
      * the Luau states this connection has built, one per key space it has called a
      * function in. Null where there is no session to hang them on - the swig and
      * module paths - and a function there is compiled for the call and thrown away.
@@ -224,6 +262,17 @@ public:
     virtual void transfer_rpc_blocks(const barch::abstract_session_ptr& ) {};
     virtual void erase_blocks(const barch::abstract_session_ptr& ) {};
     virtual void add_block(const keys_t& blocks, uint64_t to_ms, std::function<void(caller&, const keys_t&)>) = 0;
+    /**
+     * said once the session has put this caller's blocks on their shards.
+     *
+     * Something that parks and then starts its own work has a race: the work can
+     * finish, and wake, before the waiter it is waking exists. Foreign covers it by
+     * kicking each blocked key after registering; this is the same re-check for
+     * anything else that parks - a stored function, so far. See TODO 98 H.
+     */
+    virtual void after_blocks_registered() {}
+    /** what after_blocks_registered should call, set by whoever parked */
+    virtual void set_blocks_registered(std::function<void()>) {}
     virtual bool has_blocks() = 0;
     /**
      * said by a block callback that was woken and found nothing to give.

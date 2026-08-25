@@ -93,6 +93,58 @@ int KSPACE(caller& call, const arg_t& argv) {
     if (parser.parse_options() != 0) {
         return call.syntax_error();
     }
+    if (parser.is_acl) {
+        /*
+         * `KSPACE ACL [KSNAME] SETUSER alice -read -write +function`
+         *
+         * The rights a user holds in one key space, as the differences from their
+         * global ones. A space with no rule leaves them exactly as they are, so
+         * nothing that works today changes. See TODO 135.
+         */
+        std::string space = parser.name.empty()
+            ? call.kspace()->get_canonical_name() : parser.name;
+        // the arguments from the verb onwards read as an ordinary ACL, so the same
+        // parser handles them - it is the same vocabulary and should stay so
+        arg_t tail;
+        tail.push_back(art::value_type{"ACL"});
+        for (size_t i = parser.acl_at; i < argv.size(); ++i) {
+            tail.push_back(argv[i]);
+        }
+        art::acl_spec spec(tail);
+        if (spec.parse_options() != 0) {
+            return call.syntax_error();
+        }
+        if (spec.is_filter) {
+            return call.push_error("ACL key patterns are not supported");
+        }
+        if (spec.is_secret) {
+            // a secret belongs to the user, not to their rights in one space
+            return call.push_error("a secret cannot be set per key space");
+        }
+        if (spec.get) {
+            auto all = barch::read_space_overrides(spec.user);
+            auto it = all.find(space);
+            call.start_array();
+            if (it != all.end()) {
+                for (const auto& c : it->second) {
+                    call.push_values({"$" + c.first, c.second ? "true" : "false"});
+                }
+            }
+            return call.end_array();
+        }
+        if (spec.del) {
+            barch::write_space_overrides(spec.user, space, {});
+            return call.push_simple("OK");
+        }
+        auto& valid = get_category_map();
+        for (const auto& c : spec.cat) {
+            if (c.first != "all" && !valid.count(c.first)) {
+                return call.push_error("ACL category not found");
+            }
+        }
+        barch::write_space_overrides(spec.user, space, spec.cat);
+        return call.push_simple("OK");
+    }
     if (parser.is_exist) {
         return call.push_bool(barch::is_keyspace(parser.name));
     }

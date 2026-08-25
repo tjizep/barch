@@ -98,7 +98,82 @@ struct store_access {
     std::function<bool(std::string& key)> max{};
     /** what the space is configured as, read only */
     std::function<void(heap::vector<std::pair<std::string, std::string>>& out)> config{};
+    /** write a key. false fills err - too large, wrong type, refused */
+    std::function<bool(const std::string& key, const std::string& value,
+                       std::string& err)> set{};
+    /** remove a key. false means there was nothing there */
+    std::function<bool(const std::string& key)> remove{};
+    /**
+     * one page of the space at a time, from `after` onwards, ascending.
+     *
+     * A page is copied under the lock and handed back with the lock dropped, so no
+     * script runs while a shard is held and a key erased behind the walk cannot
+     * matter - what is being read is nobody's live memory. Empty means the end.
+     * See TODO 98 F2.
+     */
+    struct row {
+        std::string type;        // "key", "list", "hash", "orderedset", "function"
+        std::string container;   // empty for a plain key
+        std::string key;         // empty for a container header
+        std::string value;
+        bool has_value{false};
+    };
+    /*
+     * `after` and `next` are opaque: the encoded bytes of the last key handed out,
+     * not its name. A decoded name cannot be a continuation - re-encoding it puts it
+     * back wherever a *plain* key of that name would sort, and a function name lands
+     * at the string lead rather than the function one, so the walk starts over and
+     * never ends.
+     */
+    std::function<void(const std::string& after, size_t want,
+                       heap::vector<row>& out, std::string& next)> page{};
+
+    /*
+     * Containers, which are a different key shape rather than a different store: a
+     * list, hash or ordered set is `{lead, name, member}` with one lead per kind, so
+     * one set of entry points covers all three once the kind is known. A hash's field
+     * and an ordered set's member are the same position; only what the value means
+     * differs, and that is the script's business rather than this interface's.
+     */
+    std::function<std::string(const std::string& name)> container_kind{};
+    std::function<bool(const std::string& name, const std::string& member,
+                       std::string& value)> container_get{};
+    std::function<bool(const std::string& name, const std::string& member,
+                       const std::string& value, std::string& err)> container_set{};
+    std::function<bool(const std::string& name, const std::string& member)> container_del{};
+    /** members from `after` onwards, the same paging the space walk uses */
+    std::function<void(const std::string& name, const std::string& after, size_t want,
+                       heap::vector<std::pair<std::string, std::string>>& out,
+                       std::string& next)> container_page{};
 };
+
+/**
+ * Open another key space by name, with this user's rights *in that space*.
+ *
+ * `barch.space.other.k` reaches somewhere the call did not start, so the rights have
+ * to be asked for again rather than inherited - which is what per-space ACLs are for,
+ * TODO 135. False means no such space, and touching a name must never build one.
+ */
+typedef std::function<bool(const std::string& space, store_access& out)> space_opener;
+
+/**
+ * Everything a script reaches, built once rather than per call.
+ *
+ * These four are about a dozen std::functions between them and none of them depends
+ * on the script or its arguments - only on the key space and the user's rights there.
+ * Building them per call was 1.8us, which was 72% of what a one line function cost.
+ * See TODO 98 F5.
+ */
+struct call_interface {
+    source_loader load{};
+    command_runner run_command{};
+    store_access store{};
+    space_opener open_space{};
+    /** what it was built for, so a call in another space builds its own */
+    std::string running_in{};
+    std::string defined_in{};
+};
+typedef std::shared_ptr<call_interface> call_interface_ptr;
 
 /**
  * compile a stored function's source, throwing the result away. SETF asks before it
@@ -122,17 +197,30 @@ bool compile_function(const std::string& space, const std::string& name,
  * already compiled in `cache`, so a warm call never reads the store. It is asked for
  * other names too when a script requires one. A null cache runs against a state built
  * for this call alone, which is what the contexts without a session do.
+/** what a parked call reports when it ends, on whatever thread ended it */
+typedef std::function<void(bool ok, Variable out, std::string err)> function_done;
+
+/**
+ * Start a stored function and let it run in slices on the foreign pool.
  *
- * `insns` is a hard instruction cap and `deadline_ms` a wall clock one; both end the
- * call with an error rather than slicing it, which is what a first cut can afford -
- * see TODO 98 H for why that has to become a park.
+ * The caller does not wait: `done` is called when the script finishes, from whichever
+ * thread finished it, which may be before this returns - a script that completes
+ * inside its first slice never leaves this thread at all. Everything the script needs
+ * - the loader, the command runner, the store - is copied into the job, because the
+ * command that started it has returned by then and its stack is gone.
+ *
+ * `args` reach the script as varargs, so `function call(key)` works and a script that
+ * wants them as a table writes `local argv = {...}`.
+ *
+ * `insns` is a slice rather than a cap: the script yields when it runs out and is put
+ * back on the pool, so a long script shares the pool instead of owning a thread. The
+ * deadline is what actually ends a runaway. See TODO 98 H.
  */
-bool call_function(const std::string& space, const std::string& name,
-                   const source_loader& load, const command_runner& run_command,
-                   const store_access& store,
-                   const heap::vector<std::string>& args, uint64_t insns,
-                   uint64_t deadline_ms, const function_states_ptr& cache,
-                   Variable& out, std::string& err);
+void start_function(const std::string& space, const std::string& name,
+                    const call_interface_ptr& iface,
+                    const heap::vector<std::string>& args, uint64_t insns,
+                    uint64_t deadline_ms, const function_states_ptr& cache,
+                    const function_done& done);
 
 }
 }

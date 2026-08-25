@@ -1386,6 +1386,53 @@
         way, which is fine because a member with no value does not
         exist.
 
+    Built, and the storage had one more surprise in it than the
+    bullets above predicted. The surface is a handle rather than a
+    whole space walk: `sp:container(name)` gives something iterable
+    as `for member, value`, and `sp:kind(name)` answers "list",
+    "hash", "orderedset" or "" - both reached through a `__namecall`
+    on the space metatable. Member first means the control variable
+    is never nil until the walk ends, which is the same fix the
+    four tuple needed.
+
+    Two things had to be got right and neither was guessable from
+    the interface:
+
+      - a container's keys live on the shard its *name* routes to,
+        not wherever the whole key hashes. `with_container_read` is
+        literally `with_key_read(container)`, which is why hash_api
+        opens a scope and works on the shard inside it. A plain
+        `store.search` on the full key compiles, runs, and finds
+        nothing - the first cut did exactly that and every read
+        came back empty while `kind` worked, because `kind` asks a
+        different question.
+      - an ordered set keeps two families of key under its name,
+        and the obvious one is the wrong one. The score index is
+        `{name, score, member}` with an empty value; the member
+        index is `{IX_MEMBER, name, member}` and its value is the
+        score index key. Walking the plain `{name, ...}` prefix
+        therefore hands back the score where the member belongs and
+        nothing where the value belongs - observed as
+        `1.5 -> ` before it was `alpha -> 1.5`. So the walk uses
+        the member index and cuts the score back out of the value,
+        at `prefix.size` for `numeric_key_size` bytes through
+        `enc_bytes_to_dbl`, formatted so `tonumber` reads it.
+
+    Writing a member of an ordered set is refused with a message
+    pointing at ZADD, and deleting one likewise. Both are two keys
+    that have to agree, and the old score index entry has to be
+    unlinked when a score changes - a generic setter that wrote
+    only the member index would leave the set readable and wrong,
+    which is worse than not offering it. Lists and hashes write
+    normally.
+
+    This closes what F recorded as impossible: `myHrandfield` and
+    `myZrangebyscore` are now written in Luau in
+    test/functiontest.py and answer correctly, alongside field
+    reads cross checked against HGET, writes and removes, kind
+    detection for all three, and a refusal for a name that is not a
+    container.
+
     Measured, because the shape was worth testing before building
     it. A benchmark driving the Luau VM directly over 200,000 rows,
     counting through the same interrupt the budget uses, comparing
@@ -1484,6 +1531,341 @@
     the call is running in, or goes. Two ways to read the same key
     is one too many.
 
+    F5. What each call site costs.
+
+    Measured with everything in one run and each figure beside the
+    command that does the same job, because absolutes move by 2x
+    with machine load and only the within-run comparison means
+    anything.
+
+    Which build matters, and the first pass got it wrong: all of
+    this was measured against cmake-build-relwithdebinfo, which is
+    `-O2 -g` *and* has BARCH_LOCK_DEBUG defined globally - the
+    CMakeLists turns it off only for Release. That path adds
+    mark_reader, a linear push_hold/pop_hold scan and an atomic to
+    every lock, and everything that touches the store takes locks.
+
+    Re-measured against Release (-O3 -flto, no lock debug),
+    alternating the two so drift hits both:
+
+                          RelWithDebInfo        Release
+        store.get         0.38 / 0.30 us     0.37 / 0.34 us
+        space[k]          0.50 / 0.56 us     0.41 / 0.45 us
+        s[k] hoisted      0.48 / 0.48 us     0.39 / 0.46 us
+        barch.call        5.97 / 6.18 us     5.09 / 4.95 us
+
+    So Release is modestly ahead - nothing on store.get, roughly
+    15% on a space read, and a consistent 18% on barch.call, which
+    is the one doing the most locking. A single run each had
+    suggested 40 to 60%, and that was a noisy baseline flattering
+    it; alternating is what settled it.
+
+    The conclusions hold either way: the boundary is cheap, the
+    per-call setup dominates, and barch.call is the outlier. The
+    absolute figures below are the RelWithDebInfo ones, so read
+    them as an upper bound.
+
+        PING              2.62 us    the floor: parse, dispatch, reply
+        GET               3.64 us
+        SET               5.57 us
+
+        noop fn           4.18 us   +1.56 over PING    1.60x
+        store.get         5.71 us   +2.07 over GET     1.57x
+        space read        6.64 us   +3.00 over GET     1.82x
+        space write       9.30 us   +3.74 over SET     1.67x
+        barch.call GET   11.71 us   +8.07 over GET     3.22x
+        require + call    4.35 us   +1.73 over PING    1.66x
+        walk            2.26 us per row
+
+    The ratios in that table are wrong, and the reason matters.
+    Every figure was taken through redis-py, so each one is
+    `python client + barch`, and the client is most of it: memtier
+    reports about a million requests a second per thread at
+    pipeline depth 50, which is under a microsecond a request,
+    where this harness calls a PING 2.6us. Building and parsing a
+    three hundred command pipeline in Python costs more than the
+    server does.
+
+    Differences survive that - the client cost is common to both
+    sides and cancels - so the *additive* numbers stand: a function
+    call adds about 1.5 to 2us, a store access about 0.35us,
+    barch.call about 5us. The *ratios* do not: dividing by a
+    denominator that is mostly Python flatters Luau badly. If a GET
+    really costs 0.6us server side rather than the 3.6us measured,
+    then LUAU_GET at +3us is closer to 5x than the 1.8x reported.
+
+    Re-measured with memtier, release build, pipeline 50 - which is
+    barch rather than a client. Connection count matters and is
+    easy to misread: four connections spread over the eight service
+    threads, so those figures are aggregate throughput, while one
+    connection is the serial cost of a request.
+
+        one thread, one connection:
+        PING          1,654,778 ops/s    0.604 us
+        GET           1,181,108 ops/s    0.847 us
+        noop fn         404,161 ops/s    2.474 us
+        LUAU_GET        323,742 ops/s    3.089 us     3.65x, +2.24us
+
+    GET at 1.18M ops/s a thread is the figure barch is known to
+    hit, so this is the right measurement rather than a lucky one.
+
+        one thread, four connections (aggregate):
+
+        PING          3,461,562 ops/s    0.289 us
+        GET           3,098,255 ops/s    0.323 us
+        noop fn         797,705 ops/s    1.254 us
+        LUAU_GET        742,082 ops/s    1.348 us
+        barch.call      122,566 ops/s    8.159 us
+
+    The additive column survived: a function call adds 0.97us over
+    a PING and LUAU_GET adds 1.03us over a GET, which is the 1 to
+    2us this section had all along.
+
+    The ratios did not, and were out by more than a factor of two.
+    LUAU_GET is 3.65x a GET on one connection and 4.18x aggregate -
+    not the 1.8x reported through redis-py - and barch.call is 25x
+    rather than 3.2x. The ratio holding across both connection
+    counts is what says it is real.
+
+    The reason is that barch's own per command work is small: a GET
+    costs 0.24us more than a PING on one connection, so the
+    denominator is small and anything added to it dominates.
+    Through redis-py the same denominator read 3.6us because it was
+    mostly Python, which compressed every ratio toward 1.
+
+    Where the microseconds actually are, taken by adding one thing
+    at a time to a function that does nothing (memtier, release,
+    one connection, pipeline 50):
+
+        PING                      0.598 us
+        call() -> nil             2.410 us    an empty function
+        call() -> 1               2.413 us    +0.002 returning an integer
+        call(k) -> 1              2.524 us    +0.111 taking an argument
+        call(k) -> k              2.549 us    +0.026 handing it back
+        call(k) -> store.get(k)   3.126 us    +0.577 the store lookup
+
+    So an empty Luau function costs 1.813us before a line of Luau
+    runs, and that is 72% of what a LUAU_GET costs. Everything the
+    interface was suspected of is nearly free: arguments and return
+    values together are 0.14us, and the boundary crossings measured
+    at 20 to 58ns in isolation agree with that.
+
+    The 1.813us is all C++ setup per call - resolve's store lookup,
+    the job, the parked slot and wake key, the coroutine and its
+    registry ref, and four interface objects built from a dozen
+    std::functions. None of it depends on the script, and almost
+    none of it needs to be per call: it wants building once per
+    session and space, where the compiled functions already live.
+
+    Done, and it paid:
+
+                                  before      after
+        empty fn, above PING      1.813 us    1.133 us
+        LUAU_GET                  3.126 us    2.292 us
+        LUAU_GET vs GET           3.79x       2.85x
+
+    Two changes. The interface - loader, runner, store access and
+    space opener, about a dozen std::functions - is built once and
+    kept on the connection in `caller::script_interface`, keyed on
+    the space it was built for and dropped when the rights change.
+    And the parking apparatus is not built on the fast path any
+    more: the wake key is a string and a shard lookup that a call
+    finishing in its first slice never needed, so it is filled in
+    only when the call actually parks.
+
+    That wanted a release flag. The job can finish on the pool
+    while the command thread is still writing the key, and a reader
+    taking a half written std::string is a data race, so `can_wake`
+    is published after the key and read before it. A wake that
+    arrives too early does nothing and `after_blocks_registered`
+    wakes again - which is what that hook was already for.
+
+    A perf profile of the RelWithDebInfo build under memtier calling
+    an empty function, before and after, says the same thing the
+    timings do. Before:
+
+        12.3%  _Sp_counted_base::_M_release
+         7.8%  barch::functions::store_for
+        ~5%    _Function_handler<...store_for...>::_M_manager
+        ~15%   malloc / free / operator new
+         1.7%  ~store_access
+
+    After, `store_for` and its lambda managers are gone from the
+    profile entirely, and what is left is:
+
+        8.9%   _Sp_counted_base::_M_release
+        ~15%   malloc / free / operator new
+        4.4%   start_function
+        1.0%   _Sp_counted_ptr_inplace<call_job>
+
+    Almost none of it is Luau, the store or the ART - it is
+    allocation and reference counting. The call graph says where:
+    8.11% of the release traffic runs through
+    `run_params -> rpc_caller::call -> functions::run`, and 5.27%
+    of that is a `_Sp_counted_ptr_inplace` holding `_Function_handler`s.
+    That is `call_job` being destroyed at the end of every call,
+    taking the four interface objects it copied with it.
+
+    Then the profile's own advice was taken. `call_job` held the
+    interface by shared_ptr instead of copying it - one refcount
+    where there had been about a dozen std::function constructions
+    and as many destructions - and `key_space::canonical()` returns
+    the undecorated name from a member rather than building it,
+    which a call asked for twice.
+
+                                  start     hoisted    +job
+        empty fn, above PING      1.813us   1.133us    0.813us
+        LUAU_GET                  3.126us   2.292us    2.085us
+        LUAU_GET vs GET           3.79x     2.85x      2.60x
+
+    So the floor is down by 55% and the ratio from 3.79x to 2.60x,
+    all of it by not allocating rather than by doing anything
+    cleverer. The profile agrees and has gone flat - nothing above
+    4% where the first one had a 12% peak:
+
+                            first   hoisted   now
+        _Sp_counted_base    12.3%    8.9%     3.9%
+        store_for            7.8%     -        -
+        malloc family       ~15%    ~15%      4.0%
+
+    What is left is spread rather than concentrated, and it is a
+    different set of things:
+
+        7.3%  resolve's existence check - sharded_store::exists,
+              art::search, get_shard_index, key_space::get and
+              composite::create between them. This is the store
+              lookup that decides a bare name is a function, and it
+              is now the largest single thing a call does.
+        4.0%  Luau's collector - propagatemark, stack_init and
+              friends. Visible only now that the allocation noise
+              is gone; a coroutine and its garbage per call.
+        4.0%  malloc and free, down from about fifteen.
+        ~5%   dispatch and RESP parsing, which every command pays.
+
+    That the biggest remaining item was *deciding the name is a
+    function* rather than running it said the per-call machinery was
+    about done. So the decision is cached, per connection, and only
+    when it resolved:
+
+                            start   hoist    job    resolve
+        empty fn, above    1.813us 1.133us 0.813us 0.508us
+        LUAU_GET           3.126us 2.292us 2.085us 1.911us
+        vs GET               3.79x   2.85x   2.60x   2.41x
+
+    Only hits are kept. A miss is looked up every time, which is
+    what C insists on - a name tried before it existed has to
+    resolve once it does, or SETF followed by a call on the same
+    connection breaks, and functiontest asserts exactly that. The
+    cache clears when the space changes, because a bare name
+    resolves in its own space and then the global one, and on AUTH
+    alongside the interface. Returning a pointer into it rather
+    than a value took a std::function copy off the dispatch as
+    well.
+
+    So the floor is down 72% from where it started and the ratio
+    from 3.79x to 2.41x, without touching Luau, the store or the
+    ART - only by not building things per call that do not change
+    between calls.
+
+    A last profile says the character of the cost has changed
+    completely. Summed by cause:
+
+        5.86%  RESP parse and write - every command pays this
+        5.81%  Luau coroutine and execution: stack_init,
+               luau_execute, resume
+        5.63%  Luau's collector: propagatemark, reallymarkobject,
+               gcstep
+        4.78%  malloc and free, from about fifteen
+        3.35%  shared_ptr refcounts, from twelve
+        0.60%  resolve's store lookup, from seven
+
+    Nothing above 4% and no single villain. What used to be a C++
+    allocation problem had become Luau's own machinery: the
+    collector and coroutine creation together were 11.4%, both
+    driven by making a fresh coroutine for every call.
+
+    So they are pooled. A space keeps up to 32 spent coroutines and
+    hands one back out, `lua_resetthread` putting it to empty on
+    the way in and again on the way out - a thread that errored is
+    holding the error object and should not keep it alive until it
+    is next used. A call that yields keeps its own until it
+    finishes, because `release` runs from `finish_job` and nowhere
+    else.
+
+                            resolve   pooled
+        empty fn, above     0.508us   0.359us
+        LUAU_GET            1.911us   1.592us
+        vs GET                2.41x     2.02x
+
+    Which lands where this started out predicting: about twice a
+    GET, from 3.79x, with the fixed cost of a call down 80% from
+    1.813us to 0.359us. Five changes, none of them clever - hoist
+    the interface, hold it rather than copy it, cache the canonical
+    name, cache the resolution hit, pool the coroutines. Luau was
+    never the problem and the store was never the problem; it was
+    building the same things per call that do not change between
+    calls.
+
+    The rest is honest floor. RESP parsing is what every command
+    pays, and the store lookup a function does is now smaller than
+    the parsing of the command that asked for it.
+
+    What is left that is worth anything: `barch.call` at 8.16us,
+    which none of this touched and which is still an order of
+    magnitude worse than every other call site - a fresh
+    `rpc_caller` per command whose constructor runs AUTH. One per
+    function call rather than per command pays that once.
+
+    What is left, in rough order: `resolve` builds a
+    std::function closure per bare-name call, capturing a key space
+    pointer and the name, and does a store lookup to decide the
+    name is a function at all; `make_shared<parked>` and
+    `make_shared<call_job>`; the args vector and a string per
+    argument; the coroutine and its registry ref. The 1.4us first
+    predicted has been passed, and 2x a GET now looks reachable.
+
+    Two lessons rather than one:
+
+      - a client in the measurement loop is not a constant to
+        subtract. It cancels from differences and destroys ratios,
+        and ratios are what get quoted.
+      - barch's own per-command cost is far smaller than assumed.
+        34ns of work for a GET is the number to hold in mind when
+        judging what a script costs: there is very little to hide
+        behind.
+
+    What it says:
+
+      - a function call is about 1us of fixed cost whatever it
+        does. Against barch's own 34ns of work for a GET that is
+        4x, not the 1.6x the client-bound measurement suggested.
+      - `barch.space.x.k` costs about the same as
+        `barch.store.get(k)`. The metamethod is not the expensive
+        part, so the syntax that reads better is not paid for.
+      - a write through the space handle is 1.67x a SET, not
+        because writing is cheap but because SET is dear enough to
+        hide the overhead. The heavier the command, the less a
+        script costs relative to it.
+      - `require` is free at call time - the same as a noop -
+        because it resolved when the function was compiled. Only
+        the first use in a session pays.
+      - `barch.call` is the outlier at 3.22x and always has been.
+        It builds an `rpc_caller` per command, whose constructor
+        runs AUTH. One sub-caller per function call rather than per
+        command would pay that once, and it is the only figure here
+        with obvious headroom.
+
+    The walk was the useful measurement. It came out at 3.6us a row
+    with a body that only counts, which made no sense until the
+    reason turned up: `page` was reading the value of every row as
+    it built the page. The row object was lazy about making the
+    *Luau string* while the C++ side had already done the store
+    lookup, so the 3.3x the F2 benchmark predicted for a filtering
+    walk was being thrown away before Luau ever saw it. Reading the
+    value when a script asks for it took the row from 3.62us to
+    2.26us, and a filter that skips most values now skips the
+    lookups too.
+
     G2. Where a foreign retrieval happens, and what that means for
         a script.
 
@@ -1551,6 +1933,111 @@
     that is built once per function call rather than once per
     command would not pay it at all.
 
+    H2. Native codegen, and the interrupt that makes it pointless.
+
+    Luau ships a native code generator - `Luau.CodeGen`, which the
+    build already fetches - and the question was whether it is
+    worth having and what it costs in sandboxing.
+
+    The sandbox worry turned out to be the wrong one. Native code
+    emits interrupt calls just as the interpreter does:
+    `IrCmd::INTERRUPT` is lowered at loop back edges, LOP_CALL and
+    LOP_RETURN, and a twenty million iteration loop fires the
+    interrupt 20,000,001 times whether it is interpreted or
+    native. So the instruction budget and the deadline keep
+    working and a spinning script stays killable, which is the
+    property that would have refused it outright.
+
+    What it costs is that with our interrupt installed it is not
+    faster. Measured on a compute heavy loop:
+
+        interpreter, interrupt + singlestep      209 ms
+        native codegen, interrupt + singlestep   217 ms   0.96x
+        interpreter, interrupt, no singlestep    161 ms
+        native codegen, interrupt, no singlestep  61 ms   2.64x
+        interpreter, no interrupt at all         144 ms
+        native codegen, no interrupt              60 ms
+
+    Two things fall out of that table.
+
+    The first is free and has been taken: `lua_singlestep(L, 1)`
+    was costing 1.30x for nothing. It drives the *debugstep* hook,
+    which neither driver sets, and turning it on forces the
+    interpreter off its computed goto dispatch - the comment at
+    the top of `luau_execute` says so. It does not change how
+    often `interrupt` fires, which is what the budget rides on:
+    identical counts either way. It was in the foreign driver and
+    got copied into the function one. Gone from both.
+
+    The second is that codegen is worth 2.64x on scripts that
+    compute, and nothing at all on the ones we have. Our per call
+    cost is machinery - the coroutine, the argv table, the
+    Variable conversion - not bytecode, and a LUAU_GET body is a
+    handful of instructions. Not adopted, for reasons that are
+    about this architecture rather than Luau:
+
+      - one state per session per space means native code would be
+        compiled per session, unless `SharedCodeGenContext` and
+        `SharedCodeAllocator` are used to share it. That is the
+        real work in adopting it.
+      - `CodeGen::create(L)` per state and a compile pass per
+        function both land on the cold path, which is where a
+        short lived connection spends its life.
+      - it wants executable memory, which is a process level
+        consideration this has not had to have before.
+
+    Worth revisiting when F's ambition of writing real commands in
+    Luau is real. A ZRANGEBYSCORE written as a script is exactly
+    the case 2.64x is for.
+
+    H3. What a script needs to compute with.
+
+    The aim this is all pointed at: someone writing their own H3
+    geo index in Luau and not paying for the choice. That is a
+    compute bound script, which changes what matters - the per call
+    overhead is 2 to 6us and irrelevant against real indexing work,
+    while execution speed and the numeric types are everything.
+
+    Three libraries are open now, all pure computation with no
+    files, clock or network, so the sandbox is unchanged:
+
+      - `integer`. The one that matters. Luau numbers are doubles,
+        so a 64 bit identifier - an H3 cell, a hash, a snowflake -
+        could otherwise only be carried as two halves through
+        bit32, which is slow to run and worse to write. This is a
+        native 64 bit type, `LUA_TINTEGER`, with the arithmetic,
+        the bit operations, the shifts and the unsigned
+        comparisons. Note both arguments to `lshift` are integers,
+        not an integer and a number.
+      - `buffer`. A mutable byte array with typed reads and
+        writes, which is how a lookup table wants to be held
+        rather than as a Luau table of boxed numbers.
+      - `vector`, for the same reason on the float side.
+
+    Opening `integer` needed the conversions to carry the width,
+    and the first attempt did not: `to_variable` had no
+    `LUA_TINTEGER` case at all, so a function returning one was
+    refused as "not a value", and once that was added it used
+    `lua_tointegerx` - the *32 bit* accessor, which silently keeps
+    the low word and turned 2^62 into 0. `lua_tointeger64` is the
+    one that means it, and `push_variable` pushes 64 bit the same
+    way so a counter read back through barch.call keeps every bit.
+
+    That truncation is worth remembering because of how it would
+    have failed: an H3 cell keeps its mode and resolution in the
+    *high* bits, so a script would have looked right at low
+    resolutions and been quietly wrong where it counted.
+
+    What is left between here and the aim:
+
+      - codegen, per H2. 2.64x on compute, gated on
+        SharedCodeGenContext so a hundred connections do not each
+        compile their own copy.
+      - the store interface, per F2 and 6b - an index is written by
+        walking and writing keys, and the walk is not built yet.
+      - nothing about the per call cost. It is already noise at
+        this scale.
+
     G. SQL, and later HTTP.
 
     `sql.query` exists and is scoped to the space's driver; a
@@ -1567,11 +2054,10 @@
     fill and a client-invoked command are not the same risk, plus a
     wall-clock deadline as foreign has.
 
-    First cut registers the command with `is_asynch`, so it runs on
-    the worker pool out of the asynchronous batch and never on a
-    service thread. That still holds one worker for the whole
-    script, bounded by the budget and the deadline, which is the
-    deal KEYS already has. The proper answer is to park: pump on the
+    The first cut registered the command with `is_asynch`, which
+    ran it on the worker pool out of the asynchronous batch and
+    never on a service thread - but held one worker for the whole
+    script. That is gone; see I.7 for what replaced it. The proper answer is to park: pump on the
     foreign pool with requeue and wake the session when it finishes.
     A block with no key is never woken by the shard waiter registry -
     `add_block` keys on (session, key) and `call_unblock` fires from
@@ -1599,17 +2085,18 @@
          including a spin being cut off with the connection still
          usable afterwards.
 
-         Shortcuts taken, both deliberate and both wanting undoing
-         before this is called finished:
-           - the budget is `get_foreign_script_insns()`, a million
-             instructions, rather than the `function_script_insns`
-             of its own that H asks for, and the deadline is the
-             space's `foreign_query_timeout_ms`. A fill and a
-             client-invoked command are not the same risk.
-           - no session cache yet: every CALLF compiles the source
-             again. C is the design; this is correctness first, and
-             the cache is a measurable change on its own rather
-             than two hard things at once.
+         One shortcut left, and it is the only thing between this
+         item and done: the budget is `get_foreign_script_insns()`,
+         a million instructions, rather than the
+         `function_script_insns` of its own that H asks for, and
+         the deadline is the space's `foreign_query_timeout_ms`. A
+         fill and a client-invoked command are not the same risk,
+         and after 7 the budget is a slice size while the deadline
+         is the real bound - so they want naming for what they now
+         are, not just separating.
+
+         (The session cache that was listed here as missing landed
+         in 4.)
 
       2b. [done] Calling one by name. `barch::functions::resolve`
          answers for a name the built-in table missed, and
@@ -1793,7 +2280,7 @@
          is "" and there is no `space:` prefix for it, so a function
          there sees `barch.space().name == ""`. That is the
          vocabulary a client uses, not a gap.
-      6b. The space as a value - `barch.space.sp1.key1`, read,
+      6b. [done] The space as a value - `barch.space.sp1.key1`, read,
          written and removed through `__index` and `__newindex` -
          and iteration by page copy, handing back a row object with
          container, key, value and type that decodes on demand. See
@@ -1801,22 +2288,160 @@
          and what that is worth. Per space ACLs (135) want to
          land first, or a function is a way to write any space the
          user can write at all.
-      7. Parking, replacing `is_asynch`.
+      7. [done] Parking, replacing `is_asynch`.
 
-    J. Still open.
+         The script yields instead of dying. `function_interrupt`
+         calls `lua_yield` when its slice is spent, so the
+         instruction budget is a slice size and the *deadline* is
+         what ends a runaway - the same lesson foreign learned in
+         DONE 83. A call not on a coroutine has nowhere to yield
+         to, so there the slice stays a cap.
 
-      - whether `KS2:KS1.PRINT_NAME` - one space's function run
-        against another space - is allowed or refused. Refusing it
-        means the dotted form only ever repeats what the colon
-        already said.
-      - what the session cache costs at a thousand connections, and
-        where the cap goes - and whether an evicted-then-recompiled
-        function picking up newer source is acceptable or has to be
-        prevented.
-      - one `argv` table or varargs.
-      - whether globals in the `configuration` space may be
-        redefined by a space-local function of the same name, or
-        whether that is refused rather than shadowed.
+         `start_function` runs the script on a coroutine, pumped on
+         the foreign pool, and the command answers "parked" rather
+         than a value. `call_job` owns the loader, the command
+         runner and the store access, because those were built on
+         the command's stack and would be dangling by the first
+         yield, and it holds the states cache so a session's state
+         cannot be closed under a suspended coroutine.
+
+         The wake needed no new plumbing: `call_unblock(key)` fires
+         whoever is registered under a key, which is how a foreign
+         fill wakes a parked GET, so the call registers a block
+         under a key nobody writes and wakes itself the same way.
+
+         Two hazards, both handled rather than hoped about:
+
+           - a stray write to that key would wake the call early.
+             The block callback checks `finished` and re-parks
+             through `retry_block()` if the script is still going.
+           - the session puts blocks on their shards only after the
+             command returns, so a script that finished first would
+             wake nothing. `caller::after_blocks_registered` is the
+             generic re-check - the same thing `foreign::kick`
+             does for foreign spaces, which is where the shape came
+             from.
+
+         CALLF is no longer `is_asynch`, and the dispatcher runs a
+         function inline - except when the batch is already
+         asynchronous, where it has to queue or its reply overtakes
+         the ones in front. test/functiontest.py pipelines a
+         function with commands either side, both ways round.
+
+         7b. [done] A short script does not park at all.
+
+         Parking cost about 20us a call - a shard latch, a pool
+         hop, a wake and a post back - which measured as the whole
+         difference between a GET and a GET written in Luau:
+
+                              PING   GET   noop fn   fn+store.get
+             parking always    4.2   5.4     24.9        23.4
+             short slice first 2.9   4.0      4.4         5.0
+
+         The middle column is the finding: a function that does
+         *nothing* cost 24.9us and one that read a key cost 23.4,
+         so none of it was the work. It was all machinery a script
+         that finishes in microseconds never needed.
+
+         So the first slice runs on the calling thread and the call
+         parks only if it actually yields. The slice is deliberately
+         short - `inline_insns`, 20000 - because a full one on a
+         service thread is what parking was for; this is long enough
+         for a one liner and short enough that anything else parks
+         almost at once.
+
+         The fixed cost of a function call went 20.7us to 1.4us.
+
+         What a Luau GET costs, measured by alternating it with the
+         built-in inside one run so machine drift hits both - which
+         matters, because comparing across runs flattered it:
+
+             quiet machine   +2.5us   1.68x pipelined  1.08x not
+             busy machine    +6.1us   2.15x pipelined  1.12x not
+
+         The stable number is the *additive* one: a call adds
+         roughly 2 to 6us whatever it does. The ratio is only a
+         statement about what it is being compared with. Against a
+         pipelined GET, which is 4 or 5us of real work, that is
+         about 1.7 to 2.2x. Against a GET on its own round trip,
+         where 30 or 40us of wire swamps it, it is 1.1x. Against
+         any function that does actual work it disappears - at
+         100us of logic it is 1.02x.
+
+         So "Luau is about twice as slow" is true only for a
+         function whose body is one store read *and* a client that
+         pipelines. It is the wrong shape to plan with; the fixed
+         couple of microseconds is the thing to keep in mind.
+         Worst ping while sixteen long scripts ran went 32ms to
+         0.5ms, because short work no longer queues behind them.
+
+         Two things it left behind:
+
+           - `barch.call` is still 14.5us against `barch.store`'s
+             3.7us. That is the sub-caller: `rpc_caller`'s
+             constructor runs AUTH, so every command a script calls
+             authenticates `default` first. One sub-caller per
+             function call rather than per command would pay it
+             once, and G2 already noticed it - it is measurable now.
+           - the deadline is wall clock from the start, so it
+             counts time a script spends queued behind others. Under
+             enough load a script fails rather than being slow:
+             sixteen at once, each wanting 0.29s, and three of them
+             hit the 1s deadline. That may be right - it is what
+             bounds a runaway - but it is a decision, not an
+             accident, and nothing says so anywhere yet.
+
+         Measured before the fast path: one script alone 0.35s,
+         sixteen at once 1.00s
+         rather than 5.6s, 89 pings served throughout at worst
+         32ms, nothing failed. Worth being honest that this does
+         not isolate parking from what `is_asynch` did - both use a
+         pool of about the same size, so both predict a second.
+         What parking gives that the old path did not is structural:
+         the connection holds no worker while the script runs, and
+         slices interleave instead of running to completion.
+
+    J. Settled.
+
+      - `KS2:KS1.PRINT_NAME` is allowed: one space's function run
+        against another. The colon says what it runs against, the
+        dot says where the definition comes from, and they are
+        worth having separately - a function written against an
+        interface rather than particular keys is exactly what this
+        is for. Already how it behaves.
+      - an evicted-then-recompiled function picking up newer source
+        is acceptable. A session keeps what it compiled, but memory
+        pressure is allowed to break that: it is the same source of
+        truth either way, just read later.
+      - arguments are varargs:
+
+            arity = 1
+            function call(key) return barch.store.get(key) end
+
+        which reads the way a function of fixed arity should. A
+        script that wants them as a table writes
+        `local argv = {...}` and has both, so the host does not
+        have to offer two shapes to give both.
+      - a global may be redefined by a space-local function of the
+        same name. The space wins; KEYSF shows what is shadowed.
+
+      - and globals moved out of `configuration` into the default
+        space. Putting code in `configuration` was a mistake: it
+        holds `<name>.foreign` settings and has a job of its own,
+        while the default space is where an unqualified client
+        already works, so a function written there being callable
+        everywhere reads as defining something at top level. The
+        consequence is symmetrical rather than a gap - there is no
+        way to write a function that is *only* in the default
+        space, because the default space is the global namespace.
+
+        The same mistake is still in the foreign path and predates
+        this: `<name>.foreign_script` is a configuration key, and
+        `load_source` takes inline Luau source when it begins with
+        `--`, so foreign scripts do live in `configuration` today.
+        Now that a function is an ordinary key, that wants to
+        become a reference to a tfunction key instead. Not changed
+        here - it is shipped behaviour with its own tests.
 
     K. The commands that address the range: SETF, GETF, REMF, KEYSF.
 
@@ -2012,11 +2637,45 @@
     reads it. `>secret` is refused in the KSPACE form: a secret
     belongs to the user, not to their rights in one space.
 
+    Built. `KSPACE ACL [KSNAME] SETUSER alice -read -write +function`
+    writes `user:space:<user>:<space>:<cat>`, AUTH reads a user's
+    overrides at the same time as their categories, and
+    `caller::get_space_acl()` is the global vector with that
+    space's differences applied. A space with no rule answers the
+    global vector itself, so a user nobody has written a rule for
+    costs nothing and behaves exactly as before.
+
+    Three things worth recording out of building it:
+
+      - the hazard was real and was where it was expected. The
+        authorization check sat *inside* the lookup cache -
+        `if (prev_cn != cn) { find; if (!authorized) refuse; }` -
+        so a repeated command name was never checked again. Fine
+        while rights were global, wrong the moment they vary: the
+        test does open:SET, shut:SET, open:SET on one connection
+        and each has to answer for itself. The check now runs per
+        command; the resolution is what is cached, once per space
+        change rather than per command.
+      - a SETUSER states a space's whole rule rather than adding
+        to it. Otherwise the rule accumulates and you have to read
+        it back to know what a new one means.
+      - `>secret` is refused per space: a secret belongs to the
+        user, not to their rights in one place. `~pattern` is
+        refused too, per 136.
+
     Still to answer:
 
       - `~pattern` filters, now refused rather than silently
         dropped - see 136. Implementing key-level rights for real
-        is a separate job, and per-space rights should land first.
+        is a separate job.
+      - replication is the one that still matters. docs/ACL.md
+        says outright that acl data does not replicate, and the
+        auth store is a standalone `barch::shard` rather than a
+        key space, so a per space rule reaches no replica. That
+        was true of categories before this and is not made worse,
+        but per space rights make it more obviously wrong.
+      - docs/ACL.md needs the KSPACE ACL form, and its list of
+        thirteen categories is now fourteen with `function`.
       - spaces that come and go. A rule naming a space that does
         not exist yet, and a space dropped by UNLOAD while a user
         holds rules on it. Keeping the rule is probably right,
@@ -2075,3 +2734,5 @@
     tolerable depends on how often that happens.
 
 138. [Done] art::iterator::last() finds nothing in a single key tree [24-08-2026] Nr 129 1fee45f
+
+139. [Done] foreign_script kept Luau source in the configuration space [25-08-2026] Nr 130 4761263

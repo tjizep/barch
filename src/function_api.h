@@ -35,8 +35,26 @@ namespace functions {
      * `configuration`, where the globals live. False means no such function, which the
      * dispatcher answers as an unknown command exactly as it did before.
      */
-    bool resolve(caller& call, const std::string& from_space, const std::string& name,
-                 barch_function& out);
+    /**
+     * Returns what to run for `name`, or null if there is no such function.
+     *
+     * The answer is kept on the connection, so a name called twice is resolved once -
+     * the lookup that decides a bare name is a function was the largest single thing
+     * a call did. A pointer rather than a value, so the caller does not copy a
+     * std::function per call either. See TODO 98 F5.
+     */
+    const barch_function* resolve(caller& call, const std::string& from_space,
+                                  const std::string& name);
+
+    /**
+     * the source stored for `name`, looked up in `space` and then in the global one.
+     *
+     * Exposed for the foreign fill path, which names a function in its configuration
+     * rather than carrying the script there - see TODO 139. False means no function
+     * of that name, which is not the same as an error.
+     */
+    bool source_of(const barch::key_space_ptr& space, const std::string& name,
+                   std::string& out);
 }
 }
 

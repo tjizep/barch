@@ -5,6 +5,7 @@
 #include "configuration.h"
 #include "lzr_log.h"
 #include "art/nodes.h"
+#include "function_api.h"
 
 #include <cmath>
 #include <fstream>
@@ -85,6 +86,22 @@ static void open_safe(lua_State* L) {
     luaopen_utf8(L);
     luaopen_bit32(L);
     luaopen_coroutine(L);
+    /*
+     * Three more that are pure computation - no files, no clock, no network - and are
+     * what a script needs to do real work rather than string handling.
+     *
+     * `integer` is the one that matters. Luau numbers are doubles, so anything with a
+     * 64 bit identifier - an H3 geo cell, a snowflake id, a hash - could otherwise
+     * only be carried as two halves through bit32, which is slow to run and worse to
+     * write. This is a native 64 bit type with the arithmetic, the bit operations and
+     * the unsigned comparisons.
+     *
+     * `buffer` is a mutable byte array with typed reads and writes, which is how a
+     * lookup table wants to be stored rather than as a Luau table of numbers.
+     */
+    luaopen_integer(L);
+    luaopen_buffer(L);
+    luaopen_vector(L);
     lua_pushcfunction(L, blocked_require, "require");
     lua_setglobal(L, "require");
     lua_newtable(L);
@@ -108,14 +125,26 @@ static std::string script_key(std::string_view k) {
     return {k.data() + start, end - start};
 }
 
+/*
+ * Read a fill script from a file, if the spec is one.
+ *
+ * It used to take the value itself as the script when it began with `--`, which put
+ * Luau source in the configuration space - a store whose job is settings. A script is
+ * a function now: store it with SETF and point `foreign_script` at the name. See
+ * TODO 139.
+ *
+ * A path is not the same mistake - it is a reference, not the code - so it still
+ * works, and is tried after the name.
+ */
 static bool load_source(const std::string& spec, std::string& source, std::string& err) {
     if (spec.size() >= 2 && spec[0] == '-' && spec[1] == '-') {
-        source = spec;
-        return true;
+        err = "a luau script belongs in a function: SETF it, then name it in "
+              "foreign_script";
+        return false;
     }
     std::ifstream in(spec, std::ios::binary);
     if (!in) {
-        err = "cannot read luau script";
+        err = "no function or file of that name";
         return false;
     }
     source.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -167,7 +196,9 @@ static bool compile_entry(const std::string& source, std::string& bytecode,
 }
 
 static bool compile_source(const std::string& source, std::string& bytecode, std::string& err) {
-    return compile_entry(source, bytecode, "resolve", err);
+    // one entry point for every stored Luau function. A fill answers `call(key, space)`
+    // where it used to answer `resolve(key, space)` - see TODO 139
+    return compile_entry(source, bytecode, "call", err);
 }
 
 struct luau_job {
@@ -199,7 +230,7 @@ static result take_result(lua_State* T, int status) {
         const char* s = lua_tolstring(T, -1, &n);
         return {result::status::value, std::string(s, n)};
     }
-    return {result::status::error, "FOREIGN resolve must return a string or nil"};
+    return {result::status::error, "FOREIGN call must return a string or nil"};
 }
 
 static void pump(std::shared_ptr<luau_job> job, int narg) {
@@ -226,6 +257,33 @@ static void pump(std::shared_ptr<luau_job> job, int narg) {
     }
 }
 
+/**
+ * compile the space's fill script, once, on the first fill that needs it.
+ *
+ * The script is a stored function: looked up in this space and then in the default
+ * one, the same order a call resolves in. A file path still works and is tried after
+ * the name, since a path is a reference rather than code in the settings store.
+ */
+static bool fill_bytecode(const key_space_ptr& ks, std::string& err) {
+    static std::mutex compiling;
+    std::lock_guard lock(compiling);
+    if (!ks->luau_bytecode.empty())
+        return true;              // another fill got here first
+
+    std::string source;
+    if (!barch::functions::source_of(ks, ks->foreign_script, source)
+        && !load_source(ks->foreign_script, source, err)) {
+        if (err.empty())
+            err = "no function or file named " + ks->foreign_script;
+        return false;
+    }
+    if (!compile_source(source, ks->luau_bytecode, err)) {
+        ks->luau_bytecode.clear();
+        return false;
+    }
+    return true;
+}
+
 static void start_resolve(std::string_view space, std::string_view key, uint64_t deadline_ms,
                           bool requeue, std::function<void(result)> done) {
     auto ks = get_keyspace(std::string(space));
@@ -234,8 +292,14 @@ static void start_resolve(std::string_view space, std::string_view key, uint64_t
         return;
     }
     if (ks->luau_bytecode.empty()) {
-        done({result::status::error, "FOREIGN no script"});
-        return;
+        // first fill for this space: find the function the configuration names and
+        // compile it. Deferred to here because prepare_luau runs before the space has
+        // shards to read a key out of - see TODO 139
+        std::string err;
+        if (!fill_bytecode(ks, err)) {
+            done({result::status::error, "FOREIGN " + err});
+            return;
+        }
     }
     auto job = std::make_shared<luau_job>();
     job->requeue = requeue;
@@ -255,7 +319,6 @@ static void start_resolve(std::string_view space, std::string_view key, uint64_t
         job->ctx.deadline = art::now() + static_cast<int64_t>(deadline_ms);
     lua_callbacks(L)->userdata = &job->ctx;
     lua_callbacks(L)->interrupt = interrupt;
-    lua_singlestep(L, 1);
     int rc = luau_load(L, "=foreign", ks->luau_bytecode.data(), ks->luau_bytecode.size(), 0);
     if (rc != 0) {
         std::string err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "FOREIGN luau load";
@@ -273,9 +336,9 @@ static void start_resolve(std::string_view space, std::string_view key, uint64_t
         return;
     }
     job->T = lua_newthread(L);
-    lua_getglobal(job->T, "resolve");
+    lua_getglobal(job->T, "call");
     if (lua_type(job->T, -1) != LUA_TFUNCTION) {
-        job->done({result::status::error, "FOREIGN resolve missing"});
+        job->done({result::status::error, "FOREIGN call missing"});
         return;
     }
     auto uk = script_key(key);
@@ -297,15 +360,20 @@ struct luau_driver_t : driver {
     }
 };
 
+/*
+ * Nothing is compiled here any more.
+ *
+ * This runs from the key_space constructor, before the space has any shards, so the
+ * function the script now lives in cannot be read yet. The first fill compiles it and
+ * the space keeps the bytecode after that - which also means a script stored *after*
+ * its space was built starts working, where before the space had to be rebuilt.
+ *
+ * All that is left to check is that a name was given at all. See TODO 139.
+ */
 bool prepare_luau(key_space& ks) {
-    std::string source, err;
-    if (!load_source(ks.foreign_script, source, err)) {
-        barch::err({"luau foreign source - ignoring it for space", ks.get_name(), err});
-        return false;
-    }
-    if (!compile_source(source, ks.luau_bytecode, err)) {
-        barch::err({"luau foreign source - ignoring it for space", ks.get_name(), err});
-        ks.luau_bytecode.clear();
+    if (ks.foreign_script.empty()) {
+        barch::err({"luau foreign source needs a function name - ignoring it for space",
+                    ks.get_name()});
         return false;
     }
     return true;
@@ -324,8 +392,17 @@ static void function_interrupt(lua_State* L, int gc) {
         return;
     if (ctx->deadline && art::now() > ctx->deadline)
         luaL_error(L, "FUNCTION timeout");
-    if (ctx->left == 0)
+    if (ctx->left == 0) {
+        // the slice is spent. Yield so the pool thread can take other work and this
+        // script comes back on the next one - the deadline is what ends a runaway,
+        // not the slice. A call that is not on a coroutine has nowhere to yield to,
+        // which is the synchronous path below, so there the slice is a cap
+        if (lua_isyieldable(L)) {
+            lua_yield(L, 0);
+            return;
+        }
         luaL_error(L, "FUNCTION instruction budget exceeded");
+    }
     --ctx->left;
 }
 
@@ -357,11 +434,24 @@ struct space_state {
     const command_runner* run_command{nullptr};
     /** and where barch.store goes, on the same terms */
     const store_access* store{nullptr};
+    /** how barch.space reaches another one */
+    const space_opener* open_space{nullptr};
+    /** spaces already opened for this call, so a loop does not reopen one per step */
+    heap::string_map<store_access> opened{};
     /**
      * what is being compiled right now, innermost last. A require for something on
      * this stack is a cycle, and the stack is the path to put in the message.
      */
     std::vector<std::string> loading{};
+    /**
+     * coroutines that have finished and can be used again.
+     *
+     * A call runs its script on a coroutine of its own, and making a fresh one every
+     * time was 11% of the server between `stack_init` and the collector marking the
+     * garbage it left. They are interchangeable - `lua_resetthread` puts one back to
+     * empty - so a small pool of them removes both at once. See TODO 98 F5.
+     */
+    heap::vector<std::pair<lua_State*, int>> free_threads{};
 
     ~space_state() {
         if (L)
@@ -397,10 +487,12 @@ static void push_variable(lua_State* L, const Variable& v) {
             lua_pushboolean(L, std::get<bool>(v));
             return;
         case var_int64:
-            lua_pushnumber(L, (double) std::get<int64_t>(v));
+            // pushed as a 64 bit integer, not a double: a script that reads a counter
+            // back through barch.call should get every bit of it
+            lua_pushinteger64(L, std::get<int64_t>(v));
             return;
         case var_uint64:
-            lua_pushnumber(L, (double) std::get<uint64_t>(v));
+            lua_pushinteger64(L, (int64_t) std::get<uint64_t>(v));
             return;
         case var_double:
             lua_pushnumber(L, std::get<double>(v));
@@ -545,6 +637,302 @@ static int store_space(lua_State* L) {
 }
 
 /*
+ * barch.space.NAME.key - a key space as a value.
+ *
+ *     barch.space.sp1.key1              read
+ *     barch.space.sp1.key1 = "v"        write
+ *     barch.space.sp1.key1 = nil        remove
+ *     for row in barch.space.sp1 do     walk it
+ *
+ * Userdata rather than tables all the way down: `__index` on a table only fires when
+ * the key is absent, so a table could be written past, while userdata always goes
+ * through the metamethods. See TODO 98 F2.
+ */
+enum { space_tag = 1, row_tag = 2 };
+
+struct space_handle {
+    space_state* st{nullptr};
+    const store_access* store{nullptr};
+};
+
+/** a container reached through a space handle: sp:container("name") */
+struct container_handle {
+    const store_access* store{nullptr};
+    std::string name{};
+};
+
+/** where a container walk has got to */
+struct member_cursor {
+    const store_access* store{nullptr};
+    std::string name{};
+    heap::vector<std::pair<std::string, std::string>> page{};
+    size_t at{0};
+    std::string after{};
+    bool done{false};
+};
+
+/** where a walk has got to, and the page it is reading */
+struct row_cursor {
+    const store_access* store{nullptr};
+    heap::vector<store_access::row> page{};
+    size_t at{0};
+    std::string after{};
+    bool done{false};
+};
+
+static const store_access* handle_store(lua_State* L, int idx) {
+    auto* h = static_cast<space_handle*>(lua_touserdata(L, idx));
+    if (!h || !h->store)
+        luaL_error(L, "FUNCTION that key space is not open");
+    return h->store;
+}
+
+static int space_read(lua_State* L) {
+    const store_access* s = handle_store(L, 1);
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 2, &n);
+    std::string value;
+    if (!s->get({k, n}, value)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, value.data(), value.size());
+    return 1;
+}
+
+static int space_write(lua_State* L) {
+    const store_access* s = handle_store(L, 1);
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 2, &n);
+    // assigning nil removes, which is how a table behaves and so how this should
+    if (lua_isnoneornil(L, 3)) {
+        s->remove({k, n});
+        return 0;
+    }
+    size_t vn = 0;
+    const char* v = lua_tolstring(L, 3, &vn);
+    if (!v)
+        luaL_error(L, "FUNCTION a key space holds strings and numbers");
+    std::string err;
+    if (!s->set({k, n}, {v, vn}, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    return 0;
+}
+
+static int row_read(lua_State* L) {
+    auto* c = static_cast<row_cursor*>(lua_touserdata(L, 1));
+    const char* f = lua_tostring(L, 2);
+    if (!c || !f || c->at == 0 || c->at > c->page.size()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    const auto& r = c->page[c->at - 1];
+    // decoded only when asked for: a filter that reads keys and skips most values is
+    // the loop people write, and it is 3.3x faster for not building the rest
+    if (!strcmp(f, "key")) {
+        if (r.key.empty()) lua_pushnil(L);
+        else lua_pushlstring(L, r.key.data(), r.key.size());
+    } else if (!strcmp(f, "value")) {
+        // read now, not when the page was copied: a walk that looks at keys and wants
+        // the value of a few should pay for those few, which is the whole point of
+        // handing back a row that decodes on demand
+        if (r.key.empty() || !c->store || !c->store->get) {
+            lua_pushnil(L);
+        } else {
+            std::string v;
+            if (!c->store->get(r.key, v)) lua_pushnil(L);
+            else lua_pushlstring(L, v.data(), v.size());
+        }
+    } else if (!strcmp(f, "container")) {
+        if (r.container.empty()) lua_pushnil(L);
+        else lua_pushlstring(L, r.container.data(), r.container.size());
+    } else if (!strcmp(f, "type")) {
+        lua_pushlstring(L, r.type.data(), r.type.size());
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+/** the step of `for row in space do`: one row, or nil when the walk is over */
+static int row_next(lua_State* L) {
+    auto* c = static_cast<row_cursor*>(lua_touserdata(L, lua_upvalueindex(1)));
+    if (!c || !c->store) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (c->at >= c->page.size()) {
+        if (c->done) {
+            lua_pushnil(L);
+            return 1;
+        }
+        c->page.clear();
+        c->at = 0;
+        // `after` is the encoded key the last page ended on, kept as the store
+        // handed it over. A key erased after this page was copied simply does not
+        // appear, which is the promise SCAN already makes
+        c->store->page(c->after, 256, c->page, c->after);
+        if (c->page.empty()) {
+            c->done = true;
+            lua_pushnil(L);
+            return 1;
+        }
+    }
+    ++c->at;
+    lua_pushvalue(L, lua_upvalueindex(1));   // the same row object every step
+    return 1;
+}
+
+static int space_iter(lua_State* L) {
+    const store_access* s = handle_store(L, 1);
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    auto* c = static_cast<row_cursor*>(lua_newuserdatadtor(L, sizeof(row_cursor),
+        [](void* p) { static_cast<row_cursor*>(p)->~row_cursor(); }));
+    new (c) row_cursor();
+    c->store = s;
+    lua_getfield(L, LUA_REGISTRYINDEX, "barch.row.meta");
+    lua_setmetatable(L, -2);
+    lua_pushcclosure(L, row_next, "next", 1);
+    return 1;
+}
+
+static container_handle* as_container(lua_State* L, int idx) {
+    auto* h = static_cast<container_handle*>(lua_touserdata(L, idx));
+    if (!h || !h->store)
+        luaL_error(L, "FUNCTION that container is not open");
+    return h;
+}
+
+static int container_read(lua_State* L) {
+    auto* h = as_container(L, 1);
+    size_t n = 0;
+    const char* m = luaL_checklstring(L, 2, &n);
+    std::string value;
+    if (!h->store->container_get || !h->store->container_get(h->name, {m, n}, value)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, value.data(), value.size());
+    return 1;
+}
+
+static int container_write(lua_State* L) {
+    auto* h = as_container(L, 1);
+    size_t n = 0;
+    const char* m = luaL_checklstring(L, 2, &n);
+    if (lua_isnoneornil(L, 3)) {
+        if (h->store->container_del)
+            h->store->container_del(h->name, {m, n});
+        return 0;                          // assigning nil removes, as a table does
+    }
+    size_t vn = 0;
+    const char* v = lua_tolstring(L, 3, &vn);
+    if (!v)
+        luaL_error(L, "FUNCTION a container holds strings and numbers");
+    std::string err;
+    if (!h->store->container_set || !h->store->container_set(h->name, {m, n}, {v, vn}, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    return 0;
+}
+
+/** the step of `for member, value in container do` */
+static int member_next(lua_State* L) {
+    auto* c = static_cast<member_cursor*>(lua_touserdata(L, lua_upvalueindex(1)));
+    if (!c || !c->store) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (c->at >= c->page.size()) {
+        if (c->done) {
+            lua_pushnil(L);
+            return 1;
+        }
+        c->page.clear();
+        c->at = 0;
+        c->store->container_page(c->name, c->after, 128, c->page, c->after);
+        if (c->page.empty()) {
+            c->done = true;
+            lua_pushnil(L);
+            return 1;
+        }
+    }
+    const auto& kv = c->page[c->at++];
+    lua_pushlstring(L, kv.first.data(), kv.first.size());
+    lua_pushlstring(L, kv.second.data(), kv.second.size());
+    return 2;                              // member first: it is never nil until the end
+}
+
+static int container_iter(lua_State* L) {
+    auto* h = as_container(L, 1);
+    auto* c = static_cast<member_cursor*>(lua_newuserdatadtor(L, sizeof(member_cursor),
+        [](void* p) { static_cast<member_cursor*>(p)->~member_cursor(); }));
+    new (c) member_cursor();
+    c->store = h->store;
+    c->name = h->name;
+    lua_pushcclosure(L, member_next, "next", 1);
+    return 1;
+}
+
+/** sp:container("name") and sp:kind("name") */
+static int space_namecall(lua_State* L) {
+    const char* m = lua_namecallatom(L, nullptr);
+    const store_access* s = handle_store(L, 1);
+    size_t n = 0;
+    const char* raw = luaL_checklstring(L, 2, &n);
+    std::string name(raw, n);
+    if (m && !strcmp(m, "kind")) {
+        std::string k = s->container_kind ? s->container_kind(name) : std::string();
+        if (k.empty()) lua_pushnil(L);
+        else lua_pushlstring(L, k.data(), k.size());
+        return 1;
+    }
+    if (m && !strcmp(m, "container")) {
+        if (!s->container_kind || s->container_kind(name).empty())
+            luaL_error(L, "FUNCTION no container called %s", name.c_str());
+        auto* h = static_cast<container_handle*>(lua_newuserdatadtor(L,
+            sizeof(container_handle),
+            [](void* p) { static_cast<container_handle*>(p)->~container_handle(); }));
+        new (h) container_handle();
+        h->store = s;
+        h->name = std::move(name);
+        lua_getfield(L, LUA_REGISTRYINDEX, "barch.container.meta");
+        lua_setmetatable(L, -2);
+        return 1;
+    }
+    luaL_error(L, "FUNCTION no such method on a key space");
+    return 0;
+}
+
+/** barch.space.NAME - the handle, built once per space per call */
+static int space_open(lua_State* L) {
+    size_t n = 0;
+    const char* raw = luaL_checklstring(L, 2, &n);
+    std::string name(raw, n);
+    space_state* st = state_of(L);
+    if (!st || !st->open_space)
+        luaL_error(L, "FUNCTION barch.space is not available here");
+    auto have = st->opened.find(name);
+    if (have == st->opened.end()) {
+        store_access opened;
+        // an unknown name is not a key space and must not become one
+        if (!(*st->open_space)(name, opened))
+            luaL_error(L, "FUNCTION no key space called %s", name.c_str());
+        have = st->opened.emplace(name, std::move(opened)).first;
+    }
+    auto* h = static_cast<space_handle*>(lua_newuserdata(L, sizeof(space_handle)));
+    h->st = st;
+    h->store = &have->second;
+    lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
+/*
  * barch.call("GET", "k") - run an ordinary command and hand back its reply.
  *
  * Named on the barch table rather than as a bare `call`, which is the name a script
@@ -610,6 +998,13 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
                 out = Variable((int64_t) 1);
             else
                 out = Variable(nullptr);
+            return true;
+        case LUA_TINTEGER:
+            // a real 64 bit integer, which is why the library is open at all - it must
+            // not go out through the double case and lose the bottom bits
+            // lua_tointegerx is the 32 bit accessor and silently keeps the low word,
+            // which turned 2^62 into 0. lua_tointeger64 is the one that means it
+            out = Variable(lua_tointeger64(L, idx, nullptr));
             return true;
         case LUA_TNUMBER: {
             double d = lua_tonumber(L, idx);
@@ -678,6 +1073,41 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
  * bound is what stops a roaming client holding the whole space's functions open */
 enum { max_cached_functions = 64, max_cached_spaces = 8 };
 
+/* what a call may run on the calling thread before it has to park. See start_function */
+enum { inline_insns = 20000 };
+
+/* how many spent coroutines a space keeps to hand out again */
+enum { max_free_threads = 32 };
+
+/** a coroutine to run a call on, reused where there is one going spare */
+static void take_thread(space_state& st, lua_State*& T, int& ref) {
+    if (!st.free_threads.empty()) {
+        auto got = st.free_threads.back();
+        st.free_threads.pop_back();
+        T = got.first;
+        ref = got.second;
+        lua_resetthread(T);          // back to empty, whatever the last call left
+        return;
+    }
+    T = lua_newthread(st.L);
+    ref = lua_ref(st.L, -1);
+    lua_pop(st.L, 1);
+}
+
+/** done with it: keep it for the next call, or let it go if there are enough */
+static void give_thread(space_state& st, lua_State* T, int ref) {
+    if (!T || ref == LUA_NOREF)
+        return;
+    if (st.free_threads.size() >= max_free_threads) {
+        lua_unref(st.L, ref);
+        return;
+    }
+    // reset on the way out as well as in: a thread that errored is holding the error
+    // object, and nothing should keep that alive until it is next used
+    lua_resetthread(T);
+    st.free_threads.push_back({T, ref});
+}
+
 static space_state* state_for(function_states& cache, const std::string& space) {
     auto it = cache.spaces.find(space);
     if (it != cache.spaces.end())
@@ -708,8 +1138,10 @@ static space_state* state_for(function_states& cache, const std::string& space) 
     lua_newtable(L);
     lua_pushcfunction(L, barch_call, "call");
     lua_setfield(L, -2, "call");
-    lua_pushcfunction(L, store_space, "space");
-    lua_setfield(L, -2, "space");
+    // the space's own settings. Named `config` because `space` is now the key space
+    // itself rather than a function describing it
+    lua_pushcfunction(L, store_space, "config");
+    lua_setfield(L, -2, "config");
     lua_newtable(L);
     lua_pushcfunction(L, store_get, "get");
     lua_setfield(L, -2, "get");
@@ -724,13 +1156,61 @@ static space_state* state_for(function_states& cache, const std::string& space) 
     lua_pushcfunction(L, store_max, "max");
     lua_setfield(L, -2, "max");
     lua_setfield(L, -2, "store");
+
+    // a key space read and written as a value - see TODO 98 F2
+    lua_newtable(L);
+    lua_pushcfunction(L, space_read, "__index");
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, space_write, "__newindex");
+    lua_setfield(L, -2, "__newindex");
+    lua_pushcfunction(L, space_iter, "__iter");
+    lua_setfield(L, -2, "__iter");
+    lua_pushcfunction(L, space_namecall, "__namecall");
+    lua_setfield(L, -2, "__namecall");
+    lua_setreadonly(L, -1, true);
+    lua_setfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
+
+    // a list, hash or ordered set, read and written the same way a space is
+    lua_newtable(L);
+    lua_pushcfunction(L, container_read, "__index");
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, container_write, "__newindex");
+    lua_setfield(L, -2, "__newindex");
+    lua_pushcfunction(L, container_iter, "__iter");
+    lua_setfield(L, -2, "__iter");
+    lua_setreadonly(L, -1, true);
+    lua_setfield(L, LUA_REGISTRYINDEX, "barch.container.meta");
+
+    lua_newtable(L);
+    lua_pushcfunction(L, row_read, "__index");
+    lua_setfield(L, -2, "__index");
+    lua_setreadonly(L, -1, true);
+    lua_setfield(L, LUA_REGISTRYINDEX, "barch.row.meta");
+
+    // `barch.space` is itself userdata whose __index opens a space by name, so
+    // `barch.space.sp1` and `barch.space["sp1"]` are the same thing
+    lua_newuserdata(L, 1);
+    lua_newtable(L);
+    lua_pushcfunction(L, space_open, "__index");
+    lua_setfield(L, -2, "__index");
+    lua_setreadonly(L, -1, true);
+    lua_setmetatable(L, -2);
+    lua_setfield(L, -2, "space");
+
     lua_setglobal(L, "barch");
     // freeze the base globals. Each function then loads on a thread of its own with a
     // globals table that proxies reads here and keeps writes to itself, so one
     // function cannot leave anything behind for the next
     luaL_sandbox(L);
+    /*
+     * No `lua_singlestep`. It drives the *debugstep* hook, which nothing here sets,
+     * and switching it on forces the interpreter off its computed goto dispatch - see
+     * the comment at the top of luau_execute. It does not change how often `interrupt`
+     * is called, which is what the budget and the deadline actually ride on: measured
+     * at 20,000,001 firings for a twenty million iteration loop either way, and 1.30x
+     * faster without it. It was here because the foreign driver had it.
+     */
     lua_callbacks(L)->interrupt = function_interrupt;
-    lua_singlestep(L, 1);
     cache.spaces.emplace(space, std::move(st));
     return raw;
 }
@@ -855,95 +1335,182 @@ static bool compile_into(space_state& st, const std::string& name,
     return true;
 }
 
-bool call_function(const std::string& space, const std::string& name,
-                   const source_loader& load, const command_runner& run_command,
-                   const store_access& store,
-                   const heap::vector<std::string>& args, uint64_t insns,
-                   uint64_t deadline_ms, const function_states_ptr& cache,
-                   Variable& out, std::string& err) {
-    // no session to hang a state on - the swig and module paths - gets one that lives
-    // for this call, so there is a single code path rather than two
-    auto local = cache ? cache : make_function_states();
-    space_state* st = state_for(*local, space);
-    if (!st) {
-        err = "FUNCTION luau state";
-        return false;
+/*
+ * A call that is running in slices.
+ *
+ * It owns everything the script can reach, because the command that started it has
+ * already answered "parked" and gone: the loader, the command runner and the store
+ * access were built on that stack and would be dangling by the first yield. The cache
+ * is held too, so the session's state for this space cannot be closed underneath a
+ * suspended coroutine.
+ */
+struct call_job {
+    function_states_ptr cache{};
+    space_state* st{nullptr};
+    /*
+     * held, not copied. Copying the four interface objects into every job meant a
+     * dozen std::function constructions and as many destructions per call, which the
+     * profile showed as most of the reference counting and a good share of the
+     * malloc traffic. The connection owns these and outlives the job, so one refcount
+     * does the whole job. See TODO 98 F5.
+     */
+    call_interface_ptr iface{};
+    lua_State* T{nullptr};
+    int tref{LUA_NOREF};
+    run_ctx ctx{};
+    function_done done{};
+
+    void release() {
+        if (st && st->L && tref != LUA_NOREF) {
+            give_thread(*st, T, tref);
+            tref = LUA_NOREF;
+        }
+        T = nullptr;
     }
+};
+
+static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable out,
+                       std::string err) {
+    job->st->load = nullptr;
+    job->st->run_command = nullptr;
+    job->st->store = nullptr;
+    job->st->open_space = nullptr;
+    // the handles a script kept hold of point into this, so it goes with the call
+    job->st->opened.clear();
+    lua_callbacks(job->st->L)->userdata = nullptr;
+    job->release();
+    auto done = job->done;
+    job->done = nullptr;
+    if (done)
+        done(ok, std::move(out), std::move(err));
+}
+
+static void pump_call(std::shared_ptr<call_job> job, int narg) {
+    for (;;) {
+        // the interrupt reads its budget through the state's callback userdata, and
+        // the state is shared with anything else this session might run, so it is
+        // pointed at this job every time the job is resumed rather than once
+        lua_callbacks(job->st->L)->userdata = &job->ctx;
+        job->st->load = &job->iface->load;
+        job->st->run_command = &job->iface->run_command;
+        job->st->store = &job->iface->store;
+        job->st->open_space = &job->iface->open_space;
+        int status = lua_resume(job->T, nullptr, narg);
+        narg = 0;
+        if (status == LUA_YIELD) {
+            // past the inline slice now, so back to the configured one
+            job->ctx.left = job->ctx.slice ? job->ctx.slice : 1;
+            enqueue([job] { pump_call(job, 0); });
+            return;
+        }
+        if (status != LUA_OK) {
+            std::string err = lua_tostring(job->T, -1) ? lua_tostring(job->T, -1)
+                                                       : "FUNCTION luau call";
+            finish_job(job, false, Variable(nullptr), err);
+            return;
+        }
+        Variable out;
+        std::string err;
+        bool ok = to_variable(job->T, lua_gettop(job->T), out, err, 0);
+        finish_job(job, ok, std::move(out), std::move(err));
+        return;
+    }
+}
+
+void start_function(const std::string& space, const std::string& name,
+                    const call_interface_ptr& iface,
+                    const heap::vector<std::string>& args, uint64_t insns,
+                    uint64_t deadline_ms, const function_states_ptr& cache,
+                    const function_done& done) {
+    auto job = std::make_shared<call_job>();
+    job->cache = cache ? cache : make_function_states();
+    job->iface = iface;
+    job->done = done;
+
+    job->st = state_for(*job->cache, space);
+    if (!job->st) {
+        done(false, Variable(nullptr), "FUNCTION luau state");
+        return;
+    }
+    space_state* st = job->st;
+    st->load = &job->iface->load;
+
     auto it = st->functions.find(name);
     if (it == st->functions.end()) {
         if (st->functions.size() >= max_cached_functions) {
-            // dropping the map would strand every registry ref in it, so the state
-            // goes and is built again - which is also what makes the cap a real bound
-            local->spaces.erase(space);
-            st = state_for(*local, space);
+            job->cache->spaces.erase(space);
+            st = job->st = state_for(*job->cache, space);
             if (!st) {
-                err = "FUNCTION luau state";
-                return false;
+                done(false, Variable(nullptr), "FUNCTION luau state");
+                return;
             }
+            st->load = &job->iface->load;
         }
-        st->load = &load;
         std::string source;
-        if (!load(name, source)) {
-            err = "no such function";
-            return false;
+        if (!job->iface->load(name, source)) {
+            st->load = nullptr;
+            done(false, Variable(nullptr), "no such function");
+            return;
         }
         compiled c;
+        std::string err;
         bool built = compile_into(*st, name, source, c, err);
         st->load = nullptr;
-        if (!built)
-            return false;
+        if (!built) {
+            done(false, Variable(nullptr), err);
+            return;
+        }
         it = st->functions.emplace(name, c).first;
     }
+    st->load = nullptr;
     const compiled& c = it->second;
 
-    // arity is checked before the script runs, so a wrong count costs nothing
     int given = (int) args.size();
-    if (c.arity > 0 && given != c.arity) {
-        err = "wrong number of arguments for '" + name + "'";
-        return false;
-    }
-    if (c.arity < 0 && given < -c.arity) {
-        err = "wrong number of arguments for '" + name + "'";
-        return false;
+    if ((c.arity > 0 && given != c.arity) || (c.arity < 0 && given < -c.arity)) {
+        done(false, Variable(nullptr), "wrong number of arguments for '" + name + "'");
+        return;
     }
 
-    lua_State* L = st->L;
-    run_ctx ctx;
-    ctx.slice = insns;
-    ctx.left = insns ? insns : 1;
+    // a coroutine of its own, so the interrupt has somewhere to yield to. Pinned in
+    // the registry: nothing else refers to it while it is suspended
+    take_thread(*st, job->T, job->tref);
+
+    job->ctx.slice = insns;
+    job->ctx.left = insns ? insns : 1;
     if (deadline_ms)
-        ctx.deadline = art::now() + static_cast<int64_t>(deadline_ms);
-    lua_callbacks(L)->userdata = &ctx;
-    // barch.call reaches the store through here, and only while this call is running
-    st->run_command = &run_command;
-    st->store = &store;
-    struct clear_on_exit {
-        space_state* st;
-        ~clear_on_exit() {
-            st->run_command = nullptr;
-            st->store = nullptr;
-        }
-    } clearer{st};
+        job->ctx.deadline = art::now() + static_cast<int64_t>(deadline_ms);
 
-    int base = lua_gettop(L);
-    lua_getref(L, c.fn);
-    lua_createtable(L, (int) args.size(), 0);
-    for (size_t i = 0; i < args.size(); ++i) {
-        lua_pushlstring(L, args[i].data(), args[i].size());
-        lua_rawseti(L, -2, (int) i + 1);
+    /*
+     * Arguments arrive as varargs, not as one table:
+     *
+     *     arity = 1
+     *     function call(key) return barch.store.get(key) end
+     *
+     * which reads the way a function of fixed arity should. A script that wants them
+     * as a table writes `local argv = {...}` and has both, so the host does not have
+     * to offer two shapes to give both.
+     */
+    lua_getref(job->T, c.fn);
+    for (const auto& a : args) {
+        lua_pushlstring(job->T, a.data(), a.size());
     }
-    if (lua_pcall(L, 1, 1, 0) != 0) {
-        err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "FUNCTION luau call";
-        lua_settop(L, base);
-        lua_callbacks(L)->userdata = nullptr;
-        return false;
-    }
-    bool ok = to_variable(L, lua_gettop(L), out, err, 0);
-    // the state outlives the call now, so what was pushed has to come back off it
-    lua_settop(L, base);
-    lua_callbacks(L)->userdata = nullptr;
-    return ok;
+    /*
+     * The first slice runs here, on the thread that asked.
+     *
+     * Parking costs about 20us - a shard latch, a pool hop, a wake and a post back -
+     * which is nothing against a script that runs for milliseconds and everything
+     * against one that is a single line. A GET written in Luau measured 4.7x the
+     * built-in, and all of it was this, so a script that finishes immediately should
+     * not pay for machinery it never uses.
+     *
+     * The slice is deliberately short. It is not the full one: a full slice on a
+     * service thread is exactly what parking was for. Long enough for a one liner,
+     * bounded enough that a script which is not one parks almost at once.
+     */
+    job->ctx.left = inline_insns;
+    pump_call(job, (int) args.size());
 }
+
 
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
@@ -995,13 +1562,12 @@ function_states_ptr make_function_states() {
     return nullptr;
 }
 
-bool call_function(const std::string&, const std::string&,
-                   const source_loader&, const command_runner&, const store_access&,
-                   const heap::vector<std::string>&, uint64_t, uint64_t,
-                   const function_states_ptr&, Variable&, std::string& err) {
-    err = "luau not built";
-    return false;
+void start_function(const std::string&, const std::string&, const call_interface_ptr&,
+                    const heap::vector<std::string>&, uint64_t, uint64_t,
+                    const function_states_ptr&, const function_done& done) {
+    done(false, Variable(nullptr), "luau not built");
 }
+
 
 bool luau_available() {
     return false;

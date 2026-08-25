@@ -236,7 +236,7 @@ namespace barch {
         return r; // destruction happens in callers thread - so hopefully no dl because shared ptr
     }
 
-    key_space::key_space(const std::string &name) :name(name) {
+    key_space::key_space(const std::string &name) :name(name), canonical_name(undecorate(name)) {
         if (shards.empty()) {
             // everything allocated while this space is built counts towards startup memory
             uint64_t memory_before = get_total_memory();

@@ -31,6 +31,9 @@ namespace art {
         bool is_static = false;
         bool is_drop = false;
         bool is_exist = false;
+        /** KSPACE ACL [KSNAME] SETUSER|GETUSER|DEL ... - see TODO 135 */
+        bool is_acl = false;
+        unsigned acl_at = 0;      // where the acl_spec tail begins
 
         std::string dependant;
         std::string source;
@@ -39,6 +42,27 @@ namespace art {
         int parse_options() {
             clear_error();
             unsigned spos = 1; // the pattern is the first one
+            if (has("ACL", spos)) {
+                is_acl = true;
+                ++spos;
+                /*
+                 * Verb first, name after: every other KSPACE subcommand puts its verb
+                 * at spos 1 and this parser reads it there. Name first would need a
+                 * look ahead and would be ambiguous against a space actually called
+                 * `acl`. The name is optional and means the selected space, which is
+                 * unambiguous because what follows it is always SETUSER, GETUSER or
+                 * DEL.
+                 */
+                if (!has("SETUSER", spos) && !has("GETUSER", spos) && !has("DEL", spos)) {
+                    name = tos(spos);
+                    if (!barch::check_ks_name(name)) {
+                        return -1;
+                    }
+                    ++spos;
+                }
+                acl_at = spos;
+                return 0;
+            }
             if (has("EXIST", spos)) {
                 is_exist = true;
                 ++spos;

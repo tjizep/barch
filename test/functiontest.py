@@ -10,8 +10,8 @@ import barch
 
 PORT = 14000
 
-GREET = 'function call(argv) return "hello " .. argv[1] end'
-COUNT = 'function call(argv) return #argv end'
+GREET = 'function call(who) return "hello " .. who end'
+COUNT = 'function call(...) return select("#", ...) end'
 
 print("start function test")
 barch.start("0.0.0.0", PORT)
@@ -43,7 +43,7 @@ try:
 
     # --- what SETF refuses ---------------------------------------------------------
     # a script that will not compile
-    e = refused("SETF", "broken", "function call(argv) return end end")
+    e = refused("SETF", "broken", "function call(...) return end end")
     assert e, "a script that does not compile should be refused"
     assert refused("GETF", "broken") is None and r.execute_command("GETF", "broken") is None, \
         "a refused SETF must not have written anything"
@@ -183,7 +183,7 @@ try:
 
     # --- arity, declared by the script and checked before it runs -------------------
     assert r.execute_command("SETF", "exactly2",
-                             "arity = 2\nfunction call(argv) return #argv end") == b"OK"
+                             'arity = 2\nfunction call(...) return select("#", ...) end') == b"OK"
     assert r.execute_command("exactly2", "a", "b") == 2
     for bad in ([], ["a"], ["a", "b", "c"]):
         e = refused("exactly2", *bad)
@@ -191,7 +191,7 @@ try:
 
     # a negative arity is a minimum, as it is in redis
     assert r.execute_command("SETF", "atleast1",
-                             "arity = -1\nfunction call(argv) return #argv end") == b"OK"
+                             'arity = -1\nfunction call(...) return select("#", ...) end') == b"OK"
     assert r.execute_command("atleast1", "a") == 1
     assert r.execute_command("atleast1", "a", "b", "c") == 3
     assert refused("atleast1") is not None
@@ -228,18 +228,19 @@ try:
     # helpers as well as its own call()
     assert r.execute_command("SETF", "helpers", '''
         function double(n) return n * 2 end
-        function call(argv) return "helpers" end
+        function call(...) return "helpers" end
     ''') == b"OK"
     assert r.execute_command("SETF", "usesHelpers", '''
         local h = require("helpers")
-        function call(argv) return h.double(tonumber(argv[1])) end
+        function call(n)
+            return h.double(tonumber(n)) end
     ''') == b"OK"
     assert r.execute_command("usesHelpers", "21") == 42
 
     # the required name folds like any other
     assert r.execute_command("SETF", "usesUpper", '''
         local h = require("HELPERS")
-        function call(argv) return h.double(1) end
+        function call(...) return h.double(1) end
     ''') == b"OK"
     assert r.execute_command("usesUpper") == 2
 
@@ -274,7 +275,8 @@ try:
 
     # --- barch.call, into the ordinary commands -------------------------------------
     assert r.execute_command("SETF", "roundtrip", '''
-        function call(argv)
+        function call(...)
+            local argv = {...}
             barch.call("SET", argv[1], argv[2])
             return barch.call("GET", argv[1])
         end
@@ -285,7 +287,7 @@ try:
 
     # numbers go over as the wire would carry them, without the script saying tostring
     assert r.execute_command("SETF", "counterup", '''
-        function call(argv)
+        function call(...)
             barch.call("SET", "n", 0)
             barch.call("INCRBY", "n", 41)
             return barch.call("INCR", "n")
@@ -295,7 +297,7 @@ try:
 
     # an array reply becomes a table, and a missing key becomes nil
     assert r.execute_command("SETF", "readsmany", '''
-        function call(argv)
+        function call(...)
             barch.call("SET", "a", "1")
             barch.call("SET", "b", "2")
             local got = barch.call("MGET", "a", "b")
@@ -312,7 +314,7 @@ try:
 
     def refuses(name, body):
         refusers.append(name)
-        assert r.execute_command("SETF", name, "function call(argv) %s end" % body) == b"OK"
+        assert r.execute_command("SETF", name, "function call(...) %s end" % body) == b"OK"
         return refused(name)
 
     e = refuses("ref_block", 'return barch.call("BLPOP", "nolist", "0")')
@@ -326,7 +328,7 @@ try:
 
     # a refused call is a Lua error, so a script that wants to carry on can pcall it
     assert r.execute_command("SETF", "survives", '''
-        function call(argv)
+        function call(...)
             local ok, e = pcall(function() return barch.call("BLPOP", "nolist", "0") end)
             return ok and "ran" or "caught"
         end
@@ -346,12 +348,10 @@ try:
 
     # GETRANGE, on barch.store.get
     assert r.execute_command("SETF", "myGetrange", '''
-        function call(argv)
-            local v = barch.store.get(argv[1])
+        function call(key, from, to)
+            local v = barch.store.get(key)
             if v == nil then return nil end
-            local from = tonumber(argv[2]) + 1
-            local to = tonumber(argv[3]) + 1
-            return string.sub(v, from, to)
+            return string.sub(v, tonumber(from) + 1, tonumber(to) + 1)
         end
     ''') == b"OK"
     assert r.execute_command("myGetrange", "sk2", "0", "2").decode() == "cha"
@@ -360,13 +360,14 @@ try:
 
     # COUNT, on barch.store.count
     assert r.execute_command("SETF", "myCount", '''
-        function call(argv) return barch.store.count(argv[1], argv[2]) end
+        function call(lo, hi) return barch.store.count(lo, hi) end
     ''') == b"OK"
     assert r.execute_command("myCount", "sk0", "sk9") == 4
 
     # a KEYS-shaped walk, bounded, on barch.store.range
     assert r.execute_command("SETF", "myKeys", '''
-        function call(argv)
+        function call(...)
+            local argv = {...}
             local out = {}
             for _, k in ipairs(barch.store.range(argv[1], argv[2], 100)) do
                 out[#out + 1] = k
@@ -379,7 +380,7 @@ try:
 
     # min, max and exists
     assert r.execute_command("SETF", "myBounds", '''
-        function call(argv)
+        function call(...)
             return {barch.store.min(), barch.store.max(),
                     barch.store.exists("sk0") and "y" or "n",
                     barch.store.exists("nothing") and "y" or "n"}
@@ -388,24 +389,26 @@ try:
     bounds = r.execute_command("myBounds")
     assert bounds[2] == b"y" and bounds[3] == b"n", f"exists gave {bounds}"
 
-    # the space describes itself, by the name a client would address it with. The
+    # the space describes itself through barch.config(); `barch.space` is now the
+    # key space itself rather than a function describing one. The
     # default space has no name in that vocabulary - `undecorate("node")` is "" and
     # there is no `space:` prefix for it - so that is what a function there sees
     assert r.execute_command("SETF", "mySpace", '''
-        function call(argv) local s = barch.space() return {s.name, s.ordered} end
+        function call() local s = barch.config() return {s.name, s.ordered} end
     ''') == b"OK"
     assert r.execute_command("mySpace") == [b"", b"1"], \
         f"the default space has no prefix name, got {r.execute_command('mySpace')}"
     # in a named one it is the name the prefix uses
     assert r.execute_command("fspace:SETF", "mySpace", '''
-        function call(argv) return barch.space().name end
+        function call() return barch.config().name end
     ''') == b"OK"
     assert r.execute_command("fspace:mySpace").decode() == "fspace"
 
     # a range walk is bounded whatever the script asks for, so one function cannot
     # copy the whole space into a single reply
     assert r.execute_command("SETF", "myHuge", '''
-        function call(argv) return #barch.store.range(argv[1], argv[2], 100000000) end
+        function call(lo, hi)
+            return #barch.store.range(lo, hi, 100000000) end
     ''') == b"OK"
     assert r.execute_command("myHuge", "sk0", "sk9") == 4
 
@@ -420,7 +423,7 @@ try:
     r.execute_command("SET", "part one", "composite")
     r.execute_command("SET", "partplain", "plain")
     assert r.execute_command("SETF", "myComposite", '''
-        function call(argv)
+        function call(...)
             -- bounds holding the split are composites too, so they bracket one
             local found = barch.store.range("part a", "part z", 10)
             local plain = barch.store.range("part", "partz", 10)
@@ -486,7 +489,7 @@ try:
     # string bound there is. `max()` is the one entry point that can surface one
     r.execute_command("SET", "walkkey", "v")
     assert r.execute_command("SETF", "walker", '''
-        function call(argv)
+        function call(...)
             local ks = barch.store.range("", "\255", 1000)
             local top = barch.store.max()
             return {#ks, top == nil and "nil" or top}
@@ -538,6 +541,195 @@ try:
         r.execute_command("ACL", "DEL", "fnblind")
     r.execute_command("DEL", "blindkey")
 
+    # --- a parked call keeps its place in a pipeline --------------------------------
+    # a function does not run on the connection's thread any more: it parks, the script
+    # runs in slices on the foreign pool, and the reply is written when it wakes. The
+    # replies behind it must not overtake it. See TODO 98 H
+    assert r.execute_command("SETF", "slowish",
+                             'function call() local n=0 for i=1,2000000 do n=n+i end return "fn" end') == b"OK"
+    r.execute_command("SET", "pipea", "1")
+    pipe = r.pipeline(transaction=False)
+    pipe.execute_command("SET", "pipea", "2")
+    pipe.execute_command("slowish")
+    pipe.execute_command("GET", "pipea")
+    pipe.execute_command("slowish")
+    pipe.execute_command("PING")
+    assert pipe.execute() == [True, b"fn", b"2", b"fn", True], "the pipeline came back out of order"
+    # and with an asynchronous command in front, which forces the batch path
+    pipe2 = r.pipeline(transaction=False)
+    pipe2.execute_command("KEYS", "pipea")
+    pipe2.execute_command("slowish")
+    pipe2.execute_command("GET", "pipea")
+    out2 = pipe2.execute()
+    assert out2[1] == b"fn" and out2[2] == b"2", f"batched pipeline gave {out2}"
+    r.execute_command("DEL", "pipea")
+
+    # --- 64 bit integers and buffers, for scripts that compute ---------------------
+    # Luau numbers are doubles, so a 64 bit identifier - an H3 geo cell, a hash, a
+    # snowflake - could only be carried as two halves through bit32 without these.
+    # The conversion has to keep every bit: lua_tointegerx is the 32 bit accessor and
+    # silently kept the low word, which turned 2^62 into 0. See TODO 98
+    assert r.execute_command("SETF", "bigint", '''
+        function call()
+            local v = integer.lshift(integer.create(1), integer.create(62))
+            return integer.add(v, integer.create(12345))
+        end
+    ''') == b"OK"
+    assert r.execute_command("bigint") == 2**62 + 12345, \
+        f"a 64 bit value lost bits: {r.execute_command('bigint')}"
+
+    # the bit work an H3 style cell id is made of, packed into the high bits where
+    # truncation would have hidden itself
+    assert r.execute_command("SETF", "packcell", '''
+        function call(...)
+            local argv = {...}
+            local res = tonumber(argv[1])
+            local cell = integer.bor(integer.create(0),
+                                     integer.lshift(integer.create(1), integer.create(59)))
+            cell = integer.bor(cell, integer.lshift(integer.create(res), integer.create(52)))
+            return cell
+        end
+    ''') == b"OK"
+    packed = r.execute_command("packcell", "9")
+    assert packed == (1 << 59) | (9 << 52), f"cell packing gave {packed}"
+
+    # buffers, for a lookup table that is not a table of boxed numbers
+    assert r.execute_command("SETF", "bufwork", '''
+        function call()
+            local b = buffer.create(1024)
+            for i = 0, 255 do buffer.writeu32(b, i * 4, i * i) end
+            return buffer.readu32(b, 200)
+        end
+    ''') == b"OK"
+    assert r.execute_command("bufwork") == 2500
+
+    # --- a key space as a value ----------------------------------------------------
+    # barch.space.NAME.key reads, assigns and removes, and iterates. See TODO 98 F2
+    r.execute_command("SET", "sv1", "one")
+    r.execute_command("SET", "sv2", "two")
+    assert r.execute_command("SETF", "spaceval", '''
+        function call(name)
+            local sp = barch.space[name]
+            local before = sp.sv1
+            sp.sv3 = "three"           -- write
+            sp.sv2 = nil               -- remove
+            return {before, sp.sv3, sp.sv2 == nil and "gone" or "still there"}
+        end
+    ''') == b"OK"
+    assert r.execute_command("spaceval", "") == [b"one", b"three", b"gone"], \
+        f"got {r.execute_command('spaceval', '')}"
+    # and the write a script made is an ordinary key
+    assert r.execute_command("GET", "sv3").decode() == "three"
+    assert r.execute_command("GET", "sv2") is None
+
+    # the dotted form and the bracket form are the same thing
+    assert r.execute_command("SETF", "spacedot", '''
+        function call() return barch.space[""].sv3 end
+    ''') == b"OK"
+    assert r.execute_command("spacedot").decode() == "three"
+
+    # a name that is not a key space is refused, and touching it does not create one
+    assert r.execute_command("SETF", "spacebad", '''
+        function call()
+            local ok, e = pcall(function() return barch.space["nosuchspace"].k end)
+            return ok and "opened" or "refused"
+        end
+    ''') == b"OK"
+    assert r.execute_command("spacebad").decode() == "refused"
+    assert r.execute_command("KSPACE", "EXIST", "nosuchspace") == 0, \
+        "mentioning a space must not build one"
+
+    # iterating: every row says what it is, so a walk can skip what it does not want
+    assert r.execute_command("SETF", "spacewalk", '''
+        function call()
+            local keys, fns = 0, 0
+            for row in barch.space[""] do
+                if row.type == "function" then fns = fns + 1
+                elseif row.type == "key" then keys = keys + 1 end
+            end
+            return {keys, fns}
+        end
+    ''') == b"OK"
+    walked = r.execute_command("spacewalk")
+    assert walked[0] >= 2, f"the walk should see the plain keys, got {walked}"
+    assert walked[1] >= 1, f"and the functions, got {walked}"
+
+    r.execute_command("DEL", "sv1"); r.execute_command("DEL", "sv3")
+
+    # --- containers: a hash, a list and an ordered set from a script ----------------
+    # a list, hash and ordered set are the same key shape with a different lead, so one
+    # handle serves all three once the kind is known. See TODO 98 F
+    r.execute_command("HSET", "ch", "one", "1", "two", "2", "three", "3")
+    r.execute_command("ZADD", "cz", "1.5", "alpha", "2.5", "beta")
+    r.execute_command("RPUSH", "cl", "x", "y")
+
+    assert r.execute_command("SETF", "ckind", '''
+        function call(n) return barch.space[""]:kind(n) end
+    ''') == b"OK"
+    assert r.execute_command("ckind", "ch").decode() == "hash"
+    assert r.execute_command("ckind", "cz").decode() == "orderedset"
+    assert r.execute_command("ckind", "cl").decode() == "list"
+    assert r.execute_command("ckind", "nosuchthing") is None
+
+    # read, write and remove a field, the way a space handle does a key
+    assert r.execute_command("SETF", "cfield", '''
+        function call(n, f)
+            local h = barch.space[""]:container(n)
+            local before = h[f]
+            h.added = "new"
+            h.two = nil
+            return {before, h.added, h.two == nil and "gone" or "there"}
+        end
+    ''') == b"OK"
+    assert r.execute_command("cfield", "ch", "one") == [b"1", b"new", b"gone"], \
+        f"got {r.execute_command('cfield', 'ch', 'one')}"
+    # and the built-in agrees about what the script did
+    assert r.execute_command("HGET", "ch", "added").decode() == "new"
+    assert r.execute_command("HGET", "ch", "two") is None
+
+    # HRANDFIELD, which section F said could not be written against this interface
+    assert r.execute_command("SETF", "myHrandfield", '''
+        function call(n)
+            local fields = {}
+            for member in barch.space[""]:container(n) do
+                fields[#fields + 1] = member
+            end
+            if #fields == 0 then return nil end
+            return fields[(math.random(#fields))]
+        end
+    ''') == b"OK"
+    got = r.execute_command("myHrandfield", "ch")
+    assert got.decode() in ("one", "three", "added"), f"HRANDFIELD gave {got!r}"
+
+    # ZRANGEBYSCORE, the other one
+    assert r.execute_command("SETF", "myZrangebyscore", '''
+        function call(n, lo, hi)
+            local out = {}
+            for member, score in barch.space[""]:container(n) do
+                local s = tonumber(score)
+                if s and s >= tonumber(lo) and s <= tonumber(hi) then
+                    out[#out + 1] = member
+                end
+            end
+            return out
+        end
+    ''') == b"OK"
+    assert r.execute_command("myZrangebyscore", "cz", "1.0", "2.0") == [b"alpha"], \
+        f"got {r.execute_command('myZrangebyscore', 'cz', '1.0', '2.0')}"
+    assert r.execute_command("myZrangebyscore", "cz", "0", "9") == [b"alpha", b"beta"]
+
+    # a name that is not a container is refused rather than invented
+    assert r.execute_command("SETF", "cbad", '''
+        function call()
+            local ok = pcall(function() return barch.space[""]:container("nope").f end)
+            return ok and "opened" or "refused"
+        end
+    ''') == b"OK"
+    assert r.execute_command("cbad").decode() == "refused"
+
+    for n in ("ch", "cz", "cl"):
+        r.execute_command("DEL", n)
+
     # --- an export carries functions, and puts them back as functions --------------
     # they used to be dropped: a function is not a container and not a string, so it
     # fell through to the plain branch, where re-encoding the name found no key and
@@ -571,7 +763,10 @@ finally:
               "roundtrip", "counterup", "readsmany", "survives",
               "ref_block", "ref_async", "ref_multi", "ref_unknown",
               "myGetrange", "myCount", "myKeys", "myBounds", "mySpace", "myHuge",
-              "myComposite", "aclreads", "walker"):
+              "myComposite", "aclreads", "walker", "slowish",
+              "bigint", "packcell", "bufwork", "spaceval", "spacedot",
+              "spacebad", "spacewalk", "ckind", "cfield", "myHrandfield",
+              "myZrangebyscore", "cbad"):
         try:
             r.execute_command("REMF", n)
             r.execute_command("fspace:REMF", n)

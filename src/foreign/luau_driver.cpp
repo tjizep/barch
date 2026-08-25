@@ -436,8 +436,8 @@ struct space_state {
     const store_access* store{nullptr};
     /** how barch.space reaches another one */
     const space_opener* open_space{nullptr};
-    /** spaces already opened for this call, so a loop does not reopen one per step */
-    heap::string_map<store_access> opened{};
+    /** where the spaces `barch.space.NAME` opened live - the interface owns them */
+    heap::string_map<store_access>* opened{nullptr};
     /**
      * what is being compiled right now, innermost last. A require for something on
      * this stack is a cycle, and the stack is the path to put in the message.
@@ -916,13 +916,15 @@ static int space_open(lua_State* L) {
     space_state* st = state_of(L);
     if (!st || !st->open_space)
         luaL_error(L, "FUNCTION barch.space is not available here");
-    auto have = st->opened.find(name);
-    if (have == st->opened.end()) {
+    if (!st->opened)
+        luaL_error(L, "FUNCTION barch.space is not available here");
+    auto have = st->opened->find(name);
+    if (have == st->opened->end()) {
         store_access opened;
         // an unknown name is not a key space and must not become one
         if (!(*st->open_space)(name, opened))
             luaL_error(L, "FUNCTION no key space called %s", name.c_str());
-        have = st->opened.emplace(name, std::move(opened)).first;
+        have = st->opened->emplace(name, std::move(opened)).first;
     }
     auto* h = static_cast<space_handle*>(lua_newuserdata(L, sizeof(space_handle)));
     h->st = st;
@@ -1375,8 +1377,9 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
     job->st->run_command = nullptr;
     job->st->store = nullptr;
     job->st->open_space = nullptr;
-    // the handles a script kept hold of point into this, so it goes with the call
-    job->st->opened.clear();
+    // the spaces themselves stay on the interface; only the way in goes with the call,
+    // which is what stops a handle reaching them once the call is over
+    job->st->opened = nullptr;
     lua_callbacks(job->st->L)->userdata = nullptr;
     job->release();
     auto done = job->done;
@@ -1395,6 +1398,7 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         job->st->run_command = &job->iface->run_command;
         job->st->store = &job->iface->store;
         job->st->open_space = &job->iface->open_space;
+        job->st->opened = &job->iface->opened;
         int status = lua_resume(job->T, nullptr, narg);
         narg = 0;
         if (status == LUA_YIELD) {

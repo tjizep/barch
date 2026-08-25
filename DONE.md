@@ -4832,3 +4832,153 @@ have been.
 
 Not covered: a fill surviving a restart. The script is an ordinary key so it persists
 the way any other does, but nothing asserts it.
+
+## 131. `barch.call` built a whole caller for every command [25-08-2026]
+
+`runner_for` in function_api.cpp constructed an `rpc_caller` per call. That
+constructor runs `update_routes()` and then a real AUTH command through the auth
+shard, and the object itself allocates a function state holder and copies the
+global ACL vector - all of it thrown away one command later.
+
+Two smaller costs sat beside it. The command table was fetched through
+`functions_by_name()` (a shared_ptr copy) and looked up through a freshly
+upper-cased `std::string` every call, and every argument was copied into a
+`std::vector` before the call even though `call()` only indexes and iterates
+what it is given.
+
+Fixed by hoisting the sub caller to the connection, the same move that worked
+for the script interface. `call()` already clears args, errors, results and temp
+at its head, so one caller serves any number of commands. It is built on the
+first call that needs it and lives as long as the interface.
+
+The part that needed care is re-entrancy, and it is not hypothetical: CALLF is
+an ordinary built-in, so a script can reach a script, and the inner call would
+otherwise have cleared the results the outer was still producing. A `busy` flag
+covers it - a nested call builds a fresh caller for its duration rather than
+keeping a stack of them, since nesting is rare and the cost belongs on the rare
+path.
+
+The name lookup is cached on the name as the script wrote it, so no case folding
+on a repeat, and the table shared_ptr is held rather than re-fetched. What is
+cached is only that a name resolves and to what. The ACL check stays outside the
+cache and runs every call, because a session's rights can change under it.
+
+Measured with memtier, one connection, pipeline 50, Release:
+
+                                     before        after
+    GET, C++                        0.80 us      0.83 us
+    Luau through the store          2.61 us      2.82 us
+    Luau through barch.call         6.77 us      1.69 us
+
+So barch.call went 4.0x faster, and its cost above a raw GET fell from 5.96 us
+to 0.89 us. The two unchanged rows moved by about 8% between runs, which is the
+run to run noise on this box and worth knowing when reading the other number.
+
+The surprise is that a script now reaches a built-in *faster* than it reaches
+the store interface. That is not a measurement error: the store path builds a
+`sharded_store` and encodes the key itself on every access, while barch.call
+hands the work to the same optimised C++ path a client would hit. It suggests
+the store interface has the same kind of per access setup left in it that the
+caller had, which is a separate job.
+
+Re-measured afterwards against the fuller set the earlier report used, one
+thread, pipeline 50, Release. PING and GET reproduce the old figures within 3%,
+so the two runs are comparable:
+
+                              1 connection        4 connections
+                            before    after     before    after
+    PING                    0.596 us  0.597 us  0.286 us  0.288 us
+    GET                     0.785 us  0.759 us  0.326 us  0.328 us
+    noop function           1.023 us  1.094 us  0.345 us  0.363 us
+    LUAU_GET                1.611 us  1.425 us  0.491 us  0.466 us
+    barch.call              6.778 us  1.594 us  8.369 us  0.525 us
+
+The concurrency column is the one that says what the bug actually was. Before,
+barch.call was the only thing that got *slower* with four connections than with
+one - 6.78 us to 8.37 us, while everything else improved. That is contention,
+and it was the AUTH every constructor ran through the auth shard, with four
+connections queueing on one store. Hoisting the caller removed the contention
+along with the work, which is why the aggregate number improved 16x where the
+serial one improved 4x.
+
+Two notes on reading the table. `LUAU_GET` is `barch.store.get(k)`, the form the
+driver documents at luau_driver.cpp:1487 - not `barch.space[""][k]`, which is a
+different and heavier path measuring 2.63 us and 1.11 us in the same run. That
+gap of about 1.2 us per read is the store interface overhead noted above,
+arriving from a second direction: the space path builds and encodes per access
+where the caller no longer does. And the `vs GET` ratios drift from the earlier
+report because GET itself came out 3% faster this time while the Luau rows did
+not, so the microsecond figures are the ones to compare, not the ratios.
+
+functiontest, foreign_luau, aclfiltertest, spaceacltest and functionevicttest
+all pass unchanged.
+
+## 132. `barch.space.NAME` rebuilt a store interface on every call [25-08-2026]
+
+Reading through `barch.space[""][k]` cost about 1.2us more than the same read
+through `barch.store.get(k)`. The read was not the difference - `space_read` and
+`store_get` have the same body and both end in `s->get(...)`. Getting `s` was.
+
+`store_get` uses `st->store`, which the interface built once for the connection.
+`barch.space.NAME` went through `space_open`, which looked in `st->opened` - and
+`finish_job` cleared that map at the end of every call. So every call naming a
+space rebuilt a whole `store_access` through `store_for`, fifteen or so
+std::functions with a heap allocation each, to serve one read.
+
+Fixed by moving `opened` off the per call state and onto the `call_interface`,
+where `store` already lives. The state keeps a pointer to it, set when a job is
+pumped and cleared when it finishes, so a handle still cannot reach a space once
+its call is over - which is what the old clear was really protecting. The
+interface is the right owner because it is already rebuilt when the running
+space changes, when the defined space changes and on `set_acl`, which are
+exactly the three things that make a cached store_access wrong.
+
+Measured, one thread, pipeline 50, Release, comparing within a run:
+
+                              1 connection        4 connections
+                            before    after     before    after
+    barch.store.get(k)      1.425 us  1.434 us  0.466 us  0.457 us
+    barch.space[""][k]      2.633 us  1.657 us  1.108 us  0.507 us
+    the gap                 1.21  us  0.22 us   0.64  us  0.05 us
+
+So 1.6x faster serial, 2.2x aggregate, and at four connections the two forms are
+within 11% of each other. What is left at one connection is the userdata
+allocation, the extra metamethod hop and the std::string built from the name,
+which is roughly what was predicted and is a much smaller thing to chase.
+
+Two notes. The first run after the change showed barch.call 18% slower, which
+was noise - a repeat put it back at 1.61 us against 1.59 us before, and nothing
+in this change touches that path. It is worth repeating a sweep before believing
+a number that has no mechanism behind it. The second: the script side workaround
+still helps a loop, `local sp = barch.space[""]` hoists the handle out of it,
+but it never helped the shape being measured here, where a call does one read.
+
+functiontest, foreign_luau, aclfiltertest, spaceacltest, functionevicttest and
+containerkindtest all pass.
+
+## 133. The SQL foreign tests still wrote Luau source into `foreign_script` [25-08-2026]
+
+CI failed in test/foreign_mysql.py:203 with
+
+    FOREIGN a luau script belongs in a function: SETF it, then name it in
+    foreign_script
+
+Fallout from DONE 130, which made `foreign_script` name a stored function rather
+than hold source. foreign_luau.py was rewritten for that; foreign_mysql.py:189
+and foreign_postgres.py:189 were missed. Both set the option to a script body,
+and both wrote `function resolve(...)` where the entry point is `call`.
+
+Fixed by following the order foreign_luau.py already documents: configure, USE
+to build the space, SETF the script under the name the configuration points at,
+then fill. The option is now just "filler" in both.
+
+Why local runs stayed green while CI did not: the block these lines sit in only
+executes with a live database, so a machine without docker skips the whole thing
+and reports success. That is worth knowing about this pair of tests generally -
+passing them locally says nothing unless the container actually came up. Both
+were run here against real mysql and postgres containers, and both print their
+"complete" line.
+
+The two remaining sites named in DONE 130 turned out to be the only ones: a grep
+for foreign_script across test/ finds nothing else but configtest.py, which only
+lists `foreign_script_insns` among the option names and does not set a script.

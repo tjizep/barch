@@ -2736,3 +2736,9 @@
 138. [Done] art::iterator::last() finds nothing in a single key tree [24-08-2026] Nr 129 1fee45f
 
 139. [Done] foreign_script kept Luau source in the configuration space [25-08-2026] Nr 130 4761263
+
+140. [Done] barch.call built a whole caller per command [25-08-2026] Nr 131 9d612c8
+
+141. [Done] barch.space.NAME rebuilt a store interface per call [25-08-2026] Nr 132 9d612c8
+
+142. [Done] SQL foreign tests wrote Luau source into foreign_script [25-08-2026] Nr 133 9d612c8

@@ -164,52 +164,108 @@ namespace functions {
      * destroy the reply being built. `finish_call_buffer` solves the same problem the
      * same way for EXEC.
      */
+    /**
+     * What one connection reuses across every `barch.call` its scripts make.
+     *
+     * The sub caller used to be built per command, and an `rpc_caller` is not a cheap
+     * thing to build: `update_routes()`, then a real AUTH through the auth shard, plus
+     * a function state holder and a copy of the global ACL vector. Since `call()`
+     * clears args, errors, results and temp at its head, one caller serves any number
+     * of commands - so it is built once, on the first call that needs it, and lives as
+     * long as the interface does. See TODO 140.
+     *
+     * `busy` is for re-entrancy. CALLF is an ordinary built-in, so a script can reach a
+     * script, and the inner call would otherwise clear the results the outer is still
+     * in the middle of producing. Nesting is rare, so it just builds a fresh caller for
+     * the duration rather than keeping a stack of them.
+     */
+    struct sub_caller_state {
+        rpc_caller sub{};
+        bool busy = false;
+        /** the command table, held rather than re-fetched: a shared_ptr copy per call */
+        std::shared_ptr<function_map> table{functions_by_name()};
+        /** names already resolved, keyed as the script wrote them so no case folding */
+        heap::string_map<const barch_info*> known{};
+    };
+
     static barch::foreign::command_runner runner_for(caller& outer) {
-        return [&outer](const heap::vector<std::string>& argv, Variable& out,
-                        std::string& err) -> bool {
+        auto held = std::make_shared<std::shared_ptr<sub_caller_state>>();
+        return [&outer, held](const heap::vector<std::string>& argv, Variable& out,
+                              std::string& err) -> bool {
             if (argv.empty()) {
                 err = "barch.call needs a command name";
                 return false;
             }
-            std::string name = argv[0];
-            for (auto& ch : name) {
-                ch = (char) toupper((unsigned char) ch);
-            }
-            // a transaction is the connection's, not the script's. MULTI on a caller
-            // nobody is going to EXEC just swallows everything after it
-            if (name == "MULTI" || name == "EXEC" || name == "DISCARD" || name == "WATCH"
-                || name == "UNWATCH") {
-                err = "FUNCTION cannot call " + name;
-                return false;
-            }
-            auto table = functions_by_name();
-            auto f = table->find(name);
-            if (f == table->end()) {
-                err = "FUNCTION unknown command '" + name + "'";
-                return false;
-            }
-            // an asynchronous command expects to own a worker and answer later; there
-            // is nowhere for that answer to go from inside a script
-            if (f->second.is_asynch) {
-                err = "FUNCTION cannot call '" + name + "', it is asynchronous";
-                return false;
+            if (!*held)
+                *held = std::make_shared<sub_caller_state>();
+            auto& st = **held;
+
+            /*
+             * The name as the script wrote it is the cache key, so a loop calling the
+             * same command pays for the case folding and the table lookup once. What
+             * is cached is only that the name resolves and to what - every check that
+             * can change between calls stays below.
+             */
+            const barch_info* fn = nullptr;
+            auto seen = st.known.find(argv[0]);
+            if (seen != st.known.end()) {
+                fn = seen->second;
+            } else {
+                std::string name = argv[0];
+                for (auto& ch : name) {
+                    ch = (char) toupper((unsigned char) ch);
+                }
+                // a transaction is the connection's, not the script's. MULTI on a caller
+                // nobody is going to EXEC just swallows everything after it
+                if (name == "MULTI" || name == "EXEC" || name == "DISCARD" || name == "WATCH"
+                    || name == "UNWATCH") {
+                    err = "FUNCTION cannot call " + name;
+                    return false;
+                }
+                auto f = st.table->find(name);
+                if (f == st.table->end()) {
+                    err = "FUNCTION unknown command '" + name + "'";
+                    return false;
+                }
+                // an asynchronous command expects to own a worker and answer later; there
+                // is nowhere for that answer to go from inside a script
+                if (f->second.is_asynch) {
+                    err = "FUNCTION cannot call '" + name + "', it is asynchronous";
+                    return false;
+                }
+                fn = &f->second;
+                st.known.emplace(argv[0], fn);
             }
             // the script runs as whoever called it, so this is the check that stops a
-            // function being a way round the one the connection would have failed
-            if (!allowed(f->second.cats, outer.get_acl())) {
-                err = "FUNCTION not authorized to call '" + name + "'";
+            // function being a way round the one the connection would have failed. It
+            // is asked every call, never cached: the rights can change under a session
+            if (!allowed(fn->cats, outer.get_acl())) {
+                err = "FUNCTION not authorized to call '" + argv[0] + "'";
                 return false;
             }
 
-            rpc_caller sub;
+            // nested calls get their own, see sub_caller_state
+            std::unique_ptr<rpc_caller> nested;
+            if (st.busy)
+                nested = std::make_unique<rpc_caller>();
+            rpc_caller& sub = nested ? *nested : st.sub;
+            bool mine = !nested;
+            if (mine)
+                st.busy = true;
+            struct release {
+                sub_caller_state& s; bool mine;
+                ~release() { if (mine) s.busy = false; }
+            } rel{st, mine};
+
             sub.set_kspace(outer.kspace());
-            std::vector<std::string> params(argv.begin(), argv.end());
-            out = sub.callv(params, f->second.call, Variable(nullptr));
+            // argv goes straight in - `call` only indexes and iterates it, and copying
+            // every argument into a std::vector first was pure cost
+            out = sub.callv(argv, fn->call, Variable(nullptr));
             if (sub.has_blocks()) {
                 // it parked. Nothing is going to service those blocks, and a parked
                 // command has not done anything yet, so refusing here is safe
                 sub.clear_blocks();
-                err = "FUNCTION cannot call '" + name + "', it blocks";
+                err = "FUNCTION cannot call '" + argv[0] + "', it blocks";
                 return false;
             }
             if (out.index() == var_error) {

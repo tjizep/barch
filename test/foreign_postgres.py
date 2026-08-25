@@ -185,21 +185,26 @@ if dsn and built:
                 time.sleep(0.35)
                 id3 = r.get("age_c")
                 assert id3 != id1, (id1, id3)
-                conf.set(
-                    "fp_luau.foreign_script",
-                    "-- fill\n"
-                    "function resolve(key, space)\n"
-                    "    local row = sql.query('SELECT v FROM t WHERE k = ?', key)\n"
-                    "    if row == nil then return nil end\n"
-                    "    return row[1]\n"
-                    "end\n",
-                )
+                conf.set("fp_luau.foreign_script", "filler")
                 conf.set("fp_luau.foreign_dsn", "env:BARCH_POSTGRES_LIVE")
                 conf.set("fp_luau.foreign_query_timeout_ms", "5000")
                 conf.set("fp_luau.foreign", "luau")
                 conf.save()
                 assert option(r, "fp_luau", "FOREIGN") == "luau"
+                # the fill script is a stored function now, so the space has to
+                # exist before it can hold one, and the entry point is `call`
+                # rather than `resolve` - see DONE 130
                 r.execute_command("USE", "fp_luau")
+                r.execute_command(
+                    "SETF",
+                    "filler",
+                    "-- fill\n"
+                    "function call(key, space)\n"
+                    "    local row = sql.query('SELECT v FROM t WHERE k = ?', key)\n"
+                    "    if row == nil then return nil end\n"
+                    "    return row[1]\n"
+                    "end\n",
+                )
                 assert r.get("sku") == "widget"
                 assert r.get("nope") is None
                 assert r.get("o'reilly") == "quoted"

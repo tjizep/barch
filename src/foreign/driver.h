@@ -169,6 +169,17 @@ struct call_interface {
     command_runner run_command{};
     store_access store{};
     space_opener open_space{};
+    /**
+     * spaces `barch.space.NAME` has already opened, held here rather than per call.
+     *
+     * Building one is not cheap - `store_for` fills in fifteen or so std::functions -
+     * and it used to be thrown away at the end of every call, so a function doing one
+     * read through a named space paid for the whole interface to serve it. The
+     * interface is the right owner: it is already rebuilt when the running space
+     * changes, when the defined space changes and on `set_acl`, which are exactly the
+     * three things that make a cached store_access wrong. See TODO 141.
+     */
+    heap::string_map<store_access> opened{};
     /** what it was built for, so a call in another space builds its own */
     std::string running_in{};
     std::string defined_in{};

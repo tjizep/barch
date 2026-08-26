@@ -816,6 +816,20 @@ try:
     assert r.execute_command("tombkind") == [b"barch.tomb", b"false"]
     r.execute_command("USE", "")
 
+    # --- the Luau states show up in INFO MEMORY, TODO 151 ---------------------------
+    # a state belongs to the session using it, so the bytes are counted by the
+    # allocator every state is built with rather than read out of someone else's VM
+    before = r.info("memory")
+    assert "used_memory_luau" in before, "INFO MEMORY should report the Luau states"
+    assert r.execute_command("SETF", "statfn",
+                             'function call() return 1 end') == b"OK"
+    r.execute_command("statfn")
+    after = r.info("memory")
+    assert after["luau_states"] >= 1, after["luau_states"]
+    assert after["luau_functions_compiled"] >= 1
+    assert after["used_memory_luau"] > 0
+    r.execute_command("REMF", "statfn")
+
     # --- one state, several spaces: names must not collide, TODO 150 ----------------
     # a session keeps one Luau state for every space it touches, so the compiled
     # functions of two spaces live in one map. If the key were the bare name, the

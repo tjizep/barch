@@ -44,6 +44,44 @@ struct run_ctx {
 /** the region's instruction cap - short, because nothing else can touch the shard */
 static constexpr uint64_t locked_region_insns = 100000;
 
+/*
+ * Every Luau state barch builds is built with this, so the bytes they hold show up in
+ * INFO MEMORY - see TODO 151.
+ *
+ * Counted in the allocator rather than asked for with `lua_gc(LUA_GCCOUNT)`, because
+ * a state belongs to the session using it: reading its collector from the thread that
+ * happens to be serving INFO would be a race. An allocator sees every state - the
+ * per-session function states, the foreign fill states, and the scratch one a SETF
+ * compile check uses - and it sees them live.
+ */
+static void* luau_alloc(void*, void* ptr, size_t osize, size_t nsize) {
+    if (nsize > osize)
+        statistics::luau_bytes += nsize - osize;
+    else
+        statistics::luau_bytes -= osize - nsize;
+    if (nsize == 0) {
+        free(ptr);
+        return nullptr;
+    }
+    return realloc(ptr, nsize);
+}
+
+/** a state built the way barch builds them, counted and countable */
+static lua_State* new_counted_state() {
+    lua_State* L = lua_newstate(luau_alloc, nullptr);
+    if (L)
+        ++statistics::luau_states;
+    return L;
+}
+
+static void close_counted_state(lua_State* L) {
+    if (!L)
+        return;
+    lua_close(L);
+    if (statistics::luau_states > 0)
+        --statistics::luau_states;
+}
+
 /**
  * what a running call carries on its coroutine - TODO 150.
  *
@@ -212,7 +250,7 @@ static bool compile_entry(const std::string& source, std::string& bytecode,
     }
     bytecode.assign(bc, n);
     free(bc);
-    lua_State* L = luaL_newstate();
+    lua_State* L = new_counted_state();
     if (!L) {
         err = "luau state failed";
         return false;
@@ -220,21 +258,21 @@ static bool compile_entry(const std::string& source, std::string& bytecode,
     int rc = luau_load(L, "=barch", bytecode.data(), bytecode.size(), 0);
     if (rc != 0) {
         err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "luau load failed";
-        lua_close(L);
+        close_counted_state(L);
         return false;
     }
     if (lua_pcall(L, 0, 0, 0) != 0) {
         err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "luau script error";
-        lua_close(L);
+        close_counted_state(L);
         return false;
     }
     lua_getglobal(L, entry);
     if (lua_type(L, -1) != LUA_TFUNCTION) {
         err = std::string("luau script has no ") + entry + "()";
-        lua_close(L);
+        close_counted_state(L);
         return false;
     }
-    lua_close(L);
+    close_counted_state(L);
     return true;
 }
 
@@ -253,7 +291,7 @@ struct luau_job {
 
     ~luau_job() {
         if (L)
-            lua_close(L);
+            close_counted_state(L);
     }
 };
 
@@ -290,7 +328,7 @@ static void pump(std::shared_ptr<luau_job> job, int narg) {
         }
         result r = take_result(job->T, status);
         if (job->L) {
-            lua_close(job->L);
+            close_counted_state(job->L);
             job->L = nullptr;
             job->T = nullptr;
         }
@@ -347,7 +385,7 @@ static void start_resolve(std::string_view space, std::string_view key, uint64_t
     auto job = std::make_shared<luau_job>();
     job->requeue = requeue;
     job->done = std::move(done);
-    job->L = luaL_newstate();
+    job->L = new_counted_state();
     if (!job->L) {
         job->done({result::status::error, "FOREIGN luau state"});
         return;
@@ -526,8 +564,10 @@ struct space_state {
     heap::vector<std::pair<lua_State*, int>> free_threads{};
 
     ~space_state() {
-        if (L)
-            lua_close(L);
+        // the functions go with it, so what they were counted as goes too
+        if (statistics::luau_functions >= functions.size())
+            statistics::luau_functions -= functions.size();
+        close_counted_state(L);
     }
 };
 
@@ -1385,7 +1425,7 @@ static space_state* state_for(function_states& cache) {
     if (cache.only)
         return cache.only.get();
     auto st = std::make_unique<space_state>();
-    st->L = luaL_newstate();
+    st->L = new_counted_state();
     if (!st->L)
         return nullptr;
     lua_State* L = st->L;
@@ -1557,6 +1597,7 @@ static int function_require(lua_State* L) {
     if (!compile_into(*st, key, source, c, err))
         luaL_error(L, "%s", err.c_str());
     st->functions.emplace(key, c);
+    ++statistics::luau_functions;
     lua_getref(L, c.envt);
     return 1;
 }
@@ -1777,6 +1818,8 @@ void start_function(const std::string& space, const std::string& name,
             // the state - which now outlives any one space - holds every one of them
             for (auto& e : st->functions)
                 drop_compiled(st->L, e.second);
+            if (statistics::luau_functions >= st->functions.size())
+                statistics::luau_functions -= st->functions.size();
             st->functions.clear();
         }
         std::string source;
@@ -1794,6 +1837,7 @@ void start_function(const std::string& space, const std::string& name,
             return;
         }
         it = st->functions.emplace(key, c).first;
+        ++statistics::luau_functions;
     }
     st->load = nullptr;
     const compiled& c = it->second;

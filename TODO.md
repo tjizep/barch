@@ -952,8 +952,9 @@
     thousand copies of the popular ones, and a session that roams
     over spaces holds a state for each. That is no longer true: a
     session keeps one state whatever it touches, so there is nothing
-    left that is expensive enough to want LRU - see DONE 143. A line
-    in the memory statistics is still worth having. Eviction is not invalidation:
+    left that is expensive enough to want LRU - see DONE 143. The
+    line in the memory statistics is there too - DONE 144, which
+    also corrects 143's per state figure from 50kB to 362kB. Eviction is not invalidation:
     an evicted function is compiled again from whatever the key
     says now, so a long-lived session can pick up a redefinition by
     accident. Either that is fine and it is written down, or the
@@ -2870,3 +2871,5 @@
 149. [Done] FLUSHALL leaves the configuration space alone [26-08-2026] Nr 142 d99231f
 
 150. [Done] One Luau state per session, not per session and space [26-08-2026] Nr 143 d99231f
+
+151. [Done] Luau memory is in the statistics [26-08-2026] Nr 144 d99231f

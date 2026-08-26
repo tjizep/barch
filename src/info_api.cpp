@@ -210,6 +210,12 @@ int INFO(caller& call, const arg_t& argv) {
         "used_memory_scripts_eval:0\n"
         "number_of_cached_scripts:0\n"
         "number_of_functions:"+tos(functions_by_name()->size())+"\n"
+        // what the Luau VMs hold - the per session function states, the foreign fill
+        // states and the scratch one SETF compiles against. See TODO 151
+        "used_memory_luau:"+tos(statistics::luau_bytes)+"\n"
+        "used_memory_luau_human:"+human(statistics::luau_bytes)+"\n"
+        "luau_states:"+tos(statistics::luau_states)+"\n"
+        "luau_functions_compiled:"+tos(statistics::luau_functions)+"\n"
         "number_of_libraries:0\n"
         "used_memory_vm_functions:0\n"
         "used_memory_vm_total:0\n"

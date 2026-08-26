@@ -6,6 +6,17 @@ namespace statistics {
     /**
      * size stats
      */
+    /**
+     * what the Luau VMs hold - TODO 151.
+     *
+     * `luau_bytes` is counted by the allocator every state is built with, so it sees
+     * a session's function states, the foreign fill states and the scratch state a
+     * SETF compile check uses, live and without reaching into another thread's VM.
+     * `luau_states` and `luau_functions` are what those bytes are spread over.
+     */
+    extern std::atomic<uint64_t> luau_bytes;
+    extern std::atomic<uint64_t> luau_states;
+    extern std::atomic<uint64_t> luau_functions;
     extern std::atomic<uint64_t> n4_nodes;
     extern std::atomic<uint64_t> n16_nodes;
     extern std::atomic<uint64_t> n48_nodes;

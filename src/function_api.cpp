@@ -244,6 +244,21 @@ namespace functions {
                 return false;
             }
 
+            /*
+             * How deep this chain has gone. CALLF is an ordinary built-in, so a script
+             * reaches another script through here, and each level used to start with a
+             * deadline of its own - which meant the deadline bounded one call and not
+             * a tree of them. Depth is carried on the caller, so it survives a nested
+             * call parking and coming back on another thread. See TODO 98 E.
+             */
+            int depth = outer.script_depth() + 1;
+            if (depth > (int) barch::get_function_max_depth()) {
+                err = std::string("FUNCTION ") + barch::foreign::too_deep_marker
+                    + ", stopped at " + std::to_string(depth)
+                    + " - raise function_max_depth if this is meant to recurse";
+                return false;
+            }
+
             // nested calls get their own, see sub_caller_state
             std::unique_ptr<rpc_caller> nested;
             if (st.busy)
@@ -253,11 +268,14 @@ namespace functions {
             if (mine)
                 st.busy = true;
             struct release {
-                sub_caller_state& s; bool mine;
-                ~release() { if (mine) s.busy = false; }
-            } rel{st, mine};
+                sub_caller_state& s; bool mine; rpc_caller& c;
+                // the sub caller outlives the call, so the depth has to be put back or
+                // a connection would climb towards the limit one command at a time
+                ~release() { if (mine) s.busy = false; c.set_script_depth(0); }
+            } rel{st, mine, sub};
 
             sub.set_kspace(outer.kspace());
+            sub.set_script_depth(depth);
             // argv goes straight in - `call` only indexes and iterates it, and copying
             // every argument into a std::vector first was pure cost
             out = sub.callv(argv, fn->call, Variable(nullptr));
@@ -270,6 +288,13 @@ namespace functions {
             }
             if (out.index() == var_error) {
                 err = std::get<error>(out).what();
+                // the refusal from further down comes back whole rather than wrapped
+                // again, so the reason survives the trip up
+                if (err.find(barch::foreign::too_deep_marker) != std::string::npos) {
+                    auto at = err.find("FUNCTION ");
+                    if (at != std::string::npos)
+                        err = err.substr(at);
+                }
                 return false;
             }
             return true;
@@ -348,10 +373,13 @@ namespace functions {
             art::value_type limit{fn_start.data(), fn_start.size()};
             return hi < limit ? hi : limit;
         };
-        s.get = [space](const std::string& key, std::string& value) -> bool {
+        s.get = [space](const std::string& key,
+                        std::string& value) -> barch::foreign::store_access::read_state {
             auto converted = space->encode_key(art::value_type{key.data(), key.size()});
             barch::sharded_store store(space);
-            return store.search(converted.get_value(), [&](const art::node_ptr& n) {
+            // through search_state rather than search, so a cached source miss is not
+            // reported as though nothing had ever been looked for - TODO 148
+            auto st = store.search_state(converted.get_value(), [&](const art::node_ptr& n) {
                 auto cl = n.const_leaf();
                 auto v = cl->get_value();
                 if (cl->is_compressed()) {
@@ -361,6 +389,14 @@ namespace functions {
                     value.assign(v.chars(), v.size);
                 }
             });
+            switch (st) {
+                case barch::sharded_store::read_state::present:
+                    return barch::foreign::store_access::read_state::present;
+                case barch::sharded_store::read_state::tombed:
+                    return barch::foreign::store_access::read_state::tombed;
+                default:
+                    return barch::foreign::store_access::read_state::absent;
+            }
         };
         s.exists = [space](const std::string& key) -> bool {
             auto converted = space->encode_key(art::value_type{key.data(), key.size()});

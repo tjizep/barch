@@ -68,6 +68,7 @@ struct config_state {
     heap::string foreign_script_insns{};
     heap::string function_slice_insns{};
     heap::string function_deadline_ms{};
+    heap::string function_max_depth{};
     heap::string jump_factor{};
     heap::string ordered_keys{};
     heap::string server_port{};
@@ -338,6 +339,34 @@ static int SetFunctionDeadlineMs(const char *unused_arg, ValkeyModuleString *val
 }
 
 static int ApplyFunctionDeadlineMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+static ValkeyModuleString *GetFunctionMaxDepth(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_max_depth.c_str(),
+                                     state().function_max_depth.length());
+}
+
+static int SetFunctionMaxDepth(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_max_depth = val;
+    char *end = nullptr;
+    uint64_t n = std::strtoull(val.c_str(), &end, 10);
+    if (n == 0) n = 1;
+    config().function_max_depth = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionMaxDepth(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionMaxDepth(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionMaxDepth(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -1283,6 +1312,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetFunctionDeadlineMs, SetFunctionDeadlineMs,
                                                  ApplyFunctionDeadlineMs, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_max_depth", "100", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionMaxDepth, SetFunctionMaxDepth,
+                                                 ApplyFunctionMaxDepth, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetOrderedKeys, SetOrderedKeys,
                                                      ApplyOrderedKeys, nullptr);
@@ -1606,6 +1639,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyFunctionDeadlineMs(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "function_max_depth") {
+        auto r = SetFunctionMaxDepth(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionMaxDepth(nullptr, nullptr, nullptr);
+        }
+        return r;
     }else if (name == "ordered_keys") {
         auto r = SetOrderedKeys(val);
         if (r == VALKEYMODULE_OK) {
@@ -1815,6 +1854,11 @@ uint64_t barch::get_function_deadline_ms() {
     return config().function_deadline_ms;
 }
 
+uint64_t barch::get_function_max_depth() {
+    std::lock_guard lock(state().config_mutex);
+    return config().function_max_depth;
+}
+
 bool barch::get_log_page_access_trace() {
     //std::lock_guard lock(state().config_mutex);
     return config().log_page_access_trace;
@@ -1911,7 +1955,7 @@ const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "compression", "db_number_prefix", "eviction_policy",
         "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
-        "function_slice_insns", "function_deadline_ms",
+        "function_slice_insns", "function_deadline_ms", "function_max_depth",
         "foreign_timeout_ms",
         "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
@@ -1937,6 +1981,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
     else if (name == "function_slice_insns")        value = std::to_string(c.function_slice_insns);
     else if (name == "function_deadline_ms")        value = std::to_string(c.function_deadline_ms);
+    else if (name == "function_max_depth")          value = std::to_string(c.function_max_depth);
     else if (name == "foreign_timeout_ms")          value = std::to_string(c.foreign_timeout_ms);
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);
     else if (name == "listen_port")                 value = std::to_string(c.listen_port);

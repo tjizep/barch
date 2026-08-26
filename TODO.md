@@ -702,8 +702,9 @@
         SETF, GETF, REMF and KEYSF are the commands that can; see
         K for why they are their own commands and not a flag.
       - FLUSHDB drops a space's functions with the space. FLUSHALL
-        reaching `configuration` would drop the global ones, which
-        is either right or wants refusing.
+        does not reach `configuration` at all - it is settings
+        rather than data, and clearing the caches should not
+        unconfigure the server. See DONE 142.
       - eviction never takes one. A function is a command, not
         data: losing one to memory pressure deletes a command, and
         because a session keeps whatever it compiled, the
@@ -767,8 +768,8 @@
     composite themselves - see K. KEYS and SCAN still
     show function keys, since the reply path decodes any composite,
     so the asymmetry to live with is that a name KEYS printed cannot
-    be handed back to GET. That wants saying in the docs rather than
-    being discovered.
+    be handed back to GET. Said in the docs now, as a notice under
+    the commands - see DONE 139.
 
     A guard was planned for the paths that write an already encoded
     key, on the grounds that a forged tfunction key from a peer is a
@@ -949,10 +950,10 @@
     Size is the other one. A client that calls a hundred functions
     has a hundred of them compiled, a thousand connections have a
     thousand copies of the popular ones, and a session that roams
-    over spaces holds a state for each. That wants a cap with LRU
-    eviction - on the states as well as on the functions in them -
-    and a line in the memory statistics, the same as the scan
-    cursors in caller.h already have. Eviction is not invalidation:
+    over spaces holds a state for each. That is no longer true: a
+    session keeps one state whatever it touches, so there is nothing
+    left that is expensive enough to want LRU - see DONE 143. A line
+    in the memory statistics is still worth having. Eviction is not invalidation:
     an evicted function is compiled again from whatever the key
     says now, so a long-lived session can pick up a redefinition by
     accident. Either that is fine and it is written down, or the
@@ -1053,21 +1054,36 @@
         arriving by a different route.
       - MULTI/EXEC from inside a script.
 
+    The depth limit is built - `function_max_depth`, default 100,
+    carried on the caller so a nested call that parks and resumes
+    elsewhere does not lose the count. See DONE 140.
+
+    Sharing the budget and the deadline across a tree of nested
+    calls was asked for here originally and is dropped. The depth
+    cap is what actually bounds the tree, and it bounds it with one
+    number an operator can reason about; a shared budget would have
+    to be threaded through every nested caller and would make a
+    call's failure depend on what its callers had already spent,
+    which is a much harder thing to explain than "a hundred deep is
+    too deep". The per level deadline stays.
+
     ACL is not optional here: the script runs as the calling user
     and `call` checks that user's acl vector, or a function becomes
     a way to launder a command past the check that would have
-    refused it. There is also a nesting depth limit, and the
-    instruction budget and deadline are shared across the whole
-    tree of nested calls rather than reset per call.
+    refused it. There is also a nesting depth limit.
 
-    `_G["NAME"]` is a convenience on top of `call`, and it brings
-    its own questions, which is why `call` is the primitive and
-    stays available: a command name can collide with a base global
+    `_G["NAME"]` was going to be a convenience on top of `call`.
+    Dropped, and the reasons it was hedged about from the start are
+    the reasons: a command name can collide with a base global
     (barch has `KEYS`, which is also the name redis's own Lua API
-    uses), `_G` cannot express the `space:CMD` form, and the set of
-    names would have to be rebuilt whenever a function is loaded.
-    Populate the per-call global proxy, skip any name that would
-    shadow something already there, and say so in KEYSF.
+    uses), `_G` cannot express the `space:CMD` form at all, and the
+    set of names would have to be rebuilt whenever a function is
+    loaded. So it would be a second way to call a command that
+    works for most names, silently does something else for a few,
+    and cannot express one of the two forms - against `barch.call`,
+    which is one way that always works.
+
+    `call` was always the primitive and it stays the only one.
 
     F. The store interface.
 
@@ -1420,7 +1436,8 @@
     `row.type` - a script walking a space cannot avoid meeting
     function keys and needs a way to say so.
 
-    Open, because it decides whether the two halves agree: a key
+    Answered, and built - see DONE 138. The rest of this paragraph
+    is what the question was: a key
     stored as an integer - `SET 42 x`, which encodes as tinteger,
     not as the string "42" - should probably come back from
     `row.key` as a Luau number, since `barch.space.sp1[42]` will
@@ -1980,12 +1997,40 @@
     `barch.store.range` matching them is the interface agreeing
     with the commands, not falling short of them.
 
-    Left open and not urgent: the point read asymmetry above -
-    `store.get` answers nil where `barch.call("GET")` fills - and
-    the ctx_swig accident behind it. Both wait for H, where the
-    park makes the question answerable instead of a choice between
-    two bad options. The five minute worker hold is real today
-    whatever is decided later.
+    Decided, and the asymmetry stays: `barch.call("GET")` fills and
+    `barch.store.get` does not. That is the same split as everywhere
+    else - filling is what a *command* does, and the store interface
+    is the cache - so a script picks the one it means rather than
+    getting one behaviour with two names. Written into the docs
+    beside `barch.tomb`, which is what makes the store side usable:
+    a script that reads the cache can now tell a cached miss from an
+    unasked key, so choosing not to fill is an informed choice
+    rather than a silent nil. See DONE 141.
+
+    The ctx_swig hold: left as it is, and the five minutes above was
+    overstated. Traced properly rather than repeated:
+    `fetch_async` is given `foreign_query_timeout_ms`
+    (foreign.cpp:183), and `finish_fetch` notifies `swig_cv`
+    (foreign.cpp:111) whether the fetch succeeded, failed or timed
+    out. So the waiter is woken when the *query* ends, and the hold
+    on the worker is one query - a second by default, per space and
+    settable, which is the timeout an outgoing call ought to have.
+    `waiter_timeout_ms`, the five minutes, is the backstop for a
+    wake that never arrives, not the normal case.
+
+    So a script's sub-caller does take the SWIG branch of
+    `park_or_wait` rather than parking (`rpc_caller` sets ctx_swig
+    at rpc_caller.h:137), and that is a worker held rather than a
+    session parked - but it is held for as long as the source is
+    given, which is the bound that matters and is already in the
+    operator's hands.
+
+    What to watch rather than fix: the exposure is pool saturation,
+    not duration. Enough concurrent foreign misses from scripts hold
+    that many workers for the query timeout each. Lower
+    `foreign_query_timeout_ms` on a space whose source is slow -
+    that is the knob, and it is per space precisely so a slow source
+    does not set the pace for everything else.
 
     One more thing that fell out of the same trace: `rpc_caller`'s
     constructor runs AUTH, so every `barch.call` authenticates
@@ -2451,9 +2496,12 @@
              counts time a script spends queued behind others. Under
              enough load a script fails rather than being slow:
              sixteen at once, each wanting 0.29s, and three of them
-             hit the 1s deadline. That may be right - it is what
-             bounds a runaway - but it is a decision, not an
-             accident, and nothing says so anywhere yet.
+             hit the 1s deadline. That is right - it is what bounds
+             a runaway, and a bound that stopped counting whenever
+             the machine was busy would not bound anything - but it
+             is a decision rather than an accident, so it is now
+             written down where someone tuning it will find it. See
+             DONE 137.
 
          Measured before the fast path: one script alone 0.35s,
          sixteen at once 1.00s
@@ -2808,3 +2856,17 @@
 142. [Done] SQL foreign tests wrote Luau source into foreign_script [25-08-2026] Nr 133 9d612c8
 
 143. [Done] A function returning nothing took the server down [26-08-2026] Nr 134 9d612c8
+
+144. [Done] Wall clock deadline documented, and two stale doc claims [26-08-2026] Nr 137 9d612c8
+
+145. [Done] Keys are strings, in and out [26-08-2026] Nr 138 9d612c8
+
+146. [Done] Stored functions are documented [26-08-2026] Nr 139 d99231f
+
+147. [Done] Nested script calls are bounded [26-08-2026] Nr 140 d99231f
+
+148. [Done] store.get tells a cached miss from an absent key [26-08-2026] Nr 141 d99231f
+
+149. [Done] FLUSHALL leaves the configuration space alone [26-08-2026] Nr 142 d99231f
+
+150. [Done] One Luau state per session, not per session and space [26-08-2026] Nr 143 d99231f

@@ -255,6 +255,17 @@ public:
         static const barch::foreign::function_states_ptr none{};
         return none;
     }
+    /**
+     * how deep in a chain of nested script calls this caller is - see TODO 98 E.
+     *
+     * A function reaches another through `barch.call("CALLF", ...)`, and each level
+     * builds its own state with its own deadline, so the deadline bounds one call and
+     * not a tree of them. The depth is carried on the caller rather than in a thread
+     * local because a nested call can park and come back on a different thread, which
+     * would lose the count exactly where it matters.
+     */
+    [[nodiscard]] virtual int script_depth() const { return 0; }
+    virtual void set_script_depth(int) {}
     virtual barch::key_space_ptr& kspace() = 0;
     virtual barch::key_space_ref ks_ref() = 0;
     virtual void set_kspace(const barch::key_space_ptr& ks) = 0;

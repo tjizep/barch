@@ -195,6 +195,7 @@ pre.solo{background:var(--code-bg);color:var(--code-tx);border-radius:8px;paddin
   <a href="#ref-list" data-nav="ref-list">List <code>L*</code></a>
   <a href="#ref-keyspaces" data-nav="ref-keyspaces">Named Key Spaces</a>
   <a href="#ref-foreign" data-nav="ref-foreign">Coalesced Foreign Sources</a>
+  <a href="#ref-functions" data-nav="ref-functions">Stored Luau Functions</a>
   <a href="#ref-memory" data-nav="ref-memory">Memory &amp; Prefix Elimination</a>
   <a href="#ref-replication" data-nav="ref-replication">Replication &amp; Routing</a>
   <a href="#ref-stats" data-nav="ref-stats">Statistics &amp; Introspection</a>
@@ -329,11 +330,16 @@ sudo cmake --install build --component barchlua   <span class="c"># luajit → /
 <tr><td><code>&lt;keyspace&gt;.foreign</code></td><td>enum</td><td class="req c">PER-SPACE</td><td><code>off</code> · <code>mysql</code> · <code>postgres</code> · <code>luau</code> · <code>fake</code>. Names a source that will fill a miss. Read once at first open. <code>mysql</code>/<code>postgres</code> without a DSN or host, and <code>luau</code> without a script, are left <code>off</code>. A source miss is stored as an empty tomb, so the next GET stays nil and does not ask again</td><td><code>off</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_dsn</code></td><td>string</td><td class="req c">PER-SPACE</td><td>DSN, or <code>file:/path</code>, or <code>env:VAR</code>. Prefer this over putting a password in the configuration space, which replicates under PUBLISH. The server does not log the resolved DSN</td><td>empty</td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_query</code></td><td>string</td><td class="req c">PER-SPACE</td><td>one column. <code>?</code> binds the whole user key. <code>$0</code>, <code>$1</code>, … bind that component of a composite key. <code>$$</code> binds the key reconstructed by <code>encoded_key_as_string</code> (the original <code>GET</code> string). <code>$k</code> is the keyspace name, written into the SQL as an identifier (a schema or table qualifier). <code>\$</code> is a literal <code>$</code>. Key macros are sent as a prepared statement</td><td>empty</td></tr>
-<tr><td><code>&lt;keyspace&gt;.foreign_script</code></td><td>string</td><td class="req c">PER-SPACE</td><td>Luau file, or the script itself if it starts with <code>--</code>. Must define <code>resolve(key, space)</code> returning a string or nil. No <code>require</code>, no IO. <code>sql.query(sql, key)</code> runs against this space's MySQL or Postgres backend when a DSN is also set. Loaded once at first open</td><td>empty</td></tr>
+<tr><td><code>&lt;keyspace&gt;.foreign_script</code></td><td>string</td><td class="req c">PER-SPACE</td><td>the name of a stored function in this space — <code>SETF</code> it first, then name it here. It must define <code>call(key, space)</code> returning a string or nil. <code>sql.query(sql, key)</code> runs against this space's MySQL or Postgres backend when a DSN is also set</td><td>empty</td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_script_insns</code></td><td>int</td><td class="req c">PER-SPACE</td><td>instruction slice for this space. Unset inherits <code>foreign_script_insns</code></td><td>inherits global</td></tr>
+<tr><td><code>function_slice_insns</code></td><td>int</td><td class="req n">OPTIONAL</td><td>Luau instruction slice for one stored function (<code>SETF</code>/<code>CALLF</code>), separate from the foreign one. After this many instructions the call yields its worker and is queued again; it is not a kill. A named space can override with <code>&lt;name&gt;.function_slice_insns</code></td><td><code>1000000</code></td></tr>
+<tr><td><code>function_max_depth</code></td><td>int</td><td class="req n">OPTIONAL</td><td>how deep a chain of nested script calls may go. A function reaches another with <code>barch.call("CALLF", …)</code>, and each level runs with a deadline of its own, so without a limit the deadline bounds one call and not a tree of them. Past this the call is refused</td><td><code>100</code></td></tr>
+<tr><td><code>function_deadline_ms</code></td><td>ms</td><td class="req n">OPTIONAL</td><td>wall clock bound on a whole stored-function call, measured from when the call arrives — <b>not</b> CPU time, and it does not stop while the call is queued. This is what ends a runaway. A named space can override with <code>&lt;name&gt;.function_deadline_ms</code></td><td><code>1000</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.missing_ttl</code></td><td>int</td><td class="req c">PER-SPACE</td><td>seconds a source-miss tomb will live; <code>0</code> keeps it until DEL</td><td><code>0</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_timeout_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>parked GET wait for this space. Unset inherits <code>foreign_timeout_ms</code></td><td>inherits global</td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_query_timeout_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>driver / script deadline</td><td><code>1000</code></td></tr>
+<tr><td><code>&lt;keyspace&gt;.function_slice_insns</code></td><td>int</td><td class="req c">PER-SPACE</td><td>stored-function instruction slice for this space. Unset inherits <code>function_slice_insns</code></td><td>inherits global</td></tr>
+<tr><td><code>&lt;keyspace&gt;.function_deadline_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>stored-function wall clock deadline for this space. Unset inherits <code>function_deadline_ms</code>. Read it back with <code>KSPACE OPTION GET FUNCTION_DEADLINE</code>, and the slice with <code>FUNCTION_SLICE</code></td><td>inherits global</td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_max_inflight</code></td><td>int</td><td class="req c">PER-SPACE</td><td>cap of running foreign queries for this space</td><td><code>32</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_pool_size</code></td><td>int</td><td class="req c">PER-SPACE</td><td>MySQL/PG connections for this space</td><td><code>8</code></td></tr>
 <tr><td><code>&lt;keyspace&gt;.foreign_pool_max_age_ms</code></td><td>ms</td><td class="req c">PER-SPACE</td><td>idle MySQL/PG connection max age for this space. Unset inherits <code>foreign_pool_max_age_ms</code>. <code>0</code> is inherit, not “keep forever”</td><td>inherits global</td></tr>
@@ -2398,7 +2404,7 @@ GET Smith 42
 <span class="c"># SELECT name FROM people.person WHERE surname = $1 AND age = $2</span></pre>
 <p>Build the table (or schema <code>people</code>) before the first GET. The query returns one column; extra columns are ignored. The bound values are never interpolated into the SQL.</p>
 <h3>Luau instead of a fixed query</h3>
-<p>Set <code>&lt;name&gt;.foreign</code> to <code>luau</code> and put a script in <code>&lt;name&gt;.foreign_script</code> (a path, or the script itself if it starts with <code>--</code>). The script must define <code>resolve(key, space)</code> and return a string or nil. Nil is a cached miss. A thrown error or a script that runs past the query timeout is <code>-ERR FOREIGN</code>, not a tomb. <code>foreign_script_insns</code> is a slice, not a kill: when it runs out the script pauses and the foreign pool takes other work, then the script continues. <code>sql.query</code> is a blocking C call, so a slice cannot yield in the middle of one. Give the space a DSN as well if <code>resolve</code> calls <code>sql.query</code>; that call uses the same macros and the same pool. There is no <code>require</code> and no IO.</p>
+<p>Set <code>&lt;name&gt;.foreign</code> to <code>luau</code> and name a stored function in <code>&lt;name&gt;.foreign_script</code>. Store it with <code>SETF</code> first — the space has to exist before it can hold one, so the order is: configure, <code>USE</code> the space, <code>SETF</code> the script, then let it fill. The script must define <code>call(key, space)</code> and return a string or nil. Nil is a cached miss. A thrown error or a script that runs past the query timeout is <code>-ERR FOREIGN</code>, not a tomb. <code>foreign_script_insns</code> is a slice, not a kill: when it runs out the script pauses and the foreign pool takes other work, then the script continues. <code>sql.query</code> is a blocking C call, so a slice cannot yield in the middle of one. Give the space a DSN as well if <code>call</code> calls <code>sql.query</code>; that call uses the same macros and the same pool. There is no <code>require</code> and no IO.</p>
 <h3>Caps and timeouts</h3>
 <ul>
 <li><code>foreign_query_timeout_ms</code> is the driver deadline. A job waits up to that long for a pooled connection, then the statement itself is cut off.</li>
@@ -2406,7 +2412,13 @@ GET Smith 42
 <li><code>foreign_max_inflight</code> is the cap of running queries for the space. A miss above the cap is <code>-ERR FOREIGN overloaded</code>, not a queue that grows without bound.</li>
 <li><code>foreign_pool_size</code> is the MySQL or Postgres connection pool for the space. Do not open one connection per query.</li>
 <li><code>foreign_pool_max_age_ms</code> is how long an idle pooled connection may sit before the key space maintenance thread closes it. The next miss then opens a new one. Unset, it inherits the global <code>foreign_pool_max_age_ms</code> (thirty seconds). The global <code>0</code> keeps idle connections.</li>
+<li>A stored function called by a client does not use these. Its slice is <code>function_slice_insns</code> and its deadline is <code>function_deadline_ms</code> — see the note below, which is the one thing about them worth reading before you tune either.</li>
 </ul>
+<div class="notice note"><b>The stored-function deadline is wall clock, and it counts queued time.</b>
+<p><code>function_deadline_ms</code> (default one second) runs from the moment a call arrives, not from when it starts executing and not from CPU used. A function only ever runs a slice at a time — <code>function_slice_insns</code> instructions, then it yields its worker so short calls are not stuck behind long ones — and the time it spends waiting for its next slice counts against the deadline just the same.</p>
+<p>The consequence is worth stating plainly, because it is a decision rather than an accident: <b>under enough load a function fails rather than being slow</b>. Sixteen scripts started together, each wanting about 0.29s of work, put three of them past a one second deadline. That is the deadline doing its job — it is what bounds a runaway, and a bound that stopped counting whenever the machine was busy would not bound anything. But it means the deadline has to be set against the load you expect and not against how long the function takes on an idle server.</p>
+<p>If functions are timing out under load and the work itself is not the problem, raise <code>function_deadline_ms</code> — for the space with <code>&lt;name&gt;.function_deadline_ms</code> if only some of them need it. Lowering <code>function_slice_insns</code> makes each function give up its worker sooner, which helps short calls get through and does nothing for a long one. Read both back with <code>KSPACE OPTION GET FUNCTION_DEADLINE</code> and <code>FUNCTION_SLICE</code>.</p>
+<p>A call cut off this way answers an error; nothing it wrote before it was cut is rolled back, since a function is not a transaction.</p></div>
 <h3>Introspection</h3>
 <table>
 <thead><tr><th>Surface</th><th>Returns</th></tr></thead>
@@ -2473,6 +2485,109 @@ conf:save()
 <span class="k">local</span> kv = barch.KeyValue(<span class="s">"catalog"</span>)
 <span class="k">print</span>(kv:get(<span class="s">"sku"</span>))</pre></div>
 </div>
+</div>
+</div>
+</article>
+
+<article id="ref-functions">
+<div class="crumb">Reference / Stored Luau Functions</div>
+<h1>Stored Luau Functions</h1>
+<p class="lede">User-defined commands written in Luau, stored as ordinary keys in the space they belong to. A function persists, replicates and exports the way any other key does.</p>
+<div class="chips"><span class="chip o">SETF · GETF · REMF · KEYSF · CALLF</span><span class="chip lock">never evicted</span><span class="chip l2">function ACL category</span></div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>What a function is</h2></header>
+<div class="bd">
+<ul>
+<li><b>A key, not configuration.</b> A function lives under a lead byte of its own, so it is written to the AOF and RDB, replicates to a peer, and comes out of <code>EXPORT</code> — with no machinery specific to functions. A space's functions have the same lifetime as the space, and <code>FLUSHDB</code> drops them with it.</li>
+<li><b><code>FLUSHALL</code> does not touch <code>configuration</code>.</b> That space holds each space's settings as well as the global functions, so clearing every cache with it would silently unconfigure the server. Every other space is cleared as usual. To clear configuration deliberately, <code>USE configuration</code> and <code>FLUSHDB</code>.</li>
+<li><b>Scope.</b> A function is callable in the space it was stored in. Functions in the <code>configuration</code> space are global: defined once, callable from any client in any space, the same scope the <code>barch</code> module itself has.</li>
+<li><b>Never evicted.</b> Eviction does not take a function key under any policy. A function is a command, not data — losing one to memory pressure deletes a command, and since a session keeps whatever it compiled, connections that already ran it would carry on working while new ones failed. Defragmentation still moves them.</li>
+<li><b>No TTL.</b> <code>EXPIRE</code> and the rest of the TTL family refuse a function. A session holds what it compiled for as long as it is connected, so a TTL would expire the key while every connected client went on calling the function. A setting that visibly does not do what it says is worse than not having one.</li>
+</ul>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>Commands</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Command</th><th>Arguments</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>SETF</code></td><td>name source</td><td>compile and store. The source is compiled before it is written, so a script that will not run is refused rather than saved as a command that cannot work. Names fold to upper case</td></tr>
+<tr><td><code>GETF</code></td><td>name</td><td>the stored source, or null</td></tr>
+<tr><td><code>REMF</code></td><td>name</td><td>remove; <code>1</code> if it was there</td></tr>
+<tr><td><code>KEYSF</code></td><td>[pattern]</td><td>the function names in this space, in their canonical (folded) form</td></tr>
+<tr><td><code>CALLF</code></td><td>name arg…</td><td>call by name. Arguments arrive as strings</td></tr>
+<tr><td><code>NAME</code> arg…</td><td>—</td><td>a stored function is also reachable as a command in its own right, once the built-in table has missed. <code>space:NAME</code> reaches one in another space</td></tr>
+</tbody>
+</table>
+<p>A script defines its entry point as <code>call</code>, and may declare its own arity as a global: <code>arity = 2</code> for exactly two arguments, <code>arity = -2</code> for at least two, absent for anything. It is checked before the script runs, so a wrong count costs nothing.</p>
+<div class="notice note"><b>A name <code>KEYS</code> prints cannot be handed to <code>GET</code>.</b> Function keys are first class — <code>KEYS</code>, <code>SCAN</code>, <code>RANGE</code> and the bounds all see them, and <code>DBSIZE</code> counts them, so a <code>SETF</code> changes it. But <code>GET</code>, <code>SET</code> and <code>DEL</code> cannot address one at all, and that is the encoding rather than a rule: a client's key never encodes to the function lead, so those commands have no way to name one. <code>GETF</code> and <code>REMF</code> are the surface that can. The asymmetry to live with is that a name printed by <code>KEYS</code> answers null from <code>GET</code>. Functions also sort after everything else, so <code>MAX</code> and <code>RANDOMKEY</code> can hand one back.</div>
+<p>A user without the <code>function</code> ACL category does not see function keys at all — they are filtered out of <code>KEYS</code>, <code>SCAN</code>, the bounds and a script's own iteration, rather than being listed and then refused.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ref">Endpoint reference</span><h2>What a script can reach</h2></header>
+<div class="bd">
+<table>
+<thead><tr><th>Surface</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>barch.call(cmd, …)</code></td><td>run an ordinary command and get its reply. Checked against the calling user's rights, so a function is not a way past a check the connection would have failed</td></tr>
+<tr><td><code>barch.store.get/exists/count</code></td><td>point reads of the space the call is running in. <code>get</code> answers the value, <code>nil</code> when nothing is there, or <code>barch.tomb</code> — see below</td></tr>
+<tr><td><code>barch.store.set/remove</code></td><td>point writes. <code>set(k, nil)</code> removes</td></tr>
+<tr><td><code>barch.store.range(lo, hi, n)</code></td><td>keys in <code>[lo, hi)</code>, at most <code>n</code>. The limit is required and capped at 10000 — an unbounded walk would copy a whole space into one table</td></tr>
+<tr><td><code>barch.store.min/max</code></td><td>the bounds of the space</td></tr>
+<tr><td><code>barch.store.shardNumber(k)</code></td><td>which shard a key routes to. Two keys with the same number can be locked together</td></tr>
+<tr><td><code>barch.store.hasLock(k)</code></td><td>whether this call already holds that key's shard</td></tr>
+<tr><td><code>barch.store.locked(k, fn)</code></td><td>run <code>fn</code> with the shard write locked — see below</td></tr>
+<tr><td><code>barch.space[name]</code></td><td>a key space as a value: <code>sp[k]</code> reads, <code>sp[k] = v</code> writes, <code>sp[k] = nil</code> removes, and <code>for row in sp</code> walks it. An unknown name is refused and is never created by being mentioned</td></tr>
+<tr><td><code>sp:kind(n)</code> / <code>sp:container(n)</code></td><td>what a container is (<code>list</code>, <code>hash</code>, <code>orderedset</code>) and a handle over it: <code>for member, value in c</code>. An ordered set's value is its score</td></tr>
+<tr><td><code>barch.config()</code></td><td>the space's own settings as a table</td></tr>
+<tr><td><code>require("NAME")</code></td><td>another function in this space, falling back to <code>configuration</code>. What comes back is that function's globals, so a module can offer helpers as well as its own <code>call</code></td></tr>
+<tr><td><code>sql.query(sql, key)</code></td><td>this space's MySQL or Postgres backend, when a DSN is set</td></tr>
+</tbody>
+</table>
+<div class="notice note"><b>The store interface reads the cache; <code>barch.call</code> runs the command.</b> On a space with a foreign source that difference shows: <code>barch.call("GET", k)</code> fills from the source on a miss, exactly as a client's <code>GET</code> would, while <code>barch.store.get(k)</code> answers from what is held locally and never fetches. That is deliberate — filling is something a command does — so a script picks the one it means. Ranges and iteration are local for the same reason, and always have been: no range-shaped command has ever consulted a foreign source either.</div>
+<div class="notice note"><b><code>barch.tomb</code> is a cached source miss, and it is not the same as <code>nil</code>.</b> A space with a foreign source has three states for a key, not two: the value; <code>barch.tomb</code>, meaning the source was asked and had nothing, and the miss was cached so it will not be asked again; and <code>nil</code>, meaning nothing is there and nobody has asked. A script that folds the last two together cannot tell "does not exist" from "not fetched yet". It is a value with an identity rather than a boolean, so <code>if not v</code> does not quietly collapse the two — say <code>v == barch.tomb</code> when that is what you mean. A tomb whose <code>missing_ttl</code> has lapsed reads as <code>nil</code> again, because the source can be asked once more. On a space with no foreign source nothing is ever tombed, and <code>get</code> only ever answers a value or <code>nil</code>.</div>
+<p>Keys are strings, in and out. That is how a key enters and leaves barch everywhere else, so a walk hands back the same text <code>KEYS</code> prints and a script can hand it straight back. A composite key is its components rejoined with the space's split character.</p>
+<p>Iterating a space hands back a row that decodes only what is read: <code>row.type</code> (<code>key</code>, <code>list</code>, <code>hash</code>, <code>orderedset</code>, <code>function</code>), <code>row.container</code>, <code>row.key</code> and <code>row.value</code>. It promises what <code>SCAN</code> promises — everything present throughout the walk is seen at least once, repeats are allowed, and a key written or erased after its page was copied may or may not appear. A script that assumes a snapshot will be wrong in a way that is hard to see.</p>
+<p>What a script may not do, each refused rather than half-supported: a blocking command such as <code>BLPOP</code>, an asynchronous one such as <code>KEYS</code>, and <code>MULTI</code>/<code>EXEC</code>/<code>WATCH</code>. A transaction belongs to the connection, not to the script.</p>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Locking, for a read-modify-write</h2></header>
+<div class="bd">
+<p>Every read above copies what it needs under the shard lock and drops the lock before a line of Luau runs. That is what keeps script code from ever running while a shard is held, and it means a <code>get</code> followed by a <code>set</code> has a gap another connection can land in. <code>barch.store.locked</code> closes the gap:</p>
+<div class="code"><pre>barch.store.locked(key, function()
+    local n = tonumber(barch.store.get(key)) or 0
+    barch.store.set(key, tostring(n + 1))
+end)</pre></div>
+<p>The lock is a write lock on the shard the key routes to, or on every shard when no key is named. It is scoped rather than a lock and an unlock to pair up: the lock goes back whether the function returns, raises, or is cut off, which a pair cannot promise.</p>
+<div class="notice note"><b>Inside a locked region the rules are narrow, deliberately.</b>
+<ul>
+<li><b>One shard, or the whole space — never two.</b> Reaching a second shard aborts the call. Two scripts each holding one shard and waiting for the other is a deadlock nothing recovers from. Use <code>shardNumber</code> to check two keys are together before locking, or put them in one container, which routes them to a single shard by name.</li>
+<li><b>No <code>barch.call</code></b>, which would take shard locks of its own.</li>
+<li><b>No <code>sql.query</code></b>, which would stall every connection on that shard for as long as the remote takes.</li>
+<li><b>No yielding.</b> The instruction budget inside the region is a hard cap rather than a slice, and running past it raises. A call that parked holding a shard lock would never come back.</li>
+<li><b>No nesting</b> — an inner region is already covered by the outer hold.</li>
+</ul>
+<p>So <code>store.range</code>, and a container living elsewhere, are not usable inside a single-key region. Under the whole-space form they are, since every shard is held.</p></div>
+</div>
+</div>
+
+<div class="block">
+<header><span class="tag ctx">Design context</span><h2>Time and memory</h2></header>
+<div class="bd">
+<ul>
+<li><b>The slice.</b> <code>function_slice_insns</code> instructions, then the call yields its worker and is queued for its next slice, so a short call is never stuck behind a long one. It is not a kill.</li>
+<li><b>Nesting.</b> A function reaches another through <code>barch.call("CALLF", …)</code>, and each level runs with a deadline of its own — so the depth is capped at <code>function_max_depth</code> (100). A chain past it is refused rather than allowed to recurse until something else gives way. Raise it if a script is meant to recurse deeply.</li>
+<li><b>The deadline.</b> <code>function_deadline_ms</code> is wall clock from when the call arrives and <b>keeps counting while the call waits for its next slice</b>. Under enough load a function fails rather than being slow. See the note under <a href="#ref-foreign">Caps and timeouts</a>, which is worth reading before tuning either.</li>
+<li><b>Compilation.</b> Each function is compiled once per session and space and kept, so a warm call neither reads the source nor compiles it. A running session does not pick up a redefinition; a new connection does.</li>
+<li><b>Sandboxing.</b> The base globals are frozen, and a global one function writes lands in its own table where the next function cannot see it.</li>
+</ul>
 </div>
 </div>
 </article>

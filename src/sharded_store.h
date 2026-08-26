@@ -175,6 +175,16 @@ namespace barch {
          * @return true if cb was called
          */
         bool search(art::value_type key, const node_cb& cb) const;
+        /**
+         * the same read, keeping the difference `search` throws away.
+         *
+         * A tomb is a *cached* miss - a foreign source was asked and had nothing - and
+         * that is a different fact from a key nobody has looked for. `search` answers
+         * false for both, which is right for a command that only wants the value and
+         * wrong for anything that wants to know why there isn't one. See TODO 148.
+         */
+        enum class read_state { absent, tombed, present };
+        [[nodiscard]] read_state search_state(art::value_type key, const node_cb& cb) const;
 
         /** true if key is present. does not read the value */
         [[nodiscard]] bool exists(art::value_type key) const;

@@ -733,6 +733,151 @@ try:
     assert r.execute_command("KSPACE", "OPTION", "GET", "FUNCTION_SLICE") == 1000000
     assert r.execute_command("KSPACE", "OPTION", "GET", "FUNCTION_DEADLINE") == 1000
 
+    # --- a key is a string, in and out, TODO 145 ------------------------------------
+    # keys enter and leave barch as text, so that is what a script sees too - no
+    # guessing at a stored type and no two ways to name one key. What matters is the
+    # round trip: what a walk hands back must reach the same key when handed back
+    r.execute_command("SET", "4242", "int key")
+    r.execute_command("SET", "1.5", "double key")
+    r.execute_command("SET", "plainstr", "string key")
+    r.execute_command("SET", "two part", "composite value")
+    assert r.execute_command("SETF", "keytypes", """
+        function call()
+            local seen = {}
+            for row in barch.space[""] do
+                if row.type == "key" and type(row.key) == "string" then
+                    local v = barch.store.get(row.key)
+                    if v ~= nil then seen[#seen+1] = row.key .. "=" .. v end
+                end
+            end
+            return seen
+        end
+    """) == b"OK"
+    seen = sorted(x.decode() for x in r.execute_command("keytypes"))
+    for want in ("1.5=double key", "4242=int key", "plainstr=string key",
+                 "two part=composite value"):
+        assert want in seen, f"{want} missing from {seen}"
+
+    # a number written by a client is addressed by its text, which is the same text
+    # the client sent, so the script and the client name one key rather than two
+    assert r.execute_command("SETF", "keyroundtrip", """
+        function call()
+            return { barch.store.get("4242"), barch.space[""]["two part"] }
+        end
+    """) == b"OK"
+    assert r.execute_command("keyroundtrip") == [b"int key", b"composite value"]
+    for k in ("4242", "1.5", "plainstr", "two part"):
+        r.execute_command("DEL", k)
+
+    # --- a cached source miss is not the same as an absent key, TODO 148 ------------
+    # a foreign space has three states and a script could see only two of them. With a
+    # fake source: one key the source has, one it does not (which GET turns into a
+    # tomb), and one nothing has ever asked for
+    conf = barch.KeyValue("configuration")
+    conf.set("fn_fake.foreign", "fake")
+    conf.set("fn_fake.missing_ttl", "30")
+    conf.save()
+    r.execute_command("USE", "fn_fake")
+    r.execute_command("FOREIGN", "FAKE", "SET", "there", "from-source")
+    assert r.get("there") == b"from-source"      # fills, and caches the value
+    assert r.get("gone") is None                 # asks, gets nothing, and tombs it
+    assert r.execute_command("SETF", "tombtell", """
+        function call(k)
+            local v = barch.store.get(k)
+            if v == nil then return "unknown" end
+            if v == barch.tomb then return "tombed" end
+            return "value:" .. v
+        end
+    """) == b"OK"
+    assert r.execute_command("tombtell", "there") == b"value:from-source"
+    assert r.execute_command("tombtell", "gone") == b"tombed", \
+        "a cached source miss must be distinguishable"
+    assert r.execute_command("tombtell", "never-asked") == b"unknown"
+
+    # the same three answers through the space value, which is the other way in
+    assert r.execute_command("SETF", "tombspace", """
+        function call(k)
+            local v = barch.space["fn_fake"][k]
+            if v == nil then return "unknown" end
+            if v == barch.tomb then return "tombed" end
+            return "value:" .. v
+        end
+    """) == b"OK"
+    assert r.execute_command("tombspace", "gone") == b"tombed"
+    assert r.execute_command("tombspace", "never-asked") == b"unknown"
+
+    # the token has an identity of its own rather than being a bool a script can
+    # confuse with a value, and it cannot be rewritten from inside a script
+    assert r.execute_command("SETF", "tombkind", """
+        function call()
+            return { tostring(barch.tomb), tostring(barch.tomb == false) }
+        end
+    """) == b"OK"
+    assert r.execute_command("tombkind") == [b"barch.tomb", b"false"]
+    r.execute_command("USE", "")
+
+    # --- one state, several spaces: names must not collide, TODO 150 ----------------
+    # a session keeps one Luau state for every space it touches, so the compiled
+    # functions of two spaces live in one map. If the key were the bare name, the
+    # second space would get the first space's compiled function
+    r.execute_command("USE", "")
+    assert r.execute_command("SETF", "shared",
+                             'function call() return "from-default" end') == b"OK"
+    assert r.execute_command("SETF", "asks",
+                             'local s = require("shared")\n'
+                             'function call() return s.call() end') == b"OK"
+    r.execute_command("USE", "collb")
+    assert r.execute_command("SETF", "shared",
+                             'function call() return "from-collb" end') == b"OK"
+    assert r.execute_command("SETF", "asks",
+                             'local s = require("shared")\n'
+                             'function call() return s.call() end') == b"OK"
+    r.execute_command("USE", "")
+    assert r.execute_command("shared") == b"from-default"
+    assert r.execute_command("asks") == b"from-default", "require must stay in its space"
+    r.execute_command("USE", "collb")
+    assert r.execute_command("shared") == b"from-collb"
+    assert r.execute_command("asks") == b"from-collb", "require must stay in its space"
+    for n in ("shared", "asks"):
+        r.execute_command("REMF", n)
+    r.execute_command("USE", "")
+    for n in ("shared", "asks"):
+        r.execute_command("REMF", n)
+
+    # --- nested calls are bounded, TODO 98 E ----------------------------------------
+    # CALLF is an ordinary built-in, so a script reaches a script, and each level used
+    # to start with a deadline of its own - the deadline bounded one call and not a
+    # tree. A function that calls itself now hits the depth limit and says so, and the
+    # server is still there afterwards, which is the half that matters
+    assert r.execute_command("SETF", "recurse", """
+        function call(n)
+            return barch.call("CALLF", "recurse", n)
+        end
+    """) == b"OK"
+    try:
+        r.execute_command("recurse", "1")
+        raise AssertionError("unbounded recursion should have been stopped")
+    except redis.ResponseError as e:
+        assert "too deep" in str(e), e
+    assert r.ping() is True
+
+    # a chain shorter than the limit still works. The limit itself is a setting, and
+    # configtest is where it is round tripped - asserting its value here would couple
+    # this test to whatever another test last saved
+    assert r.execute_command("SETF", "leaf", """
+        function call() return "bottom" end
+    """) == b"OK"
+    assert r.execute_command("SETF", "viacall", """
+        function call() return barch.call("CALLF", "leaf") end
+    """) == b"OK"
+    assert r.execute_command("viacall") == b"bottom"
+
+    # and the depth does not accumulate across commands on one connection: the sub
+    # caller is reused, so a connection would otherwise climb to the limit one call
+    # at a time
+    for _ in range(5):
+        assert r.execute_command("viacall") == b"bottom"
+
     # --- the locked region, TODO 98 F6 ---------------------------------------------
     # a read and a write with nothing able to land between them. Without the lock this
     # is the classic lost update; with it, concurrent callers each see their own
@@ -972,6 +1117,32 @@ try:
     assert r.execute_command("GETF", "counter").decode() == COUNT, \
         "the other space's function must not be visible here"
 finally:
+    # --- FLUSHALL leaves configuration alone, TODO 149 ------------------------------
+    # configuration is not data: it holds every space's settings and the global
+    # functions, so clearing the caches must not unconfigure the server.
+    #
+    # Last in the file on purpose - FLUSHALL reaches every space, so anything after it
+    # would be running against a suite whose functions had just been cleared
+    conf = barch.KeyValue("configuration")
+    conf.set("fa_probe.key_split", ".")
+    conf.save()
+    r.execute_command("USE", "configuration")
+    assert r.execute_command("SETF", "globalfn", """
+        function call() return "still here" end
+    """) == b"OK"
+    r.execute_command("USE", "")
+    r.execute_command("SET", "flushme", "data")
+    assert r.get("flushme") == b"data"
+    r.execute_command("FLUSHALL")
+    assert r.get("flushme") is None, "ordinary keys should be gone"
+    r.execute_command("USE", "configuration")
+    assert r.execute_command("GETF", "globalfn") is not None, \
+        "a global function must survive FLUSHALL"
+    assert b"GLOBALFN" in r.execute_command("KEYSF")
+    assert conf.get("fa_probe.key_split") == ".", "settings must survive FLUSHALL"
+    r.execute_command("REMF", "globalfn")
+    r.execute_command("USE", "")
+
     for n in ("greet", "counter", "broken", "noentry", "spin", "boom", "r_err",
               "r_nil", "r_int", "r_float", "r_true", "r_false", "r_str", "r_array",
               "r_ok", "r_nested", "laterfn", "dotted", "exactly2", "atleast1",
@@ -986,7 +1157,8 @@ finally:
               "myZrangebyscore", "cbad", "storewrite", "storeput", "storenil",
               "returnsnothing", "lockedincr", "lockedret", "lockedcall",
               "locknest", "lockedboom", "lockedall", "lockedcross", "shardof", "findother",
-              "lockstate"):
+              "lockstate", "keytypes", "keyroundtrip", "recurse", "leaf",
+              "viacall", "tombtell", "tombspace", "tombkind"):
         try:
             r.execute_command("REMF", n)
             r.execute_command("fspace:REMF", n)

@@ -5111,3 +5111,290 @@ The unlocked figure is the important one: it says the test can see the thing it 
 testing. The locked case is in test/functiontest.py along with the whole space form,
 the three refusals, the nested refusal, an error inside the region followed by a call
 that proves the lock went back, and the cross shard abort actually firing.
+
+## 137. The wall clock deadline, written down where someone tuning it will find it [26-08-2026]
+
+98 item 7b recorded that a function's deadline is wall clock from when the call
+arrives and counts time spent queued behind other scripts, and that "nothing says
+so anywhere yet". Now something does.
+
+The behaviour, confirmed against the code rather than taken from the note:
+luau_driver.cpp:1652 sets `deadline = art::now() + deadline_ms` once when the call
+starts, and :1561 refills the instruction slice on every resumption without ever
+touching the deadline. So it keeps running while a call waits for its next slice.
+
+What went into docs/index.html:
+
+  - `function_slice_insns` and `function_deadline_ms` in the settings table, both
+    global and per-space, with the KSPACE OPTION names to read them back.
+  - a note in the caps and timeouts list saying plainly that under enough load a
+    function fails rather than being slow - sixteen at once, each wanting 0.29s,
+    three past a one second deadline - and that this is the deadline working, since
+    a bound that stopped counting whenever the machine was busy would not bound
+    anything. With what to do about it: raise the deadline for the load expected,
+    not for how long the function takes on an idle server, and know that lowering
+    the slice helps short calls get through and does nothing for a long one.
+  - that a cut-off call answers an error and does not roll back what it already
+    wrote, because a function is not a transaction.
+
+Two stale claims went with it, both user facing and both wrong since DONE 130:
+`foreign_script` was documented as a Luau file or inline source defining
+`resolve(key, space)`. It names a stored function now and the entry point is
+`call`, so both the settings table row and the "Luau instead of a fixed query"
+prose said something a reader would have followed straight into an error. The
+ordering that DONE 133 had to discover the hard way - configure, USE, SETF, then
+fill - is written into the prose as well.
+
+Worth noting for anyone adding a setting later: docs/index.html is hand written,
+so a new variable does not appear in it on its own, and the settings table is the
+first place a user looks. There is still no section for stored functions
+themselves - SETF, GETF, REMF, KEYSF, CALLF and the barch.* interface are
+undocumented outside TODO 98.
+
+## 138. Keys are strings, in and out [26-08-2026]
+
+The open question in 98 F2, decided: a key is a string to a script, because that is
+what a key is everywhere else. It enters barch as text on the wire and leaves as
+text, so a script seeing a third form would be the only thing in the system that had
+to know about stored types - and there would be two ways to name one key.
+
+Typed keys were built first and then taken out again, which is worth recording
+because what made them attractive is real: `row.key == 42` is false for a key written
+as `SET 42 x`, since everything arrives as text. What the typed version cost was
+worse. `row.key` would return one of four Luau types depending on how the key
+happened to be encoded, so any script touching a key it did not write would need a
+type test first.
+
+The probe that settled it, and it is worth knowing about this Luau: **its integer is
+a separate type that does not mix with numbers.** With a key pushed by
+`lua_pushinteger64`, `type(k)` is "integer", `k == 4242` is false against a literal,
+and `k + 1` raises
+
+    attempt to perform arithmetic (add) on integer and number
+
+So the "natural" representation of an int64 key was not natural at all - it was a
+value equal to nothing a script would write down. The workaround was going to be
+numbers below 2^53 and integers above it, which trades one surprise for a worse one:
+the type of `row.key` depending on the magnitude of the key. That is the point where
+strings everywhere is obviously the simpler answer.
+
+What that leaves, all of it as it already was: `row.key` is the decoded key text, the
+same text KEYS prints, and `sp[k]`, `store.get` and the rest take that text back. A
+number index still works, because Lua coerces it and `encode_key` parses it back to a
+tinteger, so a script and a client naming 42 reach one key. A composite is its
+components rejoined with the space's split character.
+
+test/functiontest.py pins the round trip for an integer, a double, a string and a
+composite key, all written by an ordinary client: each is seen as a string by a walk,
+and each reaches its own value when handed back.
+
+One process note, because it cost more than the work did. The revert was done with
+scripted string replacements, and one of them silently corrupted an unrelated line of
+the test - `barch.store.range` became `barch.tore.range` - which failed as "attempt
+to index nil with 'range'" and looked exactly like a broken interface. Two probes
+went into it before a diff showed all four source files byte for byte identical to
+the committed state and the only changed file was the test. A scripted edit nobody
+looks at is worth a diff before it is worth a test run.
+
+## 139. Stored functions are documented [26-08-2026]
+
+SETF, GETF, REMF, KEYSF, CALLF and the whole `barch.*` script interface existed
+only in TODO 98. DONE 137 had put the slice and deadline settings into
+docs/index.html, so the published docs named two settings for a feature they never
+described.
+
+A reference section now sits beside the others, `#ref-functions`, with its nav
+entry after Coalesced Foreign Sources: what a function key is and why it is a key
+rather than configuration, the five commands and the arity global, everything a
+script can reach, the locked region, and how time and memory work.
+
+The two things 98 specifically said should be written down and were not:
+
+  - a name `KEYS` prints cannot be handed back to `GET`. Function keys are first
+    class, so KEYS, SCAN, RANGE and the bounds see them and DBSIZE counts them,
+    but GET, SET and DEL cannot address one - which falls out of the encoding
+    rather than being a rule, since a client's key never encodes to the function
+    lead. Written as a notice, because it is the kind of thing found by being
+    surprised.
+  - the locked region's rules: one shard or the whole space, a second shard
+    aborts, no barch.call, no sql.query, no yielding, no nesting - and the
+    consequence that `store.range` and a container elsewhere are unusable inside
+    a single-key region while the whole-space form covers them.
+
+Four claims taken from the entry rather than from a test were checked against a
+running server before publishing, and all four held: `RANDOMKEY` does hand back a
+function name, `FLUSHDB` does drop a space's functions, `KEYSF` answers folded
+names, and a range asking for 100000000 is capped rather than refused. Worth
+doing - the entry had only *measured* DBSIZE, KEYS, SCAN and MAX, and listed
+RANDOMKEY as a prediction.
+
+The HTML is hand written, so the section was checked with a parser after each
+edit. One thing to know for next time: the nav list and the article are separate
+edits, and a script that fails between them leaves the section unreachable rather
+than broken - it renders, it just cannot be navigated to.
+
+## 140. Nested script calls are bounded [26-08-2026]
+
+98 section E asked for "a nesting depth limit, and the instruction budget and
+deadline shared across the whole tree of nested calls rather than reset per call".
+Neither existed. `CALLF` is an ordinary non-asynchronous built-in, so
+`barch.call("CALLF", ...)` reaches another function, and every level started with a
+deadline of its own - the deadline bounded one call and not a tree of them.
+
+A chain is now capped at `function_max_depth`, default 100, a server setting like
+the slice and the deadline. The depth is carried on the caller rather than in a
+thread local: a nested call can park and come back on another thread, which would
+lose the count exactly where it matters. It is put back when the sub caller is
+released, because that caller is reused for the life of the connection - without
+that, a connection would climb towards the limit one command at a time and start
+refusing ordinary calls.
+
+The first version worked and was still wrong to use. Recursion stopped, but the
+message came back as a screen of
+
+    RECURSE:3: ERR RECURSE:3: ERR RECURSE:3: ERR ...
+
+with the reason nowhere in it. Each level raises through `luaL_error`, which
+prefixes the chunk and line, so a hundred levels prefix each other and the actual
+cause falls off the end when the reply is truncated. The prefix is worth having
+once and worthless a hundred times, so a depth refusal now carries a marker,
+`too_deep_marker` in driver.h: `runner_for` passes such an error back up whole
+instead of wrapping it again, and `barch_call` raises it with `lua_error` rather
+than `luaL_error` so no position is prepended. Every other error keeps its
+position.
+
+Left per level rather than shared across the tree, which E had originally asked
+for. Dropped deliberately [26-08-2026]: the depth cap is what bounds the tree, and
+it does it with one number an operator can reason about. A shared budget would
+have to be threaded through every nested caller and would make a call's failure
+depend on what its callers had already spent - harder to explain than "a hundred
+deep is too deep", for no bound the cap does not already give.
+
+One test lesson. The first cut asserted `CONFIG GET function_max_depth` was the
+default, which fails as soon as configtest has run - it saves its own value to the
+configuration space and that persists on disk between runs. A test should not
+assert the value of a global that another test writes; the round trip belongs in
+configtest, which already has it.
+
+## 141. `store.get` tells a cached miss from an absent key [26-08-2026]
+
+Half of G2's point-read asymmetry. A space with a foreign source has three states for
+a key - the value, a tomb (the source was asked and had nothing, cached so it is not
+asked again), and nothing at all - and `barch.store.get` answered nil for the last
+two. A script could not tell "does not exist" from "not fetched yet".
+
+`barch.tomb` is the third answer. A table with an identity rather than a boolean,
+because `false` collapses under the `if not v` everyone writes and the whole point is
+that a script has to say which case it means. Its metatable is locked, so a script
+cannot rewrite it.
+
+Two things in the store had to change, and the second was the actual work:
+
+  - `sharded_store::search` returns false for a tomb and for a null alike, which is
+    right for a command that wants the value and wrong here. `search_state` is the
+    same read keeping the difference.
+  - and the first cut of it did not work, because `shard::search` erases a tomb to
+    null before a caller ever sees it - shard.cpp:1186. So `is_tomb()` on what came
+    back could never fire. `local_leaf` is the raw accessor, and it is what the
+    foreign path itself uses to decide whether to fetch, for exactly this reason.
+    Two layers were hiding the same fact and only one of them was obvious.
+
+An expired tomb reads as absent rather than tombed, which is the honest answer: once
+`missing_ttl` has lapsed the source can be asked again, so the state really is
+unknown.
+
+Found on the way, and worth knowing when reading this code: a cached source miss is
+not stored as an empty value with a TTL, as the shape of `insert_cached_miss`
+suggests at first - it writes the empty value and then calls `set_tomb()` on the leaf
+at shard.cpp:1134. The tomb flag is what matters, the empty value is incidental.
+
+test/functiontest.py builds a fake-source space and asks a script for a key the
+source has, one it does not, and one nothing has ever asked for - through both
+`store.get` and the space value. Documented as a notice in the functions section.
+
+Still open in G2: `barch.call("GET")` fills where `store.get` does not, and the
+`ctx_swig` inheritance behind it that holds a worker for up to five minutes on an
+external round trip. This entry only closes the part about telling the states apart.
+
+## 142. FLUSHALL leaves the configuration space alone [26-08-2026]
+
+`CLEARALL` called `barch::all_shards` and cleared every one, which reached
+`configuration`. That space is not data: it holds each space's `<name>.foreign*`
+settings, key_split and shard count, and now the global stored functions. So a
+FLUSHALL of the caches silently unconfigured the server. 98 A had noticed it and
+left it as "either right or wants refusing".
+
+Refused. It iterates spaces by name now and skips `configuration` and
+`configuration_`. FLUSHDB is untouched, so someone who really means to clear
+configuration can `USE configuration` and say so - which is the difference between
+an accident and a decision.
+
+test/functiontest.py writes a setting and a global function, runs FLUSHALL, and
+checks an ordinary key is gone while both of those are still there.
+
+The test had to move to the end of the file, twice. FLUSHALL reaches every space,
+so it cleared the functions that later assertions in the same suite depend on -
+and the first move landed before a *container* cleanup loop rather than the
+function one, which looked identical at a glance and failed the same way. A test
+for a global operation belongs last, and "before the cleanup loop" is not a
+location when there are two of them.
+
+## 143. One Luau state per session, not one per session and space [26-08-2026]
+
+Measured first, because the shape of the fix depended on the numbers. RSS deltas on
+a live server:
+
+    a compiled function, in a state that exists      ~0.5 kB
+    a lua_State, one session and one space           ~50   kB
+
+So the expensive thing was duplicated per space a session touched, while the cheap
+thing was capped at 64 - and the cap was a cliff: the sixty fifth function threw
+away the state, all 64 compiled functions and the ten libraries, then paid for a
+fresh state and a re-sandbox. Backwards on both counts.
+
+Almost nothing in a state was ever per space. The functions map was, and
+`barch.foreign.space` in the registry was - read by `sql_query` to choose a
+backend. `require` already resolved through `st->load`, which is re-pointed per
+call, so it never was. The ten libraries and the API tables, which are the 50 kB,
+are identical for every space.
+
+So: one state per session, functions keyed by `space \0 name`, and the space a call
+runs in carried on the coroutine with `lua_setthreaddata`.
+
+Why not the function's environment, which is where it first looks like it belongs:
+`luaL_sandboxthread` gives each function its own globals table and a script can
+write to it - that is exactly what test/functiontest.py's `setsglobal` pins - so a
+script could overwrite the space name and point `sql.query` at another space's
+database. That is a privilege escalation, not a bug. Thread data is C side only,
+with no Lua-visible key to shadow, and it is per coroutine rather than per VM,
+which matters now that a nested CALLF is a second job on the same state.
+
+Two places had to learn the qualified key and both failed the same way when they
+did not - a cycle going undetected, because one side pushed one key shape and the
+other looked up another:
+
+  - `compile_into` runs the chunk's top level, where `require` fires, on a thread
+    it creates itself. That thread needed the space *before* the chunk ran, not
+    after, so the scope is set there and cleared on the way out - the thread is
+    kept as the function's environment and must not be readable through a stale
+    local.
+  - the SETF compile check still compiled under the bare name. That is the path
+    the cycle test actually exercises, since a cycle can only be built through a
+    redefinition.
+
+The separator is a nul rather than an underscore: space `A` with function `B_C`
+and space `A_B` with function `C` would otherwise be one key.
+
+`max_cached_spaces` is gone. `max_cached_functions` stays as a backstop at 4096 -
+a couple of megabytes - and clearing it now calls `lua_unref` on all three refs of
+every entry. That matters more than it did: the state used to be destroyed on
+overflow, which freed everything; a state that lives for the session would just
+keep them.
+
+Measured after: a second session over the same 20 spaces went from 992 kB to
+264 kB, and what is left is per-space bookkeeping and compiled functions rather
+than twenty copies of the standard library.
+
+Sixteen test files pass. test/functiontest.py pins the hazard the merge
+introduces: the same function name in two spaces, reached directly and through
+`require`, staying separate.

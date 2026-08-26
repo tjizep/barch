@@ -44,6 +44,22 @@ struct run_ctx {
 /** the region's instruction cap - short, because nothing else can touch the shard */
 static constexpr uint64_t locked_region_insns = 100000;
 
+/**
+ * what a running call carries on its coroutine - TODO 150.
+ *
+ * Not in the function's environment, which is where it first looks like it belongs:
+ * `luaL_sandboxthread` gives each function its own globals table and a script can
+ * write to it, so a script could overwrite the space and point `sql.query` at another
+ * space's database. Thread data is C side only, with no Lua-visible key to shadow.
+ *
+ * On the coroutine rather than the VM, because one state now serves every space a
+ * session uses: a nested CALLF is a second job on the same VM, and anything kept per
+ * VM would need saving and restoring around it.
+ */
+struct running_call {
+    std::string space;
+};
+
 static void interrupt(lua_State* L, int gc) {
     if (gc >= 0)
         return;
@@ -67,12 +83,25 @@ static int blocked_require(lua_State* L) {
     return 0;
 }
 
+/** the space this call is running in, or empty on the foreign fill path - TODO 150 */
+static std::string current_space(lua_State* L);
+
 static int sql_query(lua_State* L) {
     if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
         luaL_error(L, "FUNCTION sql.query is not allowed inside a locked region");
-    lua_getfield(L, LUA_REGISTRYINDEX, "barch.foreign.space");
-    const char* sp = lua_tostring(L, -1);
-    lua_pop(L, 1);
+    /*
+     * A stored function carries its space on the coroutine, because one state serves
+     * every space the session uses. The foreign fill path still has a state of its own
+     * with the space in the registry, so it falls through to that - TODO 150.
+     */
+    std::string running = current_space(L);
+    if (running.empty()) {
+        lua_getfield(L, LUA_REGISTRYINDEX, "barch.foreign.space");
+        const char* reg = lua_tostring(L, -1);
+        if (reg) running = reg;
+        lua_pop(L, 1);
+    }
+    const char* sp = running.empty() ? nullptr : running.c_str();
     auto ks = sp ? get_keyspace(sp) : nullptr;
     if (!ks || !ks->sql)
         luaL_error(L, "FOREIGN no sql driver");
@@ -444,8 +473,29 @@ struct compiled {
     int arity{0};           // 0 is "any", n exactly n, -n at least n. See TODO 98 I.3
 };
 
+/** hand a compiled function's registry refs back, or the state keeps it alive
+ *  forever - the state now lives for the session, so nothing else will drop them */
+static void drop_compiled(lua_State* L, compiled& c) {
+    if (c.fn != LUA_NOREF) lua_unref(L, c.fn);
+    if (c.env != LUA_NOREF) lua_unref(L, c.env);
+    if (c.envt != LUA_NOREF) lua_unref(L, c.envt);
+    c.fn = c.env = c.envt = LUA_NOREF;
+}
+
+/** a function's key in the shared map: the space, then the name, so `A` + `B_C` and
+ *  `A_B` + `C` cannot collide the way a printable separator would let them */
+static std::string qualified(const std::string& space, const std::string& name) {
+    std::string q;
+    q.reserve(space.size() + name.size() + 1);
+    q.append(space);
+    q.push_back('\0');
+    q.append(name);
+    return q;
+}
+
 struct space_state {
     lua_State* L{nullptr};
+    /** keyed by `qualified(space, name)` - one map for every space the session uses */
     heap::string_map<compiled> functions{};
     /**
      * where require gets a source from, for as long as a call is running. A session
@@ -482,9 +532,16 @@ struct space_state {
 };
 
 struct function_states {
-    // keyed by canonical space name, never by key_space_ptr: a session holding one
-    // would keep an UNLOADed space alive for as long as it stayed connected
-    heap::string_map<std::unique_ptr<space_state>> spaces{};
+    /*
+     * One state for the session, not one per space it touches - TODO 150.
+     *
+     * A state is about 50kB (ten libraries, the barch and sql tables, the VM's own
+     * globals) and a compiled function about 0.5kB, so duplicating the state per space
+     * was paying the expensive part per space and capping the cheap one. Almost
+     * nothing in it was ever space specific: the functions map is, and is keyed by
+     * space now, and the space a call runs in travels on the coroutine.
+     */
+    std::unique_ptr<space_state> only{};
 };
 
 function_states_ptr make_function_states() {
@@ -574,16 +631,55 @@ static const store_access* store_of(lua_State* L, const char* what, bool writing
     return st->store;
 }
 
+/*
+ * `barch.tomb` - what a cached source miss reads as.
+ *
+ * A foreign space has three states for a key and a script could see only two: nil for
+ * both "nobody has looked" and "looked, and the source had nothing". The second is a
+ * fact worth acting on - it is why the source will not be asked again - so it gets a
+ * value of its own rather than being folded into nil. See TODO 148.
+ *
+ * A table with an identity rather than a boolean, because `false` collapses under the
+ * `if not v` that everyone writes, and the point is that a script has to say which
+ * case it means.
+ */
+static void push_tomb(lua_State* L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "barch.tomb");
+}
+
+static int tomb_tostring(lua_State* L) {
+    lua_pushstring(L, "barch.tomb");
+    return 1;
+}
+
+static void make_tomb(lua_State* L) {
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushcfunction(L, tomb_tostring, "__tostring");
+    lua_setfield(L, -2, "__tostring");
+    lua_pushstring(L, "tomb");
+    lua_setfield(L, -2, "__type");
+    lua_pushboolean(L, true);
+    lua_setfield(L, -2, "__metatable");     // not rewritable from a script
+    lua_setmetatable(L, -2);
+    lua_setfield(L, LUA_REGISTRYINDEX, "barch.tomb");
+}
+
 static int store_get(lua_State* L) {
     size_t n = 0;
     const char* k = luaL_checklstring(L, 1, &n);
     const auto* s = store_of(L, "get");
     std::string value;
-    if (!s->get({k, n}, value)) {
-        lua_pushnil(L);
-        return 1;
+    switch (s->get({k, n}, value)) {
+        case store_access::read_state::present:
+            lua_pushlstring(L, value.data(), value.size());
+            break;
+        case store_access::read_state::tombed:
+            push_tomb(L);
+            break;
+        default:
+            lua_pushnil(L);
     }
-    lua_pushlstring(L, value.data(), value.size());
     return 1;
 }
 
@@ -836,11 +932,16 @@ static int space_read(lua_State* L) {
     size_t n = 0;
     const char* k = luaL_checklstring(L, 2, &n);
     std::string value;
-    if (!s->get({k, n}, value)) {
-        lua_pushnil(L);
-        return 1;
+    switch (s->get({k, n}, value)) {
+        case store_access::read_state::present:
+            lua_pushlstring(L, value.data(), value.size());
+            break;
+        case store_access::read_state::tombed:
+            push_tomb(L);
+            break;
+        default:
+            lua_pushnil(L);
     }
-    lua_pushlstring(L, value.data(), value.size());
     return 1;
 }
 
@@ -886,7 +987,10 @@ static int row_read(lua_State* L) {
             lua_pushnil(L);
         } else {
             std::string v;
-            if (!c->store->get(r.key, v)) lua_pushnil(L);
+            // a walk never hands out a tomb as a row, so anything but present here
+            // is an absent value rather than a cached miss
+            if (c->store->get(r.key, v) != store_access::read_state::present)
+                lua_pushnil(L);
             else lua_pushlstring(L, v.data(), v.size());
         }
     } else if (!strcmp(f, "container")) {
@@ -1117,8 +1221,21 @@ static int barch_call(lua_State* L) {
     }
     Variable out;
     std::string err;
-    if (!(*st->run_command)(argv, out, err))
+    if (!(*st->run_command)(argv, out, err)) {
+        /*
+         * A depth refusal is raised without position information, and every other
+         * error keeps it. `luaL_error` prefixes the chunk and line, which is worth
+         * having once - but a hundred nested levels each prefixing the one below
+         * builds a message of nothing but prefixes, and the reason falls off the end
+         * when the reply is truncated. Observed as a screen of "RECURSE:3: ERR "
+         * with the actual cause nowhere in it. See TODO 98 E.
+         */
+        if (err.find(barch::foreign::too_deep_marker) != std::string::npos) {
+            lua_pushlstring(L, err.data(), err.size());
+            lua_error(L);
+        }
         luaL_error(L, "%s", err.empty() ? "FUNCTION call failed" : err.c_str());
+    }
     push_variable(L, out);
     return 1;
 }
@@ -1218,7 +1335,16 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
 /* how much one session may keep before its state for a space is thrown away and
  * built again. Crude next to the LRU that TODO 98 C asks for, but bounded, and the
  * bound is what stops a roaming client holding the whole space's functions open */
-enum { max_cached_functions = 64, max_cached_spaces = 8 };
+/*
+ * A backstop rather than a working limit - TODO 150.
+ *
+ * A compiled function is about 0.5kB, so this is a couple of megabytes for a session
+ * that has called four thousand distinct functions, and it is bounded anyway by how
+ * many are stored. The old 64 was a real limit and a cliff: the sixty fifth call threw
+ * away the whole state, all its compiled functions and its libraries, and paid for a
+ * fresh one. Nothing that expensive happens now.
+ */
+enum { max_cached_functions = 4096 };
 
 /* what a call may run on the calling thread before it has to park. See start_function */
 enum { inline_insns = 20000 };
@@ -1255,21 +1381,17 @@ static void give_thread(space_state& st, lua_State* T, int ref) {
     st.free_threads.push_back({T, ref});
 }
 
-static space_state* state_for(function_states& cache, const std::string& space) {
-    auto it = cache.spaces.find(space);
-    if (it != cache.spaces.end())
-        return it->second.get();
-    if (cache.spaces.size() >= max_cached_spaces)
-        cache.spaces.clear();
+static space_state* state_for(function_states& cache) {
+    if (cache.only)
+        return cache.only.get();
     auto st = std::make_unique<space_state>();
     st->L = luaL_newstate();
     if (!st->L)
         return nullptr;
     lua_State* L = st->L;
-    // sql.query reads the space out of the registry, so a function gets the same SQL
-    // its space is configured with, or the same error when there is none
-    lua_pushlstring(L, space.data(), space.size());
-    lua_setfield(L, LUA_REGISTRYINDEX, "barch.foreign.space");
+    // no space is written into the registry here any more: one state serves every
+    // space this session touches, so which space a call runs in travels on the
+    // coroutine instead - see `running_space` and TODO 150
     open_safe(L);
     auto* raw = st.get();
     // a back pointer, so require can find the state it is running in. Stored before
@@ -1289,6 +1411,9 @@ static space_state* state_for(function_states& cache, const std::string& space) 
     // itself rather than a function describing it
     lua_pushcfunction(L, store_space, "config");
     lua_setfield(L, -2, "config");
+    make_tomb(L);
+    push_tomb(L);
+    lua_setfield(L, -2, "tomb");
     lua_newtable(L);
     lua_pushcfunction(L, store_get, "get");
     lua_setfield(L, -2, "get");
@@ -1368,7 +1493,7 @@ static space_state* state_for(function_states& cache, const std::string& space) 
      * faster without it. It was here because the foreign driver had it.
      */
     lua_callbacks(L)->interrupt = function_interrupt;
-    cache.spaces.emplace(space, std::move(st));
+    cache.only = std::move(st);
     return raw;
 }
 
@@ -1402,16 +1527,22 @@ static int function_require(lua_State* L) {
     if (!st || !st->load)
         luaL_error(L, "FUNCTION require is not available here");
 
-    auto have = st->functions.find(name);
+    // the map is shared across the session's spaces now, so a require resolves within
+    // the space the calling function belongs to - TODO 150. `st->load` was already
+    // scoped that way; this makes the key agree with it
+    const std::string key = qualified(current_space(L), name);
+    auto have = st->functions.find(key);
     if (have != st->functions.end()) {
         lua_getref(L, have->second.envt);
         return 1;
     }
     for (const auto& busy : st->loading) {
-        if (busy == name) {
+        if (busy == key) {
             std::string path;
             for (const auto& step : st->loading) {
-                path += step;
+                // the stack holds qualified keys; the message wants the names
+                auto at = step.find('\0');
+                path += at == std::string::npos ? step : step.substr(at + 1);
                 path += " -> ";
             }
             path += name;
@@ -1423,9 +1554,9 @@ static int function_require(lua_State* L) {
         luaL_error(L, "FUNCTION require has no function %s", name.c_str());
     compiled c;
     std::string err;
-    if (!compile_into(*st, name, source, c, err))
+    if (!compile_into(*st, key, source, c, err))
         luaL_error(L, "%s", err.c_str());
-    st->functions.emplace(name, c);
+    st->functions.emplace(key, c);
     lua_getref(L, c.envt);
     return 1;
 }
@@ -1448,6 +1579,19 @@ static bool compile_into(space_state& st, const std::string& name,
     int env = lua_ref(L, -1);   // pins the thread, and with it the globals it owns
     lua_pop(L, 1);
     luaL_sandboxthread(T);
+    /*
+     * The chunk's own top level can `require`, and require resolves within the space
+     * the function belongs to - so this thread has to carry that space before the
+     * chunk runs, not after. The key is qualified, so the space is the part before the
+     * separator. Without this, a require during compilation looked in the wrong space
+     * and a cycle went undetected, because the stack held one key shape and the lookup
+     * built another. See TODO 150.
+     */
+    running_call scope;
+    auto at = name.find('\0');
+    if (at != std::string::npos)
+        scope.space = name.substr(0, at);
+    lua_setthreaddata(T, &scope);
     // the thread's own globals table, which is what require hands to whoever asked
     lua_pushvalue(T, LUA_GLOBALSINDEX);
     int envt = lua_ref(T, -1);
@@ -1460,6 +1604,13 @@ static bool compile_into(space_state& st, const std::string& name,
         space_state& st;
         ~pop_on_exit() { st.loading.pop_back(); }
     } popper{st};
+
+    // `scope` is a local, so it must not be readable from the thread once this
+    // returns - the thread is kept as the function's environment
+    struct clear_on_exit {
+        lua_State* T;
+        ~clear_on_exit() { lua_setthreaddata(T, nullptr); }
+    } clearer{T};
 
     auto give_up = [&](const char* fallback) {
         err = lua_tostring(T, -1) ? lua_tostring(T, -1) : fallback;
@@ -1501,9 +1652,16 @@ static bool compile_into(space_state& st, const std::string& name,
  * is held too, so the session's state for this space cannot be closed underneath a
  * suspended coroutine.
  */
+static std::string current_space(lua_State* L) {
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    return rc ? rc->space : std::string{};
+}
+
 struct call_job {
     function_states_ptr cache{};
     space_state* st{nullptr};
+    /** points at this job's coroutine for as long as the call runs */
+    running_call scope{};
     /*
      * held, not copied. Copying the four interface objects into every job meant a
      * dozen std::function constructions and as many destructions per call, which the
@@ -1519,6 +1677,10 @@ struct call_job {
 
     void release() {
         if (st && st->L && tref != LUA_NOREF) {
+            // cleared before the coroutine goes back in the pool, so the next call
+            // cannot read this job's space out of a thread it inherited
+            if (T)
+                lua_setthreaddata(T, nullptr);
             give_thread(*st, T, tref);
             tref = LUA_NOREF;
         }
@@ -1598,24 +1760,24 @@ void start_function(const std::string& space, const std::string& name,
     job->iface = iface;
     job->done = done;
 
-    job->st = state_for(*job->cache, space);
+    job->st = state_for(*job->cache);
     if (!job->st) {
         done(false, Variable(nullptr), "FUNCTION luau state");
         return;
     }
     space_state* st = job->st;
+    job->scope.space = space;
     st->load = &job->iface->load;
 
-    auto it = st->functions.find(name);
+    const std::string key = qualified(space, name);
+    auto it = st->functions.find(key);
     if (it == st->functions.end()) {
         if (st->functions.size() >= max_cached_functions) {
-            job->cache->spaces.erase(space);
-            st = job->st = state_for(*job->cache, space);
-            if (!st) {
-                done(false, Variable(nullptr), "FUNCTION luau state");
-                return;
-            }
-            st->load = &job->iface->load;
+            // the backstop. Give the refs back rather than just dropping the map, or
+            // the state - which now outlives any one space - holds every one of them
+            for (auto& e : st->functions)
+                drop_compiled(st->L, e.second);
+            st->functions.clear();
         }
         std::string source;
         if (!job->iface->load(name, source)) {
@@ -1625,13 +1787,13 @@ void start_function(const std::string& space, const std::string& name,
         }
         compiled c;
         std::string err;
-        bool built = compile_into(*st, name, source, c, err);
+        bool built = compile_into(*st, key, source, c, err);
         st->load = nullptr;
         if (!built) {
             done(false, Variable(nullptr), err);
             return;
         }
-        it = st->functions.emplace(name, c).first;
+        it = st->functions.emplace(key, c).first;
     }
     st->load = nullptr;
     const compiled& c = it->second;
@@ -1645,6 +1807,9 @@ void start_function(const std::string& space, const std::string& name,
     // a coroutine of its own, so the interrupt has somewhere to yield to. Pinned in
     // the registry: nothing else refers to it while it is suspended
     take_thread(*st, job->T, job->tref);
+    // the coroutine carries which space this call runs in, for as long as it runs.
+    // The job outlives the coroutine's use of it, and `release` clears it - TODO 150
+    lua_setthreaddata(job->T, &job->scope);
 
     job->ctx.slice = insns;
     job->ctx.left = insns ? insns : 1;
@@ -1690,7 +1855,7 @@ bool compile_function(const std::string& space, const std::string& name,
     // the script's top level may require others, and require needs both the loader
     // and a state to compile them into
     auto scratch = make_function_states();
-    space_state* st = state_for(*scratch, space);
+    space_state* st = state_for(*scratch);
     if (!st) {
         err = "FUNCTION luau state";
         return false;
@@ -1700,7 +1865,9 @@ bool compile_function(const std::string& space, const std::string& name,
     // runs at SETF time, when there is no caller to run a command on, so one that
     // tries is told so rather than reaching a half-built one
     compiled c;
-    bool ok = compile_into(*st, name, source, c, err);
+    // the same qualified key the call path uses, or require inside this chunk builds
+    // one shape and the loading stack holds another - and a cycle goes undetected
+    bool ok = compile_into(*st, qualified(space, name), source, c, err);
     st->load = nullptr;
     return ok;
 }

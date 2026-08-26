@@ -88,7 +88,16 @@ struct store_access {
      * so for them the store behaves as though the range is not there. See TODO 98.
      */
     bool may_see_functions{false};
-    std::function<bool(const std::string& key, std::string& value)> get{};
+    /**
+     * present, or why not - see TODO 148.
+     *
+     * `tombed` means a foreign source was asked for this key and had nothing, and the
+     * miss was cached so it is not asked again. That is a different fact from a key
+     * nobody has looked for, and a script that treats them the same cannot tell "does
+     * not exist" from "not fetched yet".
+     */
+    enum class read_state { absent, tombed, present };
+    std::function<read_state(const std::string& key, std::string& value)> get{};
     std::function<bool(const std::string& key)> exists{};
     std::function<int64_t(const std::string& lo, const std::string& hi)> count{};
     /** keys in [lo, hi), at most limit of them, copied out before the lock goes */
@@ -192,6 +201,12 @@ typedef std::function<bool(const std::string& space, store_access& out)> space_o
  * Building them per call was 1.8us, which was 72% of what a one line function cost.
  * See TODO 98 F5.
  */
+/**
+ * what a nested-call refusal says, so the message can be recognised as it comes back
+ * up a chain and passed on whole rather than prefixed at every level - see TODO 98 E
+ */
+inline constexpr const char* too_deep_marker = "nested calls too deep";
+
 struct call_interface {
     source_loader load{};
     command_runner run_command{};

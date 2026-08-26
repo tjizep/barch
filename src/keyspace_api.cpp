@@ -529,8 +529,20 @@ int cmd_CLEAR(ValkeyModuleCtx *ctx, ValkeyModuleString ** argv, int argc) {
 int CLEARALL(caller& call, const arg_t& argv) {
     if (argv.size() != 1)
         return call.wrong_arity();
-    barch::all_shards([](auto& shard) {
-        shard->clear();
+    /*
+     * Every space but `configuration`, which is not data - see TODO 149.
+     *
+     * It holds each space's foreign settings, key_split and shard count, and the
+     * global stored functions, so clearing it with the caches would silently
+     * unconfigure the server. FLUSHDB still clears the selected space, so someone who
+     * means to clear configuration can `USE configuration` and say so.
+     */
+    barch::all_spaces([](const std::string& name, const barch::key_space_ptr& ks) {
+        if (name == "configuration" || name == "configuration_")
+            return;
+        for (auto& shard : ks->get_shards()) {
+            shard->clear();
+        }
     });
 
 

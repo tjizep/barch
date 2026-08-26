@@ -139,6 +139,39 @@ bool sharded_store::search(art::value_type key, const node_cb& cb) const {
     return true;
 }
 
+sharded_store::read_state sharded_store::search_state(art::value_type key,
+                                                     const node_cb& cb) const {
+    auto ruled_out = [&key](const shard_ptr& t) {
+        return !t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key);
+    };
+    auto moves = space()->opt_range_sharded;
+    auto t = shard_for(key);
+    if (!t) return read_state::absent;
+    if (!moves && ruled_out(t)) {
+        return read_state::absent;
+    }
+    std::optional<read_lock> release;
+    t = route_locked<read_lock>(*this, key, release);
+    if (!t) return read_state::absent;
+    if (moves && ruled_out(t)) {
+        return read_state::absent;
+    }
+    // local_leaf rather than search, because `shard::search` erases a tomb to null
+    // before a caller can see it - which is right for a command that wants the value
+    // and is exactly the difference this function exists to report. The foreign path
+    // reads it the same way, for the same reason
+    auto r = t->local_leaf(key);
+    if (r.null())
+        return read_state::absent;
+    auto cl = r.const_leaf();
+    if (cl->expired())
+        return read_state::absent;      // a lapsed tomb is askable again, so unknown
+    if (cl->is_tomb())
+        return read_state::tombed;
+    cb(r);
+    return read_state::present;
+}
+
 bool sharded_store::exists(art::value_type key) const {
     auto ruled_out = [&key](const shard_ptr& t) {
         return !t->sources() && t->has_static_bloom_filter() && !t->is_bloom(key);

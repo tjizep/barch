@@ -49,6 +49,8 @@ struct rpc_caller : caller {
     heap::vector<bool> named_acl{};
     /** see caller::script_interface */
     barch::foreign::call_interface_ptr script_iface{};
+    /** see caller::script_depth */
+    int nest_depth{0};
     /** see caller::resolutions - names already known to be functions here */
     heap::string_map<caller::resolved_fn> resolved{};
     std::string resolved_space{"\x01none"};
@@ -665,6 +667,12 @@ struct rpc_caller : caller {
         block_retry = false;
         block_fun(*this, blocks);
         return errors.empty() ? 0 : -1;
+    }
+    [[nodiscard]] int script_depth() const override {
+        return nest_depth;
+    }
+    void set_script_depth(int d) override {
+        nest_depth = d;
     }
     std::string get_info() const override {
         if (!info_fun) return "";

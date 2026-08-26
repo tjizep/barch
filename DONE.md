@@ -5398,3 +5398,43 @@ than twenty copies of the standard library.
 Sixteen test files pass. test/functiontest.py pins the hazard the merge
 introduces: the same function name in two spaces, reached directly and through
 `require`, staying separate.
+
+## 144. Luau memory is in the statistics [26-08-2026]
+
+98 C asked for a line in the memory statistics for what the function states hold.
+INFO MEMORY now carries four:
+
+    used_memory_luau            bytes held by every Luau state in the process
+    used_memory_luau_human
+    luau_states                 how many states exist
+    luau_functions_compiled     how many compiled functions they hold
+
+Counted by an allocator installed with `lua_newstate`, not asked for with
+`lua_gc(LUA_GCCOUNT)`. A state belongs to the session using it, so reading its
+collector from whichever thread happens to be serving INFO would be a race. An
+allocator sees all three kinds of state - the per session function states, the
+foreign fill states, and the scratch one a SETF compile check builds - and sees
+them live.
+
+The round trip holds: zero before anything runs, zero again after a SETF (the
+scratch state is created and closed, so it nets out), and back to zero after the
+session that used a state disconnects. That last one is the check worth having,
+since a counter that only goes up is worse than no counter.
+
+**It also corrects DONE 143.** That entry measured a state at about 50 kB from RSS
+deltas. The allocator says 362 kB. RSS undercounts because freed pages elsewhere
+get reused and not every page is touched, so the honest figure for what a state
+holds is the allocator's. A compiled function measures about 1.06 kB against the
+0.5 kB estimated the same way.
+
+Which strengthens rather than changes what 143 concluded: duplicating a state per
+space was costing seven times what the RSS estimate suggested, so merging them was
+worth more than it looked, and the ratio between a state and a function - the thing
+the decision actually rested on - is 340:1 rather than 100:1.
+
+One near miss worth recording. Routing every `lua_close` through the counting
+wrapper was done with a scripted sweep over the file, and it rewrote the
+`lua_close` *inside the wrapper itself* into a call to the wrapper - infinite
+recursion on every state close. Caught by reading the result rather than by a test,
+because a test would have crashed without saying why. That is twice now that a
+blind textual sweep has produced something that compiles and is wrong.

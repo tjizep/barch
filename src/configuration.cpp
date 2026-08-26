@@ -66,6 +66,8 @@ struct config_state {
     heap::string foreign_timeout_ms{};
     heap::string foreign_pool_max_age_ms{};
     heap::string foreign_script_insns{};
+    heap::string function_slice_insns{};
+    heap::string function_deadline_ms{};
     heap::string jump_factor{};
     heap::string ordered_keys{};
     heap::string server_port{};
@@ -270,6 +272,72 @@ static int SetForeignScriptInsns(const char *unused_arg, ValkeyModuleString *val
 }
 
 static int ApplyForeignScriptInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+/*
+ * A function's instruction slice and its deadline.
+ *
+ * These used to be borrowed from foreign: the budget was `foreign_script_insns` and
+ * the bound was the space's `foreign_query_timeout_ms`. A fill and a command a client
+ * invoked are not the same risk, and since a script yields rather than dying the
+ * instruction count is a *slice* size while the deadline is the real bound - so they
+ * are named for what they now are. See TODO 98 I.2.
+ */
+static ValkeyModuleString *GetFunctionSliceInsns(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_slice_insns.c_str(),
+                                     state().function_slice_insns.length());
+}
+
+static int SetFunctionSliceInsns(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_slice_insns = val;
+    char *end = nullptr;
+    uint64_t n = std::strtoull(val.c_str(), &end, 10);
+    if (n == 0) n = 1;
+    config().function_slice_insns = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionSliceInsns(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionSliceInsns(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionSliceInsns(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
+    return VALKEYMODULE_OK;
+}
+// ===========================================================================================================
+static ValkeyModuleString *GetFunctionDeadlineMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().function_deadline_ms.c_str(),
+                                     state().function_deadline_ms.length());
+}
+
+static int SetFunctionDeadlineMs(const std::string& val) {
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check)) {
+        return VALKEYMODULE_ERR;
+    }
+    std::lock_guard lock(state().config_mutex);
+    state().function_deadline_ms = val;
+    char *end = nullptr;
+    uint64_t n = std::strtoull(val.c_str(), &end, 10);
+    if (n == 0) n = 1;
+    config().function_deadline_ms = n;
+    return VALKEYMODULE_OK;
+}
+
+static int SetFunctionDeadlineMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionDeadlineMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+
+static int ApplyFunctionDeadlineMs(ValkeyModuleCtx *unused(ctx), void *unused(priv), ValkeyModuleString **unused(vks)) {
     return VALKEYMODULE_OK;
 }
 // ===========================================================================================================
@@ -1207,6 +1275,14 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                  GetForeignScriptInsns, SetForeignScriptInsns,
                                                  ApplyForeignScriptInsns, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_slice_insns", "1000000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionSliceInsns, SetFunctionSliceInsns,
+                                                 ApplyFunctionSliceInsns, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "function_deadline_ms", "1000", VALKEYMODULE_CONFIG_DEFAULT,
+                                                 GetFunctionDeadlineMs, SetFunctionDeadlineMs,
+                                                 ApplyFunctionDeadlineMs, nullptr);
+
     ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetOrderedKeys, SetOrderedKeys,
                                                      ApplyOrderedKeys, nullptr);
@@ -1518,6 +1594,18 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyForeignScriptInsns(nullptr, nullptr, nullptr);
         }
         return r;
+    } else if (name == "function_slice_insns") {
+        auto r = SetFunctionSliceInsns(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionSliceInsns(nullptr, nullptr, nullptr);
+        }
+        return r;
+    } else if (name == "function_deadline_ms") {
+        auto r = SetFunctionDeadlineMs(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyFunctionDeadlineMs(nullptr, nullptr, nullptr);
+        }
+        return r;
     }else if (name == "ordered_keys") {
         auto r = SetOrderedKeys(val);
         if (r == VALKEYMODULE_OK) {
@@ -1717,6 +1805,16 @@ uint64_t barch::get_foreign_script_insns() {
     return config().foreign_script_insns;
 }
 
+uint64_t barch::get_function_slice_insns() {
+    std::lock_guard lock(state().config_mutex);
+    return config().function_slice_insns;
+}
+
+uint64_t barch::get_function_deadline_ms() {
+    std::lock_guard lock(state().config_mutex);
+    return config().function_deadline_ms;
+}
+
 bool barch::get_log_page_access_trace() {
     //std::lock_guard lock(state().config_mutex);
     return config().log_page_access_trace;
@@ -1813,6 +1911,7 @@ const std::vector<std::string>& barch::configuration_names() {
     static const std::vector<std::string> names = {
         "active_defrag", "compression", "db_number_prefix", "eviction_policy",
         "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
+        "function_slice_insns", "function_deadline_ms",
         "foreign_timeout_ms",
         "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
@@ -1836,6 +1935,8 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "external_host")               value = c.external_host;
     else if (name == "foreign_pool_max_age_ms")     value = std::to_string(c.foreign_pool_max_age_ms);
     else if (name == "foreign_script_insns")        value = std::to_string(c.foreign_script_insns);
+    else if (name == "function_slice_insns")        value = std::to_string(c.function_slice_insns);
+    else if (name == "function_deadline_ms")        value = std::to_string(c.function_deadline_ms);
     else if (name == "foreign_timeout_ms")          value = std::to_string(c.foreign_timeout_ms);
     else if (name == "iteration_worker_count")      value = std::to_string(c.iteration_worker_count);
     else if (name == "listen_port")                 value = std::to_string(c.listen_port);

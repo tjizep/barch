@@ -15,6 +15,55 @@
 namespace barch {
 
     /**
+     * What a script's explicit lock is holding on this thread, so nothing takes it
+     * again - see TODO 98 F6.
+     *
+     * The shard mutex is not recursive, so an implicit acquire inside an explicit hold
+     * is EDEADLK on the calling thread rather than a slower path. Every place that
+     * takes a shard lock asks here first and skips its own acquire when the shard is
+     * already held.
+     *
+     * Thread local, which is only sound because a locked region forbids yielding: a
+     * call that cannot yield cannot park, and a call that cannot park never comes back
+     * on another thread. Nothing outside a locked region ever sets it, so every
+     * ordinary command reads it clear and behaves exactly as it did.
+     */
+    struct shard_hold {
+        /** the space the hold is on, null when nothing is held */
+        const void* space{nullptr};
+        /** the one shard held, or null when the whole space is */
+        const void* shard{nullptr};
+        bool all{false};
+
+        static shard_hold& current();
+
+        /** is this shard covered by what is already held here */
+        [[nodiscard]] bool covers(const void* sp, const void* sh) const {
+            if (!space || space != sp) return false;
+            return all || shard == sh;
+        }
+        /** is a hold on this space in force but not covering this shard */
+        [[nodiscard]] bool conflicts(const void* sp, const void* sh) const {
+            return space && space == sp && !all && shard != sh;
+        }
+    };
+
+    /**
+     * Raised when a locked region reaches a second shard - see TODO 98 F6.
+     *
+     * One shard or all of them, never an arbitrary subset, because two scripts each
+     * holding one shard and wanting the other is a deadlock nothing can get out of.
+     * A script that wants two keys atomically can put them in one container, which
+     * routes them to a single shard by name.
+     */
+    struct cross_shard_lock : std::runtime_error {
+        explicit cross_shard_lock(const std::string& what) : std::runtime_error(what) {}
+    };
+
+    /** the check every acquire makes: skip if held, throw if it would be a second one */
+    bool shard_already_held(const void* space, const void* shard);
+
+    /**
      * A view over the shards of one key space, and the only place that should know a
      * key space is sharded at all.
      *

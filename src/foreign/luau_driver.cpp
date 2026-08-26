@@ -30,7 +30,19 @@ struct run_ctx {
     uint64_t left{0};
     uint64_t slice{0};
     int64_t deadline{0};
+    /**
+     * inside a locked region a shard lock is held, so the three things that would
+     * deadlock or stall behind it are refused: yielding (a parked call holding a shard
+     * lock never comes back), barch.call (a command takes shard locks of its own), and
+     * sql.query (network I/O with a shard stopped). See TODO 98 F6.
+     */
+    bool locked{false};
+    /** what is left of the region's own cap, since it cannot end in a yield */
+    uint64_t locked_left{0};
 };
+
+/** the region's instruction cap - short, because nothing else can touch the shard */
+static constexpr uint64_t locked_region_insns = 100000;
 
 static void interrupt(lua_State* L, int gc) {
     if (gc >= 0)
@@ -56,6 +68,8 @@ static int blocked_require(lua_State* L) {
 }
 
 static int sql_query(lua_State* L) {
+    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
+        luaL_error(L, "FUNCTION sql.query is not allowed inside a locked region");
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.foreign.space");
     const char* sp = lua_tostring(L, -1);
     lua_pop(L, 1);
@@ -392,6 +406,14 @@ static void function_interrupt(lua_State* L, int gc) {
         return;
     if (ctx->deadline && art::now() > ctx->deadline)
         luaL_error(L, "FUNCTION timeout");
+    if (ctx->locked) {
+        // a hard cap inside the region, because the usual budget ends in a yield and a
+        // yield is exactly what must not happen while a shard lock is held
+        if (ctx->locked_left == 0)
+            luaL_error(L, "FUNCTION locked region ran too long");
+        --ctx->locked_left;
+        return;
+    }
     if (ctx->left == 0) {
         // the slice is spent. Yield so the pool thread can take other work and this
         // script comes back on the next one - the deadline is what ends a runaway,
@@ -562,6 +584,126 @@ static int store_get(lua_State* L) {
         return 1;
     }
     lua_pushlstring(L, value.data(), value.size());
+    return 1;
+}
+
+/*
+ * barch.store.set(k, v) and barch.store.remove(k).
+ *
+ * The reads landed first and the write half was reached only through the space value,
+ * `sp[k] = v`, which meant the two halves of the same interface disagreed about what
+ * a script could do. They are the same calls underneath - `store_of` has taken a
+ * `writing` flag since the rights went in, and this is what it was for. See 98 I.6.
+ *
+ * A nil value removes, so `set(k, nil)` and `remove(k)` are the same thing, which is
+ * how `sp[k] = nil` already behaves. Keeping the two forms consistent matters more
+ * than making one of them an error.
+ */
+static int store_set(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    const auto* s = store_of(L, "set", true);
+    if (lua_isnoneornil(L, 2)) {
+        s->remove({k, n});
+        return 0;
+    }
+    size_t vn = 0;
+    const char* v = lua_tolstring(L, 2, &vn);
+    if (!v)
+        luaL_error(L, "FUNCTION a key space holds strings and numbers");
+    std::string err;
+    if (!s->set({k, n}, {v, vn}, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    return 0;
+}
+
+static int store_remove(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    lua_pushboolean(L, store_of(L, "remove", true)->remove({k, n}));
+    return 1;
+}
+
+/*
+ * barch.store.locked(key, fn) - run fn with the shard that owns `key` write locked,
+ * or with the whole space locked when key is nil. See TODO 98 F6.
+ *
+ * Scoped rather than a lock and an unlock a script pairs up itself. A pair leaks the
+ * shard lock the first time a script errors between the two halves, and errors are
+ * exactly what a region with a hard instruction cap produces - so the guard lives on
+ * the C++ side of the boundary and the lock goes back whether fn returns, raises, or
+ * is cut off.
+ *
+ * What fn returns is what this returns, so a region can hand its result out.
+ */
+static int store_locked(lua_State* L) {
+    std::string key;
+    int fn_at = 1;
+    if (lua_isstring(L, 1) && !lua_isnoneornil(L, 2)) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 1, &n);
+        key.assign(k, n);
+        fn_at = 2;
+    }
+    luaL_checktype(L, fn_at, LUA_TFUNCTION);
+    const auto* s = store_of(L, "locked", true);
+    if (!s->locked)
+        luaL_error(L, "FUNCTION barch.store.locked is not available here");
+
+    auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata);
+    int base = lua_gettop(L);
+    int raised = 0;
+    std::string err;
+
+    bool ok = s->locked(key, [&]() -> bool {
+        if (rc) {
+            rc->locked = true;
+            rc->locked_left = locked_region_insns;
+        }
+        // pcall rather than a straight call: an error has to come back through here so
+        // the lock is given up on this side before it is re-raised to the script
+        lua_pushvalue(L, fn_at);
+        raised = lua_pcall(L, 0, 1, 0);
+        if (rc)
+            rc->locked = false;
+        return raised == LUA_OK;
+    }, err);
+
+    if (!ok && raised == 0) {
+        // the region never ran - no rights, no shard, or already inside one
+        luaL_error(L, "%s", err.empty() ? "FUNCTION locked region refused" : err.c_str());
+    }
+    if (raised != LUA_OK) {
+        // re-raise what the body raised, now that the lock is back
+        lua_error(L);
+    }
+    return lua_gettop(L) > base ? 1 : 0;
+}
+
+/*
+ * barch.store.shardNumber(k) and barch.store.hasLock(k).
+ *
+ * A locked region may hold one shard or the whole space and never two, so a script
+ * that wants two keys together needs to be able to ask whether they are on one shard
+ * rather than finding out from the abort. And a helper called from both inside and
+ * outside a region can ask whether the lock is already there instead of being passed
+ * a flag. See TODO 98 F6.
+ */
+static int store_shard_number(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    const auto* s = store_of(L, "shardNumber");
+    if (!s->shard_number)
+        luaL_error(L, "FUNCTION barch.store.shardNumber is not available here");
+    lua_pushinteger(L, (int) s->shard_number(std::string(k, n)));
+    return 1;
+}
+
+static int store_has_lock(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    const auto* s = store_of(L, "hasLock");
+    lua_pushboolean(L, s->has_lock && s->has_lock(std::string(k, n)));
     return 1;
 }
 
@@ -943,6 +1085,8 @@ static int space_open(lua_State* L) {
  * between redis.call and redis.pcall.
  */
 static int barch_call(lua_State* L) {
+    if (auto* rc = static_cast<run_ctx*>(lua_callbacks(L)->userdata); rc && rc->locked)
+        luaL_error(L, "FUNCTION barch.call is not allowed inside a locked region");
     int n = lua_gettop(L);
     if (n < 1)
         luaL_error(L, "FUNCTION barch.call needs a command name");
@@ -990,6 +1134,7 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
         return false;
     }
     switch (lua_type(L, idx)) {
+        case LUA_TNONE:     // an index that holds nothing, not a value that is nil
         case LUA_TNIL:
             out = Variable(nullptr);
             return true;
@@ -1147,6 +1292,16 @@ static space_state* state_for(function_states& cache, const std::string& space) 
     lua_newtable(L);
     lua_pushcfunction(L, store_get, "get");
     lua_setfield(L, -2, "get");
+    lua_pushcfunction(L, store_set, "set");
+    lua_setfield(L, -2, "set");
+    lua_pushcfunction(L, store_remove, "remove");
+    lua_setfield(L, -2, "remove");
+    lua_pushcfunction(L, store_locked, "locked");
+    lua_setfield(L, -2, "locked");
+    lua_pushcfunction(L, store_shard_number, "shardNumber");
+    lua_setfield(L, -2, "shardNumber");
+    lua_pushcfunction(L, store_has_lock, "hasLock");
+    lua_setfield(L, -2, "hasLock");
     lua_pushcfunction(L, store_exists, "exists");
     lua_setfield(L, -2, "exists");
     lua_pushcfunction(L, store_count, "count");
@@ -1415,7 +1570,19 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         }
         Variable out;
         std::string err;
-        bool ok = to_variable(job->T, lua_gettop(job->T), out, err, 0);
+        /*
+         * A script that returns nothing leaves an empty stack, and 0 is not a valid
+         * index - `lua_type(L, 0)` walks off the frame rather than answering LUA_TNONE,
+         * which took the server down for a `function call(k) end` with nothing else
+         * wrong with it. Nothing to return is a null reply, the same answer redis gives
+         * a script with no return statement.
+         */
+        bool ok = true;
+        if (lua_gettop(job->T) == 0) {
+            out = Variable(nullptr);
+        } else {
+            ok = to_variable(job->T, lua_gettop(job->T), out, err, 0);
+        }
         finish_job(job, ok, std::move(out), std::move(err));
         return;
     }

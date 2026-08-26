@@ -4982,3 +4982,132 @@ were run here against real mysql and postgres containers, and both print their
 The two remaining sites named in DONE 130 turned out to be the only ones: a grep
 for foreign_script across test/ finds nothing else but configtest.py, which only
 lists `foreign_script_insns` among the option names and does not set a script.
+
+## 134. A stored function that returned nothing took the server down [26-08-2026]
+
+`function call(k) end` - no return statement, nothing else wrong with it - crashed
+with SIGILL. Found while writing tests for the `barch.store` write half, but
+nothing to do with it: it was simply the first script in the suite that returned
+nothing.
+
+`pump_call` converted the reply with `to_variable(job->T, lua_gettop(job->T), ...)`.
+An empty stack makes that index 0, which is not a valid Lua index, so
+`lua_type(L, 0)` read off the frame rather than answering LUA_TNONE.
+
+An empty stack now answers null, which is what redis gives a script with no return
+statement, and `to_variable` treats LUA_TNONE as nil so no other caller can repeat
+it. test/functiontest.py has a function that returns nothing followed by a PING -
+the PING is the point, since a wrong answer here is a dead server rather than a
+wrong reply.
+
+Worth noting how close this came to shipping unnoticed. Every script in the suite
+happened to return something, and a function with no return is the most ordinary
+thing a user would write - a setter. The bug was reachable by the second script
+anyone would try.
+
+## 135. A function's slice and deadline are its own, and `barch.store` writes [26-08-2026]
+
+Two things off 98's build order, I.2 and I.6.
+
+I.2. The budget was `foreign_script_insns` and the bound was the space's
+`foreign_query_timeout_ms`. A fill and a command a client invoked are not the same
+risk, and since a script yields rather than dying the instruction count is a
+*slice* size while the deadline is the real bound - so they are named for what they
+now are: `function_slice_insns` and `function_deadline_ms`, both server settings
+with per space overrides, 0 meaning use the server's, the same shape
+`script_insns()` and `waiter_timeout_ms()` already had. `KSPACE OPTION GET
+FUNCTION_SLICE|FUNCTION_DEADLINE` reports them.
+
+Two places had to move that are easy to miss, and both fail quietly rather than at
+compile time: `configuration_names()` and the value reflection are separate lists,
+so a variable registered in one and not the other reads back empty - configtest
+catches it, which is what it is for. And the option name whitelist in
+spaces_spec.h carries a hand written count of its own length, so a name added
+without moving the count is a syntax error at the parser.
+
+I.6. `barch.store` was read only while the space value could write, so the two
+halves of one interface disagreed about what a script could do. `store_of` has
+taken a `writing` flag since the rights went in and nothing used it - this is what
+it was for. `barch.store.set(k, v)` and `barch.store.remove(k)` now exist, rights
+checked the same way, with a nil value removing so `set(k, nil)` and `sp[k] = nil`
+agree.
+
+The entry's own note that writes were missing was overstating it: writes landed in
+6b through `__newindex`, and containers got set and del with the container work.
+What was actually missing was the symmetry.
+
+One test bug worth recording because it looks like a real failure: a script
+returning `{ value, nil }` answers with a one element array, since a trailing nil
+in a Lua table is a shorter table rather than a hole. The assertion was wrong, not
+the code - but chasing it is what produced 134.
+
+## 136. The locked region: explicit locking, and an API that knows one is held [26-08-2026]
+
+The last thing in 98 item 6. Everything else in the store interface copies under the
+lock and lets it go, so a get followed by a set has a gap another connection can land
+in. `barch.store.locked(key, fn)` closes it: fn runs with a write lock held on the
+shard the key routes to, or on every shard in shard order when no key is named.
+
+The hard half was not the lock, it was everything else having to know about it. The
+shard mutex is not recursive - keyspace_api.cpp:219 and key_space.cpp:473 both say so,
+both having been bitten - so an implicit acquire inside an explicit hold is EDEADLK on
+the calling thread rather than a slower path. `shard_hold` is a thread local record of
+what is held, and `route_locked`, `each_shard_read` and `each_shard_write` all ask it
+before taking anything.
+
+Three things fell out of doing it that were not obvious from the outside:
+
+  - the guard has to sit on every shard acquisition, not just on explicit lock calls.
+    A script that locks one key and then calls `store.range`, or reads a container
+    living elsewhere, reaches a second shard through the implicit path without ever
+    asking for one. Checking only explicit locks leaves exactly the case the check
+    exists to prevent.
+  - nothing else in the tree holds two shard locks at once. `each_shard_read` and
+    `each_shard_write` scope the guard inside the loop body - take one, release, take
+    the next - so single shard holders cannot form a cycle with anything, and the
+    ordering only has to defend the all-shards form against another all-shards form.
+    That is a much smaller thing to get right than it first looked.
+  - the held record can be thread local, which avoids threading a lock token through
+    every store_access entry point, and it is sound only because the region forbids
+    yielding. A call that cannot yield cannot park, and a call that cannot park never
+    resumes on another thread. The no-yield rule pays for the cheap implementation as
+    well as for the deadlock it was there to stop.
+
+What the region refuses, each of which would otherwise deadlock or stall every
+connection on that shard: yielding (the interrupt raises instead, with a hard cap of
+100000 instructions, since the ordinary budget ends in a yield), `barch.call` (a
+command takes shard locks of its own), and `sql.query` (network I/O with a shard
+stopped). A region inside a region is refused too - the inner one is already covered,
+and letting it through would drop the outer hold when it left.
+
+A second key on a different shard aborts with a message naming what happened and what
+to do instead - put the keys in one container, which routes them to a single shard by
+name. Two scripts each holding one shard and wanting the other is a deadlock nothing
+can get out of, so it is an error rather than a wait.
+
+The surface is scoped rather than a lock and an unlock the script pairs up itself. A
+pair leaks the shard lock the first time a script errors between the halves, and
+errors are exactly what a region with a hard cap produces. The guard is on the C++
+side and the body runs under `lua_pcall`, so the lock goes back whether the script
+returns, raises, or is cut off - then the error is re-raised once the lock is gone.
+
+Measured rather than asserted, because a single threaded increment passes with no
+lock at all. Eight connections, 250 increments each, one key:
+
+    unlocked   1994 of 2000     six lost updates
+    locked     2000 of 2000
+
+Two companions went in beside it, because the region is deliberately restrictive and
+a script should be able to find that out rather than discover it from an abort.
+`barch.store.shardNumber(k)` answers which shard a key routes to, so two keys can be
+checked for being together before anything is locked, and `barch.store.hasLock(k)`
+answers whether this call already holds that key's shard, so a helper can be written
+once and called from inside or outside a region without being passed a flag. Both are
+tested: the same key routes the same way twice, a key on another shard is found by
+comparing numbers rather than by catching the error, and hasLock reads false, true,
+false across a region boundary.
+
+The unlocked figure is the important one: it says the test can see the thing it is
+testing. The locked case is in test/functiontest.py along with the whole space form,
+the three refusals, the nested refusal, an error inside the region followed by a call
+that proves the lock went back, and the cross shard abort actually firing.

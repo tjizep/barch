@@ -61,6 +61,16 @@ namespace barch {
         return get_foreign_script_insns();
     }
 
+    uint64_t key_space::function_slice() const {
+        if (function_slice_insns != 0) return function_slice_insns;
+        return get_function_slice_insns();
+    }
+
+    uint64_t key_space::function_deadline() const {
+        if (function_deadline_ms != 0) return function_deadline_ms;
+        return get_function_deadline_ms();
+    }
+
     uint64_t key_space::pool_max_age_ms() const {
         if (foreign_pool_max_age_ms != 0) return foreign_pool_max_age_ms;
         return get_foreign_pool_max_age_ms();
@@ -281,6 +291,8 @@ namespace barch {
                 read_u64(kv, real+".foreign_pool_size", foreign_pool_size);
                 read_u64(kv, real+".foreign_pool_max_age_ms", foreign_pool_max_age_ms);
                 read_u64(kv, real+".foreign_script_insns", foreign_script_insns);
+                read_u64(kv, real+".function_slice_insns", function_slice_insns);
+                read_u64(kv, real+".function_deadline_ms", function_deadline_ms);
                 key_split = kv.get(real+".key_split");
                 if (!key_split.empty()) {
                     try {

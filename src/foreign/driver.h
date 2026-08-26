@@ -145,6 +145,34 @@ struct store_access {
     std::function<void(const std::string& name, const std::string& after, size_t want,
                        heap::vector<std::pair<std::string, std::string>>& out,
                        std::string& next)> container_page{};
+
+    /**
+     * Run `body` with a write lock held on the shard a key routes to, or on the whole
+     * space when the key is empty - see TODO 98 F6.
+     *
+     * This is what makes a read-modify-write atomic. Everything else here copies under
+     * the lock and lets it go, so a get followed by a set has a gap another connection
+     * can land in; inside here it does not.
+     *
+     * `body` returns false if the script raised, which is passed back rather than
+     * thrown through the lock. The lock goes back either way - the guard is on this
+     * side of the boundary so that an error, the instruction cap or the deadline
+     * cannot leave a shard locked.
+     */
+    std::function<bool(const std::string& key, const std::function<bool()>& body,
+                       std::string& err)> locked{};
+
+    /**
+     * Which shard a key routes to, and whether this call already holds its lock.
+     *
+     * Both exist because the locked region is deliberately restrictive: one shard or
+     * the whole space, never two. `shard_number` lets a script find out whether two
+     * keys are on one shard *before* it tries to lock them and gets the abort, and
+     * `has_lock` lets a helper work either inside a region or outside one without
+     * being told which. See TODO 98 F6.
+     */
+    std::function<int64_t(const std::string& key)> shard_number{};
+    std::function<bool(const std::string& key)> has_lock{};
 };
 
 /**

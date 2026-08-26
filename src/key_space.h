@@ -58,6 +58,9 @@ namespace barch {
         uint64_t missing_ttl{0};
         uint64_t foreign_timeout_ms{0};
         uint64_t foreign_query_timeout_ms{1000};
+        /** a function's own slice and deadline, 0 meaning use the server setting */
+        uint64_t function_slice_insns{0};
+        uint64_t function_deadline_ms{0};
         uint64_t foreign_max_inflight{32};
         uint64_t foreign_pool_size{8};
         uint64_t foreign_pool_max_age_ms{0};
@@ -76,6 +79,9 @@ namespace barch {
         [[nodiscard]] const char *foreign_kind_name() const;
         [[nodiscard]] uint64_t waiter_timeout_ms() const;
         [[nodiscard]] uint64_t script_insns() const;
+        /** what a stored function gets: a slice to run in, and a bound on the call */
+        [[nodiscard]] uint64_t function_slice() const;
+        [[nodiscard]] uint64_t function_deadline() const;
         /** idle MySQL/PG connection max age. Unset inherits the global. */
         [[nodiscard]] uint64_t pool_max_age_ms() const;
         /** close idle SQL pool connections that have sat past the max age. */

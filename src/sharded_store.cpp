@@ -43,12 +43,38 @@ static shard_ptr route_locked(const sharded_store& store, art::value_type key,
         // primitive the class is meant to be specialised on
         auto t = store.shard_for(key);
         if (!t) return t;
+        // a script's explicit lock is already holding this shard, so taking it again
+        // would be EDEADLK on this thread - and a *different* shard is the cross shard
+        // case that has to fail loudly rather than deadlock. See TODO 98 F6
+        if (shard_already_held(store.space().get(), t.get()))
+            return t;
         held.emplace(t);
         if (!store.space()->route_moved(key, t)) {
             return t;
         }
         held.reset();
     }
+}
+
+shard_hold& shard_hold::current() {
+    static thread_local shard_hold held{};
+    return held;
+}
+
+bool shard_already_held(const void* space, const void* shard) {
+    const auto& held = shard_hold::current();
+    if (held.covers(space, shard))
+        return true;
+    if (held.conflicts(space, shard)) {
+        // naming both is the point: "a second shard" means nothing to someone who
+        // cannot see the routing, and the whole reason this is an error rather than a
+        // wait is that there is no way out of it once two scripts have one each
+        throw cross_shard_lock(
+            "FUNCTION a locked region reached a second shard. A script may hold one "
+            "shard, or the whole space, never two - put the keys in one container if "
+            "they have to be locked together");
+    }
+    return false;
 }
 
 art::merge_iterator make_merged(const shard_ptr& shard, art::value_type lower) {
@@ -276,6 +302,10 @@ void sharded_store::each_shard(const shard_fn& fn) const {
 
 void sharded_store::each_shard_write(const shard_fn& fn) const {
     for (const auto& t : shards()) {
+        if (shard_already_held(space().get(), t.get())) {
+            fn(t);
+            continue;
+        }
         storage_release release(t);
         fn(t);
     }
@@ -283,6 +313,10 @@ void sharded_store::each_shard_write(const shard_fn& fn) const {
 
 void sharded_store::each_shard_read(const shard_fn& fn) const {
     for (const auto& t : shards()) {
+        if (shard_already_held(space().get(), t.get())) {
+            fn(t);
+            continue;
+        }
         read_lock release(t);
         fn(t);
     }

@@ -1092,6 +1092,67 @@
         entry was worried about, and this is what makes it
         impossible rather than merely discouraged.
 
+    F6. What the locked region actually needs: an explicit lock, and
+    an API that knows one is held.
+
+    The shape: a script locks a key, or locks the whole space when it
+    names no key, and inside that the ordinary interface works as it
+    always did - except that nothing takes the lock a second time.
+
+    That second half is not a refinement, it is the whole difficulty.
+    The shard mutex is not recursive - keyspace_api.cpp:219 and
+    key_space.cpp:473 both say so, both having been bitten - so an
+    implicit acquire inside an explicit hold is EDEADLK on the
+    calling thread, not a slower path. Every entry point that opens a
+    scope today has to ask whether the shard it wants is already held
+    and skip taking it if so.
+
+    Which means the guard belongs on *every* shard acquisition inside
+    the region, not only on the explicit lock call. A script that
+    locks one key and then calls `store.range`, or reads a container
+    that lives elsewhere, reaches a second shard through the implicit
+    path without ever asking for it. If only explicit locks are
+    checked, that case deadlocks silently, which is the failure the
+    check exists to prevent.
+
+    The rule for how many: one shard, or all of them in shard order,
+    and never an arbitrary subset. A second explicitly locked key
+    that lands on a different shard aborts the call with a loud
+    error rather than taking the lock - deadlock is not worth being
+    clever about, and a script that wants two keys atomically can be
+    told to put them in one container, which routes them to one
+    shard by name.
+
+    Two things make this cheaper than it looks:
+
+      - nothing today holds two shard locks at once.
+        `each_shard_read` and `each_shard_write` scope the guard
+        inside the loop body, so they take one, release it, and take
+        the next. So single-shard holders cannot form a cycle with
+        anything, and only the all-shards form is a new kind of
+        holder - which is why it has to be ordered, and why it only
+        has to be ordered against itself.
+      - the held set can be thread local, which avoids threading a
+        lock token through every store_access entry point. That is
+        only sound because the region forbids yielding: a call that
+        cannot yield cannot park, and a call that cannot park never
+        resumes on another thread. The no-yield rule pays for the
+        cheap implementation as well as for the deadlock.
+
+    The surface should be scoped rather than a lock/unlock pair:
+
+        barch.store.locked(key, function()
+            local n = tonumber(barch.store.get(key)) or 0
+            barch.store.set(key, tostring(n + 1))
+        end)
+
+    A pair a script has to close itself leaks the shard lock the
+    first time a script errors between them, and errors are exactly
+    what happens inside a region with a hard instruction cap. With
+    the callback form the C++ side holds an RAII guard across the
+    call and the lock goes back whether the script returns, raises,
+    or is cut off at the cap or the deadline.
+
     The goal being most of the built-ins re-implementable in Luau is
     a good test of the interface: pick three of different shapes -
     say GETRANGE, HRANDFIELD and ZRANGEBYSCORE - write them in Luau
@@ -2078,22 +2139,21 @@
          script that will not run is refused rather than stored.
          The `storage_version` bump is done, and so is EXPORT -
          see below. Nothing outstanding here.
-      2. [part done] CALLF runs a stored function: arguments in as a
+      2. [done] CALLF runs a stored function: arguments in as a
          1-based array of strings, the reply conversion in J below,
          a hard instruction cap and deadline, `is_asynch` so it
          runs on the worker pool. Covered in test/functiontest.py,
          including a spin being cut off with the connection still
          usable afterwards.
 
-         One shortcut left, and it is the only thing between this
-         item and done: the budget is `get_foreign_script_insns()`,
-         a million instructions, rather than the
-         `function_script_insns` of its own that H asks for, and
-         the deadline is the space's `foreign_query_timeout_ms`. A
-         fill and a client-invoked command are not the same risk,
-         and after 7 the budget is a slice size while the deadline
-         is the real bound - so they want naming for what they now
-         are, not just separating.
+         The shortcut that was left here is gone: the budget was
+         `get_foreign_script_insns()` and the deadline was the
+         space's `foreign_query_timeout_ms`. They are now
+         `function_slice_insns` and `function_deadline_ms`, named
+         for what they are - a slice to run in, and the wall clock
+         bound that is the real limit. Server settings with per
+         space overrides, reported by `KSPACE OPTION GET
+         FUNCTION_SLICE|FUNCTION_DEADLINE`. See DONE 135.
 
          (The session cache that was listed here as missing landed
          in 4.)
@@ -2233,8 +2293,8 @@
          refusal case and every case ran the first body, because
          this connection keeps what it compiled. The caching
          contract in C is real enough to trip its own test.
-      6. [first cut done, rights added] `barch.store` - get, exists, count, range,
-         min, max - and `barch.space()` for what the space is
+      6. [done] `barch.store` - get, exists, count, range,
+         min, max, set, remove - and `barch.space()` for what the space is
          configured as. Reads run against the space the call is
          running in, not the one the function was defined in.
 
@@ -2256,24 +2316,28 @@
          it copies. What they show is that the flat key half of the
          interface is enough.
 
-         What is missing, which was the point of writing them:
+         What was missing when they were written, and where it went:
 
-           - containers. HRANDFIELD and ZRANGEBYSCORE cannot be
-             written against this, because there is no way to reach
-             a hash's fields or an ordered set's members and scores
-             except through barch.call. Container keys are a
-             different lead and a different routing - the
-             with_container_read scope - so they want their own
-             entry points rather than a flag on these.
-           - writes. Everything here reads. A script writes through
-             barch.call, which is the slow path and cannot say
-             "insert under the lock I am already holding".
+           - containers. HRANDFIELD and ZRANGEBYSCORE could not be
+             written against this at all. Both are now, in
+             test/functiontest.py, through `sp:container(name)` and
+             `sp:kind(name)`. The prediction that they wanted their
+             own entry points rather than a flag was right, and for
+             a sharper reason than the lead byte: a container's keys
+             live on the shard its *name* routes to. See F2.
+           - writes. This overstated it - writes landed in 6b
+             through `__newindex`, and containers got set and del
+             with the container work. What was actually missing was
+             the symmetry: `barch.store` could read but not write
+             while the space value could do both. `barch.store.set`
+             and `.remove` close that. See DONE 135.
            - the locked region F describes, where a callback runs
-             under a lock with yields and calls refused. Nothing
-             needs it yet, because every read here is a copy - it
-             becomes interesting when a script wants to read and
-             write one key without another connection getting in
-             between.
+             under a lock with yields and calls refused. Built -
+             `barch.store.locked(key, fn)`, one shard or the whole
+             space, with the API taught not to take a lock it
+             already holds, plus `shardNumber` and `hasLock` so a
+             script can see what the region will allow before it
+             asks. See F6 and DONE 136.
 
          The space's own name is worth knowing about: the default
          space's canonical name is empty, since `undecorate("node")`
@@ -2742,3 +2806,5 @@
 141. [Done] barch.space.NAME rebuilt a store interface per call [25-08-2026] Nr 132 9d612c8
 
 142. [Done] SQL foreign tests wrote Luau source into foreign_script [25-08-2026] Nr 133 9d612c8
+
+143. [Done] A function returning nothing took the server down [26-08-2026] Nr 134 9d612c8

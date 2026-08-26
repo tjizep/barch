@@ -727,6 +727,223 @@ try:
     ''') == b"OK"
     assert r.execute_command("cbad").decode() == "refused"
 
+    # --- the slice and the deadline are the function's own ---------------------------
+    # they used to be borrowed from foreign - see 98 I.2. Both answer the server
+    # setting here, since this space overrides neither
+    assert r.execute_command("KSPACE", "OPTION", "GET", "FUNCTION_SLICE") == 1000000
+    assert r.execute_command("KSPACE", "OPTION", "GET", "FUNCTION_DEADLINE") == 1000
+
+    # --- the locked region, TODO 98 F6 ---------------------------------------------
+    # a read and a write with nothing able to land between them. Without the lock this
+    # is the classic lost update; with it, concurrent callers each see their own
+    # increment
+    assert r.execute_command("SETF", "lockedincr", """
+        function call(k)
+            local out
+            barch.store.locked(k, function()
+                local n = tonumber(barch.store.get(k)) or 0
+                n = n + 1
+                barch.store.set(k, tostring(n))
+                out = n
+            end)
+            return out
+        end
+    """) == b"OK"
+    r.delete("lk")
+    assert r.execute_command("lockedincr", "lk") == 1
+    assert r.execute_command("lockedincr", "lk") == 2
+    assert r.get("lk") == b"2"
+
+    # what the region returns is what the call returns
+    assert r.execute_command("SETF", "lockedret", """
+        function call(k)
+            return barch.store.locked(k, function()
+                return "from inside"
+            end)
+        end
+    """) == b"OK"
+    assert r.execute_command("lockedret", "lk") == b"from inside"
+
+    # the three refusals that make holding a shard lock safe. Each one would otherwise
+    # deadlock or stall every other connection on that shard
+    assert r.execute_command("SETF", "lockedcall", """
+        function call(k)
+            return barch.store.locked(k, function()
+                return barch.call("GET", k)
+            end)
+        end
+    """) == b"OK"
+    try:
+        r.execute_command("lockedcall", "lk")
+        raise AssertionError("barch.call inside a locked region must be refused")
+    except redis.ResponseError as e:
+        assert "locked region" in str(e), e
+
+    # a region inside a region: the inner one is already covered, and letting it
+    # through would drop the outer hold when it left
+    assert r.execute_command("SETF", "locknest", """
+        function call(k)
+            return barch.store.locked(k, function()
+                return barch.store.locked(k, function() return 1 end)
+            end)
+        end
+    """) == b"OK"
+    try:
+        r.execute_command("locknest", "lk")
+        raise AssertionError("a nested locked region must be refused")
+    except redis.ResponseError as e:
+        assert "locked region" in str(e), e
+
+    # an error inside the region comes back as an error, and - the point of the test -
+    # does not leave the shard locked. The call after it is what says so
+    assert r.execute_command("SETF", "lockedboom", """
+        function call(k)
+            return barch.store.locked(k, function()
+                error("boom")
+            end)
+        end
+    """) == b"OK"
+    try:
+        r.execute_command("lockedboom", "lk")
+        raise AssertionError("expected the error to come back out")
+    except redis.ResponseError:
+        pass
+    assert r.execute_command("lockedincr", "lk") == 3, "the lock must have gone back"
+    assert r.ping() is True
+
+    # and the proof, since a single threaded increment would pass without any lock at
+    # all: eight connections racing on one key. Measured with the lock taken out, this
+    # same loop lost six of 2000 updates, so the test can see the thing it is testing
+    import threading
+    r.delete("race")
+    def hammer():
+        c = redis.Redis(port=PORT)
+        for _ in range(250):
+            c.execute_command("lockedincr", "race")
+        c.close()
+    crowd = [threading.Thread(target=hammer) for _ in range(8)]
+    for th in crowd: th.start()
+    for th in crowd: th.join()
+    assert int(r.get("race")) == 2000, f"lost updates: {r.get('race')}"
+
+    # the whole space, when no key is named. Every shard, so a read of any key is
+    # covered rather than being a second shard
+    assert r.execute_command("SETF", "lockedall", """
+        function call(a, b)
+            return barch.store.locked(function()
+                barch.store.set(a, "one")
+                barch.store.set(b, "two")
+                return barch.store.get(a) .. "/" .. barch.store.get(b)
+            end)
+        end
+    """) == b"OK"
+    assert r.execute_command("lockedall", "spanA", "spanB") == b"one/two"
+
+    # ...and the same two keys under a single key's lock must abort rather than
+    # quietly take a second shard lock. Which of 347 shards a key lands on is not
+    # something the test can predict, so it looks for the first key that is elsewhere
+    assert r.execute_command("SETF", "lockedcross", """
+        function call(k)
+            return barch.store.locked(k, function()
+                for i = 1, 200 do
+                    local other = "cross_" .. i
+                    local ok, e = pcall(function() return barch.store.get(other) end)
+                    if not ok then return tostring(e) end
+                end
+                return "no other shard found"
+            end)
+        end
+    """) == b"OK"
+    crossed = r.execute_command("lockedcross", "lk").decode()
+    assert "second shard" in crossed, f"expected the cross shard abort, got {crossed!r}"
+
+    # shardNumber and hasLock, which exist so a script can work out what the locked
+    # region will allow before it runs into the abort
+    assert r.execute_command("SETF", "shardof", """
+        function call(k)
+            return barch.store.shardNumber(k)
+        end
+    """) == b"OK"
+    n = r.execute_command("shardof", "lk")
+    assert isinstance(n, int) and n >= 0, n
+    assert r.execute_command("shardof", "lk") == n, "the same key must route the same way"
+
+    # the pair the region would refuse can be found without asking for it: scan for a
+    # key on another shard and check the two answers really differ
+    assert r.execute_command("SETF", "findother", """
+        function call(k)
+            local mine = barch.store.shardNumber(k)
+            for i = 1, 400 do
+                local other = "cross_" .. i
+                if barch.store.shardNumber(other) ~= mine then
+                    return { other, barch.store.shardNumber(other) }
+                end
+            end
+            return nil
+        end
+    """) == b"OK"
+    other = r.execute_command("findother", "lk")
+    assert other is not None, "expected some key on another shard"
+    assert int(other[1]) != n
+
+    # hasLock answers for where it is asked: false outside a region, true inside one
+    # for the key that region locked
+    assert r.execute_command("SETF", "lockstate", """
+        function call(k)
+            local before = barch.store.hasLock(k)
+            local inside = barch.store.locked(k, function()
+                return barch.store.hasLock(k)
+            end)
+            local after = barch.store.hasLock(k)
+            return { tostring(before), tostring(inside), tostring(after) }
+        end
+    """) == b"OK"
+    assert r.execute_command("lockstate", "lk") == [b"false", b"true", b"false"]
+
+    # --- a function that returns nothing answers null, and does not take the server
+    # down doing it. `lua_gettop` is 0 on an empty stack and 0 is not a valid Lua
+    # index, so this used to be a SIGILL - see TODO 143. The PING is the point of the
+    # test: a wrong answer here is a dead server, not a wrong reply
+    assert r.execute_command("SETF", "returnsnothing", """
+        function call(k)
+        end
+    """) == b"OK"
+    assert r.execute_command("returnsnothing", "x") is None
+    assert r.ping() is True
+
+    # --- barch.store writes, so both halves of the interface agree -------------------
+    assert r.execute_command("SETF", "storewrite", """
+        function call(k, v)
+            barch.store.set(k, v)
+            local back = barch.store.get(k)
+            barch.store.remove(k)
+            -- a trailing nil is not a hole in a Lua table, it is just a shorter
+            -- table, so the "it went" half has to be said rather than returned as nil
+            local gone = barch.store.get(k) == nil
+            return { back, gone and "gone" or "still there" }
+        end
+    """) == b"OK"
+    assert r.execute_command("storewrite", "sw_k", "sw_v") == [b"sw_v", b"gone"]
+    assert r.execute_command("EXISTS", "sw_k") == 0, "remove must actually remove"
+
+    # a written key is visible to the ordinary commands, not just to the script
+    assert r.execute_command("SETF", "storeput", """
+        function call(k, v)
+            barch.store.set(k, v)
+        end
+    """) == b"OK"
+    r.execute_command("storeput", "sw_seen", "here")
+    assert r.get("sw_seen") == b"here"
+
+    # setting nil removes, the same as `sp[k] = nil` does
+    assert r.execute_command("SETF", "storenil", """
+        function call(k)
+            barch.store.set(k, nil)
+        end
+    """) == b"OK"
+    r.execute_command("storenil", "sw_seen")
+    assert r.execute_command("EXISTS", "sw_seen") == 0
+
     for n in ("ch", "cz", "cl"):
         r.execute_command("DEL", n)
 
@@ -766,7 +983,10 @@ finally:
               "myComposite", "aclreads", "walker", "slowish",
               "bigint", "packcell", "bufwork", "spaceval", "spacedot",
               "spacebad", "spacewalk", "ckind", "cfield", "myHrandfield",
-              "myZrangebyscore", "cbad"):
+              "myZrangebyscore", "cbad", "storewrite", "storeput", "storenil",
+              "returnsnothing", "lockedincr", "lockedret", "lockedcall",
+              "locknest", "lockedboom", "lockedall", "lockedcross", "shardof", "findother",
+              "lockstate"):
         try:
             r.execute_command("REMF", n)
             r.execute_command("fspace:REMF", n)

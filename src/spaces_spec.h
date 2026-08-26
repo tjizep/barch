@@ -168,10 +168,13 @@ namespace art {
                 }
                 if (has("GET",spos)) {
                     is_get = true;
+                    // the count is the length of the list above it - a name added
+                    // without moving it parses as a syntax error
                     if (has_enum({"ORDERED","LRU","RANDOM",
                                   "FOREIGN","MISSING_TTL","FOREIGN_TIMEOUT",
                                   "FOREIGN_QUERY_TIMEOUT","FOREIGN_INFLIGHT",
-                                  "KEY_SPLIT","FOREIGN_POOL_MAX_AGE"},++spos) < 10) {
+                                  "KEY_SPLIT","FOREIGN_POOL_MAX_AGE",
+                                  "FUNCTION_SLICE","FUNCTION_DEADLINE"},++spos) < 12) {
                         name = tos(spos);
                     }else {
                         return -1;

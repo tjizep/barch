@@ -703,6 +703,78 @@ namespace functions {
             out.emplace_back("foreign", space->foreign_kind_name());
             out.emplace_back("key_split", space->key_split);
         };
+        /*
+         * The locked region - TODO 98 F6.
+         *
+         * A write lock, not a read one, because the point is read-modify-write and
+         * because a write lock also stops a rebalance moving the key out from under
+         * the hold. One shard when a key is named, every shard in shard order when one
+         * is not - never an arbitrary subset, which is what the ordering has to defend
+         * against, since a fan out holding one at a time cannot form a cycle with it.
+         *
+         * The thread local hold is set only while the guards are alive, so every
+         * acquire inside the body finds its shard already held and skips its own -
+         * the shard mutex is not recursive, so that is correctness, not economy.
+         */
+        s.locked = [space, may_write = s.may_write](
+                const std::string& key, const std::function<bool()>& body,
+                std::string& err) -> bool {
+            if (!may_write) {
+                err = "FUNCTION not authorized to write there";
+                return false;
+            }
+            auto& held = barch::shard_hold::current();
+            if (held.space) {
+                // a region inside a region: the inner one is already covered by the
+                // outer hold, and re-entering would clear the hold when it left
+                err = "FUNCTION already inside a locked region";
+                return false;
+            }
+            barch::sharded_store store(space);
+            /** puts the hold back however the body leaves */
+            struct release {
+                ~release() { barch::shard_hold::current() = {}; }
+            } rel;
+
+            bool ran = false;
+            if (key.empty()) {
+                // the whole space. Taken in shard order, which is the only ordering
+                // that matters here - see F6
+                heap::vector<storage_release> all;
+                store.each_shard([&](const barch::shard_ptr& t) {
+                    all.emplace_back(t);
+                });
+                held.space = space.get();
+                held.all = true;
+                ran = body();
+            } else {
+                // routed exactly the way a read of the same key is, or the region
+                // would lock a shard the body then does not use
+                auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+                auto t = store.shard_for(converted.get_value());
+                if (!t) {
+                    err = "FUNCTION no shard for that key";
+                    return false;
+                }
+                storage_release one(t);
+                held.space = space.get();
+                held.shard = t.get();
+                ran = body();
+            }
+            return ran;
+        };
+        s.shard_number = [space](const std::string& key) -> int64_t {
+            auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+            return (int64_t) space->get_shard_index(converted.get_value());
+        };
+        s.has_lock = [space](const std::string& key) -> bool {
+            barch::sharded_store store(space);
+            auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+            auto t = store.shard_for(converted.get_value());
+            if (!t)
+                return false;
+            return barch::shard_hold::current().covers(space.get(), t.get());
+        };
         return s;
     }
 
@@ -807,8 +879,9 @@ namespace functions {
 
         barch::foreign::start_function(
             defined_in, folded, held, args,
-            barch::get_foreign_script_insns(),
-            call.kspace()->foreign_query_timeout_ms, call.function_states(),
+            // a slice and a deadline of the function's own, not foreign's - see 98 I.2
+            call.kspace()->function_slice(),
+            call.kspace()->function_deadline(), call.function_states(),
             [slot, wake](bool ok, Variable value, std::string failed) {
                 slot->ok = ok;
                 slot->out = std::move(value);

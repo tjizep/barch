@@ -18,7 +18,7 @@ PORT = 14000
 EXPECTED = {
     "active_defrag", "compression", "db_number_prefix", "eviction_policy",
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
-    "foreign_timeout_ms",
+    "foreign_timeout_ms", "function_deadline_ms", "function_slice_insns",
     "iteration_worker_count", "listen_port", "log_page_access_trace",
     "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
     "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
@@ -70,6 +70,8 @@ NEW_VALUE = {
     "foreign_pool_max_age_ms": "15000",
     "foreign_script_insns": "2000000",
     "foreign_timeout_ms": "120000",
+    "function_deadline_ms": "2500",
+    "function_slice_insns": "500000",
     "iteration_worker_count": "6",
     "log_page_access_trace": "on",
     "maintenance_poll_delay": "120",

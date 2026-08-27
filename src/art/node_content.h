@@ -411,8 +411,10 @@ namespace art {
             if (UNLIKELY(KEYS < dat.occupants)) {
                 return dat.occupants;
             }
-            auto at = (const uint8_t*)memchr(dat.keys, c, dat.occupants);
-            return at - dat.keys;
+            if (dat.occupants == 0) return 0;
+            auto at = static_cast<const uint8_t *>(memchr(dat.keys, c, dat.occupants));
+            if (!at) return dat.occupants;
+            return static_cast<unsigned>(at - dat.keys);
         }
 
         // TODO: NB check where this function is used

@@ -93,6 +93,25 @@ static uint64_t update_memory_peak(uint64_t used) {
     }
     return std::max(peak, used);
 }
+// taken once, the first time INFO has a real number, so a later write cannot move it.
+// min() with used is so we never claim more startup than the process holds; doing that
+// on every INFO made the figure track used as the first inserts grew the hybrid hash.
+static std::atomic<uint64_t> frozen_startup{0};
+static uint64_t freeze_startup_memory(uint64_t used) {
+    uint64_t frozen = frozen_startup.load(std::memory_order_relaxed);
+    if (frozen != 0) {
+        return frozen;
+    }
+    uint64_t v = std::min<uint64_t>(get_startup_memory(), used);
+    if (v == 0) {
+        return 0;
+    }
+    uint64_t expected = 0;
+    if (frozen_startup.compare_exchange_strong(expected, v, std::memory_order_relaxed)) {
+        return v;
+    }
+    return expected;
+}
 extern "C"{
 int INFO(caller& call, const arg_t& argv) {
     if (argv.size() == 3 && argv[1] == "SHARD") {
@@ -110,7 +129,7 @@ int INFO(caller& call, const arg_t& argv) {
         }
         auto s = ks->get(shard);
         std::string order = s->opt_ordered_keys ? "ordered" : "unordered";
-        std::string index = s->opt_ordered_keys ? "ART" : "HASH";
+        std::string index = s->opt_ordered_keys ? (s->hybrid_active() ? "ART+HASH" : "ART") : "HASH";
         std::string response =
         "# Shard\n\n"
         "number:"+tos(shard)+"\n"
@@ -156,7 +175,7 @@ int INFO(caller& call, const arg_t& argv) {
         uint64_t peak = update_memory_peak(used);
         uint64_t rss = get_rss_bytes();
         uint64_t vmm = heap::vmm_allocated;
-        uint64_t startup = std::min<uint64_t>(get_startup_memory(), used);
+        uint64_t startup = freeze_startup_memory(used);
         // dataset is what the keys and values occupy, everything else is overhead
         uint64_t dataset = leaf_logical;
         uint64_t overhead = used > dataset ? used - dataset : 0;

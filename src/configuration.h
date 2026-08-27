@@ -56,6 +56,7 @@ namespace barch {
         double pre_evict_thresh = 0.85;
         uint64_t min_compressed_size {64};
         bool ordered_keys{true};
+        bool hybrid_keys{true};
         bool use_vmm_memory{true};
         bool static_bloom_filter{false};
         bool active_defrag{true};
@@ -122,6 +123,8 @@ namespace barch {
     bool get_use_vmm_memory();
 
     bool get_ordered_keys();
+
+    bool get_hybrid_keys();
 
     bool get_static_bloom_filter();
     std::string get_tls_pem_certificate_chain_file();

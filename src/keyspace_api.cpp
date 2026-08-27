@@ -230,6 +230,11 @@ int KSPACE(caller& call, const arg_t& argv) {
             call.push_bool(ptr->opt_ordered_keys);
             return 0;
         }
+        if (parser.name == "HYBRID") {
+            barch::shard_ptr ptr = spc->get(0ul);
+            call.push_bool(ptr->opt_hybrid_keys);
+            return 0;
+        }
         if (parser.name == "LRU") {
             barch::shard_ptr ptr = spc->get(0ul);
             call.push_bool(ptr->opt_evict_all_keys_lru);
@@ -280,6 +285,15 @@ int KSPACE(caller& call, const arg_t& argv) {
         if (parser.name == "ORDERED") {
             bool on = parser.value == "ON";
             store.each_shard([on](const barch::shard_ptr& shrd) { shrd->opt_ordered_keys = on; });
+            return call.push_simple("OK");
+        }
+        if (parser.name == "HYBRID") {
+            bool on = parser.value == "ON";
+            spc->opt_hybrid_keys = on;
+            store.each_shard([on](const barch::shard_ptr& shrd) {
+                shrd->opt_hybrid_keys = on;
+                shrd->apply_hybrid_keys();
+            });
             return call.push_simple("OK");
         }
         if (parser.name == "LRU") {
@@ -564,6 +578,17 @@ int KSOPTIONS(caller& call, const arg_t& argv) {
         if (argv[2] == "ORDERED") {
             barch::sharded_store store(call.kspace());
             store.each_shard([](const barch::shard_ptr& shard) { shard->opt_ordered_keys = true; });
+            return call.push_simple("OK");
+        }
+        if (argv[2] == "HYBRID") {
+            auto spc = call.kspace();
+            ks_unique ul(spc);
+            barch::sharded_store store(spc);
+            spc->opt_hybrid_keys = true;
+            store.each_shard([](const barch::shard_ptr& shard) {
+                shard->opt_hybrid_keys = true;
+                shard->apply_hybrid_keys();
+            });
             return call.push_simple("OK");
         }
     }

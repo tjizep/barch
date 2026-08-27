@@ -156,6 +156,10 @@ namespace barch {
         bool remove_from_unordered_set(value_type key);
         void write_extra(std::ostream& of) const ;
         void read_extra(std::istream& of);
+        // hash is an index of ART leaves. never set_hashed, never free through it.
+        void hash_add_leaf(const node_ptr& leaf);
+        void hash_unindex(value_type key);
+        void rebuild_hybrid_index();
         shard_ptr dependencies;
         uint64_t deletes{};
         uint64_t inserts{};
@@ -235,6 +239,7 @@ namespace barch {
 
         void load_hash();
         void clear_hash() ;
+        void apply_hybrid_keys() override;
         bool remove_leaf_from_uset(value_type key) override;
         node_ptr from_unordered_set(value_type key) const;
         /** leaf in this shard only; tombs stay visible. does not walk DEPENDS. */
@@ -362,7 +367,9 @@ namespace barch {
             if (src) {
                 src_size += src->get_size(); // called recursively but no cycles
             }
-            auto total = get_hash_size() + this->get_tree_size() + src_size;
+            // ordered (and hybrid): ART is the set of keys, the hash is only an index.
+            // unordered: the hash is the set of keys and the tree is empty.
+            auto total = (opt_ordered_keys ? get_tree_size() : get_hash_size()) + src_size;
             if (tomb_stones >total) {
                 throw_exception<std::runtime_error>("invalid tombstone count");
             }

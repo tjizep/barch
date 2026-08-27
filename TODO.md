@@ -875,3 +875,13 @@
 150. [Done] One Luau state per session, not per session and space [26-08-2026] Nr 143 d99231f
 
 151. [Done] Luau memory is in the statistics [26-08-2026] Nr 144 d99231f
+
+152. [Done] Ordered ART GET: two failed speedups, two correctness fixes [27-08-2026] Nr 146 1b1be6b
+
+153. [Done] GET lower_bound on a stack path, not the heap trace list [27-08-2026] Nr 147 1b1be6b
+
+154. [Done] Hybrid ART plus hash index [27-08-2026] Nr 148 1b1be6b
+
+155. [Done] Hybrid keys as the default [27-08-2026] Nr 149 1b1be6b
+
+

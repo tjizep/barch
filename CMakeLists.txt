@@ -736,6 +736,10 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/configtest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestHybrid
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/hybridtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         # rights that differ per key space
         add_test(NAME TestSpaceAcl
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/spaceacltest.py

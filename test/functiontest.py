@@ -18,6 +18,8 @@ barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)
 
 r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+# the build directory is shared, so a previous test's save is still here
+r.execute_command("FLUSHDB")
 
 
 def names(*args):

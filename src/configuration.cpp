@@ -71,6 +71,7 @@ struct config_state {
     heap::string function_max_depth{};
     heap::string jump_factor{};
     heap::string ordered_keys{};
+    heap::string hybrid_keys{};
     heap::string server_port{};
     heap::string server_binding{};
     heap::string static_bloom_filter{};
@@ -85,6 +86,7 @@ struct config_state {
     // we want alloc tests but the db has to be created with alloc tests in the first place
     heap::vector<std::string> valid_alloc_tests = valid_on_off;
     heap::vector<std::string> valid_ordered_keys = valid_on_off;
+    heap::vector<std::string> valid_hybrid_keys = valid_on_off;
 
     heap::string tls_pem_certificate_chain_file{};
     heap::string tls_private_key_file{};
@@ -1057,6 +1059,43 @@ static int ApplyOrderedKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, Valke
     return VALKEYMODULE_OK;
 }
 
+static ValkeyModuleString *GetHybridKeys(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().hybrid_keys.c_str(), state().hybrid_keys.length());
+}
+
+static int SetHybridKeys(std::string test_hybrid_keys) {
+    std::lock_guard lock(state().config_mutex);
+    std::transform(test_hybrid_keys.begin(), test_hybrid_keys.end(), test_hybrid_keys.begin(), ::tolower);
+
+    if (!check_type(test_hybrid_keys, state().valid_hybrid_keys)) {
+        return VALKEYMODULE_ERR;
+    }
+
+    state().hybrid_keys = test_hybrid_keys;
+    config().hybrid_keys =
+            state().hybrid_keys == "on" || state().hybrid_keys == "true" || state().hybrid_keys == "yes";
+    return VALKEYMODULE_OK;
+}
+static int SetHybridKeys(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    std::string test_hybrid_keys = ValkeyModule_StringPtrLen(val, nullptr);
+    return SetHybridKeys(test_hybrid_keys);
+}
+static int ApplyHybridKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    auto spc = get_default_ks();
+    ks_unique ul(spc);
+    spc->opt_hybrid_keys = config().hybrid_keys;
+    barch::sharded_store store(spc);
+    store.each_shard([](const barch::shard_ptr& s) {
+        if (!s)
+            abort_with("invalid shard");
+        s->opt_hybrid_keys = config().hybrid_keys;
+        s->apply_hybrid_keys();
+    });
+    return VALKEYMODULE_OK;
+}
+
 
 // ===========================================================================================================
 static ValkeyModuleString *GetActiveDefragType(const char *unused_arg, void *unused_arg) {
@@ -1319,6 +1358,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "ordered_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetOrderedKeys, SetOrderedKeys,
                                                      ApplyOrderedKeys, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "hybrid_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetHybridKeys, SetHybridKeys,
+                                                     ApplyHybridKeys, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "server_port", "14000", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetServerPort, SetServerPort,
@@ -1651,6 +1694,12 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyOrderedKeys(nullptr, nullptr, nullptr);
         }
         return r;
+    }else if (name == "hybrid_keys") {
+        auto r = SetHybridKeys(val);
+        if (r == VALKEYMODULE_OK) {
+            return ApplyHybridKeys(nullptr, nullptr, nullptr);
+        }
+        return r;
     }else if (name == "server_port") {
         auto r = SetServerPort(val);
         if (r == VALKEYMODULE_OK) {
@@ -1881,6 +1930,10 @@ bool barch::get_ordered_keys() {
     return config().ordered_keys;
 }
 
+bool barch::get_hybrid_keys() {
+    return config().hybrid_keys;
+}
+
 uint64_t barch::get_internal_shards() {
     return config().internal_shards;
 }
@@ -1960,7 +2013,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "iteration_worker_count", "listen_port", "log_page_access_trace",
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
-        "min_compressed_size", "min_fragmentation_ratio", "ordered_keys",
+        "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
@@ -1995,6 +2048,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "min_compressed_size")         value = std::to_string(c.min_compressed_size);
     else if (name == "min_fragmentation_ratio")     value = cfg_float(c.min_fragmentation_ratio);
     else if (name == "ordered_keys")                value = cfg_bool(c.ordered_keys);
+    else if (name == "hybrid_keys")                 value = cfg_bool(c.hybrid_keys);
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);
     else if (name == "rpc_max_buffer")              value = std::to_string(c.rpc_max_buffer);

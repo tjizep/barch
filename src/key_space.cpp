@@ -264,6 +264,9 @@ namespace barch {
                 auto ordered = kv.get(real+".ordered");
                 if (!ordered.empty())
                     opt_ordered_keys = ordered != "0";
+                auto hybrid = kv.get(real+".hybrid");
+                if (!hybrid.empty())
+                    opt_hybrid_keys = hybrid != "0";
                 auto ranged = kv.get(real+".range_sharded");
                 if (!ranged.empty())
                     opt_range_sharded = ranged != "0";
@@ -356,6 +359,7 @@ namespace barch {
                 shard_ptr& shard = shards_out[shard_num];
                 shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
                 shard->opt_ordered_keys = opt_ordered_keys;
+                shard->opt_hybrid_keys = opt_hybrid_keys;
                 shard->load(true);
             });
             if (shards_out.size() != shards_loaded) {

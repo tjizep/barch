@@ -11,6 +11,7 @@
 #include "art/art.h"
 #include "art/key_options.h"
 #include "merge_options.h"
+#include "configuration.h"
 #include "shared_mutex.h"
 #include "rpc/abstract_session.h"
 #include "shared_mutex.h"
@@ -58,6 +59,12 @@ namespace barch {
             return opt_static_bloom_filter;
         }
         bool opt_ordered_keys = barch::get_ordered_keys();
+        // ART owns the leaves; the overflow hash is only an index of 32-bit
+        // pointers. GET and in-place SET can use it. Anything that needs a
+        // trace still walks the tree. Off unless ordered_keys is on.
+        bool opt_hybrid_keys = barch::get_hybrid_keys();
+        bool hybrid_active() const { return opt_ordered_keys && opt_hybrid_keys; }
+        virtual void apply_hybrid_keys() = 0;
         bool opt_evict_all_keys_lru = barch::get_evict_allkeys_lru();
         bool opt_evict_all_keys_lfu = barch::get_evict_allkeys_lfu();
         bool opt_evict_all_keys_random = barch::get_evict_allkeys_random();

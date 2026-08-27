@@ -24,6 +24,7 @@ namespace barch {
         typedef std::shared_ptr<key_space> key_space_ptr;
         typedef key_space* key_space_ref;
         bool opt_ordered_keys = barch::get_ordered_keys();
+        bool opt_hybrid_keys = barch::get_hybrid_keys();
         size_t opt_shard_count = barch::get_shard_count().size();
         /**
          * Route keys to shards by the range they fall in rather than by their hash, so

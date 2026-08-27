@@ -7477,3 +7477,185 @@ compiled functions - that is TODO 137 and stays open on purpose.
     a call refused by ACL, a cycle refused at load, a global in
     `configuration` called from another space, and a function
     surviving a restart and reaching a replica.
+
+## 146. Ordered ART GET: two failed speedups, two correctness fixes [27-08-2026]
+
+*Was `TODO.md` entry 152.*
+
+RelWithDebInfo perf of a 1-thread, 1-connection, pipeline-50 GET of 1M
+32-byte keys (ordered) still has the same shape as the earlier 256-byte
+profile. Baseline GET was 506k ops/s. Top self:
+
+    17%  node16_v::lower_bound_child
+    15%  inner_lower_bound
+     8%  art::search
+     7%  resolve_read_node
+
+GET goes through `art::search`, which always does a lower-bound walk and
+then checks the leaf key. `art::find` already does exact descent. Switching
+search onto find looked like the obvious win.
+
+It was not. The first version stopped at `key.length()`, which does not
+include the terminating 0 that stored keys carry, so leaves that sit under
+that last 0 were misses. Memtier then reported ~1200 misses/s and 574k
+ops/s - faster because a miss is cheaper than a hit. After walking to
+`key.size`, hits came back and GET dropped to ~430k, slower than the
+lower-bound path. Search was put back.
+
+A second try enabled unsigned SIMD (`_mm_max_epu8`) for node16
+`lower_bound_child`. The old `#if 0` SIMD used signed `cmpgt` and would
+have been wrong for bytes >= 128. The unsigned version was correct
+(`GET k\x80` still hit) but slower: that function went from 17% to 21%
+self, GET down to ~380-400k. The scalar loop is short, inlined, and often
+exits early; a 16-wide compare is not cheaper here. Reverted.
+
+Two correctness fixes stayed, neither of which is the GET hot path:
+
+- `index_eq` treated a `memchr` miss as `NULL - keys`, a huge index.
+  It now returns `occupants`.
+- `art::find` walks to `key.size` so the terminating 0 can be a child hop.
+
+The GET cost is still the lower-bound walk and the logical-address resolve
+at each child, not the 16-byte key scan.
+
+## 147. GET lower_bound on a stack path, not the heap trace list [27-08-2026]
+
+*Was `TODO.md` entry 153.*
+
+`art::search` used `inner_lower_bound` with a thread-local `scratch_trace`
+it then threw away. The GET profile had that walk plus vector `push_back`
+of fat `trace_element`s. GET only needs the leaf, and only if the key
+matches.
+
+A new `inner_lower_bound_notrace` does the same child walk, increment,
+and extend, but the path is a thread-local array of 64 hops, not a
+`std::vector`. Search is the only caller. Range, LB, and update still
+use the heap trace.
+
+A first cut that returned null on a non-equal byte was wrong: integer
+keys share a long prefix, and finding "1" after "0" needs increment.
+`expiretest.py` caught that on the first TTL. The walk has to be a real
+lower_bound, just without the vector.
+
+RelWithDebInfo, ordered, 1 thread, 1 connection, pipeline 50, 1M 32-byte
+keys:
+
+                    before     notrace
+    GET             506k       418k
+    populate SET    173k       131k
+    GET misses/s    1.35       0.95
+
+SET does not use search, so the 173k to 131k drop is the box, not this
+function. Scaling GET by that factor lands around 550k, which is noise
+rather than a win. Hits stayed ~100%. The function stays wired so the
+experiment is in the tree; it is not a measured speedup.
+
+A 60s A/B on a slower box (SET ~110k then ~102k) looked like a small
+regression: notrace 395k vs heap-trace 387k. A 180s pair on the same
+setup, after the box had recovered, was:
+
+                    heap-trace   notrace
+    GET 180s        556k         573k
+    GET misses/s    0.56         0.57
+    p50             0.079 ms     0.079 ms
+
+Notrace is ~3% ahead, same band as the 60s pair, hits still ~100%. The
+10s 506k→418k drop was load, not the trace list. Longer runs do not
+show a real regression and do not show a measured win either.
+
+A 1-thread client left the python process around half a core, so a
+3-thread, 1-connection, 60s pair was run on the same RelWithDebInfo
+ordered 1M 32-byte setup to push past that IO lag. Python CPU during
+the heap-trace GET climbed from ~76% to ~143%. SET populate was 110k
+then 112k, so the box was matched:
+
+                    heap-trace   notrace
+    GET 60s 3t/1c   1.566M       1.555M
+    GET misses/s    1.57         1.57
+    p50             0.087 ms     0.087 ms
+
+That is ~0.7% the other way. Filling more of the server still does not
+separate the two paths.
+
+Same setup again with 4 clients per thread (12 connections). Python
+CPU during GET was ~165% to ~369% on notrace and ~196% to ~403% on
+heap-trace. SET populate was 114k then 110k:
+
+                    heap-trace   notrace
+    GET 60s 3t/4c   3.666M       3.881M
+    GET misses/s    3.47         3.67
+    p50             0.151 ms     0.143 ms
+
+Notrace is ~6% ahead. SET was ~4% ahead on that side too, so most of
+it is still the box. Hits stayed ~100%. At this point the extra
+clients have filled several cores and the two GET paths still do not
+split in a way that would justify keeping one over the other on
+throughput.
+
+## 148. Hybrid ART plus hash index [27-08-2026]
+
+*Was `TODO.md` entry 154.*
+
+Ordered GET walks the ART. Unordered GET is a hash of 32-bit pointers
+into the data allocator, which is cheaper for a point lookup, but it
+does not keep key order and it cannot fill a trace. The two indexes
+used to be exclusive.
+
+Hybrid keeps ART as the owner of every leaf and adds the same 32-bit
+pointer to the overflow hash after the leaf is allocated. GET and a
+same-size SET go through the hash. A SET that has to replace the leaf,
+INCR, and anything else that needs a trace still walk the tree. The
+hash is never the owner: leaves are not marked `is_hashed`, delete
+drops the hash entry first while the leaf is still alive, and ART
+frees it. Indexing after a replace was a use-after-free, because the
+hash compare reads the old leaf; the index is now dropped before the
+tree mutation and the new pointer is inserted afterwards.
+
+`get_size()` counts the tree when ordered (hybrid included) and the
+hash when unordered, so the index does not double-count. Turning
+hybrid on rebuilds the index from the leaves; turning it off clears
+the hash and leaves ART answering. Config is `hybrid_keys` (default
+off), also `<space>.hybrid` and `KEYSPACE SET HYBRID`. Covered by
+`test/hybridtest.py`.
+
+RelWithDebInfo, ordered hybrid, 3 threads × 4 clients, pipeline 50,
+1M 32-byte keys, 60s. Ordered ART-only on the same setup was 3.88M GET:
+
+                    ART-only     hybrid
+    GET 60s 3t/4c   3.881M       4.338M
+    GET p50         0.143 ms     0.127 ms
+    populate SET    114k         102k
+    SET 60s 3t/4c   (not run)    1.132M
+    90/10 total     (not run)    3.165M
+
+Hybrid GET is about 12% ahead of ART-only. Hits ~100%. Python CPU on
+GET climbed to ~3.6 cores, on SET to ~4.9. Populate SET is still the
+ART insert plus an index write, so it did not get faster.
+
+## 149. Hybrid keys as the default [27-08-2026]
+
+*Was `TODO.md` entry 155.*
+
+`hybrid_keys` now defaults to on (`configuration.h`, CONFIG `"yes"`).
+The first RelWithDebInfo run was 65/67. The two failures were not
+"hybrid cannot do KEYS" or "hybrid cannot report memory" - they were
+the default showing up in places the earlier ART-only suite never
+stressed.
+
+TestFunctions failed because `hybridtest.py` saves keys named `"0"`
+and `"1"` into the shared build directory, and `KEYS *` encodes an
+integer-typed name as a RESP integer. `k.decode()` then blows up.
+The function test assumed an empty space and did not flush; it does
+now. Isolated, with no leftover save, it had already passed.
+
+TestRespInfoMemory failed because `used_memory_startup` was
+`min(recorded, used)` on every INFO. The recorded figure is the peak
+during key-space load, which is often above what the process holds
+once the temps are gone, so the min tracked `used` as the first
+hybrid inserts grew the overflow hash. Redis's number does not move
+after start. The baseline is now frozen the first time INFO has a
+real value.
+
+After those two, RelWithDebInfo `ctest -j1 -E 'TestInstall|TestBarchInstall'`
+is 67/67. Unordered spaces, save/load, expire, range sharding,
+functions, and the hybrid test itself are in that run.

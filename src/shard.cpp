@@ -368,6 +368,44 @@ bool barch::shard::remove_from_unordered_set(value_type key) {
     return h.erase(key_query{key}) > 0;
 }
 
+void barch::shard::hash_add_leaf(const node_ptr& leaf) {
+    if (leaf.null() || !leaf.is_leaf) return;
+    hashed_key want{leaf};
+    auto i = h.find(key_query{leaf.const_leaf()->get_key()});
+    if (i != h.end()) {
+        if (i->addr == want.addr) return;
+        h.erase(i);
+    }
+    h.insert_unique(want);
+}
+
+void barch::shard::hash_unindex(value_type key) {
+    h.erase(key_query{key});
+}
+
+void barch::shard::rebuild_hybrid_index() {
+    h.clear();
+    if (!hybrid_active()) return;
+    if (size == 0) return;
+    auto &lc = get_leaves();
+    lc.iterate_pages([this](size_t s, size_t page, auto& data) {
+        if (s == 0) return;
+        page_iterator(data, s, [page, this](const leaf *l, uint32_t pos) {
+            if (l->is_hashed() || l->deleted()) return true;
+            logical_address lad{page, pos, this};
+            h.insert_unique(lad);
+            return true;
+        });
+    });
+}
+
+void barch::shard::apply_hybrid_keys() {
+    if (hybrid_active())
+        rebuild_hybrid_index();
+    else if (opt_ordered_keys)
+        h.clear();
+}
+
 
 bool barch::shard::publish(std::string , int ) {
 
@@ -386,6 +424,12 @@ void barch::shard::read_extra(std::istream &in) {
         opt_ordered_keys = ordered != 0;
         --extra;
     }
+    if (extra > 0) {
+        uint8_t hybrid = 0;
+        readp(in, hybrid);
+        opt_hybrid_keys = hybrid != 0;
+        --extra;
+    }
     // to keep backwards compatibility between shards
     while (extra > 0) {
         uint8_t x;
@@ -393,12 +437,13 @@ void barch::shard::read_extra(std::istream &in) {
     }
 }
 void barch::shard::write_extra(std::ostream &of) const {
-    uint32_t extra = 1;
+    uint32_t extra = 2;
 
     writep(of, extra);
     uint8_t ordered = opt_ordered_keys ? 1 : 0;
     writep(of, ordered);
-    // in future we can extend with more options here
+    uint8_t hybrid = opt_hybrid_keys ? 1 : 0;
+    writep(of, hybrid);
 }
 
 
@@ -589,7 +634,7 @@ bool barch::shard::_load(bool) {
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
 
     if (log_loading_messages == 1) {
-        log({"Done loading BARCH Shard, keys loaded:", t->size + h.size(), "index mode: [",opt_ordered_keys?"ordered":"unordered","]"});
+        log({"Done loading BARCH Shard, keys loaded:", get_size(), "index mode: [",opt_ordered_keys?(hybrid_active()?"hybrid":"ordered"):"unordered","]"});
 
         log({"loaded barch db in", d.count(), "millis or", (double) dm.count() / 1000000, "seconds"});
         log({"db memory when created", (double) get_total_memory() / (1024 * 1024), "Mb"});
@@ -775,7 +820,12 @@ bool barch::shard::insert(const key_options& options, value_type unfiltered_key,
 bool barch::shard::tree_insert(const art::key_options &options, art::value_type key, art::value_type value, bool update, const art::NodeResult &fc) {
     ++inserts;
     //add_bloom(key);
-    return art::insert(this, options, key, value, update, fc);
+    if (hybrid_active())
+        hash_unindex(key);
+    bool r = art::insert(this, options, key, value, update, fc);
+    if (hybrid_active())
+        hash_add_leaf(last_leaf_added);
+    return r;
 }
 
 bool barch::shard::hash_erase(logical_address lad) {
@@ -839,14 +889,45 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
     add_bloom(key);
     cancel_flight(key);
 
-    size_t before = size;
-    if (options.is_hashed()) {
+    // tree size when ordered (hybrid included), hash size when unordered.
+    // size+h.size() double-counts hybrid and makes every update look like a new key.
+    size_t before = opt_ordered_keys ? size : h.size();
+    if (options.is_hashed() && !hybrid_active()) {
         hash_insert(options, key, value, update, fc);
     }else {
-        art::insert(this, options, key, value, update, fc);
+        bool inplace = false;
+        if (hybrid_active() && update) {
+            auto i = h.find(key_query{key});
+            if (i != h.end()) {
+                node_ptr n = i->node(this);
+                if (!n.null() && n.is_leaf) {
+                    leaf *dl = n.l();
+                    if (dl && art::is_leaf_direct_replacement(dl, value, options)) {
+                        fc(n);
+                        dl->set_value(value);
+                        dl->set_expiry(options.is_keep_ttl() ? dl->expiry_ms() : options.get_expiry());
+                        options.is_volatile() ? dl->set_volatile() : dl->unset_volatile();
+                        dl->set_compressed(options.is_compressed());
+                        last_leaf_added = n;
+                        ++statistics::keys_replaced;
+                        ++statistics::set_ops;
+                        inplace = true;
+                    } else {
+                        // drop the index while the old leaf is still alive;
+                        // art::insert will free it
+                        h.erase(i);
+                    }
+                }
+            }
+        }
+        if (!inplace) {
+            art::insert(this, options, key, value, update, fc);
+            if (hybrid_active())
+                hash_add_leaf(last_leaf_added);
+        }
     }
     call_unblock(std::string(key.chars(), key.size));
-    return size+h.size() > before;
+    return (opt_ordered_keys ? size : h.size()) > before;
 }
 
 
@@ -907,7 +988,29 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
         call_unblock(std::string(key.chars(), key.size));
         return false;
     }
-    bool r = barch::update(this, key, repl_updateresult);
+    node_ptr indexed;
+    hashed_key saved;
+    bool had = false;
+    if (hybrid_active()) {
+        auto hi = h.find(key_query{key});
+        if (hi != h.end()) {
+            saved = *hi;
+            had = true;
+            h.erase(hi);
+        }
+    }
+    auto art_updater = [&](const node_ptr &leaf) {
+        auto value = repl_updateresult(leaf);
+        indexed = value;
+        return value;
+    };
+    bool r = barch::update(this, key, art_updater);
+    if (hybrid_active()) {
+        if (r && !indexed.null())
+            hash_add_leaf(indexed);
+        else if (!r && had)
+            h.insert_unique(saved);
+    }
     call_unblock(std::string(key.chars(), key.size));
     return r;
 }
@@ -928,6 +1031,8 @@ bool barch::shard::evict(const leaf* l) {
 
         return false;
     }
+    if (hybrid_active())
+        hash_unindex(l->get_key());
     art::erase(this, l->get_key(), [](const art::node_ptr &){});
     if (size < before) {
         ++statistics::keys_evicted;
@@ -951,6 +1056,8 @@ bool barch::shard::evict(value_type unfiltered_key) {
             return true;
         }
     }
+    if (hybrid_active())
+        hash_unindex(key);
     --statistics::delete_ops; // were not counting these deletes
     art::erase(this, key, [](const art::node_ptr &){});
     return size < before;
@@ -959,6 +1066,8 @@ bool barch::shard::evict(value_type unfiltered_key) {
 bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
     auto sbef = size;
     ++deletes;
+    if (hybrid_active())
+        hash_unindex(key);
     art::erase(this, key, fc);
     return sbef < size;
 }
@@ -978,7 +1087,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         ~wake_on_exit() { s->call_unblock(k); }
     } wake{this, std::string(key.chars(), key.size)};
     node_ptr old = from_unordered_set(key);
-    if (!old.null()) {
+    if (!old.null() && old.cl()->is_hashed()) {
         if (dependencies) {
             // check if exists and insert tombstone else continue with normal erase
             auto dep = dependencies->search(key);
@@ -995,15 +1104,15 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         }
         auto n = old;
         leaf *dl = n.l();
-        if (dl->is_hashed()) {
-            fc(n);
-            erase_tomb(dl);
-            h.erase(key_query{key});
-            n.free_from_storage();
+        fc(n);
+        erase_tomb(dl);
+        h.erase(key_query{key});
+        n.free_from_storage();
 
-            return true;
-        }
+        return true;
     }
+    if (hybrid_active())
+        hash_unindex(key);
     if (dependencies) {
         // check if exists and insert tombstone else continue with normal erase
         auto dep = dependencies->search(key);
@@ -1090,6 +1199,10 @@ art::node_ptr barch::shard::local_leaf(value_type unfiltered_key) {
     if (!opt_ordered_keys) {
         return from_unordered_set(key);
     }
+    if (hybrid_active()) {
+        auto n = from_unordered_set(key);
+        if (!n.null()) return n;
+    }
     return art::search(this, key);
 }
 
@@ -1098,7 +1211,9 @@ void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms
     value_type key = s_filter_key(kbuf, unfiltered_key);
     add_bloom(key);
 
-    node_ptr existing = hashed ? from_unordered_set(key) : art::search(this, key);
+    node_ptr existing = hashed ? from_unordered_set(key) : (hybrid_active() ? from_unordered_set(key) : art::search(this, key));
+    if (existing.null() && hybrid_active() && !hashed)
+        existing = art::search(this, key);
     const bool was_tomb = !existing.null() && existing.cl()->is_tomb();
     const bool valid_tomb = was_tomb && !existing.cl()->expired();
     const bool live = !existing.null() && !existing.cl()->is_tomb() && !existing.cl()->expired();
@@ -1125,14 +1240,19 @@ void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms
     if (hashed)
         hash_insert(opts, key, empty, true, [](const node_ptr&) {});
     else
-        art::insert(this, opts, key, empty, true, [](const node_ptr&) {});
-    node_ptr n = hashed ? from_unordered_set(key) : art::search(this, key);
+        tree_insert(opts, key, empty, true, [](const node_ptr&) {});
+    node_ptr n = hashed ? from_unordered_set(key) : (hybrid_active() ? from_unordered_set(key) : art::search(this, key));
+    if (n.null() && !hashed)
+        n = last_leaf_added;
     if (n.null()) {
         call_unblock(std::string(key.chars(), key.size));
         return;
     }
+    // art::insert may have erase_tomb'd an in-place rewrite, so count from
+    // the leaf as it is now rather than from the one we found at the start
+    const bool already_tomb = n.cl()->is_tomb();
     n.l()->set_tomb();
-    if (!was_tomb)
+    if (!already_tomb)
         ++tomb_stones;
     call_unblock(std::string(key.chars(), key.size));
 }
@@ -1171,6 +1291,10 @@ bool barch::shard::is_present(value_type unfiltered_key) {
         auto n = from_unordered_set(key);
         return !n.null();
     }
+    if (hybrid_active()) {
+        auto n = from_unordered_set(key);
+        if (!n.null()) return true;
+    }
 
     auto r = art::search(this, key);
     return !r.null();
@@ -1187,6 +1311,15 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
             return nullptr;
         }
         return n;
+    }
+    if (hybrid_active()) {
+        auto n = from_unordered_set(key);
+        if (!n.null()) {
+            if (n.cl()->is_tomb()) {
+                return nullptr;
+            }
+            return n;
+        }
     }
 
     auto r = art::search(this, key);
@@ -1325,6 +1458,8 @@ void barch::shard::load_hash() {
     if (h.size() > 0) {
         opt_ordered_keys = false;
     }
+    if (hybrid_active())
+        rebuild_hybrid_index();
     if (log_loading_messages == 1)
         log({"loaded hash [",lc.get_name(),"] keys:",h.size(),", bytes per key:",sizeof(hashed_key)});
 }

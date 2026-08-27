@@ -109,6 +109,7 @@ static art::node_ptr last_node(const art::trace_list &trace) {
 }
 
 static art::trace_element first_child_off(art::node_ptr n);
+static art::trace_element increment_te(const art::trace_element &te);
 
 //static art::trace_element last_child_off(art::node_ptr n);
 static art::node_ptr inner_maximum(art::node_ptr n);
@@ -173,6 +174,7 @@ static bool extend_trace_max
  * trace afterwards passes its own - see art::lower_bound's two arg overload. */
 static thread_local art::trace_list scratch_trace{};
 static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key);
+static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_type key);
 art::node_ptr art::search(const art::tree *t, art::value_type key) {
     ++statistics::get_ops;
     try {
@@ -180,8 +182,7 @@ art::node_ptr art::search(const art::tree *t, art::value_type key) {
             abort_with("invalid root node");
         }
         art::node_ptr al ;
-        scratch_trace.clear();
-        al = inner_lower_bound(scratch_trace, t, key);
+        al = inner_lower_bound_notrace(t, key);
         if (!al.null() && al.const_leaf()->get_key() == key) {
             ++statistics::keys_found;
             return al;
@@ -285,6 +286,132 @@ static art::node_ptr inner_minimum(const art::node_ptr &n) {
  * the leaf containing the value pointer is returned.
  */
 static bool increment_trace(const art::node_ptr &root, art::trace_list &trace);
+
+// GET lower_bound that never touches the heap trace list. The path lives on
+// the stack so increment/extend still work (integer keys share a long prefix
+// and need that) without vector push_back of a fat trace_element per hop.
+static art::node_ptr inner_lower_bound_notrace(const art::tree *t, art::value_type key) {
+    if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
+        abort_with("invalid root node");
+    }
+    constexpr unsigned k_path = 64;
+    struct search_path {
+        art::trace_element el[k_path];
+        unsigned n{0};
+    };
+    static thread_local search_path sp;
+    auto *path = sp.el;
+    unsigned &np = sp.n;
+    np = 0;
+
+    auto path_extend_min = [&]() -> bool {
+        if (np == 0) {
+            auto te = first_child_off(t->root);
+            if (te.empty()) return false;
+            path[np++] = te;
+        }
+        while (np < k_path) {
+            auto c = path[np - 1].child;
+            if (c.null()) return false;
+            if (c.is_leaf) return true;
+            auto u = first_child_off(c);
+            if (u.empty()) return false;
+            path[np++] = u;
+        }
+        return false;
+    };
+    auto path_increment = [&]() -> bool {
+        while (np) {
+            auto npt = increment_te(path[np - 1]);
+            if (!npt.valid()) {
+                --np;
+            } else {
+                path[np - 1] = npt;
+                break;
+            }
+        }
+        if (np == 0) return false;
+        return path_extend_min();
+    };
+
+    art::node_ptr n = t->root;
+    unsigned depth = 0;
+    int is_equal = 0;
+
+    while (!n.null()) {
+        if (n.is_leaf) {
+            auto l = n.const_leaf();
+            if (np == 0)
+                return (l->get_key() < key || l->expired()) ? nullptr : n;
+            for (uint64_t i = 0;; ++i) {
+                auto c = path[np - 1].child;
+                if (!c.is_leaf) return nullptr;
+                l = c.const_leaf();
+                if (l->get_key() < key || l->expired()) {
+                    if (!path_increment()) return nullptr;
+                } else {
+                    break;
+                }
+                if (i > statistics::max_spin) {
+                    statistics::max_spin = i;
+                }
+            }
+            return path[np - 1].child;
+        }
+        auto &d = n->data();
+        if (d.partial_len) {
+            unsigned prefix_len = n->check_prefix(key.bytes, key.length(), depth);
+            if (prefix_len != std::min<unsigned>(art::max_prefix_llength, d.partial_len)) {
+                art::node_ptr mx = inner_maximum(t->root);
+                if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+                    return nullptr;
+                }
+                break;
+            }
+            depth += d.partial_len;
+            if (depth >= key.size) {
+                break;
+            }
+        }
+
+        art::trace_element te = lower_bound_child(n, key.bytes, key.length(), depth, &is_equal);
+        if (te.child.null()) {
+            art::node_ptr mx = inner_maximum(t->root);
+            if (mx.is_leaf && mx.const_leaf()->get_key() < key) {
+                return nullptr;
+            }
+            path_increment();
+            break;
+        }
+        if (!is_equal && !te.child.is_leaf) {
+            te = te.parent->previous(te);
+            if (te.child.null()) {
+                break;
+            }
+        }
+        if (np >= k_path) {
+            abort_with("search path too deep");
+        }
+        path[np++] = te;
+        n = te.child;
+        depth++;
+    }
+    if (!path_extend_min()) return nullptr;
+    for (uint64_t i = 0;; ++i) {
+        auto c = path[np - 1].child;
+        if (!c.is_leaf) return nullptr;
+        auto l = c.const_leaf();
+        if (l->get_key() < key || l->expired()) {
+            if (!path_increment()) return nullptr;
+        } else {
+            break;
+        }
+        if (i > statistics::max_spin) {
+            statistics::max_spin = i;
+        }
+    }
+    return path[np - 1].child;
+}
 
 static art::node_ptr inner_lower_bound(art::trace_list &trace, const art::tree *t, art::value_type key) {
     if (!t->root.null() && !t->root.is_leaf && t->root->data().type > 4u) {
@@ -620,9 +747,11 @@ art::node_ptr art::find(const tree* t, value_type key) {
                 if (prefix_len != std::min<unsigned>(max_prefix_llength, d.partial_len))
                     return nullptr;
                 depth += d.partial_len;
-                if (depth >= key.length()) {
-                    return nullptr;
-                }
+            }
+            // key.size includes the terminating 0; length() does not. The last hop can
+            // be that 0, so stopping at length() misses leaves that sit under it.
+            if (depth >= key.size) {
+                return nullptr;
             }
             unsigned at = n->index(key[depth]);
             n = n->get_child(at);

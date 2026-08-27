@@ -735,6 +735,7 @@ namespace functions {
             out.emplace_back("name", space->get_canonical_name());
             out.emplace_back("shards", std::to_string(space->get_shard_count()));
             out.emplace_back("ordered", space->opt_ordered_keys ? "1" : "0");
+            out.emplace_back("hybrid", space->opt_hybrid_keys ? "1" : "0");
             out.emplace_back("range_sharded", space->opt_range_sharded ? "1" : "0");
             out.emplace_back("foreign", space->foreign_kind_name());
             out.emplace_back("key_split", space->key_split);

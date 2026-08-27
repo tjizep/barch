@@ -27,11 +27,12 @@
 
 namespace {
 
-struct luau_file {
+struct checkout_file {
     std::string space; // empty is the default space
-    std::string name;
+    std::string name;  // folded function stem, or the key including its extension
     std::string source;
     std::string path;
+    bool luau{false};
 };
 
 std::mutex mu;
@@ -43,6 +44,7 @@ std::string last_ok;
 std::string last_err;
 std::string last_stamp;
 heap::string_set managed;
+heap::string_map<heap::string_set> managed_data;
 
 std::string fold_name(std::string s) {
     for (auto& ch : s)
@@ -50,14 +52,19 @@ std::string fold_name(std::string s) {
     return s;
 }
 
-std::string stem_of(const std::string& file) {
-    auto slash = file.find_last_of('/');
-    std::string base = slash == std::string::npos ? file : file.substr(slash + 1);
-    if (base.size() < 6 || base.substr(base.size() - 5) != ".luau")
+bool hidden_name(const std::string& name) {
+    return !name.empty() && name[0] == '.';
+}
+
+bool is_luau_name(const std::string& name) {
+    return name.size() >= 6 && name.compare(name.size() - 5, 5, ".luau") == 0
+        && !hidden_name(name);
+}
+
+std::string stem_of(const std::string& name) {
+    if (!is_luau_name(name))
         return {};
-    if (base[0] == '.')
-        return {};
-    return fold_name(base.substr(0, base.size() - 5));
+    return fold_name(name.substr(0, name.size() - 5));
 }
 
 bool read_file(const std::string& path, std::string& out) {
@@ -206,39 +213,65 @@ std::string git_pull(const std::string& dir, std::string& err) {
     return {};
 }
 
-bool scan_luau(const std::string& root, std::vector<luau_file>& files, std::string& err) {
-    auto add = [&](const std::string& space, const std::string& path) {
-        std::string name = stem_of(path);
-        if (name.empty())
+std::string key_in(const std::string& prefix, const std::string& name) {
+    return prefix.empty() ? name : prefix + ":" + name;
+}
+
+bool add_file(const std::string& space, const std::string& prefix, const std::string& path,
+              const std::string& name, std::vector<checkout_file>& files, std::string& err) {
+    checkout_file f;
+    f.space = space;
+    f.path = path;
+    f.luau = is_luau_name(name);
+    if (f.luau) {
+        f.name = stem_of(name);
+        if (f.name.empty())
             return true;
-        luau_file f;
-        f.space = space;
-        f.name = name;
-        f.path = path;
-        if (!read_file(path, f.source)) {
-            err = "could not read " + path;
-            return false;
-        }
-        files.push_back(std::move(f));
-        return true;
-    };
-    for (const auto& name : list_dir(root)) {
-        std::string path = root + "/" + name;
+    } else {
+        f.name = key_in(prefix, name);
+    }
+    if (!read_file(path, f.source)) {
+        err = "could not read " + path;
+        return false;
+    }
+    files.push_back(std::move(f));
+    return true;
+}
+
+bool scan_tree(const std::string& dir, const std::string& space, const std::string& prefix,
+               std::vector<checkout_file>& files, std::string& err) {
+    for (const auto& name : list_dir(dir)) {
+        if (hidden_name(name))
+            continue;
+        std::string path = dir + "/" + name;
         if (is_reg(path)) {
-            if (!add({}, path))
+            if (!add_file(space, prefix, path, name, files, err))
                 return false;
         } else if (is_dir(path)) {
-            if (name == ".git" || name == "configuration")
+            if (!scan_tree(path, space, key_in(prefix, name), files, err))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool scan_checkout(const std::string& root, std::vector<checkout_file>& files, std::string& err) {
+    for (const auto& name : list_dir(root)) {
+        if (hidden_name(name))
+            continue;
+        std::string path = root + "/" + name;
+        if (is_reg(path)) {
+            if (!add_file({}, {}, path, name, files, err))
+                return false;
+        } else if (is_dir(path)) {
+            if (name == "configuration")
                 continue;
             if (!barch::check_ks_name(name)) {
                 barch::err({"function sync skipping folder, not a space name", name});
                 continue;
             }
-            for (const auto& f : list_dir(path)) {
-                std::string fp = path + "/" + f;
-                if (is_reg(fp) && !add(name, fp))
-                    return false;
-            }
+            if (!scan_tree(path, name, {}, files, err))
+                return false;
         }
     }
     return true;
@@ -250,14 +283,29 @@ barch::key_space_ptr dest_of(const std::string& space) {
     return barch::get_keyspace(space);
 }
 
-bool fill_temp(const std::vector<luau_file>& files, barch::key_space_ptr& tmp, std::string& err) {
+bool set_plain(const barch::key_space_ptr& space, const std::string& key,
+               const std::string& value, std::string& err) {
+    auto acc = barch::functions::store_for_owner(space);
+    return acc.set(key, value, err);
+}
+
+bool rem_plain(const barch::key_space_ptr& space, const std::string& key) {
+    auto acc = barch::functions::store_for_owner(space);
+    return acc.remove(key);
+}
+
+bool get_plain(const barch::key_space_ptr& space, const std::string& key, std::string& value) {
+    auto acc = barch::functions::store_for_owner(space);
+    return acc.get(key, value) == barch::foreign::store_access::read_state::present;
+}
+
+bool fill_temp(const std::vector<const checkout_file*>& luau,
+               const std::vector<const checkout_file*>& data,
+               barch::key_space_ptr& tmp, std::string& err) {
     tmp = barch::key_space::make_scratch();
-    std::vector<const luau_file*> left;
-    left.reserve(files.size());
-    for (const auto& f : files)
-        left.push_back(&f);
+    std::vector<const checkout_file*> left = luau;
     while (!left.empty()) {
-        std::vector<const luau_file*> next;
+        std::vector<const checkout_file*> next;
         std::string last;
         size_t progress = 0;
         for (auto* f : left) {
@@ -275,6 +323,14 @@ bool fill_temp(const std::vector<luau_file>& files, barch::key_space_ptr& tmp, s
             return false;
         }
         left.swap(next);
+    }
+    for (auto* f : data) {
+        std::string e;
+        if (!set_plain(tmp, f->name, f->source, e)) {
+            err = f->path + ": " + (e.empty() ? "could not store key" : e);
+            tmp.reset();
+            return false;
+        }
     }
     return true;
 }
@@ -319,7 +375,24 @@ void restore_functions(const barch::key_space_ptr& dest,
     (void) install_all(dest, previous_src, previous, ignored);
 }
 
+struct data_snap {
+    std::string name;
+    std::string value;
+    bool had{false};
+};
+
+void restore_data(const barch::key_space_ptr& dest, const std::vector<data_snap>& snap) {
+    std::string ignored;
+    for (const auto& s : snap) {
+        if (s.had)
+            (void) set_plain(dest, s.name, s.value, ignored);
+        else
+            (void) rem_plain(dest, s.name);
+    }
+}
+
 bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& dest,
+                const std::vector<const checkout_file*>& data, const std::string& space,
                 std::string& err) {
     auto want = barch::functions::names(tmp);
     heap::string_map<std::string> sources;
@@ -338,23 +411,63 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
         if (barch::functions::source_in(dest, n, src))
             had_src[n] = std::move(src);
     }
+
+    heap::string_set want_keys;
+    for (auto* f : data)
+        want_keys.insert(f->name);
+    heap::string_set prev_keys;
+    auto mit = managed_data.find(space);
+    if (mit != managed_data.end())
+        prev_keys = mit->second;
+    std::vector<data_snap> snap;
+    heap::string_set touch = want_keys;
+    for (const auto& k : prev_keys)
+        touch.insert(k);
+    for (const auto& k : touch) {
+        data_snap s;
+        s.name = k;
+        s.had = get_plain(dest, k, s.value);
+        snap.push_back(std::move(s));
+    }
+
     const bool one_shard = dest->get_shard_count() == 1;
     barch::sharded_store store(dest);
     if (one_shard)
         store.each_shard([](const barch::shard_ptr& t) { t->begin(); });
-    if (!install_all(dest, sources, want, err)) {
+    auto undo = [&] {
         if (one_shard)
             store.each_shard([](const barch::shard_ptr& t) { t->rollback(); });
-        else
+        else {
             restore_functions(dest, had, had_src);
+            restore_data(dest, snap);
+        }
+    };
+    if (!install_all(dest, sources, want, err)) {
+        undo();
         return false;
+    }
+    for (auto* f : data) {
+        std::string e;
+        if (!set_plain(dest, f->name, f->source, e)) {
+            err = f->path + ": " + (e.empty() ? "could not apply key" : e);
+            undo();
+            return false;
+        }
     }
     for (const auto& n : had) {
         if (sources.find(n) == sources.end())
             barch::functions::remove(dest, n);
     }
+    for (const auto& k : prev_keys) {
+        if (want_keys.find(k) == want_keys.end())
+            rem_plain(dest, k);
+    }
     if (one_shard)
         store.each_shard([](const barch::shard_ptr& t) { t->commit(); });
+    if (want_keys.empty())
+        managed_data.erase(space);
+    else
+        managed_data[space] = std::move(want_keys);
     return true;
 }
 
@@ -372,23 +485,38 @@ std::string do_sync() {
             return failed;
     }
 
-    std::vector<luau_file> files;
+    std::vector<checkout_file> files;
     std::string err;
-    if (!scan_luau(dir, files, err))
+    if (!scan_checkout(dir, files, err))
         return err;
 
-    heap::string_map<std::vector<luau_file>> by_space;
+    heap::string_map<std::vector<checkout_file>> by_space;
     for (auto& f : files)
         by_space[f.space].push_back(std::move(f));
 
     heap::string_set seen;
     for (auto& [space, group] : by_space) {
         seen.insert(space);
+        std::vector<const checkout_file*> luau;
+        std::vector<const checkout_file*> data;
+        heap::string_set fn_names;
+        heap::string_set key_names;
+        for (const auto& f : group) {
+            if (f.luau) {
+                if (!fn_names.insert(f.name).second)
+                    return "duplicate function " + f.name + " in " + (space.empty() ? "default" : space);
+                luau.push_back(&f);
+            } else {
+                if (!key_names.insert(f.name).second)
+                    return "duplicate key " + f.name + " in " + (space.empty() ? "default" : space);
+                data.push_back(&f);
+            }
+        }
         barch::key_space_ptr tmp;
-        if (!fill_temp(group, tmp, err))
+        if (!fill_temp(luau, data, tmp, err))
             return err;
         auto dest = dest_of(space);
-        if (!apply_dest(tmp, dest, err)) {
+        if (!apply_dest(tmp, dest, data, space, err)) {
             tmp.reset();
             return err;
         }
@@ -403,7 +531,7 @@ std::string do_sync() {
     for (const auto& space : gone) {
         barch::key_space_ptr tmp = barch::key_space::make_scratch();
         auto dest = dest_of(space);
-        if (!apply_dest(tmp, dest, err)) {
+        if (!apply_dest(tmp, dest, {}, space, err)) {
             tmp.reset();
             return err;
         }

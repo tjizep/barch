@@ -7731,3 +7731,26 @@ STATUS` is the last result.
 Covered by `test/functionsynctest.py`: load greet, refuse a broken
 file without storing BROKEN, require-order AMOD/ZMOD, REMF greet,
 and a function in a `hnsw/` folder.
+
+## 153. Non-luau checkout files become keys [27-08-2026]
+
+*Was `TODO.md` entry 159.*
+
+`functions_dir` still SETFs `.luau` files, but every other regular
+file is now SET as an ordinary key, extension included. Root files
+land in the default space. A first-level folder is still a key space,
+so `hnsw/words.txt` is `words.txt` in `hnsw` (the client says
+`hnsw:GET words.txt`). Nested folders are walked: `/` becomes `:`,
+so `hnsw/data/foo.json` is `data:foo.json` in `hnsw`. Hidden names,
+`.git` and `configuration` stay skipped.
+
+The temp-then-dest apply is unchanged. Data keys ride along on the
+same snapshot, so a broken `.luau` still refuses the whole space,
+including pending key writes. A deleted file is REM'd; keys someone
+SET by hand are not, because only names this watcher previously
+wrote are forgotten.
+
+Covered by the same `test/functionsynctest.py`: a root `notes.md`,
+`hnsw/words.txt`, nested `hnsw/data/foo.json`, a leftover user key
+in each space, a failed sync that leaves `notes.md` alone, and REM
+of the dropped files.

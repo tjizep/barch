@@ -4,8 +4,10 @@ import tempfile
 import redis
 import barch
 
-# A checkout of .luau files is SETF'd by FUNCTIONS SYNC. A broken file must not
-# leave a half-applied space, and a deleted file is REMF after a successful sync.
+# A checkout of .luau files is SETF'd by FUNCTIONS SYNC. Other files are SET as
+# keys, keeping the extension; a nested path becomes dir:name. A broken file
+# must not leave a half-applied space, and a deleted file is REMF / REM after
+# a successful sync. Keys someone SET by hand stay.
 
 PORT = 14000
 
@@ -78,6 +80,41 @@ try:
     r.execute_command("configuration:SET", "hnsw.shards", "1")
     assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
     assert r.execute_command("hnsw:put", "x").decode() == "put x"
+
+    # non-luau files become keys; nested dirs get dir: prepended
+    write("notes.md", "hello notes")
+    write("hnsw/words.txt", "cat dog")
+    write("hnsw/data/foo.json", '{"a":1}')
+    r.set("user-key", "hand")
+    r.execute_command("hnsw:SET", "keep-me", "hand")
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert r.get("notes.md") == b"hello notes"
+    assert r.execute_command("hnsw:GET", "words.txt") == b"cat dog"
+    assert r.execute_command("hnsw:GET", "data:foo.json") == b'{"a":1}'
+    assert r.get("user-key") == b"hand"
+    assert r.execute_command("hnsw:GET", "keep-me") == b"hand"
+
+    # a broken luau refuses the space, including pending key writes
+    write("broken.luau", "function call( end\n")
+    write("notes.md", "should not land")
+    try:
+        r.execute_command("FUNCTIONS", "SYNC")
+        assert False, "broken luau should refuse the sync"
+    except redis.exceptions.ResponseError:
+        pass
+    assert r.get("notes.md") == b"hello notes"
+    remove("broken.luau")
+    write("notes.md", "hello notes")
+
+    # dropping a data file REMs it; hand-written keys stay
+    remove("hnsw/words.txt")
+    remove("notes.md")
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert r.get("notes.md") is None
+    assert r.execute_command("hnsw:GET", "words.txt") is None
+    assert r.execute_command("hnsw:GET", "data:foo.json") == b'{"a":1}'
+    assert r.get("user-key") == b"hand"
+    assert r.execute_command("hnsw:GET", "keep-me") == b"hand"
 
     print("complete function sync test")
 finally:

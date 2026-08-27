@@ -99,6 +99,7 @@ struct store_access {
     enum class read_state { absent, tombed, present };
     std::function<read_state(const std::string& key, std::string& value)> get{};
     std::function<bool(const std::string& key)> exists{};
+    std::function<int64_t()> size{};
     std::function<int64_t(const std::string& lo, const std::string& hi)> count{};
     /** keys in [lo, hi), at most limit of them, copied out before the lock goes */
     std::function<void(const std::string& lo, const std::string& hi, int64_t limit,

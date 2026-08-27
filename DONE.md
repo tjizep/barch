@@ -7659,3 +7659,49 @@ real value.
 After those two, RelWithDebInfo `ctest -j1 -E 'TestInstall|TestBarchInstall'`
 is 67/67. Unordered spaces, save/load, expire, range sharding,
 functions, and the hybrid test itself are in that run.
+
+## 150. Private one-shard ART for Luau [27-08-2026]
+
+*Was `TODO.md` entry 156.*
+
+Luau could already reach the live store through `barch.store` and
+`barch.space.NAME`. Using that as a working set - an HNSW candidate
+queue, any other priority queue - would persist keys, show them in
+KEYS, and route through every shard.
+
+`barch.art()` returns a space handle to a private one-shard
+`key_space`: same `store_access` as a real space, so get/set/min/max
+/range/count and `q[k] = v` are the same methods. It is not named, not
+saved, not in the space map, and it does not call `clear_route` (that
+table is global per shard number). The shard is constructed empty
+(`shard(name, scratch_t)`), hybrid and ordered follow the server
+defaults, and `opt_drop_on_release` deletes the arena files when the
+userdata is collected. `popmin` / `popmax` are min-or-max then
+remove, on every space handle.
+
+The first constructor that skipped `start_maintain` hung in
+`~key_space` on `thread_exit.wait()`. The destructor only waits if
+the maintenance thread was actually started.
+
+Covered in `test/functiontest.py`: empty, set/get/remove, numeric
+order (`2` before `10`), composite distances, popmin, two trees in
+one call, a second CALLF seeing nothing, range capped at 10000.
+
+## 151. HNSW stored functions over Levenshtein [27-08-2026]
+
+*Was `TODO.md` entry 157.*
+
+`examples/hnsw/` is a one-shard `HNSW` space whose graph is ordinary
+keys and whose walks use `barch.art()` as the candidate min-queue and
+the found set. Distance is Levenshtein, so the keys are words and
+short phrases.
+
+`ADD` is already a barch command, so insert is `PUT`. The commands
+are `HNSW:PUT`, `HNSW:CLOSEST`, `HNSW:TUNE`. `graph.luau` is required
+by the others and has to be SETF first; `deploy.py` does that.
+
+TUNE presets: fast (M=8, efC=16, efS=8), default (16/64/32), accurate
+(32/200/100 plus the diverse-neighbour heuristic). `--demo` loaded 27
+related words in 32ms and got the nearest neighbour for five typos
+(`cta`→cat, `helo`→hello, and so on). `CLOSEST hello 3` was hello,
+hallo, help.

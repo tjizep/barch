@@ -342,14 +342,15 @@ namespace functions {
         return built.emplace(k, cats2vec(m)).first->second;
     }
 
-    static barch::foreign::store_access store_for(const key_space_ptr& space,
-                                                  const heap::vector<bool>& acl) {
+    barch::foreign::store_access store_for(const key_space_ptr& space,
+                                           const heap::vector<bool>& acl,
+                                           bool owner) {
         barch::foreign::store_access s;
         // what GET and SET ask for. Reading through barch.store is reading, whatever
         // route it took, so it answers to the same categories
-        s.may_read = allowed(cats_of("read", "keys"), acl);
-        s.may_write = allowed(cats_of("write", "keys"), acl);
-        s.may_see_functions = allowed(cats_of("read", "function"), acl);
+        s.may_read = owner || allowed(cats_of("read", "keys"), acl);
+        s.may_write = owner || allowed(cats_of("write", "keys"), acl);
+        s.may_see_functions = owner || allowed(cats_of("read", "function"), acl);
         const char sep = split_char(space);
         // functions are the top of the key order - tfunction is 12 and sorts after
         // every other lead - so hiding them is a bound rather than a filter: stop the
@@ -812,7 +813,23 @@ namespace functions {
                 return false;
             return barch::shard_hold::current().covers(space.get(), t.get());
         };
+        s.size = [space]() -> int64_t {
+            int64_t n = 0;
+            for (const auto& sh : space->get_shards())
+                n += (int64_t) sh->get_size();
+            return n;
+        };
         return s;
+    }
+
+    barch::foreign::store_access store_for(const key_space_ptr& space,
+                                           const heap::vector<bool>& acl) {
+        return store_for(space, acl, false);
+    }
+
+    barch::foreign::store_access store_for_owner(const key_space_ptr& space) {
+        heap::vector<bool> none;
+        return store_for(space, none, true);
     }
 
     /**

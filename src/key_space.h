@@ -104,6 +104,7 @@ namespace barch {
         moodycamel::LightweightSemaphore thread_exit{};
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
         bool exiting = false;
+        bool maintain_running = false;
         std::mutex lock{};
 
         void start_maintain();
@@ -112,6 +113,14 @@ namespace barch {
 
     public:
         key_space(const std::string &name);
+        /**
+         * a private one-shard space. not named in the map, not saved, no
+         * maintenance thread. Luau holds it for the lifetime of a `barch.art()`
+         * handle and talks to it through the same store_access as a real space.
+         */
+        struct scratch_t {};
+        explicit key_space(scratch_t);
+        static key_space_ptr make_scratch();
         virtual  ~key_space();
         shard_ptr get_local();
         shard_ptr get(size_t shard);

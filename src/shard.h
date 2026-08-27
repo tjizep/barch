@@ -233,6 +233,16 @@ namespace barch {
             barch::repl::clear_route(shard_number);
             start_maintain();
         }
+        // a private one-shard tree. empty, not loaded, not replicated, deleted
+        // when the last pointer goes. used by barch.art() so Luau can keep a
+        // working set without routing through the live space
+        struct scratch_t {};
+        shard(const std::string& name, scratch_t) :
+        tree{name, 0, root, 0} {
+            opt_ordered_keys = barch::get_ordered_keys();
+            opt_hybrid_keys = barch::get_hybrid_keys();
+            opt_drop_on_release = true;
+        }
         shard& operator=(const shard&) = delete;
 
         ~shard() override;

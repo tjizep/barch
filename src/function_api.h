@@ -6,6 +6,8 @@
 #define FUNCTION_API_H
 #include "caller.h"
 #include "barch_apis.h"
+#include "foreign/driver.h"
+#include "key_space.h"
 
 /*
  * Stored Luau functions. A function is an ordinary key under art::tfunction, so it
@@ -55,6 +57,14 @@ namespace functions {
      */
     bool source_of(const barch::key_space_ptr& space, const std::string& name,
                    std::string& out);
+
+    /**
+     * the same store_access `barch.store` and `barch.space.NAME` use.
+     * `store_for_owner` skips ACL - a private scratch space has no user.
+     */
+    barch::foreign::store_access store_for(const barch::key_space_ptr& space,
+                                           const heap::vector<bool>& acl);
+    barch::foreign::store_access store_for_owner(const barch::key_space_ptr& space);
 }
 }
 

@@ -8,6 +8,7 @@
 #include "function_api.h"
 
 #include <cmath>
+#include <cstring>
 #include <fstream>
 
 #include <functional>
@@ -937,6 +938,9 @@ enum { space_tag = 1, row_tag = 2 };
 struct space_handle {
     space_state* st{nullptr};
     const store_access* store{nullptr};
+    // set when this is a private scratch space from barch.art()
+    barch::key_space_ptr owned{};
+    std::unique_ptr<store_access> owned_access{};
 };
 
 /** a container reached through a space handle: sp:container("name") */
@@ -1170,20 +1174,148 @@ static int container_iter(lua_State* L) {
     return 1;
 }
 
-/** sp:container("name") and sp:kind("name") */
+static int push_store_get(lua_State* L, const store_access* s, const std::string& key) {
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    std::string value;
+    switch (s->get(key, value)) {
+        case store_access::read_state::present:
+            lua_pushlstring(L, value.data(), value.size());
+            break;
+        case store_access::read_state::tombed:
+            push_tomb(L);
+            break;
+        default:
+            lua_pushnil(L);
+    }
+    return 1;
+}
+
+static int push_store_bound(lua_State* L, const store_access* s, bool want_min) {
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    std::string key;
+    bool found = want_min ? s->min(key) : s->max(key);
+    if (!found) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, key.data(), key.size());
+    return 1;
+}
+
+static int space_pop(lua_State* L, const store_access* s, bool want_min) {
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    std::string key;
+    bool found = want_min ? s->min(key) : s->max(key);
+    if (!found) {
+        lua_pushnil(L);
+        return 1;
+    }
+    std::string value;
+    if (s->get(key, value) == store_access::read_state::present)
+        lua_pushlstring(L, value.data(), value.size());
+    else
+        lua_pushnil(L);
+    s->remove(key);
+    lua_pushlstring(L, key.data(), key.size());
+    lua_insert(L, -2); // key, value
+    return 2;
+}
+
+/** the store methods plus container/kind - same interface on a live space and on barch.art() */
 static int space_namecall(lua_State* L) {
     const char* m = lua_namecallatom(L, nullptr);
     const store_access* s = handle_store(L, 1);
-    size_t n = 0;
-    const char* raw = luaL_checklstring(L, 2, &n);
-    std::string name(raw, n);
-    if (m && !strcmp(m, "kind")) {
-        std::string k = s->container_kind ? s->container_kind(name) : std::string();
+    if (!m)
+        luaL_error(L, "FUNCTION no such method on a key space");
+
+    if (!strcmp(m, "get")) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return push_store_get(L, s, {k, n});
+    }
+    if (!strcmp(m, "set")) {
+        if (!s->may_write)
+            luaL_error(L, "FUNCTION not authorized to write there");
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        if (lua_isnoneornil(L, 3)) {
+            s->remove({k, n});
+            return 0;
+        }
+        size_t vn = 0;
+        const char* v = lua_tolstring(L, 3, &vn);
+        if (!v)
+            luaL_error(L, "FUNCTION a key space holds strings and numbers");
+        std::string err;
+        if (!s->set({k, n}, {v, vn}, err))
+            luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+        return 0;
+    }
+    if (!strcmp(m, "remove")) {
+        if (!s->may_write)
+            luaL_error(L, "FUNCTION not authorized to write there");
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        lua_pushboolean(L, s->remove({k, n}));
+        return 1;
+    }
+    if (!strcmp(m, "exists")) {
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        lua_pushboolean(L, s->exists({k, n}));
+        return 1;
+    }
+    if (!strcmp(m, "min"))
+        return push_store_bound(L, s, true);
+    if (!strcmp(m, "max"))
+        return push_store_bound(L, s, false);
+    if (!strcmp(m, "size")) {
+        lua_pushnumber(L, s->size ? (double) s->size() : 0);
+        return 1;
+    }
+    if (!strcmp(m, "count")) {
+        size_t ln = 0, hn = 0;
+        const char* lo = luaL_checklstring(L, 2, &ln);
+        const char* hi = luaL_checklstring(L, 3, &hn);
+        lua_pushnumber(L, (double) s->count({lo, ln}, {hi, hn}));
+        return 1;
+    }
+    if (!strcmp(m, "range")) {
+        size_t ln = 0, hn = 0;
+        const char* lo = luaL_checklstring(L, 2, &ln);
+        const char* hi = luaL_checklstring(L, 3, &hn);
+        int64_t limit = (int64_t) luaL_checknumber(L, 4);
+        if (limit <= 0 || limit > max_range_batch)
+            limit = max_range_batch;
+        heap::vector<std::string> keys;
+        s->range({lo, ln}, {hi, hn}, limit, keys);
+        lua_createtable(L, (int) keys.size(), 0);
+        int at = 1;
+        for (const auto& k : keys) {
+            lua_pushlstring(L, k.data(), k.size());
+            lua_rawseti(L, -2, at++);
+        }
+        return 1;
+    }
+    if (!strcmp(m, "popmin"))
+        return space_pop(L, s, true);
+    if (!strcmp(m, "popmax"))
+        return space_pop(L, s, false);
+    if (!strcmp(m, "kind")) {
+        size_t n = 0;
+        const char* raw = luaL_checklstring(L, 2, &n);
+        std::string k = s->container_kind ? s->container_kind({raw, n}) : std::string();
         if (k.empty()) lua_pushnil(L);
         else lua_pushlstring(L, k.data(), k.size());
         return 1;
     }
-    if (m && !strcmp(m, "container")) {
+    if (!strcmp(m, "container")) {
+        size_t n = 0;
+        const char* raw = luaL_checklstring(L, 2, &n);
+        std::string name(raw, n);
         if (!s->container_kind || s->container_kind(name).empty())
             luaL_error(L, "FUNCTION no container called %s", name.c_str());
         auto* h = static_cast<container_handle*>(lua_newuserdatadtor(L,
@@ -1218,11 +1350,40 @@ static int space_open(lua_State* L) {
             luaL_error(L, "FUNCTION no key space called %s", name.c_str());
         have = st->opened->emplace(name, std::move(opened)).first;
     }
-    auto* h = static_cast<space_handle*>(lua_newuserdata(L, sizeof(space_handle)));
+    auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
+        [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
+    new (h) space_handle();
     h->st = st;
     h->store = &have->second;
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
     lua_setmetatable(L, -2);
+    return 1;
+}
+
+/*
+ * barch.art() - a private one-shard space, same store_access as barch.store.
+ *
+ * Not named, not saved, not in the space map. The handle owns it; when Luau
+ * collects the userdata the shard goes with it. min/max/range are the ordered
+ * operations a working set (an HNSW candidate queue, a priority queue) needs
+ * without walking the live store.
+ */
+static space_handle* new_space_handle(lua_State* L) {
+    auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
+        [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
+    new (h) space_handle();
+    lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
+    lua_setmetatable(L, -2);
+    return h;
+}
+
+static int art_open(lua_State* L) {
+    auto space = barch::key_space::make_scratch();
+    auto access = barch::functions::store_for_owner(space);
+    auto* h = new_space_handle(L);
+    h->owned = std::move(space);
+    h->owned_access = std::make_unique<store_access>(std::move(access));
+    h->store = h->owned_access.get();
     return 1;
 }
 
@@ -1484,6 +1645,8 @@ static space_state* state_for(function_states& cache) {
     lua_pushcfunction(L, store_max, "max");
     lua_setfield(L, -2, "max");
     lua_setfield(L, -2, "store");
+    lua_pushcfunction(L, art_open, "art");
+    lua_setfield(L, -2, "art");
 
     // a key space read and written as a value - see TODO 98 F2
     lua_newtable(L);

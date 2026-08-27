@@ -20,7 +20,9 @@
 #include <cctype>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 namespace barch {
+    static std::atomic<uint64_t> scratch_ids{0};
 
     static std::string lower_copy(std::string s) {
         std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -416,8 +418,29 @@ namespace barch {
         }
     }
 
+    key_space::key_space(scratch_t)
+        : name("-s" + std::to_string(++scratch_ids)),
+          canonical_name(name) {
+        opt_shard_count = 1;
+        opt_ordered_keys = barch::get_ordered_keys();
+        opt_hybrid_keys = barch::get_hybrid_keys();
+        opt_range_sharded = false;
+        shards.resize(1);
+        heap::allocator<barch::shard> alloc;
+        shards[0] = std::allocate_shared<barch::shard>(alloc, name, barch::shard::scratch_t{});
+        shards[0]->opt_ordered_keys = opt_ordered_keys;
+        shards[0]->opt_hybrid_keys = opt_hybrid_keys;
+        shards[0]->opt_drop_on_release = true;
+    }
+
+    key_space::key_space_ptr key_space::make_scratch() {
+        heap::allocator<key_space> alloc;
+        return std::allocate_shared<key_space>(alloc, scratch_t{});
+    }
+
     void key_space::start_maintain() {
         exiting = false;
+        maintain_running = true;
         tmaintain = std::thread([&]() -> void {
 
             try {
@@ -497,10 +520,12 @@ namespace barch {
 
     key_space::~key_space() {
         exiting = true;
-        thread_control.signal(1);
-        thread_exit.wait();
-        if (tmaintain.joinable())
-            tmaintain.join();
+        if (maintain_running) {
+            thread_control.signal(1);
+            thread_exit.wait();
+            if (tmaintain.joinable())
+                tmaintain.join();
+        }
         fail_foreign_flights();
         shards.clear();
     }

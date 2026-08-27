@@ -414,6 +414,58 @@ try:
     ''') == b"OK"
     assert r.execute_command("myHuge", "sk0", "sk9") == 4
 
+    # --- barch.art(): a private one-shard space, same methods as a space handle ------
+    assert r.execute_command("SETF", "scratchArt", '''
+        function call()
+            local q = barch.art()
+            if q:size() ~= 0 or q:min() ~= nil or q:get("x") ~= nil then
+                return "empty?"
+            end
+            q["a"] = "1"
+            q:set("b", "2")
+            if q:get("a") ~= "1" or q["b"] ~= "2" or q:size() ~= 2 then
+                return "set"
+            end
+            q["a"] = nil
+            if q:exists("a") or not q:remove("b") or q:size() ~= 0 then
+                return "remove"
+            end
+            q["2"] = "n2"
+            q["10"] = "n10"
+            if q:min() ~= "2" or q:max() ~= "10" then
+                return "numeric " .. tostring(q:min()) .. " " .. tostring(q:max())
+            end
+            local d = barch.art()
+            d["0.2 b"] = "db"
+            d["0.1 a"] = "da"
+            if d:min() ~= "0.1 a" then
+                return "dist " .. tostring(d:min())
+            end
+            local k, v = d:popmin()
+            if k ~= "0.1 a" or v ~= "da" or d:min() ~= "0.2 b" then
+                return "popmin"
+            end
+            q["x"] = "mine"
+            if d:get("x") ~= nil then
+                return "leak"
+            end
+            local r = d:range("0", "9", 100000000)
+            if #r > 10000 then
+                return "cap"
+            end
+            return "ok"
+        end
+    ''') == b"OK"
+    assert r.execute_command("scratchArt").decode() == "ok", \
+        f"scratch art: {r.execute_command('scratchArt')!r}"
+    # a second call does not see the first call's tree
+    assert r.execute_command("SETF", "scratchAgain", '''
+        function call()
+            return barch.art():get("x")
+        end
+    ''') == b"OK"
+    assert r.execute_command("scratchAgain") is None
+
     # a composite key comes back the way it was written - the components rejoined
     # with the space's split character, which is what KEYS answers too, because a
     # script and a client have to agree about the same key.

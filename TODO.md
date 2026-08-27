@@ -884,4 +884,8 @@
 
 155. [Done] Hybrid keys as the default [27-08-2026] Nr 149 1b1be6b
 
+156. [Done] Private one-shard ART for Luau [27-08-2026] Nr 150 1b1be6b
+
+157. [Done] HNSW stored functions over Levenshtein [27-08-2026] Nr 151 1b1be6b
+
 

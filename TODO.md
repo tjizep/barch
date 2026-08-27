@@ -888,4 +888,6 @@
 
 157. [Done] HNSW stored functions over Levenshtein [27-08-2026] Nr 151 1b1be6b
 
+158. [Done] Git-driven functions from a checkout [27-08-2026] Nr 152 d045bf8
+
 

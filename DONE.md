@@ -7705,3 +7705,29 @@ TUNE presets: fast (M=8, efC=16, efS=8), default (16/64/32), accurate
 related words in 32ms and got the nearest neighbour for five typos
 (`cta`→cat, `helo`→hello, and so on). `CLOSEST hello 3` was hello,
 hallo, help.
+
+## 152. Git-driven functions from a checkout [27-08-2026]
+
+*Was `TODO.md` entry 158.*
+
+`functions_dir` is a checkout of `.luau` files. Root files go in the
+default space; each subfolder is a key space; the stem is the function
+name, folded. `configuration` is skipped. SETF already refuses a bad
+file; the watcher uses that as the prove step.
+
+A sync fills a throwaway one-shard space with a multi-pass SETF so
+`require` can see siblings regardless of directory order. Any failure
+drops the temp space and leaves the destination alone. On success the
+destination is updated as one snapshot: one-shard spaces use
+begin/commit/rollback, wider spaces restore previous sources if apply
+fails, then REMF names that are no longer in the tree. The managed-space
+list moves only after that.
+
+Optional `functions_git_pull` does `git fetch` + `reset --hard` with a
+read-only key from `functions_git_ssh_key` (`file:` / `env:` / path).
+`FUNCTIONS SYNC` runs it now; `functions_sync_ms` polls. `FUNCTIONS
+STATUS` is the last result.
+
+Covered by `test/functionsynctest.py`: load greet, refuse a broken
+file without storing BROKEN, require-order AMOD/ZMOD, REMF greet,
+and a function in a `hnsw/` folder.

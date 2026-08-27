@@ -14,6 +14,7 @@
 #include "module.h"
 #include "rpc/server.h"
 #include "rpc/restarter.h"
+#include "function_sync.h"
 #define unused_arg
 static bool is_on(const std::string& val) {
     return (val == "on" || val == "true" || val == "yes");
@@ -72,6 +73,11 @@ struct config_state {
     heap::string jump_factor{};
     heap::string ordered_keys{};
     heap::string hybrid_keys{};
+    heap::string functions_dir{"off"};
+    heap::string functions_sync_ms{"0"};
+    heap::string functions_git_pull{"off"};
+    heap::string functions_git_branch{"main"};
+    heap::string functions_git_ssh_key{"off"};
     heap::string server_port{};
     heap::string server_binding{};
     heap::string static_bloom_filter{};
@@ -1096,6 +1102,111 @@ static int ApplyHybridKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, Valkey
     return VALKEYMODULE_OK;
 }
 
+static ValkeyModuleString *GetFunctionsDir(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().functions_dir.c_str(), state().functions_dir.length());
+}
+static int SetFunctionsDir(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    state().functions_dir = val;
+    config().functions_dir = val;
+    return VALKEYMODULE_OK;
+}
+static int SetFunctionsDir(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                           ValkeyModuleString **unused_arg) {
+    return SetFunctionsDir(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyFunctionsDir(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    if (barch::get_functions_dir().empty())
+        barch::stop_function_sync();
+    else
+        barch::start_function_sync();
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetFunctionsSyncMs(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().functions_sync_ms.c_str(), state().functions_sync_ms.length());
+}
+static int SetFunctionsSyncMs(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    std::regex check("[0-9]+");
+    if (!std::regex_match(val, check))
+        return VALKEYMODULE_ERR;
+    state().functions_sync_ms = val;
+    config().functions_sync_ms = std::stoull(val);
+    return VALKEYMODULE_OK;
+}
+static int SetFunctionsSyncMs(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                              ValkeyModuleString **unused_arg) {
+    return SetFunctionsSyncMs(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyFunctionsSyncMs(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    barch::request_function_sync();
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetFunctionsGitPull(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().functions_git_pull.c_str(), state().functions_git_pull.length());
+}
+static int SetFunctionsGitPull(std::string val) {
+    std::lock_guard lock(state().config_mutex);
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (!check_type(val, state().valid_on_off))
+        return VALKEYMODULE_ERR;
+    state().functions_git_pull = val;
+    config().functions_git_pull = val == "on" || val == "true" || val == "yes";
+    return VALKEYMODULE_OK;
+}
+static int SetFunctionsGitPull(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                               ValkeyModuleString **unused_arg) {
+    return SetFunctionsGitPull(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyFunctionsGitPull(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetFunctionsGitBranch(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().functions_git_branch.c_str(),
+                                     state().functions_git_branch.length());
+}
+static int SetFunctionsGitBranch(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    if (val.empty())
+        return VALKEYMODULE_ERR;
+    state().functions_git_branch = val;
+    config().functions_git_branch = val;
+    return VALKEYMODULE_OK;
+}
+static int SetFunctionsGitBranch(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionsGitBranch(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyFunctionsGitBranch(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
+static ValkeyModuleString *GetFunctionsGitSshKey(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().functions_git_ssh_key.c_str(),
+                                     state().functions_git_ssh_key.length());
+}
+static int SetFunctionsGitSshKey(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    state().functions_git_ssh_key = val;
+    config().functions_git_ssh_key = val;
+    return VALKEYMODULE_OK;
+}
+static int SetFunctionsGitSshKey(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionsGitSshKey(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyFunctionsGitSshKey(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
 
 // ===========================================================================================================
 static ValkeyModuleString *GetActiveDefragType(const char *unused_arg, void *unused_arg) {
@@ -1362,6 +1473,22 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "hybrid_keys", "yes", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetHybridKeys, SetHybridKeys,
                                                      ApplyHybridKeys, nullptr);
+
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetFunctionsDir, SetFunctionsDir,
+                                                     ApplyFunctionsDir, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_sync_ms", "0", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetFunctionsSyncMs, SetFunctionsSyncMs,
+                                                     ApplyFunctionsSyncMs, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_git_pull", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetFunctionsGitPull, SetFunctionsGitPull,
+                                                     ApplyFunctionsGitPull, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_git_branch", "main", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetFunctionsGitBranch, SetFunctionsGitBranch,
+                                                     ApplyFunctionsGitBranch, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_git_ssh_key", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetFunctionsGitSshKey, SetFunctionsGitSshKey,
+                                                     ApplyFunctionsGitSshKey, nullptr);
 
     ret |= ValkeyModule_RegisterStringConfig(ctx, "server_port", "14000", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetServerPort, SetServerPort,
@@ -1700,6 +1827,31 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyHybridKeys(nullptr, nullptr, nullptr);
         }
         return r;
+    }else if (name == "functions_dir") {
+        auto r = SetFunctionsDir(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyFunctionsDir(nullptr, nullptr, nullptr);
+        return r;
+    }else if (name == "functions_sync_ms") {
+        auto r = SetFunctionsSyncMs(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyFunctionsSyncMs(nullptr, nullptr, nullptr);
+        return r;
+    }else if (name == "functions_git_pull") {
+        auto r = SetFunctionsGitPull(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyFunctionsGitPull(nullptr, nullptr, nullptr);
+        return r;
+    }else if (name == "functions_git_branch") {
+        auto r = SetFunctionsGitBranch(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyFunctionsGitBranch(nullptr, nullptr, nullptr);
+        return r;
+    }else if (name == "functions_git_ssh_key") {
+        auto r = SetFunctionsGitSshKey(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyFunctionsGitSshKey(nullptr, nullptr, nullptr);
+        return r;
     }else if (name == "server_port") {
         auto r = SetServerPort(val);
         if (r == VALKEYMODULE_OK) {
@@ -1934,6 +2086,26 @@ bool barch::get_hybrid_keys() {
     return config().hybrid_keys;
 }
 
+static bool cfg_off(const std::string& s) {
+    return s.empty() || s == "off" || s == "none" || s == "no";
+}
+
+std::string barch::get_functions_dir() {
+    return cfg_off(config().functions_dir) ? std::string() : config().functions_dir;
+}
+uint64_t barch::get_functions_sync_ms() {
+    return config().functions_sync_ms;
+}
+bool barch::get_functions_git_pull() {
+    return config().functions_git_pull;
+}
+std::string barch::get_functions_git_branch() {
+    return config().functions_git_branch;
+}
+std::string barch::get_functions_git_ssh_key() {
+    return cfg_off(config().functions_git_ssh_key) ? std::string() : config().functions_git_ssh_key;
+}
+
 uint64_t barch::get_internal_shards() {
     return config().internal_shards;
 }
@@ -2014,6 +2186,8 @@ const std::vector<std::string>& barch::configuration_names() {
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
         "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
+        "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
+        "functions_git_ssh_key",
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
@@ -2049,6 +2223,11 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "min_fragmentation_ratio")     value = cfg_float(c.min_fragmentation_ratio);
     else if (name == "ordered_keys")                value = cfg_bool(c.ordered_keys);
     else if (name == "hybrid_keys")                 value = cfg_bool(c.hybrid_keys);
+    else if (name == "functions_dir")                value = c.functions_dir;
+    else if (name == "functions_sync_ms")            value = std::to_string(c.functions_sync_ms);
+    else if (name == "functions_git_pull")           value = cfg_bool(c.functions_git_pull);
+    else if (name == "functions_git_branch")         value = c.functions_git_branch.empty() ? "main" : c.functions_git_branch;
+    else if (name == "functions_git_ssh_key")        value = c.functions_git_ssh_key;
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);
     else if (name == "rpc_max_buffer")              value = std::to_string(c.rpc_max_buffer);

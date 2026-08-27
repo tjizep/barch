@@ -8,6 +8,7 @@
 #include "barch_apis.h"
 #include "foreign/driver.h"
 #include "key_space.h"
+#include "sastam.h"
 
 /*
  * Stored Luau functions. A function is an ordinary key under art::tfunction, so it
@@ -24,6 +25,7 @@ extern "C" {
     int REMF(caller& call, const arg_t& argv);
     int KEYSF(caller& call, const arg_t& argv);
     int CALLF(caller& call, const arg_t& argv);
+    int FUNCTIONS(caller& call, const arg_t& argv);
 }
 
 namespace barch {
@@ -65,6 +67,14 @@ namespace functions {
     barch::foreign::store_access store_for(const barch::key_space_ptr& space,
                                            const heap::vector<bool>& acl);
     barch::foreign::store_access store_for_owner(const barch::key_space_ptr& space);
+
+    /** SETF/REMF/KEYSF without a client. false fills err and writes nothing. */
+    bool install(const barch::key_space_ptr& space, const std::string& name,
+                 const std::string& source, std::string& err);
+    bool remove(const barch::key_space_ptr& space, const std::string& name);
+    heap::vector<std::string> names(const barch::key_space_ptr& space);
+    bool source_in(const barch::key_space_ptr& space, const std::string& name,
+                   std::string& out);
 }
 }
 

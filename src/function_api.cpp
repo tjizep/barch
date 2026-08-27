@@ -4,6 +4,7 @@
 
 #include "function_api.h"
 
+#include <algorithm>
 #include <limits>
 
 #include "composite.h"
@@ -17,6 +18,7 @@
 #include "sharded_store.h"
 #include "art/key_options.h"
 #include "key_type.h"
+#include "function_sync.h"
 
 namespace {
     /*
@@ -832,6 +834,68 @@ namespace functions {
         return store_for(space, none, true);
     }
 
+    bool install(const key_space_ptr& space, const std::string& name,
+                 const std::string& source, std::string& err) {
+        if (!space) {
+            err = "no key space";
+            return false;
+        }
+        art::value_type raw{name.data(), name.size()};
+        if (key_ok(raw) != 0 || name.empty()) {
+            err = "a function needs a name";
+            return false;
+        }
+        if (is_builtin_name(raw)) {
+            err = "that name is already a command";
+            return false;
+        }
+        auto folded = upper_name(raw);
+        if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
+                                              loader_for(space), err))
+            return false;
+        composite q;
+        auto key = function_key(q, art::value_type{folded.data(), folded.size()});
+        if (!fits_in_leaf(key.size, source.size())) {
+            err = too_large_message();
+            return false;
+        }
+        art::key_options opts;
+        auto fc = [](const art::node_ptr&) -> void {};
+        barch::sharded_store store(space);
+        store.insert(opts, key, art::value_type{source.data(), source.size()}, true, fc);
+        return true;
+    }
+
+    bool remove(const key_space_ptr& space, const std::string& name) {
+        if (!space) return false;
+        auto folded = upper_name(art::value_type{name.data(), name.size()});
+        composite q;
+        auto key = function_key(q, art::value_type{folded.data(), folded.size()});
+        barch::sharded_store store(space);
+        auto fc = [](art::node_ptr) -> void {};
+        return store.remove(key, fc);
+    }
+
+    heap::vector<std::string> names(const key_space_ptr& space) {
+        heap::vector<std::string> out;
+        if (!space) return out;
+        composite qlo, qhi;
+        auto lo = function_lo(qlo);
+        auto hi = function_hi(qhi);
+        barch::sharded_store store(space);
+        store.range(lo, hi, -1, [&](art::value_type key) {
+            if (key.size <= composite_key_size)
+                return;
+            out.push_back(encoded_key_as_string(key.sub(composite_key_size)));
+        });
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    bool source_in(const key_space_ptr& space, const std::string& name, std::string& out) {
+        return read_source(space, art::value_type{name.data(), name.size()}, out);
+    }
+
     /**
      * Run the function `name` out of `from` (the caller's space when it is null), with
      * argv from `first` onwards as its arguments.
@@ -1062,32 +1126,11 @@ int SETF(caller& call, const arg_t& argv) {
     auto source = argv[2];
     if (key_ok(name) != 0)
         return call.key_check_error(name);
-    if (name.size == 0)
-        return call.push_error("a function needs a name");
-    if (is_builtin_name(name))
-        return call.push_error("that name is already a command");
-    auto folded = upper_name(name);
-    art::value_type stored{folded.data(), folded.size()};
-
     std::string err;
-    // compiled against this space, so a require in the script resolves now and a
-    // cycle is refused here rather than at the first call
-    if (!barch::foreign::compile_function(call.kspace()->get_canonical_name(), folded,
-                                          {source.chars(), source.size},
-                                          barch::functions::loader_for(call.kspace()), err))
+    if (!barch::functions::install(call.kspace(),
+                                   {name.chars(), name.size},
+                                   {source.chars(), source.size}, err))
         return call.push_error(err.c_str());
-
-    composite q;
-    auto key = function_key(q, stored);
-    // the source and the key share a leaf and a leaf has to fit in a page. SET learned
-    // the hard way that answering OK and storing nothing is the worst way to be wrong
-    if (!fits_in_leaf(key.size, source.size))
-        return call.push_error(too_large_message());
-
-    art::key_options opts;
-    auto fc = [](const art::node_ptr&) -> void {};
-    barch::sharded_store store(call.kspace());
-    store.insert(opts, key, source, true, fc);
     return call.push_simple("OK");
 }
 
@@ -1177,6 +1220,27 @@ int KEYSF(caller& call, const arg_t& argv) {
     }
     return call.end_array();
 }
+
+/* FUNCTIONS SYNC | STATUS
+ *
+ * SYNC applies the checkout in functions_dir. STATUS is the last result.
+ */
+int FUNCTIONS(caller& call, const arg_t& argv) {
+    if (argv.size() < 2)
+        return call.wrong_arity();
+    std::string sub(argv[1].chars(), argv[1].size);
+    for (auto& ch : sub)
+        ch = (char) toupper((unsigned char) ch);
+    if (sub == "STATUS")
+        return call.push_string(barch::functions_sync_status());
+    if (sub == "SYNC") {
+        auto err = barch::sync_functions();
+        if (!err.empty())
+            return call.push_error(err.c_str());
+        return call.push_simple("OK");
+    }
+    return call.push_error("FUNCTIONS SYNC|STATUS");
+}
 }
 
 void register_function_api(function_map& r) {
@@ -1187,4 +1251,5 @@ void register_function_api(function_map& r) {
     // not asynchronous any more: a call parks and the script runs in slices on the
     // foreign pool, so it owns no thread at all while it waits. See TODO 98 H
     r["CALLF"] = {::CALLF,{"read","data","function"}};
+    r["FUNCTIONS"] = {::FUNCTIONS,{"write","data","function","admin"}};
 }

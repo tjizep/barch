@@ -49,6 +49,7 @@ extern "C" {
 #include "spaces_spec.h"
 #include "keyspace_locks.h"
 #include "dictionary_compressor.h"
+#include "function_sync.h"
 
 
 extern "C" {
@@ -166,6 +167,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     // the config file does not mention, so anything taken from the environment earlier
     // would be undone here
     barch::apply_environment_configuration();
+    if (!barch::get_functions_dir().empty())
+        barch::start_function_sync();
     auto ks = get_default_ks();
     if (ks == nullptr) {
         return VALKEYMODULE_ERR;

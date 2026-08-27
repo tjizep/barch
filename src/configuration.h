@@ -72,6 +72,13 @@ namespace barch {
         std::string external_host{"localhost"};
         std::string bind_interface{"127.0.0.1"};
         int listen_port{12145};
+        /** checkout of luau functions; "off" means the watcher is idle */
+        std::string functions_dir{"off"};
+        uint64_t functions_sync_ms{0};
+        bool functions_git_pull{false};
+        std::string functions_git_branch{"main"};
+        /** path, file:/path, or env:VAR pointing at a read-only deploy key */
+        std::string functions_git_ssh_key{"off"};
     };
 
     int register_valkey_configuration(ValkeyModuleCtx *ctx);
@@ -127,6 +134,11 @@ namespace barch {
     bool get_hybrid_keys();
 
     bool get_static_bloom_filter();
+    std::string get_functions_dir();
+    uint64_t get_functions_sync_ms();
+    bool get_functions_git_pull();
+    std::string get_functions_git_branch();
+    std::string get_functions_git_ssh_key();
     std::string get_tls_pem_certificate_chain_file();
     std::string get_tls_private_key_file();
     std::string get_tls_tmp_dh_file();

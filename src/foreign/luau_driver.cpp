@@ -1788,8 +1788,9 @@ static int function_require(lua_State* L) {
         name = std::move(given);
         if (!st->space_stack.empty())
             space_name = st->space_stack.back();
-        else
-            space_name = current_space(L);
+        // else leave space_name empty: the loader uses the space being
+        // compiled or run. Passing current_space() here broke function sync,
+        // whose scratch is named `-sN` and is not in the space map.
     }
     for (auto& ch : name)
         ch = (char) toupper((unsigned char) ch);
@@ -1806,7 +1807,7 @@ static int function_require(lua_State* L) {
         }
     } popper{st, space_name, pushed};
 
-    const std::string key = qualified(space_name, name);
+    const std::string key = qualified(space_name.empty() ? current_space(L) : space_name, name);
     auto have = st->functions.find(key);
     if (have != st->functions.end()) {
         lua_getref(L, have->second.envt);

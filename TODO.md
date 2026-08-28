@@ -898,4 +898,6 @@
 
 162. [Done] Space-aware require [28-08-2026] Nr 156 bea392b
 
+163. [Done] Function sync require in a scratch space [28-08-2026] Nr 157 3c3548a
+
 

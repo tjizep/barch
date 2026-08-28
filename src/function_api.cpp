@@ -118,9 +118,14 @@ namespace functions {
                          std::string& source) -> bool {
             key_space_ptr space = current;
             if (!space_name.empty() && current->canonical() != space_name) {
-                if (!barch::is_keyspace(space_name))
-                    return false;
-                space = barch::get_keyspace(space_name);
+                // a scratch used by function sync is not in the space map. An
+                // unqualified require still means *this* store, not "no such space".
+                if (!barch::is_keyspace(space_name)) {
+                    if (exact)
+                        return false;
+                } else {
+                    space = barch::get_keyspace(space_name);
+                }
             }
             art::value_type n{want.data(), want.size()};
             if (read_source(space, n, source))

@@ -7811,3 +7811,22 @@ does: this space, then the default.
 Covered by `test/functiontest.py`: two nested helpers via
 `otherspace.mod`, case of the space half, no global ghost, no space
 created for `nosuchreq.mod`, and unqualified fallback from `emptyreq`.
+
+## 157. Function sync require in a scratch space [28-08-2026]
+
+*Was `TODO.md` entry 163.*
+
+`FUNCTIONS SYNC` proves files in a one-shard scratch named `-sN`,
+which is not in the space map. After space-aware require, an
+unqualified `require("zmod")` passed that compile name into the
+loader, `is_keyspace("-s")` was false, and AMOD never saw ZMOD in
+the temp store.
+
+Unqualified require now leaves the space name empty so the loader
+uses the store being compiled. A dotted name that is not a mapped
+space is still a miss. The session cache keys an unqualified module
+by `current_space()`, not `""`, so two spaces requiring `helpers`
+do not share a compiled copy.
+
+Covered by `test/functionsynctest.py` AMOD/ZMOD, and
+`test/functiontest.py` still passing.

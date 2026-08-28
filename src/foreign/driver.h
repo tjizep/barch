@@ -44,8 +44,11 @@ struct function_states;
 typedef std::shared_ptr<function_states> function_states_ptr;
 function_states_ptr make_function_states();
 
-/** how the driver asks for a function's source, by name */
-typedef std::function<bool(const std::string& name, std::string& source)> source_loader;
+/** how the driver asks for a function's source, by name.
+ *  `space` empty means the function's own space. `exact` true (a dotted
+ *  require) looks only there and must not create a space or fall back. */
+typedef std::function<bool(const std::string& space, const std::string& name, bool exact,
+                           std::string& source)> source_loader;
 
 /**
  * how a script runs an ordinary command - `barch.call("GET", "k")`.
@@ -252,7 +255,10 @@ bool compile_function(const std::string& space, const std::string& name,
  * already compiled in `cache`, so a warm call never reads the store. It is asked for
  * other names too when a script requires one. A null cache runs against a state built
  * for this call alone, which is what the contexts without a session do.
-/** what a parked call reports when it ends, on whatever thread ended it */
+ */
+
+/**
+ * parked call completion event */
 typedef std::function<void(bool ok, Variable out, std::string err)> function_done;
 
 /**

@@ -537,6 +537,8 @@ static std::string qualified(const std::string& space, const std::string& name) 
 
 struct space_state {
     lua_State* L{nullptr};
+    /** stack of space names gathered during require */
+    heap::vector<std::string> space_stack;
     /** keyed by `qualified(space, name)` - one map for every space the session uses */
     heap::string_map<compiled> functions{};
     /**
@@ -562,7 +564,7 @@ struct space_state {
      * what is being compiled right now, innermost last. A require for something on
      * this stack is a cycle, and the stack is the path to put in the message.
      */
-    std::vector<std::string> loading{};
+    heap::vector<std::string> loading{};
     /**
      * coroutines that have finished and can be used again.
      *
@@ -1755,27 +1757,56 @@ static space_state*& state_of(lua_State* L) {
 
 /*
  * require("NAME") - another function in the same space, or a global from
- * `configuration`, compiled if this session has not compiled it yet.
+ * the default space. require("SPACE.NAME") loads NAME from SPACE, and a nested
+ * require("helpers") stays in SPACE until that dotted require returns.
  *
  * What comes back is that function's globals table, so a required module can offer
  * helpers as well as its own `call`. Cycles are refused with the path that made them,
- * rather than recursing until the stack gives out. See TODO 98 D.
+ * rather than recursing until the stack gives out. See TODO 98 D, 162.
  */
 static int function_require(lua_State* L) {
     size_t n = 0;
     const char* raw = luaL_checklstring(L, 1, &n);
-    std::string name(raw, n);
-    for (auto& ch : name) {
-        ch = (char) toupper((unsigned char) ch);
-    }
+    std::string given(raw, n);
     space_state* st = state_of(L);
     if (!st || !st->load)
         luaL_error(L, "FUNCTION require is not available here");
 
-    // the map is shared across the session's spaces now, so a require resolves within
-    // the space the calling function belongs to - TODO 150. `st->load` was already
-    // scoped that way; this makes the key agree with it
-    const std::string key = qualified(current_space(L), name);
+    // split before folding: space names keep their case, same as HNSW.SET
+    std::string space_name;
+    std::string name;
+    bool exact = false;
+    bool pushed = false;
+    auto dot = given.find('.');
+    if (dot != std::string::npos && dot > 0 && dot + 1 < given.size()) {
+        space_name = given.substr(0, dot);
+        name = given.substr(dot + 1);
+        exact = true;
+        st->space_stack.push_back(space_name);
+        pushed = true;
+    } else {
+        name = std::move(given);
+        if (!st->space_stack.empty())
+            space_name = st->space_stack.back();
+        else
+            space_name = current_space(L);
+    }
+    for (auto& ch : name)
+        ch = (char) toupper((unsigned char) ch);
+
+    struct pop_if_pushed {
+        space_state* st{};
+        std::string space;
+        bool armed{false};
+        ~pop_if_pushed() {
+            if (!armed || !st)
+                return;
+            if (!st->space_stack.empty() && st->space_stack.back() == space)
+                st->space_stack.pop_back();
+        }
+    } popper{st, space_name, pushed};
+
+    const std::string key = qualified(space_name, name);
     auto have = st->functions.find(key);
     if (have != st->functions.end()) {
         lua_getref(L, have->second.envt);
@@ -1785,7 +1816,6 @@ static int function_require(lua_State* L) {
         if (busy == key) {
             std::string path;
             for (const auto& step : st->loading) {
-                // the stack holds qualified keys; the message wants the names
                 auto at = step.find('\0');
                 path += at == std::string::npos ? step : step.substr(at + 1);
                 path += " -> ";
@@ -1795,7 +1825,7 @@ static int function_require(lua_State* L) {
         }
     }
     std::string source;
-    if (!(*st->load)(name, source))
+    if (!(*st->load)(space_name, name, exact, source))
         luaL_error(L, "FUNCTION require has no function %s", name.c_str());
     compiled c;
     std::string err;
@@ -2035,7 +2065,7 @@ void start_function(const std::string& space, const std::string& name,
             st->functions.clear();
         }
         std::string source;
-        if (!job->iface->load(name, source)) {
+        if (!job->iface->load("", name, false, source)) {
             st->load = nullptr;
             done(false, Variable(nullptr), "no such function");
             return;

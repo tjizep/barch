@@ -5,6 +5,7 @@
 #include "function_api.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 
 #include "composite.h"
@@ -100,32 +101,32 @@ namespace functions {
         return get_default_ks();
     }
 
-    /** one value, for the page walk to fill in after its lock has gone */
-    static bool s_get_value(const key_space_ptr& space, const std::string& key,
-                            std::string& out) {
-        auto converted = space->encode_key(art::value_type{key.data(), key.size()});
-        barch::sharded_store store(space);
-        return store.search(converted.get_value(), [&](const art::node_ptr& n) {
-            auto cl = n.const_leaf();
-            auto v = cl->get_value();
-            if (cl->is_compressed()) {
-                auto d = dictionary::decompress(v);
-                out.assign(d.chars(), d.size);
-            } else {
-                out.assign(v.chars(), v.size);
-            }
-        });
-    }
+
 
     /**
-     * how the driver asks for a source: this space first, then the globals. The same
-     * order a bare name resolves in, so a require reads the way a call does.
+     * how the driver asks for a source.
+     *
+     * Unqualified (`space_name` empty): this space, then the default space, the
+     * same order a bare command name uses. A nested `require("helpers")` inside
+     * `require("HNSW.graph")` passes HNSW so helpers are found there first.
+     *
+     * Dotted (`exact`): that space only. An unknown name is not a key space and
+     * must not become one, and a miss must not pick up a global of the same name.
      */
-    static barch::foreign::source_loader loader_for(const key_space_ptr& space) {
-        return [space](const std::string& want, std::string& source) -> bool {
+    static barch::foreign::source_loader loader_for(const key_space_ptr& current) {
+        return [current](const std::string& space_name, const std::string& want, bool exact,
+                         std::string& source) -> bool {
+            key_space_ptr space = current;
+            if (!space_name.empty() && current->canonical() != space_name) {
+                if (!barch::is_keyspace(space_name))
+                    return false;
+                space = barch::get_keyspace(space_name);
+            }
             art::value_type n{want.data(), want.size()};
             if (read_source(space, n, source))
                 return true;
+            if (exact)
+                return false;
             auto global = global_space();
             if (global == space)
                 return false;
@@ -135,7 +136,7 @@ namespace functions {
 
     bool source_of(const key_space_ptr& space, const std::string& name, std::string& out) {
         auto folded = upper_name(art::value_type{name.data(), name.size()});
-        return loader_for(space)(folded, out);
+        return loader_for(space)("", folded, false, out);
     }
 
     /** does this user hold every category the command asks for? */
@@ -837,6 +838,10 @@ namespace functions {
             err = "a function needs a name";
             return false;
         }
+        if (memchr(name.data(),'.',name.size()) != nullptr) {
+            err = "a '.' not allowed in function names";
+            return false;
+        }
         // a stored SET does not overload SET. The dotted form HNSW.SET is how you
         // call it; HNSW:SET and a bare SET stay the builtin. See TODO 160.
         auto folded = upper_name(raw);
@@ -1117,6 +1122,8 @@ int SETF(caller& call, const arg_t& argv) {
     auto source = argv[2];
     if (key_ok(name) != 0)
         return call.key_check_error(name);
+
+
     std::string err;
     if (!barch::functions::install(call.kspace(),
                                    {name.chars(), name.size},

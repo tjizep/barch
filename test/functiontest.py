@@ -310,6 +310,75 @@ try:
                 'local me = require("selfref")\nfunction call() return 1 end')
     assert e and "cycle" in e.lower(), f"said: {e}"
 
+    # --- require("SPACE.NAME"): another space, nested helpers stay there ------------
+    e = refused("SETF", "foo.bar", GREET)
+    assert e and "." in e, f"a function name must not contain a dot, said: {e}"
+
+    r.execute_command("SETF", "helpers", '''
+        function who() return "from-default" end
+        function call() return who() end
+    ''')
+    r.execute_command("SETF", "ghost", 'function call() return "ghost" end')
+    r.execute_command("otherspace:SETF", "helpers", '''
+        function who() return "from-other" end
+        function call() return who() end
+    ''')
+    r.execute_command("otherspace:SETF", "more", '''
+        function who() return "more-other" end
+        function call() return who() end
+    ''')
+    r.execute_command("otherspace:SETF", "mod", '''
+        local h = require("helpers")
+        local m = require("more")
+        function call()
+            return {h.who(), m.who()}
+        end
+    ''')
+    assert r.execute_command("SETF", "requses", '''
+        local g = require("otherspace.mod")
+        function call() return g.call() end
+    ''') == b"OK"
+    got = r.execute_command("requses")
+    assert got == [b"from-other", b"more-other"], got
+
+    # space half keeps its case
+    e = refused("SETF", "reqcase",
+                'local g = require("OTHERSPACE.mod")\nfunction call() return 1 end')
+    assert e and "no function" in e.lower(), f"said: {e}"
+    assert r.execute_command("SETF", "reqcase", '''
+        local g = require("otherspace.mod")
+        function call() return g.call() end
+    ''') == b"OK"
+    assert r.execute_command("reqcase") == [b"from-other", b"more-other"]
+
+    # a dotted miss does not pick up a global of the same name
+    e = refused("SETF", "reqghost",
+                'local g = require("otherspace.ghost")\nfunction call() return 1 end')
+    assert e and "ghost" in e.lower(), f"said: {e}"
+
+    # an unknown space is not created
+    assert r.execute_command("KSPACE", "EXIST", "nosuchreq") == 0
+    e = refused("SETF", "reqnosuch",
+                'local g = require("nosuchreq.mod")\nfunction call() return 1 end')
+    assert e, f"said: {e}"
+    assert r.execute_command("KSPACE", "EXIST", "nosuchreq") == 0, \
+        "require of an unknown space must not build one"
+
+    # unqualified require still falls through to a global
+    r.execute_command("emptyreq:SETF", "reqglob", '''
+        local h = require("helpers")
+        function call() return h.who() end
+    ''')
+    assert r.execute_command("emptyreq:reqglob") == b"from-default"
+
+    r.execute_command("REMF", "requses")
+    r.execute_command("REMF", "reqcase")
+    r.execute_command("REMF", "ghost")
+    r.execute_command("REMF", "helpers")
+    for n in ("mod", "more", "helpers"):
+        r.execute_command("otherspace:REMF", n)
+    r.execute_command("emptyreq:REMF", "reqglob")
+
     # --- barch.call, into the ordinary commands -------------------------------------
     assert r.execute_command("SETF", "roundtrip", '''
         function call(...)
@@ -1251,6 +1320,7 @@ finally:
               "r_ok", "r_nested", "laterfn", "dotted", "exactly2", "atleast1",
               "setsglobal", "readsglobal", "version", "helpers", "usesHelpers",
               "usesUpper", "usesMissing", "cyclea", "cycleb", "selfref",
+              "requses", "reqcase", "reqghost", "reqnosuch", "reqglob", "ghost",
               "roundtrip", "counterup", "readsmany", "survives",
               "ref_block", "ref_async", "ref_multi", "ref_unknown",
               "myGetrange", "myCount", "myKeys", "myBounds", "mySpace", "myHuge",

@@ -7790,3 +7790,24 @@ The parser already split colon first, then the dot, so
 the combined form was missing from the test.
 
 Covered by the same `test/functiontest.py` block as 154.
+
+## 156. Space-aware require [28-08-2026]
+
+*Was `TODO.md` entry 162.*
+
+`require("HNSW.graph")` loads GRAPH from HNSW. A nested
+`require("helpers")` stays in HNSW (the dotted require pushes that
+space, and only that frame pops, including on error). Function names
+cannot contain `.`, so the split is unambiguous.
+
+The first cut folded the whole string, cached under the caller's
+space with the unsplit name, popped the stack on every require, and
+`get_keyspace` created a space on a miss. Now: split before folding
+(space case is kept), the compile key is `(space, name)`, unknown
+spaces are not created (`is_keyspace`), and a dotted miss does not
+fall through to a global of the same name. Unqualified require still
+does: this space, then the default.
+
+Covered by `test/functiontest.py`: two nested helpers via
+`otherspace.mod`, case of the space half, no global ghost, no space
+created for `nosuchreq.mod`, and unqualified fallback from `emptyreq`.

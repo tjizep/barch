@@ -896,4 +896,6 @@
 
 161. [Done] MYSPACE:HNSW.SET is colon then dot [28-08-2026] Nr 155 62b2324
 
+162. [Done] Space-aware require [28-08-2026] Nr 156 bea392b
+
 

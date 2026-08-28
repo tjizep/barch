@@ -36,8 +36,9 @@ namespace functions {
      *
      * `from_space` is the part before the dot in `KS1.PRINT_NAME`, empty when the name
      * carried none. An empty one resolves in the selected space and then in
-     * `configuration`, where the globals live. False means no such function, which the
-     * dispatcher answers as an unknown command exactly as it did before.
+     * the default space, where the globals live. A dotted name is always this
+     * lookup, even when the name is a builtin - `HNSW.SET` is the stored function,
+     * `HNSW:SET` is SET. See TODO 160.
      */
     /**
      * Returns what to run for `name`, or null if there is no such function.

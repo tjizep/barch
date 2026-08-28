@@ -96,7 +96,10 @@ static void close_counted_state(lua_State* L) {
  * VM would need saving and restoring around it.
  */
 struct running_call {
+    /** the space the function was loaded from, which is where require looks */
     std::string space;
+    /** the space the call is running against - barch.store / barch.current */
+    std::string running;
 };
 
 static void interrupt(lua_State* L, int gc) {
@@ -1332,6 +1335,42 @@ static int space_namecall(lua_State* L) {
     return 0;
 }
 
+/** push a space handle around an already-open store_access */
+static int push_space_handle(lua_State* L, space_state* st, const store_access* store) {
+    auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
+        [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
+    new (h) space_handle();
+    h->st = st;
+    h->store = store;
+    lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
+/*
+ * barch.current() - the space this call is running against, as a space handle.
+ *
+ * `barch.store` is the same data with the older method table. This is the handle
+ * `barch.space.NAME` would give you if you already knew the name. See TODO 160.
+ */
+static int current_space_handle(lua_State* L) {
+    space_state* st = state_of(L);
+    if (!st || !st->store)
+        luaL_error(L, "FUNCTION barch.current is not available here");
+    return push_space_handle(L, st, st->store);
+}
+
+/** barch.running() - the canonical name of that space, empty for the default */
+static int running_space_name(lua_State* L) {
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    if (!rc) {
+        lua_pushlstring(L, "", 0);
+        return 1;
+    }
+    lua_pushlstring(L, rc->running.data(), rc->running.size());
+    return 1;
+}
+
 /** barch.space.NAME - the handle, built once per space per call */
 static int space_open(lua_State* L) {
     size_t n = 0;
@@ -1350,14 +1389,7 @@ static int space_open(lua_State* L) {
             luaL_error(L, "FUNCTION no key space called %s", name.c_str());
         have = st->opened->emplace(name, std::move(opened)).first;
     }
-    auto* h = static_cast<space_handle*>(lua_newuserdatadtor(L, sizeof(space_handle),
-        [](void* p) { static_cast<space_handle*>(p)->~space_handle(); }));
-    new (h) space_handle();
-    h->st = st;
-    h->store = &have->second;
-    lua_getfield(L, LUA_REGISTRYINDEX, "barch.space.meta");
-    lua_setmetatable(L, -2);
-    return 1;
+    return push_space_handle(L, st, &have->second);
 }
 
 /*
@@ -1647,6 +1679,10 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "store");
     lua_pushcfunction(L, art_open, "art");
     lua_setfield(L, -2, "art");
+    lua_pushcfunction(L, current_space_handle, "current");
+    lua_setfield(L, -2, "current");
+    lua_pushcfunction(L, running_space_name, "running");
+    lua_setfield(L, -2, "running");
 
     // a key space read and written as a value - see TODO 98 F2
     lua_newtable(L);
@@ -1977,6 +2013,7 @@ void start_function(const std::string& space, const std::string& name,
     }
     space_state* st = job->st;
     job->scope.space = space;
+    job->scope.running = job->iface->running_in;
     st->load = &job->iface->load;
 
     // into the state's buffer rather than a new string: assign keeps the capacity,

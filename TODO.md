@@ -892,4 +892,8 @@
 
 159. [Done] Non-luau checkout files become keys [27-08-2026] Nr 153 0e88261
 
+160. [Done] Colon is the builtin, a dotted name is the stored function [28-08-2026] Nr 154 62b2324
+
+161. [Done] MYSPACE:HNSW.SET is colon then dot [28-08-2026] Nr 155 62b2324
+
 

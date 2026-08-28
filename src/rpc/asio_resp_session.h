@@ -289,17 +289,18 @@ namespace barch {
                 // was never checked again - harmless while rights were global, and
                 // wrong the moment they vary by key space: `KS1:GET` then `KS2:GET`
                 // is one name and two answers. See TODO 135.
-                if (ic != barch_functions->end()
-                    && !is_authorized(ic->second.cats, caller.get_space_acl())) {
-                    redis::rwrite(ostream, error{"not authorized"});
-                    return;
-                }
-                if (ic == barch_functions->end()) {
-                    // not a built-in. It may still be a stored function - see TODO 98.
-                    // Deliberately not cached alongside `ic`: a name that missed once
-                    // would otherwise stay unknown for the life of the session, and
-                    // SETF followed by a call on the same connection would fail for a
-                    // reason that has nothing to do with the function
+                //
+                // A dotted name is never a builtin. HNSW.SET is the stored function
+                // SET in HNSW, running against the current space; HNSW:SET (colon)
+                // is the builtin SET in HNSW. Builtins win only when there is no
+                // dot. See TODO 160.
+                const bool dotted = !fn_space.empty();
+                if (dotted || ic == barch_functions->end()) {
+                    // a stored function - see TODO 98. Deliberately not cached
+                    // alongside `ic`: a name that missed once would otherwise stay
+                    // unknown for the life of the session, and SETF followed by a
+                    // call on the same connection would fail for a reason that has
+                    // nothing to do with the function
                     const barch_function* fn = nullptr;
                     if (!is_authorized(function_cats(), caller.get_space_acl())) {
                         redis::rwrite(ostream, error{"not authorized"});
@@ -326,6 +327,9 @@ namespace barch {
                     } else {
                         redis::rwrite(ostream, error{"unknown command"});
                     }
+                } else if (!is_authorized(ic->second.cats, caller.get_space_acl())) {
+                    redis::rwrite(ostream, error{"not authorized"});
+                    return;
                 } else {
                     auto &f = ic->second.call;
                     ++ic->second.calls;

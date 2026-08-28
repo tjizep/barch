@@ -54,11 +54,11 @@ try:
     e = refused("SETF", "noentry", 'function other() return 1 end')
     assert e and "call" in e, f"the refusal should name call(), said: {e}"
 
-    # a name that is already a command. Built-ins are never overloaded
-    e = refused("SETF", "GET", GREET)
-    assert e and "command" in e, f"SETF GET should say the name is a command, said: {e}"
-    e = refused("SETF", "get", GREET)
-    assert e, "the built-in check is case insensitive"
+    # a stored GET does not overload GET. The dotted form is how you call it.
+    assert r.execute_command("SETF", "GET", GREET) == b"OK"
+    assert r.execute_command("GET", "no-such-key") is None, \
+        "bare GET must stay the builtin"
+    r.execute_command("REMF", "GET")
 
     # --- functions and ordinary keys are different ranges ---------------------------
     r.execute_command("SET", "greet", "an ordinary value")
@@ -182,6 +182,41 @@ try:
     e = refused("nosuchspace.dotted", "x")
     assert e and "unknown command" in e.lower(), f"said: {e}"
     r.execute_command("fspace:REMF", "dotted")
+
+    # colon is the builtin in that space; a dotted name is the stored function
+    # against whatever space is current. See TODO 160.
+    assert r.execute_command("fspace:SETF", "SET", '''
+        function call(v)
+            barch.store.set("fromfn", v)
+            barch.current().seen = "yes"
+            return barch.running()
+        end
+    ''') == b"OK"
+    assert r.execute_command("fspace:SETF", "CLOSEST", '''
+        function call(q)
+            return barch.store.get("fromfn")
+        end
+    ''') == b"OK"
+    r.execute_command("USE", "myspace")
+    assert r.set("a", "b") is True
+    assert r.get("a") == b"b"
+    got = r.execute_command("fspace.SET", "alpha")
+    assert got == b"myspace" or (isinstance(got, bytes) and got.decode() == "myspace"), got
+    assert r.get("fromfn") == b"alpha"
+    assert r.get("seen") == b"yes"
+    assert r.execute_command("fspace:SET", "alpha", "beta") == b"OK"
+    assert r.execute_command("fspace:GET", "alpha") == b"beta"
+    assert r.get("alpha") is None, "colon SET must not have written in the current space"
+    assert r.execute_command("fspace.CLOSEST", "alfa") == b"alpha"
+    r.execute_command("USE", "")
+    # colon then dot, no USE: myspace:fspace.SET runs fspace's SET in myspace
+    got = r.execute_command("myspace:fspace.SET", "gamma")
+    assert got == b"myspace", got
+    assert r.get("fromfn") is None, "must not have written in the default space"
+    assert r.execute_command("myspace:GET", "fromfn") == b"gamma"
+    assert r.execute_command("myspace:fspace.CLOSEST", "gmma") == b"gamma"
+    r.execute_command("fspace:REMF", "SET")
+    r.execute_command("fspace:REMF", "CLOSEST")
 
     # --- arity, declared by the script and checked before it runs -------------------
     assert r.execute_command("SETF", "exactly2",

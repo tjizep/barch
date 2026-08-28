@@ -1,10 +1,11 @@
 local g = require("graph")
 
--- ADD is already a barch command, so the insert is PUT
+-- insert. SET is a builtin, so HNSW:SET is ordinary SET in HNSW;
+-- HNSW.SET is this function, against the current space.
 function call(...)
     local parts = {...}
     if #parts == 0 then
-        return {err = "HNSW.PUT needs a word or phrase"}
+        return {err = "HNSW.SET needs a word or phrase"}
     end
     local word = table.concat(parts, " ")
     local id, added

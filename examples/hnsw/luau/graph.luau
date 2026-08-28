@@ -1,4 +1,4 @@
--- HNSW graph helpers. Required by ADD and CLOSEST.
+-- HNSW graph helpers. Required by SET and CLOSEST.
 -- The live graph lives in the caller's space under hnsw.* keys.
 -- Candidate and found-sets during a walk are private ART trees (barch.art).
 
@@ -92,7 +92,7 @@ function levenshtein(a, b)
     end
     return prev[lb]
 end
-
+local distance = levenshtein
 -- ART priority queue keyed by "dist id" so equal distances still order
 local function pq_key(dist, id)
     return tostring(dist) .. " " .. tostring(id)
@@ -119,7 +119,7 @@ function greedy(q, start, layer)
     local curr = start
     local cw = word_of(curr)
     if cw == nil then return curr end
-    local cd = levenshtein(q, cw)
+    local cd = distance(q, cw)
     local moved = true
     while moved do
         moved = false
@@ -128,7 +128,7 @@ function greedy(q, start, layer)
             local nb = nbs[i]
             local nw = word_of(nb)
             if nw ~= nil then
-                local d = levenshtein(q, nw)
+                local d = distance(q, nw)
                 if d < cd then
                     curr, cd, moved = nb, d, true
                 end
@@ -151,7 +151,7 @@ function search_layer(q, eps, ef, layer)
         visited[id] = true
         local w = word_of(id)
         if w == nil then return end
-        local d = levenshtein(q, w)
+        local d = distance(q, w)
         local far = W:max()
         if W:size() < ef or far == nil or d < pq_dist(far) then
             local pk = pq_key(d, id)
@@ -205,11 +205,11 @@ function select_heuristic(q, ids, m)
         if #selected >= m then break end
         local c = ids[i]
         local cw = word_of(c)
-        local dq = levenshtein(q, cw or "")
+        local dq = distance(q, cw or "")
         local keep = true
         for j = 1, #selected do
             local sw = word_of(selected[j])
-            if levenshtein(cw or "", sw or "") < dq then
+            if distance(cw or "", sw or "") < dq then
                 keep = false
                 break
             end
@@ -238,7 +238,7 @@ function prune(id, layer, cap)
     local Q = barch.art()
     for i = 1, #nbs do
         local nb = nbs[i]
-        local d = levenshtein(w, word_of(nb) or "")
+        local d = distance(w, word_of(nb) or "")
         Q:set(pq_key(d, nb), nb)
     end
     local keep = {}
@@ -342,7 +342,7 @@ function closest(q, k)
     if n > #found then n = #found end
     for i = 1, n do
         local id = found[i]
-        out[i] = {word_of(id), levenshtein(q, word_of(id) or "")}
+        out[i] = {word_of(id), distance(q, word_of(id) or "")}
     end
     return out
 end

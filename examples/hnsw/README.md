@@ -13,6 +13,10 @@ From a RelWithDebInfo (or Release) build, with redis-py installed:
 
 ```
 cd examples/hnsw
+python3 -m venv ./venv
+./venv/bin/pip install ../../cmake-build-release/
+source ./venv/bin/activate
+pip install redis
 python3 deploy.py --start --demo
 ```
 
@@ -24,21 +28,25 @@ Without `--start`, the same script talks to whatever is already on
 
 ## Commands
 
-Once loaded, the functions are commands. The colon form runs in the
-`HNSW` space, which is where the graph lives (one shard):
+Once loaded, the functions are commands. A colon is the builtin in
+that space (`HNSW:SET a b` is ordinary SET). A dot is the stored
+function, running against the current space:
 
 ```
-HNSW:PUT hello
-HNSW:PUT hallo
-HNSW:CLOSEST helo
-HNSW:CLOSEST hello 3
-HNSW:TUNE
+USE HNSW
+HNSW.SET hello
+HNSW.SET hallo
+HNSW.CLOSEST helo
+HNSW.CLOSEST hello 3
+HNSW.TUNE
 ```
 
-`ADD` is already a barch command, so insert is `PUT`. The dotted form
-`HNSW.PUT` is the same function, but it writes the graph in *the
-current space*. That is the usual dotted-name rule: definition comes
-from `HNSW`, data from wherever the call ran.
+Insert is `SET`. It does not overload SET: `HNSW:SET "alpha" "beta"`
+still writes the key `alpha` in `HNSW`, while `HNSW.SET "alpha"`
+builds the graph in whatever space `USE` selected. `CLOSEST` is not
+a builtin, so `HNSW:CLOSEST` and `HNSW.CLOSEST` both run the
+function; the colon one searches `HNSW`, the dotted one searches
+here.
 
 `CLOSEST` with one argument answers the nearest word. A trailing
 integer is how many to return, as a flat list of word, distance, …
@@ -78,5 +86,5 @@ raised.
 ## Files
 
 - `luau/graph.luau` — distance, ART queues, insert and search
-- `luau/put.luau` / `closest.luau` / `tune.luau` — the commands
+- `luau/set.luau` / `closest.luau` / `tune.luau` — the commands
 - `deploy.py` — SETF in order (`graph` first, because the others require it)

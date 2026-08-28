@@ -29,6 +29,7 @@ namespace {
      *
      * The name is converted with noint set, so a function called "123" stays a string
      * rather than encoding as an integer and landing somewhere else in the order.
+     * A function may share a name with a builtin; the dotted form is how you call it.
      */
     art::value_type function_key(composite& q, art::value_type name) {
         return q.create(art::ts_function, {conversion::convert(name, true)});
@@ -62,15 +63,6 @@ namespace {
         return q.create(art::ts_function, {art::ts_end});
     }
 
-    /** a name that is already a command cannot become a function - see TODO 98 */
-    bool is_builtin_name(art::value_type name) {
-        std::string upper(name.chars(), name.size);
-        for (auto& ch : upper) {
-            ch = (char) toupper((unsigned char) ch);
-        }
-        auto table = functions_by_name();
-        return table->find(upper) != table->end();
-    }
 }
 
 namespace barch {
@@ -845,10 +837,8 @@ namespace functions {
             err = "a function needs a name";
             return false;
         }
-        if (is_builtin_name(raw)) {
-            err = "that name is already a command";
-            return false;
-        }
+        // a stored SET does not overload SET. The dotted form HNSW.SET is how you
+        // call it; HNSW:SET and a bare SET stay the builtin. See TODO 160.
         auto folded = upper_name(raw);
         if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
                                               loader_for(space), err))
@@ -1117,7 +1107,8 @@ extern "C" {
  *
  * Store a Luau function under name. The source is compiled before anything is written,
  * so a script that will not compile is refused rather than saved as a command that
- * cannot run.
+ * cannot run. A name that is already a builtin is allowed: SET stays SET, and the
+ * stored one is reached as SPACE.SET. See TODO 160.
  */
 int SETF(caller& call, const arg_t& argv) {
     if (argv.size() != 3)

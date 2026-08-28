@@ -5,7 +5,8 @@
 
 Then, from redis-cli -p 14000:
 
-    HNSW.PUT hello
+    USE HNSW
+    HNSW.SET hello
     HNSW.CLOSEST helo
     HNSW.TUNE fast
 """
@@ -19,8 +20,8 @@ LUAU = os.path.join(HERE, "luau")
 SPACE = "HNSW"
 PORT = 14000
 
-# GRAPH first: ADD/CLOSEST/TUNE require it at SETF time
-ORDER = ("graph.luau", "put.luau", "closest.luau", "tune.luau")
+# GRAPH first: SET/CLOSEST/TUNE require it at SETF time
+ORDER = ("graph.luau", "set.luau", "closest.luau", "tune.luau")
 
 DEMO_WORDS = [
     "cat", "cats", "car", "cart", "card", "care",
@@ -71,23 +72,24 @@ def deploy(r):
 
 
 def demo(r):
-    # a new connection so SETF from this process is what we run
+    # dotted form: definition from HNSW, data in the current space
+    r.execute_command("USE", SPACE)
     t0 = time.time()
     for w in DEMO_WORDS:
-        r.execute_command(f"{SPACE}:PUT", w)
+        r.execute_command(f"{SPACE}.SET", w)
     dt = time.time() - t0
     print(f"added {len(DEMO_WORDS)} words in {dt:.3f}s")
-    stats = r.execute_command(f"{SPACE}:TUNE")
+    stats = r.execute_command(f"{SPACE}.TUNE")
     print("stats count,M,efc,efs,heur,entry:", stats)
     ok = True
     for q, want in DEMO_QUERIES:
-        got = r.execute_command(f"{SPACE}:CLOSEST", q)
+        got = r.execute_command(f"{SPACE}.CLOSEST", q)
         if isinstance(got, bytes):
             got = got.decode()
         print(f"  CLOSEST {q!r} -> {got!r}  (want {want!r})")
         if got != want:
             ok = False
-    top = r.execute_command(f"{SPACE}:CLOSEST", "hello", "3")
+    top = r.execute_command(f"{SPACE}.CLOSEST", "hello", "3")
     print("  CLOSEST hello 3 ->", top)
     return ok
 

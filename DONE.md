@@ -7754,3 +7754,39 @@ Covered by the same `test/functionsynctest.py`: a root `notes.md`,
 `hnsw/words.txt`, nested `hnsw/data/foo.json`, a leftover user key
 in each space, a failed sync that leaves `notes.md` alone, and REM
 of the dropped files.
+
+## 154. Colon is the builtin, a dotted name is the stored function [28-08-2026]
+
+*Was `TODO.md` entry 160.*
+
+A stored function may share a name with a builtin. SETF no longer
+refuses `SET` or `GET`. Dispatch keeps them apart:
+
+- `SET` and `HNSW:SET` are the builtin, in the current space or in
+  `HNSW`. The colon still only switches `call.kspace()`.
+- `HNSW.SET` is always the stored function defined in `HNSW`, and it
+  runs against whatever space is current. A dotted name that does not
+  resolve is an unknown command, even if the stem is a builtin.
+
+Luau can see that current space: `barch.running()` is its canonical
+name (empty for the default), and `barch.current()` is the same kind
+of handle as `barch.space.NAME`. `barch.store` was already bound
+there; this is the handle and the name that were missing.
+
+The HNSW example's insert is `SET` again, called as `HNSW.SET`.
+`HNSW:SET a b` remains ordinary SET in that space.
+
+Covered by `test/functiontest.py`: SETF GET leaves GET alone,
+`USE myspace` then SET / `fspace.SET` / `fspace:SET` / `fspace.CLOSEST`
+as in the five-step example.
+
+## 155. `MYSPACE:HNSW.SET` is colon then dot [28-08-2026]
+
+*Was `TODO.md` entry 161.*
+
+The parser already split colon first, then the dot, so
+`myspace:fspace.SET gamma` from the default space writes `fromfn` in
+`myspace` and leaves the default space alone. No dispatch change;
+the combined form was missing from the test.
+
+Covered by the same `test/functiontest.py` block as 154.

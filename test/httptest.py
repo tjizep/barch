@@ -97,7 +97,34 @@ function transport()
         kind = "http",
         port = 18088,
         bind = "127.0.0.1",
-        keys = {"ECHO", "PAGE", "SESS"},
+        keys = {"ECHO", "PAGE", "SESS", "SLOW"},
+    }
+end
+'''
+
+# a handler that stays busy long enough for STATUS to catch it running - TODO 181.
+# No clock in the sandbox, so the wait is a loop; the count is well inside the
+# function deadline but takes a few hundred ms.
+SLOW = r'''
+function call()
+    return "slow"
+end
+
+function spin(req, res)
+    local x = 0.0
+    for i = 1, 12000000 do
+        x = x + i % 7
+    end
+    res.body = tostring(x)
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/slow",
+        methods = {GET = spin},
+        send = "text/plain",
     }
 end
 '''
@@ -156,6 +183,7 @@ try:
     assert r.execute_command("SETF", "httpconf", CONF) == b"OK"
     assert r.execute_command("SETF", "plain", PLAIN) == b"OK"
     assert r.execute_command("SETF", "sess", SESS) == b"OK"
+    assert r.execute_command("SETF", "slow", SLOW) == b"OK"
     # no transport: still an ordinary function
     assert r.execute_command("plain") == b"plain"
 
@@ -168,6 +196,7 @@ try:
     assert "ECHO /echo POST" in text, started
     assert "PAGE /page GET" in text, started
     assert "SESS /sess GET" in text, started
+    assert "SLOW /slow GET" in text, started
     assert "PLAIN" not in text, started
 
     # Crow bind can take a beat after START returns
@@ -214,6 +243,46 @@ try:
 
     st = r.execute_command("HTTP", "STATUS")
     assert any(b"ECHO" in x for x in st), st
+
+    # TODO 181: the pool counts and the Luau bytes those VMs hold
+    def status_fields():
+        out = {}
+        for line in r.execute_command("HTTP", "STATUS"):
+            text = line.decode()
+            if "=" in text:
+                k, _, v = text.partition("=")
+                out[k] = v
+        return out
+
+    fields = status_fields()
+    vms = int(fields["vms"])
+    assert 2 <= vms <= 8, fields
+    assert int(fields["idle"]) == vms and int(fields["executing"]) == 0, fields
+    # every VM in the pool has a state with the same functions compiled in, so the
+    # figure is well past a single state's ~50kB but nothing like a gigabyte
+    idle_bytes = int(fields["luau_bytes"])
+    assert idle_bytes > 50 * 1024, fields
+
+    # and the executing count moves while a handler is actually in flight
+    with ThreadPoolExecutor(max_workers=1) as spinner:
+        fut = spinner.submit(http_call, "GET", "/slow", None, None, 20)
+        seen = 0
+        peak = 0
+        for _ in range(400):
+            f = status_fields()
+            peak = max(peak, int(f["executing"]))
+            if int(f["executing"]) >= 1:
+                seen += 1
+                assert int(f["idle"]) == vms - int(f["executing"]), f
+                break
+            if fut.done():
+                break
+            time.sleep(0.005)
+        status, body, _ = fut.result()
+    assert status == 200, (status, body)
+    assert seen == 1, f"never caught the slow handler running, peak={peak}"
+    after = status_fields()
+    assert int(after["executing"]) == 0 and int(after["idle"]) == vms, after
 
     workers = 8
     per_worker = 20

@@ -92,6 +92,24 @@ HTTP STATUS
 HTTP STOP
 ```
 
+`HTTP STATUS` also reports the VM pool, since handlers run on a pool of
+Luau states rather than one:
+
+```
+port=18088
+bind=127.0.0.1
+ssl=off
+vms=8
+executing=1
+idle=7
+luau_bytes=4699368
+ECHO /echo POST
+```
+
+`executing` plus `idle` is always `vms`. `luau_bytes` is what this
+space's VMs hold, counted by the allocator the states are built with —
+the whole-server figure is `used_memory_luau` on INFO MEMORY.
+
 SSL is optional on the same table: `ssl = {cert = "...", key = "...",
 proto = "TLS"}`. Cert and key are file paths, or PEM if they start
 with `-----BEGIN`.

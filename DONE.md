@@ -8072,3 +8072,48 @@ usual Redis cookie-plus-key pattern.
 
 Covered by `test/httptest.py` cookie round-trip (n=1 then n=2) and
 `examples/http/luau/session.luau`.
+
+## 174. HTTP session statistics [30-08-2026]
+
+*Was `TODO.md` entry 181.*
+
+`HTTP STATUS` now reports the VM pool alongside the bind options:
+`vms`, `executing`, `idle` and `luau_bytes`. Both counts are read
+under `pool_mu` in one go, so the pair always adds up to the pool
+rather than being two samples of a moving target. `executing` is
+`pool_size - idle`, which is exact because a slot is only off the
+idle list while a handler has it — a request waiting for a free VM is
+not counted as executing, which is right: it is queued, not running.
+
+The bytes are the interesting part. DONE 151 counts Luau memory in the
+allocator instead of asking `lua_gc(LUA_GCCOUNT)`, because a state
+belongs to the thread running it and reading a live collector from the
+thread serving INFO is a race. That reasoning applies here word for
+word — STATUS answers on a RESP thread while the VMs run on Crow
+threads — so the same allocator does the work. `luau_alloc` now takes
+its `ud`, and `make_function_states` has an overload that hands the
+state a shared counter to add to as well as the global one. Every slot
+in a space's pool gets the same counter, so the figure is what that
+space's VMs hold. The counter is kept alive by the states cache, so it
+is still there to be decremented when a state closes.
+
+The global figure is unchanged and still on INFO MEMORY as
+`used_memory_luau`; this is the per-space share of it.
+
+Measured on an eight-slot pool: `vms=8 executing=0 idle=8
+luau_bytes=4699368` at rest, so about 590kB a state rather than the
+~50kB DONE 150 quotes for a bare one — the nk, simdjson and crow
+tables plus the compiled functions are the difference, and they are
+paid per slot.
+
+Covered by `test/httptest.py`: the fields at rest, then a `/slow`
+resource that spins ~440ms while the test polls STATUS and catches
+`executing=1 idle=7`, then back to `0` and `8` once it returns. The
+sandbox has no clock, so the wait is an arithmetic loop; it is well
+inside the function deadline, which for an HTTP handler is the only
+cap that applies since `http_vm_call` gives the instruction budget
+away.
+
+Full suite 75 of 75. `TestRangeShardRouting` failed once under load
+and passed on its own and on a second full run, and has nothing to do
+with HTTP or Luau.

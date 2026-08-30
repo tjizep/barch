@@ -940,13 +940,6 @@
 
 180. [Done] HTTP Luau VM pool [30-08-2026] Nr 172 6da0969
 
-181. HTTP session statistics: how many Luau VMs are currently executing
-    a handler, how many sit idle in the pool, and Luau memory if we can
-    get it. Memory is already counted in `statistics::luau_bytes` by the
-    custom allocator (`luau_alloc` in luau_driver.cpp) and shows up on
-    INFO as `used_memory_luau`; HTTP STATUS (or a similar surface)
-    should report the VM counts and that figure. Settle with HTTP
-    STATUS after START showing executing, idle, and bytes, and the
-    executing count moving while a slow handler is in flight.
+181. [Done] HTTP session statistics [30-08-2026] Nr 174 4a1c729
 
 

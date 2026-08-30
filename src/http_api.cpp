@@ -90,6 +90,10 @@ struct space_http {
     std::mutex pool_mu;
     std::condition_variable pool_cv;
     std::vector<std::shared_ptr<http_vm_slot>> idle;
+    /** how many slots the pool was built with, so executing = pool_size - idle */
+    size_t pool_size{0};
+    /** what this space's VMs hold, counted by the Luau allocator - TODO 181 */
+    std::shared_ptr<std::atomic<uint64_t>> luau_bytes{std::make_shared<std::atomic<uint64_t>>(0)};
 };
 
 std::shared_ptr<http_vm_slot> pop_vm(space_http& s) {
@@ -114,9 +118,10 @@ void push_vm(space_http& s, std::shared_ptr<http_vm_slot> v) {
 
 std::shared_ptr<http_vm_slot> make_vm_slot(const std::string& space,
                                            const barch::foreign::call_interface_ptr& iface,
-                                           uint64_t deadline_ms) {
+                                           uint64_t deadline_ms,
+                                           std::shared_ptr<std::atomic<uint64_t>> bytes) {
     auto slot = std::make_shared<http_vm_slot>();
-    slot->vm.cache = barch::foreign::make_function_states();
+    slot->vm.cache = barch::foreign::make_function_states(std::move(bytes));
     slot->vm.space = space;
     slot->vm.deadline_ms = deadline_ms ? deadline_ms : 5000;
     slot->vm.iface = iface;
@@ -275,7 +280,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
     };
     iface->store = barch::functions::store_for_owner(space);
     uint64_t deadline = space->function_deadline();
-    auto slot0 = make_vm_slot(canon, iface, deadline);
+    auto slot0 = make_vm_slot(canon, iface, deadline, server->luau_bytes);
 
     std::vector<std::string> want = keys;
     if (!httpkey.empty()) {
@@ -420,9 +425,10 @@ std::string start_space_http(const barch::key_space_ptr& space,
         pool = 2;
     if (pool > 8)
         pool = 8;
+    server->pool_size = pool;
     server->idle.push_back(std::move(slot0));
     for (unsigned i = 1; i < pool; ++i) {
-        auto slot = make_vm_slot(canon, iface, deadline);
+        auto slot = make_vm_slot(canon, iface, deadline, server->luau_bytes);
         for (const auto& r : server->routes) {
             std::string load_err;
             if (!load_resource_into(*slot, r.name, sources[r.name], load_err)) {
@@ -559,10 +565,23 @@ int status_space_http(caller& call, const barch::key_space_ptr& space) {
     }
     if (!server || !server->running.load())
         return call.push_simple("stopped");
+    // read both under the one lock, so the pair adds up to the pool
+    size_t idle = 0;
+    size_t pool_size = 0;
+    {
+        std::lock_guard<std::mutex> g(server->pool_mu);
+        idle = server->idle.size();
+        pool_size = server->pool_size;
+    }
+    size_t executing = pool_size > idle ? pool_size - idle : 0;
     call.start_array();
     call.push_string("port=" + std::to_string(server->port));
     call.push_string("bind=" + server->bind);
     call.push_string(std::string("ssl=") + (server->ssl_proto.empty() ? "off" : server->ssl_proto));
+    call.push_string("vms=" + std::to_string(pool_size));
+    call.push_string("executing=" + std::to_string(executing));
+    call.push_string("idle=" + std::to_string(idle));
+    call.push_string("luau_bytes=" + std::to_string(server->luau_bytes->load()));
     for (const auto& r : server->routes) {
         std::string line = r.name + " " + r.route;
         for (size_t i = 0; i < r.methods.size(); ++i) {

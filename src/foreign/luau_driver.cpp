@@ -59,11 +59,19 @@ static constexpr uint64_t locked_region_insns = 100000;
  * per-session function states, the foreign fill states, and the scratch one a SETF
  * compile check uses - and it sees them live.
  */
-static void* luau_alloc(void*, void* ptr, size_t osize, size_t nsize) {
-    if (nsize > osize)
+static void* luau_alloc(void* ud, void* ptr, size_t osize, size_t nsize) {
+    // a state built for a pool also reports into that pool's own counter, so HTTP
+    // STATUS can say what its VMs hold without reading a live collector - TODO 181
+    auto* local = static_cast<std::atomic<uint64_t>*>(ud);
+    if (nsize > osize) {
         statistics::luau_bytes += nsize - osize;
-    else
+        if (local)
+            *local += nsize - osize;
+    } else {
         statistics::luau_bytes -= osize - nsize;
+        if (local)
+            *local -= osize - nsize;
+    }
     if (nsize == 0) {
         free(ptr);
         return nullptr;
@@ -72,8 +80,8 @@ static void* luau_alloc(void*, void* ptr, size_t osize, size_t nsize) {
 }
 
 /** a state built the way barch builds them, counted and countable */
-static lua_State* new_counted_state() {
-    lua_State* L = lua_newstate(luau_alloc, nullptr);
+static lua_State* new_counted_state(std::atomic<uint64_t>* local = nullptr) {
+    lua_State* L = lua_newstate(luau_alloc, local);
     if (L)
         ++statistics::luau_states;
     return L;
@@ -591,6 +599,8 @@ struct space_state {
 };
 
 struct function_states {
+    /** where this cache's Luau bytes are counted as well, if anyone asked - TODO 181 */
+    std::shared_ptr<std::atomic<uint64_t>> bytes{};
     /*
      * One state for the session, not one per space it touches - TODO 150.
      *
@@ -605,6 +615,12 @@ struct function_states {
 
 function_states_ptr make_function_states() {
     return std::make_shared<function_states>();
+}
+
+function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>> into) {
+    auto fs = std::make_shared<function_states>();
+    fs->bytes = std::move(into);
+    return fs;
 }
 
 // require and the state builder call each other: a state installs require, and require
@@ -1647,7 +1663,7 @@ static space_state* state_for(function_states& cache) {
     if (cache.only)
         return cache.only.get();
     auto st = std::make_unique<space_state>();
-    st->L = new_counted_state();
+    st->L = new_counted_state(cache.bytes.get());
     if (!st->L)
         return nullptr;
     lua_State* L = st->L;
@@ -2329,6 +2345,10 @@ bool compile_function(const std::string&, const std::string&, const std::string&
 struct function_states {};
 
 function_states_ptr make_function_states() {
+    return nullptr;
+}
+
+function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>>) {
     return nullptr;
 }
 

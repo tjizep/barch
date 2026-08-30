@@ -1,8 +1,10 @@
 #ifndef BARCH_FOREIGN_DRIVER_H
 #define BARCH_FOREIGN_DRIVER_H
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -44,6 +46,16 @@ bool luau_available();
 struct function_states;
 typedef std::shared_ptr<function_states> function_states_ptr;
 function_states_ptr make_function_states();
+/**
+ * The same, but every byte its Luau state allocates is added to `into` as well as to
+ * the global `statistics::luau_bytes`. The counter is shared and kept alive by the
+ * cache, so it is still there to be decremented when the state closes.
+ *
+ * Counted in the allocator rather than read out of the collector for the reason
+ * `luau_alloc` gives: a state belongs to the thread running it, and asking a live
+ * state how big it is from another thread is a race.
+ */
+function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>> into);
 
 /** how the driver asks for a function's source, by name.
  *  `space` empty means the function's own space. `exact` true (a dotted

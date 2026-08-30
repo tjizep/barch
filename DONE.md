@@ -7830,3 +7830,154 @@ do not share a compiled copy.
 
 Covered by `test/functionsynctest.py` AMOD/ZMOD, and
 `test/functiontest.py` still passing.
+
+## 158. NumKong f64/f32/f16/bf16 in Luau [30-08-2026]
+
+*Was `TODO.md` entry 164.*
+
+Stored functions now have NumKong scalars and `nk::vector` of those
+for f64, f32, f16, and bf16. Construct from a Lua number, then `+`
+`-` `*` `/` unary minus, and `==` `<` `<=`. Vectors are 1-based,
+`#v` is the length, `v * scalar` and `v * v` both work. No kernels,
+no GPU, no extra dtypes.
+
+The types live under `nk` (`nk.f32(3)`, `nk.f32.vector(1, 2)`,
+`nk.vector.f32({1, 2})`) and as globals (`nkf32`, `nkf32vector`,
+same pattern for f64/f16/bf16). That follows the C++ type names
+more than the Python `nk.zeros(..., dtype=...)` surface, which is
+built around tensors and kernels we are not wrapping yet.
+
+CMake clones NumKong on `main` (FetchContent without a tag tries
+`master`, and that branch does not exist). Their CMake is not
+run: it would ISA-probe at configure time and put Clang
+`-fmodules` on the INTERFACE target. We only need the headers.
+
+A few things that were not obvious from the library docs. Luau
+`lua_CFunction` is a function pointer, so the metamethods cannot
+capture the dtype; it is a template argument. `nk.f32(x)` is a
+table `__call`, so the first argument is the type table, not `x`.
+`#include "lauxlib.h"` pulls LuaJIT's copy because that include
+path is global; Luau puts `luaL_*` in `lualib.h`. And RESP2
+sends Luau `false` as nil, so the test checks truthiness rather
+than `== 0`.
+
+Covered by `test/nkluautest.py` (`TestNkLuau`).
+
+## 159. Luau nk vector slice [30-08-2026]
+
+*Was `TODO.md` entry 165.*
+
+`v:slice(start, stop)` copies a 1-based inclusive span. It follows
+`string.sub`: omitted stop is the end, negatives count from the
+end, and a stop past `#v` is clamped rather than an error.
+`nkf32vector(1, 2, 3):slice(1, 5)` is the whole vector;
+`slice(10, 20)` is empty. Indexing a single element still errors
+out of range.
+
+It is a copy, not a NumKong view, so the parent does not have to
+stay alive. No step.
+
+Covered by `test/nkluautest.py` `nkslice`.
+
+## 160. nk vectors are 0-based [30-08-2026]
+
+*Was `TODO.md` entry 166.*
+
+Entry 159 took `v:slice(1, 5)` as Lua `string.sub`. Slice is 0-based
+and half-open, like Python and NumKong `range`. Indexing went with
+it: `v[0]` is the first element, `v[-1]` the last. `v:slice(1, 5)`
+on `{1, 2, 3}` is `{2, 3}`; a stop past the end is still clamped.
+
+`#v` is still the length. A single index outside `[0, #v)` still
+errors.
+
+Covered by `test/nkluautest.py` `nkvec` and `nkslice`.
+
+## 161. nk vectors are 1-based like Luau [30-08-2026]
+
+*Was `TODO.md` entry 167.*
+
+Entry 160 made indexing and slice 0-based. Luau tables are 1-based, so
+that was the wrong default. `v[1]` is the first element again.
+`v:slice(start, stop)` is inclusive, like `string.sub`, and still
+clamps: `slice(1, 5)` on a length-3 vector is the whole thing.
+Negatives on slice still count from the end. A single index outside
+`[1, #v]` still errors.
+
+Covered by `test/nkluautest.py` `nkvec` and `nkslice`.
+
+## 162. nk vector conversion constructors [30-08-2026]
+
+*Was `TODO.md` entry 168.*
+
+`nkf32vector(v)` copies any of the four nk vectors into f32, element
+by element through a double. Same for f64, f16, and bf16, and for a
+scalar: `nkf16(nkf32(7))`. There is no `nkf8vector` yet; this cut is
+still only those four dtypes.
+
+Covered by `test/nkluautest.py` `nkconv`.
+
+## 163. nk vectors from a barch value buffer [30-08-2026]
+
+*Was `TODO.md` entry 169.*
+
+`v:buffer()` is a Luau buffer of the packed native bytes. The matching
+constructor takes a buffer or a binary string, so
+`nkf32vector(barch.store.get(k))` works after `barch.store.set(k, v:buffer())`.
+`store.set` accepts a buffer now; a returned buffer from a function is
+a bulk string. Length must be a multiple of the element size. Native
+endian.
+
+Covered by `test/nkluautest.py` `nkbuf`.
+
+## 164. nk vector dot, cosine, Euclidean [30-08-2026]
+
+*Was `TODO.md` entry 170.*
+
+Same-dtype methods: `v:dot(w)`, `v:euclidean(w)` (also `l2`), and
+`v:cosine(w)` (also `angular`). Cosine is NumKong's angular
+*distance*, `1 − ⟨a,b⟩ / (‖a‖‖b‖)`, not similarity. Results are Lua
+numbers, widened the way NumKong widens (f32/f16/bf16 into a wider
+float). Size mismatch is the same error as `+`.
+
+Covered by `test/nkluautest.py` `nkdist`.
+
+## 165. nk vector sum and average [30-08-2026]
+
+*Was `TODO.md` entry 171.*
+
+`v:sum()` and `v:average()` (also `mean`) are Lua numbers from
+NumKong `reduce_moments`. Empty vectors are 0.
+
+Covered by `test/nkluautest.py` `nksum`.
+
+## 166. Git function sync pin to a commit [30-08-2026]
+
+*Was `TODO.md` entry 172.*
+
+`functions_git_commit` pins the checkout. `off` (the default) still
+follows `functions_git_branch`. With a rev set, fetch+reset land on
+that commit and later origin commits do not apply until the pin
+moves. `FUNCTIONS SYNC <rev>` does the same for that one apply
+without changing the config. STATUS reports `pin=`.
+
+Covered by `test/functionsynctest.py` origin/clone pin, and
+`test/configtest.py` knows the new name.
+
+## 167. simdjson in Luau [30-08-2026]
+
+*Was `TODO.md` entry 173.*
+
+Stored functions get a `simdjson` global, shaped after
+[lua-simdjson](https://github.com/FourierTransformer/lua-simdjson):
+`parse` (string or buffer → table), `open` plus `:atPointer` / `:at`
+(JSON Pointer), `encode`, `null` as lightuserdata, and
+`activeImplementation`. `parseFile` / `openFile` are not there —
+stored functions do not read the disk.
+
+The amalgamated single header is FetchContent of simdjson `master`
+(`singleheader/simdjson.h` + `simdjson.cpp`), compiled as
+`simdjson_amalg` with their CMake left unrun. JSON null is
+`simdjson.null`, not Lua nil, so it survives a table round-trip.
+
+Covered by `test/simdjsontest.py`.

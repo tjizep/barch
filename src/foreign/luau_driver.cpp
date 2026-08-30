@@ -20,6 +20,8 @@
 #include "lua.h"
 #include "lualib.h"
 #include "luacode.h"
+#include "nk_luau.h"
+#include "simdjson_luau.h"
 #endif
 
 namespace barch {
@@ -187,6 +189,8 @@ static void open_safe(lua_State* L) {
     luaopen_integer(L);
     luaopen_buffer(L);
     luaopen_vector(L);
+    luaopen_nk(L);
+    luaopen_simdjson(L);
     lua_pushcfunction(L, blocked_require, "require");
     lua_setglobal(L, "require");
     lua_newtable(L);
@@ -756,9 +760,13 @@ static int store_set(lua_State* L) {
         return 0;
     }
     size_t vn = 0;
-    const char* v = lua_tolstring(L, 2, &vn);
+    const char* v = nullptr;
+    if (void* b = lua_tobuffer(L, 2, &vn))
+        v = static_cast<const char*>(b);
+    else
+        v = lua_tolstring(L, 2, &vn);
     if (!v)
-        luaL_error(L, "FUNCTION a key space holds strings and numbers");
+        luaL_error(L, "FUNCTION a key space holds strings, numbers, and buffers");
     std::string err;
     if (!s->set({k, n}, {v, vn}, err))
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
@@ -1162,7 +1170,7 @@ static int member_next(lua_State* L) {
             return 1;
         }
     }
-    const auto& kv = c->page[c->at++];
+    const auto& kv = c->page.at(c->at++);
     lua_pushlstring(L, kv.first.data(), kv.first.size());
     lua_pushlstring(L, kv.second.data(), kv.second.size());
     return 2;                              // member first: it is never nil until the end
@@ -1223,7 +1231,9 @@ static int space_pop(lua_State* L, const store_access* s, bool want_min) {
         lua_pushlstring(L, value.data(), value.size());
     else
         lua_pushnil(L);
-    s->remove(key);
+    if (!s->remove(key)) {
+        err({"remove failed for",key});
+    }
     lua_pushlstring(L, key.data(), key.size());
     lua_insert(L, -2); // key, value
     return 2;
@@ -1247,7 +1257,9 @@ static int space_namecall(lua_State* L) {
         size_t n = 0;
         const char* k = luaL_checklstring(L, 2, &n);
         if (lua_isnoneornil(L, 3)) {
-            s->remove({k, n});
+            if (!s->remove({k, n})) {
+                err({"remove failed for",k});
+            }
             return 0;
         }
         size_t vn = 0;
@@ -1527,6 +1539,12 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
             out = Variable(std::string(s, n));
             return true;
         }
+        case LUA_TBUFFER: {
+            size_t n = 0;
+            void* b = lua_tobuffer(L, idx, &n);
+            out = Variable(std::string(b ? static_cast<const char*>(b) : "", n));
+            return true;
+        }
         case LUA_TTABLE: {
             // {err = "..."} and {ok = "..."} first, as redis does, so a script can
             // answer an error without the host having to invent one
@@ -1560,7 +1578,7 @@ static bool to_variable(lua_State* L, int idx, Variable& out, std::string& err, 
                     lua_pop(L, 1);
                     return false;
                 }
-                items.push_back(item);
+                items.emplace_back(item);
                 lua_pop(L, 1);
             }
             out = Variable(items);
@@ -1876,7 +1894,7 @@ static bool compile_into(space_state& st, const std::string& name,
 
     // on this stack for as long as its chunk is running, so a require that comes back
     // round to it is a cycle rather than a recursion
-    st.loading.push_back(name);
+    st.loading.emplace_back(name);
     struct pop_on_exit {
         space_state& st;
         ~pop_on_exit() { st.loading.pop_back(); }

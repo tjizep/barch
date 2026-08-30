@@ -77,6 +77,8 @@ namespace barch {
         uint64_t functions_sync_ms{0};
         bool functions_git_pull{false};
         std::string functions_git_branch{"main"};
+        /** pin the checkout to this rev; "off" follows the branch */
+        std::string functions_git_commit{"off"};
         /** path, file:/path, or env:VAR pointing at a read-only deploy key */
         std::string functions_git_ssh_key{"off"};
     };
@@ -138,6 +140,7 @@ namespace barch {
     uint64_t get_functions_sync_ms();
     bool get_functions_git_pull();
     std::string get_functions_git_branch();
+    std::string get_functions_git_commit();
     std::string get_functions_git_ssh_key();
     std::string get_tls_pem_certificate_chain_file();
     std::string get_tls_private_key_file();

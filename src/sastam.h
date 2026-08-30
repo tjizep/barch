@@ -686,6 +686,13 @@ namespace heap {
 
     struct string_hash{
         using is_avalanching = void; // for ankerl hash
+        using is_transparent = void;
+        size_t operator()(std::string_view sv) const {
+            return ankerl::unordered_dense::hash<std::string_view>{}(sv);
+        }
+        size_t operator()(const std::pmr::string& sv) const {
+            return ankerl::unordered_dense::hash<std::string_view>{}(sv);
+        }
         size_t operator()(const std::string& k) const {
             uint64_t hash = ankerl::unordered_dense::detail::wyhash::hash(k.data(), k.size());
             return hash;

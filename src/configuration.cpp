@@ -77,6 +77,7 @@ struct config_state {
     heap::string functions_sync_ms{"0"};
     heap::string functions_git_pull{"off"};
     heap::string functions_git_branch{"main"};
+    heap::string functions_git_commit{"off"};
     heap::string functions_git_ssh_key{"off"};
     heap::string server_port{};
     heap::string server_binding{};
@@ -1188,6 +1189,25 @@ static int ApplyFunctionsGitBranch(ValkeyModuleCtx *unused_arg, void *unused_arg
     return VALKEYMODULE_OK;
 }
 
+static ValkeyModuleString *GetFunctionsGitCommit(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().functions_git_commit.c_str(),
+                                     state().functions_git_commit.length());
+}
+static int SetFunctionsGitCommit(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    state().functions_git_commit = val;
+    config().functions_git_commit = val;
+    return VALKEYMODULE_OK;
+}
+static int SetFunctionsGitCommit(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                                 ValkeyModuleString **unused_arg) {
+    return SetFunctionsGitCommit(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyFunctionsGitCommit(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;
+}
+
 static ValkeyModuleString *GetFunctionsGitSshKey(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().functions_git_ssh_key.c_str(),
@@ -1486,6 +1506,9 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
     ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_git_branch", "main", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetFunctionsGitBranch, SetFunctionsGitBranch,
                                                      ApplyFunctionsGitBranch, nullptr);
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_git_commit", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                                     GetFunctionsGitCommit, SetFunctionsGitCommit,
+                                                     ApplyFunctionsGitCommit, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_git_ssh_key", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetFunctionsGitSshKey, SetFunctionsGitSshKey,
                                                      ApplyFunctionsGitSshKey, nullptr);
@@ -1847,6 +1870,11 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
         if (r == VALKEYMODULE_OK)
             return ApplyFunctionsGitBranch(nullptr, nullptr, nullptr);
         return r;
+    }else if (name == "functions_git_commit") {
+        auto r = SetFunctionsGitCommit(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyFunctionsGitCommit(nullptr, nullptr, nullptr);
+        return r;
     }else if (name == "functions_git_ssh_key") {
         auto r = SetFunctionsGitSshKey(val);
         if (r == VALKEYMODULE_OK)
@@ -2102,6 +2130,9 @@ bool barch::get_functions_git_pull() {
 std::string barch::get_functions_git_branch() {
     return config().functions_git_branch;
 }
+std::string barch::get_functions_git_commit() {
+    return cfg_off(config().functions_git_commit) ? std::string() : config().functions_git_commit;
+}
 std::string barch::get_functions_git_ssh_key() {
     return cfg_off(config().functions_git_ssh_key) ? std::string() : config().functions_git_ssh_key;
 }
@@ -2187,7 +2218,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
         "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
         "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
-        "functions_git_ssh_key",
+        "functions_git_commit", "functions_git_ssh_key",
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
         "tls_pem_certificate_chain_file", "tls_private_key_file", "tls_tmp_dh_file",
@@ -2227,6 +2258,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "functions_sync_ms")            value = std::to_string(c.functions_sync_ms);
     else if (name == "functions_git_pull")           value = cfg_bool(c.functions_git_pull);
     else if (name == "functions_git_branch")         value = c.functions_git_branch.empty() ? "main" : c.functions_git_branch;
+    else if (name == "functions_git_commit")         value = c.functions_git_commit.empty() ? "off" : c.functions_git_commit;
     else if (name == "functions_git_ssh_key")        value = c.functions_git_ssh_key;
     else if (name == "pre_evict_thresh")            value = cfg_float(c.pre_evict_thresh);
     else if (name == "rpc_client_max_wait_ms")      value = std::to_string(c.rpc_client_max_wait_ms);

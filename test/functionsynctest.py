@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 
 import redis
@@ -115,6 +116,59 @@ try:
     assert r.execute_command("hnsw:GET", "data:foo.json") == b'{"a":1}'
     assert r.get("user-key") == b"hand"
     assert r.execute_command("hnsw:GET", "keep-me") == b"hand"
+
+    # pin a checkout to one commit so later origin commits do not land
+    origin = tempfile.mkdtemp(prefix="barch-fns-origin-")
+    clone = tempfile.mkdtemp(prefix="barch-fns-clone-")
+    os.rmdir(clone)
+    def git(cwd, *args, out=False):
+        cmd = ["git", "-C", cwd, *args]
+        if out:
+            return subprocess.check_output(cmd, text=True).strip()
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    git(origin, "init", "-b", "main")
+    git(origin, "config", "user.email", "t@t")
+    git(origin, "config", "user.name", "t")
+    with open(os.path.join(origin, "ver.luau"), "w", encoding="utf-8") as f:
+        f.write('function call(who) return "v1 " .. who end\n')
+    git(origin, "add", "ver.luau")
+    git(origin, "commit", "-m", "v1")
+    sha1 = git(origin, "rev-parse", "HEAD", out=True)
+    subprocess.check_call(["git", "clone", "--quiet", origin, clone])
+    def call_ver():
+        c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+        try:
+            return c.execute_command("ver", "sam").decode()
+        finally:
+            c.close()
+    r.execute_command("CONFIG", "SET", "functions_dir", clone)
+    r.execute_command("CONFIG", "SET", "functions_git_pull", "on")
+    r.execute_command("CONFIG", "SET", "functions_git_commit", sha1)
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert call_ver() == "v1 sam"
+    with open(os.path.join(origin, "ver.luau"), "w", encoding="utf-8") as f:
+        f.write('function call(who) return "v2 " .. who end\n')
+    git(origin, "add", "ver.luau")
+    git(origin, "commit", "-m", "v2")
+    sha2 = git(origin, "rev-parse", "HEAD", out=True)
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert call_ver() == "v1 sam"
+    r.execute_command("CONFIG", "SET", "functions_git_commit", sha2)
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert call_ver() == "v2 sam"
+    r.execute_command("CONFIG", "SET", "functions_git_commit", "off")
+    with open(os.path.join(origin, "ver.luau"), "w", encoding="utf-8") as f:
+        f.write('function call(who) return "v3 " .. who end\n')
+    git(origin, "add", "ver.luau")
+    git(origin, "commit", "-m", "v3")
+    assert r.execute_command("FUNCTIONS", "SYNC") == b"OK"
+    assert call_ver() == "v3 sam"
+    # one-shot pin on the command, without changing the config
+    assert r.execute_command("FUNCTIONS", "SYNC", sha1) == b"OK"
+    assert call_ver() == "v1 sam"
+    st = r.execute_command("FUNCTIONS", "STATUS").decode()
+    assert "pin=off" in st, st
+    assert "commit=" in st, st
 
     print("complete function sync test")
 finally:

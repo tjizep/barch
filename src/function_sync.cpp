@@ -173,7 +173,7 @@ bool git_head(const std::string& dir, std::string& sha) {
     return !sha.empty();
 }
 
-std::string git_pull(const std::string& dir, std::string& err) {
+std::string git_pull(const std::string& dir, std::string& err, const std::string& pin) {
     if (!is_dir(dir + "/.git"))
         return {};
     std::string branch = barch::get_functions_git_branch();
@@ -198,14 +198,20 @@ std::string git_pull(const std::string& dir, std::string& err) {
                          "ssh -i " + keyfile +
                          " -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new");
     }
+    std::string spec = pin.empty() ? branch : pin;
     std::string out, e2;
-    int rc = run_cmd({"git", "-C", dir, "fetch", "--quiet", "origin", branch}, env, out, e2);
+    int rc = run_cmd({"git", "-C", dir, "fetch", "--quiet", "origin", spec}, env, out, e2);
+    if (rc != 0 && !pin.empty() && pin != branch) {
+        out.clear(); e2.clear();
+        rc = run_cmd({"git", "-C", dir, "fetch", "--quiet", "origin", branch}, env, out, e2);
+    }
     if (rc != 0) {
         err = e2.empty() ? "git fetch failed" : e2;
         return err;
     }
+    std::string target = pin.empty() ? "FETCH_HEAD" : pin;
     out.clear(); e2.clear();
-    rc = run_cmd({"git", "-C", dir, "reset", "--hard", "--quiet", "FETCH_HEAD"}, env, out, e2);
+    rc = run_cmd({"git", "-C", dir, "reset", "--hard", "--quiet", target}, env, out, e2);
     if (rc != 0) {
         err = e2.empty() ? "git reset failed" : e2;
         return err;
@@ -471,16 +477,17 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
     return true;
 }
 
-std::string do_sync() {
+std::string do_sync(const std::string& pin) {
     std::string dir = barch::get_functions_dir();
     if (dir.empty())
         return "functions_dir is not set";
     if (!is_dir(dir))
         return "functions_dir is not a directory";
 
-    if (barch::get_functions_git_pull()) {
+    std::string want = pin.empty() ? barch::get_functions_git_commit() : pin;
+    if (barch::get_functions_git_pull() || !pin.empty()) {
         std::string err;
-        auto failed = git_pull(dir, err);
+        auto failed = git_pull(dir, err, want);
         if (!failed.empty())
             return failed;
     }
@@ -545,9 +552,9 @@ std::string do_sync() {
 
 namespace barch {
 
-std::string sync_functions() {
+std::string sync_functions(const std::string& pin) {
     std::lock_guard<std::mutex> g(mu);
-    auto err = do_sync();
+    auto err = do_sync(pin);
     if (err.empty()) {
         last_err.clear();
         last_ok = "ok";
@@ -569,6 +576,7 @@ std::string functions_sync_status() {
     o << "dir=" << get_functions_dir()
       << " pull=" << (get_functions_git_pull() ? "on" : "off")
       << " branch=" << get_functions_git_branch()
+      << " pin=" << (get_functions_git_commit().empty() ? "off" : get_functions_git_commit())
       << " interval=" << get_functions_sync_ms()
       << " last=" << (last_err.empty() ? (last_ok.empty() ? "never" : last_ok) : last_err);
     if (!last_stamp.empty())

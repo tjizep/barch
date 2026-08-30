@@ -1224,9 +1224,11 @@ int KEYSF(caller& call, const arg_t& argv) {
     return call.end_array();
 }
 
-/* FUNCTIONS SYNC | STATUS
+/* FUNCTIONS SYNC [commit] | STATUS
  *
- * SYNC applies the checkout in functions_dir. STATUS is the last result.
+ * SYNC applies the checkout in functions_dir. An optional commit pins that
+ * rev for this apply (functions_git_commit does the same until unset).
+ * STATUS is the last result.
  */
 int FUNCTIONS(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
@@ -1237,12 +1239,17 @@ int FUNCTIONS(caller& call, const arg_t& argv) {
     if (sub == "STATUS")
         return call.push_string(barch::functions_sync_status());
     if (sub == "SYNC") {
-        auto err = barch::sync_functions();
+        if (argv.size() > 3)
+            return call.wrong_arity();
+        std::string pin;
+        if (argv.size() == 3)
+            pin.assign(argv[2].chars(), argv[2].size);
+        auto err = barch::sync_functions(pin);
         if (!err.empty())
             return call.push_error(err.c_str());
         return call.push_simple("OK");
     }
-    return call.push_error("FUNCTIONS SYNC|STATUS");
+    return call.push_error("FUNCTIONS SYNC [commit]|STATUS");
 }
 }
 

@@ -274,9 +274,63 @@ if (ADD_LUAU)
         endif ()
     endforeach ()
     set(BARCH_HAS_LUAU ON)
+
+    # NumKong: header-only C++ types and nk::vector. Scalar kernels stay for
+    # a later cut; this is f64/f32/f16/bf16 and their vectors in Luau.
+    # Populate the source and add our own INTERFACE target. Their CMake
+    # defaults GIT to `master` (the repo is `main`), runs ISA probes at
+    # configure time, and puts Clang `-fmodules` on the INTERFACE target.
+    FetchContent_Declare(
+            numkong
+            GIT_REPOSITORY https://github.com/ashvardanian/NumKong.git
+            GIT_TAG main
+            GIT_SHALLOW TRUE
+    )
+    # CMake 3.30+ wants MakeAvailable; that would run NumKong's CMake.
+    if (POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif ()
+    FetchContent_GetProperties(numkong)
+    if (NOT numkong_POPULATED)
+        FetchContent_Populate(numkong)
+    endif ()
+    if (NOT TARGET numkong)
+        add_library(numkong INTERFACE)
+        target_include_directories(numkong INTERFACE ${numkong_SOURCE_DIR}/include)
+    endif ()
+    set(BARCH_HAS_NUMKONG ON)
+    # Their vector::try_zeros memsets the wrapper structs. Harmless, noisy.
+    set_source_files_properties(src/foreign/nk_luau.cpp PROPERTIES
+            COMPILE_OPTIONS "-Wno-class-memaccess")
+    message("Using NumKong for Luau nk.f32 / nkf32vector")
+
+    # simdjson amalgamated single header. Their CMake is not run.
+    FetchContent_Declare(
+            simdjson
+            GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+            GIT_TAG master
+            GIT_SHALLOW TRUE
+    )
+    if (POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif ()
+    FetchContent_GetProperties(simdjson)
+    if (NOT simdjson_POPULATED)
+        FetchContent_Populate(simdjson)
+    endif ()
+    add_library(simdjson_amalg OBJECT ${simdjson_SOURCE_DIR}/singleheader/simdjson.cpp)
+    set_target_properties(simdjson_amalg PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(simdjson_amalg PUBLIC ${simdjson_SOURCE_DIR}/singleheader)
+    target_compile_options(simdjson_amalg PRIVATE -w)
+    set_source_files_properties(src/foreign/simdjson_luau.cpp PROPERTIES
+            COMPILE_OPTIONS "-Wno-undef")
+    set(BARCH_HAS_SIMDJSON ON)
+    message("Using simdjson for Luau simdjson.parse")
 else ()
     message("Luau not used; foreign=luau spaces stay off")
     set(BARCH_HAS_LUAU OFF)
+    set(BARCH_HAS_NUMKONG OFF)
+    set(BARCH_HAS_SIMDJSON OFF)
 endif ()
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
@@ -360,6 +414,8 @@ if (ADD_SWIG)
             # compiled as an object library below and linked in.
             set(BARCHLUA_SOURCES ${SOURCES})
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "luau_driver\\.cpp$")
+            list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "nk_luau\\.cpp$")
+            list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "simdjson_luau\\.cpp$")
             swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${BARCHLUA_SOURCES})
             target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
             if (USE_LIBURING)
@@ -523,16 +579,28 @@ if (BARCH_HAS_LUAU)
                 ${luau_SOURCE_DIR}/VM/include
                 ${luau_SOURCE_DIR}/Compiler/include)
             target_link_libraries(${tgt} PRIVATE Luau.Compiler Luau.VM)
+            if (BARCH_HAS_NUMKONG)
+                target_link_libraries(${tgt} PRIVATE numkong)
+            endif ()
+            if (BARCH_HAS_SIMDJSON)
+                target_link_libraries(${tgt} PRIVATE simdjson_amalg)
+            endif ()
         endif ()
     endforeach ()
     if (TARGET barchlua)
         target_compile_definitions(barchlua PRIVATE BARCH_HAS_LUAU)
         target_link_libraries(barchlua PRIVATE Luau.Compiler Luau.VM)
+        if (BARCH_HAS_NUMKONG)
+            target_link_libraries(barchlua PRIVATE numkong)
+        endif ()
+        if (BARCH_HAS_SIMDJSON)
+            target_link_libraries(barchlua PRIVATE simdjson_amalg)
+        endif ()
     endif ()
 endif ()
 
 if (TARGET barchlua)
-    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp)
+    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp)
     set_target_properties(barch_luau_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
     if (BARCH_HAS_LUAU)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_LUAU)
@@ -540,6 +608,12 @@ if (TARGET barchlua)
             ${luau_SOURCE_DIR}/VM/include
             ${luau_SOURCE_DIR}/Compiler/include)
         target_link_libraries(barch_luau_driver PRIVATE Luau.Compiler Luau.VM)
+        if (BARCH_HAS_NUMKONG)
+            target_link_libraries(barch_luau_driver PRIVATE numkong)
+        endif ()
+        if (BARCH_HAS_SIMDJSON)
+            target_link_libraries(barch_luau_driver PRIVATE simdjson_amalg)
+        endif ()
     endif ()
     if (BARCH_HAS_MYSQL)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_MYSQL)
@@ -759,6 +833,15 @@ else()
         add_test(NAME TestFunctionSync
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functionsynctest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        if (ADD_LUAU)
+            add_test(NAME TestNkLuau
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/nkluautest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            add_test(NAME TestSimdjsonLuau
+                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/simdjsontest.py
+                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        endif ()
 
         # ACL key patterns are parsed and refused rather than silently dropped
         add_test(NAME TestAclFilter

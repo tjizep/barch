@@ -900,4 +900,24 @@
 
 163. [Done] Function sync require in a scratch space [28-08-2026] Nr 157 3c3548a
 
+164. [Done] NumKong f64/f32/f16/bf16 in Luau [30-08-2026] Nr 158 5d27f3c
+
+165. [Done] Luau nk vector slice [30-08-2026] Nr 159 5d27f3c
+
+166. [Done] nk vectors are 0-based [30-08-2026] Nr 160 5d27f3c
+
+167. [Done] nk vectors are 1-based like Luau [30-08-2026] Nr 161 5d27f3c
+
+168. [Done] nk vector conversion constructors [30-08-2026] Nr 162 5d27f3c
+
+169. [Done] nk vectors from a barch value buffer [30-08-2026] Nr 163 5d27f3c
+
+170. [Done] nk vector dot, cosine, Euclidean [30-08-2026] Nr 164 5d27f3c
+
+171. [Done] nk vector sum and average [30-08-2026] Nr 165 5d27f3c
+
+172. [Done] Git function sync pin to a commit [30-08-2026] Nr 166 5d27f3c
+
+173. [Done] simdjson in Luau [30-08-2026] Nr 167 5d27f3c
+
 

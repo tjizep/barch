@@ -920,4 +920,10 @@
 
 173. [Done] simdjson in Luau [30-08-2026] Nr 167 5d27f3c
 
+174. [Done] Crow HTTP for stored Luau [30-08-2026] Nr 168 7efe967
+
+175. [Done] HTTP example README and deploy.py [30-08-2026] Nr 169 7efe967
+
+176. [Done] transport() kind http vs resource [30-08-2026] Nr 170 7efe967
+
 

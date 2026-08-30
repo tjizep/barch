@@ -7981,3 +7981,51 @@ The amalgamated single header is FetchContent of simdjson `master`
 `simdjson.null`, not Lua nil, so it survives a table round-trip.
 
 Covered by `test/simdjsontest.py`.
+
+## 168. Crow HTTP for stored Luau [30-08-2026]
+
+*Was `TODO.md` entry 174.*
+
+A stored function can advertise HTTP by defining `transport()`, which
+returns a table: `route`, `methods` (GET/POST/… to a Lua function),
+`accept`, `send`, `cors`, and optional `ssl` (`cert`, `key`, `proto`).
+Functions without `transport()` stay ordinary RESP commands.
+
+`HTTP START [key] [port] [bind]` runs a Crow thread for the current
+space. The optional key is the config function: its table can set
+port/bind/ssl and list other keys. Without a key, every function in
+the space is asked. START answers with the bind options and the
+routes that actually registered. `HTTP STOP` / `STATUS` match.
+
+Each method gets `crow::request` and `crow::response` userdata
+(`req.body`, `req.method`, `req:header`, `res.body`, `res.code`,
+`res:header`). Crow is one thread per space and not fully async;
+the handler runs on that thread. SSL is wired when OpenSSL is on.
+`parseFile` is still not a thing here.
+
+Covered by `test/httptest.py` GET html and POST json through simdjson.
+Examples: `examples/http/luau/echo.luau`, `examples/http/luau/page.luau`.
+
+## 169. HTTP example README and deploy.py [30-08-2026]
+
+*Was `TODO.md` entry 175.*
+
+`examples/http` is laid out like `examples/hnsw`: `README.md`,
+`deploy.py`, and the Luau under `luau/`. `conf.luau` is the HTTP key
+(`keys = {"ECHO", "PAGE"}`). `deploy.py --start --demo` SETFs those
+three, runs `HTTP START CONF`, GETs `/page` and POSTs JSON to
+`/echo`.
+
+Covered by running `examples/http/deploy.py --start --demo`.
+
+## 170. transport() kind http vs resource [30-08-2026]
+
+*Was `TODO.md` entry 176.*
+
+`transport()` now has `kind`. `"resource"` is a route (`route` plus
+`methods`). `"http"` is server startup (`port`, `bind`, `ssl`, `keys`).
+`HTTP START <key>` only accepts kind=http; a resource used as that
+key is refused. Kind can still be left off: a table with a route is a
+resource, one without is http.
+
+Covered by `test/httptest.py` and `examples/http/deploy.py --start --demo`.

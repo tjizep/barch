@@ -19,6 +19,7 @@
 #include "version.h"
 #include "glob.h"
 #include "function_sync.h"
+#include "http_api.h"
 #include "keys.h"
 #include "art/art.h"
 #include "art/iterator.h"
@@ -167,6 +168,7 @@ int STOP(caller& call, const arg_t& ) {
         return call.push_error("Cannot stop server");
     }
     barch::stop_function_sync();
+    barch::stop_http_servers();
     if (call.is_remote()) {
         restart.asynch_stop();
     }else {

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 
 #include <functional>
 #include <memory>
@@ -22,6 +23,7 @@
 #include "luacode.h"
 #include "nk_luau.h"
 #include "simdjson_luau.h"
+#include "crow_luau.h"
 #endif
 
 namespace barch {
@@ -191,6 +193,7 @@ static void open_safe(lua_State* L) {
     luaopen_vector(L);
     luaopen_nk(L);
     luaopen_simdjson(L);
+    luaopen_crowhttp(L);
     lua_pushcfunction(L, blocked_require, "require");
     lua_setglobal(L, "require");
     lua_newtable(L);
@@ -2153,6 +2156,126 @@ void start_function(const std::string& space, const std::string& name,
 }
 
 
+bool http_vm_load(http_vm& vm, const std::string& name, const std::string& source,
+                  http_route& out, std::string& err) {
+    out = http_route{};
+    out.name = name;
+    if (!vm.cache)
+        vm.cache = make_function_states();
+    space_state* st = state_for(*vm.cache);
+    if (!st) {
+        err = "FUNCTION luau state";
+        return false;
+    }
+    if (!vm.iface) {
+        err = "HTTP luau interface";
+        return false;
+    }
+    st->load = &vm.iface->load;
+    compiled c;
+    bool built = compile_into(*st, qualified(vm.space, name), source, c, err);
+    st->load = nullptr;
+    if (!built)
+        return false;
+    lua_getref(st->L, c.env);
+    lua_State* T = lua_tothread(st->L, -1);
+    lua_pop(st->L, 1);
+    if (!T) {
+        err = "HTTP function environment";
+        drop_compiled(st->L, c);
+        return false;
+    }
+    lua_getglobal(T, "transport");
+    if (lua_type(T, -1) != LUA_TFUNCTION) {
+        lua_pop(T, 1);
+        drop_compiled(st->L, c);
+        return true;
+    }
+    running_call scope;
+    scope.space = vm.space;
+    scope.running = vm.iface->running_in.empty() ? vm.space : vm.iface->running_in;
+    lua_setthreaddata(T, &scope);
+    st->load = &vm.iface->load;
+    st->store = &vm.iface->store;
+    st->open_space = vm.iface->open_space ? &vm.iface->open_space : nullptr;
+    st->opened = &vm.iface->opened;
+    int rc = lua_pcall(T, 0, 1, 0);
+    lua_setthreaddata(T, nullptr);
+    st->load = nullptr;
+    st->store = nullptr;
+    st->open_space = nullptr;
+    st->opened = nullptr;
+    if (rc != 0) {
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        lua_pop(T, 1);
+        drop_compiled(st->L, c);
+        return false;
+    }
+    if (lua_isnil(T, -1)) {
+        lua_pop(T, 1);
+        drop_compiled(st->L, c);
+        return true;
+    }
+    if (!crow_read_transport(T, -1, out, err)) {
+        lua_pop(T, 1);
+        drop_compiled(st->L, c);
+        return false;
+    }
+    lua_pop(T, 1);
+    out.name = name;
+    // keep the compiled chunk so method closures stay alive
+    std::string key = qualified(vm.space, name);
+    st->functions.emplace(std::move(key), c);
+    ++statistics::luau_functions;
+    return true;
+}
+
+void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::string& err) {
+    err.clear();
+    if (!vm.cache) {
+        err = "HTTP luau state";
+        return;
+    }
+    space_state* st = state_for(*vm.cache);
+    if (!st || !st->L) {
+        err = "HTTP luau state";
+        return;
+    }
+    lua_State* L = st->L;
+    run_ctx ctx;
+    ctx.left = (std::numeric_limits<uint64_t>::max)() / 4;
+    ctx.slice = ctx.left;
+    if (vm.deadline_ms)
+        ctx.deadline = art::now() + static_cast<int64_t>(vm.deadline_ms);
+    lua_callbacks(L)->userdata = &ctx;
+    st->load = vm.iface ? &vm.iface->load : nullptr;
+    st->store = vm.iface ? &vm.iface->store : nullptr;
+    st->run_command = vm.iface && vm.iface->run_command ? &vm.iface->run_command : nullptr;
+    st->open_space = vm.iface && vm.iface->open_space ? &vm.iface->open_space : nullptr;
+    st->opened = vm.iface ? &vm.iface->opened : nullptr;
+    running_call scope;
+    scope.space = vm.space;
+    scope.running = vm.iface && !vm.iface->running_in.empty() ? vm.iface->running_in
+                                                              : vm.space;
+    lua_setthreaddata(L, &scope);
+    lua_getref(L, fn_ref);
+    crow_push_request(L, req);
+    crow_push_response(L, res);
+    int rc = lua_pcall(L, 2, 0, 0);
+    lua_setthreaddata(L, nullptr);
+    lua_callbacks(L)->userdata = nullptr;
+    st->load = nullptr;
+    st->store = nullptr;
+    st->run_command = nullptr;
+    st->open_space = nullptr;
+    st->opened = nullptr;
+    crow_http_end_call();
+    if (rc != 0) {
+        err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "HTTP handler failed";
+        lua_pop(L, 1);
+    }
+}
+
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
                       std::string& err) {
@@ -2209,6 +2332,16 @@ void start_function(const std::string&, const std::string&, const call_interface
                     const heap::vector<std::string>&, uint64_t, uint64_t,
                     const function_states_ptr&, const function_done& done) {
     done(false, Variable(nullptr), "luau not built");
+}
+
+bool http_vm_load(http_vm&, const std::string&, const std::string&, http_route&,
+                  std::string& err) {
+    err = "luau not built";
+    return false;
+}
+
+void http_vm_call(http_vm&, int, const void*, void*, std::string& err) {
+    err = "luau not built";
 }
 
 

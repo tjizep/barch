@@ -12,6 +12,7 @@
 #include "auth_api.h"
 #include "export_api.h"
 #include "function_api.h"
+#include "http_api.h"
 //
 // Created by teejip on 7/13/25.
 //
@@ -80,6 +81,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         register_auth_api(*r);
         register_export_api(*r);
         register_function_api(*r);
+        register_http_api(*r);
     }
 
     return r;

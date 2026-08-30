@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 #include "sastam.h"
 #include "variable.h"
 
@@ -282,6 +283,50 @@ void start_function(const std::string& space, const std::string& name,
                     const heap::vector<std::string>& args, uint64_t insns,
                     uint64_t deadline_ms, const function_states_ptr& cache,
                     const function_done& done);
+
+/** one HTTP method advertised by transport().methods */
+struct http_method {
+    std::string verb;
+    int fn_ref{-2}; // LUA_NOREF
+};
+
+/**
+ * What a function's transport() table said.
+ *
+ * `kind` is "resource" for a route and "http" for server startup. Missing
+ * kind still infers: a route means resource, otherwise http. A function
+ * with no transport() is an ordinary stored function. fn_ref values are
+ * only valid on the http_vm they were loaded into.
+ */
+struct http_route {
+    std::string name;
+    std::string kind;
+    std::string route;
+    std::string accept;
+    std::string send;
+    std::string cors;
+    std::vector<http_method> methods;
+    std::vector<std::string> extra_keys;
+    uint16_t port{0};
+    std::string bind;
+    std::string ssl_cert;
+    std::string ssl_key;
+    std::string ssl_proto;
+    bool has_transport{false};
+    bool has_route{false};
+};
+
+/** Luau state that holds compiled HTTP functions for one Crow thread */
+struct http_vm {
+    function_states_ptr cache;
+    call_interface_ptr iface;
+    std::string space;
+    uint64_t deadline_ms{5000};
+};
+
+bool http_vm_load(http_vm& vm, const std::string& name, const std::string& source,
+                  http_route& out, std::string& err);
+void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::string& err);
 
 }
 }

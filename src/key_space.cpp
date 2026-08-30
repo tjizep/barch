@@ -16,6 +16,7 @@
 #include "configuration.h"
 #include "foreign/driver.h"
 #include "foreign/sql.h"
+#include "http_api.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -519,6 +520,7 @@ namespace barch {
     }
 
     key_space::~key_space() {
+        barch::stop_http_server(canonical_name);
         exiting = true;
         if (maintain_running) {
             thread_control.signal(1);

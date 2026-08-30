@@ -8,10 +8,12 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #ifdef BARCH_HAS_CROW
@@ -68,10 +70,15 @@ bool is_resource_kind(const barch::foreign::http_route& r) {
 
 #ifdef BARCH_HAS_CROW
 
+struct http_vm_slot {
+    barch::foreign::http_vm vm;
+    /** "NAME:VERB" -> lua ref, valid only on this vm */
+    std::unordered_map<std::string, int> methods;
+};
+
 struct space_http {
     std::unique_ptr<crow::SimpleApp> app;
     std::thread thread;
-    barch::foreign::http_vm vm;
     std::vector<barch::foreign::http_route> routes;
     std::string bind{"0.0.0.0"};
     uint16_t port{18080};
@@ -80,7 +87,53 @@ struct space_http {
     std::string ssl_key;
     std::string fail;
     std::atomic<bool> running{false};
+    std::mutex pool_mu;
+    std::condition_variable pool_cv;
+    std::vector<std::shared_ptr<http_vm_slot>> idle;
 };
+
+std::shared_ptr<http_vm_slot> pop_vm(space_http& s) {
+    std::unique_lock<std::mutex> g(s.pool_mu);
+    s.pool_cv.wait(g, [&] { return !s.idle.empty() || !s.running.load(); });
+    if (s.idle.empty())
+        return nullptr;
+    auto v = std::move(s.idle.back());
+    s.idle.pop_back();
+    return v;
+}
+
+void push_vm(space_http& s, std::shared_ptr<http_vm_slot> v) {
+    if (!v)
+        return;
+    {
+        std::lock_guard<std::mutex> g(s.pool_mu);
+        s.idle.push_back(std::move(v));
+    }
+    s.pool_cv.notify_one();
+}
+
+std::shared_ptr<http_vm_slot> make_vm_slot(const std::string& space,
+                                           const barch::foreign::call_interface_ptr& iface,
+                                           uint64_t deadline_ms) {
+    auto slot = std::make_shared<http_vm_slot>();
+    slot->vm.cache = barch::foreign::make_function_states();
+    slot->vm.space = space;
+    slot->vm.deadline_ms = deadline_ms ? deadline_ms : 5000;
+    slot->vm.iface = iface;
+    return slot;
+}
+
+bool load_resource_into(http_vm_slot& slot, const std::string& name,
+                        const std::string& source, std::string& err) {
+    barch::foreign::http_route spec;
+    if (!barch::foreign::http_vm_load(slot.vm, name, source, spec, err))
+        return false;
+    if (!is_resource_kind(spec))
+        return true;
+    for (const auto& m : spec.methods)
+        slot.methods[spec.name + ":" + m.verb] = m.fn_ref;
+    return true;
+}
 
 std::mutex http_mu;
 heap::string_map<std::shared_ptr<space_http>> http_servers;
@@ -153,8 +206,25 @@ void handle_route(const std::shared_ptr<space_http>& server,
         res.end();
         return;
     }
+    auto slot = pop_vm(*server);
+    if (!slot) {
+        res.code = 503;
+        res.body = "HTTP vm pool empty";
+        apply_cors(res, spec);
+        res.end();
+        return;
+    }
+    struct put_back {
+        space_http* s;
+        std::shared_ptr<http_vm_slot> v;
+        ~put_back() { push_vm(*s, std::move(v)); }
+    } hold{server.get(), std::move(slot)};
     std::string err;
-    barch::foreign::http_vm_call(server->vm, method->fn_ref, &req, &res, err);
+    auto it = hold.v->methods.find(spec.name + ":" + verb);
+    if (it == hold.v->methods.end())
+        err = "no handler on this vm";
+    else
+        barch::foreign::http_vm_call(hold.v->vm, it->second, &req, &res, err);
     if (!err.empty()) {
         res.code = 500;
         res.body = err;
@@ -196,11 +266,6 @@ std::string start_space_http(const barch::key_space_ptr& space,
     }
 
     auto server = std::make_shared<space_http>();
-    server->vm.cache = barch::foreign::make_function_states();
-    server->vm.space = canon;
-    server->vm.deadline_ms = space->function_deadline();
-    if (server->vm.deadline_ms == 0)
-        server->vm.deadline_ms = 5000;
     auto iface = std::make_shared<barch::foreign::call_interface>();
     iface->running_in = canon;
     iface->defined_in = canon;
@@ -209,7 +274,8 @@ std::string start_space_http(const barch::key_space_ptr& space,
         return barch::functions::source_of(space, want, source);
     };
     iface->store = barch::functions::store_for_owner(space);
-    server->vm.iface = iface;
+    uint64_t deadline = space->function_deadline();
+    auto slot0 = make_vm_slot(canon, iface, deadline);
 
     std::vector<std::string> want = keys;
     if (!httpkey.empty()) {
@@ -219,7 +285,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
             err = "no such function '" + httpkey + "'";
             return err;
         }
-        if (!barch::foreign::http_vm_load(server->vm, httpkey, source, conf, err))
+        if (!barch::foreign::http_vm_load(slot0->vm, httpkey, source, conf, err))
             return err;
         if (!conf.has_transport) {
             err = "'" + httpkey + "' has no transport()";
@@ -283,7 +349,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
             continue;
         barch::foreign::http_route spec;
         std::string load_err;
-        if (!barch::foreign::http_vm_load(server->vm, name, source, spec, load_err)) {
+        if (!barch::foreign::http_vm_load(slot0->vm, name, source, spec, load_err)) {
             err = name + ": " + load_err;
             return err;
         }
@@ -337,6 +403,36 @@ std::string start_space_http(const barch::key_space_ptr& space,
         return err;
     }
 
+    std::unordered_map<std::string, std::string> sources;
+    for (const auto& r : server->routes) {
+        std::string src;
+        if (!barch::functions::source_in(space, r.name, src)) {
+            err = "no source for '" + r.name + "'";
+            return err;
+        }
+        sources[r.name] = std::move(src);
+        for (const auto& m : r.methods)
+            slot0->methods[r.name + ":" + m.verb] = m.fn_ref;
+    }
+
+    unsigned pool = std::thread::hardware_concurrency();
+    if (pool < 2)
+        pool = 2;
+    if (pool > 8)
+        pool = 8;
+    server->idle.push_back(std::move(slot0));
+    for (unsigned i = 1; i < pool; ++i) {
+        auto slot = make_vm_slot(canon, iface, deadline);
+        for (const auto& r : server->routes) {
+            std::string load_err;
+            if (!load_resource_into(*slot, r.name, sources[r.name], load_err)) {
+                err = r.name + ": " + load_err;
+                return err;
+            }
+        }
+        server->idle.push_back(std::move(slot));
+    }
+
     if (port == 0)
         port = 18080;
     if (bind.empty())
@@ -350,7 +446,8 @@ std::string start_space_http(const barch::key_space_ptr& space,
     server->app = std::make_unique<crow::SimpleApp>();
     server->app->loglevel(crow::LogLevel::Warning);
     server->app->signal_clear();
-    server->app->concurrency(1);
+    server->app->concurrency((uint16_t) pool);
+    server->app->timeout(30);
     server->app->server_name("barch");
 
     for (const auto& spec : server->routes) {
@@ -408,6 +505,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
             server->fail = e.what();
         }
         server->running.store(false);
+        server->pool_cv.notify_all();
     });
 
     bool up = false;
@@ -493,10 +591,14 @@ void stop_http_server(const std::string& space) {
         server = std::move(it->second);
         http_servers.erase(it);
     }
-    if (server && server->app) {
-        try {
-            server->app->stop();
-        } catch (...) {
+    if (server) {
+        server->running.store(false);
+        server->pool_cv.notify_all();
+        if (server->app) {
+            try {
+                server->app->stop();
+            } catch (...) {
+            }
         }
     }
     if (server && server->thread.joinable())

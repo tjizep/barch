@@ -8029,3 +8029,46 @@ key is refused. Kind can still be left off: a table with a route is a
 resource, one without is http.
 
 Covered by `test/httptest.py` and `examples/http/deploy.py --start --demo`.
+
+## 171. Multi-threaded HTTP ingress [30-08-2026]
+
+*Was `TODO.md` entry 178.*
+
+Crow already runs two threads. Handlers share one Luau state, so
+`handle_route` takes `lua_mu` around the call. `test/httptest.py`
+then hits GET `/page` and POST `/echo` from eight client threads
+while those threads also SET/GET ordinary keys over RESP.
+
+A handler that uses `barch.store` never comes back (Crow thread,
+shard lock). That is TODO 179 rather than this cut.
+
+Covered by `test/httptest.py` concurrent ingress.
+
+## 172. HTTP Luau VM pool [30-08-2026]
+
+*Was `TODO.md` entry 180.*
+
+Each space keeps a pool of `http_vm` slots (one Luau state each, same
+functions compiled in). A handler pops a slot under a short lock, runs
+on that state with no global lua lock, and pushes it back. Crow
+concurrency matches the pool size (2–8). Req/res userdata generation
+is thread-local so two handlers cannot invalidate each other's
+userdata.
+
+Covered by `test/httptest.py` concurrent ingress.
+
+## 173. HTTP handlers use barch.store for session state [30-08-2026]
+
+*Was `TODO.md` entry 179.*
+
+HTTP method handlers were `lua_pcall`'d on the VM's main thread. That
+is not how stored functions run, and `barch.store` never came back.
+They now run on a coroutine thread, the same as CALLF, so get/set and
+`store.locked` work.
+
+Session state is an ordinary key. `req:cookie` / `res:cookie` carry a
+`sid`, and GET `/sess` bumps `sess:<sid>` under a locked region — the
+usual Redis cookie-plus-key pattern.
+
+Covered by `test/httptest.py` cookie round-trip (n=1 then n=2) and
+`examples/http/luau/session.luau`.

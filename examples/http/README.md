@@ -76,6 +76,16 @@ keys. `HTTP START CONF 18088 127.0.0.1` uses that table and still lets
 the command override port and bind. Starting a resource as the HTTP
 key is refused.
 
+Session state is an ordinary key, the way people use Redis. GET `/sess`
+sets a `sid` cookie if needed and bumps `sess:<sid>` in `barch.store`:
+
+```
+curl -c jar -b jar http://127.0.0.1:18088/sess
+```
+
+`req:cookie("sid")` reads it, `res:cookie("sid", id, {path="/", httponly=true})`
+sets it.
+
 ```
 HTTP START CONF 18088 127.0.0.1
 HTTP STATUS
@@ -90,5 +100,6 @@ with `-----BEGIN`.
 
 - `luau/echo.luau` — `kind = "resource"`, POST `/echo`
 - `luau/page.luau` — `kind = "resource"`, GET `/page`
-- `luau/conf.luau` — `kind = "http"`, lists the other two
+- `luau/session.luau` — `kind = "resource"`, GET `/sess`, cookie + store
+- `luau/conf.luau` — `kind = "http"`, lists the other keys
 - `deploy.py` — SETF in order, then `HTTP START CONF`

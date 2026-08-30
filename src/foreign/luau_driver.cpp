@@ -2257,12 +2257,15 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::stri
     scope.space = vm.space;
     scope.running = vm.iface && !vm.iface->running_in.empty() ? vm.iface->running_in
                                                               : vm.space;
-    lua_setthreaddata(L, &scope);
-    lua_getref(L, fn_ref);
-    crow_push_request(L, req);
-    crow_push_response(L, res);
-    int rc = lua_pcall(L, 2, 0, 0);
-    lua_setthreaddata(L, nullptr);
+    lua_State* T = nullptr;
+    int tref = LUA_NOREF;
+    take_thread(*st, T, tref);
+    lua_setthreaddata(T, &scope);
+    lua_getref(T, fn_ref);
+    crow_push_request(T, req);
+    crow_push_response(T, res);
+    int rc = lua_pcall(T, 2, 0, 0);
+    lua_setthreaddata(T, nullptr);
     lua_callbacks(L)->userdata = nullptr;
     st->load = nullptr;
     st->store = nullptr;
@@ -2271,9 +2274,10 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::stri
     st->opened = nullptr;
     crow_http_end_call();
     if (rc != 0) {
-        err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "HTTP handler failed";
-        lua_pop(L, 1);
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "HTTP handler failed";
+        lua_pop(T, 1);
     }
+    give_thread(*st, T, tref);
 }
 
 bool compile_function(const std::string& space, const std::string& name,

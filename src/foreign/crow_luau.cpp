@@ -17,7 +17,7 @@
 
 namespace {
 
-uint32_t call_gen = 1;
+thread_local uint32_t call_gen = 1;
 
 const char* req_meta = "crow.request";
 const char* res_meta = "crow.response";
@@ -66,6 +66,33 @@ int req_param(lua_State* L) {
     return 1;
 }
 
+int req_cookie(lua_State* L) {
+    auto* p = check_req(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+    const std::string& h = p->req->get_header_value("Cookie");
+    size_t nlen = std::strlen(name);
+    size_t i = 0;
+    while (i < h.size()) {
+        while (i < h.size() && (h[i] == ' ' || h[i] == ';'))
+            ++i;
+        if (i + nlen <= h.size() && h.compare(i, nlen, name) == 0 &&
+            i + nlen < h.size() && h[i + nlen] == '=') {
+            size_t v = i + nlen + 1;
+            size_t e = h.find(';', v);
+            if (e == std::string::npos)
+                e = h.size();
+            lua_pushlstring(L, h.data() + v, e - v);
+            return 1;
+        }
+        i = h.find(';', i);
+        if (i == std::string::npos)
+            break;
+        ++i;
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
 int req_index(lua_State* L) {
     auto* p = check_req(L, 1);
     const char* k = luaL_checkstring(L, 2);
@@ -99,6 +126,10 @@ int req_index(lua_State* L) {
         lua_pushcfunction(L, req_param, "param");
         return 1;
     }
+    if (std::strcmp(k, "cookie") == 0) {
+        lua_pushcfunction(L, req_cookie, "cookie");
+        return 1;
+    }
     return 0;
 }
 
@@ -115,6 +146,48 @@ int res_header(lua_State* L) {
     if (!v)
         luaL_error(L, "header value must be a string");
     p->res->set_header(name, std::string(v, n));
+    return 0;
+}
+
+int res_cookie(lua_State* L) {
+    auto* p = check_res(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+    size_t vn = 0;
+    const char* val = lua_tolstring(L, 3, &vn);
+    if (!val)
+        luaL_error(L, "cookie value must be a string");
+    std::string cookie = std::string(name) + "=" + std::string(val, vn);
+    if (lua_istable(L, 4)) {
+        lua_getfield(L, 4, "path");
+        if (lua_isstring(L, -1)) {
+            cookie += "; Path=";
+            cookie += lua_tostring(L, -1);
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 4, "max_age");
+        if (lua_isnumber(L, -1)) {
+            cookie += "; Max-Age=";
+            cookie += std::to_string((long long) lua_tointeger(L, -1));
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 4, "httponly");
+        if (lua_toboolean(L, -1))
+            cookie += "; HttpOnly";
+        lua_pop(L, 1);
+        lua_getfield(L, 4, "secure");
+        if (lua_toboolean(L, -1))
+            cookie += "; Secure";
+        lua_pop(L, 1);
+        lua_getfield(L, 4, "samesite");
+        if (lua_isstring(L, -1)) {
+            cookie += "; SameSite=";
+            cookie += lua_tostring(L, -1);
+        }
+        lua_pop(L, 1);
+    } else {
+        cookie += "; Path=/; HttpOnly";
+    }
+    p->res->add_header("Set-Cookie", cookie);
     return 0;
 }
 
@@ -155,6 +228,10 @@ int res_index(lua_State* L) {
     }
     if (std::strcmp(k, "redirect") == 0) {
         lua_pushcfunction(L, res_redirect, "redirect");
+        return 1;
+    }
+    if (std::strcmp(k, "cookie") == 0) {
+        lua_pushcfunction(L, res_cookie, "cookie");
         return 1;
     }
     return 0;

@@ -21,7 +21,7 @@ LUAU = os.path.join(HERE, "luau")
 PORT = 14000
 HTTP_PORT = 18088
 
-ORDER = ("echo.luau", "page.luau", "conf.luau")
+ORDER = ("echo.luau", "page.luau", "session.luau", "conf.luau")
 
 
 def read_luau(name):

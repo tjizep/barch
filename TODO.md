@@ -926,4 +926,18 @@
 
 176. [Done] transport() kind http vs resource [30-08-2026] Nr 170 7efe967
 
+177. Full-path HTTP example with a foreign MySQL or Postgres space. An HTTP
+    resource reads a barch key, and a miss (or the first access) goes to
+    the foreign server, so the database is only reached through the
+    stored function rather than from the client. Settle with a deploy.py
+    like examples/http that starts the space as foreign=mysql or
+    foreign=postgres, serves a resource, and a GET that fills from SQL
+    and a second GET that hits the cached key.
+
+178. [Done] Multi-threaded HTTP ingress [30-08-2026] Nr 171 6da0969
+
+179. [Done] HTTP handlers use barch.store for session state [30-08-2026] Nr 173 a537170
+
+180. [Done] HTTP Luau VM pool [30-08-2026] Nr 172 6da0969
+
 

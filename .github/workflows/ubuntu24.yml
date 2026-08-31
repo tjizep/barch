@@ -20,10 +20,16 @@ jobs:
           cmake -B build \
              -DTEST_OD=ON \
              -DCMAKE_CXX_FLAGS=' -Wall -Wextra '
-          cmake --build build --target barch --parallel
-          cmake --build build --target lbarch --parallel
-          cmake --build build --target globdifftest --parallel
-          cmake --build build --target locktest --parallel
+          # --parallel with no number becomes `gmake -j`, which to GNU make
+          # means no limit: every ready source starts at once. That is 58
+          # compiles of around a gigabyte each on a 16GB runner, and the job
+          # dies with SIGTERM (exit 143) and no gcc error to explain it. The
+          # sanitized workflow hit the same wall. Ninja caps itself, so a
+          # local build never shows this.
+          cmake --build build --target barch --parallel "$(nproc)"
+          cmake --build build --target lbarch --parallel "$(nproc)"
+          cmake --build build --target globdifftest --parallel "$(nproc)"
+          cmake --build build --target locktest --parallel "$(nproc)"
           ( cd build ; ctest --output-on-failure )
       - name: Prepare Release Artifacts
         run: |

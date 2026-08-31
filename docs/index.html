@@ -286,9 +286,10 @@ barch.start("127.0.0.1", 14000)</pre>
 <h2>Build from source</h2>
 <pre class="solo">sudo apt install build-essential cmake swig python3-dev libssl-dev
 cmake -B build -DTEST_OD=ON
-cmake --build build --target barch --parallel     <span class="c"># SWIG python module</span>
-cmake --build build --target lbarch --parallel    <span class="c"># valkey runtime</span>
-sudo cmake --install build --component barchlua   <span class="c"># luajit → /var/lib/lua/5.1/barch.so</span></pre>
+cmake --build build --target barch --parallel "$(nproc)"     <span class="c"># SWIG python module</span>
+cmake --build build --target lbarch --parallel "$(nproc)"    <span class="c"># valkey runtime</span>
+sudo cmake --install build --component barchlua               <span class="c"># luajit → /var/lib/lua/5.1/barch.so</span></pre>
+<div class="notice note"><b>Give <code>--parallel</code> a number.</b> With no number it reaches make as a bare <code>-j</code>, which starts every source at once &mdash; around sixty compiles of up to a gigabyte each. A machine without that much memory has the build killed with nothing from the compiler to explain it. Ninja picks its own limit, so this only affects the Makefile generator.</div>
 <div class="notice warning"><b>Platform constraint.</b> Linux only, gcc 11+ (any C++20 compiler), amd64+SSE or arm+NEON. Valkey 8.0+ is required only for the module deployment — the embedded and native-RESP paths run without it.</div>
 </article>
 

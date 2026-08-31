@@ -557,8 +557,10 @@ public:
 
         std::unique_lock<std::timed_mutex> lock(upgrade_write_mtx, std::defer_lock);
         while (true) {
-            auto now = std::chrono::steady_clock::now();
 #ifdef BARCH_LOCK_DEBUG
+            // only the debug build slices the wait up to log progress; without it
+            // there is one slice, so reading the clock here has nothing to answer
+            auto now = std::chrono::steady_clock::now();
             auto slice = now + dump_every;
             if (slice > deadline)
                 slice = deadline;

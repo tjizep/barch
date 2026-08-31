@@ -26,8 +26,12 @@ jobs:
              -DTEST_OD=ON \
              -DCOVERAGE=ON \
              -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          # coverage instrumentation is fat; unlimited --parallel has
-          # SIGTERM'd this job mid-compile (exit 143) with no gcc error.
+          # unlimited --parallel has SIGTERM'd this job mid-compile (exit
+          # 143) with no gcc error. DONE 100 put that down to coverage
+          # being fat, but the real cause is that --parallel with no
+          # number reaches make as a bare `-j`, so every ready source
+          # starts at once; coverage only made each one bigger. Kept at 2
+          # because this build is the fat one.
           # ctest uses _barch.so, so skip lbarch (a second copy of the
           # same sources). locktest is already a dependency of barch.
           cmake --build build --target barch --parallel 2

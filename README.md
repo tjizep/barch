@@ -83,9 +83,15 @@ Checkout and build on (currently linux only) with gcc 10 or above...
 
       ```
       cmake -B build -DTEST_OD=ON
-      cmake --build build --target barch --parallel 
-      cmake --build build --target lbarch --parallel
+      cmake --build build --target barch --parallel "$(nproc)"
+      cmake --build build --target lbarch --parallel "$(nproc)"
       ```
+
+     Give `--parallel` a number. With no number it reaches make as a
+     bare `-j`, which starts every source at once; a machine with less
+     memory than that needs will have the build killed with no error
+     from the compiler to explain it. Ninja picks its own limit, so
+     this only bites the Makefile generator.
      
    - Test: `ctest`
    - start `valkey-server valkey.conf --loadmodule {src code location}/build/_barch.so`

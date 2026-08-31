@@ -8117,3 +8117,64 @@ away.
 Full suite 75 of 75. `TestRangeShardRouting` failed once under load
 and passed on its own and on a second full run, and has nothing to do
 with HTTP or Luau.
+
+## 175. CI killed mid-compile again, and the bare -j behind it [31-08-2026]
+
+*Was `TODO.md` entry 182.*
+
+`full_error.txt` from the Ubuntu 24.04 job is not a compiler
+diagnostic. gcc never printed `error:`; gmake reported `Terminated`
+on `shard.cpp.o` and the step ended with exit 143, which is SIGTERM.
+
+DONE 100 saw this on the sanitized job and put it down to coverage
+instrumentation being fat. That is not the cause. `cmake --build
+--parallel` with no number reaches the native tool with no number
+either, and for Make that is a bare `-j`, which to GNU make means no
+limit at all. The log shows it plainly: 58 `Building CXX object`
+lines for the barch target back to back with no completion between
+them, and the percentage counter jumping 94, 97, 91, 97 as they all
+start at once.
+
+Checked rather than assumed, with a throwaway project and strace:
+
+    execve("/usr/bin/gmake", ["/usr/bin/gmake", "-f", "Makefile", "-j", "jt"])
+
+Peak compiler memory here, measured with `/usr/bin/time -v` on the
+real compile lines plus `-Wall -Wextra`:
+
+    http_api.cpp        1.22 GB     barchPYTHON_wrap.cxx  0.92 GB
+    function_api.cpp    0.84 GB     barchLUA_wrap.cxx     0.84 GB
+    swig_api.cpp        0.83 GB     barchJAVA_wrap.cxx    0.84 GB
+    shard.cpp           0.75 GB     luau_driver.cpp       0.68 GB
+
+None of those is alarming on its own, and four at once is fine. Fifty
+eight is not, on any runner this job will ever get. Coverage never
+had to be involved, which is why the plain job has now died the same
+way without it.
+
+Both release workflows pass `--parallel "16"`. `nproc` rather
+than a constant because it is right on a two core runner (DONE 101
+measured two) and stays right if the job ever moves to a bigger one.
+`lbarch` stays: unlike the sanitized job, these two publish
+`liblbarch.so` as a release artifact.
+
+The sanitized workflow keeps `-j2` since that build really is the fat
+one, but its comment now names the actual mechanism. `README.md`'s
+build steps had the same bare `--parallel`, so anyone following them
+on the Makefile generator was one large machine-load away from the
+same unexplained kill; they now pass a number and say why, and so do
+the build steps in `docs/index.html`, which is hand written rather
+than generated from the README.
+
+Ninja chooses its own limit, which is the whole reason this never
+shows up in the local build.
+
+Also in this entry, asked for alongside it: `debuggable_server_lock.h`
+read the clock at the top of `try_lock_for`'s wait loop, but the only
+thing that used it was the `BARCH_LOCK_DEBUG` slice, so every build
+without that flag warned `variable 'now' set but not used`. The read
+moved inside the `#ifdef`. The second loop's `now` stays where it is,
+since that one is compared against the deadline in both builds.
+
+Verified: `shard.cpp` compiles clean under `-Wall -Wextra` both with
+and without `BARCH_LOCK_DEBUG`, and the full suite is 75 of 75.

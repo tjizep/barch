@@ -1,0 +1,60 @@
+#!/bin/sh
+#
+# Take runtime shard data back out of the index before it can be committed.
+#
+# .gitignore covers nodes_*.dat and leaves_*.dat at every depth already, and git
+# itself honours that: `git add -A` skips them and `git add <name>` is refused.
+# They arrive through CLion's Ctrl+Alt+A anyway. Exactly why is not settled -
+# an explicit add forces past the ignore rules, and the IDE may also be
+# treating files its own processes wrote as noise while showing ones a terminal
+# test run left behind. Either way something adds what git would not, so no
+# entry in .gitignore can prevent it and the guard lives here instead.
+#
+# Enable once per clone:
+#     git config core.hooksPath hooks
+#
+# Only the shard pair is unstaged, because those are never source. Anything
+# else you force-add is left alone, on the grounds that you meant it.
+
+set -e
+
+if git rev-parse --verify -q HEAD >/dev/null; then
+    unstage() { git reset -q HEAD -- "$1"; }
+else
+    # nothing to reset back to on the very first commit
+    unstage() { git rm -q --cached --force -- "$1"; }
+fi
+
+matches=$(git diff --cached --name-only | while IFS= read -r name; do
+    case "${name##*/}" in
+        nodes_*.dat|leaves_*.dat) printf '%s\n' "$name" ;;
+    esac
+done)
+
+[ -n "$matches" ] || exit 0
+
+count=$(printf '%s\n' "$matches" | wc -l | tr -d ' ')
+printf 'removed %s shard file(s) from the index:\n' "$count" >&2
+printf '%s\n' "$matches" | sed 's/^/  /' >&2
+printf 'these are runtime output, not source - see .gitignore\n' >&2
+
+printf '%s\n' "$matches" | while IFS= read -r name; do
+    unstage "$name"
+done
+
+# git decides whether there is anything to commit before it runs this hook, so
+# emptying the index here does not make it stop - it would go on and write an
+# empty commit. If the shard files were the whole of the change, say so and let
+# the commit fail instead.
+if git rev-parse --verify -q HEAD >/dev/null; then
+    remaining=$(git diff --cached --name-only)
+else
+    remaining=$(git ls-files --cached)
+fi
+
+if [ -z "$remaining" ]; then
+    printf 'nothing else was staged, so there is nothing to commit\n' >&2
+    exit 1
+fi
+
+exit 0

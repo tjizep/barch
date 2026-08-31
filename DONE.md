@@ -8213,3 +8213,51 @@ The other candidate is a tool using `git add -f`, which no
 `.gitignore` entry can stop. Nothing in the repo does that: the only
 scripted `git add` is the coverage badge in ubuntu24-sanitize.yml,
 which names `coverage.svg` and `docs/coverage.svg` and nothing else.
+
+## 177. A pre-commit hook for force-added shard data [31-08-2026]
+
+*Was `TODO.md` entry 184.*
+
+DONE 176 added `nodes_*.dat` and `leaves_*.dat` to `.gitignore` and
+said the rule was already working. It is, and it was still the wrong
+place to look: the files arrive through CLion's Ctrl+Alt+A.
+
+What is verified is git's half. `git add -A` stages none of them and
+`git add <name>` is refused with the ignored-paths hint, both checked
+here. What is not verified is which part of the IDE gets past that,
+and I cannot test CLion from a terminal. An explicit add forces past
+the ignore rules, which was my first guess. The author's is at least
+as likely: the IDE seems to treat files its own processes wrote as
+noise, so a test run started from a terminal is not filtered the way
+one it launched would be, and the leftovers end up in the sweep.
+
+Both end in the same place - something adds what git on its own would
+not - so the guard cannot be an entry in `.gitignore`.
+
+`hooks/pre-commit` takes them back out of the index before the commit
+is written, and prints what it dropped. Only the shard pair is
+touched; anything else force-added is left alone on the grounds that
+it was meant.
+
+It needs one command per clone, which is left to run by hand:
+
+    git config core.hooksPath hooks
+
+Tracked rather than dropped in `.git/hooks` so it survives a fresh
+clone. There were no other hooks and no `core.hooksPath`, so nothing
+is displaced by pointing it at `hooks/`.
+
+One wrinkle worth writing down. git works out whether there is
+anything to commit *before* it runs the hook, so emptying the index
+from inside the hook does not make it stop - it goes on and writes an
+empty commit. The first version did exactly that. The hook now checks
+what is left staged and exits non-zero if the shard files were the
+whole change, so the commit fails with a reason instead.
+
+Tested in a throwaway repo, not this one: a shard file mixed with real
+files on the very first commit (no HEAD, so the unstage is `rm
+--cached` rather than `reset`), shard files at two depths, a
+deliberately force-added `keepme.dat` that must survive, shard files
+as the only staged change, and an already-tracked shard file - which
+is left tracked rather than having a deletion staged behind your back.
+The files stay on disk in every case; only the index is touched.

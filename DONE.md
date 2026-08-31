@@ -8178,3 +8178,38 @@ since that one is compared against the deadline in both builds.
 
 Verified: `shard.cpp` compiles clean under `-Wall -Wextra` both with
 and without `BARCH_LOCK_DEBUG`, and the full suite is 75 of 75.
+
+## 176. Shard .dat files by name in .gitignore [31-08-2026]
+
+*Was `TODO.md` entry 183.*
+
+Asked for because `nodes_*.dat` / `leaves_*.dat` keep getting staged
+by accident. `.gitignore` now names both patterns as well as the
+`*.dat` catch-all above them.
+
+The honest part: on `main` this changes nothing today. A pattern with
+no slash matches at every depth, so `*.dat` was already covering
+these everywhere, and it was checked rather than assumed -
+`git add -A --dry-run` stages none of them, and naming one directly
+is refused with the "ignored by one of your .gitignore files" hint.
+The named rules are worth having anyway: they are the patterns that
+actually matter, and they survive anyone narrowing the catch-all to
+stop it swallowing a data file that should be tracked.
+
+So what is staging them? Two candidates found while looking:
+
+Two local branches, `iterator_offset` and `nanos`, have no `*.dat`
+rule in their `.gitignore` at all, and neither did the remote-only
+branches from before the rule landed (`apis`, `build_test`,
+`cumulative_index`, `docker`, `exp`, `fix_zrank` and others). The
+rule arrived in db85c71 on 26-07-2026, the same day e82a865 committed
+`examples/flask/leaves_auth0.dat` and `nodes_auth0.dat` - which is
+what it was written to stop. A `git add -A` on one of those older
+branches after a test run stages hundreds of these, and merging one
+forward carries the older `.gitignore` with it. Nothing tracks the
+files on any branch now, so this is about branches, not history.
+
+The other candidate is a tool using `git add -f`, which no
+`.gitignore` entry can stop. Nothing in the repo does that: the only
+scripted `git add` is the coverage badge in ubuntu24-sanitize.yml,
+which names `coverage.svg` and `docs/coverage.svg` and nothing else.

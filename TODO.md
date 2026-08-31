@@ -945,3 +945,5 @@
 
 
 182. [Done] CI killed mid-compile again, and the bare -j behind it [31-08-2026] Nr 175 a30ffaa
+
+183. [Done] Shard .dat files by name in .gitignore [31-08-2026] Nr 176 2b8bce6

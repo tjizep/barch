@@ -32,6 +32,12 @@ test/MinSizeRel/
 # examples/flask, which is what running that example there left behind.
 # (supersedes the older leaf_data.dat / node_data.dat names)
 *.dat
+# and the shard pair by name as well. `*.dat` already covers these at every depth,
+# so this is deliberate belt and braces: it is the pattern that actually matters,
+# and it keeps working if anyone ever narrows the catch-all above to stop it
+# swallowing a data file that ought to be tracked.
+nodes_*.dat
+leaves_*.dat
 
 .ninja*
 .idea/*

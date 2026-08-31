@@ -357,8 +357,77 @@ if (ADD_LUAU)
         set_property(SOURCE src/http_api.cpp src/foreign/crow_luau.cpp
                 APPEND PROPERTY COMPILE_OPTIONS -Wno-undef -Wno-unused-parameter)
         message("Using Crow for Luau HTTP transport()")
+
+        # cofetch is an asio-native async HTTP client, header-only over libcurl,
+        # and it is what `http.request(url):get()` inside a stored function runs
+        # on. Ubuntu ships no libcurl.a, so static means building curl here.
+        #
+        # Kept as small as it can usefully be: HTTP and HTTPS only, no ldap, psl,
+        # ssh or brotli, no exe and no tests. TLS reuses the OpenSSL this build
+        # already links. That leaves HTTP/1.1 - HTTP/2 would want nghttp2, which
+        # is another source build for something no stored function has asked for.
+        set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
+        set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+        set(BUILD_LIBCURL_DOCS OFF CACHE BOOL "" FORCE)
+        set(BUILD_MISC_DOCS OFF CACHE BOOL "" FORCE)
+        set(CURL_ENABLE_EXPORT_TARGET OFF CACHE BOOL "" FORCE)
+        set(HTTP_ONLY ON CACHE BOOL "" FORCE)
+        set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
+        set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
+        set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_LDAP ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_LDAPS ON CACHE BOOL "" FORCE)
+        set(CURL_BROTLI OFF CACHE BOOL "" FORCE)
+        set(CURL_ZSTD OFF CACHE BOOL "" FORCE)
+        # curl's CMake reads this to decide shared vs static; it is restored below
+        # so nothing else in the build inherits it
+        set(BARCH_SAVED_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(
+                curl
+                DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+                URL "https://github.com/curl/curl/releases/download/curl-8_11_1/curl-8.11.1.tar.gz"
+        )
+        FetchContent_MakeAvailable(curl)
+        set(BUILD_SHARED_LIBS ${BARCH_SAVED_BUILD_SHARED_LIBS} CACHE BOOL "" FORCE)
+        # everything barch builds ends up in a shared module, so curl's objects
+        # have to be position independent even though the library itself is static
+        set_property(TARGET libcurl_static PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+        FetchContent_Declare(
+                cofetch
+                GIT_REPOSITORY https://github.com/SSARCandy/cofetch.git
+                GIT_TAG main
+                GIT_SHALLOW TRUE
+                # only include/cofetch.h is wanted. Their submodules are asio,
+                # googletest and a doxygen theme - we have our own asio and none
+                # of the rest is built here
+                GIT_SUBMODULES ""
+                GIT_SUBMODULES_RECURSE OFF
+        )
+        if (POLICY CMP0169)
+            cmake_policy(SET CMP0169 OLD)
+        endif ()
+        FetchContent_GetProperties(cofetch)
+        if (NOT cofetch_POPULATED)
+            FetchContent_Populate(cofetch)
+        endif ()
+        if (NOT TARGET cofetch)
+            add_library(cofetch INTERFACE)
+            target_include_directories(cofetch INTERFACE ${cofetch_SOURCE_DIR}/include)
+            # consumers of a static curl must say so, or the headers declare the
+            # entry points dllimport-style and the link fails on some platforms
+            target_compile_definitions(cofetch INTERFACE CURL_STATICLIB)
+            target_link_libraries(cofetch INTERFACE libcurl_static)
+        endif ()
+        set(BARCH_HAS_COFETCH ON)
+        set_property(SOURCE src/foreign/fetch_luau.cpp
+                APPEND PROPERTY COMPILE_OPTIONS -Wno-undef -Wno-unused-parameter)
+        message("Using cofetch for Luau http.request()")
     else ()
         set(BARCH_HAS_CROW OFF)
+        set(BARCH_HAS_COFETCH OFF)
     endif ()
 else ()
     message("Luau not used; foreign=luau spaces stay off")
@@ -452,6 +521,7 @@ if (ADD_SWIG)
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "nk_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "simdjson_luau\\.cpp$")
             list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "crow_luau\\.cpp$")
+            list(FILTER BARCHLUA_SOURCES EXCLUDE REGEX "fetch_luau\\.cpp$")
             swig_add_library(barchlua LANGUAGE lua SOURCES src/barch.i ${BARCHLUA_SOURCES})
             target_link_libraries(barchlua PRIVATE ${LUAJIT_LIBRARIES})
             if (USE_LIBURING)
@@ -628,6 +698,10 @@ if (BARCH_HAS_LUAU)
                     target_compile_definitions(${tgt} PRIVATE CROW_ENABLE_SSL)
                 endif ()
             endif ()
+            if (BARCH_HAS_COFETCH)
+                target_compile_definitions(${tgt} PRIVATE BARCH_HAS_COFETCH)
+                target_link_libraries(${tgt} PRIVATE cofetch)
+            endif ()
         endif ()
     endforeach ()
     if (TARGET barchlua)
@@ -646,11 +720,15 @@ if (BARCH_HAS_LUAU)
                 target_compile_definitions(barchlua PRIVATE CROW_ENABLE_SSL)
             endif ()
         endif ()
+        if (BARCH_HAS_COFETCH)
+            target_compile_definitions(barchlua PRIVATE BARCH_HAS_COFETCH)
+            target_link_libraries(barchlua PRIVATE cofetch)
+        endif ()
     endif ()
 endif ()
 
 if (TARGET barchlua)
-    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp)
+    add_library(barch_luau_driver OBJECT src/foreign/luau_driver.cpp src/foreign/nk_luau.cpp src/foreign/simdjson_luau.cpp src/foreign/crow_luau.cpp src/foreign/fetch_luau.cpp)
     set_target_properties(barch_luau_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
     if (BARCH_HAS_LUAU)
         target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_LUAU)
@@ -670,6 +748,10 @@ if (TARGET barchlua)
             if (USE_OPENSSL)
                 target_compile_definitions(barch_luau_driver PRIVATE CROW_ENABLE_SSL)
             endif ()
+        endif ()
+        if (BARCH_HAS_COFETCH)
+            target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_COFETCH)
+            target_link_libraries(barch_luau_driver PRIVATE cofetch)
         endif ()
     endif ()
     if (BARCH_HAS_MYSQL)
@@ -901,6 +983,11 @@ else()
             add_test(NAME TestHttpLuau
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/httptest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            if (BARCH_HAS_COFETCH)
+                add_test(NAME TestFetchLuau
+                        COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fetchluautest.py
+                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+            endif ()
         endif ()
 
         # ACL key patterns are parsed and refused rather than silently dropped

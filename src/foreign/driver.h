@@ -11,6 +11,8 @@
 #include "sastam.h"
 #include "variable.h"
 
+struct lua_State;
+
 namespace barch {
 class key_space;
 namespace foreign {
@@ -56,6 +58,33 @@ function_states_ptr make_function_states();
  * state how big it is from another thread is a race.
  */
 function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>> into);
+
+/**
+ * Parking a running Luau call while something else finishes - TODO 186.
+ *
+ * A C function that has to wait on I/O asks to be parked, starts its work, and
+ * returns `lua_yield(L, 0)`. The coroutine stops where it is and the pool thread
+ * it was on goes back to other jobs. When the work lands, on whatever thread it
+ * lands on, `complete_call` hands over a function that pushes the results; the
+ * coroutine is resumed on a pool thread and those become the return values of
+ * the C function.
+ *
+ * `park_call` answers null when this call cannot yield, which is the case inside
+ * a Crow HTTP handler: the method runs under `lua_pcall`, and it is holding a VM
+ * slot from the space's pool. Yielding there would return through `handle_route`
+ * and release the slot while the coroutine is still suspended on it, so the next
+ * request could take that state and run it underneath. A caller that gets null
+ * has to wait inline instead.
+ *
+ * `complete_call` is safe to call from any thread and does nothing after the
+ * first call. The pushing function only ever runs on the thread that resumes the
+ * coroutine, so no lua_State is touched from a completion thread.
+ */
+struct parked_call;
+typedef std::shared_ptr<parked_call> parked_call_ptr;
+typedef std::function<int(lua_State*)> push_results;
+parked_call_ptr park_call(lua_State* L);
+void complete_call(const parked_call_ptr& parked, push_results push);
 
 /** how the driver asks for a function's source, by name.
  *  `space` empty means the function's own space. `exact` true (a dotted

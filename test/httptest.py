@@ -10,6 +10,41 @@ import barch
 
 PORT = 14088
 HTTP_PORT = 18088
+UP_PORT = 18089
+
+import http.server
+import socketserver
+import threading
+
+
+class Upstream(http.server.BaseHTTPRequestHandler):
+    """What the handlers call out to with http.request.
+
+    Deliberately a separate server. A handler that fetched from its own Crow
+    server would hold one VM slot while waiting on a second, and with eight
+    client threads against a pool of 2-8 the slots run out and the whole thing
+    deadlocks. Calling out is fine; calling back into yourself is not.
+    """
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        body = b"upstream ok"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class UpstreamServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+upstream = UpstreamServer(("127.0.0.1", UP_PORT), Upstream)
+threading.Thread(target=upstream.serve_forever, daemon=True).start()
 
 print("start http luau test", flush=True)
 barch.start("0.0.0.0", PORT)
@@ -97,7 +132,7 @@ function transport()
         kind = "http",
         port = 18088,
         bind = "127.0.0.1",
-        keys = {"ECHO", "PAGE", "SESS", "SLOW"},
+        keys = {"ECHO", "PAGE", "SESS", "SLOW", "FETCH"},
     }
 end
 '''
@@ -128,6 +163,30 @@ function transport()
     }
 end
 '''
+
+# an outbound request from inside a handler. A handler cannot park - it holds a
+# VM slot under lua_pcall - so this is the inline wait, under the same eight
+# threads that are hammering everything else.
+FETCH = """
+function call()
+    return "fetch"
+end
+
+function proxy(req, res)
+    local got = http.request("http://127.0.0.1:%d/up"):timeout(5000):get()
+    res.body = tostring(got.status) .. "|" .. got.body
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/fetch",
+        methods = {GET = proxy},
+        send = "text/plain",
+    }
+end
+""" % UP_PORT
 
 PLAIN = r'''
 function call()
@@ -184,6 +243,7 @@ try:
     assert r.execute_command("SETF", "plain", PLAIN) == b"OK"
     assert r.execute_command("SETF", "sess", SESS) == b"OK"
     assert r.execute_command("SETF", "slow", SLOW) == b"OK"
+    assert r.execute_command("SETF", "fetch", FETCH) == b"OK"
     # no transport: still an ordinary function
     assert r.execute_command("plain") == b"plain"
 
@@ -197,6 +257,7 @@ try:
     assert "PAGE /page GET" in text, started
     assert "SESS /sess GET" in text, started
     assert "SLOW /slow GET" in text, started
+    assert "FETCH /fetch GET" in text, started
     assert "PLAIN" not in text, started
 
     # Crow bind can take a beat after START returns
@@ -240,6 +301,10 @@ try:
     assert status == 200, (status, body)
     second = json.loads(body)
     assert second["n"] == 2 and second["sid"] == first["sid"], second
+
+    print("handler calls out with http.request", flush=True)
+    status, body, _ = http_call("GET", "/fetch", timeout=15)
+    assert status == 200 and body == b"200|upstream ok", (status, body)
 
     st = r.execute_command("HTTP", "STATUS")
     assert any(b"ECHO" in x for x in st), st
@@ -302,6 +367,8 @@ try:
             assert status == 200, (status, body)
             got = json.loads(body)
             assert got["ok"] is True and got["a"] == i * 100 + n, got
+            status, body, _ = http_call("GET", "/fetch", timeout=20)
+            assert status == 200 and body == b"200|upstream ok", (status, body)
             rc.set(f"noise-{i}-{n}", n)
             assert rc.get(f"noise-{i}-{n}") == str(n).encode()
         return True
@@ -315,6 +382,10 @@ try:
     assert r.execute_command("HTTP", "STATUS") == b"stopped"
     print("complete http luau test")
 finally:
+    try:
+        upstream.shutdown()
+    except Exception:
+        pass
     try:
         r.execute_command("HTTP", "STOP")
     except Exception:

@@ -951,3 +951,18 @@
 184. [Done] A pre-commit hook for force-added shard data [31-08-2026] Nr 177 22189c6
 
 185. [Done] NumKong bf16 on gcc 11, and a container to catch it [31-08-2026] Nr 178 bee9f27
+
+186. [Done] http.request inside stored Luau functions [31-08-2026] Nr 179 f302898
+
+187. Exercise the outbound `http.request` client inside the existing
+    multithreaded Crow ingress test, not just on its own. `httptest.py`
+    already runs eight threads over /page, /echo and /sess while the same
+    threads write over RESP, which mixes the VM pool with `store.locked`
+    in a way the isolated fetch test does not. A handler must not fetch
+    from its own Crow server there: that takes two pool slots per
+    request and deadlocks once the slots run out, so the requests go to
+    a separate upstream. Settle with a /fetch resource in that worker
+    loop coming back correct every time, and the hazard written down.
+
+
+187. [Done] Outbound fetches in the concurrent Crow test [31-08-2026] Nr 180 f302898

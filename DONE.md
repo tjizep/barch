@@ -8318,3 +8318,126 @@ and passes with `-DNK_NATIVE_BF16=0`; the define reaches every target
 in the container's `flags.make` on 22.04 and is absent on 24.04; the
 full `barch` target builds under gcc 11 in the container with 0 errors,
 against 613 before; the host is unaffected and the suite is 75 of 75.
+
+## 179. http.request inside stored Luau functions [31-08-2026]
+
+*Was `TODO.md` entry 186.*
+
+cofetch (https://github.com/SSARCandy/cofetch) is an asio-native async HTTP
+client, header-only over libcurl, and it is now what
+`http.request(url):get()` runs on inside a stored function. The chain is
+theirs: `:headers`, `:body`, `:timeout`, `:redirects`, then `:get`,
+`:post`, `:put`, `:patch` or `:delete`. The answer is a table -
+`ok`, `status`, `body`, `headers`, `error` - so a refused connection
+is something a script handles rather than an error it dies of.
+
+libcurl is built from source and linked static, per the author's call.
+HTTP and HTTPS only, no ldap, psl, ssh or brotli, no exe and no tests, TLS
+on the OpenSSL already linked. That leaves HTTP/1.1; HTTP/2 would want
+nghttp2, another source build for something nothing has asked for. cofetch
+itself is fetched with `GIT_SUBMODULES ""` - its submodules are asio,
+googletest and a doxygen theme, and only `include/cofetch.h` is wanted.
+
+### The reactor is ours
+
+The plan was to borrow the io_context from Crow or from
+`asio_resp_session`. That does not work. A stored function can be reached
+down four paths - the native RESP port, a valkey module command, the
+embedded SWIG store, and a Crow handler - and the foreign pool that
+actually runs them is a plain thread pool with no reactor anywhere near it.
+So `fetch_luau.cpp` owns one io_context and one thread, and every path
+behaves the same.
+
+Requests are `asio::post`ed onto that thread rather than started inline.
+cofetch's initiation runs `Client::start` on whichever thread calls it,
+and that reaches into the easy-handle pool and `curl_multi_add_handle`;
+starting a request from a foreign pool thread would race the thread already
+in `io.run()`.
+
+### Parking a call
+
+`park_call` / `complete_call` in the driver are the new general facility.
+A C function that has to wait asks to be parked, starts its work and
+returns `lua_yield(L, 0)`. `pump_call` now tells two yields apart: the
+budget yield goes straight back on the queue as before, and a parked yield
+is not requeued at all - the completion does that, or the coroutine gets
+resumed twice.
+
+The lost-wake-up case is handled both ways round. A completion that lands
+before the pump has seen the yield sets `done` and returns; the pump then
+finds `done` already true and loops round to push. A completion that lands
+after sees `waiting` and enqueues the resume itself. The completion only
+ever *stores* a pushing function - it is called on the thread that resumes
+the coroutine, so no lua_State is touched from a completion thread.
+
+While parked, the job is held alive by the resume closure in its parking
+slot and by nothing else, because the pool thread that was running it has
+gone. That cycle is broken the moment it resumes, and `finish_job` clears
+it too so an error while parked cannot leak the pair.
+
+### Two things the tests found
+
+Waiting was being charged against the deadline. `function_deadline_ms`
+defaults to 1000, so a one second fetch died with FUNCTION timeout every
+time. Parked time is now added back to the deadline on resume: the budget
+is there to stop a script computing forever, and a parked call is not
+computing. `:timeout()` is what bounds the wait.
+
+`barchlua` compiles the sources against LuaJIT's `lua.h`, so it already
+excludes the four Luau files by regex; `fetch_luau.cpp` had to join them
+or the build fails on `lua_pushcfunction` taking two arguments.
+
+### The Crow path deliberately does not park
+
+Raised by the author while this was being written, and right: a handler
+runs under `lua_pcall` holding a VM slot out of the space's pool, and the
+result comes back on a Crow thread that the pool can move a slot between.
+Yielding there would return through `handle_route`, put the slot back, and
+let the next request pick up a lua_State with a suspended coroutine on it.
+
+So `park_call` answers null when the call cannot yield, and the verb waits
+inline instead - costing that Crow thread for the length of the request,
+which is what the pool size is there to bound. The discriminator is
+`lua_isyieldable`, which is what the interrupt already uses for the same
+reason.
+
+### Verified
+
+`test/fetchluautest.py`, against a threaded Python server: body of a 200,
+status of a 404, a response header, a POST with a body and a content type,
+and a refused connection handled with the server still fine afterwards.
+
+Then the two that matter. **21689 stored-function calls ran on the pool
+while one fetch sat parked**, so the wait really does not hold a worker.
+**Four one-second fetches finished in 1.00s**, so they overlap on the
+reactor instead of queueing. And **48 handler fetches across 8 threads**
+through a Crow `/proxy` resource, all correct, which is the inline path
+under exactly the slot reuse it has to survive.
+
+Full suite 76 of 76. The gcc 11 container builds curl from source and the
+whole barch target with 0 errors, so CI needs no image change.
+
+## 180. Outbound fetches in the concurrent Crow test [31-08-2026]
+
+*Was `TODO.md` entry 187.*
+
+DONE 179 tested the handler path on its own: eight threads on a `/proxy`
+resource. This puts it in the mix that was already there instead.
+`httptest.py`'s eight workers now do GET /page, POST /echo, **GET /fetch**
+and a RESP set/get each time round, twenty times over, so 160 outbound
+requests go through the inline wait while the VM pool is also serving
+`store.locked` sessions and ordinary RESP traffic is running beside it.
+One `/fetch` on its own comes first, so a failure there is not a
+concurrency puzzle to unpick.
+
+The upstream is a separate threaded Python server, and that is not
+incidental. **A handler must not fetch from its own Crow server.** It holds
+one VM slot while waiting on a second, and with eight client threads
+against a pool of 2-8 the slots run out and every request is waiting for
+one another request is holding. Calling out is fine; calling back into
+yourself deadlocks. Written into `examples/http/README.md` next to the
+inline-wait paragraph that explains why, with the advice to call the Lua
+function directly rather than going out over HTTP to reach it.
+
+Ran three times over along with the isolated fetch test: no failures and no
+hangs.

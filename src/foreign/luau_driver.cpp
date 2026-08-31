@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -22,6 +23,7 @@
 #include "lualib.h"
 #include "luacode.h"
 #include "nk_luau.h"
+#include "fetch_luau.h"
 #include "simdjson_luau.h"
 #include "crow_luau.h"
 #endif
@@ -107,11 +109,19 @@ static void close_counted_state(lua_State* L) {
  * session uses: a nested CALLF is a second job on the same VM, and anything kept per
  * VM would need saving and restoring around it.
  */
+struct call_job;
+
 struct running_call {
     /** the space the function was loaded from, which is where require looks */
     std::string space;
     /** the space the call is running against - barch.store / barch.current */
     std::string running;
+    /**
+     * the stored-function call this coroutine belongs to, when there is one.
+     * Null for the foreign fill states and for a Crow handler, neither of which
+     * can be parked - see `park_call` in driver.h.
+     */
+    call_job* owner{nullptr};
 };
 
 static void interrupt(lua_State* L, int gc) {
@@ -202,6 +212,7 @@ static void open_safe(lua_State* L) {
     luaopen_nk(L);
     luaopen_simdjson(L);
     luaopen_crowhttp(L);
+    luaopen_fetch(L);
     lua_pushcfunction(L, blocked_require, "require");
     lua_setglobal(L, "require");
     lua_newtable(L);
@@ -1971,6 +1982,28 @@ static std::string current_space(lua_State* L) {
     return rc ? rc->space : std::string{};
 }
 
+/**
+ * A call stopped mid-flight while something outside Lua finishes - TODO 186.
+ *
+ * `resume` holds the job alive for as long as it is parked; nothing else does,
+ * because the pool thread that was running it has gone back to the queue. The
+ * reference is dropped the moment the call is resumed, so the cycle between the
+ * job and its parking slot lasts exactly as long as the wait.
+ *
+ * `push` is filled by whichever thread the work completed on, and is only ever
+ * *called* on the pool thread that resumes the coroutine. That is what keeps a
+ * completion off the lua_State.
+ */
+struct parked_call {
+    std::mutex mu;
+    push_results push{};
+    std::function<void()> resume{};
+    /** the work has finished and `push` is set */
+    bool done{false};
+    /** the pump has seen the yield, so a completion has to wake it */
+    bool waiting{false};
+};
+
 struct call_job {
     function_states_ptr cache{};
     space_state* st{nullptr};
@@ -1988,6 +2021,12 @@ struct call_job {
     int tref{LUA_NOREF};
     run_ctx ctx{};
     function_done done{};
+    /** so a C function holding only the lua_State can take a strong reference */
+    std::weak_ptr<call_job> self{};
+    /** set while this call is waiting on something that is not Lua - TODO 186 */
+    parked_call_ptr parked{};
+    /** when that wait started, so the deadline can be moved past it */
+    int64_t parked_since{0};
 
     void release() {
         if (st && st->L && tref != LUA_NOREF) {
@@ -2013,6 +2052,12 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
     job->st->opened = nullptr;
     lua_callbacks(job->st->L)->userdata = nullptr;
     job->release();
+    // an error or a return while parked would otherwise leave the job holding the
+    // slot and the slot holding the job
+    if (job->parked) {
+        job->parked->resume = nullptr;
+        job->parked.reset();
+    }
     auto done = job->done;
     job->done = nullptr;
     if (done)
@@ -2021,6 +2066,33 @@ static void finish_job(const std::shared_ptr<call_job>& job, bool ok, Variable o
 
 static void pump_call(std::shared_ptr<call_job> job, int narg) {
     for (;;) {
+        // a call coming back from a park pushes what it was waiting for first, and
+        // those values become the return values of the C function that yielded
+        if (job->parked) {
+            auto p = job->parked;
+            push_results push;
+            {
+                std::lock_guard<std::mutex> lk(p->mu);
+                if (!p->done)
+                    return; // not our turn: the completion will bring it back
+                push = std::move(p->push);
+            }
+            // drop the mutual hold before running anything else
+            job->parked.reset();
+            p->resume = nullptr;
+            /*
+             * Waiting is not running. The deadline is there to stop a script
+             * computing forever, and while parked this one was not computing at
+             * all - it was a suspended coroutine and a socket. Charging it for
+             * the wait would cap every request at the deadline, which for the
+             * default 1000ms means no useful HTTP call at all. The request has
+             * its own timeout for bounding the wait.
+             */
+            if (job->ctx.deadline && job->parked_since)
+                job->ctx.deadline += art::now() - job->parked_since;
+            job->parked_since = 0;
+            narg = push ? push(job->T) : 0;
+        }
         // the interrupt reads its budget through the state's callback userdata, and
         // the state is shared with anything else this session might run, so it is
         // pointed at this job every time the job is resumed rather than once
@@ -2033,6 +2105,23 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         int status = lua_resume(job->T, nullptr, narg);
         narg = 0;
         if (status == LUA_YIELD) {
+            /*
+             * Two yields reach here and they are not the same thing. The budget
+             * yield means "this slice is used up", and the job goes straight back
+             * on the queue. A parked yield means "waiting on something that is not
+             * Lua", and it must NOT be requeued - the completion does that, or the
+             * coroutine gets resumed twice.
+             */
+            if (job->parked) {
+                auto p = job->parked;
+                std::lock_guard<std::mutex> lk(p->mu);
+                if (!p->done) {
+                    p->waiting = true;
+                    return;
+                }
+                // it finished before the yield was even seen; no lost wake-up
+                continue;
+            }
             // past the inline slice now, so back to the configured one
             job->ctx.left = job->ctx.slice ? job->ctx.slice : 1;
             enqueue([job] { pump_call(job, 0); });
@@ -2062,6 +2151,45 @@ static void pump_call(std::shared_ptr<call_job> job, int narg) {
         finish_job(job, ok, std::move(out), std::move(err));
         return;
     }
+}
+
+parked_call_ptr park_call(lua_State* L) {
+    // a Crow handler runs under lua_pcall while holding a VM slot from the space's
+    // pool. It cannot yield, and it must not: the yield would return through
+    // handle_route, the slot would go back to the pool, and the next request could
+    // pick up that state while this coroutine is still suspended on it.
+    if (!lua_isyieldable(L))
+        return nullptr;
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    if (!rc || !rc->owner)
+        return nullptr;
+    auto job = rc->owner->self.lock();
+    if (!job)
+        return nullptr;
+    auto p = std::make_shared<parked_call>();
+    p->resume = [job] { pump_call(job, 0); };
+    job->parked = p;
+    job->parked_since = art::now();
+    return p;
+}
+
+void complete_call(const parked_call_ptr& parked, push_results push) {
+    if (!parked)
+        return;
+    std::function<void()> resume;
+    {
+        std::lock_guard<std::mutex> lk(parked->mu);
+        if (parked->done)
+            return; // a second completion is a no-op, not a second resume
+        parked->done = true;
+        parked->push = std::move(push);
+        if (!parked->waiting)
+            return; // the pump has not parked it yet and will see `done` itself
+        parked->waiting = false;
+        resume = parked->resume;
+    }
+    if (resume)
+        enqueue(std::move(resume));
 }
 
 void start_function(const std::string& space, const std::string& name,
@@ -2134,6 +2262,9 @@ void start_function(const std::string& space, const std::string& name,
     // the coroutine carries which space this call runs in, for as long as it runs.
     // The job outlives the coroutine's use of it, and `release` clears it - TODO 150
     lua_setthreaddata(job->T, &job->scope);
+    // so a C function with only the lua_State can find this call and park it
+    job->self = job;
+    job->scope.owner = job.get();
 
     job->ctx.slice = insns;
     job->ctx.left = insns ? insns : 1;
@@ -2350,6 +2481,13 @@ function_states_ptr make_function_states() {
 
 function_states_ptr make_function_states(std::shared_ptr<std::atomic<uint64_t>>) {
     return nullptr;
+}
+
+parked_call_ptr park_call(lua_State*) {
+    return nullptr;
+}
+
+void complete_call(const parked_call_ptr&, push_results) {
 }
 
 void start_function(const std::string&, const std::string&, const call_interface_ptr&,

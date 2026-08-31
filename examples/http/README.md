@@ -114,6 +114,56 @@ SSL is optional on the same table: `ssl = {cert = "...", key = "...",
 proto = "TLS"}`. Cert and key are file paths, or PEM if they start
 with `-----BEGIN`.
 
+## Calling out: `http.request`
+
+The same functions can make outbound requests. `http.request(url)` builds a
+chain and the verb fires it:
+
+```lua
+function call(url)
+    local res = http.request(url)
+        :headers({["Content-Type"] = "application/json"})
+        :body('{"a":1}')
+        :timeout(2000)
+        :post()
+    if not res.ok then return "failed: " .. res.error end
+    return res.body
+end
+```
+
+The result is a table: `ok`, `status`, `body`, `headers` (a name to value
+map), and `error` when something went wrong. A refused connection or a
+timeout is `ok = false` with a reason, not a raised error, so a script can
+handle it. `:headers` takes either a map or a list of `"Name: value"`
+lines; `:redirects(n)` follows up to n, off by default.
+
+It runs on cofetch over asio, with libcurl underneath, on a reactor thread
+of its own. That last part matters: stored functions run on a plain thread
+pool with no event loop, and a function can be reached down four different
+paths, so the client owns its reactor rather than borrowing one.
+
+**A stored function does not hold its worker while it waits.** The verb
+suspends the coroutine, the pool thread goes back to other work, and the
+call resumes when the response lands. Time spent waiting is not charged
+against `function_deadline_ms` — that budget is there to stop a script
+computing forever, and a parked call is not computing. Bound the wait with
+`:timeout()` instead.
+
+**Inside a `transport()` handler it waits inline instead.** A handler runs
+under `lua_pcall` holding a VM slot from the space's pool; yielding would
+give that slot back while the coroutine was still suspended on it, and the
+next request could pick up the same Luau state. So in a handler the request
+blocks that Crow thread for its duration, which is what the pool size is
+there to bound. Everything else about it is the same.
+
+That has one consequence worth knowing before you hit it: **a handler must
+not fetch from its own Crow server.** It would hold one slot while waiting
+on a second, and once enough concurrent requests do that the pool runs out
+and every one of them is waiting for a slot that another is holding. Calling
+out to another service is fine; calling back into yourself deadlocks. If you
+want one route to reuse another's work, call the Lua function directly
+rather than going out over HTTP for it.
+
 ## Files
 
 - `luau/echo.luau` — `kind = "resource"`, POST `/echo`

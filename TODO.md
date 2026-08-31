@@ -949,3 +949,5 @@
 183. [Done] Shard .dat files by name in .gitignore [31-08-2026] Nr 176 2b8bce6
 
 184. [Done] A pre-commit hook for force-added shard data [31-08-2026] Nr 177 22189c6
+
+185. [Done] NumKong bf16 on gcc 11, and a container to catch it [31-08-2026] Nr 178 bee9f27

@@ -8261,3 +8261,60 @@ deliberately force-added `keepme.dat` that must survive, shard files
 as the only staged change, and an already-tracked shard file - which
 is left tracked rather than having a deletion staged behind your back.
 The files stay on disk in every case; only the index is touched.
+
+## 178. NumKong bf16 on gcc 11, and a container to catch it [31-08-2026]
+
+*Was `TODO.md` entry 185.*
+
+613 errors in `full_error.txt`, every one of them inside NumKong's own
+headers, starting with the only one that matters:
+
+    numkong/types.h:1095:9: error: '__bf16' does not name a type
+
+NumKong takes the native type when the compiler is gcc or clang and the
+target has bf16, and it tests the second half with `__AVX512BF16__`:
+
+    #if (defined(__GNUC__) || defined(__clang__)) && \
+        ((defined(__ARM_BF16_FORMAT_ALTERNATIVE)) || (defined(__AVX512BF16__)))
+    typedef __bf16 nk_bf16_t;
+
+gcc only grew the `__bf16` scalar type in 13. 11 and 12 define
+`__AVX512BF16__` for the intrinsics regardless, so on `-march=native`
+over a CPU that has AVX512-BF16 the typedef has nothing to name and the
+other 612 errors are the wreckage.
+
+It was not a version drift, which was the first guess and was wrong:
+upstream `main` is 928a214 v7.8.1, the same commit already in the local
+`_deps`. Two conditions have to meet - gcc under 13 and a bf16 capable
+CPU - so a 24.04 host never sees it whatever the hardware, and neither
+does a 22.04 runner on an older CPU. That is why it read as new work
+breaking rather than as a runner with a newer chip.
+
+`CMakeLists.txt` defines `NK_NATIVE_BF16=0` on the numkong INTERFACE
+target for gcc under 13. That is their own switch, and it falls back to
+`typedef unsigned short nk_bf16_t` - two bytes either way, so no layout
+changes. gcc 13 and clang keep the native type.
+
+`ci/local-ci.sh` runs the workflow build in a container, which is what
+the request was really for: 22 for gcc 11, 24 for gcc 13, with
+`--configure`, `--target`, `--tests` and `--shell`. The tree is bind
+mounted rather than copied and the container runs as the invoking user,
+so nothing lands root-owned and there is no second checkout to drift
+out of step. Each image builds into its own `ci-build-ubuntu<n>`, now
+ignored. The container's TestStarter goes to `test/build` and a
+RelWithDebInfo host build uses `test/RelWithDebInfo`, so those do not
+collide.
+
+Worth being straight about its limits, and `ci/README.md` says so: it
+reproduces the compiler, not the runner. The images install what the
+build reaches for rather than what a hosted image ships, so a missing
+dependency looks like a build failure. And it reproduces this
+particular bug only because this machine's CPU has bf16 - on one
+without, `ci/local-ci.sh 22` would compile happily and tell you
+nothing.
+
+Verified: the minimal repro fails in `ubuntu:22.04` exactly as CI did
+and passes with `-DNK_NATIVE_BF16=0`; the define reaches every target
+in the container's `flags.make` on 22.04 and is absent on 24.04; the
+full `barch` target builds under gcc 11 in the container with 0 errors,
+against 613 before; the host is unaffected and the suite is 75 of 75.

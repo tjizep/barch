@@ -42,6 +42,8 @@ leaves_*.dat
 .ninja*
 .idea/*
 cmake-*
+# what ci/local-ci.sh builds into, one per container image
+ci-build-ubuntu*/
 CTestTestfile.cmake
 _deps
 CMakeUserPresets.json

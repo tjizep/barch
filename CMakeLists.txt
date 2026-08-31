@@ -297,6 +297,17 @@ if (ADD_LUAU)
     if (NOT TARGET numkong)
         add_library(numkong INTERFACE)
         target_include_directories(numkong INTERFACE ${numkong_SOURCE_DIR}/include)
+        # NumKong picks the native `__bf16` when the compiler is gcc or clang and
+        # the target has bf16, which it tests with `__AVX512BF16__`. gcc only grew
+        # the `__bf16` scalar type in 13; 11 and 12 define `__AVX512BF16__` for the
+        # intrinsics but have no such type, so `-march=native` on a host that has
+        # AVX512-BF16 gives 600 errors starting at `typedef __bf16 nk_bf16_t`.
+        # Both halves are needed to see it, which is why it only shows up on the
+        # 22.04 job and only on the runners with a new enough CPU.
+        # 0 falls back to their `unsigned short`, same two bytes, same layout.
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+            target_compile_definitions(numkong INTERFACE NK_NATIVE_BF16=0)
+        endif ()
     endif ()
     set(BARCH_HAS_NUMKONG ON)
     # Their vector::try_zeros memsets the wrapper structs. Harmless, noisy.

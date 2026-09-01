@@ -238,7 +238,23 @@ public:
      * TODO 98 C and F5.
      */
     typedef std::function<int(caller&, const arg_t&)> resolved_fn;
-    virtual heap::string_map<resolved_fn>* resolutions(const std::string&) {
+    /**
+     * what a name resolved to: the callable, and the rights it needs.
+     *
+     * `cats` is empty for a plain stored function, which is authorized against
+     * the one `function_cats()` set as it always was. A command exposed by a resp
+     * `transport()` carries its own, so a read-only one needs @read and a writing
+     * one needs @write - and `is_write && is_data` is what sends the call on to a
+     * replication destination, which a stored function could not say before.
+     * See TODO 188.
+     */
+    struct resolved {
+        resolved_fn call{};
+        heap::vector<bool> cats{};
+        bool is_write{false};
+        bool is_data{false};
+    };
+    virtual heap::string_map<resolved>* resolutions(const std::string&) {
         return nullptr;
     }
     virtual barch::foreign::call_interface_ptr& script_interface() {

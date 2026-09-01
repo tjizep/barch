@@ -301,10 +301,23 @@ namespace barch {
                     // unknown for the life of the session, and SETF followed by a
                     // call on the same connection would fail for a reason that has
                     // nothing to do with the function
-                    const barch_function* fn = nullptr;
+                    /*
+                     * Two authorizations, not one - TODO 188.
+                     *
+                     * Calling a stored function at all needs `function_cats()`, as it
+                     * always did. A command a resp transport() exposes then carries
+                     * its own categories on top, so a read-only one and a writing one
+                     * are not the same right. A plain stored function declares none
+                     * and is left as it was.
+                     */
+                    const caller::resolved* fn = nullptr;
                     if (!is_authorized(function_cats(), caller.get_space_acl())) {
                         redis::rwrite(ostream, error{"not authorized"});
-                    } else if ((fn = barch::functions::resolve(caller, fn_space, prev_cn))) {
+                    } else if ((fn = barch::functions::resolve(caller, fn_space, prev_cn))
+                               && !fn->cats.empty()
+                               && !is_authorized(fn->cats, caller.get_space_acl())) {
+                        redis::rwrite(ostream, error{"not authorized"});
+                    } else if (fn) {
                         // a function parks rather than running here, so it costs this
                         // thread nothing to start - the script goes on the foreign pool
                         // in slices and the reply is written when it wakes.
@@ -312,14 +325,21 @@ namespace barch {
                         // Unless the batch is already asynchronous, in which case this
                         // has to queue behind it like everything else does, or its
                         // reply overtakes the ones in front of it
+                        // a stored function could not say it writes before, so nothing
+                        // it did was ever replicated. One that declares write and data
+                        // now goes on to the destinations like any builtin - TODO 188
+                        if (fn->is_write && fn->is_data && barch::repl::has_destinations()) {
+                            std::vector<std::string> owned(params.begin(), params.end());
+                            repl::call(owned);
+                        }
                         if (!asynch_calls.empty()) {
-                            auto ctx = std::make_shared<asynch_call_context>(caller, *fn, params, prev_cn);
+                            auto ctx = std::make_shared<asynch_call_context>(caller, fn->call, params, prev_cn);
                             if (!stream.empty())
                                 ctx->stream = std::move(stream);
                             asynch_calls.push_back(ctx);
                         } else {
                             caller.reply_out = &ostream;
-                            int32_t r = caller.call(params, *fn);
+                            int32_t r = caller.call(params, fn->call);
                             caller.reply_out = nullptr;
                             if (!caller.has_blocks())
                                 write_result<Stream>(caller, ostream, r);

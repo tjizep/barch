@@ -9,6 +9,10 @@ Then, from redis-cli -p 14000:
     HNSW.SET hello
     HNSW.CLOSEST helo
     HNSW.TUNE fast
+    HNSW.PARAMS
+
+SET/CLOSEST/TUNE/PARAMS all come from the one HNSW key, through a resp
+transport(). FUNCTIONS COMMANDS lists them with the rights each one needs.
 """
 import argparse
 import os
@@ -20,8 +24,8 @@ LUAU = os.path.join(HERE, "luau")
 SPACE = "HNSW"
 PORT = 14000
 
-# GRAPH first: SET/CLOSEST/TUNE require it at SETF time
-ORDER = ("graph.luau", "set.luau", "closest.luau", "tune.luau")
+# GRAPH first: hnsw.luau requires it at SETF time
+ORDER = ("graph.luau", "hnsw.luau")
 
 DEMO_WORDS = [
     "cat", "cats", "car", "cart", "card", "care",
@@ -79,7 +83,7 @@ def demo(r):
         r.execute_command(f"{SPACE}.SET", w)
     dt = time.time() - t0
     print(f"added {len(DEMO_WORDS)} words in {dt:.3f}s")
-    stats = r.execute_command(f"{SPACE}.TUNE")
+    stats = r.execute_command(f"{SPACE}.PARAMS")
     print("stats count,M,efc,efs,heur,entry:", stats)
     ok = True
     for q, want in DEMO_QUERIES:
@@ -91,6 +95,9 @@ def demo(r):
             ok = False
     top = r.execute_command(f"{SPACE}.CLOSEST", "hello", "3")
     print("  CLOSEST hello 3 ->", top)
+    # one key, four commands, and what each of them needs
+    for line in r.execute_command("FUNCTIONS", "COMMANDS"):
+        print("  ", line.decode() if isinstance(line, bytes) else line)
     return ok
 
 

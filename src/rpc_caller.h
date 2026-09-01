@@ -52,7 +52,7 @@ struct rpc_caller : caller {
     /** see caller::script_depth */
     int nest_depth{0};
     /** see caller::resolutions - names already known to be functions here */
-    heap::string_map<caller::resolved_fn> resolved{};
+    heap::string_map<caller::resolved> resolved{};
     std::string resolved_space{"\x01none"};
     arg_t args{};
     std::string user = "default";
@@ -695,7 +695,7 @@ struct rpc_caller : caller {
         this->acl_space = "\x01none";
     };
 
-    heap::string_map<caller::resolved_fn>* resolutions(const std::string& space) override {
+    heap::string_map<caller::resolved>* resolutions(const std::string& space) override {
         if (resolved_space != space) {
             resolved.clear();          // a different space resolves differently
             resolved_space = space;

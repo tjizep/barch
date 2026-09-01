@@ -966,3 +966,34 @@
 
 
 187. [Done] Outbound fetches in the concurrent Crow test [31-08-2026] Nr 180 f302898
+
+188. `transport()` with `kind = "resp"`, so a stored function key can
+    expose several RESP commands under names of its own choosing, each
+    with its own ACL and replication categories:
+
+        return {
+            kind = "resp",
+            methods = {GETNAME = get_name, SETNAME = set_name},
+            categories = {GETNAME = {"read"}, SETNAME = {"write", "data"}},
+        }
+
+    Consistent with `kind = "resource"`, and it closes two real gaps.
+    Today every stored function is authorized against one fixed
+    `function_cats()` whatever it does, so a read-only function needs
+    the same rights as one that writes. And the resolve branch in
+    `asio_resp_session` never replicates, so a stored function that
+    writes is not sent on to destinations the way a builtin `is_write()
+    && is_data()` command is.
+
+    Categories are checked against `categories()` and an unknown one
+    fails SETF rather than being ignored. Settle with: a key exposing
+    two names under different categories, each callable; a user granted
+    only one of the categories getting one command and refused the
+    other; an invalid category refused at SETF; the write one reaching a
+    replication destination and the read one not; and `FUNCTIONS`
+    listing the exposed names.
+
+
+188. [Done] transport() with kind = "resp" [01-09-2026] Nr 181 60cbcfe
+
+189. [Done] The HNSW example on a resp transport() [01-09-2026] Nr 182 60cbcfe

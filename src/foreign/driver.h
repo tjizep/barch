@@ -286,9 +286,39 @@ typedef std::shared_ptr<call_interface> call_interface_ptr;
  * or a require of something that is not there, is caught at write time rather than at
  * the first call. It does mean a function has to be stored after the ones it requires.
  */
+/**
+ * One RESP command a `transport()` of kind "resp" exposes - TODO 188.
+ *
+ *     return {
+ *         kind = "resp",
+ *         methods = {GETNAME = get_name, SETNAME = set_name},
+ *         categories = {GETNAME = {"read"}, SETNAME = {"write", "data"}},
+ *     }
+ *
+ * `name` is what a client types; the table value is the function itself, so the
+ * exposed command and the function implementing it are named independently. The
+ * categories are the same vocabulary the builtins declare, and they decide both
+ * what rights a caller needs and whether the call is replicated onward.
+ *
+ * `arity` follows the same convention as the script-level one: n exactly n, -n
+ * at least n, 0 whatever it is given.
+ */
+struct resp_method {
+    std::string name;
+    std::vector<std::string> categories;
+    int arity{0};
+};
+
+struct resp_spec {
+    bool has_transport{false};
+    /** transport() was there and said kind = "resp" */
+    bool is_resp{false};
+    std::vector<resp_method> methods;
+};
+
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
-                      std::string& err);
+                      std::string& err, resp_spec* spec = nullptr);
 
 /**
  * run a stored function's `call(argv)` and hand back what it returned.
@@ -323,7 +353,7 @@ void start_function(const std::string& space, const std::string& name,
                     const call_interface_ptr& iface,
                     const heap::vector<std::string>& args, uint64_t insns,
                     uint64_t deadline_ms, const function_states_ptr& cache,
-                    const function_done& done);
+                    const function_done& done, const std::string& entry = {});
 
 /** one HTTP method advertised by transport().methods */
 struct http_method {

@@ -8441,3 +8441,159 @@ function directly rather than going out over HTTP to reach it.
 
 Ran three times over along with the isolated fetch test: no failures and no
 hangs.
+
+## 181. transport() with kind = "resp" [01-09-2026]
+
+*Was `TODO.md` entry 188.*
+
+A stored function key was one command named by the key. A `transport()`
+of kind "resp" now lets it expose several under names of its own:
+
+    return {
+        kind = "resp",
+        methods = {GETNAME = get_name, SETNAME = set_name},
+        categories = {GETNAME = {"read"}, SETNAME = {"write", "data"}},
+        arity = {GETNAME = 1, SETNAME = 2},
+    }
+
+The key's own name still runs `call()`, so a key can be both. `arity` is
+per method, same convention as the script-level one, which matters now
+that one key answers to several shapes.
+
+### What the categories are actually for
+
+Two things that were missing rather than one.
+
+Every stored function was authorized against a single `function_cats()`
+whatever it did, so a read-only one needed the same right as one that
+writes. A resp command carries its own on top of that, and both are
+checked: calling a stored function at all still needs the function
+category, then the command's own categories decide the rest.
+
+And the resolve branch in `asio_resp_session` never replicated. A builtin
+goes on to the destinations when `is_write() && is_data()`; a stored
+function had no way to say either, so nothing it did was ever sent. An
+exposed command that declares both now takes the same branch with the same
+`repl::call(params)`.
+
+### How a name that is not a key becomes a command
+
+`resolve` looked for a key of that name and gave up. It now falls back to
+asking what the space's functions expose, in the same order it would have
+looked for a key: current space, then the globals. `SPACE.NAME` reaches an
+exposed command too.
+
+That answer is cached per space and dropped whenever a function is written
+or removed. Building it compiles every function in the space once, which is
+the price of a name that turns out not to be a command at all - paid once,
+not per call. `REMF` removes the key directly rather than going through
+`functions::remove`, so it needed the invalidation adding separately or a
+removed function's names outlived it.
+
+`caller::resolved_fn` became `caller::resolved`, carrying the callable
+plus the categories, because the dispatch needs both and resolving twice to
+get them would undo the caching that lookup exists for.
+
+### Validation
+
+Categories are checked against `get_category_map()` at SETF and an unknown
+one fails the write. A category nobody recognises would otherwise vectorise
+to "needs nothing", which is the opposite of what someone writing it meant.
+A dot in an exposed name is refused for the same reason it is in a key
+name, and a methods table that is missing, empty, or holds something that
+is not a function is refused with what is wrong.
+
+### FUNCTIONS COMMANDS
+
+New subcommand listing what the current space exposes - the name, the key
+that defines it, and its categories - since a command that is not a key and
+not a builtin was otherwise invisible.
+
+### Verified
+
+`test/resptransporttest.py`: the key name still works; two exposed names
+answer; per-method arity is enforced both ways; an unknown category, a
+missing methods table, a non-function method and a dotted name are each
+refused at SETF; REMF takes the names with it; FUNCTIONS COMMANDS lists
+them; and a user with `+read` gets GETNAME and is refused SETNAME while
+one with `+write +data` gets the opposite.
+
+Full suite 77 of 77.
+
+### One thing deliberately not claimed
+
+The replication half is wired on exactly the builtin's condition and calls
+the same `repl::call`, but it is not covered by a test. A single process
+publishing to itself does not replicate a plain `SET` either, so the probe
+I built to check it proves nothing about the new path - the control failed
+the same way. It wants a real two-node test, which is worth opening
+separately rather than pretending the assertion exists.
+
+### Also noted while testing
+
+A connection that has already called a function keeps answering after
+`REMF`, because a session runs whatever it compiled the first time - TODO
+98 C. Exposed names inherit that; they do not introduce it. A connection
+that never saw the name gets "unknown command".
+
+## 182. The HNSW example on a resp transport() [01-09-2026]
+
+*Was `TODO.md` entry 189.*
+
+`set.luau`, `closest.luau` and `tune.luau` were one command per key because
+that was the only shape there was. They are now one `hnsw.luau`, whose
+`transport()` names four commands and says what each one needs:
+
+    methods    = {SET = cmd_set, CLOSEST = cmd_closest, TUNE = cmd_tune, PARAMS = cmd_params}
+    categories = {SET = {"write","data"}, CLOSEST = {"read"},
+                  TUNE = {"write","data"}, PARAMS = {"read"}}
+    arity      = {SET = -1, CLOSEST = -1, TUNE = 0, PARAMS = 0}
+
+`graph.luau` is untouched and still has to be stored first.
+
+### STATS had to be renamed
+
+`TUNE` with no arguments already reported the parameters, and splitting that
+out into its own read-only command is the whole point of the categories. The
+obvious name was taken: `STATS` is a builtin, so a bare `STATS` never reaches
+a stored function and `HNSW:STATS` is the builtin too. Only the dotted form
+would have worked, which is a trap in an example. It is `PARAMS`, which
+collides with nothing. `SET` keeps its collision on purpose, since explaining
+`HNSW:SET` vs `HNSW.SET` is something the example was already for.
+
+### What the split actually costs a caller
+
+A user with `+read +function +connection` gets `HNSW:CLOSEST` and is refused
+`HNSW.SET` and `HNSW:TUNE`, which is what was wanted. Two things that were
+not obvious until it was tried:
+
+- `+keys` is needed as well as `+read`, because `barch.store.get` inside the
+  script is gated separately - `may_read` is `read` **and** `keys`. The
+  command's own categories get you as far as running the function; the store
+  gate is a second check one layer down.
+- `USE` needs `@write`, so a read-only user cannot switch space at all and
+  has to go by the colon form. `HNSW:CLOSEST` works for them; `USE HNSW`
+  does not. That is not new, but it decides what a read-only client looks
+  like.
+
+A write-only user is not a useful thing here either: insert reads the graph
+before it writes it, so `HNSW.SET` needs `+read +keys +write +data`.
+
+### Verified
+
+`deploy.py --start --demo` gives the same five nearest neighbours and the
+same `CLOSEST hello 3` it did before, and now prints `FUNCTIONS COMMANDS`:
+
+    CLOSEST HNSW read
+    SET HNSW write,data
+    PARAMS HNSW read
+    TUNE HNSW write,data
+
+A scratch script also checked: the dotted, colon and bare forms all reach
+the exposed commands (`HNSW.CLOSEST`, `HNSW:CLOSEST`, and plain `CLOSEST`
+after `USE HNSW`); `HNSW:SET a b` is still the builtin writing key `a`;
+per-method arity refuses `HNSW.SET` and `HNSW.CLOSEST` with no arguments;
+`HNSW.HNSW` prints the four; and the reader/writer split above.
+
+The replication half is still only wired, not tested - same as DONE 181, and
+it wants the two-node test that entry asked for.

@@ -539,11 +539,18 @@ struct compiled {
     int env{LUA_NOREF};     // its thread, which owns the globals table it closed over
     int envt{LUA_NOREF};    // that globals table, which is what require hands back
     int arity{0};           // 0 is "any", n exactly n, -n at least n. See TODO 98 I.3
+    /** exposed command name -> the function transport() named for it - TODO 188 */
+    heap::string_map<int> methods{};
+    /** and the arity each declared, same convention as the script-level one */
+    heap::string_map<int> method_arity{};
 };
 
 /** hand a compiled function's registry refs back, or the state keeps it alive
  *  forever - the state now lives for the session, so nothing else will drop them */
 static void drop_compiled(lua_State* L, compiled& c) {
+    for (auto& m : c.methods)
+        if (m.second != LUA_NOREF) lua_unref(L, m.second);
+    c.methods.clear();
     if (c.fn != LUA_NOREF) lua_unref(L, c.fn);
     if (c.env != LUA_NOREF) lua_unref(L, c.env);
     if (c.envt != LUA_NOREF) lua_unref(L, c.envt);
@@ -1792,6 +1799,141 @@ static space_state* state_for(function_states& cache) {
     return raw;
 }
 
+
+/*
+ * Read a `transport()` of kind "resp" - TODO 188.
+ *
+ * Called on the chunk's own environment thread, so the globals it defined are
+ * the ones in scope. `refs` is filled with a registry reference per exposed name
+ * when the caller needs to run them later; the SETF check passes null and takes
+ * only the names and categories.
+ *
+ * Absent transport(), or one of another kind, is not an error - most functions
+ * have none, and a "resource" belongs to Crow.
+ */
+static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
+                                heap::string_map<int>* refs, std::string& err) {
+    lua_getglobal(T, "transport");
+    if (lua_type(T, -1) != LUA_TFUNCTION) {
+        lua_pop(T, 1);
+        return true;
+    }
+    if (lua_pcall(T, 0, 1, 0) != 0) {
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        lua_pop(T, 1);
+        return false;
+    }
+    if (lua_type(T, -1) != LUA_TTABLE) {
+        err = "transport() must return a table";
+        lua_pop(T, 1);
+        return false;
+    }
+    spec.has_transport = true;
+    lua_getfield(T, -1, "kind");
+    std::string kind = lua_isstring(T, -1) ? lua_tostring(T, -1) : "";
+    lua_pop(T, 1);
+    for (auto& ch : kind)
+        ch = (char) tolower((unsigned char) ch);
+    if (kind != "resp") {
+        lua_pop(T, 1);
+        return true;
+    }
+    spec.is_resp = true;
+
+    lua_getfield(T, -1, "methods");
+    if (lua_type(T, -1) != LUA_TTABLE) {
+        err = "resp transport() needs a methods table";
+        lua_pop(T, 2);
+        return false;
+    }
+    // -1 methods, -2 transport table
+    lua_pushnil(T);
+    while (lua_next(T, -2) != 0) {
+        // -1 value, -2 key
+        if (lua_type(T, -2) != LUA_TSTRING) {
+            err = "resp methods must be keyed by the exposed command name";
+            lua_pop(T, 4);
+            return false;
+        }
+        if (lua_type(T, -1) != LUA_TFUNCTION) {
+            err = std::string("resp method '") + lua_tostring(T, -2) + "' is not a function";
+            lua_pop(T, 4);
+            return false;
+        }
+        std::string name = lua_tostring(T, -2);
+        for (auto& ch : name)
+            ch = (char) toupper((unsigned char) ch);
+        if (name.empty()) {
+            err = "resp method name is empty";
+            lua_pop(T, 4);
+            return false;
+        }
+        resp_method m;
+        m.name = name;
+        spec.methods.push_back(std::move(m));
+        if (refs) {
+            lua_pushvalue(T, -1);
+            (*refs)[name] = lua_ref(T, -1);
+            lua_pop(T, 1);
+        }
+        lua_pop(T, 1); // the value; the key stays for lua_next
+    }
+    lua_pop(T, 1); // methods
+
+    if (spec.methods.empty()) {
+        err = "resp transport() exposes no methods";
+        lua_pop(T, 1);
+        return false;
+    }
+
+    // categories, keyed by the same exposed names. Absent is allowed and means
+    // the function declares nothing, which the caller decides what to do about
+    lua_getfield(T, -1, "categories");
+    if (lua_type(T, -1) == LUA_TTABLE) {
+        for (auto& m : spec.methods) {
+            lua_getfield(T, -1, m.name.c_str());
+            if (lua_type(T, -1) == LUA_TTABLE) {
+                int n = (int) lua_objlen(T, -1);
+                for (int i = 1; i <= n; ++i) {
+                    lua_rawgeti(T, -1, i);
+                    if (lua_isstring(T, -1)) {
+                        std::string c = lua_tostring(T, -1);
+                        for (auto& ch : c)
+                            ch = (char) tolower((unsigned char) ch);
+                        m.categories.push_back(c);
+                    }
+                    lua_pop(T, 1);
+                }
+            } else if (!lua_isnil(T, -1)) {
+                err = "categories for '" + m.name + "' must be a list of names";
+                lua_pop(T, 3);
+                return false;
+            }
+            lua_pop(T, 1);
+        }
+    } else if (!lua_isnil(T, -1)) {
+        err = "resp transport() categories must be a table";
+        lua_pop(T, 2);
+        return false;
+    }
+    lua_pop(T, 1); // categories
+
+    lua_getfield(T, -1, "arity");
+    if (lua_type(T, -1) == LUA_TTABLE) {
+        for (auto& m : spec.methods) {
+            lua_getfield(T, -1, m.name.c_str());
+            if (lua_isnumber(T, -1))
+                m.arity = (int) lua_tointeger(T, -1);
+            lua_pop(T, 1);
+        }
+    }
+    lua_pop(T, 1); // arity
+
+    lua_pop(T, 1); // the transport table
+    (void) L;
+    return true;
+}
+
 static bool compile_into(space_state& st, const std::string& name,
                          const std::string& source, compiled& out, std::string& err);
 
@@ -1965,6 +2107,19 @@ static bool compile_into(space_state& st, const std::string& name,
     lua_getglobal(T, "arity");
     out.arity = lua_isnumber(T, -1) ? (int) lua_tointeger(T, -1) : 0;
     lua_pop(T, 1);
+    // and the commands a resp transport() exposes, so a call can reach one by the
+    // name a client typed rather than by the key - TODO 188
+    resp_spec spec;
+    std::string terr;
+    if (!read_resp_transport(L, T, spec, &out.methods, terr)) {
+        err = terr;
+        drop_compiled(L, out);
+        out.env = LUA_NOREF;
+        out.envt = LUA_NOREF;
+        return false;
+    }
+    for (const auto& m : spec.methods)
+        out.method_arity[m.name] = m.arity;
     return true;
 }
 
@@ -2196,7 +2351,7 @@ void start_function(const std::string& space, const std::string& name,
                     const call_interface_ptr& iface,
                     const heap::vector<std::string>& args, uint64_t insns,
                     uint64_t deadline_ms, const function_states_ptr& cache,
-                    const function_done& done) {
+                    const function_done& done, const std::string& entry) {
     auto job = std::make_shared<call_job>();
     job->cache = cache ? cache : make_function_states();
     job->iface = iface;
@@ -2250,9 +2405,30 @@ void start_function(const std::string& space, const std::string& name,
     st->load = nullptr;
     const compiled& c = it->second;
 
+    /*
+     * Which function in the chunk actually runs - TODO 188.
+     *
+     * With no entry it is `call`, as it always was. An entry names one of the
+     * commands a resp transport() exposed, and the arity checked is the one that
+     * method declared rather than the chunk's own.
+     */
+    int entry_ref = c.fn;
+    int want_arity = c.arity;
+    if (!entry.empty()) {
+        auto m = c.methods.find(entry);
+        if (m == c.methods.end()) {
+            done(false, Variable(nullptr), "no such method '" + entry + "'");
+            return;
+        }
+        entry_ref = m->second;
+        auto a = c.method_arity.find(entry);
+        want_arity = a == c.method_arity.end() ? 0 : a->second;
+    }
+
     int given = (int) args.size();
-    if ((c.arity > 0 && given != c.arity) || (c.arity < 0 && given < -c.arity)) {
-        done(false, Variable(nullptr), "wrong number of arguments for '" + name + "'");
+    if ((want_arity > 0 && given != want_arity) || (want_arity < 0 && given < -want_arity)) {
+        done(false, Variable(nullptr),
+             "wrong number of arguments for '" + (entry.empty() ? name : entry) + "'");
         return;
     }
 
@@ -2281,7 +2457,7 @@ void start_function(const std::string& space, const std::string& name,
      * as a table writes `local argv = {...}` and has both, so the host does not have
      * to offer two shapes to give both.
      */
-    lua_getref(job->T, c.fn);
+    lua_getref(job->T, entry_ref);
     for (const auto& a : args) {
         lua_pushlstring(job->T, a.data(), a.size());
     }
@@ -2429,7 +2605,7 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::stri
 
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
-                      std::string& err) {
+                      std::string& err, resp_spec* spec) {
     // a state of its own, thrown away when this returns. It has to be a real one:
     // the script's top level may require others, and require needs both the loader
     // and a state to compile them into
@@ -2447,6 +2623,17 @@ bool compile_function(const std::string& space, const std::string& name,
     // the same qualified key the call path uses, or require inside this chunk builds
     // one shape and the loading stack holds another - and a cycle goes undetected
     bool ok = compile_into(*st, qualified(space, name), source, c, err);
+    if (ok && spec) {
+        // read again for the categories, which the call path has no use for and so
+        // does not keep. Only SETF pays this, and only once per stored function
+        lua_getref(st->L, c.env);
+        lua_State* T = lua_tothread(st->L, -1);
+        lua_pop(st->L, 1);
+        if (T) {
+            st->load = &load;
+            ok = read_resp_transport(st->L, T, *spec, nullptr, err);
+        }
+    }
     st->load = nullptr;
     return ok;
 }
@@ -2468,7 +2655,7 @@ bool prepare_luau(key_space& ks) {
 }
 
 bool compile_function(const std::string&, const std::string&, const std::string&,
-                      const source_loader&, std::string& err) {
+                      const source_loader&, std::string& err, resp_spec*) {
     err = "luau not built";
     return false;
 }
@@ -2492,7 +2679,8 @@ void complete_call(const parked_call_ptr&, push_results) {
 
 void start_function(const std::string&, const std::string&, const call_interface_ptr&,
                     const heap::vector<std::string>&, uint64_t, uint64_t,
-                    const function_states_ptr&, const function_done& done) {
+                    const function_states_ptr&, const function_done& done,
+                    const std::string&) {
     done(false, Variable(nullptr), "luau not built");
 }
 

@@ -114,6 +114,44 @@ SSL is optional on the same table: `ssl = {cert = "...", key = "...",
 proto = "TLS"}`. Cert and key are file paths, or PEM if they start
 with `-----BEGIN`.
 
+## `kind = "resp"`: several commands from one key
+
+A function key is normally one command, named by the key. A `transport()`
+of kind `resp` lets it expose several under names of its own, each with
+the categories it needs:
+
+```lua
+function get_name(k) return barch.store.get(k) end
+function set_name(k, v) barch.store.set(k, v) return "OK" end
+
+function transport()
+    return {
+        kind = "resp",
+        methods = {GETNAME = get_name, SETNAME = set_name},
+        categories = {GETNAME = {"read"}, SETNAME = {"write", "data"}},
+        arity = {GETNAME = 1, SETNAME = 2},
+    }
+end
+```
+
+`GETNAME` and `SETNAME` are then commands like any other. The key's own
+name still runs `call()`, so a key can do both.
+
+The categories are the same vocabulary the builtins use — `read`, `write`,
+`data`, `keys`, `orderedset` and the rest — and they do two jobs. They
+decide what rights a caller needs, so a user with only `+read` gets
+`GETNAME` and is refused `SETNAME`, where before every stored function
+needed the same one right whatever it did. And `write` together with
+`data` is what sends the call on to a replication destination, which a
+stored function had no way to ask for at all.
+
+A category that does not exist fails the `SETF` rather than being ignored,
+because a name nobody recognises would otherwise read as "needs nothing".
+`arity` is optional and per method: n exactly n, -n at least n.
+
+`FUNCTIONS COMMANDS` lists what the current space exposes, each with the
+key it came from and its categories.
+
 ## Calling out: `http.request`
 
 The same functions can make outbound requests. `http.request(url)` builds a

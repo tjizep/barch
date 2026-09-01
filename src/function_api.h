@@ -48,8 +48,8 @@ namespace functions {
      * a call did. A pointer rather than a value, so the caller does not copy a
      * std::function per call either. See TODO 98 F5.
      */
-    const barch_function* resolve(caller& call, const std::string& from_space,
-                                  const std::string& name);
+    const caller::resolved* resolve(caller& call, const std::string& from_space,
+                                    const std::string& name);
 
     /**
      * the source stored for `name`, looked up in `space` and then in the global one.
@@ -68,6 +68,23 @@ namespace functions {
     barch::foreign::store_access store_for(const barch::key_space_ptr& space,
                                            const heap::vector<bool>& acl);
     barch::foreign::store_access store_for_owner(const barch::key_space_ptr& space);
+
+    /**
+     * drop what this space's functions were known to expose - TODO 188.
+     *
+     * Called whenever a function key is written or removed, which is the only
+     * thing that can change the answer. Rebuilt on the next name that is not a
+     * key, which is when it is next needed.
+     */
+    void forget_exposed(const std::string& space);
+
+    /** one command a resp transport() exposes, as FUNCTIONS COMMANDS shows it */
+    struct exposed_info {
+        std::string name;
+        std::string key;
+        std::vector<std::string> categories;
+    };
+    heap::vector<exposed_info> exposed_commands(const barch::key_space_ptr& space);
 
     /** SETF/REMF/KEYSF without a client. false fills err and writes nothing. */
     bool install(const barch::key_space_ptr& space, const std::string& name,

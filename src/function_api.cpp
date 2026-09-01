@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <mutex>
 
 #include "composite.h"
 #include "conversion.h"
@@ -832,6 +833,137 @@ namespace functions {
         return store_for(space, none, true);
     }
 
+    /*
+     * Commands a `transport()` of kind "resp" exposes - TODO 188.
+     *
+     * A stored function key used to be exactly one command, named by the key. A
+     * resp transport lets one key expose several under names of its own, so a
+     * name that is not a key may still be a command, and finding out means asking
+     * the functions in the space what they expose.
+     *
+     * That answer is cached per space and thrown away whenever a function in it is
+     * written or removed, which is the only thing that can change it. Building it
+     * compiles every function in the space once - the price of a name that turns
+     * out not to be a command at all, paid once rather than per call.
+     */
+    struct exposed_command {
+        /** the function key that defines it */
+        std::string key;
+        /** the exposed name, which is also the entry passed to the driver */
+        std::string method;
+        heap::vector<bool> cats;
+        /** the names as the script wrote them, for FUNCTIONS COMMANDS to show */
+        std::vector<std::string> cat_names;
+        bool is_write{false};
+        bool is_data{false};
+    };
+
+    typedef heap::string_map<exposed_command> exposed_map;
+
+    static std::mutex& exposed_mu() {
+        static std::mutex m;
+        return m;
+    }
+
+    static heap::string_map<std::shared_ptr<exposed_map>>& exposed_cache() {
+        static heap::string_map<std::shared_ptr<exposed_map>> c;
+        return c;
+    }
+
+    void forget_exposed(const std::string& space) {
+        std::lock_guard<std::mutex> lk(exposed_mu());
+        exposed_cache().erase(space);
+    }
+
+    /** every category a resp transport names has to be one that exists */
+    static bool check_resp_spec(const barch::foreign::resp_spec& spec, std::string& err) {
+        auto& valid = get_category_map();
+        for (const auto& m : spec.methods) {
+            if (m.name.find('.') != std::string::npos) {
+                err = "a '.' not allowed in an exposed command name";
+                return false;
+            }
+            for (const auto& c : m.categories) {
+                if (c == "all")
+                    continue;
+                if (!valid.count(c)) {
+                    err = "unknown category '" + c + "' for '" + m.name + "'";
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static heap::vector<bool> cats_of(const std::vector<std::string>& names) {
+        catmap m;
+        for (const auto& c : names)
+            m[c] = true;
+        return cats2vec(m);
+    }
+
+    static std::shared_ptr<exposed_map> exposed_in(const key_space_ptr& space) {
+        if (!space)
+            return nullptr;
+        const std::string canon = space->canonical();
+        {
+            std::lock_guard<std::mutex> lk(exposed_mu());
+            auto it = exposed_cache().find(canon);
+            if (it != exposed_cache().end())
+                return it->second;
+        }
+        auto built = std::make_shared<exposed_map>();
+        auto& catm = get_category_map();
+        const size_t wr = catm.at("write");
+        const size_t dp = catm.at("data");
+        for (const auto& fname : names(space)) {
+            std::string source;
+            if (!source_in(space, fname, source))
+                continue;
+            barch::foreign::resp_spec spec;
+            std::string err;
+            if (!barch::foreign::compile_function(space->get_canonical_name(), fname,
+                                                  source, loader_for(space), err, &spec))
+                continue; // a function that will not compile exposes nothing
+            if (!spec.is_resp)
+                continue;
+            for (const auto& m : spec.methods) {
+                exposed_command e;
+                e.key = fname;
+                e.method = m.name;
+                e.cats = cats_of(m.categories);
+                e.cat_names = m.categories;
+                e.is_write = e.cats.size() > wr && e.cats[wr];
+                e.is_data = e.cats.size() > dp && e.cats[dp];
+                // first definition wins, so two keys claiming one name is not a
+                // silent coin toss that changes with iteration order
+                built->emplace(m.name, std::move(e));
+            }
+        }
+        std::lock_guard<std::mutex> lk(exposed_mu());
+        auto it = exposed_cache().find(canon);
+        if (it != exposed_cache().end())
+            return it->second;
+        return exposed_cache().emplace(canon, std::move(built)).first->second;
+    }
+
+    heap::vector<exposed_info> exposed_commands(const key_space_ptr& space) {
+        heap::vector<exposed_info> out;
+        auto index = exposed_in(space);
+        if (!index)
+            return out;
+        for (const auto& e : *index) {
+            exposed_info i;
+            i.name = e.first;
+            i.key = e.second.key;
+            i.categories = e.second.cat_names;
+            out.push_back(std::move(i));
+        }
+        std::sort(out.begin(), out.end(),
+                  [](const exposed_info& a, const exposed_info& b) { return a.name < b.name; });
+        return out;
+    }
+
     bool install(const key_space_ptr& space, const std::string& name,
                  const std::string& source, std::string& err) {
         if (!space) {
@@ -850,8 +982,14 @@ namespace functions {
         // a stored SET does not overload SET. The dotted form HNSW.SET is how you
         // call it; HNSW:SET and a bare SET stay the builtin. See TODO 160.
         auto folded = upper_name(raw);
+        barch::foreign::resp_spec spec;
         if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
-                                              loader_for(space), err))
+                                              loader_for(space), err, &spec))
+            return false;
+        // a resp transport() names commands and the rights they need. An unknown
+        // category is refused here rather than quietly dropped, because a category
+        // that does not exist would otherwise read as "needs nothing" - TODO 188
+        if (spec.is_resp && !check_resp_spec(spec, err))
             return false;
         composite q;
         auto key = function_key(q, art::value_type{folded.data(), folded.size()});
@@ -863,6 +1001,7 @@ namespace functions {
         auto fc = [](const art::node_ptr&) -> void {};
         barch::sharded_store store(space);
         store.insert(opts, key, art::value_type{source.data(), source.size()}, true, fc);
+        forget_exposed(space->canonical());
         return true;
     }
 
@@ -873,7 +1012,10 @@ namespace functions {
         auto key = function_key(q, art::value_type{folded.data(), folded.size()});
         barch::sharded_store store(space);
         auto fc = [](art::node_ptr) -> void {};
-        return store.remove(key, fc);
+        bool gone = store.remove(key, fc);
+        if (gone)
+            forget_exposed(space->canonical());
+        return gone;
     }
 
     heap::vector<std::string> names(const key_space_ptr& space) {
@@ -901,7 +1043,7 @@ namespace functions {
      * argv from `first` onwards as its arguments.
      */
     static int run(caller& call, const key_space_ptr& from, art::value_type name,
-                   const arg_t& argv, size_t first) {
+                   const arg_t& argv, size_t first, const std::string& entry = {}) {
         auto space = from ? from : call.kspace();
         auto folded = upper_name(name);
         // only asked when the function is not already compiled on this connection, so
@@ -1006,7 +1148,8 @@ namespace functions {
                 slot->err = std::move(failed);
                 slot->finished.store(true);
                 wake();
-            });
+            },
+            entry);
 
         // a script that finished on this thread answers here, with none of the parking
         // machinery touched. That is most of them: a one line function costs about
@@ -1063,8 +1206,32 @@ namespace functions {
         return store.exists(key);
     }
 
-    const barch_function* resolve(caller& call, const std::string& from_space,
-                                  const std::string& name) {
+    /** build the callable, remember it on the connection when there is somewhere to */
+    static const caller::resolved* keep(caller& call,
+                                        heap::string_map<caller::resolved>* known,
+                                        std::string key, const key_space_ptr& from,
+                                        const std::string& fname, const std::string& entry,
+                                        heap::vector<bool> cats, bool is_write,
+                                        bool is_data) {
+        caller::resolved built;
+        built.call = [from, fname, entry](caller& c, const arg_t& argv) -> int {
+            return run(c, from, art::value_type{fname.data(), fname.size()}, argv, 1, entry);
+        };
+        built.cats = std::move(cats);
+        built.is_write = is_write;
+        built.is_data = is_data;
+        if (!known) {
+            // nowhere to keep it - the swig and module paths - so it lives for this
+            // call only
+            static thread_local caller::resolved scratch;
+            scratch = std::move(built);
+            return &scratch;
+        }
+        return &known->emplace(std::move(key), std::move(built)).first->second;
+    }
+
+    const caller::resolved* resolve(caller& call, const std::string& from_space,
+                                    const std::string& name) {
         if (name.empty())
             return nullptr;
         // remembered per connection, and only when it resolved. A miss is looked up
@@ -1078,6 +1245,10 @@ namespace functions {
         }
         art::value_type n{name.data(), name.size()};
         key_space_ptr from;
+        std::string entry;
+        heap::vector<bool> cats;
+        bool is_write = false;
+        bool is_data = false;
         if (!from_space.empty()) {
             // a dotted name says which space the definition comes from. An unknown one
             // is not a function, and must not build the space as a side effect of a
@@ -1085,28 +1256,56 @@ namespace functions {
             if (!barch::is_keyspace(from_space))
                 return nullptr;
             from = barch::get_keyspace(from_space);
-            if (!exists_in(from, n))
-                return nullptr;
+            if (!exists_in(from, n)) {
+                // SPACE.NAME reaches a command exposed there just as a bare name
+                // reaches one exposed here - TODO 188
+                auto index = exposed_in(from);
+                if (!index)
+                    return nullptr;
+                auto hit = index->find(name);
+                if (hit == index->end())
+                    return nullptr;
+                return keep(call, known, std::move(key), from, hit->second.key,
+                            hit->second.method, hit->second.cats,
+                            hit->second.is_write, hit->second.is_data);
+            }
         } else if (exists_in(call.kspace(), n)) {
             from = call.kspace();
         } else {
             // globals live in the default space, callable from anywhere
             auto global = global_space();
-            if (global == call.kspace() || !exists_in(global, n))
+            if (global != call.kspace() && exists_in(global, n)) {
+                from = global;
+            } else {
+                /*
+                 * Not a key of that name anywhere. It may still be a command some
+                 * function exposes through a resp transport() - TODO 188. Asked of
+                 * the current space first and then the globals, which is the same
+                 * order a key would have been looked for in.
+                 */
+                heap::vector<key_space_ptr> look;
+                look.push_back(call.kspace());
+                if (global && global != call.kspace())
+                    look.push_back(global);
+                for (auto& space : look) {
+                    if (!space)
+                        continue;
+                    auto index = exposed_in(space);
+                    if (!index)
+                        continue;
+                    auto hit = index->find(name);
+                    if (hit == index->end())
+                        continue;
+                    // the key that defines it is what gets compiled and run
+                    return keep(call, known, std::move(key), space, hit->second.key,
+                                hit->second.method, hit->second.cats,
+                                hit->second.is_write, hit->second.is_data);
+                }
                 return nullptr;
-            from = global;
+            }
         }
-        barch_function built = [from, name](caller& c, const arg_t& argv) -> int {
-            return run(c, from, art::value_type{name.data(), name.size()}, argv, 1);
-        };
-        if (!known) {
-            // nowhere to keep it - the swig and module paths - so it lives for this
-            // call only
-            static thread_local barch_function scratch;
-            scratch = std::move(built);
-            return &scratch;
-        }
-        return &known->emplace(std::move(key), std::move(built)).first->second;
+        return keep(call, known, std::move(key), from, name, entry, std::move(cats),
+                    is_write, is_data);
     }
 
 }
@@ -1167,7 +1366,13 @@ int REMF(caller& call, const arg_t& argv) {
     auto key = function_key(q, art::value_type{folded.data(), folded.size()});
     barch::sharded_store store(call.kspace());
     auto fc = [](art::node_ptr) -> void {};
-    return call.push_ll(store.remove(key, fc) ? 1 : 0);
+    bool gone = store.remove(key, fc);
+    // this removes the key itself rather than going through functions::remove, so
+    // the exposed-command index has to be dropped here too or a resp transport's
+    // names outlive the function that declared them - TODO 188
+    if (gone)
+        barch::functions::forget_exposed(call.kspace()->canonical());
+    return call.push_ll(gone ? 1 : 0);
 }
 
 /* CALLF <name> [arg...]
@@ -1249,7 +1454,19 @@ int FUNCTIONS(caller& call, const arg_t& argv) {
             return call.push_error(err.c_str());
         return call.push_simple("OK");
     }
-    return call.push_error("FUNCTIONS SYNC [commit]|STATUS");
+    if (sub == "COMMANDS") {
+        // what the resp transports in this space expose, and what each needs
+        auto listed = barch::functions::exposed_commands(call.kspace());
+        call.start_array();
+        for (const auto& e : listed) {
+            std::string line = e.name + " " + e.key;
+            for (size_t i = 0; i < e.categories.size(); ++i)
+                line += (i == 0 ? " " : ",") + e.categories[i];
+            call.push_string(line);
+        }
+        return call.end_array();
+    }
+    return call.push_error("FUNCTIONS SYNC [commit]|STATUS|COMMANDS");
 }
 }
 

@@ -39,22 +39,67 @@ HNSW.SET hallo
 HNSW.CLOSEST helo
 HNSW.CLOSEST hello 3
 HNSW.TUNE
+HNSW.PARAMS
 ```
+
+All four come from the one `HNSW` key. It has a `transport()` of kind
+`"resp"`, which names the commands it answers to and says what each one
+needs:
+
+```lua
+function transport()
+    return {
+        kind = "resp",
+        methods = {SET = cmd_set, CLOSEST = cmd_closest, ...},
+        categories = {SET = {"write", "data"}, CLOSEST = {"read"}, ...},
+        arity = {SET = -1, CLOSEST = -1, TUNE = 0, PARAMS = 0},
+    }
+end
+```
+
+`FUNCTIONS COMMANDS` lists them with the key they came from and the
+categories they declared. `HNSW.HNSW` - the key's own name - prints the
+same four with their arguments.
 
 Insert is `SET`. It does not overload SET: `HNSW:SET "alpha" "beta"`
 still writes the key `alpha` in `HNSW`, while `HNSW.SET "alpha"`
-builds the graph in whatever space `USE` selected. `CLOSEST` is not
-a builtin, so `HNSW:CLOSEST` and `HNSW.CLOSEST` both run the
-function; the colon one searches `HNSW`, the dotted one searches
-here.
+builds the graph in whatever space `USE` selected. `CLOSEST` and `TUNE`
+are not builtins, so `HNSW:CLOSEST` and `HNSW.CLOSEST` both run the
+function; the colon one searches `HNSW`, the dotted one searches here.
+`PARAMS` is the read-only half of `TUNE`, and is spelt that way because
+`STATS` is a builtin and would never reach the function.
 
 `CLOSEST` with one argument answers the nearest word. A trailing
-integer is how many to return, as a flat list of word, distance, …
+integer is how many to return, as a flat list of word, distance, ...
+
+## What the categories buy
+
+Before this the index was four keys - `graph`, `set`, `closest`, `tune`
+- and every one of them was authorized against the single category set
+that calling any stored function needs. Searching cost the same rights
+as rebuilding.
+
+Now `SET` and `TUNE` declare `@write @data` while `CLOSEST` and
+`PARAMS` declare `@read`, so:
+
+```
+ACL SETUSER search on >secret +read +keys +function +connection
+```
+
+can `HNSW:CLOSEST` and `HNSW:PARAMS` and is refused `HNSW.SET` and
+`HNSW:TUNE`. Reading the graph from inside the script wants `+keys`
+as well as `+read` - that is the store gate, one layer below the
+command, and it is checked whatever the command declared.
+
+Declaring `@write @data` also means the two writing commands are sent
+on to a replication destination the way a builtin write is. A stored
+function had no way to say that before, so nothing the index did was
+ever replicated.
 
 ## Speed vs recall
 
-`HNSW:TUNE` with no arguments reports `count, M, efConstruction,
-efSearch, heuristic, entry`.
+`HNSW:PARAMS` (or `HNSW:TUNE` with no arguments) reports `count, M,
+efConstruction, efSearch, heuristic, entry`.
 
 | preset    | M  | efConstruction | efSearch | heuristic |
 |-----------|----|----------------|----------|-----------|
@@ -86,5 +131,5 @@ raised.
 ## Files
 
 - `luau/graph.luau` — distance, ART queues, insert and search
-- `luau/set.luau` / `closest.luau` / `tune.luau` — the commands
-- `deploy.py` — SETF in order (`graph` first, because the others require it)
+- `luau/hnsw.luau` — the four commands and the `transport()` that names them
+- `deploy.py` — SETF in order (`graph` first, because `hnsw` requires it)

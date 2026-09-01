@@ -991,9 +991,6 @@ else()
             add_test(NAME TestRespTransport
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/resptransporttest.py
                     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-            add_test(NAME TestRespTransport
-                    COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/resptransporttest.py
-                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         endif ()
 
         # ACL key patterns are parsed and refused rather than silently dropped

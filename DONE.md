@@ -8536,6 +8536,13 @@ A connection that has already called a function keeps answering after
 98 C. Exposed names inherit that; they do not introduce it. A connection
 that never saw the name gets "unknown command".
 
+### Fixed afterwards
+
+`add_test(NAME TestRespTransport ...)` had been written into `CMakeLists.txt`
+twice, so the suite carried the same test under one name twice over. Removed,
+and the whole thing reconfigured and rebuilt before the count was quoted again:
+77 of 77, with TestRespTransport listed once as #45.
+
 ## 182. The HNSW example on a resp transport() [01-09-2026]
 
 *Was `TODO.md` entry 189.*

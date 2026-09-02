@@ -85,6 +85,17 @@ private:
     std::condition_variable cv;
     size_t num_slots{1};
     mutable std::atomic<size_t> slot_ticket{0};
+    /*
+     * How far readers_drained() has to look: one past the highest slot any
+     * thread has ever claimed, never lowered.
+     *
+     * num_slots is hardware_concurrency() * 4 - 64 on a 16 core box - and every
+     * slot is its own cache line, so scanning all of them on each write lock
+     * costs 64 cache misses whether or not a reader exists. The threads that
+     * actually take this lock are the service threads, so in practice a handful
+     * of slots are ever in use. See TODO 192.
+     */
+    mutable std::atomic<size_t> slots_used{0};
 
 #ifdef BARCH_LOCK_DEBUG
     char label_[label_cap]{"(unnamed)"};
@@ -101,6 +112,26 @@ private:
         if (s < 0) {
             s = static_cast<int>(slot_ticket.fetch_add(1, std::memory_order_relaxed) % num_slots);
             tls_slot = s;
+        }
+        /*
+         * Every call, not only the first: tls_slot is one index per thread for
+         * all locks, so a thread that took slot 40 from another lock arrives
+         * here with it already set and this lock has never heard of slot 40.
+         * Publishing only on the claim left that reader outside the range its
+         * writers scan, and they took the lock on top of it.
+         *
+         * seq_cst, and ahead of the caller's reader_count increment, which is
+         * what makes the shorter scan safe: a reader that gets past its
+         * write_intent check ordered this store before the writer's
+         * write_intent store, so the writer's load sees a bound covering that
+         * reader's slot. A reader that does not get past it backs off instead.
+         * Only ever raised. See TODO 192.
+         */
+        const size_t want = static_cast<size_t>(s) % num_slots + 1;
+        size_t seen = slots_used.load(std::memory_order_seq_cst);
+        while (seen < want &&
+               !slots_used.compare_exchange_weak(seen, want, std::memory_order_seq_cst,
+                                                 std::memory_order_seq_cst)) {
         }
         return static_cast<size_t>(s) % num_slots;
     }
@@ -185,7 +216,8 @@ private:
     }
 
     bool readers_drained() const noexcept {
-        for (size_t i = 0; i < num_slots; ++i) {
+        const size_t used = slots_used.load(std::memory_order_seq_cst);
+        for (size_t i = 0; i < used; ++i) {
             if (core_slots[i].reader_count.load(std::memory_order_seq_cst) != 0)
                 return false;
         }
@@ -584,37 +616,47 @@ public:
 
         write_intent.store(true, std::memory_order_seq_cst);
 
-        std::unique_lock<std::mutex> cv_lock(cv_mtx);
-        while (!readers_drained()) {
-            auto now = std::chrono::steady_clock::now();
-            if (now >= deadline) {
-                write_intent.store(false, std::memory_order_seq_cst);
-                cv.notify_all();
-#ifdef BARCH_LOCK_DEBUG
-                log_if_slow_timeout(timeout_duration, "Draining Readers During Write", started);
-#endif
-                return false;
-            }
-#ifdef BARCH_LOCK_DEBUG
-            auto slice = now + dump_every;
-            if (slice > deadline)
-                slice = deadline;
-            if (!cv.wait_until(cv_lock, slice, [this] { return readers_drained(); })) {
-                if (std::chrono::steady_clock::now() >= deadline) {
+        /*
+         * Almost always there is no reader at all, and taking cv_mtx to find
+         * that out is a second mutex on every write. Test first and only take
+         * it when there is someone to wait for. The wait below still re-tests
+         * the predicate under the mutex, and a finishing reader takes the same
+         * mutex before it notifies, so nothing is missed by looking early.
+         * See TODO 192.
+         */
+        if (!readers_drained()) {
+            std::unique_lock<std::mutex> cv_lock(cv_mtx);
+            while (!readers_drained()) {
+                auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
                     write_intent.store(false, std::memory_order_seq_cst);
                     cv.notify_all();
+#ifdef BARCH_LOCK_DEBUG
                     log_if_slow_timeout(timeout_duration, "Draining Readers During Write", started);
+#endif
                     return false;
                 }
-                log_if_slow_timeout(dump_every, "Draining Readers During Write", started);
-            }
+#ifdef BARCH_LOCK_DEBUG
+                auto slice = now + dump_every;
+                if (slice > deadline)
+                    slice = deadline;
+                if (!cv.wait_until(cv_lock, slice, [this] { return readers_drained(); })) {
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        write_intent.store(false, std::memory_order_seq_cst);
+                        cv.notify_all();
+                        log_if_slow_timeout(timeout_duration, "Draining Readers During Write", started);
+                        return false;
+                    }
+                    log_if_slow_timeout(dump_every, "Draining Readers During Write", started);
+                }
 #else
-            if (!cv.wait_until(cv_lock, deadline, [this] { return readers_drained(); })) {
-                write_intent.store(false, std::memory_order_seq_cst);
-                cv.notify_all();
-                return false;
-            }
+                if (!cv.wait_until(cv_lock, deadline, [this] { return readers_drained(); })) {
+                    write_intent.store(false, std::memory_order_seq_cst);
+                    cv.notify_all();
+                    return false;
+                }
 #endif
+            }
         }
 
 #ifdef BARCH_LOCK_DEBUG

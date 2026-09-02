@@ -1015,3 +1015,12 @@
     back decompressed on the Luau side; `barch.art()` has the same
     methods; an HTTP counter using the int helpers; and an increment
     benchmark against `tonumber`/`tostring` for that counter.
+
+192. Optimize SET. First the measurement DONE 183 stopped short of:
+    memtier SET over a million keys with `ordered_keys` off and
+    `hybrid_keys` off, so the hash path is measured on its own, at 1, 2
+    and 4 threads with pipeline 50. Each thread count gets a fresh
+    server, because a second run over the same keyspace overwrites
+    rather than inserts and that is not the same cost. Settle with the
+    three numbers, what they say about how SET scales, and where the
+    time goes.

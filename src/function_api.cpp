@@ -459,10 +459,13 @@ namespace functions {
                 err = too_large_message();
                 return false;
             }
-            art::key_options opts;
             auto fc = [](const art::node_ptr&) -> void {};
             barch::sharded_store store(space);
-            store.insert(opts, k, v, true, fc);
+            store.with_key_write(k, [&](const barch::shard_ptr& t) {
+                art::key_options opts;
+                opts.set_hashed(!t->opt_ordered_keys);
+                t->opt_insert(opts, k, v, true, fc);
+            });
             return true;
         };
         s.remove = [space](const std::string& key) -> bool {
@@ -664,9 +667,10 @@ namespace functions {
                 err = too_large_message();
                 return false;
             }
-            art::key_options opts;
             auto fc = [](const art::node_ptr&) -> void {};
             store.with_container_write(n, [&](const barch::shard_ptr& t) {
+                art::key_options opts;
+                opts.set_hashed(!t->opt_ordered_keys);
                 t->insert(opts, key, v, true, fc);
             });
             return true;
@@ -813,6 +817,53 @@ namespace functions {
             if (!t)
                 return false;
             return barch::shard_hold::current().covers(space.get(), t.get());
+        };
+        s.getBufferAt = [space](const std::string& key, size_t offset,
+                                const std::function<void(const void*, size_t)>& cb)
+            -> barch::foreign::store_access::read_state {
+            auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+            barch::sharded_store store(space);
+            bool handed = false;
+            auto st = store.search_state(converted.get_value(), [&](const art::node_ptr& n) {
+                auto cl = n.const_leaf();
+                auto v = cl->get_value();
+                if (cl->is_compressed())
+                    v = dictionary::decompress(v);
+                if (offset > v.size)
+                    return;
+                cb(v.bytes + offset, v.size - offset);
+                handed = true;
+            });
+            if (st != barch::sharded_store::read_state::present)
+                return st == barch::sharded_store::read_state::tombed
+                    ? barch::foreign::store_access::read_state::tombed
+                    : barch::foreign::store_access::read_state::absent;
+            return handed ? barch::foreign::store_access::read_state::present
+                          : barch::foreign::store_access::read_state::absent;
+        };
+        s.setBufferAt = [space, may_write = s.may_write](const std::string& key, size_t offset,
+                                                         const void* data, size_t len,
+                                                         std::string& err) -> bool {
+            if (!may_write) {
+                err = "FUNCTION not authorized to write there";
+                return false;
+            }
+            auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+            auto k = converted.get_value();
+            if (k.size + offset + len > (size_t) maximum_allocation_size) {
+                err = too_large_message();
+                return false;
+            }
+            art::value_type buf{static_cast<const unsigned char*>(data), len};
+            bool ok = true;
+            barch::sharded_store store(space);
+            store.with_key_write(k, [&](const barch::shard_ptr& t) {
+                if (!t->setBufferAt(k, buf, offset)) {
+                    err = too_large_message();
+                    ok = false;
+                }
+            });
+            return ok;
         };
         s.size = [space]() -> int64_t {
             int64_t n = 0;
@@ -997,10 +1048,13 @@ namespace functions {
             err = too_large_message();
             return false;
         }
-        art::key_options opts;
         auto fc = [](const art::node_ptr&) -> void {};
         barch::sharded_store store(space);
-        store.insert(opts, key, art::value_type{source.data(), source.size()}, true, fc);
+        store.with_key_write(key, [&](const barch::shard_ptr& t) {
+            art::key_options opts;
+            opts.set_hashed(!t->opt_ordered_keys);
+            t->opt_insert(opts, key, art::value_type{source.data(), source.size()}, true, fc);
+        });
         forget_exposed(space->canonical());
         return true;
     }
@@ -1207,7 +1261,7 @@ namespace functions {
     }
 
     /** build the callable, remember it on the connection when there is somewhere to */
-    static const caller::resolved* keep(caller& call,
+    static const caller::resolved* keep(caller& unused(call),
                                         heap::string_map<caller::resolved>* known,
                                         std::string key, const key_space_ptr& from,
                                         const std::string& fname, const std::string& entry,

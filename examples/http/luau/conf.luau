@@ -9,6 +9,6 @@ function transport()
     return {
         kind = "http",
         bind = "127.0.0.1",
-        keys = {"ECHO", "PAGE", "SESSION"},
+        keys = {"ECHO", "PAGE", "SESSION", "HITS", "HITSSTR"},
     }
 end

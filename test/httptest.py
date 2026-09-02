@@ -132,7 +132,7 @@ function transport()
         kind = "http",
         port = 18088,
         bind = "127.0.0.1",
-        keys = {"ECHO", "PAGE", "SESS", "SLOW", "FETCH"},
+        keys = {"ECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS"},
     }
 end
 '''
@@ -194,6 +194,32 @@ function call()
 end
 '''
 
+HITS = r'''
+function call()
+    return "hits"
+end
+
+function hits(req, res)
+    local n
+    barch.store.locked("hits", function()
+        n = barch.store.getInt32At("hits") or 0
+        n = n + 1
+        barch.store.setInt32At("hits", n)
+    end)
+    res.body = simdjson.encode({n = n})
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/hits",
+        methods = {GET = hits},
+        send = "application/json",
+    }
+end
+'''
+
 SESS = r'''
 function call()
     return "sess"
@@ -242,6 +268,7 @@ try:
     assert r.execute_command("SETF", "httpconf", CONF) == b"OK"
     assert r.execute_command("SETF", "plain", PLAIN) == b"OK"
     assert r.execute_command("SETF", "sess", SESS) == b"OK"
+    assert r.execute_command("SETF", "hits", HITS) == b"OK"
     assert r.execute_command("SETF", "slow", SLOW) == b"OK"
     assert r.execute_command("SETF", "fetch", FETCH) == b"OK"
     # no transport: still an ordinary function
@@ -256,6 +283,7 @@ try:
     assert "ECHO /echo POST" in text, started
     assert "PAGE /page GET" in text, started
     assert "SESS /sess GET" in text, started
+    assert "HITS /hits GET" in text, started
     assert "SLOW /slow GET" in text, started
     assert "FETCH /fetch GET" in text, started
     assert "PLAIN" not in text, started
@@ -301,6 +329,10 @@ try:
     assert status == 200, (status, body)
     second = json.loads(body)
     assert second["n"] == 2 and second["sid"] == first["sid"], second
+
+    status, body, _ = http_call("GET", "/hits", timeout=10)
+    assert status == 200, (status, body)
+    assert json.loads(body)["n"] == 1, body
 
     print("handler calls out with http.request", flush=True)
     status, body, _ = http_call("GET", "/fetch", timeout=15)
@@ -369,6 +401,9 @@ try:
             assert got["ok"] is True and got["a"] == i * 100 + n, got
             status, body, _ = http_call("GET", "/fetch", timeout=20)
             assert status == 200 and body == b"200|upstream ok", (status, body)
+            status, body, _ = http_call("GET", "/hits", timeout=10)
+            assert status == 200, (status, body)
+            assert json.loads(body)["n"] >= 1, body
             rc.set(f"noise-{i}-{n}", n)
             assert rc.get(f"noise-{i}-{n}") == str(n).encode()
         return True
@@ -377,6 +412,9 @@ try:
         futs = [pool.submit(http_worker, i) for i in range(workers)]
         for f in as_completed(futs):
             f.result()
+
+    hits = int.from_bytes(r.get("hits"), "little", signed=True)
+    assert hits == 1 + workers * per_worker, hits
 
     assert r.execute_command("HTTP", "STOP") == b"OK"
     assert r.execute_command("HTTP", "STATUS") == b"stopped"

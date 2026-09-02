@@ -997,3 +997,21 @@
 188. [Done] transport() with kind = "resp" [01-09-2026] Nr 181 60cbcfe
 
 189. [Done] The HNSW example on a resp transport() [01-09-2026] Nr 182 60cbcfe
+
+191. [Done] SET vs GET memtier was hybrid still on [02-09-2026] Nr 183 d0a26c5
+
+190. Low-level buffer access on the shard, and the same on `barch.store`
+    and `barch.art()`. `setBufferAt(key, buffer, offset=0)` grows the
+    value to fit `offset + buffer.size`, creates a missing key, replaces
+    a tomb, and decompresses a compressed leaf before writing — in-place
+    memcpy when the uncompressed leaf is already large enough, otherwise
+    a reallocation inside the shard (the same trade APPEND/SETRANGE
+    make). `getBufferAt(key, offset=0)` is nil in Luau when there is no
+    buffer, else a Luau buffer copy; in C++ the caller holds at least a
+    read lock and gets `pair<value_type,bool>` pointing at the leaf.
+    Luau also gets `setInt32At`/`getInt32At`/`setInt64At`/`getInt64At`
+    (little-endian, matching `buffer.readi32`). Settle with: missing
+    and tomb and grow and in-place overwrite; compressed values come
+    back decompressed on the Luau side; `barch.art()` has the same
+    methods; an HTTP counter using the int helpers; and an increment
+    benchmark against `tonumber`/`tostring` for that counter.

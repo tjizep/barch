@@ -8604,3 +8604,24 @@ per-method arity refuses `HNSW.SET` and `HNSW.CLOSEST` with no arguments;
 
 The replication half is still only wired, not tested - same as DONE 181, and
 it wants the two-node test that entry asked for.
+
+## 183. SET vs GET memtier was hybrid still on [02-09-2026]
+
+*Was `TODO.md` entry 191.*
+
+Memtier `SET k v` on this RelWithDebInfo build (1 thread, 1 connection,
+pipeline 50) was about half a GET: GET ~990k ops/s, SET ~510k, Valkey
+SET ~1.0M. That looked like a regression. It was the wrong config.
+
+DONE 148's hybrid is ART plus a hash index, and GET and a same-size SET
+go through the hash. DONE 149 then made `hybrid_keys` default on, with
+`ordered_keys` already on. The numbers we wanted were ordered ART-only:
+`hybrid_keys` off and `ordered_keys` on. Both were still on.
+
+While chasing it, `lock_unique` grew a `try_lock()` before
+`try_lock_for(60s)` to match the read side - that did not move SET.
+SET also stopped running `kind_of_container` on every write (three
+container lower_bounds); GET already skipped that on a hit (DONE 146 /
+TODO 59). After that skip, SET was ~750k on the same memtier, still
+with hybrid on. Those two changes stayed. The intended comparison is
+the config, not a further SET rewrite.

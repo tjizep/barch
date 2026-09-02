@@ -349,6 +349,8 @@ namespace barch {
          * @return not null key if it exists (incl. pull sources)
          */
         node_ptr search(value_type key) final;
+        bool setBufferAt(value_type key, value_type buf, size_t offset = 0) final;
+        std::pair<value_type, bool> getBufferAt(value_type key, size_t offset = 0) final;
         bool is_present(value_type key) final;
         art::node_ptr lower_bound(art::value_type key) final;
         art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) final;

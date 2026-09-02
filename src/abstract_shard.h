@@ -6,6 +6,7 @@
 #define BARCH_ABSTRACT_SHARD_H
 #include <memory>
 #include <shared_mutex>
+#include <utility>
 
 //#include "key_space.h"
 #include "art/art.h"
@@ -173,6 +174,29 @@ namespace barch {
          */
         virtual art::node_ptr search(art::value_type key) = 0;
         virtual art::node_ptr local_leaf(art::value_type key) = 0;
+        /**
+         * Write `buf` at `offset` in the value for `key`. Caller holds the write lock.
+         *
+         * The value grows to at least offset+buf.size, with any gap zero-filled.
+         * A missing key or a tomb becomes a new value. A compressed leaf is
+         * decompressed, patched, and stored uncompressed — the same latency
+         * trade APPEND and SETRANGE make, so a hot counter does not run the
+         * dictionary on every write.
+         *
+         * When the existing uncompressed leaf is already large enough the write
+         * is a memcpy into it and nothing is reallocated.
+         *
+         * false if the pair would not fit in a leaf.
+         */
+        virtual bool setBufferAt(art::value_type key, art::value_type buf, size_t offset = 0) = 0;
+        /**
+         * Pointer into the leaf's value from `offset` to the end.
+         *
+         * Caller holds at least a read lock; the pointer is only valid while
+         * that lock is held. Missing, tomb, expired, compressed (the stored
+         * bytes are not the logical value), or offset past the end: `{ {}, false }`.
+         */
+        virtual std::pair<art::value_type, bool> getBufferAt(art::value_type key, size_t offset = 0) = 0;
         virtual bool is_present(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::value_type key) = 0;
         virtual art::node_ptr lower_bound(art::trace_list &trace, art::value_type key) = 0;

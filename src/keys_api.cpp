@@ -442,14 +442,17 @@ int SET(caller& call,const arg_t& argv) {
     // barch used to write the plain key either way and leave the collection sitting under
     // the same name, so the name held both: LRANGE then answered WRONGTYPE and ZRANGE
     // still answered the members. See DONE 126
-    {
-        barch::sharded_store type_store(call.kspace());
-        if (barch::kind_of_container(type_store, k) != barch::container_kind::none) {
-            if (spec.get) {
-                return call.push_error(barch::wrong_type_message());
-            }
-            barch::remove_container(type_store, k);
-        }
+    //
+    // GET only runs that probe on a miss (TODO 59). SET used to run it on every write:
+    // three container lower_bounds, each taking a lock, which is why memtier SET k v
+    // was about half a GET. A name that already holds a string cannot also be a
+    // collection we still need to drop - the first SET that created the string did
+    // that. The probe stays for SET GET (WRONGTYPE must not write) and for a SET
+    // that is creating the string key.
+    barch::sharded_store store(sp);
+    if (spec.get && !store.exists(key) &&
+        barch::kind_of_container(store, k) != barch::container_kind::none) {
+        return call.push_error(barch::wrong_type_message());
     }
 
     // SET ... GET answers with the value that was there before, so the callback has to
@@ -478,7 +481,6 @@ int SET(caller& call,const arg_t& argv) {
         v = compressed;
     }
 
-    barch::sharded_store store(sp);
     bool stored = true;
     // deliberately no type check: redis's SET replaces whatever the name held, including
     // a list or a hash, and the tests rely on it - every other string command refuses
@@ -516,7 +518,12 @@ int SET(caller& call,const arg_t& argv) {
             stored = true;
         });
     } else {
-        store.insert(opts, key, v, true, fc);
+        // true means the string key was new. A collection of the same name is then
+        // a leftover to drop. An update skips the three container probes GET already
+        // skips on a hit - TODO 59, 191
+        const bool added = store.insert(opts, key, v, true, fc);
+        if (added && barch::kind_of_container(store, k) != barch::container_kind::none)
+            barch::remove_container(store, k);
     }
 
     if (spec.get) {

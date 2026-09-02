@@ -284,6 +284,7 @@ int KSPACE(caller& call, const arg_t& argv) {
         ks_unique ul(spc);
         if (parser.name == "ORDERED") {
             bool on = parser.value == "ON";
+            spc->opt_ordered_keys = on;
             store.each_shard([on](const barch::shard_ptr& shrd) { shrd->opt_ordered_keys = on; });
             return call.push_simple("OK");
         }
@@ -571,12 +572,16 @@ int KSOPTIONS(caller& call, const arg_t& argv) {
         return call.wrong_arity();
     if (argv[1] == "SET") {
         if (argv[2] == "UNORDERED") {
-            barch::sharded_store store(call.kspace());
+            auto spc = call.kspace();
+            spc->opt_ordered_keys = false;
+            barch::sharded_store store(spc);
             store.each_shard([](const barch::shard_ptr& shard) { shard->opt_ordered_keys = false; });
             return call.push_simple("OK");
         }
         if (argv[2] == "ORDERED") {
-            barch::sharded_store store(call.kspace());
+            auto spc = call.kspace();
+            spc->opt_ordered_keys = true;
+            barch::sharded_store store(spc);
             store.each_shard([](const barch::shard_ptr& shard) { shard->opt_ordered_keys = true; });
             return call.push_simple("OK");
         }

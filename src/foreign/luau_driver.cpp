@@ -8,6 +8,10 @@
 #include "function_api.h"
 
 #include <cmath>
+#include <cerrno>
+#include <climits>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -47,9 +51,6 @@ struct run_ctx {
     /** what is left of the region's own cap, since it cannot end in a yield */
     uint64_t locked_left{0};
 };
-
-/** the region's instruction cap - short, because nothing else can touch the shard */
-static constexpr uint64_t locked_region_insns = 100000;
 
 /*
  * Every Luau state barch builds is built with this, so the bytes they hold show up in
@@ -851,7 +852,10 @@ static int store_locked(lua_State* L) {
     bool ok = s->locked(key, [&]() -> bool {
         if (rc) {
             rc->locked = true;
-            rc->locked_left = locked_region_insns;
+            // cannot yield while the shard is held, so the usual slice is a hard
+            // stop here. function_slice_insns is the count; function_deadline_ms
+            // is already on ctx.deadline and still applies
+            rc->locked_left = rc->slice ? rc->slice : get_function_slice_insns();
         }
         // pcall rather than a straight call: an error has to come back through here so
         // the lock is given up on this side before it is re-raised to the script
@@ -898,6 +902,176 @@ static int store_has_lock(lua_State* L) {
     const auto* s = store_of(L, "hasLock");
     lua_pushboolean(L, s->has_lock && s->has_lock(std::string(k, n)));
     return 1;
+}
+
+static size_t check_buf_offset(lua_State* L, int idx) {
+    if (lua_isnoneornil(L, idx))
+        return 0;
+    lua_Integer n = luaL_checkinteger(L, idx);
+    if (n < 0)
+        luaL_error(L, "FUNCTION offset is out of range");
+    return (size_t) n;
+}
+
+static void write_le32(uint8_t* p, int32_t v) {
+    uint32_t u = (uint32_t) v;
+    p[0] = (uint8_t) u;
+    p[1] = (uint8_t) (u >> 8);
+    p[2] = (uint8_t) (u >> 16);
+    p[3] = (uint8_t) (u >> 24);
+}
+
+static int32_t read_le32(const uint8_t* p) {
+    uint32_t u = (uint32_t) p[0] | ((uint32_t) p[1] << 8) |
+                 ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+    return (int32_t) u;
+}
+
+static void write_le64(uint8_t* p, int64_t v) {
+    uint64_t u = (uint64_t) v;
+    for (int i = 0; i < 8; ++i)
+        p[i] = (uint8_t) (u >> (8 * i));
+}
+
+static int64_t read_le64(const uint8_t* p) {
+    uint64_t u = 0;
+    for (int i = 0; i < 8; ++i)
+        u |= (uint64_t) p[i] << (8 * i);
+    return (int64_t) u;
+}
+
+/** CALLF arguments are strings, so an integer helper has to accept those too */
+static int64_t check_int64_arg(lua_State* L, int idx) {
+    int isnum = 0;
+    int64_t v = lua_tointeger64(L, idx, &isnum);
+    if (isnum)
+        return v;
+    size_t len = 0;
+    const char* s = lua_tolstring(L, idx, &len);
+    if (!s || len == 0)
+        luaL_error(L, "FUNCTION expected an integer");
+    errno = 0;
+    char* end = nullptr;
+    long long parsed = strtoll(s, &end, 10);
+    if (end != s + (ptrdiff_t) len || errno == ERANGE)
+        luaL_error(L, "FUNCTION expected an integer");
+    return (int64_t) parsed;
+}
+
+static int push_copied_buffer(lua_State* L, const store_access* s, const std::string& key,
+                              size_t offset) {
+    if (!s->getBufferAt)
+        luaL_error(L, "FUNCTION getBufferAt is not available here");
+    std::string copy;
+    switch (s->getBufferAt(key, offset, [&](const void* p, size_t n) {
+        copy.assign(static_cast<const char*>(p), n);
+    })) {
+        case store_access::read_state::present: {
+            void* b = lua_newbuffer(L, copy.size());
+            if (!copy.empty())
+                memcpy(b, copy.data(), copy.size());
+            break;
+        }
+        case store_access::read_state::tombed:
+            push_tomb(L);
+            break;
+        default:
+            lua_pushnil(L);
+    }
+    return 1;
+}
+
+static int do_set_buffer_at(lua_State* L, const store_access* s, int key_idx) {
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    if (!s->setBufferAt)
+        luaL_error(L, "FUNCTION setBufferAt is not available here");
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, key_idx, &n);
+    size_t vn = 0;
+    void* b = lua_tobuffer(L, key_idx + 1, &vn);
+    if (!b && lua_type(L, key_idx + 1) != LUA_TBUFFER)
+        luaL_error(L, "FUNCTION setBufferAt wants a buffer");
+    size_t offset = check_buf_offset(L, key_idx + 2);
+    std::string err;
+    if (!s->setBufferAt({k, n}, offset, b, vn, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    return 0;
+}
+
+static int do_get_int_at(lua_State* L, const store_access* s, int key_idx, int width) {
+    if (!s->may_read)
+        luaL_error(L, "FUNCTION not authorized to read there");
+    if (!s->getBufferAt)
+        luaL_error(L, "FUNCTION getBufferAt is not available here");
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, key_idx, &n);
+    size_t offset = check_buf_offset(L, key_idx + 1);
+    uint8_t tmp[8]{};
+    size_t got = 0;
+    auto st = s->getBufferAt({k, n}, offset, [&](const void* p, size_t len) {
+        got = len;
+        if (len >= (size_t) width)
+            memcpy(tmp, p, (size_t) width);
+    });
+    if (st != store_access::read_state::present || got < (size_t) width) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (width == 4)
+        lua_pushinteger(L, read_le32(tmp));
+    else
+        lua_pushinteger64(L, read_le64(tmp));
+    return 1;
+}
+
+static int do_set_int_at(lua_State* L, const store_access* s, int key_idx, int width) {
+    if (!s->may_write)
+        luaL_error(L, "FUNCTION not authorized to write there");
+    if (!s->setBufferAt)
+        luaL_error(L, "FUNCTION setBufferAt is not available here");
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, key_idx, &n);
+    int64_t v = check_int64_arg(L, key_idx + 1);
+    if (width == 4 && (v < INT32_MIN || v > INT32_MAX))
+        luaL_error(L, "FUNCTION int32 out of range");
+    size_t offset = check_buf_offset(L, key_idx + 2);
+    uint8_t tmp[8]{};
+    if (width == 4)
+        write_le32(tmp, (int32_t) v);
+    else
+        write_le64(tmp, v);
+    std::string err;
+    if (!s->setBufferAt({k, n}, offset, tmp, (size_t) width, err))
+        luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    return 0;
+}
+
+static int store_get_buffer_at(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    size_t offset = check_buf_offset(L, 2);
+    return push_copied_buffer(L, store_of(L, "getBufferAt"), {k, n}, offset);
+}
+
+static int store_set_buffer_at(lua_State* L) {
+    return do_set_buffer_at(L, store_of(L, "setBufferAt", true), 1);
+}
+
+static int store_get_int32_at(lua_State* L) {
+    return do_get_int_at(L, store_of(L, "getInt32At"), 1, 4);
+}
+
+static int store_set_int32_at(lua_State* L) {
+    return do_set_int_at(L, store_of(L, "setInt32At", true), 1, 4);
+}
+
+static int store_get_int64_at(lua_State* L) {
+    return do_get_int_at(L, store_of(L, "getInt64At"), 1, 8);
+}
+
+static int store_set_int64_at(lua_State* L) {
+    return do_set_int_at(L, store_of(L, "setInt64At", true), 1, 8);
 }
 
 static int store_exists(lua_State* L) {
@@ -1382,6 +1556,24 @@ static int space_namecall(lua_State* L) {
         lua_setmetatable(L, -2);
         return 1;
     }
+    if (!strcmp(m, "getBufferAt")) {
+        if (!s->may_read)
+            luaL_error(L, "FUNCTION not authorized to read there");
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        size_t offset = check_buf_offset(L, 3);
+        return push_copied_buffer(L, s, {k, n}, offset);
+    }
+    if (!strcmp(m, "setBufferAt"))
+        return do_set_buffer_at(L, s, 2);
+    if (!strcmp(m, "getInt32At"))
+        return do_get_int_at(L, s, 2, 4);
+    if (!strcmp(m, "setInt32At"))
+        return do_set_int_at(L, s, 2, 4);
+    if (!strcmp(m, "getInt64At"))
+        return do_get_int_at(L, s, 2, 8);
+    if (!strcmp(m, "setInt64At"))
+        return do_set_int_at(L, s, 2, 8);
     luaL_error(L, "FUNCTION no such method on a key space");
     return 0;
 }
@@ -1733,6 +1925,18 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "min");
     lua_pushcfunction(L, store_max, "max");
     lua_setfield(L, -2, "max");
+    lua_pushcfunction(L, store_get_buffer_at, "getBufferAt");
+    lua_setfield(L, -2, "getBufferAt");
+    lua_pushcfunction(L, store_set_buffer_at, "setBufferAt");
+    lua_setfield(L, -2, "setBufferAt");
+    lua_pushcfunction(L, store_get_int32_at, "getInt32At");
+    lua_setfield(L, -2, "getInt32At");
+    lua_pushcfunction(L, store_set_int32_at, "setInt32At");
+    lua_setfield(L, -2, "setInt32At");
+    lua_pushcfunction(L, store_get_int64_at, "getInt64At");
+    lua_setfield(L, -2, "getInt64At");
+    lua_pushcfunction(L, store_set_int64_at, "setInt64At");
+    lua_setfield(L, -2, "setInt64At");
     lua_setfield(L, -2, "store");
     lua_pushcfunction(L, art_open, "art");
     lua_setfield(L, -2, "art");

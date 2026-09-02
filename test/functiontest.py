@@ -1,3 +1,5 @@
+import time
+
 import redis
 import barch
 
@@ -1264,6 +1266,148 @@ try:
     for n in ("ch", "cz", "cl"):
         r.execute_command("DEL", n)
 
+    # --- setBufferAt / getBufferAt, and the int helpers ---------------------------
+    # missing is nil; a write creates; integers are little-endian so they match
+    # buffer.readi32; an offset past the end is nil; a gap is zero-filled
+    r.delete("bufk")
+    assert r.execute_command("SETF", "bufmiss", """
+        function call(k)
+            return barch.store.getBufferAt(k) == nil
+                and barch.store.getInt32At(k) == nil
+                and barch.store.getInt64At(k) == nil
+        end
+    """) == b"OK"
+    assert r.execute_command("bufmiss", "bufk") == 1
+
+    assert r.execute_command("SETF", "bufi32", """
+        function call(k, n)
+            barch.store.setInt32At(k, n)
+            return barch.store.getInt32At(k)
+        end
+    """) == b"OK"
+    assert r.execute_command("bufi32", "bufk", 42) == 42
+    raw = r.get("bufk")
+    assert raw == b"\x2a\x00\x00\x00", raw
+    assert r.execute_command("bufi32", "bufk", -7) == -7
+
+    assert r.execute_command("SETF", "bufi64", """
+        function call(k, n)
+            barch.store.setInt64At(k, n)
+            return barch.store.getInt64At(k)
+        end
+    """) == b"OK"
+    big = 2 ** 62
+    assert r.execute_command("bufi64", "bufk64", big) == big
+    assert r.get("bufk64") == (big).to_bytes(8, "little", signed=True)
+
+    assert r.execute_command("SETF", "bufraw", """
+        function call(k, n)
+            local b = buffer.create(4)
+            buffer.writei32(b, 0, n)
+            barch.store.setBufferAt(k, b)
+            local g = barch.store.getBufferAt(k)
+            if type(g) ~= "buffer" or buffer.len(g) ~= 4 then
+                return "type"
+            end
+            return buffer.readi32(g, 0)
+        end
+    """) == b"OK"
+    assert r.execute_command("bufraw", "bufrawk", 99) == 99
+
+    # grow: write at offset 4 on an empty key, then the first four bytes are zero
+    assert r.execute_command("SETF", "bufgrow", """
+        function call(k)
+            barch.store.setInt32At(k, 7, 4)
+            return { barch.store.getInt32At(k, 0), barch.store.getInt32At(k, 4),
+                     barch.store.getInt32At(k, 8) == nil }
+        end
+    """) == b"OK"
+    r.delete("bufgrowk")
+    assert r.execute_command("bufgrow", "bufgrowk") == [0, 7, 1]
+    assert r.get("bufgrowk") == b"\x00\x00\x00\x00\x07\x00\x00\x00"
+
+    # in-place overwrite keeps the rest of the value
+    assert r.execute_command("SETF", "bufpatch", """
+        function call(k)
+            barch.store.setInt32At(k, 1, 0)
+            return barch.store.getInt32At(k, 4)
+        end
+    """) == b"OK"
+    assert r.execute_command("bufpatch", "bufgrowk") == 7
+
+    # barch.art() is the same interface
+    assert r.execute_command("SETF", "bufart", """
+        function call()
+            local q = barch.art()
+            if q:getInt32At("n") ~= nil then return "empty" end
+            q:setInt32At("n", 3)
+            local b = buffer.create(2)
+            buffer.writeu8(b, 0, 9)
+            buffer.writeu8(b, 1, 8)
+            q:setBufferAt("b", b)
+            local g = q:getBufferAt("b")
+            return { q:getInt32At("n"), buffer.len(g), buffer.readu8(g, 0), buffer.readu8(g, 1) }
+        end
+    """) == b"OK"
+    assert r.execute_command("bufart") == [3, 2, 9, 8]
+
+    # a string is refused; this wants a buffer
+    assert r.execute_command("SETF", "bufneedbuf", """
+        function call(k)
+            local ok, err = pcall(function() barch.store.setBufferAt(k, "nope") end)
+            return ok and "accepted" or "refused"
+        end
+    """) == b"OK"
+    assert r.execute_command("bufneedbuf", "bufk") == b"refused"
+
+    # increment: int32 in place vs tonumber/tostring. Timed from Python because
+    # the sandbox has no clock. One CALLF, a million loops on one key, unordered.
+    # The lock is per increment, not around the whole loop. Slice and deadline
+    # are function_slice_insns and function_deadline_ms.
+    N = 1000000
+    r.execute_command("CONFIG", "SET", "function_deadline_ms", "60000")
+    r.execute_command("CONFIG", "SET", "function_slice_insns", "10000000")
+    # colon so USE does not have to stick across redis-py's pool
+    r.execute_command("bufbench:KSPACE", "OPTION", "SET", "ORDERED", "OFF")
+    ordered = r.execute_command("bufbench:KSPACE", "OPTION", "GET", "ORDERED")
+    assert not ordered, ordered
+    assert r.execute_command("bufbench:SETF", "incrstr", """
+        function call(k, n)
+            n = tonumber(n)
+            for i = 1, n do
+                barch.store.locked(k, function()
+                    local v = tonumber(barch.store.get(k)) or 0
+                    barch.store.set(k, tostring(v + 1))
+                end)
+            end
+            return tonumber(barch.store.get(k))
+        end
+    """) == b"OK"
+    assert r.execute_command("bufbench:SETF", "incri32", """
+        function call(k, n)
+            n = tonumber(n)
+            for i = 1, n do
+                barch.store.locked(k, function()
+                    local v = barch.store.getInt32At(k) or 0
+                    barch.store.setInt32At(k, v + 1)
+                end)
+            end
+            return barch.store.getInt32At(k)
+        end
+    """) == b"OK"
+    r.execute_command("bufbench:DEL", "incr_str", "incr_i32")
+    t0 = time.perf_counter()
+    assert r.execute_command("bufbench:CALLF", "incrstr", "incr_str", N) == N
+    str_s = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    assert r.execute_command("bufbench:CALLF", "incri32", "incr_i32", N) == N
+    i32_s = time.perf_counter() - t0
+    print(f"increment bench n={N} ordered=off: string {str_s:.4f}s "
+          f"({1e6*str_s/N:.1f} us/op), int32 {i32_s:.4f}s "
+          f"({1e6*i32_s/N:.1f} us/op), ratio {str_s/i32_s:.2f}x", flush=True)
+    r.execute_command("CONFIG", "SET", "function_deadline_ms", "1000")
+    r.execute_command("CONFIG", "SET", "function_slice_insns", "1000000")
+
     # --- an export carries functions, and puts them back as functions --------------
     # they used to be dropped: a function is not a container and not a string, so it
     # fell through to the plain branch, where re-encoding the name found no key and
@@ -1331,10 +1475,13 @@ finally:
               "returnsnothing", "lockedincr", "lockedret", "lockedcall",
               "locknest", "lockedboom", "lockedall", "lockedcross", "shardof", "findother",
               "lockstate", "keytypes", "keyroundtrip", "recurse", "leaf",
-              "viacall", "tombtell", "tombspace", "tombkind"):
+              "viacall", "tombtell", "tombspace", "tombkind",
+              "bufmiss", "bufi32", "bufi64", "bufraw", "bufgrow", "bufpatch",
+              "bufart", "bufneedbuf", "incrstr", "incri32"):
         try:
             r.execute_command("REMF", n)
             r.execute_command("fspace:REMF", n)
+            r.execute_command("bufbench:REMF", n)
         except redis.exceptions.ResponseError:
             pass
     r.close()

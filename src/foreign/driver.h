@@ -228,6 +228,23 @@ struct store_access {
      */
     std::function<int64_t(const std::string& key)> shard_number{};
     std::function<bool(const std::string& key)> has_lock{};
+
+    /**
+     * Raw bytes of a key's value from `offset` to the end.
+     *
+     * `cb` runs under the read lock with a pointer into the leaf (or into a
+     * decompressed copy if the leaf was compressed). Copy what you need; the
+     * pointer is gone when this returns. Absent, tomb, or offset past the end
+     * does not call `cb`.
+     */
+    std::function<read_state(const std::string& key, size_t offset,
+                             const std::function<void(const void*, size_t)>& cb)> getBufferAt{};
+    /**
+     * Write `len` bytes at `offset`, growing the value if it has to.
+     * false fills err — too large, or the write was refused.
+     */
+    std::function<bool(const std::string& key, size_t offset,
+                       const void* data, size_t len, std::string& err)> setBufferAt{};
 };
 
 /**

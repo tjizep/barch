@@ -21,7 +21,7 @@ python3 deploy.py --start --demo
 ```
 
 `--start` boots an embedded server on 14000 and Crow on 18088.
-`--demo` hits `/page` and `/echo` once and checks the replies.
+`--demo` hits `/page`, `/echo` and `/hits` once and checks the replies.
 
 Without `--start`, the same script talks to whatever is already on
 `--port`, and still runs `HTTP START`.
@@ -37,6 +37,7 @@ Then, from another shell:
 ```
 curl http://127.0.0.1:18088/page
 curl -H 'Content-Type: application/json' -d '{"a":7}' http://127.0.0.1:18088/echo
+curl http://127.0.0.1:18088/hits
 redis-cli -p 14000 HTTP STATUS
 ```
 
@@ -85,6 +86,33 @@ curl -c jar -b jar http://127.0.0.1:18088/sess
 
 `req:cookie("sid")` reads it, `res:cookie("sid", id, {path="/", httponly=true})`
 sets it.
+
+GET `/hits` is the same idea as a page counter, but the value is four
+little-endian bytes rather than a decimal string:
+
+```
+curl http://127.0.0.1:18088/hits
+```
+
+`barch.store.getInt32At` / `setInt32At` write in place once the key exists,
+so there is no `tonumber`/`tostring` on the hot path. GET `/hits-str` is
+the string version, kept so the two can be timed against each other.
+`test/functiontest.py` runs a million increments of each in one stored
+function with `ordered_keys` off, inside `locked()` so the shard latch
+stays taken. The region's cap is `function_slice_insns`; the wall clock
+is `function_deadline_ms`. Measured around 0.7 µs per int32 increment
+and 0.8 µs via `tonumber`/`tostring`.
+
+`barch.store` and `barch.art()` also take raw Luau buffers:
+
+```
+barch.store.setBufferAt(k, buf, offset)   -- grows the value to fit
+local b = barch.store.getBufferAt(k, offset)  -- nil, or a buffer copy
+```
+
+Offset defaults to 0. A missing key is created; a tomb is replaced; a
+compressed value is decompressed and stored uncompressed, the same as
+APPEND. The integers are little-endian so they match `buffer.readi32`.
 
 ```
 HTTP START CONF 18088 127.0.0.1

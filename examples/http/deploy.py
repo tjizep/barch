@@ -7,6 +7,7 @@ Then, from a browser or curl:
 
     curl http://127.0.0.1:18088/page
     curl -H 'Content-Type: application/json' -d '{"a":7}' http://127.0.0.1:18088/echo
+    curl http://127.0.0.1:18088/hits
 """
 import argparse
 import json
@@ -21,7 +22,7 @@ LUAU = os.path.join(HERE, "luau")
 PORT = 14000
 HTTP_PORT = 18088
 
-ORDER = ("echo.luau", "page.luau", "session.luau", "conf.luau")
+ORDER = ("echo.luau", "page.luau", "session.luau", "hits.luau", "hitsstr.luau", "conf.luau")
 
 
 def read_luau(name):
@@ -92,7 +93,14 @@ def demo(http_host, http_port):
         return False
     status, _, _ = http("GET", base + "/echo")
     print("GET /echo ->", status, "(want 405)")
-    return status == 405
+    if status != 405:
+        return False
+    status, body, _ = http("GET", base + "/hits")
+    print("GET /hits ->", status, body)
+    if status != 200:
+        return False
+    got = json.loads(body)
+    return got.get("n") == 1
 
 
 def main():

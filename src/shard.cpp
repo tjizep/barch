@@ -6,8 +6,10 @@
 #include "module.h"
 #include <random>
 #include <algorithm>
+#include <cstring>
 
 #include "dictionary_compressor.h"
+#include "keys.h"
 #include "time_conversion.h"
 
 static std::random_device rd;
@@ -1204,6 +1206,72 @@ art::node_ptr barch::shard::local_leaf(value_type unfiltered_key) {
         if (!n.null()) return n;
     }
     return art::search(this, key);
+}
+
+bool barch::shard::setBufferAt(value_type unfiltered_key, value_type buf, size_t offset) {
+    std::string kbuf;
+    value_type key = s_filter_key(kbuf, unfiltered_key);
+    const size_t need = offset + buf.size;
+    if (key.size + need > (size_t) maximum_allocation_size)
+        return false;
+
+    node_ptr n = local_leaf(key);
+    const leaf* cl = (!n.null() && n.is_leaf) ? n.const_leaf() : nullptr;
+    const bool tomb = cl && cl->is_tomb() && !cl->expired();
+    const bool live = cl && !cl->is_tomb() && !cl->expired();
+
+    if (live && !cl->is_compressed() && cl->val_len() >= need) {
+        if (buf.size)
+            memcpy(n.l()->val() + offset, buf.bytes, buf.size);
+        last_leaf_added = n;
+        ++statistics::keys_replaced;
+        ++statistics::set_ops;
+        call_unblock(std::string(key.chars(), key.size));
+        return true;
+    }
+
+    if (need == 0 && !live && !tomb)
+        return true;
+
+    thread_local heap::vector<uint8_t> s;
+    s.clear();
+    if (live) {
+        auto ov = cl->get_value();
+        if (cl->is_compressed())
+            ov = dictionary::decompress(ov);
+        s.insert(s.end(), ov.begin(), ov.end());
+    }
+    if (need > s.size())
+        s.resize(need, 0);
+    if (buf.size)
+        memcpy(s.data() + offset, buf.bytes, buf.size);
+
+    art::key_options opts;
+    if (live)
+        opts = cl->options();
+    else
+        opts.set_hashed(!opt_ordered_keys);
+    opts.set_compressed(false);
+    value_type written{s.data(), s.size()};
+    if (!fits_in_leaf(key.size, written.size))
+        return false;
+    opt_insert(opts, key, written, true, [](const node_ptr&) {});
+    return true;
+}
+
+std::pair<art::value_type, bool> barch::shard::getBufferAt(value_type unfiltered_key, size_t offset) {
+    std::string kbuf;
+    value_type key = s_filter_key(kbuf, unfiltered_key);
+    node_ptr n = local_leaf(key);
+    if (n.null() || !n.is_leaf)
+        return {{}, false};
+    auto cl = n.const_leaf();
+    if (cl->is_tomb() || cl->expired() || cl->is_compressed())
+        return {{}, false};
+    auto v = cl->get_value();
+    if (offset > v.size)
+        return {{}, false};
+    return {{v.bytes + offset, v.size - offset}, true};
 }
 
 void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms, bool hashed) {

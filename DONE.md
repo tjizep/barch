@@ -9084,3 +9084,81 @@ Chaos test under TSan with `ci/tsan.supp`: zero heap-use-after-free, zero
 invalid mutex, 106 data races - all in the ART and allocator internals that
 DONE 185 left untriaged, none in the session or server paths. `ctest` on the
 coverage build at the CI's thread shape: 76/76 pass.
+
+## 191. Triage of the ART and allocator races [03-09-2026]
+
+*Was `TODO.md` entry 201.*
+
+Three clusters looked at, from the chaos run in DONE 190. Two are statistics
+counters and do not matter. The third is real, and is only latent because of
+how the default config happens to be set.
+
+### Allocator counters against INFO - benign
+
+`logical_allocator.h:892` is `allocated += size;` in `new_address`, and
+`logical_allocator.h:655` is `return allocated;` in `get_allocated()`. Every
+report in this cluster pairs a real allocation, which holds the shard latch,
+against a read from `INFO` - `info_api.cpp:156` and `:162` reaching
+`get_allocated()` through `barch::all_shards`.
+
+`all_shards` takes `ksp().lock` to copy the space map and then calls the
+callback with no shard latch at all, so the counters are read while writers
+are updating them. The consequence is a stale number in an `INFO` line. The
+reads are aligned and 8 bytes, so on x86-64 they do not tear.
+
+If it is ever worth closing, the cheap way is a shared latch per shard inside
+the `all_shards` callback rather than making the counter atomic - `allocated`
+is incremented on every node allocation and `INFO` is rare, so the cost
+belongs on the reader.
+
+### The per-command call counter - benign
+
+`asio_resp_session.h:355` is `++ic->second.calls`, a counter on the shared
+command table bumped by every session thread without synchronisation. An
+undercount under load. Same class as above.
+
+### The node cache - real
+
+`nodes.h:442-446`:
+
+    if (!dcache || last_ticker != page_modifications::get_ticker(address.page())) {
+        dcache = address.get_ap<alloc_pair>().get_nodes().modify<T>(address);
+        last_ticker = page_modifications::get_ticker(address.page());
+    }
+    return (T *) dcache;
+
+`dcache` and `last_ticker` are `mutable` and this is a `const` method, reached
+from `node_content.h:185` - `data() const`. Both threads in every report are
+readers: `lower_bound` at `shard.cpp:1180` against `shard.cpp:1184`. They hold
+the shard latch *shared*, which is what it is for, so they run together by
+design and both write the cache. The node_proxy is a shard member, so it is
+one object shared between them, not a per-thread copy.
+
+Two fields written in order and read in order, with no synchronisation, gives
+a reachable interleaving with no reordering required at all: reader B writes
+`dcache` at t1 and `last_ticker` at t2; reader A reads `dcache` at t3 and
+`last_ticker` at t4; t3 < t1 < t2 < t4 leaves A with the *old* `dcache` and
+the *new* `last_ticker`, so its condition is false and it returns the stale
+pointer.
+
+Whether a stale `dcache` is dangerous depends on whether the page moved, which
+is what the ticker is for. Pages move under the unique latch - compression and
+defrag - so `dcache` differs between one shared section and the next, and the
+interleaving above hands a reader the previous section's pointer.
+
+Nothing crashes today because the default config has `compression [ false ]`,
+so resolving a page does not relocate it and the stale pointer still addresses
+the right bytes. Turn compression on, or lean on `active_defrag`, and a stale
+`dcache` is a pointer to where the page used to be.
+
+Correction to a first reading of this: it looked as though the const path bumped
+the ticker itself, via `modify<T>()` -> `basic_resolve(at, true)` ->
+`retrieve_page(page, true)` -> `inc_ticker`. It does not. `basic_resolve` uses
+its `modify` argument only in the page-trace log line and then calls
+`get_page_data(at)`, and the arena's `get_page_data(logical_address, bool)`
+leaves that second parameter unnamed and unused. `inc_ticker` at
+`logical_allocator.h:454` is in `retrieve_page`, which is not on this path. So
+readers do not move the ticker, and `modify<T>()` against
+`logical_allocator::read<T>()` is a question of intent, not behaviour - the
+flag is ignored the whole way down. The race is unaffected: it needs only that
+the page moved between two shared sections, which writers do.

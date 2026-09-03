@@ -1046,3 +1046,20 @@
 198. [Done] The unlocked-mutex reports are a TSan limitation [03-09-2026] Nr 189 fe5911e
 
 199. [Done] do_read and do_write hold the session again [03-09-2026] Nr 190 fe5911e
+
+201. [Done] Triage of the ART and allocator races [03-09-2026] Nr 191 fe5911e
+
+202. The const `refresh_cache()` in `nodes.h` races with itself between
+    concurrent readers, and can return a stale `dcache` - see DONE 191
+    for the interleaving. Two things to settle, probably together.
+    First, whether the const path should call
+    `logical_allocator::read<T>()` instead of `modify<T>()`: a read has
+    no business setting the modify flag or bumping the page ticker, and
+    doing so is what lets readers invalidate each other. Second, what
+    makes the cache safe for concurrent readers once that is done -
+    the two fields still need to be published together, so either one
+    atomic word holding both, or accept the recompute and drop the
+    cache. Settle with: a TSan chaos run clean of `nodes.h:442`, no
+    throughput loss on the DONE 187 memtier setup, and a run with
+    `compression` on, since that is the config where a stale pointer
+    stops being harmless.

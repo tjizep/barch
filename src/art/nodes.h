@@ -436,14 +436,26 @@ namespace art {
         typedef std::array<node_ptr, max_alloc_children> children_t;
 
         struct node_proxy {
+            /*
+             * The const path resolves every time and writes nothing.
+             *
+             * dcache and last_ticker are mutable, so this used to update them from
+             * a const method - and const methods here run under the *shared* latch,
+             * which is exactly the case where several readers run at once on one
+             * node_proxy. They then raced on the two fields, and because the two
+             * are written in order and read in order with nothing ordering them, a
+             * reader could see the new last_ticker beside the previous dcache,
+             * conclude its cache was current, and return a pointer to where the
+             * page used to be. Harmless while compression is off and pages do not
+             * move; a dangling read once they do. See TODO 202.
+             *
+             * A writer holds the latch exclusively, so the non-const overload below
+             * keeps its cache - nothing else can be looking at it.
+             */
             template<typename T>
             const T *refresh_cache() const
             {
-                if (!dcache || last_ticker != page_modifications::get_ticker(address.page())) {
-                    dcache = address.get_ap<alloc_pair>().get_nodes().modify<T>(address);
-                    last_ticker = page_modifications::get_ticker(address.page());
-                }
-                return (T *) dcache;
+                return address.get_ap<alloc_pair>().get_nodes().read<T>(address);
             }
 
             template<typename T>

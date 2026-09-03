@@ -1,0 +1,29 @@
+# ThreadSanitizer suppressions for barch.
+#
+# Use with:
+#   TSAN_OPTIONS="suppressions=ci/tsan.supp" ...
+#
+# See DONE 189 for how the one entry below was arrived at, and ci/README.md
+# for the rest of the TSan recipe (the runtime has to be preloaded, and ASLR
+# turned off with setarch -R, because _barch.so is dlopened by python).
+
+# TSan does not intercept pthread_mutex_timedlock, so it never sees a lock
+# taken through std::timed_mutex::try_lock_for(). Every later unlock of that
+# mutex then looks unbalanced and is reported as "unlock of an unlocked mutex
+# (or by a wrong thread)".
+#
+# barch takes its write latch that way on the main path -
+# abstract_shard::lock_unique() is try_lock_for(lock_to_ms) - so this fires
+# once per write unlock: 1042 reports in one chaos run against 114 real ones,
+# which buries anything worth reading.
+#
+# It is a sanitizer limitation, not a barch defect. That was settled two ways:
+# a twelve line program with no barch in it reproduces the report exactly, and
+# an owner-tracking probe wrapped around every acquisition path of
+# upgrade_write_mtx found no unbalanced or cross-thread unlock across a 347
+# shard load and a full chaos run.
+#
+# The cost of this entry is that a genuine unbalanced unlock inside
+# debuggable_server_lock would also be hidden. Take it out and use the owner
+# probe from DONE 189 if that is ever in question.
+mutex:debuggable_server_lock::unlock

@@ -117,10 +117,17 @@ namespace barch {
         void register_session(const std::shared_ptr<resp_session<uds::socket>>& session) {
             register_(session,open_pos_uds, uds_sessions);
         }
+        /*
+         * asio_resp_ios is filled in the constructor before any thread that could
+         * call this exists, and is not touched again until stop(), so reading it
+         * here needs no lock. See TODO 197.
+         */
         std::shared_ptr<asio_work_unit> get_asio_unit() {
-            size_t r = (asio_resp_distributor % asio_resp_ios.size());
-            ++asio_resp_distributor;
-            return asio_resp_ios[r];
+            // one fetch_add, not a load and a separate increment: two accept
+            // threads reading the old value before either stored the new one both
+            // took the same slot, which is not what round robin is for
+            size_t r = asio_resp_distributor.fetch_add(1, std::memory_order_relaxed);
+            return asio_resp_ios[r % asio_resp_ios.size()];
         }
         template<typename Sock_T>
         void collect_sessions(heap::unordered_set<size_t>& open_pos, std::vector<std::shared_ptr<resp_session<Sock_T>>> &sessions) {
@@ -414,6 +421,52 @@ namespace barch {
                 ssl_context.use_tmp_dh_file(get_tls_tmp_dh_file());
             }
 
+            /*
+             * Everything a connection needs is built here, on this thread, before
+             * any thread that reads it exists.
+             *
+             * The accept threads used to be started first, while asio_resp_ios was
+             * still empty, and a connection landing in that window reached
+             * get_asio_unit(). Three ways for that to end, all of them bad: before
+             * the resize the vector is empty and `% asio_resp_ios.size()` is a
+             * divide by zero; during the resize the read walks a buffer that is
+             * being reallocated; after it, the slot is an empty shared_ptr and
+             * process_data dereferences it as `unit->io`. The barrier below did not
+             * help, because `++num_started` was counted before the slot it counts
+             * was written, so it could fall through with slots still empty.
+             *
+             * Filling the vector before creating any reader takes the whole
+             * question away - constructing a thread happens-after everything the
+             * constructing thread did, so get_asio_unit needs no synchronisation of
+             * its own. See TODO 197.
+             */
+            num_started = 0;
+            barch::log({"resp pool size",asio_resp_pool.size()});
+            asio_resp_ios.resize(asio_resp_pool.size());
+            for (auto &unit : asio_resp_ios) {
+                unit = std::make_shared<asio_work_unit>();
+            }
+            // run() never returns, so the count has to be taken before it
+            asio_resp_pool.start([this](size_t tid) -> void {
+                ++num_started;
+                asio_resp_ios[tid]->run();
+            });
+            while (num_started != asio_resp_pool.size()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            // workers before accepts: a session posts its asynchronous batches there
+            work_pool.start([this](size_t tid) -> void{
+                workers.run();
+                barch::log({"worker stopped using thread",tid});
+            });
+
+            /*
+             * Accepting comes last. start_accept() only arms the handler on `io`;
+             * nothing completes until a pool thread calls io.run(), so this is the
+             * line that opens the server to traffic and everything above it is
+             * ready by the time it runs.
+             */
             start_accept();
             pool.start([this,&ep](size_t tid) -> void{
                 auto addr = address_off(ep);
@@ -424,21 +477,6 @@ namespace barch {
                 io.run();
                 log({prot_name,"server stopped on", addr,"using thread",tid});
             });
-            work_pool.start([this](size_t tid) -> void{
-                workers.run();
-                barch::log({"worker stopped using thread",tid});
-            });
-            num_started = 0;
-            barch::log({"resp pool size",asio_resp_pool.size()});
-            asio_resp_ios.resize(asio_resp_pool.size());
-            asio_resp_pool.start([this](size_t tid) -> void {
-                ++num_started;
-                asio_resp_ios[tid] = std::make_shared<asio_work_unit>();
-                asio_resp_ios[tid]->run();
-            });
-            while (num_started != asio_resp_pool.size()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
 
             started = true;
         }

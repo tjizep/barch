@@ -1041,46 +1041,8 @@
 
 196. [Done] Use-after-free on a session the collector retires [03-09-2026] Nr 186 511cc84
 
-197. The resp io pool is announced before it is published. In
-    `src/rpc/server.cpp:401`, `++num_started` runs *before*
-    `asio_resp_ios[tid] = make_shared<asio_work_unit>()`, so the
-    `while (num_started != size())` barrier can fall through with slots
-    still empty. Worse, the accept threads are started earlier (`:385`)
-    and are already running `io.run()`, so a connection arriving in that
-    window reaches `get_asio_unit()` (`:110`), which reads
-    `asio_resp_ios[r]` with no synchronisation and hands back a
-    `shared_ptr` that `process_data` dereferences as `unit->io`
-    (`:297`). An empty slot there is a null dereference on an accept
-    thread. TSan reports the race on both the read and the vector fill.
-    Likely fix is to build every `asio_work_unit` on the constructing
-    thread before any accept thread is started, leaving the pool threads
-    to call `run()` only. Settle with: the race gone from a TSan run of
-    `chaostest.py`, which restarts the server twice.
+197. [Done] The resp io pool was announced before it was published [03-09-2026] Nr 188 fe5911e
 
-198. `debuggable_server_lock::unlock()` unlocks a mutex TSan does not
-    think is held - `debuggable_server_lock.h:729` reached from
-    `counted_unique_latch::~counted_unique_latch` and `shard::load`
-    (`shard.cpp:653`). It is systematic rather than racy: about one per
-    shard per load pass, 1043 of them in the chaos run. `lock()` does
-    `ul.release()` and `unlock()` does the matching
-    `upgrade_write_mtx.unlock()`, so the pairing reads correctly, which
-    leaves two candidates: `_load()` reinitialising the latch under the
-    held lock, or a TSan artifact of releasing a `unique_lock` and
-    unlocking by hand. Note `unlock()` ignores what `pop_hold()` returns
-    while `unlock_shared()` acts on it. Settle with: which of the two it
-    is, demonstrated on a small case rather than argued from the source.
+198. [Done] The unlocked-mutex reports are a TSan limitation [03-09-2026] Nr 189 fe5911e
 
-199. `do_read` (and the plain `do_write`) still capture a raw `this`, so a
-    session the collector retires while its read is pending leaves a
-    handler that runs on freed memory - the same shape as DONE 186 but on
-    the hot path. It was left alone deliberately: every idle connection
-    has one of these outstanding, covering them cost a consistent ~4% on
-    pipelined SET and GET, and doing so also kept sessions alive into
-    teardown, which is what produced the second round of faults in DONE
-    186. TSan has not caught this one firing. Settle with: whether it can
-    actually be provoked - a client that closes mid-read while the
-    collector sweeps - and if so a fix that does not put a refcount on
-    every read, since the ordering fix from DONE 186 may now make a self
-    pointer there affordable and safe.
-
-200. [Done] Memtier 80:20 read:write, barch against valkey [03-09-2026] Nr 187 511cc84
+199. [Done] do_read and do_write hold the session again [03-09-2026] Nr 190 fe5911e

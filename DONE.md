@@ -8878,9 +8878,209 @@ write has to maintain the second index. DONE 183 wanted hybrid off to see the
 ordered path on its own; that is a different question from which config is
 faster for a read-heavy mix, and the answer to that one is hybrid on.
 
+### Both were release builds, but not on identical flags
+
+barch came out of a default `cmake -B build -DTEST_OD=ON`, which `CMakeLists.txt`
+turns into Release:
+
+    -std=c++20 -march=native -O3 -funroll-all-loops -frename-registers -flto
+
+valkey's `.make-settings` records its own standard release build:
+
+    OPT=-O3 -flto=auto -ffat-lto-objects -fno-omit-frame-pointer
+    MALLOC=jemalloc
+
+Both -O3 and both LTO, so neither is a debug build. But barch got
+`-march=native` and valkey did not - its Makefile does not add it and nothing
+here overrode that - and valkey carries `-fno-omit-frame-pointer`, which barch
+does not. They also use different allocators. So these are two projects each
+built the way it ships, not the same compiler settings, and the single thread
+gap is the number most likely to move if that were equalised. The scaling
+result does not depend on it: 3.72x against 2.36x over 1 -> 4 threads is an
+architectural difference, not a codegen one.
+
 ### Reproducing
 
 memtier is not packaged here and there is no root, so it was built into a
 scratch prefix: libevent 2.1.12 static (`--disable-openssl`), then memtier at
 5694a3d with `--disable-tls`. Worth knowing that memtier's `-P` is
 *protocol*, not pipeline - pipeline is the long `--pipeline` only.
+
+## 188. The resp io pool was announced before it was published [03-09-2026]
+
+*Was `TODO.md` entry 197.*
+
+TSan reported a race between `get_asio_unit()` reading `asio_resp_ios[r]` and
+the pool threads filling that vector. Reading the startup order around it, the
+window was wider than the report suggested.
+
+### The order it ran in
+
+The constructor did this:
+
+1. `start_accept()`, then `pool.start(...)` - the accept threads, each running
+   `io.run()`, so accepts complete from here on
+2. `work_pool.start(...)`
+3. `asio_resp_ios.resize(asio_resp_pool.size())`
+4. `asio_resp_pool.start(...)`, whose threads write their own slot
+5. `while (num_started != size())`
+
+Accepting therefore opened at step 1, three steps before the thing every
+accepted connection needs. `process_data` calls `get_asio_unit()`, which is
+`asio_resp_distributor % asio_resp_ios.size()` and then a dereference of what
+comes back, so a connection landing early hit one of three things:
+
+- before step 3 the vector is empty, so the modulus is `% 0` - an integer
+  divide by zero, which on x86 is SIGFPE, not a null pointer
+- during step 3 the read walks a buffer that is being reallocated
+- after it, the slot is still an empty `shared_ptr` and `process_data`
+  dereferences it as `unit->io`
+
+The barrier at step 5 did not close any of that, because `++num_started` was
+counted *before* the slot it counts was written, so it could fall through with
+slots still empty.
+
+Whether the CI segfault was this one is not settled - DONE 186 is the better
+candidate, since it needs no startup timing at all - but this is a real second
+way to crash on the same path.
+
+### The fix
+
+Build the pool on the constructing thread before creating any thread that
+reads it, and start accepting last:
+
+1. resize `asio_resp_ios` and fill every slot with a `make_shared`
+2. start the resp pool, whose threads now only call `run()` on a unit that
+   already exists (the count still has to be taken before `run()`, which never
+   returns), and wait on the barrier
+3. start the workers - a session posts its asynchronous batches there
+4. `start_accept()` and the accept threads, last
+
+`start_accept()` only arms the handler on `io`; nothing completes until a pool
+thread calls `io.run()`, so step 4 is the single line that opens the server to
+traffic, and everything above it is finished by then.
+
+This needs no synchronisation in `get_asio_unit()` at all: creating a thread
+happens-after everything the creating thread did, so the vector is fully
+visible to every thread that can read it, and it is not touched again until
+`stop()`.
+
+`get_asio_unit()` also had a load and a separate increment of
+`asio_resp_distributor`, so two accept threads could read the same value and
+take the same slot. That is one `fetch_add` now - not a crash, just a round
+robin that was not going round.
+
+### Verified
+
+Chaos test under TSan, which restarts the server twice: `get_asio_unit` and
+`process_data` appear nowhere in the report, against 10 reports across those
+two frames before. `ctest` on the coverage build at the CI's thread shape:
+76/76 pass.
+
+No throughput measurement, on purpose: `get_asio_unit()` runs once per
+accepted connection, not per command, and the rest is startup ordering. The
+memtier runs in DONE 187 use one connection per thread, so there is nothing
+there for this to move.
+
+## 189. The unlocked-mutex reports are a TSan limitation [03-09-2026]
+
+*Was `TODO.md` entry 198.*
+
+Not a barch defect. TSan does not intercept `pthread_mutex_timedlock`, so a
+lock taken through `std::timed_mutex::try_lock_for()` is never seen, and every
+later unlock of that mutex is reported as "unlock of an unlocked mutex (or by
+a wrong thread)".
+
+### How it was settled
+
+The entry asked for a small case rather than an argument from the source, and
+the small case is twelve lines with no barch in it:
+
+    std::timed_mutex m;
+    std::unique_lock<std::timed_mutex> ul(m, std::defer_lock);
+    while (!ul.try_lock_for(std::chrono::seconds(1))) {}
+    ul.release();
+    m.unlock();
+
+Under TSan that reproduces the report exactly, down to the giveaway in the
+original: `Mutex M0 (0x...) created at:` whose stack is the *unlock*. TSan had
+never seen the mutex before the unlock, which is what "created at" is saying.
+
+The other candidate from the entry - `unique_lock::release()` followed by a
+hand unlock - was cleared first, by the same method. Swap `try_lock_for` for a
+plain `lock()` in that program and TSan is silent, with or without a second
+thread contending. So `release()` plus a manual `unlock()` is tracked fine;
+the timed acquisition is what is invisible.
+
+Then the other direction, to be sure barch is actually balanced: a probe
+wrapping `upgrade_write_mtx` in a type recording the owning thread on every
+acquisition path - `lock`, `try_lock`, `try_lock_for`, `try_lock_until` - and
+checking it on unlock. Zero unbalanced and zero cross-thread unlocks over a
+347 shard load and over a full `chaostest.py` with restarts and 32 workers.
+
+A first version of that probe instrumented only `lock()` and appeared to find
+three real unbalanced unlocks. Those were acquisitions through `try_lock_for`
+that it was not watching - a hole in the probe, not a bug. Worth recording
+because the wrong version was convincing.
+
+### `BARCH_LOCK_DEBUG` is not the variable
+
+The debug branch of `lock()` acquires with `try_lock_for` and the plain branch
+does not, so turning it off looked like it would help. It does not: a rebuild
+with `-DBARCH_LOCK_DEBUG=OFF` still produced 2084 reports, because the path
+that actually matters is `abstract_shard::lock_unique()`, which is
+`try_lock_for(lock_to_ms)` either way. Release builds have the option off and
+still take the write latch through the timed call.
+
+### What shipped
+
+`ci/tsan.supp`, one entry, `mutex:debuggable_server_lock::unlock`. On a chaos
+run it matched 1042 reports and left the data races untouched - 158 that run,
+against 1042 of noise before, which is the point: the noise was burying them.
+
+Its cost is that a genuine unbalanced unlock in that function would be hidden
+too. The file says so, and says to use the owner probe above if that is ever
+in doubt.
+
+## 190. do_read and do_write hold the session again [03-09-2026]
+
+*Was `TODO.md` entry 199.*
+
+DONE 186 left these two on a raw `this` for two reasons, and DONE 188 removed
+one of them while a better benchmark removed the other.
+
+The safety reason is gone. Covering these handlers used to produce
+use-after-free at restart, because a session held into teardown outlived the
+io_context its socket belonged to. DONE 188 declared `asio_resp_ios` ahead of
+`io` and `workers`, so the socket contexts are now destroyed last, and the
+same chaos run under TSan is clean.
+
+The cost reason was overstated. The ~4% in DONE 186 came from a python client
+driving pipelines from the same box, which is noisy enough that its first
+repetition was consistently 15% below its own third. Measured with memtier
+instead - the DONE 187 setup, 1M keys preloaded, 80:20 read:write,
+`--pipeline=50`, three reps:
+
+| | rep 1 | rep 2 | rep 3 | median | vs baseline |
+| --- | --- | --- | --- | --- | --- |
+| baseline, 1 thread | 579,327 | 588,153 | 591,137 | 588,153 | - |
+| with self, 1 thread | 584,753 | 586,439 | 581,931 | 584,753 | -0.6% |
+| baseline, 4 threads | 2,189,741 | 2,190,772 | 2,188,399 | 2,189,741 | - |
+| with self, 4 threads | 2,171,661 | 2,176,350 | 2,172,086 | 2,172,086 | -0.8% |
+
+At one thread the two overlap and nothing can be claimed. At four they do not -
+baseline 2,188.4k to 2,190.8k against 2,171.7k to 2,176.4k - so the cost is
+real, resolvable, and about 0.8%. That is a refcount on every read and every
+write of every connection, which is roughly what it should cost, and it is not
+4%.
+
+So both handlers now take `shared_from_this()`. The session cannot be freed
+under a pending read while the collector is retiring it, which was the hole
+this entry was opened for, and every async handler on a session now holds one.
+
+### Verified
+
+Chaos test under TSan with `ci/tsan.supp`: zero heap-use-after-free, zero
+invalid mutex, 106 data races - all in the ART and allocator internals that
+DONE 185 left untriaged, none in the session or server paths. `ctest` on the
+coverage build at the CI's thread shape: 76/76 pass.

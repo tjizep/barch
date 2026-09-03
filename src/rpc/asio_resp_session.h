@@ -396,21 +396,22 @@ namespace barch {
         // the async call context needs to stay alive while calls complete
         void do_read() {
             /*
-             * Deliberately a raw `this`, unlike the write and batch paths below.
+             * The self pointer keeps this session alive while the read is
+             * outstanding. Every idle connection has one of these pending, so the
+             * collector retiring a session - which is exactly what it does when the
+             * peer goes away, and exactly when this read completes - would otherwise
+             * leave the handler running on freed memory.
              *
-             * Every idle connection has one of these outstanding all the time, so a
-             * self pointer here keeps its session alive inside the io_context queue
-             * until the context is torn down - and the session destructor then runs
-             * against services that context has already destroyed. Measured: adding
-             * it turned a clean chaos run into 8 use-after-free and ~100 invalid
-             * mutex reports at restart, all in ~resp_session.
-             *
-             * That leaves the read handler itself unprotected if the collector
-             * retires the session while this read is pending. TSan has not caught
-             * that one, and it is a different bug from TODO 196 - see TODO 199.
+             * This was left on a raw `this` in DONE 186 because adding it there
+             * produced use-after-free at restart instead: a session held into
+             * teardown outlived the io_context its socket belonged to. DONE 188
+             * fixed that ordering - asio_resp_ios is declared ahead of io and
+             * workers, so the socket contexts are destroyed last - and with that in
+             * place this is both safe and free. See TODO 199.
              */
+            auto self(this->shared_from_this());
             socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                [this](std::error_code ec, std::size_t length)
+                [this, self](std::error_code ec, std::size_t length)
             {
 
                 if (!ec){
@@ -541,9 +542,9 @@ namespace barch {
 
             if (local_stream.empty()) return;
 
-            // raw `this` for the same reason as do_read - see the note there
+            auto self(this->shared_from_this()); // see the note in do_read
             asio::async_write(socket_, asio::buffer(local_stream.buf),
-                [this](std::error_code ec, std::size_t length){
+                [this, self](std::error_code ec, std::size_t length){
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;

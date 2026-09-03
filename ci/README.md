@@ -44,3 +44,34 @@ code rather than a change of runner. `CMakeLists.txt` now defines
 Note the second half of that: this only reproduces here because this
 machine's CPU has bf16. On a host without it, `ci/local-ci.sh 22` would
 have compiled quite happily.
+
+## Thread sanitizer
+
+Not part of any CI job - it is far too slow for the whole suite - but useful on
+one or two tests. `_barch.so` is dlopened by python, so the sanitizer runtime is
+not in the process at start and its interceptors never install. Preloading it
+fixes that, and then TSan needs ASLR out of the way or it dies on its own
+address space check with `unexpected memory mapping`.
+
+Configure:
+
+    cmake -B build-tsan -DTEST_OD=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+      -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+    cmake --build build-tsan --target barch --parallel 2
+
+Run, from the build directory:
+
+    setarch -R env LD_PRELOAD=$(gcc -print-file-name=libtsan.so.2) \
+      TSAN_OPTIONS="halt_on_error=0 history_size=4 suppressions=../ci/tsan.supp" \
+      PYTHONPATH=. python3 ../test/chaostest.py
+
+`chaostest.py` and `fetchluautest.py` are the two that have earned their keep -
+between them they found DONE 186 and DONE 188.
+
+Use the suppressions file. Without it every write unlock is reported, because
+TSan does not intercept `pthread_mutex_timedlock` and barch takes its write
+latch with `try_lock_for`; that was a thousand reports against a hundred real
+ones. See `ci/tsan.supp` and DONE 189.

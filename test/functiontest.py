@@ -1361,10 +1361,19 @@ try:
     assert r.execute_command("bufneedbuf", "bufk") == b"refused"
 
     # increment: int32 in place vs tonumber/tostring. Timed from Python because
-    # the sandbox has no clock. One CALLF, a million loops on one key, unordered.
-    # The lock is per increment, not around the whole loop. Slice and deadline
-    # are function_slice_insns and function_deadline_ms.
-    N = 1000000
+    # the sandbox has no clock. One CALLF, a hundred thousand loops on one key,
+    # unordered. The lock is per increment, not around the whole loop. Slice and
+    # deadline are function_slice_insns and function_deadline_ms.
+    #
+    # This was a million, which is fine on a release build - about a second - but
+    # the ubuntu24 CI builds with COVERAGE=ON, and -fprofile-update=atomic turns
+    # every basic block counter in the loop into an atomic increment. That is
+    # roughly 4.5x, so the call took ~4.8s there and redis-py 8 hands a client a
+    # 5 second socket_timeout unless you ask for something else. On a runner
+    # slower than the machine it was written on it went over and CI failed on a
+    # read timeout, not on anything the server did wrong. The ratio is what this
+    # bench is for and a hundred thousand shows it just as well. See TODO 193.
+    N = 100000
     r.execute_command("CONFIG", "SET", "function_deadline_ms", "60000")
     r.execute_command("CONFIG", "SET", "function_slice_insns", "10000000")
     # colon so USE does not have to stick across redis-py's pool

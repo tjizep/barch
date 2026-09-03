@@ -8625,3 +8625,76 @@ container lower_bounds); GET already skipped that on a hit (DONE 146 /
 TODO 59). After that skip, SET was ~750k on the same memtier, still
 with hybrid on. Those two changes stayed. The intended comparison is
 the config, not a further SET rewrite.
+
+## 184. Increment bench too slow for the coverage CI [03-09-2026]
+
+*Was `TODO.md` entry 193.*
+
+`functiontest.py` failed on CI at the first `bufbench:CALLF`, with
+`redis.exceptions.TimeoutError: Timeout reading from socket`. It looked like
+a hang in the server, and the log around it looked like the 60s
+`function_deadline_ms` running out, so the debuggable lock work from the same
+commit was the obvious suspect. It was neither.
+
+### Where the timeout comes from
+
+The test builds its client as `redis.Redis(host=..., port=PORT, db=0,
+protocol=2)` and never names a timeout. redis-py 8 does not default that to
+"wait forever" the way older versions did - `redis/_defaults.py` has
+`DEFAULT_SOCKET_TIMEOUT = 5`. So the client gives up after 5 seconds no matter
+what the server was told its deadline is. `function_deadline_ms` governs the
+server only; the two numbers were never connected.
+
+The ~60s gap in the CI log that made this look like the deadline is redis-py
+retrying the command after each 5s timeout before it finally raises. A local
+run with `N` doubled reproduced it exactly: "FAILED after 58.88s ->
+TimeoutError: Timeout reading from socket".
+
+### Why five seconds was not enough
+
+Timings for the million loop call on a 16 core box:
+
+| build | time |
+| --- | --- |
+| Release | 1.06s |
+| Coverage, RelWithDebInfo (what CI builds) | 4.70 - 4.91s |
+
+`ubuntu24-sanitize.yml` builds with `-DCOVERAGE=ON`, which adds
+`--coverage -fprofile-arcs -ftest-coverage -fprofile-update=atomic`. The last
+flag makes every basic block counter an atomic increment, and the bench is a
+million iterations of a tight Luau loop, so it pays that on every block. That
+is about 4.5x, which lands at ~4.8s against a 5s limit. A GitHub runner is
+slower per core than the machine the bench was written on, so it went over.
+Core count is not the variable - the loop is single threaded on one key.
+
+### The lock was not the cause
+
+Worth recording because it was the first guess. `src/debuggable_server_lock.h`
+at HEAD was A/B'd against `HEAD~1`, rebuilding the coverage target for each,
+three reps each:
+
+- `HEAD~1`: 5.099 / 5.030 / 5.086 s
+- HEAD (`slots_used` plus the pre-mutex `readers_drained()` check): 4.797 /
+  4.747 / 4.701 s
+
+About 6% faster, consistently. The new fast path also holds up on reading: the
+writer re-tests `readers_drained()` under `cv_mtx` before waiting and
+`backoff_reader` takes the same mutex before notifying, so there is no lost
+wakeup, and the seq_cst publish of `slots_used` ahead of the reader's
+`reader_count` increment means a reader whose slot the writer has not seen yet
+is guaranteed to see `write_intent` and back off.
+
+What made it look guilty was the timing - the failing run is the run for that
+commit - but the bench section is itself new in the commit before it, so this
+was simply the first CI run that ever executed it.
+
+### What changed
+
+`N` went from 1000000 to 100000 in `test/functiontest.py`, with the reasoning
+above left in a comment next to it so the next person does not re-derive it.
+
+Verified: on the coverage build the bench now reports 0.4567s, which leaves
+about 90% of the 5 second budget spare, and the whole of `functiontest.py`
+passes. The ratio the bench exists to show is unaffected - on the release
+build it is 1.08x at a hundred thousand, the same as the 1.07 - 1.08x it read
+at a million.

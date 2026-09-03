@@ -1027,3 +1027,12 @@
 
 193. [Done] Increment bench too slow for the coverage CI [03-09-2026] Nr 184 f4bdc13
 
+194. The ubuntu24 coverage CI segfaulted in `TestFetchLuau` and 85+ local
+    runs at the runner's thread shape would not reproduce it, so there is
+    nothing to debug from. Make that job produce a backtrace the next
+    time any test faults: core dumps enabled, a core pattern that lands
+    somewhere writable, and a step that runs gdb over whatever cores the
+    run left. The build is already RelWithDebInfo so the symbols are
+    there. Settle with: a run that shows the capture step in place and
+    reports no cores on a green run, and a deliberately faulted binary
+    proving the backtrace comes out readable.

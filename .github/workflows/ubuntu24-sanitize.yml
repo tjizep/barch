@@ -17,7 +17,26 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y lcov bc curl
+          sudo apt-get install -y lcov bc curl gdb
+
+      # A test faulting here tells us the name of the test and nothing else,
+      # and the ones that do it are rare enough that they will not reproduce
+      # on a developer box - TestFetchLuau went 85+ local runs at this
+      # runner's exact thread shape without failing once. So keep the core
+      # and read it in the job. See TODO 194.
+      #
+      # core_pattern is a host setting, not a container one, so it has to be
+      # written on the runner itself. %e and %p keep the crashing program and
+      # pid in the name. The runner is a fresh VM each time, so changing this
+      # affects nothing else.
+      - name: Enable core dumps
+        run: |
+          set -xe
+          sudo mkdir -p /tmp/cores
+          sudo chmod 1777 /tmp/cores
+          echo '/tmp/cores/core.%e.%p' | sudo tee /proc/sys/kernel/core_pattern
+          # apport rewrites core_pattern when it starts, so stop it first
+          sudo systemctl stop apport.service 2>/dev/null || true
 
       - name: Use cmake
         run: |
@@ -36,7 +55,44 @@ jobs:
           # same sources). locktest is already a dependency of barch.
           cmake --build build --target barch --parallel 2
           cmake --build build --target globdifftest --parallel 2
+          # the limit is inherited, so raising it here covers ctest and every
+          # test process under it. See TODO 194.
+          ulimit -c unlimited
           ( cd build ; ctest --output-on-failure )
+      # always, not just on failure: a green run saying "no core files" is how
+      # we know the capture is still wired up and not quietly broken by the
+      # time it is actually needed. See TODO 194.
+      - name: Backtraces from any core dumps
+        if: always()
+        run: |
+          shopt -s nullglob
+          cores=(/tmp/cores/core.*)
+          if [ ${#cores[@]} -eq 0 ]; then
+            echo "no core files - nothing faulted"
+            exit 0
+          fi
+          for c in "${cores[@]}"; do
+            echo "=============================================================="
+            echo "$c"
+            # the faulting program is in the file name, and gdb wants the
+            # binary as well as the core to resolve anything. Nearly always
+            # that is the venv python the tests run under, so look there
+            # before $PATH - the frames worth reading are in _barch.so, which
+            # gdb finds from the mappings recorded in the core.
+            prog=$(basename "$c" | cut -d. -f2)
+            if [ -x "build/venv/bin/$prog" ]; then
+              exe="build/venv/bin/$prog"
+            else
+              exe=$(command -v "$prog" || echo "$prog")
+            fi
+            echo "program: $prog  ($exe)"
+            gdb --batch -q \
+                -ex "set debuginfod enabled off" \
+                -ex "thread apply all bt" \
+                -ex "info sharedlibrary" \
+                "$exe" "$c" 2>&1 | head -400
+          done
+
       - name: Generate Coverage Badge
         run: |
           cmake --build build --target coverage_badge

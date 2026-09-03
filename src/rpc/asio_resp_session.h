@@ -395,8 +395,22 @@ namespace barch {
         }
         // the async call context needs to stay alive while calls complete
         void do_read() {
+            /*
+             * Deliberately a raw `this`, unlike the write and batch paths below.
+             *
+             * Every idle connection has one of these outstanding all the time, so a
+             * self pointer here keeps its session alive inside the io_context queue
+             * until the context is torn down - and the session destructor then runs
+             * against services that context has already destroyed. Measured: adding
+             * it turned a clean chaos run into 8 use-after-free and ~100 invalid
+             * mutex reports at restart, all in ~resp_session.
+             *
+             * That leaves the read handler itself unprotected if the collector
+             * retires the session while this read is pending. TSan has not caught
+             * that one, and it is a different bug from TODO 196 - see TODO 199.
+             */
             socket_.async_read_some(asio::buffer(data_, rpc_io_buffer_size),
-                [this](std::error_code ec, std::size_t length)// NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
+                [this](std::error_code ec, std::size_t length)
             {
 
                 if (!ec){
@@ -527,8 +541,9 @@ namespace barch {
 
             if (local_stream.empty()) return;
 
+            // raw `this` for the same reason as do_read - see the note there
             asio::async_write(socket_, asio::buffer(local_stream.buf),
-                [this](std::error_code ec, std::size_t length){ // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
+                [this](std::error_code ec, std::size_t length){
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;
@@ -555,7 +570,12 @@ namespace barch {
                 do_read(); // the one place the chain is resumed for an asynchronous batch
                 return;
             }
-            asio::post(workers, [this, batch, at]() { // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
+            // the read chain is down for the length of a batch, so its self pointer
+            // is not holding this session up - the sessions vector was, and the
+            // collector can null that while this lambda is inside write_socket_now
+            // on the socket. That is the use-after-free TSan reports. See TODO 196.
+            auto self(this->shared_from_this());
+            asio::post(workers, [this, self, batch, at]() {
                 auto ctx = (*batch)[at];
                 // replies encoded before this call (a sync GET in the same
                 // pipeline) live on ctx->stream. they have to hit the socket
@@ -635,8 +655,9 @@ namespace barch {
                 then();
                 return;
             }
+            auto self(this->shared_from_this()); // see TODO 196
             asio::async_write(socket_, asio::buffer(out->buf),
-                [this, out, then](std::error_code ec, std::size_t length){
+                [this, self, out, then](std::error_code ec, std::size_t length){
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;
@@ -654,8 +675,9 @@ namespace barch {
                 then();
                 return;
             }
+            auto self(this->shared_from_this()); // see TODO 196
             asio::async_write(socket_, asio::buffer(ctx->stream.buf),
-                [this, ctx, then](std::error_code ec, std::size_t length){
+                [this, self, ctx, then](std::error_code ec, std::size_t length){
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;
@@ -668,8 +690,9 @@ namespace barch {
         void do_write(asynch_call_context_ptr ctx) {
             if (ctx->stream.empty()) return;
 
+            auto self(this->shared_from_this()); // see TODO 196
             asio::async_write(socket_, asio::buffer(ctx->stream.buf),
-                [this, ctx](std::error_code ec, std::size_t length){ // NOTE: the self shared pointers can cause noticeable cpu usage so we keep the session afloat elsewhere
+                [this, self, ctx](std::error_code ec, std::size_t length){
                     if (!ec){
                         net_stat stat;
                         stream_write_ctr += length;

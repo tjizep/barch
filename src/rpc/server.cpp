@@ -55,11 +55,24 @@ namespace barch {
         thread_pool asio_resp_pool{(double)resp_pool_factor/100.0f};
         thread_pool work_pool{asynch_proccess_workers};
 
+        /*
+         * Declared before io and workers, so it is destroyed after both.
+         *
+         * A session's socket belongs to one of these units, and its destructor
+         * reaches into that unit's io_context services. A handler queued on
+         * `workers` can be the last thing holding a session - an asynchronous batch
+         * that never ran - and that handler is only destroyed when `workers` is.
+         * With the units declared after workers they went first, and releasing the
+         * session then ran a socket destructor against a context that no longer
+         * existed. Whatever can hold a session has to die before the contexts its
+         * sockets live in. See TODO 196.
+         */
+        std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
+        //std::vector<std::shared_ptr<uring_work_unit>> uring_resp_ios{};
+
         asio::io_context io{};
         asio::io_context workers{};
         exec_guard worker_guard {asio::make_work_guard(workers)};
-        std::vector<std::shared_ptr<asio_work_unit>> asio_resp_ios{};
-        //std::vector<std::shared_ptr<uring_work_unit>> uring_resp_ios{};
 
         Proto::acceptor accept;
         asio::ssl::context ssl_context;
@@ -224,6 +237,26 @@ namespace barch {
             collector_exit.wait();
             if (session_collector.joinable())
                 session_collector.join();
+
+            /*
+             * Let the sessions go here, with every io_context still alive and the
+             * threads that touch them already joined.
+             *
+             * A session owns a socket belonging to one of the asio_resp_ios
+             * contexts, so its destructor reaches into that context's services. If
+             * it is still held when ~server_context starts destroying members, that
+             * destructor runs against a context that is already going away. The
+             * collector is joined just above, so nothing is registering any more,
+             * and the latch is only for symmetry with the rest of the access.
+             * See TODO 196.
+             */
+            {
+                std::lock_guard lock(session_latch);
+                tcp_sessions.clear();
+                uds_sessions.clear();
+                open_pos_tcp.clear();
+                open_pos_uds.clear();
+            }
 
             //port = 0;
             started = false;

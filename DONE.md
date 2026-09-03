@@ -8698,3 +8698,189 @@ about 90% of the 5 second budget spare, and the whole of `functiontest.py`
 passes. The ratio the bench exists to show is unaffected - on the release
 build it is 1.08x at a hundred thousand, the same as the 1.07 - 1.08x it read
 at a million.
+
+## 185. Thread sanitizer on the fetch and chaos tests [03-09-2026]
+
+*Was `TODO.md` entry 195.*
+
+TSan does run against `_barch.so`, and it found real defects on the first
+try - including a use-after-free that would present as exactly the kind of
+random segfault TODO 194 was added to catch.
+
+### Driving it
+
+`_barch.so` is dlopened by python, so the sanitizer runtime is not in the
+process at start and its interceptors are never installed. Preloading it
+fixes that, but then TSan dies on its own address space check:
+
+    FATAL: ThreadSanitizer: unexpected memory mapping 0x7080df472000-...
+
+That is ASLR putting something where TSan wants its shadow. `setarch -R`
+turns randomisation off for the child and it works. The whole recipe:
+
+    cmake -B build-tsan -DTEST_OD=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+      -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+    setarch -R env LD_PRELOAD=$(gcc -print-file-name=libtsan.so.2) \
+      TSAN_OPTIONS="halt_on_error=0 history_size=4 log_path=/tmp/tsan" \
+      python3 test/fetchluautest.py
+
+Both tests still pass under it - `fetchluautest.py` and `chaostest.py` each
+ran to their completion line - so this is not slow enough to be unusable on
+one or two tests, which is as far as it was taken.
+
+### What it found
+
+`fetchluautest.py`: 364 warnings, 32 of them data races.
+`chaostest.py` (32 workers, 2 restarts): 1127 warnings, 156 data races and
+12 heap-use-after-free.
+
+Three things worth their own entries, opened as TODO 196, 197 and 198:
+
+1. **Use-after-free on a session being written to.** The session collector
+   nulls a session's slot when the peer has closed, while a worker is still
+   inside `KEYS` writing that session's socket directly. See TODO 196 - this
+   is the one that best explains the CI segfault.
+2. **The resp io pool is published after it is announced.** `++num_started`
+   runs before the slot it is counting is written, and the accept threads are
+   already running by then, so `get_asio_unit()` can hand back an empty
+   `shared_ptr` that `process_data` immediately dereferences. See TODO 197.
+3. **`unlock()` on a mutex TSan does not think is held**, once per shard on
+   every load, always from `shard::load`. See TODO 198.
+
+The rest are in the ART and allocator internals - `nodes.h:442` with
+`node_content.h:185` (11), `art.cpp:1368` with `shard.cpp:926` (8),
+`logical_allocator.h:655` (4 and 2) - not triaged here.
+
+## 186. Use-after-free on a session the collector retires [03-09-2026]
+
+*Was `TODO.md` entry 196.*
+
+TSan's report was accurate and the fix is small, but the first version of it
+traded the bug for a worse one, and finding that out is most of this entry.
+
+### The bug
+
+`resp_session` is kept alive by the `tcp_sessions` vector in `server_context`
+and by nothing else - the handlers capture a raw `this`, with a note on each
+saying self pointers cost CPU so the session is "kept afloat elsewhere". That
+holds right up until the session collector decides the peer has gone and sets
+the slot to `nullptr`, which is the only reference. A worker part way through
+`KEYS` - inside `write_socket_now`, writing that session's socket directly -
+then has the session and its socket destroyed underneath it.
+
+The read chain's own self pointer does not help, because the chain is
+deliberately down for the length of an asynchronous batch.
+
+`recv(MSG_PEEK) == 0` tells the collector the peer has gone. It does not tell
+it that nobody is using the session, and a raw `this` is invisible to the
+reference count, so no amount of checking in the collector can fix it. The
+handler has to hold a reference.
+
+### First attempt, and why it was wrong
+
+Adding `shared_from_this()` to all six handlers that can outlive the session
+removed the reported use-after-free - and produced 8 new ones plus ~100 "use
+of an invalid mutex", all in `~resp_session` during a restart.
+
+Two separate causes, both about who dies first:
+
+- Every idle connection has an outstanding `async_read_some`. A self pointer
+  there keeps its session inside the io_context queue until teardown.
+- The real one: a batch handler queued on `workers` can be the last holder of
+  a session, and it is only destroyed when `workers` is. `asio_resp_ios` was
+  declared *after* `workers`, so the units owning the sockets were destroyed
+  first, and releasing the session then ran a socket destructor against an
+  io_context that no longer existed.
+
+### What shipped
+
+- `shared_from_this()` on the three write handlers and the asynchronous batch
+  post - the paths the report actually named.
+- `do_read` and the plain `do_write` left on a raw `this`. Their handlers are
+  outstanding on every idle connection, and the measured cost of covering them
+  was real. The read handler is still unprotected against the collector; that
+  is a different bug from this one and is now TODO 199.
+- `asio_resp_ios` declared ahead of `io` and `workers` so it is destroyed
+  after them. Whatever can hold a session must die before the contexts its
+  sockets live in.
+- `stop()` releases the session vectors while every context is still alive and
+  the threads that touch them are joined.
+
+### Verified
+
+Chaos test under TSan, same seed range, before and after:
+
+| | heap-use-after-free | invalid mutex | data race |
+| --- | --- | --- | --- |
+| before | 12 | 0 | 156 |
+| all six handlers | 8 (new, in `~resp_session`) | 100 | 124 |
+| shipped | **0** | **0** | 90 |
+
+Throughput on the release build, pipelined SET/GET plus 20 KEYS, three reps:
+baseline SET 155k/155k GET 185k/186k, shipped SET 151k/154k GET 183k/187k,
+KEYS unchanged at ~15.1-15.3s. Within run-to-run noise, which is what should
+be expected once the hot read and write handlers are left alone - the version
+that covered them was consistently ~4% down on both.
+
+`ctest` on the coverage build at the CI's thread shape: 76/76 pass.
+
+## 187. Memtier 80:20 read:write, barch against valkey [03-09-2026]
+
+*Was `TODO.md` entry 200.*
+
+AMD Ryzen 7 6800H, 16 threads, 14GB. barch is the release build with the
+DONE 186 session fix in it; valkey is 8.1.10, the one the build already
+fetches, run with `--save '' --appendonly no` and `io_threads_active:0`,
+which is its default - command execution is one thread.
+
+memtier states the ratio as Set:Get, so 80% reads is `--ratio=1:4`. Both
+servers were preloaded with 1M distinct keys (`--ratio=1:0 --key-pattern=S:S`)
+before anything was measured, so every GET hits - memtier reported 0 misses
+throughout. Every run is 1M requests total, `--pipeline=50`, one connection
+per thread, so `-t 1 -n 1000000` and `-t 4 -n 250000`. Three reps each,
+median below, and the spread was tight - under 2% across reps everywhere.
+
+| | ops/sec | avg ms | p50 | p99 | p99.9 |
+| --- | --- | --- | --- | --- | --- |
+| barch 1 thread | 569,560 | 0.080 | 0.079 | 0.167 | 0.223 |
+| valkey 1 thread | 615,970 | 0.075 | 0.071 | 0.135 | 0.191 |
+| barch 4 threads | 2,118,882 | 0.086 | 0.087 | 0.127 | 0.207 |
+| valkey 4 threads | 1,454,084 | 0.130 | 0.135 | 0.207 | 0.247 |
+
+barch is at 0.92x of valkey on one thread and 1.46x on four. Going 1 -> 4
+threads barch is 3.72x and valkey 2.36x, which is the whole story: valkey
+still gains from four connections because the pipelining batches more work
+for its single execution thread, but it runs out, and barch keeps going
+because the reads are actually concurrent. The tail says the same thing from
+the other side - at four threads barch's p99 *drops* to 0.127ms while
+valkey's rises to 0.207ms.
+
+### The config matters, again
+
+Both barch numbers above are at the defaults, which is `ordered_keys on` and
+`hybrid_keys on` - the same pair DONE 183 was caught by. Rerun with
+`hybrid_keys off`, fresh load:
+
+| | ops/sec |
+| --- | --- |
+| barch 1 thread, hybrid off | 450,458 |
+| barch 4 threads, hybrid off | 1,628,458 |
+
+So for this mix hybrid is worth about 26% at one thread and 30% at four,
+which is the opposite direction from DONE 183 and not a contradiction: the
+hash index is what makes GET cheap, and this workload is 80% GET. Pure SET
+went the other way, 273k with hybrid on against 304k with it off, because a
+write has to maintain the second index. DONE 183 wanted hybrid off to see the
+ordered path on its own; that is a different question from which config is
+faster for a read-heavy mix, and the answer to that one is hybrid on.
+
+### Reproducing
+
+memtier is not packaged here and there is no root, so it was built into a
+scratch prefix: libevent 2.1.12 static (`--disable-openssl`), then memtier at
+5694a3d with `--disable-tls`. Worth knowing that memtier's `-P` is
+*protocol*, not pipeline - pipeline is the long `--pipeline` only.

@@ -1592,7 +1592,16 @@ static void defrag_page(const barch::shard_ptr& shard, const std::pair<heap::buf
     ++statistics::pages_defragged;
 }
 void barch::shard::run_defrag() {
-    if (this->get_size() == 0) return;
+    // get_size() reads size and tomb_stones, which writers update under the
+    // latch. This is only deciding whether there is anything to defragment, so
+    // the answer does not have to stay true - it does have to be read without
+    // racing the writer. Scoped tight: run_defrag takes its own unique latch
+    // further down and must not be holding a shared one when it does.
+    // See TODO 213.
+    {
+        shared_latch guard(this->latch);
+        if (this->get_size() == 0) return;
+    }
 
     auto &lc = get_leaves();
     constexpr auto defrag_lock_to = std::chrono::milliseconds(100);
@@ -1800,12 +1809,16 @@ void barch::shard::maintenance() {
         if (this->opt_active_defrag) {
             run_defrag(); // periodic
         }
-        if (saf_keys_found) {
-            unique_latch l(this->latch);
-            statistics::keys_found += saf_keys_found;
-            saf_keys_found = 0;
-            statistics::get_ops += saf_get_ops;
-            saf_get_ops = 0;
+        // Take and clear in one step. This used to test the counter unlocked,
+        // then take the write latch and clear it, while readers were still
+        // incrementing under the shared latch - so the test raced the readers
+        // and any increment landing between the read and the clear was lost.
+        // exchange needs no latch at all. See TODO 213.
+        const uint64_t found = saf_keys_found.exchange(0, std::memory_order_relaxed);
+        const uint64_t ops = saf_get_ops.exchange(0, std::memory_order_relaxed);
+        if (found || ops) {
+            statistics::keys_found += found;
+            statistics::get_ops += ops;
         }
         auto currtime = std::chrono::high_resolution_clock::now();
         if (millis(currtime, start_save_time) > get_save_interval()

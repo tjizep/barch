@@ -150,8 +150,13 @@ namespace barch {
         mutable hk_hash hk_h{qp};
         mutable hk_eq hk_e{qp};
         mutable oh::unordered_set<hashed_key,hk_hash, hk_eq> h{hk_e,hk_h};
-        mutable uint64_t saf_keys_found{};
-        mutable uint64_t saf_get_ops{};
+        // Atomic because inc_keys_found() below is const and runs under the
+        // *shared* latch, so several readers increment these at once, and
+        // maintenance() reads them from its own thread. Relaxed throughout:
+        // they are counters rolled into statistics:: periodically, and nothing
+        // is ordered against them. See TODO 213.
+        mutable std::atomic<uint64_t> saf_keys_found{};
+        mutable std::atomic<uint64_t> saf_get_ops{};
 
         bool remove_from_unordered_set(value_type key);
         void write_extra(std::ostream& of) const ;
@@ -161,13 +166,17 @@ namespace barch {
         void hash_unindex(value_type key);
         void rebuild_hybrid_index();
         shard_ptr dependencies;
-        uint64_t deletes{};
-        uint64_t inserts{};
+        // read by maintenance() on its own thread, through get_modifications(),
+        // while writers bump them under the latch. Relaxed: the maintenance
+        // check is "has anything changed since last pass", which does not need
+        // an exact number. See TODO 213.
+        std::atomic<uint64_t> deletes{};
+        std::atomic<uint64_t> inserts{};
         uint64_t get_modifications() const ;
     public:
         void inc_keys_found() const {
-            ++saf_get_ops;
-            ++saf_keys_found;
+            saf_get_ops.fetch_add(1, std::memory_order_relaxed);
+            saf_keys_found.fetch_add(1, std::memory_order_relaxed);
         }
         void remove_leaf(const logical_address& at) override;
         size_t get_jump_size() const {

@@ -27,3 +27,17 @@
 # debuggable_server_lock would also be hidden. Take it out and use the owner
 # probe from DONE 189 if that is ever in question.
 mutex:debuggable_server_lock::unlock
+
+# The lock's own diagnostics, not barch. capture_writer_stack() fills
+# diags.writer_frames with backtrace() while a timeout dump could be reading it,
+# and note_writer() sets the thread id and timestamp beside it. Racy, and it
+# does not matter: it is a best-effort snapshot for a log line.
+#
+# It is also not in a release build. This whole block is behind
+# BARCH_LOCK_DEBUG, which CMakeLists turns on for Debug and RelWithDebInfo -
+# and RelWithDebInfo is what a sanitizer build uses. So this is a race in the
+# instrumentation rather than in the thing being instrumented. 13 reports in
+# one short-set run. See DONE 203 and TODO 213.
+race:debuggable_server_lock::capture_writer_stack
+race:debuggable_server_lock::note_writer
+race:debuggable_server_lock::append_writer_stack

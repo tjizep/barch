@@ -9781,3 +9781,126 @@ inside what this box drifts by anyway.
 
 Worth stating plainly because it was the open question: none of that work cost
 anything measurable.
+
+## 203. What breaks at SANITIZE_EXITCODE=66 [04-09-2026]
+
+*Was `TODO.md` entry 212.*
+
+Everything: 17 of the 18 tests in the short set fail, on 167 reports. So 66 is
+not reachable yet. The repo default stays 0 - this was run by passing
+`-DSANITIZE_EXITCODE=66` to one build directory, nothing in the tree changed.
+
+The count is not the useful part though, because 167 reports are six or seven
+distinct things. Grouped by what is actually racing:
+
+| reports | what |
+| --- | --- |
+| 49 | `saf_get_ops` / `saf_keys_found` on the shard |
+| 41 | `size` and `tomb_stones` read through `get_size()` with no latch |
+| 22 | shutdown flags read outside their mutex |
+| 13 | the lock's own debug diagnostics |
+| 11 | `sastam.cpp:50` against `overflow_hash.h:228` |
+| 8 | statics in `auth_api.cpp` |
+| 6 | `art.cpp:1368` against `shard.cpp:936` |
+
+### The two big ones are the pattern already seen twice
+
+`inc_keys_found()` is a `const` method doing `++saf_get_ops; ++saf_keys_found;`
+on mutable members, called by readers holding the latch *shared* - so several
+readers run together and race on the counters. Exactly the shape of the node
+cache in DONE 192 and the command counters in DONE 195. The maintenance thread
+then reads `saf_keys_found` at `shard.cpp:1803` to decide whether to bother
+taking the latch, which is the other half of it.
+
+The 41 are the same idea one level up: `get_size()` reads `size` and
+`tomb_stones` while writers update them under the latch, reached from
+`maintenance()` at `key_space.cpp:476`. Same family as the INFO reads fixed in
+DONE 194 - a counter read without the lock that guards it.
+
+So 112 of the 167 are one known pattern in three places, and the fix for each
+is the one already used: atomics where the value is a statistic, the latch
+where it is not.
+
+### Two are not worth fixing the same way
+
+The 13 lock diagnostics are `capture_writer_stack()` and `note_writer()`
+writing `diags.writer_frames` while a dump could be reading it. That code only
+exists when `BARCH_LOCK_DEBUG` is defined, which is RelWithDebInfo - the
+sanitizer build itself. It is not in a release build, so it is a race in the
+instrumentation rather than in barch, and a suppression is the honest answer.
+
+The 22 shutdown flags - `exit` at `rpc/server.cpp:760`, `exiting` at
+`key_space.cpp:130` - are plain bools read outside the mutex that guards them.
+Real, but they are torn-read-free on any machine barch runs on and the failure
+mode is a late shutdown. `std::atomic<bool>` with relaxed ordering costs
+nothing on a path taken once.
+
+### Verdict
+
+66 is maybe a day away, not a flag flip. Three families account for two thirds
+of it and are already-solved problems; the diagnostics one wants a suppression;
+that leaves `sastam`/`overflow_hash`, the auth statics and `art.cpp:1368`
+untriaged, which is where the actual unknowns are.
+
+## 204. Four of the families behind exitcode 66 [04-09-2026]
+
+*Was `TODO.md` entry 213, partly - the rest is TODO 214.*
+
+**167 reports down to 37.** Still 15 of 19 tests failing, because at
+`exitcode=66` a single report fails a test, so the count that matters is
+families and there are four left rather than seven.
+
+### Fixed
+
+**The shard's `saf_get_ops` / `saf_keys_found` (49).** `inc_keys_found()` is
+`const` and runs under the *shared* latch, so several readers increment them at
+once - the same shape as DONE 192 and 195. They are `std::atomic<uint64_t>`
+now, relaxed.
+
+The other half was better than expected. `maintenance()` tested the counter
+unlocked, then took the **write** latch to clear it, so it raced the readers
+*and* lost any increment landing between the test and the clear. One
+`exchange(0)` does the whole thing and needs no latch, so a write lock came out
+of the maintenance path as well.
+
+**`size` and `tomb_stones` through `get_size()` (41).** `run_defrag()` opened
+with an unlocked `get_size() == 0` early-out. It takes a shared latch for that
+test now, scoped tight - run_defrag takes its own unique latch further down and
+must not still be holding a shared one.
+
+**`deletes` / `inserts` behind `get_modifications()` (part of the 41).** Read by
+maintenance on its own thread to decide whether anything changed since the last
+pass; atomic and relaxed, since "has anything changed" does not need an exact
+number.
+
+**The shutdown flags (22).** `exit` in `rpc/server.cpp` and `exiting` in
+`key_space.h` were plain bools read outside the mutex that guards everything
+else around them. `std::atomic<bool>`, on a path taken once.
+
+**The lock's diagnostics (13)** are suppressed rather than fixed, in
+`ci/tsan.supp`, with the reasoning: `capture_writer_stack()` fills a frame
+buffer with `backtrace()` while a dump could read it, and none of it exists in
+a release build - it is behind `BARCH_LOCK_DEBUG`, which is on for
+RelWithDebInfo, which is what a sanitizer build uses. A race in the
+instrumentation, not the thing instrumented.
+
+### A hypothesis that was wrong, and is worth recording
+
+`shard.h:383` still reports a read of `size` racing a write from
+`shard::clear()` - and by then the reader *did* hold the shard's shared latch
+and the writer *did* hold its unique one. That should be impossible, so the
+guess was that TSan cannot see the acquire: `lock_unique()` goes through
+`try_lock_for()`, which is `pthread_mutex_timedlock`, which TSan does not
+intercept - the same limitation as DONE 189.
+
+Tested by making `lock_unique()` take the lock with a blocking `lock()` that
+TSan does intercept, rebuilding and re-running: 54 reports against 47, no
+change, same families. So TSan does see the acquire and the explanation is
+somewhere else. Probe reverted. That one is now the most interesting thing
+left, because a reader under the shared latch racing a writer under the unique
+latch is either a gap in how TSan models this lock or a real defect in it.
+
+### Verified
+
+- Short set under TSan at `exitcode=66`: 37 reports, down from 167.
+- Full suite, no sanitizer, `-j4`: 76/76 in 197s.

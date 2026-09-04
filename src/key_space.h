@@ -103,7 +103,9 @@ namespace barch {
         moodycamel::LightweightSemaphore thread_control{};
         moodycamel::LightweightSemaphore thread_exit{};
         std::thread tmaintain{}; // a maintenance thread to perform defragmentation and eviction (if required)
-        bool exiting = false;
+        // the maintenance thread reads this each pass while the destructor
+        // sets it, with nothing between them. See TODO 213.
+        std::atomic<bool> exiting{false};
         bool maintain_running = false;
         std::mutex lock{};
 

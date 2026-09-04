@@ -748,7 +748,9 @@ namespace barch {
             std::mutex m;
             heap::vector<std::vector<std::string>> buffer;
             heap::string_map<std::shared_ptr<rpc>> destinations;
-            bool exit = false;
+            // read by distribute() outside the mutex that guards the rest of
+            // this, and set from another thread on the way out. See TODO 213.
+            std::atomic<bool> exit{false};
             consumers() {
 
             }

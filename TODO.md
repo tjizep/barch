@@ -1068,3 +1068,28 @@
 210. [Done] ctest -j 2 in CI [04-09-2026] Nr 200 78817c3
 
 211. [Done] The java and lua bindings are optional, and now actually optional [04-09-2026] Nr 201 78817c3
+
+212. [Done] What breaks at SANITIZE_EXITCODE=66 [04-09-2026] Nr 203 52881bc
+
+213. [Done] Four of the families behind exitcode 66 [04-09-2026] Nr 204 52881bc
+
+214. The 37 reports still standing between here and
+    `SANITIZE_EXITCODE=66`, after DONE 204. In order:
+    `sastam.cpp:50` against `overflow_hash.h:228` (8), `shard.h:383`
+    against `:393` and `:394` against `:389` (11), the `auth_api.cpp:15`
+    pair (8), `shard.cpp:528` against `keyspace_api.cpp:506` (3), then
+    singles in art, configuration and shard.
+
+    Start with `shard.h:383`. A reader holding the shard's shared latch
+    reports a race against `shard::clear()` holding its unique latch,
+    which should not be possible. DONE 204 ruled out the obvious
+    explanation - that TSan cannot see `try_lock_for` acquiring - by
+    making the acquire blocking and getting the same reports. So either
+    TSan cannot follow the happens-before this lock builds out of its
+    atomics, or the lock does not build it. The second would matter a
+    great deal.
+
+    `auth_api.cpp:15` is odd in a different way: the location is the
+    *main thread's stack*, read by a worker at `rpc/proto_info.cpp:26`.
+    Worth confirming it is not stale shadow from a reused frame before
+    spending time on it.

@@ -367,12 +367,35 @@ void encode_value(lua_State* L, int idx, std::string& out, std::vector<const voi
     }
 }
 
-int encode(lua_State* L) {
-    std::string out;
+void encode_to(lua_State* L, std::string& out) {
     out.reserve(256);
     std::vector<const void*> stack;
     encode_value(L, 1, out, stack);
+}
+
+int encode(lua_State* L) {
+    std::string out;
+    encode_to(L, out);
     lua_pushlstring(L, out.data(), out.size());
+    return 1;
+}
+
+/*
+ * encode, but into a luau buffer rather than a lua string.
+ *
+ * The input side already took either - json_bytes() tries lua_tobuffer before
+ * lua_isstring, so parse() and open() have always accepted a buffer. The output
+ * side only made strings, so anything holding json as bytes had to go through
+ * an interned lua string on the way out and another on the way back in. This is
+ * the other half: what setBufferAt wants, and what parse() will take straight
+ * back. See TODO 215.
+ */
+int encode_buffer(lua_State* L) {
+    std::string out;
+    encode_to(L, out);
+    void* b = lua_newbuffer(L, out.size());
+    if (!out.empty())
+        memcpy(b, out.data(), out.size());
     return 1;
 }
 
@@ -400,6 +423,8 @@ void luaopen_simdjson(lua_State* L) {
     lua_setfield(L, -2, "open");
     lua_pushcfunction(L, encode, "encode");
     lua_setfield(L, -2, "encode");
+    lua_pushcfunction(L, encode_buffer, "encodeBuffer");
+    lua_setfield(L, -2, "encodeBuffer");
     lua_pushcfunction(L, active_implementation, "activeImplementation");
     lua_setfield(L, -2, "activeImplementation");
     push_json_null(L);

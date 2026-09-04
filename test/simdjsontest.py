@@ -54,6 +54,45 @@ try:
     assert got[7] == 943, got
     assert got[8] == 7, got
 
+    # the input side already took a buffer - see frombuf above. This is the
+    # output side, and the round trip through both. See TODO 215.
+    assert r.execute_command("SETF", "sjbuf", '''
+        function call()
+            local b = simdjson.encodeBuffer({a = 1, b = {2, 3}, s = "x"})
+            local viastring = simdjson.encode({a = 1, b = {2, 3}, s = "x"})
+            -- straight back in, without ever being a lua string
+            local round = simdjson.parse(b)
+            -- and open() takes it too
+            local doc = simdjson.open(b)
+            return {
+                buffer.len(b),
+                #viastring,
+                buffer.tostring(b) == viastring and 1 or 0,
+                round.a,
+                round.b[2],
+                round.s,
+                doc:atPointer("/b/1"),
+            }
+        end
+    ''') == b"OK"
+    got = r.execute_command("sjbuf")
+    assert got[0] == got[1], ("buffer and string encodings differ in length", got)
+    assert got[2] == 1, ("buffer and string encodings differ", got)
+    assert got[3] == 1, got
+    assert got[4] == 3, got
+    assert got[5] == b"x", got
+    assert got[6] == 3, got
+
+    # an empty encode still produces a usable buffer rather than a nil
+    assert r.execute_command("SETF", "sjbufempty", '''
+        function call()
+            local b = simdjson.encodeBuffer({})
+            return {buffer.len(b), buffer.tostring(b)}
+        end
+    ''') == b"OK"
+    got = r.execute_command("sjbufempty")
+    assert got[0] > 0 and got[1] in (b"{}", b"[]"), got
+
     e = refused("SETF", "sjbad", '''
         function call()
             return simdjson.parse("{")

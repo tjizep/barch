@@ -1093,3 +1093,5 @@
     *main thread's stack*, read by a worker at `rpc/proto_info.cpp:26`.
     Worth confirming it is not stale shadow from a reused frame before
     spending time on it.
+
+215. [Done] simdjson takes a luau buffer, and now makes one [04-09-2026] Nr 205 07786c1

@@ -9904,3 +9904,48 @@ latch is either a gap in how TSan models this lock or a real defect in it.
 
 - Short set under TSan at `exitcode=66`: 37 reports, down from 167.
 - Full suite, no sanitizer, `-j4`: 76/76 in 197s.
+
+## 205. simdjson takes a luau buffer, and now makes one [04-09-2026]
+
+*Was `TODO.md` entry 215.*
+
+Half of this was already there.
+
+### Parsing from a buffer already worked
+
+`parse` and `open` both take their bytes through `json_bytes`, which tries
+`lua_tobuffer` before `lua_isstring`:
+
+    bool json_bytes(lua_State* L, int idx, const char*& data, size_t& len) {
+        if (void* b = lua_tobuffer(L, idx, &len)) { ... return true; }
+        if (lua_isstring(L, idx)) { ... }
+        return false;
+    }
+
+So a buffer has always been accepted, and `simdjsontest.py` was already
+covering it - `simdjson.parse(buffer.fromstring('{"k":7}'))` with an assertion
+on the result. Nothing to add on the input side, and the error text already
+said "expects a string or buffer".
+
+### Encoding into one did not
+
+`encode` built a `std::string` and pushed it with `lua_pushlstring`, so
+anything holding json as bytes had to go out through an interned lua string and
+come back in through another. `simdjson.encodeBuffer(value)` writes into a
+`lua_newbuffer` instead - the same shape `getBufferAt` uses in the luau driver.
+
+The two share `encode_to()`, so there is one encoder and the only difference is
+where the bytes land.
+
+### Verified
+
+A new case in `simdjsontest.py` covers the output side and the round trip:
+
+- `encodeBuffer` and `encode` of the same table produce the same length and the
+  same bytes, so the buffer path is not a second encoder that could drift
+- the buffer goes straight back into `parse` without ever being a lua string,
+  and the values come out right
+- `open` takes it too, and `atPointer` works on the result
+- an empty table still yields a usable buffer rather than a nil
+
+Full suite on the coverage build, `-j4`: 76/76 in 200s.

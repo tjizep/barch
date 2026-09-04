@@ -30,7 +30,12 @@ jobs:
           cmake --build build --target lbarch --parallel "$(nproc)"
           cmake --build build --target globdifftest --parallel "$(nproc)"
           cmake --build build --target locktest --parallel "$(nproc)"
-          ( cd build ; ctest --output-on-failure )
+          # -j 2, not more: the runner has 4 vCPU and these tests start
+          # servers of their own, so they compete with themselves. Locally
+          # -j8 was no faster than -j4 and failed a different test each
+          # run. Tests isolate themselves into <build>/t/<name> and take
+          # their port from ctest, so parallel is safe - see DONE 197-199.
+          ( cd build ; ctest -j 2 --output-on-failure )
       - name: Prepare Release Artifacts
         run: |
           # Create a directory for the archive

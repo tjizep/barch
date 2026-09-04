@@ -58,7 +58,12 @@ jobs:
           # the limit is inherited, so raising it here covers ctest and every
           # test process under it. See TODO 194.
           ulimit -c unlimited
-          ( cd build ; ctest --output-on-failure )
+          # -j 2, not more: the runner has 4 vCPU and these tests start
+          # servers of their own, so they compete with themselves. Locally
+          # -j8 was no faster than -j4 and failed a different test each
+          # run. Tests isolate themselves into <build>/t/<name> and take
+          # their port from ctest, so parallel is safe - see DONE 197-199.
+          ( cd build ; ctest -j 2 --output-on-failure )
       # always, not just on failure: a green run saying "no core files" is how
       # we know the capture is still wired up and not quietly broken by the
       # time it is actually needed. See TODO 194.

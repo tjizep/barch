@@ -105,6 +105,34 @@ function transport()
 end
 '''
 
+BINECHO = r'''
+function call()
+    return "binecho"
+end
+
+-- reads the request as a buffer and answers from one, so the bytes never
+-- become a lua string in either direction. See TODO 216.
+function binecho(req, res)
+    local b = req.bodyBuffer
+    local n = buffer.len(b)
+    local out = buffer.create(n + 1)
+    -- first byte is the length the handler saw, so a truncated read shows up
+    buffer.writeu8(out, 0, n % 256)
+    buffer.copy(out, 1, b, 0, n)
+    res.body = out
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/binecho",
+        methods = {POST = binecho},
+        send = "application/octet-stream",
+    }
+end
+'''
+
 PAGE = r'''
 function call()
     return "page"
@@ -136,7 +164,7 @@ function transport()
         kind = "http",
         port = %d,
         bind = "127.0.0.1",
-        keys = {"ECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS"},
+        keys = {"ECHO", "BINECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS"},
     }
 end
 ''' % HTTP_PORT
@@ -268,6 +296,7 @@ end
 
 try:
     assert r.execute_command("SETF", "echo", ECHO) == b"OK"
+    assert r.execute_command("SETF", "binecho", BINECHO) == b"OK"
     assert r.execute_command("SETF", "page", PAGE) == b"OK"
     assert r.execute_command("SETF", "httpconf", CONF) == b"OK"
     assert r.execute_command("SETF", "plain", PLAIN) == b"OK"
@@ -318,6 +347,26 @@ try:
 
     status, _, _ = http_call("GET", "/echo")
     assert status == 405, status
+
+    # request read as a buffer, response written from one - the bytes are never
+    # a lua string on either side. Includes an embedded NUL and every byte
+    # value, which is the case a string round trip is most likely to spoil.
+    # See TODO 216.
+    payload = bytes(range(256)) + b"\x00tail"
+    status, body, _ = http_call(
+        "POST", "/binecho", data=payload,
+        headers={"Content-Type": "application/octet-stream"}, timeout=10)
+    assert status == 200, (status, body)
+    assert len(body) == len(payload) + 1, ("length changed", len(body), len(payload))
+    assert body[0] == len(payload) % 256, ("handler saw a different length", body[0])
+    assert body[1:] == payload, "bytes did not survive the round trip"
+
+    # and the setter still takes a plain string, which is what every other
+    # handler in this file uses
+    status, body, _ = http_call(
+        "POST", "/echo", data=json.dumps({"a": 11}),
+        headers={"Content-Type": "application/json"}, timeout=10)
+    assert status == 200 and json.loads(body)["a"] == 11, (status, body)
 
     status, body, hdrs = http_call("GET", "/sess", timeout=10)
     assert status == 200, (status, body)

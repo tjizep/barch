@@ -9949,3 +9949,44 @@ A new case in `simdjsontest.py` covers the output side and the round trip:
 - an empty table still yields a usable buffer rather than a nil
 
 Full suite on the coverage build, `-j4`: 76/76 in 200s.
+
+## 206. The web server takes and gives luau buffers [04-09-2026]
+
+*Was `TODO.md` entry 216.*
+
+It could not, in either direction. `req.body` pushed with `lua_pushlstring`,
+`res.body =` refused anything else - "body must be a string" - and `res:write`
+the same. So a handler holding bytes, which is what `simdjson.encodeBuffer` and
+the store's `getBufferAt` hand back, had to go out through an interned lua
+string, and a binary request body arrived as one.
+
+Now:
+
+- `req.bodyBuffer` - the request body as a buffer. `req.body` still gives a
+  string, so nothing that exists changes.
+- `res.body = <buffer>` and `res.bodyBuffer = <buffer>` - either name takes
+  either type, so this is additive rather than a second field to remember.
+- `res:write(<buffer>)` likewise.
+- `res.bodyBuffer` reads back what was written, for symmetry with the request.
+
+The two entry points share `body_bytes()`, which tries `lua_tobuffer` before
+`lua_isstring` - the same shape `json_bytes` has in `simdjson_luau.cpp`, where
+the input side had been doing this all along (DONE 205).
+
+### Verified
+
+`httptest.py` gets a `/binecho` route whose handler works only in buffers: it
+reads `req.bodyBuffer`, builds a new buffer with `buffer.create`, and assigns
+it to `res.body`, so the bytes are never a lua string anywhere in the path.
+
+The payload is `bytes(range(256)) + b"\x00tail"` - every byte value and an
+embedded NUL, which is what a string round trip would be most likely to spoil.
+The reply is checked for exact bytes and for length, and the handler writes the
+length it saw into the first byte so a truncated read shows up as a wrong
+number rather than as a short body that happens to compare equal.
+
+The existing string-based `/echo` is asserted again right after it, so the
+looser setter did not quietly stop accepting the thing every other handler in
+that file uses.
+
+Full suite on the coverage build, `-j4`: 76/76 in 156s.

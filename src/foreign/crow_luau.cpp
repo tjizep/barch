@@ -93,11 +93,41 @@ int req_cookie(lua_State* L) {
     return 1;
 }
 
+/*
+ * Bytes from a lua string or a luau buffer, whichever was passed.
+ *
+ * The server used to be strings only in both directions, so a handler holding
+ * bytes - what simdjson.encodeBuffer or the store's getBufferAt hand back - had
+ * to go out through an interned lua string, and a binary request body arrived
+ * as one. See TODO 216.
+ */
+bool body_bytes(lua_State* L, int idx, const char*& data, size_t& len) {
+    if (void* b = lua_tobuffer(L, idx, &len)) {
+        data = static_cast<const char*>(b);
+        return true;
+    }
+    if (lua_isstring(L, idx)) {
+        data = lua_tolstring(L, idx, &len);
+        return data != nullptr;
+    }
+    return false;
+}
+
+void push_buffer(lua_State* L, const char* data, size_t len) {
+    void* b = lua_newbuffer(L, len);
+    if (len)
+        memcpy(b, data, len);
+}
+
 int req_index(lua_State* L) {
     auto* p = check_req(L, 1);
     const char* k = luaL_checkstring(L, 2);
     if (std::strcmp(k, "body") == 0) {
         lua_pushlstring(L, p->req->body.data(), p->req->body.size());
+        return 1;
+    }
+    if (std::strcmp(k, "bodyBuffer") == 0) {
+        push_buffer(L, p->req->body.data(), p->req->body.size());
         return 1;
     }
     if (std::strcmp(k, "url") == 0) {
@@ -194,9 +224,9 @@ int res_cookie(lua_State* L) {
 int res_write(lua_State* L) {
     auto* p = check_res(L, 1);
     size_t n = 0;
-    const char* s = lua_tolstring(L, 2, &n);
-    if (!s)
-        luaL_error(L, "write expects a string");
+    const char* s = nullptr;
+    if (!body_bytes(L, 2, s, n))
+        luaL_error(L, "write expects a string or buffer");
     p->res->write(std::string(s, n));
     return 0;
 }
@@ -212,6 +242,10 @@ int res_index(lua_State* L) {
     const char* k = luaL_checkstring(L, 2);
     if (std::strcmp(k, "body") == 0) {
         lua_pushlstring(L, p->res->body.data(), p->res->body.size());
+        return 1;
+    }
+    if (std::strcmp(k, "bodyBuffer") == 0) {
+        push_buffer(L, p->res->body.data(), p->res->body.size());
         return 1;
     }
     if (std::strcmp(k, "code") == 0) {
@@ -240,11 +274,11 @@ int res_index(lua_State* L) {
 int res_newindex(lua_State* L) {
     auto* p = check_res(L, 1);
     const char* k = luaL_checkstring(L, 2);
-    if (std::strcmp(k, "body") == 0) {
+    if (std::strcmp(k, "body") == 0 || std::strcmp(k, "bodyBuffer") == 0) {
         size_t n = 0;
-        const char* s = lua_tolstring(L, 3, &n);
-        if (!s)
-            luaL_error(L, "body must be a string");
+        const char* s = nullptr;
+        if (!body_bytes(L, 3, s, n))
+            luaL_error(L, "body must be a string or buffer");
         p->res->body.assign(s, n);
         return 0;
     }

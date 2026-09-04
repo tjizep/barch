@@ -1065,10 +1065,6 @@
 
 209. [Done] Tests make their own directory [04-09-2026] Nr 198 82e9325
 
-210. Run ctest with `-j 2` in all three CI workflows. The suite is about
-    eight minutes of the twenty a run takes, and everything it needs to
-    run in parallel landed in DONE 197 to 199. Two, not more: the
-    runners are 4 vCPU and these tests start servers, so they compete
-    with themselves - `-j8` here was no faster than `-j4` and failed a
-    different test every run. Settle with: the workflows changed and the
-    yaml still parsing, and a note of what the run time becomes.
+210. [Done] ctest -j 2 in CI [04-09-2026] Nr 200 78817c3
+
+211. [Done] The java and lua bindings are optional, and now actually optional [04-09-2026] Nr 201 78817c3

@@ -61,12 +61,14 @@ Checkout and build on (currently linux only) with gcc 10 or above...
       sudo apt install swig
       ```
 3. OPTIONAL: install jdk and maven - for barchjni, barchj and running java examples.
-   Examples for java are located in examples/java/barchj.
+   Examples for java are located in examples/java/barchj. Both are off unless
+   asked for, so add `-DGEN_JNI=ON` to the cmake line below.
       ```
       sudo apt install default-jdk
       sudo apt install maven
       ```
-4. OPTIONAL: install openresty for barchlua (luajit) - 
+4. OPTIONAL: install openresty for barchlua (luajit) - add `-DGEN_LUA=ON` to the
+   cmake line below. 
 
     - Follow instructions for openresty at https://openresty.org/en/linux-packages.html#ubuntu 
     - after building barch for lua should be located in the /var/lib/lua/5.1/barch.so

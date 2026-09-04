@@ -9692,3 +9692,92 @@ tests are competing for the same cores as the servers they start.
 - Serial: 76/76 in 502.6s.
 - `-j4`: 76/76 in 153.3s and 152.2s.
 - `-j8`: one flaky failure per run, no faster.
+
+## 200. ctest -j 2 in CI [04-09-2026]
+
+*Was `TODO.md` entry 210.*
+
+All three workflows - ubuntu22, ubuntu24 and ubuntu24-sanitize - run
+`ctest -j 2 --output-on-failure` now. The suite is about eight of the twenty
+minutes a run takes, and everything it needs to run in parallel landed in
+DONE 197 to 199: each python test makes its own directory and takes its port
+from ctest.
+
+Two rather than more, and the reason is in a comment beside it: the runners are
+4 vCPU and these tests start servers of their own, so past a couple of jobs they
+compete with themselves for the cores. Locally `-j8` was no faster than `-j4`
+and failed a different test on each run - `TestRangeShardRouting` once,
+`TestForeignMysql` the next, both passing alone.
+
+The sanitize workflow got it too. That is the job that commits the coverage
+badge, so it is the one where a flaky failure costs most; two is conservative
+enough that this should be fine, and it is one character to put back if it is
+not.
+
+Verified locally: all three files still parse as yaml, and `-j 2` is well below
+the `-j 4` that ran 76/76 twice here.
+
+Not verified: what the twenty minutes actually becomes. That needs a run.
+
+## 201. The java and lua bindings are optional, and now actually optional [04-09-2026]
+
+*Was `TODO.md` entry 211.*
+
+`-DGEN_JNI=OFF` did not turn the java binding off. The guard was
+
+    if (NOT GEN_JNI)
+        set(GEN_JNI ON)
+    endif ()
+
+which reads like "default to on" and is not: an explicit OFF is exactly the
+case where `NOT GEN_JNI` is true, so it set it straight back on. The switch
+could not be switched. `GEN_LUA` and `ADD_LUAU` were written the same way.
+
+Confirmed rather than assumed: a configure with `-DGEN_JNI=OFF -DGEN_LUA=OFF`
+still ran `find_package(Java)` and `find_package(JNI)`, still ran the LuaJIT
+search, and never printed the "Java JNI off" branch.
+
+All three are `option()`s now, which defaults the same way and leaves a `-D` on
+the command line alone - the same thing COVERAGE already was.
+
+### Both bindings default off
+
+They need a jdk or an openresty luajit that most machines building barch do not
+have, and the build looked for them on every configure and quietly produced
+nothing. The CI has been printing "Did not find Java and Jni libraries" on
+every run for as long as there has been a CI. `-DGEN_JNI=ON` and
+`-DGEN_LUA=ON` ask for them, and the README says so where it tells you to
+install the jdk.
+
+`ADD_LUAU` stays on. It is a different thing - the embedded interpreter stored
+functions run in, not an optional binding.
+
+### Verified
+
+- Default configure: no java search, no lua search, python binding still
+  generated, "Java JNI off" printed.
+- `-DGEN_JNI=ON`: the two java searches are back.
+- `-DGEN_JNI=OFF` after that: gone again.
+
+## 202. The bench after the race fixes [04-09-2026]
+
+Same setup as DONE 187 - memtier, 1M keys preloaded, 80:20 read:write
+(`--ratio=1:4`), `--pipeline=50`, one connection per thread, three reps, both
+servers measured in the same session. This time on a barch carrying everything
+from DONE 186 to 195: session refcounts, the startup reordering, the node cache
+change, a shared latch on every INFO read and atomics on the command counters.
+
+| | barch | valkey | barch/valkey |
+| --- | --- | --- | --- |
+| 1 thread | 598,565 | 615,880 | 0.97x |
+| 4 threads | 2,210,888 | 1,550,919 | 1.43x |
+
+Scaling 1 -> 4 threads: barch 3.69x, valkey 2.52x.
+
+DONE 187, before any of those fixes, had 0.92x and 1.46x with scaling of 3.72x
+and 2.36x. So six correctness fixes later the picture is the same, and the one
+that moved - 0.92x to 0.97x at a single thread - moved the right way and is
+inside what this box drifts by anyway.
+
+Worth stating plainly because it was the open question: none of that work cost
+anything measurable.

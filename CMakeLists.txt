@@ -53,15 +53,24 @@ if (NOT USE_OPENSSL)
     set(USE_OPENSSL ON)
 endif ()
 
-if (NOT GEN_LUA)
-    set(GEN_LUA ON)
-endif ()
-if (NOT GEN_JNI)
-    set(GEN_JNI ON)
-endif ()
-if (NOT ADD_LUAU)
-    set(ADD_LUAU ON)
-endif ()
+# These were `if (NOT X) set(X ON) endif()`, which reads like "default to on"
+# and is not: an explicit -DGEN_JNI=OFF is precisely the case that sets it back
+# on, so the switch could not be switched. option() defaults the same way and
+# leaves a -D alone. See TODO 211.
+# Both bindings are off by default. They need a jdk or an openresty luajit that
+# most machines building barch do not have, and until now the build looked for
+# them on every configure and quietly produced nothing - the CI has been
+# printing "Did not find Java and Jni libraries" on every run for as long as
+# there has been a CI. Ask for them:
+#
+#   cmake -B build -DGEN_JNI=ON      # barchjni, barchj.jar, the mvn install
+#   cmake -B build -DGEN_LUA=ON      # barchlua for luajit
+#
+# ADD_LUAU is a different thing and stays on: that is the embedded interpreter
+# the stored functions run in, not an optional binding.
+option(GEN_LUA "Generate the luajit binding (needs openresty luajit)" OFF)
+option(GEN_JNI "Generate the java/jni binding and jar (needs a jdk)" OFF)
+option(ADD_LUAU "Build the embedded luau interpreter" ON)
 option(COVERAGE "Enable code coverage reporting" OFF)
 
 set(CMAKE_CPP_STANDARD 20)

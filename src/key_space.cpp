@@ -368,6 +368,13 @@ namespace barch {
             if (shards_out.size() != shards_loaded) {
                 abort_with("shard loading threads invalid count");
             }
+            // each shard file carries ordered/hybrid in its extra; load puts those
+            // on the shard. SET uses the space flag and GET uses the shard, so the
+            // space has to take the loaded fact or a HashBenchy save (ordered off)
+            // comes up with SET writing ART and GET looking in the hash.
+            // the default space "node" is not configured from KV. See TODO 218.
+            opt_ordered_keys = shards_out[0]->opt_ordered_keys;
+            opt_hybrid_keys = shards_out[0]->opt_hybrid_keys;
             statistics::shards = shards_out.size();
             auto end_time = std::chrono::high_resolution_clock::now();
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();

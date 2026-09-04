@@ -5,6 +5,8 @@
 #include "configuration.h"
 #include "lzr_log.h"
 #include "art/nodes.h"
+#include "abstract_shard.h"
+#include "statistics.h"
 #include "function_api.h"
 
 #include <cmath>
@@ -1603,6 +1605,87 @@ static int current_space_handle(lua_State* L) {
     return push_space_handle(L, st, st->store);
 }
 
+static void set_i64_field(lua_State* L, const char* k, int64_t v) {
+    lua_pushinteger64(L, v);
+    lua_setfield(L, -2, k);
+}
+
+/*
+ * barch.ops() / barch.stats() - the same counters RESP STATS and OPS return,
+ * as a table. HTTP handlers have no barch.call (Crow is unauthenticated), so
+ * this is how a health or stats route reads them. ops() is atomics; stats()
+ * takes a shared latch on every shard, the same as the STATS command.
+ */
+static int barch_ops(lua_State* L) {
+    auto as = barch::get_ops_statistics();
+    lua_createtable(L, 0, 18);
+    set_i64_field(L, "delete_ops", as.delete_ops);
+    set_i64_field(L, "retrieve_ops", as.get_ops);
+    set_i64_field(L, "insert_ops", as.insert_ops);
+    set_i64_field(L, "iterations", as.iter_ops);
+    set_i64_field(L, "range_iterations", as.iter_range_ops);
+    set_i64_field(L, "lower_bound_ops", as.lb_ops);
+    set_i64_field(L, "maximum_ops", as.max_ops);
+    set_i64_field(L, "minimum_ops", as.min_ops);
+    set_i64_field(L, "range_ops", as.range_ops);
+    set_i64_field(L, "set_ops", as.set_ops);
+    set_i64_field(L, "size_ops", as.size_ops);
+    set_i64_field(L, "foreign_queries", (int64_t) statistics::foreign_queries.load());
+    set_i64_field(L, "foreign_misses", (int64_t) statistics::foreign_misses.load());
+    set_i64_field(L, "foreign_errors", (int64_t) statistics::foreign_errors.load());
+    set_i64_field(L, "foreign_waiters", (int64_t) statistics::foreign_waiters.load());
+    set_i64_field(L, "foreign_coalesced", (int64_t) statistics::foreign_coalesced.load());
+    set_i64_field(L, "foreign_overloaded", (int64_t) statistics::foreign_overloaded.load());
+    set_i64_field(L, "foreign_cancelled", (int64_t) statistics::foreign_cancelled.load());
+    set_i64_field(L, "foreign_slow", (int64_t) statistics::foreign_slow.load());
+    return 1;
+}
+
+static int barch_stats(lua_State* L) {
+    auto as = barch::get_statistics();
+    lua_createtable(L, 0, 32);
+    set_i64_field(L, "heap_bytes_allocated", as.heap_bytes_allocated);
+    set_i64_field(L, "vmm_bytes_allocated", as.vmm_bytes_allocated);
+    set_i64_field(L, "value_bytes_compressed", as.value_bytes_compressed);
+    set_i64_field(L, "last_vacuum_time", as.last_vacuum_time);
+    set_i64_field(L, "vacuum_count", as.vacuums_performed);
+    set_i64_field(L, "bytes_addressable", as.bytes_allocated);
+    set_i64_field(L, "interior_bytes_addressable", as.bytes_interior);
+    set_i64_field(L, "leaf_nodes", as.leaf_nodes);
+    set_i64_field(L, "size_4_nodes", as.node4_nodes);
+    set_i64_field(L, "size_16_nodes", as.node16_nodes);
+    set_i64_field(L, "size_48_nodes", as.node48_nodes);
+    set_i64_field(L, "size_256_nodes", as.node256_nodes);
+    set_i64_field(L, "size_256_occupancy", as.node256_occupants);
+    set_i64_field(L, "leaf_nodes_replaced", as.leaf_nodes_replaced);
+    set_i64_field(L, "pages_evicted", as.pages_evicted);
+    set_i64_field(L, "keys_evicted", as.keys_evicted);
+    set_i64_field(L, "pages_defragged", as.pages_defragged);
+    set_i64_field(L, "vmm_pages_defragged", as.vmm_pages_defragged);
+    set_i64_field(L, "vmm_pages_popped", as.vmm_pages_popped);
+    set_i64_field(L, "read_locks_active", as.read_locks_active);
+    set_i64_field(L, "write_locks_active", as.write_locks_active);
+    set_i64_field(L, "exceptions_raised", as.exceptions_raised);
+    set_i64_field(L, "maintenance_cycles", as.maintenance_cycles);
+    set_i64_field(L, "shards", as.shards);
+    set_i64_field(L, "local_calls", as.local_calls);
+    set_i64_field(L, "max_spin", as.max_spin);
+    set_i64_field(L, "logical_allocated", as.logical_allocated);
+    set_i64_field(L, "bytes_in_free_lists", as.bytes_in_free_lists);
+    set_i64_field(L, "oom_avoided_inserts", as.oom_avoided_inserts);
+    set_i64_field(L, "keys_found", as.keys_found);
+    set_i64_field(L, "foreign_queries", (int64_t) statistics::foreign_queries.load());
+    set_i64_field(L, "foreign_misses", (int64_t) statistics::foreign_misses.load());
+    set_i64_field(L, "foreign_errors", (int64_t) statistics::foreign_errors.load());
+    set_i64_field(L, "foreign_waiters", (int64_t) statistics::foreign_waiters.load());
+    set_i64_field(L, "foreign_coalesced", (int64_t) statistics::foreign_coalesced.load());
+    set_i64_field(L, "foreign_overloaded", (int64_t) statistics::foreign_overloaded.load());
+    set_i64_field(L, "foreign_cancelled", (int64_t) statistics::foreign_cancelled.load());
+    set_i64_field(L, "foreign_slow", (int64_t) statistics::foreign_slow.load());
+    set_i64_field(L, "luau_bytes", (int64_t) statistics::luau_bytes.load());
+    return 1;
+}
+
 /** barch.running() - the canonical name of that space, empty for the default */
 static int running_space_name(lua_State* L) {
     auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
@@ -1944,6 +2027,10 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "current");
     lua_pushcfunction(L, running_space_name, "running");
     lua_setfield(L, -2, "running");
+    lua_pushcfunction(L, barch_ops, "ops");
+    lua_setfield(L, -2, "ops");
+    lua_pushcfunction(L, barch_stats, "stats");
+    lua_setfield(L, -2, "stats");
 
     // a key space read and written as a value - see TODO 98 F2
     lua_newtable(L);

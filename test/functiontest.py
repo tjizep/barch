@@ -1421,6 +1421,20 @@ try:
     r.execute_command("CONFIG", "SET", "function_deadline_ms", "1000")
     r.execute_command("CONFIG", "SET", "function_slice_insns", "1000000")
 
+    # STATS/OPS counters as a table, so an HTTP health/stats route can read them
+    # without barch.call. See TODO 217.
+    assert r.execute_command("SETF", "readops", """
+        function call()
+            local o = barch.ops()
+            local s = barch.stats()
+            return {o.retrieve_ops, o.set_ops, s.heap_bytes_allocated, s.shards}
+        end
+    """) == b"OK"
+    got = r.execute_command("readops")
+    assert len(got) == 4, got
+    assert int(got[0]) >= 0 and int(got[1]) >= 0, got
+    assert int(got[2]) > 0 and int(got[3]) > 0, got
+
     # --- an export carries functions, and puts them back as functions --------------
     # they used to be dropped: a function is not a container and not a string, so it
     # fell through to the plain branch, where re-encoding the name found no key and
@@ -1490,7 +1504,7 @@ finally:
               "lockstate", "keytypes", "keyroundtrip", "recurse", "leaf",
               "viacall", "tombtell", "tombspace", "tombkind",
               "bufmiss", "bufi32", "bufi64", "bufraw", "bufgrow", "bufpatch",
-              "bufart", "bufneedbuf", "incrstr", "incri32"):
+              "bufart", "bufneedbuf", "incrstr", "incri32", "readops"):
         try:
             r.execute_command("REMF", n)
             r.execute_command("fspace:REMF", n)

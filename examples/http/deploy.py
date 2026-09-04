@@ -22,7 +22,8 @@ LUAU = os.path.join(HERE, "luau")
 PORT = 14000
 HTTP_PORT = 18088
 
-ORDER = ("echo.luau", "page.luau", "session.luau", "hits.luau", "hitsstr.luau", "conf.luau")
+ORDER = ("echo.luau", "page.luau", "session.luau", "hits.luau", "hitsstr.luau",
+         "json.luau", "health.luau", "stats.luau", "conf.luau")
 
 
 def read_luau(name):
@@ -100,7 +101,38 @@ def demo(http_host, http_port):
     if status != 200:
         return False
     got = json.loads(body)
-    return got.get("n") == 1
+    if got.get("n") != 1:
+        return False
+    nested = {"user": {"id": 1, "tags": ["a", "b"]}, "n": 2.5, "ok": True}
+    status, body, _ = http(
+        "POST", base + "/json",
+        data=json.dumps(nested),
+        headers={"Content-Type": "application/json"},
+    )
+    print("POST /json ->", status, body)
+    if status != 200:
+        return False
+    back = json.loads(body)
+    if back.get("user", {}).get("id") != 1 or back.get("ok") is not True:
+        print("json round trip lost fields:", back)
+        return False
+    status, body, _ = http("GET", base + "/health")
+    print("GET /health ->", status, body)
+    if status != 200:
+        return False
+    health = json.loads(body)
+    if health.get("ok") is not True:
+        print("health was not ok:", health)
+        return False
+    status, body, _ = http("GET", base + "/stats")
+    print("GET /stats ->", status, body[:200])
+    if status != 200:
+        return False
+    stats = json.loads(body)
+    if "retrieve_ops" not in stats.get("ops", {}) or "heap_bytes_allocated" not in stats.get("stats", {}):
+        print("stats missing counters:", stats)
+        return False
+    return True
 
 
 def main():

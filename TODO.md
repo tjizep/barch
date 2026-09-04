@@ -1000,21 +1000,7 @@
 
 191. [Done] SET vs GET memtier was hybrid still on [02-09-2026] Nr 183 d0a26c5
 
-190. Low-level buffer access on the shard, and the same on `barch.store`
-    and `barch.art()`. `setBufferAt(key, buffer, offset=0)` grows the
-    value to fit `offset + buffer.size`, creates a missing key, replaces
-    a tomb, and decompresses a compressed leaf before writing — in-place
-    memcpy when the uncompressed leaf is already large enough, otherwise
-    a reallocation inside the shard (the same trade APPEND/SETRANGE
-    make). `getBufferAt(key, offset=0)` is nil in Luau when there is no
-    buffer, else a Luau buffer copy; in C++ the caller holds at least a
-    read lock and gets `pair<value_type,bool>` pointing at the leaf.
-    Luau also gets `setInt32At`/`getInt32At`/`setInt64At`/`getInt64At`
-    (little-endian, matching `buffer.readi32`). Settle with: missing
-    and tomb and grow and in-place overwrite; compressed values come
-    back decompressed on the Luau side; `barch.art()` has the same
-    methods; an HTTP counter using the int helpers; and an increment
-    benchmark against `tonumber`/`tostring` for that counter.
+190. [Done] Low-level buffer access on the shard and in Luau [04-09-2026] Nr 207 ee012e3
 
 192. Optimize SET. First the measurement DONE 183 stopped short of:
     memtier SET over a million keys with `ordered_keys` off and
@@ -1097,3 +1083,7 @@
 215. [Done] simdjson takes a luau buffer, and now makes one [04-09-2026] Nr 205 07786c1
 
 216. [Done] The web server takes and gives luau buffers [04-09-2026] Nr 206 64f0474
+
+217. [Done] JSON round-trip, health, and internal counters over Crow [04-09-2026] Nr 208 ee012e3
+
+218. [Done] Space flag vs shard file after load, SET-OK-GET-miss [04-09-2026] Nr 209 ee012e3

@@ -164,7 +164,8 @@ function transport()
         kind = "http",
         port = %d,
         bind = "127.0.0.1",
-        keys = {"ECHO", "BINECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS"},
+        keys = {"ECHO", "BINECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS",
+                "JSON", "HEALTH", "STATS"},
     }
 end
 ''' % HTTP_PORT
@@ -223,6 +224,78 @@ end
 PLAIN = r'''
 function call()
     return "plain"
+end
+'''
+
+JSON = r'''
+function call()
+    return "json"
+end
+
+function json(req, res)
+    res.body = simdjson.encode(simdjson.parse(req.body))
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/json",
+        methods = {POST = json},
+        accept = "application/json",
+        send = "application/json",
+        cors = "*",
+    }
+end
+'''
+
+HEALTH = r'''
+function call()
+    return "health"
+end
+
+function health(req, res)
+    local ops = barch.ops()
+    res.body = simdjson.encode({
+        ok = true,
+        space = barch.running(),
+        retrieve_ops = ops.retrieve_ops,
+    })
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/health",
+        methods = {GET = health},
+        send = "application/json",
+        cors = "*",
+    }
+end
+'''
+
+STATS = r'''
+function call()
+    return "stats"
+end
+
+function stats(req, res)
+    res.body = simdjson.encode({
+        stats = barch.stats(),
+        ops = barch.ops(),
+    })
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/stats",
+        methods = {GET = stats},
+        send = "application/json",
+        cors = "*",
+    }
 end
 '''
 
@@ -302,6 +375,9 @@ try:
     assert r.execute_command("SETF", "plain", PLAIN) == b"OK"
     assert r.execute_command("SETF", "sess", SESS) == b"OK"
     assert r.execute_command("SETF", "hits", HITS) == b"OK"
+    assert r.execute_command("SETF", "json", JSON) == b"OK"
+    assert r.execute_command("SETF", "health", HEALTH) == b"OK"
+    assert r.execute_command("SETF", "stats", STATS) == b"OK"
     assert r.execute_command("SETF", "slow", SLOW) == b"OK"
     assert r.execute_command("SETF", "fetch", FETCH) == b"OK"
     # no transport: still an ordinary function
@@ -317,6 +393,9 @@ try:
     assert "PAGE /page GET" in text, started
     assert "SESS /sess GET" in text, started
     assert "HITS /hits GET" in text, started
+    assert "JSON /json POST" in text, started
+    assert "HEALTH /health GET" in text, started
+    assert "STATS /stats GET" in text, started
     assert "SLOW /slow GET" in text, started
     assert "FETCH /fetch GET" in text, started
     assert "PLAIN" not in text, started
@@ -386,6 +465,29 @@ try:
     status, body, _ = http_call("GET", "/hits", timeout=10)
     assert status == 200, (status, body)
     assert json.loads(body)["n"] == 1, body
+
+    nested = {"user": {"id": 1, "tags": ["a", "b"]}, "n": 2.5, "ok": True}
+    status, body, _ = http_call(
+        "POST", "/json", data=json.dumps(nested),
+        headers={"Content-Type": "application/json"}, timeout=10)
+    assert status == 200, (status, body)
+    back = json.loads(body)
+    assert back["user"]["id"] == 1 and back["user"]["tags"] == ["a", "b"], back
+    assert back["ok"] is True and float(back["n"]) == 2.5, back
+    status, _, _ = http_call("GET", "/json")
+    assert status == 405, status
+
+    status, body, _ = http_call("GET", "/health", timeout=10)
+    assert status == 200, (status, body)
+    health = json.loads(body)
+    assert health["ok"] is True and "retrieve_ops" in health, health
+
+    status, body, _ = http_call("GET", "/stats", timeout=10)
+    assert status == 200, (status, body)
+    stbody = json.loads(body)
+    assert "retrieve_ops" in stbody["ops"], stbody
+    assert "heap_bytes_allocated" in stbody["stats"], stbody
+    assert int(stbody["stats"]["heap_bytes_allocated"]) > 0, stbody
 
     print("handler calls out with http.request", flush=True)
     status, body, _ = http_call("GET", "/fetch", timeout=15)

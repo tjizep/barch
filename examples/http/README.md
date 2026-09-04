@@ -38,6 +38,9 @@ Then, from another shell:
 curl http://127.0.0.1:18088/page
 curl -H 'Content-Type: application/json' -d '{"a":7}' http://127.0.0.1:18088/echo
 curl http://127.0.0.1:18088/hits
+curl -H 'Content-Type: application/json' -d '{"user":{"id":1},"ok":true}' http://127.0.0.1:18088/json
+curl http://127.0.0.1:18088/health
+curl http://127.0.0.1:18088/stats
 redis-cli -p 14000 HTTP STATUS
 ```
 
@@ -93,6 +96,13 @@ little-endian bytes rather than a decimal string:
 ```
 curl http://127.0.0.1:18088/hits
 ```
+
+POST `/json` parses the body and encodes the same document back, so nested
+objects and arrays survive. GET `/health` is liveness: `{ok, space,
+retrieve_ops}`. GET `/stats` is the STATS and OPS counters as JSON.
+`barch.stats()` / `barch.ops()` are how a handler reads those; HTTP does
+not get `barch.call`, because Crow is unauthenticated. `ops()` is atomics.
+`stats()` takes a shared latch on every shard, the same as the STATS command.
 
 `barch.store.getInt32At` / `setInt32At` write in place once the key exists,
 so there is no `tonumber`/`tostring` on the hot path. GET `/hits-str` is
@@ -233,7 +243,10 @@ rather than going out over HTTP for it.
 ## Files
 
 - `luau/echo.luau` — `kind = "resource"`, POST `/echo`
+- `luau/json.luau` — `kind = "resource"`, POST `/json`, full document round trip
 - `luau/page.luau` — `kind = "resource"`, GET `/page`
 - `luau/session.luau` — `kind = "resource"`, GET `/sess`, cookie + store
+- `luau/health.luau` — `kind = "resource"`, GET `/health`
+- `luau/stats.luau` — `kind = "resource"`, GET `/stats`, STATS and OPS as JSON
 - `luau/conf.luau` — `kind = "http"`, lists the other keys
 - `deploy.py` — SETF in order, then `HTTP START CONF`

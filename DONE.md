@@ -9990,3 +9990,137 @@ looser setter did not quietly stop accepting the thing every other handler in
 that file uses.
 
 Full suite on the coverage build, `-j4`: 76/76 in 156s.
+
+## 207. Low-level buffer access on the shard and in Luau [04-09-2026]
+
+*Was `TODO.md` entry 190.*
+
+A value is a byte buffer. SET/GET go through strings; APPEND and SETRANGE
+already patched bytes, but they lived in the command layer. The same
+operations are now on the shard, and Luau reaches them without turning
+the value into a string.
+
+### C++
+
+`shard::setBufferAt(key, buf, offset)` grows the value to at least
+`offset + buf.size`, zero-fills any gap, creates a missing key, replaces
+a tomb, and decompresses a compressed leaf before writing. If the
+uncompressed leaf is already large enough it is a memcpy into it - the
+same latency trade APPEND and SETRANGE make. False if the pair would not
+fit.
+
+`shard::getBufferAt(key, offset)` is a pointer into the leaf, valid only
+while the caller holds at least a read lock. Missing, tomb, expired,
+compressed, or offset past the end: `{ {}, false }`. Compressed is
+false on purpose: the stored bytes are not the logical value. Luau
+decompresses into a copy instead.
+
+Writes of a new key set `hashed` from the shard's `opt_ordered_keys`,
+the same flag SET already used. SETF and `barch.store.set` did not, so
+on an unordered space the function key landed in the tree and
+`search()` only looked at the hash - `no such function`. That showed
+up the first time the increment bench ran with `ORDERED OFF`.
+
+### Luau
+
+`barch.store` and `barch.art()` both have `setBufferAt` / `getBufferAt`
+(Luau buffers, copy on get) and `setInt32At` / `getInt32At` /
+`setInt64At` / `getInt64At` (little-endian, matching `buffer.readi32`).
+A missing buffer is nil; a tomb from `getBufferAt` is still `barch.tomb`.
+`setBufferAt` refuses a string.
+
+GET `/hits` is the page counter as four bytes. Concurrent HTTP workers
+increment the same key; the final count matches. `/hits-str` is the
+`tonumber`/`tostring` version.
+
+The increment bench is one CALLF, lock per increment, unordered. It was
+a million loops, which is about a second on Release and ~4.8s under
+coverage atomics, so CI's 5s redis-py timeout killed it - DONE 184 cut
+it to 100000. The ratio is what it is for: int32 a bit faster than
+the decimal round trip, the lookup still most of the cost.
+
+A locked region's instruction cap is `function_slice_insns`, not a
+hardcoded 100k, and `function_deadline_ms` still applies. Holding the
+latch for the whole million needed that; looping around `locked()` is
+what the bench runs now.
+
+DONE 205 and 206 then took the same buffers out through simdjson and
+Crow, so a handler can stay in bytes from store to response.
+
+Covered by `test/functiontest.py` (missing, grow, in-place, art(),
+refuses a string, increment) and `test/httptest.py` (`/hits`).
+
+## 208. JSON round-trip, health, and internal counters over Crow [04-09-2026]
+
+*Was `TODO.md` entry 217.*
+
+POST `/echo` only ever sent `{ok, a}` back, so it was not a JSON
+round-trip. There was also no health route, and HTTP handlers cannot
+use `barch.call` - Crow is unauthenticated, and wiring a command runner
+onto those VMs would have given every request CONFIG and FLUSHDB.
+
+So the counters come in through `barch.ops()` and `barch.stats()`, the
+same fields RESP `OPS` and `STATS` already return. `ops()` is atomics.
+`stats()` takes a shared latch on every shard, which is what the STATS
+command does.
+
+### Routes
+
+- POST `/json` — parse the body, encode the same document
+- GET `/health` — `{ok, space, retrieve_ops}`
+- GET `/stats` — `{stats, ops}`
+
+### What the bodies did
+
+A nested `{"user":{"id":1,"tags":["a","b"]},"n":2.5,"ok":true}` came
+back with the same values. Health was `{"ok":true,"space":"","retrieve_ops":17}`
+on the default space. Stats had `heap_bytes_allocated`, `shards=347`,
+and the foreign/ops counters.
+
+### Latency, RelWithDebInfo, new connection each request
+
+| route | p50 | p99 |
+|---|---|---|
+| GET `/page` | 75 µs | 154 µs |
+| GET `/health` | 79 µs | 119 µs |
+| GET `/stats` | 116 µs | 187 µs |
+| POST `/echo` 8B | 87 µs | 136 µs |
+| POST `/json` 8B | 85 µs | 133 µs |
+| POST `/json` nested 147B | 92 µs | 120 µs |
+| POST `/json` ~1KB | 103 µs | 137 µs |
+| POST `/json` ~7KB | 165 µs | 264 µs |
+
+Health is `/page`. The shard walk on `/stats` is about 40 µs extra, not
+milliseconds. JSON parse+encode of a tiny object is the same as `/echo`.
+A 7KB body is still under 0.2 ms.
+
+Keep-alive is still the 41 ms delayed-ACK stall from Crow not setting
+`TCP_NODELAY`. These numbers are new connections.
+
+Covered by `test/httptest.py` and `barch.ops()` / `barch.stats()` in
+`test/functiontest.py`.
+
+## 209. Space flag vs shard file after load, SET-OK-GET-miss [04-09-2026]
+
+*Was `TODO.md` entry 218.*
+
+A shard file already stores ordered/hybrid in `write_extra` / `read_extra`,
+and `_load` puts those on the shard. SET does not ask the shard. It uses
+the space: `spec.hash = !sp->opt_ordered_keys`. The default space is
+`"node"`, which is not configured from KV, so after load the space still
+has the process default (ordered on) while the shards have what was saved
+(ordered off, from TestHashBenchy). SET writes the ART, GET looks in the
+hash.
+
+That is why a clean restart of a store that was always ordered was fine,
+and why HashBenchy leftovers were not. GET of an old HashBenchy key still
+hit; SET of a new key returned OK and GET missed.
+
+After load the space now copies ordered/hybrid from shard 0, the same
+way `CONFIG SET ordered_keys` already updates both. HashBenchy files then
+round-trip: `SET probe-key hello` comes back, including the original
+CLEAR-then-SAVE case.
+
+The Lua tests still dump those files in the build directory. That is a
+separate mess; it is no longer enough to make SET a liar.
+

@@ -1,14 +1,21 @@
 
+import scale
 import barch
 import redis
 import os
+
+# both ctest runs of this script share one directory: the second reads
+# what the first saved
+scale.workdir("largetest")
+
+PORT = scale.port(default=15000)
 print(f'running {__file__}')
 exec(open(f"{os.path.dirname(os.path.realpath(__file__))}/test_data.py").read())
 
-barch.start("0.0.0.0", 15000) # start barch on port 15000
-gr = redis.Redis(host="127.0.0.0", port=15000, db=0, protocol=2)
+barch.start("0.0.0.0", PORT)
+gr = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
 def test():
-    r = redis.Redis(host="127.0.0.0", port=15000, db=0, protocol=2)
+    r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
 
     for w in words:
         if r.exists(w):

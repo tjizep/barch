@@ -9,12 +9,13 @@
 # space's maintenance thread, so keys move *while* the writes below are happening. Every
 # read back is therefore also a test of the race between routing a key and locking the
 # shard it routed to.
+import scale
 import time
 
 import redis
 import barch
 
-PORT = 14073
+PORT = scale.port(default=14073)
 SHARDS = 8
 KEYS = 20000
 
@@ -152,6 +153,9 @@ conf.set("rs_rand.range_sharded", "1")
 rand = barch.KeyValue("rs_rand")
 
 import random
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 order = list(range(KEYS))
 random.Random(12345).shuffle(order)
 for i in order:

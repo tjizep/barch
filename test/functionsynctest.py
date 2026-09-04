@@ -1,16 +1,21 @@
 import os
 import subprocess
+
+import scale
 import tempfile
 
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # A checkout of .luau files is SETF'd by FUNCTIONS SYNC. Other files are SET as
 # keys, keeping the extension; a nested path becomes dir:name. A broken file
 # must not leave a half-applied space, and a deleted file is REMF / REM after
 # a successful sync. Keys someone SET by hand stay.
 
-PORT = 14000
+PORT = scale.port(default=14000)
 
 print("start function sync test")
 root = tempfile.mkdtemp(prefix="barch-fns-")

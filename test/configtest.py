@@ -1,5 +1,9 @@
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Round trips every registered configuration variable over RESP: read it, set it to
 # something else, read it back and check it took, then put the original back.
@@ -10,7 +14,7 @@ import barch
 # CONFIG SET accepts, which is what makes this round trip possible at all, so a
 # variable that reads back in a shape it cannot be set from is a bug this catches.
 
-PORT = 14000
+PORT = scale.port(default=14000)
 
 # every variable barch registers. Kept here rather than taken from CONFIG GET *, so
 # that a variable added to the server without being added to the reflection - or the

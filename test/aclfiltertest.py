@@ -1,5 +1,9 @@
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # `ACL SETUSER ... ~pattern` used to be accepted and thrown away. acl_spec parses the
 # pattern into `filters`, and nothing ever read that field, so a client asking for key
@@ -8,7 +12,7 @@ import barch
 #
 # Key patterns are refused until they mean something. See TODO 136.
 
-PORT = 14000
+PORT = scale.port(default=14000)
 USER = "aclfiltertestuser"
 
 print("start acl filter test")

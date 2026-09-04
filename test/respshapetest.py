@@ -19,10 +19,14 @@
 # RESP2 is what a connection speaks unless it asks for 3 with HELLO, and this test never
 # does, so these are the RESP2 encodings. Where a command answers differently under RESP3
 # that belongs in a test of its own - see the note at the bottom.
+import scale
 import socket
 import barch
 
-PORT = 14074
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14074)
 
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)

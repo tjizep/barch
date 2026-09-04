@@ -1,22 +1,28 @@
 import os
 
+import scale
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
 # the RESP version to talk. Defaults to 2 so the run is deterministic whatever the
 # installed client prefers; CTest runs this file a second time with 3 so the whole
 # command surface is exercised over both protocols.
 PROTOCOL = int(os.environ.get("BARCH_TEST_RESP", "2"))
+PORT = scale.port(default=14000)
 
 for cnt in range(1,5):
     import redis
     import barch
     print(f"start redis test {cnt} over RESP{PROTOCOL}")
-    barch.start("0.0.0.0", 14000)
+    barch.start("0.0.0.0", PORT)
     barch.stop()
-    barch.start(14000)
+    barch.start(PORT)
 
-    barch.ping("127.0.0.1", 14000)
+    barch.ping("127.0.0.1", PORT)
 
     # connect redis client to barch running inside this process
-    r = redis.Redis(host="127.0.0.0", port=14000, db=0, protocol=PROTOCOL)
+    r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=PROTOCOL)
     r.execute_command("CLIENT INFO")
 
     r.execute_command("CLEARALL")

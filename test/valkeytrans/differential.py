@@ -31,6 +31,14 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 
+# this one lives a directory down, so the test directory is not already on the
+# path the way it is for the rest of them
+sys.path.insert(0, os.path.join(HERE, ".."))
+import scale  # noqa: E402
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
 # Differences we have looked at and decided to keep. Each needs a reason; a bare entry
 # here is indistinguishable from a bug someone got tired of.
 #
@@ -468,12 +476,20 @@ def main(argv):
     live = [c for c in all_cases if not c.get("skipped")]
     print("%d cases, %d translated, %d stubs" %
           (len(all_cases), len(live), len(all_cases) - len(live)))
+    if scale.short() and live:
+        # every Nth case rather than the first N: the files are grouped by command,
+        # so a prefix would test expire.tcl thoroughly and nothing else at all
+        keep = scale.scaled(len(live), floor=40)
+        step = max(1, len(live) // keep)
+        live = live[::step][:keep]
+        scale.note("differential")
+        print("shortened to %d cases" % len(live))
     if not live:
         print("nothing to run")
         return 0
 
     # ---- step 1: valkey decides which translations are faithful ------------------
-    vport = 7811
+    vport = scale.port(default=7811)
     vproc = start_valkey(vport, None)
     if vproc is None:
         print("SKIP: no valkey-server built - configure test/CMakeLists.txt to fetch it")
@@ -510,7 +526,7 @@ def main(argv):
     # under. Do not add the build directory to the path: it holds barch.so, the valkey
     # module, which python finds first and cannot load as an extension
     import barch
-    bport = 7812
+    bport = scale.port(1, default=7812)
     barch.start("127.0.0.1", bport)
     time.sleep(0.5)
     # barch loads whatever .dat files are in the working directory, and valkey starts

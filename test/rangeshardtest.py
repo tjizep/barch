@@ -6,10 +6,14 @@
 #
 # A key space reads its options once, when it is first built, so every case below uses a
 # name of its own and sets the configuration before touching the space.
+import scale
 import redis
 import barch
 
-PORT = 14071
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14071)
 
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)

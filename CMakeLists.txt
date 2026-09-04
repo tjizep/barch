@@ -71,6 +71,26 @@ set(USE_AVX_INSTRUCTIONS ON)
 #remove -Werror because fmtlib
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -march=native -Wanalyzer-malloc-leak -Wanalyzer-double-free -Wall -Wextra -Wsign-compare -Wundef -Wno-format-zero-length -Wpointer-arith -Wno-missing-braces -Wno-missing-field-initializers -Wno-missing-attributes")
 
+# A sanitized build, for running the short test set against - see TODO 206 and
+# ci/README.md. -DSANITIZE=thread is the one that has earned its keep: it found
+# DONE 186, 188, 190 and 192. -DSANITIZE=address is wired the same way but has
+# not been run to a clean pass yet.
+#
+# Use RelWithDebInfo with it. Release turns on -flto, and a sanitizer wants
+# frame pointers and readable stacks more than it wants the last of the inlining.
+set(SANITIZE "" CACHE STRING "Build with a sanitizer: thread, address, or empty")
+set_property(CACHE SANITIZE PROPERTY STRINGS "" thread address)
+if (SANITIZE)
+    if (NOT SANITIZE STREQUAL "thread" AND NOT SANITIZE STREQUAL "address")
+        message(FATAL_ERROR "SANITIZE must be 'thread' or 'address', got '${SANITIZE}'")
+    endif ()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=${SANITIZE} -fno-omit-frame-pointer -g")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=${SANITIZE} -fno-omit-frame-pointer -g")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=${SANITIZE}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=${SANITIZE}")
+    message("Building with the ${SANITIZE} sanitizer")
+endif ()
+
 if (COVERAGE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -fprofile-arcs -ftest-coverage -fprofile-update=atomic")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
@@ -116,7 +136,43 @@ endif ()
 # include boost for all targets
 #include_directories(${Boost_INCLUDE_DIRS})
 
-set(PYTHON3_EXEC venv/bin/python3)
+set(PYTHON3_EXEC ${CMAKE_BINARY_DIR}/venv/bin/python3)
+if (SANITIZE)
+    # _barch.so is dlopened by python, so the sanitizer runtime is not in the
+    # process when it starts and its interceptors never install - it has to be
+    # preloaded. And the runtimes lay out their own shadow memory, which ASLR
+    # can land on top of: without setarch -R, TSan dies with "unexpected memory
+    # mapping" before the first test runs. See ci/README.md.
+    # 0 means a sanitizer finding is reported but does not fail the test, which is
+    # where this has to start: there are still known-benign races in the tail (see
+    # DONE 193 and 195), so 66 would fail every test in the set and teach everyone
+    # to ignore it. Set -DSANITIZE_EXITCODE=66 to make findings fail the run, which
+    # is the point to get to once that tail is empty.
+    set(SANITIZE_EXITCODE 0 CACHE STRING "Exit code a sanitizer finding produces: 0 reports, 66 fails")
+    if (SANITIZE STREQUAL "thread")
+        set(_san_libs libtsan.so.2 libtsan.so.0 libtsan.so)
+        set(_san_env "TSAN_OPTIONS=halt_on_error=0 exitcode=${SANITIZE_EXITCODE} history_size=4 suppressions=${CMAKE_SOURCE_DIR}/ci/tsan.supp")
+    else ()
+        set(_san_libs libasan.so.8 libasan.so.6 libasan.so)
+        # python allocates plenty it never frees by design; leak checking here
+        # reports the interpreter, not barch
+        set(_san_env "ASAN_OPTIONS=halt_on_error=0 exitcode=${SANITIZE_EXITCODE} detect_leaks=0")
+    endif ()
+    set(SANITIZER_RUNTIME "")
+    foreach (_lib ${_san_libs})
+        execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=${_lib}
+                OUTPUT_VARIABLE _found OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if (EXISTS "${_found}")
+            set(SANITIZER_RUNTIME "${_found}")
+            break()
+        endif ()
+    endforeach ()
+    if (NOT SANITIZER_RUNTIME)
+        message(FATAL_ERROR "no ${SANITIZE} runtime found to preload - looked for ${_san_libs}")
+    endif ()
+    message("Sanitizer runtime: ${SANITIZER_RUNTIME}")
+    set(PYTHON3_EXEC setarch -R env "LD_PRELOAD=${SANITIZER_RUNTIME}" "${_san_env}" ${CMAKE_BINARY_DIR}/venv/bin/python3)
+endif ()
 
 set(TEST_BUILD_DIR build)
 
@@ -854,7 +910,7 @@ else()
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     add_test(NAME TestClean
-            COMMAND sh -c "rm -f *.dat"
+            COMMAND sh -c "rm -f *.dat t/*/*.dat"
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     if (PYBARCH_TEST)
@@ -897,7 +953,7 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchList
-                COMMAND ${CMAKE_BINARY_DIR}/${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listtest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/listtest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
                 WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestBarchRPC
@@ -905,7 +961,7 @@ else()
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestBarchSimpleClusterRPC
-                COMMAND ${CMAKE_BINARY_DIR}/${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/routetest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/routetest.py ${CMAKE_BINARY_DIR} ${TEST_SOURCE_PATH}
                 WORKING_DIRECTORY ${TEST_BUILD_PATH})
 
         add_test(NAME TestRespClientLocal
@@ -1155,6 +1211,130 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/scantest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # The set worth running under a sanitizer: the ones that put several
+        # threads through the server at once, which is where TSan has actually
+        # found things. Pair it with BARCH_TEST_SCALE so they finish - see
+        # test/scale.py and TODO 206:
+        #
+        #   cmake -B build-tsan -DTEST_OD=ON -DSANITIZE=thread \
+        #         -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        #   cmake --build build-tsan --target barch --parallel 2
+        #   ( cd build-tsan ; BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure )
+        #
+        # TestBarchLru is deliberately not here. Its assertions are about
+        # absolute memory pressure - it fills past a cap and checks that inserts
+        # start being refused - so a smaller key count just means eviction keeps
+        # up and oom_avoided_inserts stays zero. Scaling it would mean scaling
+        # the cap and the overshoot together against a memory model nobody has
+        # written down, so it stays full size and out of the short set.
+        #
+        # TestClean and the four install tests carry the label as well, not
+        # because they are worth sanitizing but because the set has to stand on
+        # its own: the install tests build the venv everything else runs in, and
+        # TestClean removes the .dat files a previous run left in the build
+        # directory - without it TestBarchPy loads stale data and fails on a key
+        # count. They are defined first, so they still run first.
+        set_tests_properties(
+                TestClean
+                TestInstallVENV TestInstallRedisPy TestInstallRequestsPy TestBarchInstallPy
+                TestBarchPy TestBarchRPC
+                TestRespClientLocal TestRespClientLocalRESP3
+                TestAsyncPipeline TestHybrid
+                TestFunctions TestFunctionSync TestFetchLuau
+                TestKeysStream TestChaos TestScanGuarantees
+                TestMerge TestSpaceThread TestBpopThread
+                TestCompression TestScan
+                PROPERTIES LABELS short)
+
     endif ()
 endif ()
 
+# --- one directory and one port block per test -------------------------------
+#
+# ctest -j needs both. Every test used to run in the build directory and write
+# its shards there - 3535 .dat files in one place - and 34 of them had a port
+# literal, eighteen of those the same 14000. Two at once fought over both.
+#
+# The directory half is not here: a python test calls scale.workdir() and moves
+# into <build>/t/<testname> itself, so it is isolated however it was started -
+# through ctest or by hand. Doing it from here would only have isolated the
+# tests ctest launches. See TODO 209.
+#
+# What is left is the port, which the test cannot pick for itself without
+# knowing about the others. Tests read it with scale.port(), which falls back to
+# the old literal when BARCH_TEST_PORT is unset, so running one by hand is
+# unchanged. See TODO 207.
+#
+# Ports go up in twenties because a few tests need more than one - fetchluautest
+# binds a web server and a crow port beside its own.
+if (BUILD_TESTING OR TEST_OD)
+    get_property(_barch_tests DIRECTORY PROPERTY TESTS)
+    # These four build the venv every other test runs in, and TestClean sweeps
+    # the directories, so they belong in the build directory and own no port.
+    set(_barch_shared_dir_tests
+            TestClean TestInstallVENV TestInstallRedisPy TestInstallRequestsPy TestBarchInstallPy)
+    # The short list is the one that cannot run beside anything, so it is the one
+    # kept here. Everything else takes its port from BARCH_TEST_PORT and its
+    # directory from scale.workdir(), which is all it needs to run in parallel.
+    #
+    #   - the lua and C++ tests under TestStarter bind their ports from lua and
+    #     have no way to read the environment yet
+    #   - TestBarchList and TestBarchSimpleClusterRPC share TEST_BUILD_PATH, where
+    #     the valkey they start lives, and routetest.py publishes to 13000 from
+    #     lua as well as from python so both sides have to move together
+    #
+    # See TODO 208.
+    set(_barch_serial_tests
+            TestIntegers TestDoubles BicycleTest TestAbc Test123 TestRandom
+            TestBounds TestKeys LargeKeys Test1111111 TestMSG TestIntArithmetic
+            TestComposites TestZRank TestBenchy TestHashBenchy
+            TestDebuggableServerLock TestGlobDifferential
+            TestBarchList TestBarchSimpleClusterRPC)
+    set(_barch_port 20000)
+    # TestClean deletes t/*/*.dat and the install tests build the venv, so with -j
+    # they cannot simply run beside everything else - TestClean wiping a directory
+    # underneath a running test is what five of them failed on the first time this
+    # was tried. As a ctest fixture they are ordered before anything that needs
+    # them instead. The chain between them is explicit because -j does not keep
+    # definition order: the venv has to exist before pip runs in it.
+    set_tests_properties(TestInstallRedisPy PROPERTIES DEPENDS TestInstallVENV)
+    set_tests_properties(TestInstallRequestsPy PROPERTIES DEPENDS TestInstallRedisPy)
+    set_tests_properties(TestBarchInstallPy PROPERTIES DEPENDS TestInstallRequestsPy)
+    foreach (_s IN LISTS _barch_shared_dir_tests)
+        set_tests_properties(${_s} PROPERTIES FIXTURES_SETUP barch_env)
+    endforeach ()
+
+    foreach (_t IN LISTS _barch_tests)
+        list(FIND _barch_shared_dir_tests ${_t} _shared)
+        if (_shared EQUAL -1)
+            # a test that chose its own directory keeps it - TestBarchList and
+            # TestBarchSimpleClusterRPC run in TEST_BUILD_PATH because that is
+            # where the valkey they start lives. They share it, so they get a
+            # resource lock instead of a directory and ctest will not run them
+            # at the same time.
+            get_test_property(${_t} WORKING_DIRECTORY _existing_dir)
+            if (NOT _existing_dir STREQUAL "NOTFOUND" AND NOT _existing_dir STREQUAL "${CMAKE_BINARY_DIR}")
+                set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK shared_test_build_dir)
+            endif ()
+            # append, do not replace: TestRespClientLocalRESP3 and
+            # TestGlobPerformanceJson already carry an ENVIRONMENT
+            get_test_property(${_t} ENVIRONMENT _existing_env)
+            if (_existing_env STREQUAL "NOTFOUND")
+                set(_env "BARCH_TEST_PORT=${_barch_port}" "BARCH_TEST_NAME=${_t}")
+            else ()
+                set(_env ${_existing_env} "BARCH_TEST_PORT=${_barch_port}" "BARCH_TEST_NAME=${_t}")
+            endif ()
+            set_tests_properties(${_t} PROPERTIES
+                    ENVIRONMENT "${_env}"
+                    FIXTURES_REQUIRED barch_env
+                    # a hung test should fail, not hold the run open for the
+                    # 1500s ctest allows by default
+                    TIMEOUT 600)
+            list(FIND _barch_serial_tests ${_t} _serial)
+            if (NOT _serial EQUAL -1)
+                set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK legacy_ports)
+            endif ()
+            math(EXPR _barch_port "${_barch_port} + 20")
+        endif ()
+    endforeach ()
+endif ()

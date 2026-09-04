@@ -1,5 +1,6 @@
 # http.request() inside stored Luau functions: cofetch over asio, and the
 # coroutine parking that lets a request wait without holding a pool thread.
+import scale
 import http.server
 import json
 import socketserver
@@ -9,9 +10,12 @@ import time
 import redis
 import barch
 
-PORT = 14099
-WEB_PORT = 18099
-CROW_PORT = 18100
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14099)
+WEB_PORT = scale.port(1, default=18099)
+CROW_PORT = scale.port(2, default=18100)
 
 print("start fetch luau test", flush=True)
 

@@ -1,9 +1,15 @@
+import scale
 import redis
 import barch
 import threading
 import time
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=11000)
 def btest(num):
-    r = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
+    r = redis.Redis("127.0.0.1", PORT, 0, protocol=2)
     time.sleep(.1)
     r.lpush("testkey","l2")
     time.sleep(.1)
@@ -11,24 +17,24 @@ def btest(num):
     time.sleep(.1)
     r.lpush("testkey2","l4")
 def ctest(num):
-    r = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
+    r = redis.Redis("127.0.0.1", PORT, 0, protocol=2)
     popped = r.blpop(["testkey1"],10)
     print ("c",popped)
     assert (popped == None or (popped[0] == b'testkey1' and popped[1] == b'l3'))
 def tloss(num):
-    r = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
+    r = redis.Redis("127.0.0.1", PORT, 0, protocol=2)
     time.sleep(1)
     for i in range(1,1000):
         r.lpush("testloss",f"l{i}")
         #print(f"Pushed {i}")
 barch.clear()
 barch.save()
-barch.start("0.0.0.0", 11000)
+barch.start("0.0.0.0", PORT)
 
 bt = threading.Thread(target=btest, args=(1,))
 ct = threading.Thread(target=ctest, args=(1,))
 
-rp = redis.Redis("127.0.0.1", 11000, 0, protocol=2)
+rp = redis.Redis("127.0.0.1", PORT, 0, protocol=2)
 bt.start()
 ct.start()
 popped = rp.blpop(["testkey"],10)

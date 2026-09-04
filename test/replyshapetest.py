@@ -1,5 +1,9 @@
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Pins the RESP reply shape of the commands that answer with an array.
 #
@@ -9,7 +13,7 @@ import barch
 # one thing, which come out as a nil and as a bare scalar. This file records what
 # each arity should look like on the wire so the shape cannot drift.
 
-PORT = 14000
+PORT = scale.port(default=14000)
 
 
 def raw(r, *args):

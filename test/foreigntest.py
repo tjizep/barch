@@ -4,10 +4,11 @@
 #
 # Each case uses its own space name and sets the configuration keys before the
 # first USE, the same way rangeshardtest.py provisions a space.
+import scale
 import redis
 import barch
 
-PORT = 14081
+PORT = scale.port(default=14081)
 
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)
@@ -210,6 +211,9 @@ def delayed_get():
 t = threading.Thread(target=delayed_get)
 t.start()
 import time
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 time.sleep(0.05)
 r.set("k", "from-set")
 t.join()

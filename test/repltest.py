@@ -1,9 +1,16 @@
+import scale
 import barch
 import time
-barch.start("127.0.0.1","13000")
+
+# both ctest runs of this script share one directory: the second reads
+# what the first saved
+scale.workdir("repltest")
+
+PORT = str(scale.port(default=13000))
+barch.start("127.0.0.1", PORT)
 barch.stop()
-barch.start("127.0.0.1","13000")
-barch.publish("127.0.0.1","13000")
+barch.start("127.0.0.1", PORT)
+barch.publish("127.0.0.1", PORT)
 k = barch.KeyValue()
 k.set("one","1")
 k.set("two","2")

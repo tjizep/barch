@@ -1,7 +1,11 @@
+import scale
 import re
 
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Deep tests for SCAN, concentrating on the MATCH handling and therefore on the
 # glob matcher in src/glob.cpp.
@@ -17,7 +21,7 @@ import barch
 # globdifftest.cpp drives the same comparison against the matcher directly and over
 # a far larger corpus; this covers the route a real client takes.
 
-PORT = 14000
+PORT = scale.port(default=14000)
 
 
 def reference_pattern(pattern):

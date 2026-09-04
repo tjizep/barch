@@ -14,12 +14,16 @@
 # the cursor is split between the connection and the store (DONE 18), a connection may
 # only hold so many at once, and an abandoned one holds a page buffer until the
 # connection closes. None of that was covered by a test.
+import scale
 import time
 
 import redis
 import barch
 
-PORT = 14099
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14099)
 SPACE = "scantest"
 
 barch.start("0.0.0.0", PORT)

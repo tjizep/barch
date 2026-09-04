@@ -11,9 +11,13 @@
 # Only replies with more than one value can show the fault. A single value decodes
 # correctly either way, which is why the defect survived - every test that drove a binding
 # remotely happened to ask for one thing at a time.
+import scale
 import barch
 
-PORT = 14096
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14096)
 barch.start("127.0.0.1", PORT)
 barch.ping("127.0.0.1", PORT)
 

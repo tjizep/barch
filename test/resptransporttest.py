@@ -1,10 +1,14 @@
 # transport() with kind = "resp": one stored function key exposing several RESP
 # commands under names of its own, each with its own ACL and replication
 # categories. TODO 188.
+import scale
 import redis
 import barch
 
-PORT = 14112
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14112)
 
 print("start resp transport test", flush=True)
 barch.start("0.0.0.0", PORT)

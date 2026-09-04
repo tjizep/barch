@@ -122,7 +122,7 @@ namespace barch {
                                 return true;
                             }
                             auto f = ic->second.call;
-                            ++ic->second.calls;
+                            note_command_call(ic->second);
                             ++statistics::repl::barch_requests;
                             r = caller.call(params,f);
                             replies.clear();

@@ -1,7 +1,11 @@
+import scale
 import time
 
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Stored Luau functions as keys. A function lives under art::tfunction in whichever key
 # space the command ran in, so SETF/GETF/REMF/KEYSF are SET/GET/REM/KEYS with a
@@ -10,7 +14,7 @@ import barch
 # No calling yet - this covers the storage half: what gets written, what gets refused,
 # and that the function range and the ordinary key range cannot see each other.
 
-PORT = 14000
+PORT = scale.port(default=14000)
 
 GREET = 'function call(who) return "hello " .. who end'
 COUNT = 'function call(...) return select("#", ...) end'

@@ -1,11 +1,17 @@
 print("loading remotetest.py")
+import scale
 import time
 
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=13000)
 print("starting server")
-barch.start("127.0.0.1",13000)
+barch.start("127.0.0.1", PORT)
 print("server started")
-k = barch.KeyValue("127.0.0.1",13000)
+k = barch.KeyValue("127.0.0.1", PORT)
 #k = barch.KeyValue()
 k.set("key1","value1")
 for i in range(100000):
@@ -18,7 +24,7 @@ for i in range(100000):
 assert(k.get("key1")=="value1")
 print(f"k.get(str(1000))={k.get(str(1000))}")
 assert(k.get(str(1000))==str(1000))
-l = barch.List("127.0.0.1",13000)
+l = barch.List("127.0.0.1", PORT)
 # push() is LPUSH, which prepends now, as in redis. So a1 then a2 leaves a2 at the head,
 # and b1 then b2 leaves the list as b2 b1 a2 a1. pop() answers with what it removed
 # rather than with the length left behind - len() is what reports that. See TODO 38

@@ -1,6 +1,10 @@
+import scale
 import time
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # A stored function must never be evicted. It is a command, not data: losing one to
 # memory pressure deletes a command, and because a session keeps whatever it compiled,
@@ -10,7 +14,7 @@ import barch
 # This runs in a process of its own because it drops maxmemory far enough to make the
 # sweeper take almost everything, which no other test would survive.
 
-PORT = 14083
+PORT = scale.port(default=14083)
 KEYS = 500
 
 barch.start("0.0.0.0", PORT)

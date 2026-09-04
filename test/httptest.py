@@ -1,5 +1,6 @@
 # Crow HTTP for stored Luau: transport(), GET html, POST json via simdjson.
 # Concurrent ingress hammers store.locked against overlapping RESP writes.
+import scale
 import http.client
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8,13 +9,16 @@ import time
 import redis
 import barch
 
-PORT = 14088
-HTTP_PORT = 18088
-UP_PORT = 18089
+PORT = scale.port(default=14088)
+HTTP_PORT = scale.port(1, default=18088)
+UP_PORT = scale.port(2, default=18089)
 
 import http.server
 import socketserver
 import threading
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 
 class Upstream(http.server.BaseHTTPRequestHandler):
@@ -130,12 +134,12 @@ end
 function transport()
     return {
         kind = "http",
-        port = 18088,
+        port = %d,
         bind = "127.0.0.1",
         keys = {"ECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS"},
     }
 end
-'''
+''' % HTTP_PORT
 
 # a handler that stays busy long enough for STATUS to catch it running - TODO 181.
 # No clock in the sandbox, so the wait is a loop; the count is well inside the

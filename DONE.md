@@ -9162,3 +9162,533 @@ readers do not move the ticker, and `modify<T>()` against
 `logical_allocator::read<T>()` is a question of intent, not behaviour - the
 flag is ignored the whole way down. The race is unaffected: it needs only that
 the page moved between two shared sections, which writers do.
+
+## 192. The const node cache no longer writes shared state [03-09-2026]
+
+*Was `TODO.md` entry 202.*
+
+The const `refresh_cache()` in `nodes.h` now resolves every time and touches
+nothing:
+
+    template<typename T>
+    const T *refresh_cache() const {
+        return address.get_ap<alloc_pair>().get_nodes().read<T>(address);
+    }
+
+The non-const overload keeps its cache. A writer holds the latch exclusively,
+so nothing else can be looking at those fields while it updates them; it was
+only the const path, running under the *shared* latch with other readers
+alongside it, that had a problem.
+
+### On the two questions the entry asked
+
+`modify<T>()` against `read<T>()` turned out to be a question of intent rather
+than behaviour - see the correction in DONE 191. `basic_resolve` uses its
+`modify` argument only in a log line, and the arena's
+`get_page_data(logical_address, bool)` leaves the parameter unnamed and
+unused, so neither call moves the ticker or does anything the other does not.
+`read<T>()` is used here because a const method asking for write resolution
+reads wrong, not because it changes what happens.
+
+That left publishing the two fields together, and the answer is not to publish
+them at all. Packing a pointer and a ticker into one atomic word means either
+a 16 byte atomic or a tagged pointer betting on 48 bit addresses, and both are
+a lot of machinery for a cache that turns out not to be paying for itself.
+
+### The cache was not worth anything here
+
+memtier, the DONE 187 setup, 1M keys preloaded, 80:20 read:write, pipeline 50,
+three reps:
+
+| | rep 1 | rep 2 | rep 3 | median |
+| --- | --- | --- | --- | --- |
+| cached, 1 thread | 596,035 | 605,070 | 598,525 | 598,525 |
+| resolving, 1 thread | 603,801 | 622,365 | 585,617 | 603,801 |
+| cached, 4 threads | 2,147,831 | 2,176,302 | 2,176,132 | 2,176,132 |
+| resolving, 4 threads | 2,167,608 | 2,182,858 | 2,170,139 | 2,170,139 |
+
+The spreads overlap in both directions, so there is nothing to claim either
+way - removing the cache costs nothing measurable. That is not surprising once
+the resolve is read: `get_page_data` is a couple of bounds checks and a
+pointer add, against a load, a compare and a ticker fetch to decide whether the
+cache was still good.
+
+### Verified, and how the compression case was got wrong first
+
+Chaos test under TSan, `nodes.h` reports:
+
+| | compression off | compression on |
+| --- | --- | --- |
+| before | 12 | 62 |
+| after | 0 | 0 |
+
+Compression on (`BARCH_COMPRESSION=zstd`, which the env config in
+`configuration.cpp:1647` picks up) makes the path five times hotter, which is
+the point - that is the config where the pages actually move and a stale
+pointer stops addressing the right bytes.
+
+A first attempt at the compression evidence was worthless and is worth
+recording. A purpose-built test - 6000 keys, eight reader threads verifying
+every value against two writers, compression on - reported no mismatches and
+no `nodes.h` races after the fix. Running the same test against the pre-fix
+build produced no `nodes.h` races either, which means it never reached the
+racing path and its clean result said nothing at all. The chaos test does
+reach it, and the before/after above is from that.
+
+`ctest` on the coverage build at the CI's thread shape: 76/76. Chaos under
+TSan with compression on is also free of use-after-free and invalid mutex.
+
+## 193. The hash_arena races are INFO again [03-09-2026]
+
+*Was `TODO.md` entry 203.*
+
+Both clusters are the same thing as the allocator counters in DONE 191, and
+so is a large slice of everything else still being reported: `INFO` and
+`get_statistics` read scalars out of every shard without taking the shard
+latch, while writers update them under it.
+
+### The two clusters
+
+`hash_arena.h:276` is `return hidden_arena.size();`, reached from `:289`
+`page_count()`, `:698`, `logical_allocator.h:769` `get_page_count()` and then
+`info_api.cpp:169`. The other side is a real page allocation -
+`hash_arena.h:69`, which is `hidden_arena[at] = {}`, under
+`logical_allocator.h:469`/`549`/`574` - holding the shard latch.
+
+`hash_arena.h:449` is `return page_data_size;` in `get_bytes_allocated()`,
+reached from `:827` and `info_api.cpp:166`. Same shape.
+
+### Why it stays a stale number
+
+The writer at `hash_arena.h:69` inserts into a hash map, which is more than
+bumping a counter, so it was worth checking whether anything on the reader
+side walks that map while it is being changed. Nothing does. Every access
+`INFO` makes is a scalar: `page_count()` reads `hidden_arena.size()`,
+`get_bytes_allocated()` reads `page_data_size`, `get_bytes_in_free_list()`
+reads `emancipated.get_added()`, `get_allocated()` reads `allocated`, and
+`get_size()` reads the shard size. None of them iterate.
+
+The one place that does copy the whole arena, `logical_allocator.h:948`
+`iterate_pages`, takes a `std::shared_lock` on the latch first and says so in
+a comment. So the arena is only ever walked under the latch, and what `INFO`
+does is read eight or nine 8-byte scalars that a writer may be updating. On
+x86-64 those do not tear, so the visible effect is a slightly stale figure in
+an `INFO` line.
+
+### It is most of what is left
+
+Counting races whose report mentions `info_api.cpp` or `get_statistics`
+(`shard.cpp:64`/`:65`) anywhere:
+
+| | total data races | with INFO on one side |
+| --- | --- | --- |
+| compression off | 142 | 54 |
+| compression on | 68 | 21 |
+
+So roughly a third to two fifths of everything TSan still reports on this
+codebase is one root cause: `barch::all_shards` takes `ksp().lock` to copy the
+space map and then hands each shard to the callback with no shard latch at
+all.
+
+The `hash_arena` frames themselves did not appear at all in the compression-on
+run. They are not compression dependent - they need `INFO` to land at the same
+moment as a page insert, and how often that happens swings a lot between runs.
+
+### Not fixed here
+
+The fix is a shared latch per shard inside the `INFO` and `get_statistics`
+callbacks - on the reader, not the counters, since `allocated` is touched on
+every node allocation and `INFO` is rare. That is a deliberate change to what
+`INFO` costs: a shared latch blocks writers on that shard while it is held,
+so `INFO` would briefly stall writes on each of 347 shards in turn rather than
+reading through them. Worth doing, but it is a decision about `INFO`, not a
+bug fix, so it is TODO 204.
+
+## 194. INFO takes the shard latch [03-09-2026]
+
+*Was `TODO.md` entry 204.*
+
+`barch::all_shards` takes `ksp().lock` to copy the space map and then calls
+back holding nothing, so `INFO` and `get_statistics` read a dozen shard
+scalars while writers update them under the shard latch. Now the three
+callbacks - two in `get_statistics`, one in `INFO memory` - take a
+`shared_latch` on each shard.
+
+On the reader, not the counters: `allocated` is touched on every node
+allocation and statistics are rare, so an atomic there would be paid for
+constantly to fix something read a few times a second.
+
+While there, `get_statistics` made two `all_shards` passes over every shard
+for two figures that come off the same object. That is one pass now, which is
+a third fewer latch acquisitions on the `INFO memory` path, since it calls
+`get_statistics` and then walks the shards again itself.
+
+### What it costs
+
+`INFO memory` latency, and memtier 80:20 at 4 threads with an `INFO memory`
+loop running against it, three reps:
+
+| | INFO idle avg | under load avg | memtier best | memtier worst |
+| --- | --- | --- | --- | --- |
+| before, run 1 | 0.142ms | 0.158ms | 2,055,676 | 1,829,572 |
+| before, run 2 | 0.156ms | 0.154ms | 2,068,120 | 1,967,706 |
+| latched, run 1 | 0.198ms | 0.195ms | 2,063,157 | 1,488,115 |
+| latched, run 2 | 0.190ms | 0.196ms | 2,065,446 | 1,504,923 |
+| latched, one pass | 0.192ms | 0.181ms | 2,070,505 | 1,599,440 |
+
+`INFO` itself goes from about 0.15ms to about 0.19ms, which is what 347
+shards' worth of shared latches costs. Best case throughput does not move at
+all - 2.05M to 2.07M throughout.
+
+The worst of the three reps is where it shows. That rep dips in every run,
+before and after, so the harness is doing something there rather than the
+change; but the dip deepens from 1.83-1.97M to 1.49-1.50M with the latch, and
+merging the two passes brings it back to 1.60M. Worth being plain about: this
+is with `INFO memory` called about 5000 times a second, which is not a rate
+anything real uses. A monitor polling every few seconds would not find this.
+
+### What it buys
+
+Chaos test under TSan, with `ci/tsan.supp`:
+
+| | total data races | with INFO on one side |
+| --- | --- | --- |
+| before | 142 | 54 |
+| after | 40 | 0 |
+
+The one report left matching `info_api.cpp` is a grep artifact - the race is
+`shard.cpp:528` against `shard.cpp:1812`, nothing to do with statistics.
+
+So this took out the largest remaining cluster and a bit over two thirds of
+everything TSan still reported. What is left is a short tail: the session call
+counter at `asio_resp_session.h:355` (6), `art.cpp:1368` against
+`shard.cpp:936` (3), `shard.h:374` against `:384` (2), and singles.
+
+`ctest` on the coverage build at the CI's thread shape: 76/76 pass.
+
+## 195. The per-command statistics are atomic now [03-09-2026]
+
+*Was `TODO.md` entry 205.*
+
+`barch_info::calls` and `barch_info::total_nanos` are written by every session
+thread that runs a command - `asio_resp_session.h:355`, `barch_parser.h:125`,
+`swig_api.cpp:683` and the asynchronous path at `asio_resp_session.h:596` -
+read by `INFO commandstats`, and reset by `CONFIG RESETSTAT`. All of it
+unsynchronised.
+
+Every access now goes through `std::atomic_ref` with relaxed ordering, wrapped
+in `note_command_call`, `note_command_nanos`, `command_calls`, `command_nanos`
+and `reset_command_stats` in `barch_apis.h`. `atomic_ref` rather than making
+the members `std::atomic`: `barch_info` has a defaulted move assignment the
+table relies on, and an atomic member would delete it.
+
+`INFO commandstats` also read `calls` three times per line - once for the
+test, once to print and once to divide - and now takes one snapshot, so a line
+cannot report a count it did not divide by.
+
+### The performance question, which did not resolve
+
+The worry was that this puts a locked instruction on a path that runs once per
+command, on a cache line every session thread shares for a hot command. Three
+measurements, memtier 80:20, pipeline 50:
+
+| | 1 thread median | 4 thread median |
+| --- | --- | --- |
+| plain `++` (earlier run) | 602,569 | 2,208,583 |
+| `fetch_add` | 591,229 | 2,169,960 |
+| relaxed load and store | 590,124 | 2,136,862 |
+
+That looks like about 1.8%, and the load-and-store alternative - which would
+have been acceptable, since an approximate count is fine for commandstats -
+came out no better, suggesting the cost was the cache line rather than the
+lock prefix.
+
+Then the two were built and run back to back to confirm it:
+
+| | 1 thread | 4 threads |
+| --- | --- | --- |
+| plain `++` | 549,852 / 563,961 / 585,570 | 2,109,865 / 2,125,742 / 2,167,665 |
+| `fetch_add` | 615,429 / 625,557 / 605,476 | 2,149,918 / 2,174,565 / 2,175,483 |
+
+The atomic version measured *faster*, which it cannot be. The box drifts by
+more between adjacent runs than the difference being looked for - the same
+harness gave 2.21M early in the session and 1.97M later, on builds that were
+not meaningfully different. So the honest answer is that the cost is below
+what can be measured here, and the exact version is kept because there is no
+reason to accept an approximate count for it.
+
+Recorded because the first table on its own would have been reported as a
+1.8% regression, and it is not one.
+
+### Verified
+
+Chaos under TSan with `ci/tsan.supp`: 40 races down to 22, and no report at
+`asio_resp_session.h:355` at all. `ctest` on the coverage build: 76/76,
+including `TestConfig` and `TestRespInfoMemory`, which are the two that read
+these fields back.
+
+What is left is a short tail with no cluster in it: `shard.h:374` against
+`:384` three times, then singles across `shard.cpp`, `art.cpp`,
+`configuration.cpp` and `overflow_hash.h`.
+
+## 196. A short test set that runs under a sanitizer [04-09-2026]
+
+*Was `TODO.md` entry 206.*
+
+TSan found four real bugs in two days - DONE 186, 188, 190 and 192 - and every
+one of them came from running `chaostest.py` by hand, because the full suite is
+487 seconds uninstrumented and the sanitizer multiplies that. Now:
+
+    cmake -B build-tsan -DTEST_OD=ON -DSANITIZE=thread -DCMAKE_BUILD_TYPE=RelWithDebInfo
+    cmake --build build-tsan --target barch --parallel 2
+    ( cd build-tsan ; BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure )
+
+18 tests, **269 seconds**, all passing.
+
+### The three pieces
+
+**`test/scale.py`.** A multiplier read from `BARCH_TEST_SCALE`, unset meaning
+1.0, so an ordinary run is untouched - the full suite still passes 76/76 in 487
+seconds. `scaled(n, floor)` refuses to go below a floor, because a count that
+scales to zero does not run a small version of a test, it runs none of it and
+still reports success. `env_int`/`env_float` let a test keep its own knob and
+have an explicit setting win, which is how `BARCH_PERF_ENTRIES` and
+`CHAOS_SECONDS` survive.
+
+Applied to globperftest, asyncpipelinetest, chaostest, spacethreadtest and the
+valkey differential, which is where the time was.
+
+**`-DSANITIZE=thread|address` in CMake.** Adds the flags, finds the runtime, and
+prefixes `PYTHON3_EXEC` with the preload and `setarch -R` the python tests need.
+Both are needed because `_barch.so` is dlopened: without the preload the
+interceptors never install, and without `setarch -R` TSan dies on
+`unexpected memory mapping` before the first test. Since all 55 python tests go
+through `PYTHON3_EXEC`, that is one place rather than 55. `address` is wired
+identically and is *not* claimed to work - it has not been run to a clean pass.
+
+**A `short` ctest label**, on the 23 tests that put several threads through the
+server at once, plus `TestClean` and the four install tests so the set stands on
+its own.
+
+### What went wrong on the way, which is the useful part
+
+The first run had 18 of 18 tests failing. Four separate causes, none of them
+"the sanitizer found something":
+
+1. TSan's default `exitcode=66` means any finding fails the test, and there are
+   still known-benign races in the tail (DONE 193, 195), so everything failed.
+   That is now `SANITIZE_EXITCODE`, defaulting to 0 - report, do not fail. 66 is
+   where this should end up once the tail is empty, and it is one flag away.
+2. `LD_PRELOAD` is inherited by child processes, and `git` and `valkey-server`
+   are not instrumented, so they died on it. `scale.py` drops the variable at
+   import: the runtime is already loaded in this process and `LD_PRELOAD` is
+   only read at exec, so it costs nothing here and leaves children clean. Tests
+   that spawn now import scale for that reason alone.
+3. Two of my own scaling bugs. asyncpipelinetest asserted `SEED_KEYS + 2000`
+   while the loop had become scaled - the literal is a named constant now.
+   lrutest was worse: its assertions are about absolute memory pressure, not key
+   counts, so a smaller run means eviction keeps up and `oom_avoided_inserts`
+   stays zero. Scaling the cap with it did not fix that. It is unscaled and out
+   of the short set, with a comment saying why.
+4. `TestBarchPy` failed on a key count because the short set skipped `TestClean`
+   and loaded `.dat` files a previous run had left behind. A subset of a suite
+   that shares a build directory is not automatically a valid suite.
+
+### Verified
+
+- Short set under TSan: 18 tests, 269s, 100% pass.
+- Full suite, no scale, no sanitizer: 76/76 in 487s - unchanged from the 510s
+  before, within the drift this box shows.
+- A deliberately failing assertion still exits non-zero through the sanitized
+  runner, so `exitcode=0` suppresses sanitizer findings and nothing else.
+
+## 197. Per-test directories and ports, and ctest -j [04-09-2026]
+
+*Was `TODO.md` entry 207.*
+
+The short set now runs in parallel: **80.9s serial, 26.3s at `-j8`**, 21 tests,
+all passing. The full suite is not there yet and the entry says why.
+
+### What was in the way
+
+Nothing was isolated. Every test ran in the build directory and wrote its
+shards there - 3535 `.dat` files in one place - and 34 test files had a port
+literal, eighteen of them 14000 and ten 15000. There is no data directory
+setting in barch; files go where the cwd is.
+
+### What was done
+
+**A directory per test.** `WORKING_DIRECTORY` is a settable test property, so a
+loop over `get_property(DIRECTORY PROPERTY TESTS)` does all 72 rather than
+editing 77 `add_test` calls. A test that already chose a directory keeps it -
+`TestBarchList` and `TestBarchSimpleClusterRPC` run in `TEST_BUILD_PATH`
+because that is where the valkey they start lives - and those two get a
+`RESOURCE_LOCK` instead, since they share it.
+
+`PYTHON3_EXEC` had to become absolute for that to work, and two `add_test`
+calls said `${CMAKE_BINARY_DIR}/${PYTHON3_EXEC}`, which had been harmless while
+it was relative and became `/build//build/venv/...` once it was not.
+
+**A port per test.** ctest hands each one `BARCH_TEST_PORT`, twenty apart
+because a few need more than one - fetchluautest binds a web server and a crow
+port beside its own. `scale.port(default=N)` falls back to the old literal when
+the variable is unset, so running a test by hand is unchanged. Fifteen scripts
+converted, which is the short set.
+
+**Fixtures instead of a race.** `TestClean` runs `rm -f *.dat t/*/*.dat` and the
+install tests build the venv. Under `-j` they were running beside everything
+else, and TestClean deleting a directory underneath a live test is what five
+tests failed on the first time this was tried. They are `FIXTURES_SETUP
+barch_env` now, everything else is `FIXTURES_REQUIRED barch_env`, and the
+install chain has explicit `DEPENDS` because `-j` does not keep definition
+order.
+
+**A 600s `TIMEOUT`**, because the interesting failure mode here is not a failure.
+Two tests on one port do not error - the client connects to the other test's
+server and blocks on a read - and ctest's default would have held the run open
+for 1500s. This was found the way you would expect: a `-j8` run that had to be
+interrupted.
+
+### What is not done
+
+21 scripts still have a port literal. Rather than let them collide, the default
+is a shared `RESOURCE_LOCK`, so `ctest -j` runs them one at a time and a test
+joins `_barch_parallel_safe` in `CMakeLists.txt` when its script has been
+converted. That makes `-j` safe on the whole suite but not yet fast on it -
+measured, the full suite at `-j8` is no better than the 499s it takes serially,
+because almost everything is holding the lock. The win is real only for the
+short set until the rest are converted. See TODO 208.
+
+### Verified
+
+- Short set: 21 tests, 80.9s serial, 26.3s at `-j8`, all passing.
+- Full suite serial: 76/76 in 499.9s, unchanged from before any of this.
+- No stray listeners or processes left behind after an interrupted parallel run.
+
+## 198. Tests make their own directory [04-09-2026]
+
+*Was `TODO.md` entry 209.*
+
+Right, and for a reason DONE 197 got wrong. Putting the isolation in
+`WORKING_DIRECTORY` made it a property of the launcher: `python3
+test/functiontest.py` still wrote its shards into the shared build root,
+because ctest was the thing doing the isolating. Now the test does it:
+
+    scale.workdir()
+
+right after the imports, which makes `<build>/t/<name>` and moves into it. All
+48 python tests call it. The directory half is out of the CMake loop, which
+still hands out the port - a test cannot pick that for itself without knowing
+about the others.
+
+Checked directly: running `mergetest.py` by hand from the build root lands in
+`t/mergetest` and leaves nothing behind.
+
+### Named, not a uuid
+
+A uuid would guarantee an empty directory, at the cost of not being able to
+find it afterwards and of leaving one behind per run - and these directories
+hold thousands of `.dat` files. The name comes from `BARCH_TEST_NAME`, which
+ctest sets, falling back to the script name when run by hand.
+`BARCH_TEST_UNIQUE=1` appends a uuid for when a guaranteed-empty directory
+matters more.
+
+The test name rather than the script matters: `TestScanGuarantees` and
+`TestScan` are both `scantest.py`, as are the two `redispytest.py` runs, and
+keying on the script put two tests in one directory - which is the thing this
+is for. The reverse case exists too: `largetest.py` and `repltest.py` are each
+run twice and the second reads what the first saved, so they ask for a shared
+name explicitly.
+
+### Half-converted was worse than either end
+
+Moving fifteen tests out and leaving the rest in the build root took the suite
+from 76/76 to 60/76. The tests that stayed had been depending on the ones that
+left to clean up after them - `expiretest.py` asserts a TTL on keys it expects
+to be absent, and they were not, because nothing had flushed the directory any
+more. That coupling was always there; isolating half the tests is what made it
+visible. Converting the rest fixed all sixteen.
+
+Three more surfaced on the way, all the same shape - something that is not the
+test process:
+
+- `envconfigtest.py` builds a child script as a string, and the insertion went
+  into the template rather than the test. It ran `scale.workdir()` in a child
+  that had never imported scale.
+- `rangeconverttest.py` re-executes itself for its second phase. The child
+  called `workdir()` from inside the directory the parent had already moved to
+  and made another one inside it, so it could not see what phase one wrote.
+  `workdir()` pins `BARCH_TEST_ROOT` in the environment before it moves, so a
+  child resolves to the same place.
+- `valkeytrans/differential.py` was the one python test not converted, and it
+  failed with what looked like real behavioural mismatches - `zpopmin` not
+  returning WRONGTYPE, `ZMSCORE` returning empties. It was reading the shared
+  root. Isolating it fixed it, which is worth remembering: a dirty directory
+  presents as barch getting the answers wrong.
+
+### Verified
+
+- Full suite: 76/76 in 499.3s, unchanged from 499.9s before.
+- Short set: 21 tests, 26.9s at `-j8`.
+- A test run by hand isolates itself and leaves the build root clean.
+
+The 698 `.dat` files still in the build root are the lua and C++ tests under
+TestStarter, which have no way to call this. They hold the `legacy_ports` lock,
+so nothing runs beside them.
+
+## 199. The rest of the ports, and the suite in parallel [04-09-2026]
+
+*Was `TODO.md` entry 208.*
+
+**502s serial, 152s at `-j4`**, 76/76 either way. 3.3x.
+
+### The conversion
+
+31 more scripts moved to `scale.port()`. Most were a plain `PORT = <literal>`
+and mechanical. Four were not:
+
+- `httptest.py` binds three - its own, a crow port and an upstream - and the
+  crow port also appears inside a lua `transport()` string, so the string
+  became a `%d` formatted with the port the python side uses. Otherwise the
+  two halves would have disagreed about where to connect.
+- `envconfigtest.py` starts seven child servers on 14061-14067, now seven
+  offsets in its own block.
+- `repltest.py` passes its port as a *string*, and both ctest runs of it share
+  a directory because the second reads what the first saved.
+- `valkeytrans/differential.py` starts a valkey and a barch side by side, 7811
+  and 7812.
+
+A lot of the numbers in these files are not ports - key values, timeouts,
+`foreign_pool_max_age_ms: 15000` - so this was done by looking at bind and
+connect sites rather than by replacing literals.
+
+### The lock is now the short list
+
+It used to be an allow-list of what could run in parallel, which was most of the
+suite by the end. It is the opposite now, which is a much shorter thing to
+maintain: the 18 lua and C++ tests under TestStarter, which bind from lua and
+cannot read the environment, plus `TestBarchList` and
+`TestBarchSimpleClusterRPC`, which share `TEST_BUILD_PATH` where the valkey
+they start lives. `routetest.py` also publishes to 13000 from lua as well as
+from python, so both sides would have to move together.
+
+Six tests needed nothing at all - testbarch, lrutest, expiretest, hybridtest,
+bindingtest, listtest never bind a port, so the directory isolation from
+DONE 198 was already enough for them.
+
+### -j4, not -j8
+
+`-j8` runs in 147-149s against `-j4`'s 152-153s - no faster, and it failed once
+per run: `TestRangeShardRouting` on one run, `TestForeignMysql` on the next.
+A different test each time, both passing alone, which is contention rather than
+anything shared: this is a coverage build on a box already running the
+instrumented server. `-j4` did 76/76 twice.
+
+So the speedup is real but it comes from the first few jobs. Past that the
+tests are competing for the same cores as the servers they start.
+
+### Verified
+
+- Serial: 76/76 in 502.6s.
+- `-j4`: 76/76 in 153.3s and 152.2s.
+- `-j8`: one flaky failure per run, no faster.

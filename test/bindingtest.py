@@ -1,4 +1,8 @@
+import scale
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Exercises the language binding surface in src/swig_api.cpp, which reads replies
 # through rpc_caller's flat view rather than over RESP.

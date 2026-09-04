@@ -9,6 +9,8 @@
 # After a quiet period the server has to answer SET, GET, KEYS and a
 # gram RANGE again.
 import os
+
+import scale
 import random
 import threading
 import time
@@ -16,12 +18,15 @@ import time
 import redis
 import barch
 
-PORT = 14083
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14083)
 SEED = int(os.environ.get("CHAOS_SEED", str(int(time.time()) & 0xFFFFFFFF)))
 WORKERS = min(32, max(8, (os.cpu_count() or 4) * 4))
-SECONDS = float(os.environ.get("CHAOS_SECONDS", "8"))
+SECONDS = scale.env_float("CHAOS_SECONDS", 8.0, floor=2.0)
 RESTARTS = int(os.environ.get("CHAOS_RESTARTS", "2"))
-SEED_KEYS = 400
+SEED_KEYS = scale.scaled(400, floor=50)
 
 TRANSIENT = (
     redis.exceptions.ConnectionError,

@@ -1,5 +1,9 @@
+import scale
 import time
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 barch.setRoute(0,"127.0.0.1",14500)
 barch.clearAll()
 barch.saveAll()

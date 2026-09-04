@@ -1,9 +1,14 @@
 import os
+
+import scale
 import random
 import time
 
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Measures what the optimised glob path in src/glob.cpp is actually worth, through
 # the VALUES command, over two corpora chosen to sit at opposite ends of what the
@@ -33,7 +38,7 @@ import barch
 # COUNT is used throughout so the reply is a single integer and reply building never
 # enters the measurement.
 
-PORT = 14000
+PORT = scale.port(default=14000)
 
 VALUE_LEN = 1000
 # about 110 MiB of values per phase by default, which is enough that the matcher rather
@@ -41,7 +46,7 @@ VALUE_LEN = 1000
 # where the machine cannot spare that much - a shared CI runner that has already run the
 # rest of the suite in the same directory, for instance - at the cost of a noisier
 # measurement.
-ENTRIES = int(os.environ.get("BARCH_PERF_ENTRIES", "115000"))
+ENTRIES = scale.env_int("BARCH_PERF_ENTRIES", 115000, floor=2000)
 
 # a single VALUES over this corpus is milliseconds on an idle machine. The timeout is
 # far above anything healthy, and exists so that a server which stops answering gives a

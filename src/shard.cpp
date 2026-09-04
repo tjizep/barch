@@ -61,13 +61,23 @@ art_statistics barch::get_statistics() {
     as.node256_nodes = (int64_t) statistics::n256_nodes;
     as.node256_occupants = as.node256_nodes ? ((int64_t) statistics::node256_occupants / as.node256_nodes) : 0ll;
     as.node48_nodes = (int64_t) statistics::n48_nodes;
+    // all_shards holds nothing while it calls back - it takes ksp().lock only to
+    // copy the space map - so these counters were read while writers updated them
+    // under the shard latch. A shared latch here rather than atomics on the
+    // counters: they are touched on every allocation and statistics are rare, so
+    // the cost belongs on this side. See TODO 204.
+    // One pass, not two. all_shards holds nothing while it calls back - it takes
+    // ksp().lock only to copy the space map - so these counters were read while
+    // writers updated them under the shard latch. A shared latch here rather than
+    // atomics on the counters: they are touched on every allocation and statistics
+    // are rare, so the cost belongs on this side. Both figures come off the same
+    // shard, so taking its latch twice was paying for the same walk twice.
+    // See TODO 204.
     barch::all_shards( [&as](const shard_ptr &shard) {
-        as.bytes_allocated += (int64_t) shard->get_ap().get_leaves().get_allocated() + shard->get_ap().get_nodes().get_allocated();
-    });
-
-    //statistics::addressable_bytes_alloc;
-    barch::all_shards( [&as](const shard_ptr &shard) {
-        as.bytes_interior += (int64_t)shard->get_ap().get_nodes().get_allocated();
+        shared_latch release(shard->get_latch());
+        const auto interior = (int64_t) shard->get_ap().get_nodes().get_allocated();
+        as.bytes_allocated += (int64_t) shard->get_ap().get_leaves().get_allocated() + interior;
+        as.bytes_interior += interior;
     });
     as.value_bytes_compressed = (int64_t) statistics::value_bytes_compressed;
     as.vacuums_performed = (int64_t) statistics::vacuums_performed;

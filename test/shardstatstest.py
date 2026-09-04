@@ -1,5 +1,9 @@
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # The content counters (leaf_nodes, the node size counts, logical_allocated) are gauges: they
 # say what the server is holding right now. They used to be process globals with nothing
@@ -11,7 +15,7 @@ import barch
 # So this measures a gauge against something independent of it - DBSIZE - across an
 # operation that touches only part of the store.
 
-PORT = 14300
+PORT = scale.port(default=14300)
 
 barch.start("0.0.0.0", PORT)
 r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)

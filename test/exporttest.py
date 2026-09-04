@@ -1,7 +1,11 @@
+import scale
 import os
 
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # A logical export is the commands that would rebuild the data, not a copy of the pages it
 # happens to live in. That is the whole point of it: storage_version refuses a shard file
@@ -10,7 +14,7 @@ import barch
 # So the test is a round trip through an empty store. Anything that survives FLUSHALL and
 # comes back the same is exported faithfully; anything that does not is a hole.
 
-PORT = 14200
+PORT = scale.port(default=14200)
 
 barch.start("0.0.0.0", PORT)
 r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)

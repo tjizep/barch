@@ -1049,17 +1049,18 @@
 
 201. [Done] Triage of the ART and allocator races [03-09-2026] Nr 191 fe5911e
 
-202. The const `refresh_cache()` in `nodes.h` races with itself between
-    concurrent readers, and can return a stale `dcache` - see DONE 191
-    for the interleaving. Two things to settle, probably together.
-    First, whether the const path should call
-    `logical_allocator::read<T>()` instead of `modify<T>()`: a read has
-    no business setting the modify flag or bumping the page ticker, and
-    doing so is what lets readers invalidate each other. Second, what
-    makes the cache safe for concurrent readers once that is done -
-    the two fields still need to be published together, so either one
-    atomic word holding both, or accept the recompute and drop the
-    cache. Settle with: a TSan chaos run clean of `nodes.h:442`, no
-    throughput loss on the DONE 187 memtier setup, and a run with
-    `compression` on, since that is the config where a stale pointer
-    stops being harmless.
+202. [Done] The const node cache no longer writes shared state [03-09-2026] Nr 192 82e9325
+
+203. [Done] The hash_arena races are INFO again [03-09-2026] Nr 193 82e9325
+
+204. [Done] INFO takes the shard latch [03-09-2026] Nr 194 82e9325
+
+205. [Done] The per-command statistics are atomic now [03-09-2026] Nr 195 82e9325
+
+206. [Done] A short test set that runs under a sanitizer [04-09-2026] Nr 196 82e9325
+
+207. [Done] Per-test directories and ports, and ctest -j [04-09-2026] Nr 197 82e9325
+
+208. [Done] The rest of the ports, and the suite in parallel [04-09-2026] Nr 199 82e9325
+
+209. [Done] Tests make their own directory [04-09-2026] Nr 198 82e9325

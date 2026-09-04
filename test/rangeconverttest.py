@@ -12,11 +12,16 @@
 # same space, which is where the conversion happens.
 import os
 import subprocess
+
+import scale
 import sys
 
 import barch
 
-PORT = 14075
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14075)
 SHARDS = 4
 KEYS = 5000
 SPACE = "rs_conv"

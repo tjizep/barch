@@ -148,7 +148,7 @@ long long calls(const std::string& name) {
     auto barch_functions = functions_by_name();
     auto f = barch_functions->find(name);
     if (f!=barch_functions->end()) {
-        return f->second.calls;
+        return command_calls(f->second);
     }
     return 0;
 }
@@ -680,7 +680,7 @@ std::vector<Value> Caller::call(const std::string &method, const std::vector<Val
         return {};
     }
     auto f = ic->second.call;
-    ++ic->second.calls;
+    note_command_call(ic->second);
 
     result.clear();
     if (ic->second.is_write()) {

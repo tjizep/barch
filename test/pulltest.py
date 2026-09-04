@@ -2,6 +2,8 @@ import sys
 import os
 import barch
 import subprocess
+
+import scale
 import atexit
 import time
 

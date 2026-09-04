@@ -1,5 +1,9 @@
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Rights per key space: the differences from a user's global ones, so a space with no
 # rule leaves them exactly as they are. See TODO 135.
@@ -8,7 +12,7 @@ import barch
 #
 # Its own process because it writes users into the auth store.
 
-PORT = 14099
+PORT = scale.port(default=14099)
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)
 r = redis.Redis(host="127.0.0.1", port=PORT, db=0)

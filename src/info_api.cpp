@@ -2,6 +2,7 @@
 // Created by teejip on 8/12/25.
 //
 
+#include "counted_locks.h"
 #include "info_api.h"
 #include "module.h"
 #include "vk_caller.h"
@@ -160,6 +161,8 @@ int INFO(caller& call, const arg_t& argv) {
         uint64_t leaf_physical = 0, node_physical = 0;
         uint64_t free_list_bytes = 0, pages = 0, keys = 0, shards = 0;
         barch::all_shards([&](const barch::shard_ptr& s) {
+            // see TODO 204 - all_shards calls back holding nothing
+            shared_latch release(s->get_latch());
             auto& ap = s->get_ap();
             leaf_logical += ap.get_leaves().get_allocated();
             node_logical += ap.get_nodes().get_allocated();
@@ -294,19 +297,22 @@ int INFO(caller& call, const arg_t& argv) {
         std::string result = "";
         auto make_line = [&result, lower](const function_map::value_type& f) {
             std::string text;
-            if (f.second.calls > 0) { // for verbosity AND div-zero
-                auto micros = (double)f.second.total_nanos/1000.0f;
+            // one read each: these are written by every session thread, so the
+            // line is built from a snapshot rather than re-reading a moving value
+            const uint64_t calls = command_calls(f.second);
+            if (calls > 0) { // for verbosity AND div-zero
+                auto micros = (double)command_nanos(f.second)/1000.0f;
                 std::string line = "cmdstat_";
                 line += lower(text, f.first);
                 line += ":";
                 line += "calls=";
-                line += std::to_string(f.second.calls);
+                line += std::to_string(calls);
                 line += ",";
                 line += "usec=";
                 line += conversion::as_variable(roundn(micros,4)).s();
                 line += ",";
                 line += "avg_usec=";
-                line += conversion::as_variable(roundn(roundn(micros/f.second.calls,4), 4)).s();
+                line += conversion::as_variable(roundn(roundn(micros/calls,4), 4)).s();
                 line += "\n";
                 result += line;
             }

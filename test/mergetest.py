@@ -1,10 +1,16 @@
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14000)
 print("start merge test")
-barch.start("0.0.0.0", 14000)
+barch.start("0.0.0.0", PORT)
 # connect redis client to barch running inside this process
-r = redis.Redis(host="127.0.0.0", port=14000, db=0, protocol=2)
-r1 = redis.Redis(host="127.0.0.0", port=14000, db=0, protocol=2)
+r = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
+r1 = redis.Redis(host="127.0.0.0", port=PORT, db=0, protocol=2)
 r.execute_command("USE dest")
 r.set("a","desta")
 r.set("b","destb")

@@ -1,11 +1,15 @@
+import scale
 import re
 import redis
 import barch
 
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
 # exercises the "INFO MEMORY" section over RESP - the redis compatible fields, the
 # barch specific extras and the startup memory baseline collected while key spaces load
 
-PORT = 14000
+PORT = scale.port(default=14000)
 
 # every field redis reports in its own memory section that barch has an answer for
 REDIS_FIELDS = [

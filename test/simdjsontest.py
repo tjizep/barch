@@ -1,8 +1,12 @@
 # simdjson in stored Luau: parse, open/atPointer, encode.
+import scale
 import redis
 import barch
 
-PORT = 14087
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14087)
 
 print("start simdjson luau test")
 barch.start("0.0.0.0", PORT)

@@ -1,5 +1,9 @@
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # One name holds one kind of collection, and the kinds do not see each other's entries.
 #
@@ -9,7 +13,7 @@ import barch
 # and makes two kinds under one name possible instead - so the kind is claimed where a
 # collection is created, and that is most of what this asserts.
 
-PORT = 14100
+PORT = scale.port(default=14100)
 
 barch.start("0.0.0.0", PORT)
 r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)

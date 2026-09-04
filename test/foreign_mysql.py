@@ -1,6 +1,7 @@
 # MySQL foreign driver. env: and file: that cannot be resolved leave the
 # space off. A live GET runs when BARCH_MYSQL_DSN is set, or when docker
 # can start a mysql container, and the client library was linked.
+import scale
 import os
 import tempfile
 import time
@@ -8,7 +9,7 @@ import redis
 import barch
 import foreign_sql
 
-PORT = 14083
+PORT = scale.port(default=14083)
 
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)

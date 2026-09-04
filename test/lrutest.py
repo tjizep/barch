@@ -1,5 +1,9 @@
+import scale
 import barch
 import time
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 MAXK = 1000000
 barch.clear()
 barch.save()

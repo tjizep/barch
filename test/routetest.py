@@ -2,6 +2,8 @@ import sys
 import os
 import barch
 import subprocess
+
+import scale  # drops LD_PRELOAD for the valkey it spawns
 import atexit
 import time
 # test a simple cluster by adding publish replication and some routes

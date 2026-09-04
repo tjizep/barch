@@ -103,8 +103,7 @@ int CONFIG(caller& call, const arg_t& argv) {
         // as commandstats. Gauges are left alone - see statistics::reset_statistics
         statistics::reset_statistics();
         for (auto& f : *functions_by_name()) {
-            f.second.calls = 0;
-            f.second.total_nanos = 0;
+            reset_command_stats(f.second);
         }
         return call.push_simple("OK");
     }

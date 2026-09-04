@@ -2,7 +2,11 @@
 # GET and in-place SET should work through the hash, size must not
 # double-count, range still walks the tree, and turning hybrid off
 # leaves ART GET working.
+import scale
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 print("start hybrid test")
 barch.clear()

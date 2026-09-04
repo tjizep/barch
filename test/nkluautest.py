@@ -1,8 +1,12 @@
 # NumKong scalars and vectors in stored Luau: construct, + - *, compare.
+import scale
 import redis
 import barch
 
-PORT = 14086
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14086)
 
 print("start nk luau test")
 barch.start("0.0.0.0", PORT)

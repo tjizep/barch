@@ -2,13 +2,17 @@
 # require and io are refused. The instruction budget is a slice: a script
 # that needs more than one still returns. A runaway dies on the query
 # timeout, not on the first slice, and does not pin the foreign pool.
+import scale
 import threading
 import time
 
 import redis
 import barch
 
-PORT = 14082
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
+
+PORT = scale.port(default=14082)
 
 barch.start("0.0.0.0", PORT)
 barch.ping("127.0.0.1", PORT)

@@ -1,8 +1,12 @@
 import threading
 import time
 
+import scale
 import redis
 import barch
+
+# barch writes its shards to the cwd, so work somewhere of our own
+scale.workdir()
 
 # Guards the asynchronous call path in src/rpc/asio_resp_session.h.
 #
@@ -24,10 +28,11 @@ import barch
 #      with asynchronous ones, which is what the batch has to preserve while it runs
 #      the calls one at a time
 
-PORT = 14000
-ROUNDS = 40
-SEED_KEYS = 3000
-WRITE_PER_ROUND = 400
+PORT = scale.port(default=14000)
+ROUNDS = scale.scaled(40, floor=4)
+SEED_KEYS = scale.scaled(3000, floor=200)
+WRITE_PER_ROUND = scale.scaled(400, floor=40)
+AFTER_KEYS = scale.scaled(2000, floor=100)
 
 print("start async pipeline test")
 barch.start("0.0.0.0", PORT)
@@ -44,9 +49,9 @@ try:
     # the request spans what the parser reads in one go
     for _ in range(8):
         r.execute_command("VALUES", "*v1*", "COUNT")
-    r.mset({f"after:{k:05d}": "y" * 500 for k in range(2000)})
+    r.mset({f"after:{k:05d}": "y" * 500 for k in range(AFTER_KEYS)})
     assert r.get("after:00000") == b"y" * 500, "a write after a scan did not take"
-    assert r.dbsize() == SEED_KEYS + 2000, f"expected {SEED_KEYS + 2000} keys, got {r.dbsize()}"
+    assert r.dbsize() == SEED_KEYS + AFTER_KEYS, f"expected {SEED_KEYS + AFTER_KEYS} keys, got {r.dbsize()}"
     # those keys stay; the pipeline section below counts from whatever is here now
     base = r.dbsize()
 

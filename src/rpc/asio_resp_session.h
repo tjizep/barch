@@ -352,7 +352,7 @@ namespace barch {
                     return;
                 } else {
                     auto &f = ic->second.call;
-                    ++ic->second.calls;
+                    note_command_call(ic->second);
                     if (ic->second.is_write() && ic->second.is_data()
                         && barch::repl::has_destinations()) {
                         std::vector<std::string> owned(params.begin(), params.end());
@@ -593,7 +593,7 @@ namespace barch {
                     // the synchronous path - the reply is written when it resolves
                     if (!ctx->caller.has_blocks())
                         write_result<vector_stream>(ctx->caller, ctx->stream, r);
-                    fn->second.total_nanos += nanos(current);
+                    note_command_nanos(fn->second, nanos(current));
                 } else if (ctx->f) {
                     // a stored function: it is not in the table, so the context carries
                     // the only handle to it

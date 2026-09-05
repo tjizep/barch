@@ -283,6 +283,24 @@ bool scan_checkout(const std::string& root, std::vector<checkout_file>& files, s
     return true;
 }
 
+/** the walk LOADKEYS borrows - see barch::scan_directory */
+bool scan_as_keys(const std::string& dir, const std::string& prefix,
+                  std::vector<barch::import_file>& out, std::string& err) {
+    std::vector<checkout_file> files;
+    if (!scan_tree(dir, {}, prefix, files, err))
+        return false;
+    out.reserve(out.size() + files.size());
+    for (auto& f : files) {
+        barch::import_file one;
+        one.name = std::move(f.name);
+        one.source = std::move(f.source);
+        one.path = std::move(f.path);
+        one.luau = f.luau;
+        out.push_back(std::move(one));
+    }
+    return true;
+}
+
 barch::key_space_ptr dest_of(const std::string& space) {
     if (space.empty())
         return barch::get_keyspace("");
@@ -551,6 +569,11 @@ std::string do_sync(const std::string& pin) {
 } // namespace
 
 namespace barch {
+
+bool scan_directory(const std::string& dir, const std::string& prefix,
+                    std::vector<import_file>& out, std::string& err) {
+    return scan_as_keys(dir, prefix, out, err);
+}
 
 std::string sync_functions(const std::string& pin) {
     std::lock_guard<std::mutex> g(mu);

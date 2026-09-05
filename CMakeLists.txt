@@ -419,6 +419,25 @@ if (ADD_LUAU)
         if (NOT crow_POPULATED)
             FetchContent_Populate(crow)
         endif ()
+        # Crow does not set TCP_NODELAY on a connection it accepts, and its response
+        # goes out as two writes, so every keep-alive request after the first costs
+        # 40ms waiting for a delayed ACK. Run every configure rather than as a
+        # PATCH_COMMAND, because a PATCH_COMMAND only runs when the content is
+        # populated and an existing build directory would keep the unpatched copy.
+        # The script is idempotent and fails loudly if Crow has moved. See TODO 234.
+        execute_process(
+                COMMAND ${CMAKE_COMMAND}
+                        -DCROW_HTTP_SERVER_H=${crow_SOURCE_DIR}/include/crow/http_server.h
+                        -P ${CMAKE_SOURCE_DIR}/cmake/crow_tcp_nodelay.cmake
+                RESULT_VARIABLE _crow_patch_rc
+                OUTPUT_VARIABLE _crow_patch_out
+                ERROR_VARIABLE _crow_patch_err)
+        if (NOT _crow_patch_rc EQUAL 0)
+            message(FATAL_ERROR "could not patch Crow: ${_crow_patch_err}")
+        endif ()
+        if (_crow_patch_out)
+            message(STATUS "${_crow_patch_out}")
+        endif ()
         set(BARCH_HAS_CROW ON)
         set_property(SOURCE src/http_api.cpp src/foreign/crow_luau.cpp
                 APPEND PROPERTY COMPILE_OPTIONS -Wno-undef -Wno-unused-parameter)

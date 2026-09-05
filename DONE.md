@@ -11278,3 +11278,242 @@ extension fallback, four range cases including one that spans a chunk boundary,
 404 and `..` refused, 405 on POST, and eight concurrent downloads while a luau
 route is hit twenty times - all 200, which is the assertion that the pool is not
 being taken. Full suite 79/79.
+
+## 229. LOADFS, a directory imported as the file store [05-09-2026]
+
+*Was `TODO.md` entry 238, the LOADFS half of it.*
+
+    LOADFS <path> [root] [chunk]
+    barchd --load-fs PATH[:ROOT]
+
+Both go through one function, `barch::load_fs_directory` in `src/fs_api.cpp`, so
+the command and the boot option cannot drift apart.
+
+### Atomic, and what that costs
+
+The whole import lands or none of it does. The directory is walked, every file
+read and chunked, and *nothing is written* until all of it is in hand; then the
+existing value of every key the import will touch is snapshotted, and a failed
+write puts the snapshot back. So a directory with an unreadable file in it does
+not leave half an import behind, and neither does a write that fails part way.
+
+The cost is holding the import in memory while it is in flight, which was the
+accepted trade. TODO 239 is the way out of the ceiling that puts on the size of
+an import: `hash_arena` already mmaps its pages, but always
+`MAP_PRIVATE|MAP_ANONYMOUS`, so a named file backing would let a set larger than
+RAM be held.
+
+### It writes the layout the luau side reads
+
+`fs:m:<path>` and `fs:d:<path>|<n>`, the metadata json field for field. The test
+is the cross check rather than the shape: a 200KB file spanning four chunks is
+written by the C++ importer and read back by `fsget`, which is luau, byte for
+byte. If either side ever drifts, that fails.
+
+Content type comes from the extension, the same short table the HTTP side serves
+with. Dot files are skipped, directories recursed, and anything that is not a
+regular file - a socket, a device - ignored rather than read. Names are sorted
+before walking, so the same tree imports in the same order twice and a failure
+is reproducible.
+
+`barchd --load-fs` runs before the listener opens: a directory that will not
+load stops the server starting rather than being discovered by the first
+request.
+
+### The path bug that the first run found
+
+`gather` built the stored path as `at + name` when `at` was empty, so a file at
+the root became `fs:m:img/photo.png` with no leading slash, while the luau side
+writes `/img/photo.png`. LOADFS reported three files and nine keys, and every
+read of them came back nil. It is `at + "/" + name` now, `at` being empty at the
+root.
+
+### Verified
+
+`TestFileStore` covers: three files imported under a root, all three read back
+through the luau reader, metadata and types right, dot files skipped, the
+listing exactly what was imported, two refused imports leaving the space
+unchanged, and a second import over the top being the same content.
+
+By hand, since it needs a server: `barchd --load-fs <dir>:/assets` then a
+`kind = "files"` route over it, and `curl` gets back an image identical to the
+one on disk - the whole path from a directory to a browser without python
+anywhere.
+
+Full suite 79/79.
+
+### Still open in 238
+
+`LOADKEYS` - the on-demand version of what `function_sync.cpp` already does for
+`functions_dir`. That entry stays open for it.
+
+## 230. LOADKEYS, and deploy.py retired [05-09-2026]
+
+*Was `TODO.md` entry 238.*
+
+    LOADKEYS <path> [prefix]
+    barchd --load-keys PATH[:PREFIX]
+
+`.luau` becomes a stored function named after its stem, everything else a key
+named `prefix:sub:file`, dot files skipped.
+
+### The walk is shared, the apply is not
+
+The walk is the function sync's, exposed as `barch::scan_directory` in
+`function_sync.h`. There is no second implementation of what a directory means:
+LOADKEYS and the `functions_dir` sync agree because they call the same code.
+
+The apply is separate on purpose, and it is worth writing down why. The sync's
+`apply_dest` records what it wrote in `managed_data`, so that a file *removed*
+from the checkout is removed from the space on the next pass. Keys imported by
+hand have no checkout to go missing from - so if LOADKEYS went through
+`apply_dest`, the next `FUNCTIONS SYNC` would delete everything it had
+imported. An import is a one time write and this keeps it one.
+
+Atomic the same way LOADFS is: everything read first, the previous value of
+every name remembered - the source for a function, the value for a key - and
+the lot put back if a write fails. Two files that map to the same name are
+refused before anything is written, since finding that out half way through is
+no use.
+
+### deploy.py is gone
+
+`examples/http/deploy.py` did three things: `SETF` the eleven `.luau` files one
+at a time, `HTTP START CONF`, and curl the result. The first is now one
+command, the second always was one, and the third is curl. The README shows
+both routes, and they were run as written to check:
+
+```
+barchd --port 14000 --load-keys examples/http/luau
+redis-cli -p 14000 HTTP START CONF 18088 127.0.0.1
+curl http://127.0.0.1:18088/page
+```
+
+That is a directory of stored functions to a served HTTP endpoint with no
+python in the process and none driving it. `examples/python/*.py` are
+SortedDict benchmarks and stay - they were never about loading anything.
+
+### Verified
+
+`TestFileStore` covers: one directory giving one function and two keys, the
+function callable, the keys named after the path below the directory, dot files
+skipped, a prefix landing in front, a refused import leaving the space
+unchanged, and the real `examples/http/luau` directory loading all eleven
+functions with `page` answering afterwards. That last one is the assertion that
+deploy.py is actually replaced rather than approximately replaced.
+
+By hand: `barchd --load-keys examples/http/luau`, `HTTP START`, and both
+`/page` and `/echo` answer.
+
+Full suite 79/79.
+
+## 231. A key space for the boot imports [05-09-2026]
+
+*Was `TODO.md` entry 240.*
+
+    barchd --load-fs   PATH[:ROOT][@SPACE]
+    barchd --load-keys PATH[:PREFIX][@SPACE]
+
+Parsed from the right - the space off the last `@`, then the suffix off the last
+`:` - so a path may contain either character and still come out whole. For
+`--load-fs` the colon only counts when what follows starts with a slash, since a
+root is a path and a path with a colon in it should not be mistaken for one.
+
+The RESP commands are unchanged. `LOADFS` and `LOADKEYS` act on the caller's
+space, which `USE` selects, and that is the idiomatic way round - a command that
+took a space argument would be the odd one out.
+
+A name that is not a key space name is refused before anything is read, let
+alone written.
+
+### The three listeners
+
+Checking the refusal path turned up `failed to start server std::bad_alloc` in
+the log of a start-up that had correctly refused and exited 1. Nothing was
+wrong with the refusal; something else was starting a server.
+
+`set_configuration_value("server_port", ...)` calls
+`restarter::asynch_restart` (`configuration.cpp:422`), which stops and starts
+the listener on a thread of its own. barchd was writing `--port` through the
+configuration and then starting the listener itself, so one boot built it three
+times - the restarter's, barchd's own, and the restarter's again landing after -
+each tearing down the one before. On the refusal path that thread was starting a
+server while the process was exiting, which is where the bad_alloc came from.
+
+barchd keeps `--port` and `--bind` as local values now and passes them straight
+to `server::start`. One listener, and a refusal exits quietly. The underlying
+wart - recording a port starts a server as a side effect, which also affects
+`BARCH_SERVER_PORT` and the python binding - is TODO 241.
+
+### A name that cannot be a command
+
+The test first used `hello.luau`, whose stem becomes `HELLO`, which is the RESP
+handshake. The builtin wins and the stored function is unreachable by name. Not
+a defect in the import - worth knowing that a stored function cannot shadow a
+builtin, and worth not naming one after one.
+
+### Verified
+
+`TestBarchd`: a directory imported into `site` as keys and into `media` as the
+file store in one boot, with the default space getting neither; the function
+callable and the chunk readable after `USE`; exactly one listener start in a
+boot; and a bad space name exiting 1 with a message that says which name.
+
+Full suite 79/79.
+
+## 232. Crow patched for TCP_NODELAY [05-09-2026]
+
+*Was `TODO.md` entry 234.*
+
+`cmake/crow_tcp_nodelay.cmake` sets the option on every connection Crow accepts,
+and the 40ms every keep-alive request after the first was paying is gone:
+
+    before   0.21  40.77  40.93  41.31  41.39  42.28 ms
+    after    0.27   0.10   0.16   0.12   0.13   0.05 ms
+
+The diagnosis is DONE 225: Crow builds a buffer per header token, asio caps a
+scatter-gather write at 16 iovecs, so a response leaves as two `sendmsg` calls,
+and that is write-write-read with Nagle on. The second small write waits for an
+ACK the client has no reason to send promptly.
+
+### A script, not a diff
+
+`PATCH_COMMAND` was the obvious way and is the wrong one here: it runs when the
+content is populated, so every build directory that already has a `crow-src`
+would keep the unpatched copy and the fix would appear to work for whoever ran a
+clean configure and not for anyone else. The script runs on every configure
+instead, is a no-op when the marker is already there, and edits by anchor rather
+than by line.
+
+If the anchor is not found the configure **fails**. That is the important part: a
+Crow version bump that moves the accept handler must not silently produce a
+server with the 40ms back in it, and the message says to check whether Crow sets
+the option itself now before re-anchoring.
+
+### The test that keeps it fixed
+
+`TestHttpLuau` opens one keep-alive connection, sends six requests on it, and
+fails over 20ms. Every other test in that file opens its own connection, and the
+*first* request on a connection is fast - which is exactly why this went
+unnoticed for so long. Real clients keep the connection; the tests did not.
+
+Backing the patch out and rebuilding fails it as intended:
+
+    AssertionError: a keep-alive request took 41.4ms - TCP_NODELAY is not set
+    on the accepted socket, see cmake/crow_tcp_nodelay.cmake
+
+Twenty milliseconds is a floor rather than a benchmark - the signature is 40ms
+exactly, so anything well under it says Nagle is not in the way, and a loaded CI
+box will not trip it.
+
+### Verified
+
+- Six sequential keep-alive requests, no shim: worst 0.27ms.
+- The assertion fails with the patch reverted and passes with it applied.
+- The patch is idempotent: two configures in a row, one message the first time
+  and silence the second.
+- Full suite 79/79.
+
+Upstream would be better than carrying this. `CrowCpp/Crow` has no `TCP_NODELAY`
+anywhere in the tree, and a one line `set_option` in `do_accept` is the whole
+fix, so it is worth a pull request rather than a fork.

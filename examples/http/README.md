@@ -9,30 +9,25 @@ POST `/echo` parses JSON with simdjson and sends a table back. GET
 
 ## Load
 
-From a RelWithDebInfo (or Release) build, with redis-py installed:
+The whole directory goes in with one command. `LOADKEYS` walks it the way
+the `functions_dir` sync does: `.luau` becomes a stored function named after
+its stem, and anything else becomes a key.
+
+With `barchd`, which needs nothing but the binary:
 
 ```
-cd examples/http
-python3 -m venv ./venv
-./venv/bin/pip install ../../cmake-build-relwithdebinfo/
-source ./venv/bin/activate
-pip install redis
-python3 deploy.py --start --demo
+barchd --port 14000 --load-keys examples/http/luau
+redis-cli -p 14000 HTTP START CONF 18088 127.0.0.1
 ```
 
-`--start` boots an embedded server on 14000 and Crow on 18088.
-`--demo` hits `/page`, `/echo` and `/hits` once and checks the replies.
-
-Without `--start`, the same script talks to whatever is already on
-`--port`, and still runs `HTTP START`.
-
-To leave it up:
+Or against a server that is already up:
 
 ```
-python3 deploy.py --start
+redis-cli -p 14000 LOADKEYS examples/http/luau
+redis-cli -p 14000 HTTP START CONF 18088 127.0.0.1
 ```
 
-Then, from another shell:
+Either way, check it answers:
 
 ```
 curl http://127.0.0.1:18088/page
@@ -45,6 +40,9 @@ curl http://127.0.0.1:18088/who
 curl -H 'Content-Type: application/json' -d '{"user":"alice","pass":"secret"}' http://127.0.0.1:18088/login
 redis-cli -p 14000 HTTP STATUS
 ```
+
+There used to be a `deploy.py` here that read the eleven files and `SETF`'d
+them one at a time. `LOADKEYS` is that, so it is gone - see DONE 230.
 
 ## How a function advertises HTTP
 
@@ -259,4 +257,3 @@ rather than going out over HTTP for it.
 - `luau/login.luau` — `kind = "resource"`, POST `/login`, `barch.auth`
 - `luau/who.luau` — `kind = "resource"`, GET `/who`, current HTTP user
 - `luau/conf.luau` — `kind = "http"`, lists the other keys, default `user = "web"`
-- `deploy.py` — SETF in order, then `HTTP START CONF`

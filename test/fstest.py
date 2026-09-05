@@ -330,5 +330,119 @@ assert all(st == 200 and b == b"pong" for _, st, b in pings), \
 assert r.execute_command("HTTP", "STOP") == b"OK"
 print("http file serving complete", flush=True)
 
+
+# ---------------------------------------------------------------------------
+# LOADFS: a directory on disk imported as the file store - TODO 238
+#
+# The C++ writer and the luau reader have to agree about the layout, so the
+# check is that fsget reads back what LOADFS wrote, byte for byte.
+import os
+import shutil
+import tempfile
+
+src = tempfile.mkdtemp(prefix="loadfs")
+try:
+    os.makedirs(os.path.join(src, "img"))
+    os.makedirs(os.path.join(src, "pages", "deep"))
+    photo = bytes((i * 37 + 11) % 256 for i in range(200000))   # spans four chunks
+    open(os.path.join(src, "img", "photo.png"), "wb").write(photo)
+    open(os.path.join(src, "pages", "index.html"), "wb").write(b"<h1>hello</h1>")
+    open(os.path.join(src, "pages", "deep", "note.txt"), "wb").write(b"nested\n")
+    open(os.path.join(src, ".hidden"), "wb").write(b"not imported")
+
+    print("LOADFS imports a directory, and luau reads it back", flush=True)
+    out = [x.decode() for x in r.execute_command("LOADFS", src, "/imported")]
+    assert "files=3" in out, out
+    assert "bytes=%d" % (len(photo) + 14 + 7) in out, out
+    assert "root=/imported" in out, out
+
+    # the point of the cross check: written by C++, read by the luau side
+    assert r.execute_command("fsget", "/imported/img/photo.png") == photo
+    assert r.execute_command("fsget", "/imported/pages/index.html") == b"<h1>hello</h1>"
+    assert r.execute_command("fsget", "/imported/pages/deep/note.txt") == b"nested\n"
+
+    meta = json.loads(r.execute_command("fsstat", "/imported/img/photo.png"))
+    assert meta["size"] == len(photo) and meta["chunks"] == 4, meta
+    assert meta["type"] == "image/png", meta      # from the extension
+    assert json.loads(r.execute_command("fsstat", "/imported/pages/index.html"))["type"] == "text/html"
+
+    print("dot files are left out, and the listing is what was imported", flush=True)
+    assert r.execute_command("fsget", "/imported/.hidden") is None
+    assert json.loads(r.execute_command("fslist", "/imported/")) == [
+        "/imported/img/photo.png",
+        "/imported/pages/deep/note.txt",
+        "/imported/pages/index.html",
+    ], json.loads(r.execute_command("fslist", "/imported/"))
+
+    print("a refused import writes nothing at all", flush=True)
+    before = json.loads(r.execute_command("fslist", "/"))
+    for bad in ((src + "/nope", "/x"), (src, "/y", "99999999")):
+        try:
+            r.execute_command("LOADFS", *bad)
+            raise AssertionError("LOADFS %s should have been refused" % (bad,))
+        except redis.exceptions.ResponseError:
+            pass
+    assert json.loads(r.execute_command("fslist", "/")) == before, "a refused import left keys behind"
+
+    print("importing again over the top is the same content", flush=True)
+    r.execute_command("LOADFS", src, "/imported")
+    assert r.execute_command("fsget", "/imported/img/photo.png") == photo
+finally:
+    shutil.rmtree(src, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# LOADKEYS: the same directory as discrete keys and stored functions - TODO 238
+#
+# The walk is the function sync's, so a directory means the same thing here as
+# it does under functions_dir: .luau becomes a function named after its stem,
+# everything else a key named prefix:sub:file.
+src = tempfile.mkdtemp(prefix="loadkeys")
+try:
+    os.makedirs(os.path.join(src, "conf"))
+    open(os.path.join(src, "greet.luau"), "w").write(
+        'function call(who) return "hello " .. tostring(who) end')
+    open(os.path.join(src, "banner.txt"), "wb").write(b"a banner")
+    open(os.path.join(src, "conf", "settings.json"), "wb").write(b'{"a":1}')
+    open(os.path.join(src, ".hidden"), "wb").write(b"not imported")
+
+    print("LOADKEYS imports functions and keys from one directory", flush=True)
+    out = [x.decode() for x in r.execute_command("LOADKEYS", src)]
+    assert "functions=1" in out and "keys=2" in out, out
+
+    # the .luau file is a function that can be called, which is what deploy.py did
+    assert r.execute_command("greet", "world") == b"hello world"
+    # and the rest are keys, named after the path below the directory
+    assert r.execute_command("GET", "banner.txt") == b"a banner"
+    assert r.execute_command("GET", "conf:settings.json") == b'{"a":1}'
+    assert r.execute_command("GET", ".hidden") is None
+
+    print("a prefix goes in front of the keys", flush=True)
+    r.execute_command("LOADKEYS", src, "site")
+    assert r.execute_command("GET", "site:banner.txt") == b"a banner"
+    assert r.execute_command("GET", "site:conf:settings.json") == b'{"a":1}'
+
+    print("a refused import writes nothing", flush=True)
+    had = r.execute_command("GET", "banner.txt")
+    try:
+        r.execute_command("LOADKEYS", src + "/not-there")
+        raise AssertionError("LOADKEYS of a missing directory should have been refused")
+    except redis.exceptions.ResponseError:
+        pass
+    assert r.execute_command("GET", "banner.txt") == had
+
+    print("the whole examples/http/luau directory loads in one call", flush=True)
+    here = os.path.dirname(os.path.abspath(__file__))
+    demo = os.path.join(os.path.dirname(here), "examples", "http", "luau")
+    if os.path.isdir(demo):
+        out = [x.decode() for x in r.execute_command("LOADKEYS", demo)]
+        assert "functions=11" in out, out
+        names = set(x.decode() for x in r.execute_command("KEYSF"))
+        for want in ("PAGE", "ECHO", "JSON", "LOGIN", "CONF"):
+            assert want in names, (want, sorted(names))
+        assert r.execute_command("page") == b"page"
+finally:
+    shutil.rmtree(src, ignore_errors=True)
+
 print("fs test complete", flush=True)
 barch.stop()

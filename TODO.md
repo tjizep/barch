@@ -1108,17 +1108,90 @@
 
 233. [Done] HTTP latency, and the 40ms every keep-alive request was paying [05-09-2026] Nr 225 198ad57
 
-234. Crow never sets `TCP_NODELAY` on an accepted socket, so every keep-alive
-    HTTP request after the first on a connection costs 40ms - the diagnosis and
-    the proof are in DONE 225. `SimpleApp` exposes no hook for it, so the
-    options are a `PATCH_COMMAND` on the Crow FetchContent that sets the option
-    on accept, carrying a small fork, or upstreaming it. The shim used to prove
-    it is `LD_PRELOAD` over `accept4` and is not a fix. Settle with the option
-    set on the real accepted sockets and the keep-alive latency test in
-    `httptest.py` so it cannot come back.
+234. [Done] Crow patched for TCP_NODELAY [05-09-2026] Nr 232 527bfe8
 
 235. [Done] Serving the file store, in C++ [05-09-2026] Nr 228 198ad57
 
 236. [Done] A file store made of keys, in luau [05-09-2026] Nr 226 198ad57
 
 237. [Done] barchd, barch as a program [05-09-2026] Nr 227 198ad57
+
+238. [Done] LOADKEYS, and deploy.py retired [05-09-2026] Nr 230 527bfe8
+
+239. `hash_arena` should be able to back its pages with a named memory mapped
+    file, not only anonymous memory. It already mmaps when `use_vmm_memory` is
+    on (`hash_arena.h:495` and `:529`), but always `MAP_PRIVATE|MAP_ANONYMOUS`,
+    so every page costs RAM or swap. Backing a named file instead would let a
+    set of files larger than memory be held - which is exactly what an atomic
+    LOADFS of a big directory needs (238), and what a file store that is meant
+    to hold images and video wants in general. Open questions: whether the
+    mapping is MAP_SHARED over a real file or MAP_PRIVATE over one, where the
+    file lives and who cleans it up, and what it means for the existing save
+    and load path, which already writes shards of its own.
+
+240. [Done] A key space for the boot imports [05-09-2026] Nr 231 527bfe8
+
+241. Setting `server_port` or `server_binding` starts a server as a side
+    effect. `configuration.cpp:422` and `:450` call
+    `restarter::asynch_restart`, which stops and starts the listener on a
+    thread of its own, so a caller that only meant to record a port gets a
+    running server - and a caller that then starts one itself gets two. DONE
+    231 works around it in barchd by keeping `--port` and `--bind` local
+    rather than writing them through the configuration, but the wart is still
+    there for anything that sets those from the environment
+    (`BARCH_SERVER_PORT`) or `--config server_port=`, and for the python
+    binding, which applies the environment on import.
+
+    It also leaves a thread starting a server while the process is exiting,
+    which is where `failed to start server std::bad_alloc` on a refused
+    start-up came from. Settle by deciding whether recording a port should
+    restart anything at all, or whether the restart belongs behind an explicit
+    call that CONFIG SET makes and start-up does not.
+
+242. `require` should be able to load from the file store, not only from
+    function keys. Today `function_require` (luau_driver.cpp:2221) takes
+    `require("space.NAME")` or `require("NAME")` in the current space, folds
+    the name to upper case and asks the loader for a *function key*. The
+    proposal is a second form for a path in the `fs:` layout:
+
+        require("somespace:extensions/hnsw.luau")
+        require(":extensions/hnsw.luau")        -- the default space
+
+    The colon is a good separator for it: the existing form splits on a dot
+    and a dot cannot start a name, so the two cannot be confused.
+
+    **The naming question is already answered by what require does now.** It
+    returns the module's environment table - `lua_getref(L, envt)` - so a
+    stored function that defines `add` and `closest` as globals is already
+    used as `local hnsw = require(...)` then `hnsw.add(...)`, exactly like a
+    normal lua module. The fs form should return the same shape and nothing
+    new needs inventing.
+
+    What does need deciding:
+
+    - The cache key. `st->functions` is keyed by `qualified(space, NAME)`, and
+      a path is not a folded name, so the two namespaces have to be kept
+      apart or `:a/b.luau` and a function called `B` will collide. Paths keep
+      their case; function names do not.
+    - Invalidation. A function key that changes has a hook that drops the
+      compiled copy (function_api.h:92). A file in `fs:` has no such hook, so
+      a required module would stay compiled in the VM until the state is
+      recycled - which for the HTTP pool is a long time. Either the fs writes
+      grow the same hook, or an fs require documents that it is a boot time
+      thing.
+    - Rights. `require` reaches keys; the fs read has to go through the same
+      ACL the store does, or it becomes a way to read a space a caller cannot
+      otherwise see.
+    - Cycles. The existing `st->loading` stack should cover it as long as the
+      path is what goes on the stack, not the folded name.
+
+    And the one that is genuinely open: **wildcards**, `require(":extensions/*.luau")`.
+    A single require returns one module table; a wildcard would have to return
+    a table of them keyed by stem, which is a different shape from the same
+    call - and `hnsw` in `{hnsw = {...}, other = {...}}` reads differently
+    from `hnsw` being the module itself. Worth settling that before building
+    it, or leaving wildcards out and letting a caller require what it names.
+
+    Settle with the single path form working, a module used as `hnsw.add`,
+    the cache and rights questions answered in code, and a decision recorded
+    on wildcards either way.

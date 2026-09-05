@@ -122,4 +122,58 @@ for args, code in ((["--config", "nonsense=1"], 2),
     got = subprocess.run([BINARY] + args, capture_output=True, text=True, timeout=120)
     assert got.returncode == code, (args, got.returncode, got.stderr[:300])
 
+
+# --- importing at boot, into a named key space - TODO 240 -----------------
+print("--load-keys and --load-fs, into a space of their own", flush=True)
+import shutil
+import tempfile
+
+src = tempfile.mkdtemp(prefix="bdload")
+try:
+    os.makedirs(os.path.join(src, "sub"))
+    # not hello.luau: the stem becomes the command name and HELLO is the RESP
+    # handshake, which wins - a stored function cannot shadow a builtin
+    open(os.path.join(src, "greeting.luau"), "w").write(
+        'function call() return "hi from a loaded function" end')
+    open(os.path.join(src, "sub", "data.txt"), "wb").write(b"a value")
+
+    proc = start("--load-keys", src + "@site", "--load-fs", src + ":/files@media")
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+        # the default space got neither
+        assert r.execute_command("GET", "sub:data.txt") is None
+        assert r.execute_command("GET", "fs:m:/files/sub/data.txt") is None
+
+        r.execute_command("USE", "site")
+        assert r.execute_command("GET", "sub:data.txt") == b"a value"
+        assert r.execute_command("greeting") == b"hi from a loaded function"
+
+        r.execute_command("USE", "media")
+        assert r.execute_command("GET", "fs:m:/files/sub/data.txt") is not None
+        assert r.execute_command("GET", "fs:d:/files/sub/data.txt|00000000") == b"a value"
+    finally:
+        stop(proc)
+
+    print("one listener, not three", flush=True)
+    # setting server_port through the configuration restarts the server on a thread
+    # of its own, so --port used to start the listener up to three times. See TODO 241
+    proc = start()
+    try:
+        log_so_far = ""
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
+        assert r.ping() is True
+    finally:
+        log_so_far = stop(proc)
+    starts = log_so_far.count("setting static_bloom_filter")
+    assert starts == 1, "the listener was started %d times:\n%s" % (starts, log_so_far[-800:])
+
+    print("a bad space name is refused before anything is written", flush=True)
+    got = subprocess.run([BINARY, "--port", str(PORT), "--dir", DATA,
+                          "--load-keys", src + "@not a name"],
+                         capture_output=True, text=True, timeout=120)
+    assert got.returncode == 1, got.returncode
+    assert "not a key space name" in got.stdout + got.stderr, (got.stdout + got.stderr)[-400:]
+finally:
+    shutil.rmtree(src, ignore_errors=True)
+
 print("barchd test complete", flush=True)

@@ -18,6 +18,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifdef BARCH_HAS_SIMDJSON
+#include <simdjson.h>
+#endif
+
 #ifdef BARCH_HAS_CROW
 #include <crow.h>
 #include <asio.hpp>
@@ -62,12 +66,21 @@ bool is_http_kind(const barch::foreign::http_route& r) {
     return r.has_transport && !r.has_route;
 }
 
+bool is_files_kind(const barch::foreign::http_route& r) {
+    return r.kind == "files";
+}
+
 bool is_resource_kind(const barch::foreign::http_route& r) {
     if (r.kind == "resource")
         return true;
-    if (r.kind == "http")
+    if (r.kind == "http" || r.kind == "files")
         return false;
     return r.has_route;
+}
+
+/** everything that owns a route, however it is answered */
+bool is_route_kind(const barch::foreign::http_route& r) {
+    return is_resource_kind(r) || is_files_kind(r);
 }
 
 #ifdef BARCH_HAS_CROW
@@ -395,6 +408,281 @@ std::string session_user(const barch::key_space_ptr& space, const std::string& s
     return {};
 }
 
+/*
+ * Serving the file store, in C++ - TODO 235.
+ *
+ * A `kind = "files"` transport declares a route and a root, and this answers it
+ * without entering luau at all. That is not an optimisation: a luau handler holds
+ * a VM slot for the whole call and the pool is 2-8, so eight concurrent downloads
+ * would exhaust it and every other request on that server would get a 503.
+ *
+ * The layout is DONE 226 - `fs:m:<path>` is the metadata as json and
+ * `fs:d:<path>|<n>` is one chunk, the index zero padded so a range scan and a
+ * counted loop agree about the order.
+ */
+struct file_meta {
+    uint64_t size{0};
+    uint64_t chunk{0};
+    uint64_t chunks{0};
+    std::string type;
+};
+
+/** the metadata for a stored file, or false when there is no such file */
+bool read_file_meta(const barch::foreign::store_access& acc, const std::string& path,
+                    file_meta& out) {
+    std::string raw;
+    if (!acc.get || acc.get("fs:m:" + path, raw) != barch::foreign::store_access::read_state::present)
+        return false;
+#ifdef BARCH_HAS_SIMDJSON
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw).get(doc) != simdjson::SUCCESS)
+        return false;
+    uint64_t n = 0;
+    if (doc["size"].get(n) == simdjson::SUCCESS) out.size = n;
+    if (doc["chunk"].get(n) == simdjson::SUCCESS) out.chunk = n;
+    if (doc["chunks"].get(n) == simdjson::SUCCESS) out.chunks = n;
+    std::string_view t;
+    if (doc["type"].get(t) == simdjson::SUCCESS) out.type.assign(t);
+    return out.chunk > 0 || out.size == 0;
+#else
+    (void) out;
+    return false;
+#endif
+}
+
+/** the nth chunk, appended to `into` */
+bool read_chunk(const barch::foreign::store_access& acc, const std::string& path,
+                uint64_t n, std::string& into) {
+    char idx[32];
+    std::snprintf(idx, sizeof idx, "%08llu", (unsigned long long) n);
+    std::string value;
+    if (!acc.get || acc.get("fs:d:" + path + "|" + idx, value) !=
+                    barch::foreign::store_access::read_state::present)
+        return false;
+    into.append(value);
+    return true;
+}
+
+/**
+ * A guess from the extension, for a file stored without a type. Deliberately
+ * short: what a browser needs to render a page and refuse to sniff.
+ */
+std::string type_from_extension(const std::string& path) {
+    auto dot = path.find_last_of('.');
+    if (dot == std::string::npos)
+        return "application/octet-stream";
+    auto ext = lower_copy(path.substr(dot + 1));
+    static const std::unordered_map<std::string, std::string> known = {
+        {"html", "text/html"},   {"htm", "text/html"},    {"css", "text/css"},
+        {"js", "text/javascript"}, {"mjs", "text/javascript"},
+        {"json", "application/json"}, {"txt", "text/plain"},  {"csv", "text/csv"},
+        {"xml", "application/xml"},  {"svg", "image/svg+xml"},
+        {"png", "image/png"},    {"jpg", "image/jpeg"},   {"jpeg", "image/jpeg"},
+        {"gif", "image/gif"},    {"webp", "image/webp"},  {"avif", "image/avif"},
+        {"ico", "image/x-icon"}, {"woff", "font/woff"},   {"woff2", "font/woff2"},
+        {"pdf", "application/pdf"}, {"wasm", "application/wasm"},
+        {"mp4", "video/mp4"},    {"webm", "video/webm"},  {"mp3", "audio/mpeg"},
+    };
+    auto it = known.find(ext);
+    return it == known.end() ? "application/octet-stream" : it->second;
+}
+
+/**
+ * `Range: bytes=a-b`, in the one form worth supporting: a single range. Multipart
+ * ranges are legal and no client asks for them. False means "not a range request
+ * we understand", and the whole file is the right answer to that.
+ */
+bool parse_range(const std::string& header, uint64_t size, uint64_t& first, uint64_t& last) {
+    if (header.rfind("bytes=", 0) != 0 || size == 0)
+        return false;
+    auto spec = header.substr(6);
+    if (spec.find(',') != std::string::npos)
+        return false;                       // multipart, not worth it
+    auto dash = spec.find('-');
+    if (dash == std::string::npos)
+        return false;
+    auto from = spec.substr(0, dash);
+    auto to = spec.substr(dash + 1);
+    try {
+        if (from.empty()) {
+            // a suffix range: the last N bytes
+            if (to.empty()) return false;
+            auto n = std::stoull(to);
+            if (n == 0) return false;
+            first = n >= size ? 0 : size - n;
+            last = size - 1;
+        } else {
+            first = std::stoull(from);
+            last = to.empty() ? size - 1 : std::stoull(to);
+        }
+    } catch (const std::exception&) {
+        return false;
+    }
+    if (last >= size)
+        last = size - 1;
+    return first <= last;
+}
+
+/** what a files route serves for this url, or empty when the url escapes the root */
+std::string file_path_for(const barch::foreign::http_route& spec, const std::string& url) {
+    // the route's literal prefix comes off, and what is left hangs under the root
+    std::string prefix = spec.route;
+    auto star = prefix.find('*');
+    if (star != std::string::npos)
+        prefix = prefix.substr(0, star);
+    if (url.size() < prefix.size() || url.compare(0, prefix.size(), prefix) != 0)
+        return {};
+    std::string rest = pct_decode(url.substr(prefix.size()));
+    // no climbing out with .., and no NUL smuggled in through an escape
+    if (rest.find("..") != std::string::npos || rest.find('\0') != std::string::npos)
+        return {};
+    std::string root = spec.root.empty() ? std::string("/") : spec.root;
+    if (root.back() != '/')
+        root += '/';
+    while (!rest.empty() && rest.front() == '/')
+        rest.erase(rest.begin());
+    if (rest.empty())
+        return {};
+    return root + rest;
+}
+
+void handle_file(const std::shared_ptr<space_http>& server,
+                 const barch::foreign::http_route& spec,
+                 const crow::request& req, crow::response& res) {
+    auto verb = crow::method_name(req.method);
+    if (verb != "GET" && verb != "HEAD") {
+        res.code = 405;
+        res.set_header("Allow", "GET, HEAD");
+        res.body = "method not allowed";
+        apply_cors(res, spec);
+        res.end();
+        return;
+    }
+    auto path = file_path_for(spec, req.url);
+    if (path.empty()) {
+        res.code = 404;
+        res.body = "not found";
+        apply_cors(res, spec);
+        res.end();
+        return;
+    }
+
+    // the same identity a luau route would run as, so a file is as private as any
+    // other key in the space. No VM is taken to work it out
+    barch::functions::http_ident ident;
+    ident.sid = cookie_value(req.get_header_value("Cookie"), "sid");
+    if (!spec.user.empty())
+        ident.user = spec.user;
+    else if (!ident.sid.empty())
+        ident.user = session_user(server->space, ident.sid);
+    if (ident.user.empty())
+        ident.user = server->default_user.empty() ? "web" : server->default_user;
+    auto acc = barch::functions::store_for(server->space, acl_for_user(ident.user));
+    if (!acc.may_read) {
+        res.code = 403;
+        res.body = "forbidden";
+        apply_cors(res, spec);
+        res.end();
+        return;
+    }
+
+    file_meta meta;
+    if (!read_file_meta(acc, path, meta)) {
+        res.code = 404;
+        res.body = "not found";
+        apply_cors(res, spec);
+        res.end();
+        return;
+    }
+
+    /*
+     * Weak, and says so. It is built from the metadata, so it changes when the size
+     * or the type does and not when a rewrite happens to land on the same length -
+     * a content hash written at put time is the fix and is not here yet.
+     */
+    std::string etag = "W/\"" + std::to_string(meta.size) + "-" +
+                       std::to_string(meta.chunks) + "\"";
+    if (req.get_header_value("If-None-Match") == etag) {
+        res.code = 304;
+        res.set_header("ETag", etag);
+        apply_cors(res, spec);
+        res.end();
+        return;
+    }
+
+    auto type = meta.type.empty() ? type_from_extension(path) : meta.type;
+    res.set_header("Content-Type", type);
+    res.set_header("ETag", etag);
+    res.set_header("Accept-Ranges", "bytes");
+    apply_cors(res, spec);
+
+    uint64_t first = 0;
+    uint64_t last = meta.size ? meta.size - 1 : 0;
+    const auto& range_header = req.get_header_value("Range");
+    bool ranged = !range_header.empty() && parse_range(range_header, meta.size, first, last);
+    if (!range_header.empty() && !ranged && range_header.rfind("bytes=", 0) == 0 &&
+        meta.size > 0) {
+        // asked for something outside the file: 416 with what the file actually is
+        res.code = 416;
+        res.set_header("Content-Range", "bytes */" + std::to_string(meta.size));
+        res.body.clear();
+        res.end();
+        return;
+    }
+
+    /*
+     * No special case for HEAD. Crow's router sets res.skip_body on a HEAD and its
+     * end() then takes Content-Length from the body before dropping it, so the
+     * answer is the headers a GET would have given with nothing after them - which
+     * is what HEAD is. Setting the length here instead fought that and lost.
+     */
+
+    /*
+     * Assembled into the response body rather than streamed. Crow's response is a
+     * string, so a file is held once in memory while it is written - fine for the
+     * images and pages this is for, and the reason Range matters for anything
+     * bigger. Only the chunks a range actually covers are read.
+     */
+    std::string body;
+    if (meta.size) {
+        uint64_t want = last - first + 1;
+        body.reserve((size_t) want);
+        uint64_t chunk = meta.chunk ? meta.chunk : 65536;
+        uint64_t from_chunk = first / chunk;
+        uint64_t to_chunk = last / chunk;
+        std::string scratch;
+        for (uint64_t n = from_chunk; n <= to_chunk && n < meta.chunks; ++n) {
+            scratch.clear();
+            if (!read_chunk(acc, path, n, scratch)) {
+                // the metadata says there is a chunk and there is not: a half written
+                // file, or one being overwritten while it is read. Nothing here is
+                // atomic across chunks - see DONE 226
+                res.code = 500;
+                res.body = "file is incomplete";
+                res.end();
+                return;
+            }
+            uint64_t chunk_start = n * chunk;
+            uint64_t take_from = first > chunk_start ? first - chunk_start : 0;
+            uint64_t take_to = last < chunk_start + scratch.size() - 1
+                             ? last - chunk_start : scratch.size() - 1;
+            if (take_from < scratch.size() && take_from <= take_to)
+                body.append(scratch, (size_t) take_from, (size_t) (take_to - take_from + 1));
+        }
+    }
+
+    if (ranged) {
+        res.code = 206;
+        res.set_header("Content-Range", "bytes " + std::to_string(first) + "-" +
+                                        std::to_string(last) + "/" + std::to_string(meta.size));
+    } else {
+        res.code = 200;
+    }
+    res.body = std::move(body);
+    res.end();
+}
+
 void handle_route(const std::shared_ptr<space_http>& server,
                   const barch::foreign::http_route& spec,
                   const crow::request& req, crow::response& res) {
@@ -628,7 +916,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
             }
             continue;
         }
-        if (!is_resource_kind(spec))
+        if (!is_route_kind(spec))
             continue;
         if (ssl_cert.empty() && !spec.ssl_cert.empty())
             ssl_cert = spec.ssl_cert;
@@ -650,7 +938,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
     std::vector<barch::foreign::http_route> live;
     live.reserve(server->routes.size());
     for (auto& r : server->routes) {
-        if (is_resource_kind(r))
+        if (is_route_kind(r))
             live.push_back(std::move(r));
     }
     server->routes = std::move(live);
@@ -661,6 +949,9 @@ std::string start_space_http(const barch::key_space_ptr& space,
 
     std::unordered_map<std::string, std::string> sources;
     for (const auto& r : server->routes) {
+        // a files route is answered in C++ and has no handler to load into a VM
+        if (is_files_kind(r))
+            continue;
         std::string src;
         if (!barch::functions::source_in(space, r.name, src)) {
             err = "no source for '" + r.name + "'";
@@ -681,6 +972,8 @@ std::string start_space_http(const barch::key_space_ptr& space,
     for (unsigned i = 1; i < pool; ++i) {
         auto slot = make_vm_slot(canon, iface, deadline, server->luau_bytes);
         for (const auto& r : server->routes) {
+            if (is_files_kind(r))
+                continue;
             std::string load_err;
             if (!load_resource_into(*slot, r.name, sources[r.name], load_err)) {
                 err = r.name + ": " + load_err;
@@ -716,16 +1009,19 @@ std::string start_space_http(const barch::key_space_ptr& space,
         rule.methods(crow::HTTPMethod::Get, crow::HTTPMethod::Post, crow::HTTPMethod::Put,
                      crow::HTTPMethod::Delete, crow::HTTPMethod::Patch,
                      crow::HTTPMethod::Options, crow::HTTPMethod::Head);
+        const bool files = is_files_kind(spec);
         if (spec.templated) {
             // the `<path>` argument is only there because Crow insists the
             // handler's arity match the rule's; the matching itself works off
             // req.url, which is the same text with the prefix still on it
-            rule([server, spec](const crow::request& req, crow::response& res, std::string) {
-                handle_route(server, spec, req, res);
+            rule([server, spec, files](const crow::request& req, crow::response& res, std::string) {
+                if (files) handle_file(server, spec, req, res);
+                else handle_route(server, spec, req, res);
             });
         } else {
-            rule([server, spec](const crow::request& req, crow::response& res) {
-                handle_route(server, spec, req, res);
+            rule([server, spec, files](const crow::request& req, crow::response& res) {
+                if (files) handle_file(server, spec, req, res);
+                else handle_route(server, spec, req, res);
             });
         }
     }

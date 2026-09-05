@@ -10724,3 +10724,557 @@ wedged still fails the test, and now says where.
 - Six stressed runs of `TestChaos` at `-c 2`: 6 of 6 clean, against 2 of 6
   failing before.
 - Full suite, no sanitizer, `-j4`: 77/77.
+
+## 221. The bench after the sanitizer work [05-09-2026]
+
+*Was `TODO.md` entry 229.*
+
+Release build carrying everything from DONE 212 to 220. Same recipe as DONE 187
+and 202: memtier, 1M keys preloaded, `--ratio=1:4` (memtier states it Set:Get,
+so 20:80 write:read), `--pipeline=50`, one connection per thread, 1M requests a
+run (`-t 1 -n 1000000`, `-t 4 -n 250000`), three reps each, servers alternated
+within the session. Valkey 8.1.10 with `--save '' --appendonly no`, io-threads 1.
+Both preloaded to `dbsize` exactly 1000000 and memtier reported 0 misses in
+every run, so every GET hit.
+
+| | barch | valkey | barch/valkey |
+| --- | --- | --- | --- |
+| 1 thread | 794,618 | 825,286 | 0.96x |
+| 4 threads | 2,572,857 | 2,010,236 | 1.28x |
+
+Scaling 1 -> 4 threads: barch 3.24x, valkey 2.44x. Spread across reps was 1.5%
+for barch at both thread counts, 0.5% and 2.4% for valkey.
+
+Latency at 4 threads, which is the other half of the same story: barch p50
+0.071ms against valkey 0.095ms, p99 0.111 against 0.143, p99.9 0.551 against
+0.783. At one thread they are level - p50 0.055 both, p99 0.111 both.
+
+### On comparing this to DONE 202
+
+Do not, at least not directly. DONE 187 records the box as a Ryzen 7 6800H with
+14GB; this is a Ryzen 9 7940HS with 30GB, so every number here is on faster
+hardware and the absolute figures are not the same measurement. The shape is
+what carries over, and it is the same shape: level with valkey on one thread,
+ahead on four, and scaling roughly 3.2-3.7x where valkey manages 2.4-2.5x
+because its command execution is still one thread and pipelining only batches
+more work for it.
+
+The one number that moved against DONE 202 is the four thread ratio, 1.43x there
+and 1.28x here. Both servers gained on the newer box; valkey gained more at four
+threads (1.55M to 2.01M, 1.30x) than barch did (2.21M to 2.57M, 1.16x). That is
+a hardware difference between two machines, not a regression measured on one,
+and it cannot be settled without running DONE 202's build on this box.
+
+### The question that was asked
+
+Nothing in the sanitizer work cost throughput. The latch annotations compile out
+entirely without `__SANITIZE_THREAD__`, the atomics that replaced plain bools are
+relaxed loads on paths that already touched the shard, the defrag latch is taken
+once per maintenance pass, and the parked-disconnect watch arms only when a
+connection parks. The bench sees none of it: 0.96x and 1.28x, with a 1.5%
+spread, on a build that has all of it in.
+
+### Six threads, and where valkey stops
+
+Second session, both servers restarted and reloaded, 1 / 4 / 6 threads measured
+together so the scaling is internally consistent. 1M requests a run throughout
+(`-t 6 -n 166667`), three reps, medians:
+
+| | barch | valkey | barch/valkey | barch scale | valkey scale |
+| --- | --- | --- | --- | --- | --- |
+| 1 thread | 789,031 | 816,362 | 0.97x | 1.00x | 1.00x |
+| 4 threads | 2,614,024 | 2,029,859 | 1.29x | 3.31x | 2.49x |
+| 6 threads | 3,684,416 | 2,150,829 | 1.71x | 4.67x | 2.63x |
+
+The one and four thread numbers reproduce the first session inside a percent,
+so the two sessions agree.
+
+Six threads is where valkey stops: 2.03M to 2.15M going from four, +6%, while
+barch goes 2.61M to 3.68M, +41%. That is the single execution thread reaching
+its limit - four connections already gave it all the batching it could use, and
+two more only add connections it cannot run in parallel. barch's readers are
+genuinely concurrent, so the sixth thread still buys most of a thread's worth.
+
+The tail says it more loudly than the throughput. At six threads barch is p50
+0.079ms, p99 0.119, p99.9 0.551; valkey is p50 0.135, p99 0.223, p99.9 1.103 -
+so valkey's median latency at six threads is worse than its p99 at one, which
+is what a saturated server looks like.
+
+One caveat on barch's number: the spread across reps at six threads was 8.3%
+(3.62M to 3.93M), against 1.6% at four and 2.9% at one. The median is honest but
+the six thread figure is the least settled of the three, and on a sixteen thread
+laptop running memtier beside the server that is not surprising. 0 misses
+throughout, both servers, every run.
+
+### How it was run
+
+barch was served from a scratch directory holding only `_barch.so` and
+`barch.py`, because `cmake-build-release` also has a `barch.so` that shadows the
+swig pair and makes `import barch` fail. Worth knowing before the next bench.
+
+## 222. The same bench at 5% writes [05-09-2026]
+
+*Was `TODO.md` entry 230.*
+
+`--ratio=1:19` - 5% SET, 95% GET - against the 20:80 of DONE 221. Everything
+else identical: release build, 1M keys preloaded, `--pipeline=50`, one
+connection per thread, 1M requests a run, three reps, both servers restarted and
+reloaded for this session. 0 misses everywhere.
+
+| | barch | valkey | barch/valkey | barch scale | valkey scale |
+| --- | --- | --- | --- | --- | --- |
+| 1 thread | 808,752 | 850,502 | 0.95x | 1.00x | 1.00x |
+| 4 threads | 2,791,651 | 2,020,345 | 1.38x | 3.45x | 2.38x |
+| 6 threads | 3,989,412 | 2,277,172 | 1.75x | 4.93x | 2.68x |
+
+Against 20:80, run for run: barch +2.5% at one thread, +6.8% at four, +8.3% at
+six. Valkey +4.2%, -0.5%, +5.9%.
+
+### What the difference says
+
+Dropping writes from a fifth to a twentieth of the load buys barch more the more
+threads there are, and buys valkey nothing much at any of them. That is the
+shape you would expect if writes are what serialises barch and nothing much
+serialises valkey - because valkey is already serialised end to end, so the mix
+hardly matters to it, while barch's readers run in parallel and every write is a
+unique latch that stops them.
+
+It also puts a number on how much the write path costs at scale: at six threads,
+cutting writes by three quarters is worth 8%. So the exclusive latch is not what
+is holding barch back at this thread count - if it were, taking most of the
+writes away would have moved far more than that.
+
+The single thread number is the one that does not move much, and both servers
+behave the same way there, which fits: at one connection there is nothing to
+exclude.
+
+barch stays just behind valkey on one thread - 0.95x here, 0.96-0.97x at 20:80 -
+and the gap the other way widens with threads, 1.38x at four and 1.75x at six.
+Valkey is flat from four to six in both mixes (+6% here, +6% at 20:80): the
+single execution thread is the ceiling and the read/write mix does not raise it.
+
+Spread across reps was tighter than DONE 221's six thread run: 4.1% for barch
+here against 8.3% there, 2.8% for valkey.
+
+### Latency
+
+Six threads, 95% reads: barch p50 0.071ms, p99 0.095, p99.9 0.535; valkey p50
+0.127, p99 0.199, p99.9 1.015. barch's p99 at six threads is better than its own
+p99 at one thread (0.111), which is the same thing the throughput says - the
+tail improves as the reads spread out.
+
+## 223. The 20:80 bench on the hash path alone [05-09-2026]
+
+*Was `TODO.md` entry 231.*
+
+`ordered_keys` off and `hybrid_keys` off, so the overflow hash is the set of
+keys and the tree is empty - no ART in the picture at all. A fresh data
+directory, both flags set before the first key was written, then the same
+recipe as DONE 221: 1M keys preloaded, `--ratio=1:4`, `--pipeline=50`, one
+connection per thread, 1M requests a run, three reps. 0 misses everywhere.
+
+| | barch, hash only | vs default | valkey | barch/valkey |
+| --- | --- | --- | --- | --- |
+| 1 thread | 793,227 | +0.5% | 813,262 | 0.98x |
+| 4 threads | 2,647,303 | +1.3% | 2,004,828 | 1.32x |
+| 6 threads | 3,720,301 | +1.0% | 2,131,782 | 1.75x |
+
+"vs default" is against DONE 221's second session, which is the same mix on the
+same build with both flags on. Scaling 1 -> 6 is 4.69x, against 4.67x with the
+defaults.
+
+### The mixed workload does not care
+
+Half a percent to one and a bit. The spread across reps is 1.2-2.3%, so the
+whole difference sits inside the noise and the honest reading is that turning
+ART off changes nothing measurable here.
+
+That is worth knowing in itself: the ordered path is not costing anything on a
+GET-heavy point-lookup workload. DONE 148's hybrid is why - with `hybrid_keys`
+on, a GET and a same-size SET already go through the hash and never walk the
+tree, so switching the tree off entirely removes work that was not being done.
+
+### SET on its own is a different story
+
+The preload is pure SET, one thread, pipeline 50, and it is not close:
+
+| | ops/sec |
+| --- | --- |
+| hash only | 509,148 |
+| default (ordered + hybrid) | 337,941 |
+
+**+51%.** So the write path does pay for the tree even with hybrid on - an
+insert has to go into the ART as well as the hash, and only the read side gets
+to skip it. The mixed number hides this because at 20% writes the reads swamp
+it, and at six threads the writes are only 744k of 3.72M ops.
+
+This is the measurement TODO 192 asked for and did not get, though not in the
+shape it asked for it - 192 wants SET alone at 1, 2 and 4 threads with a fresh
+server per thread count, and this is one thread from a preload. It is enough to
+say the effect is real and large, and not enough to close 192.
+
+## 224. Six threads was measuring memtier, not barch [05-09-2026]
+
+*Was `TODO.md` entry 232.*
+
+The suspicion was that 4.67x at six threads means something is wrong inside
+barch. It does not. The six thread number was the load generator's ceiling, and
+barch was two thirds idle while producing it.
+
+### The machine was 63% idle
+
+During the 6 thread 20:80 run, sampled over ten seconds from `/proc/<pid>/stat`:
+
+    barch    3.88 cores
+    memtier  2.05 cores
+    -------------------
+    total    5.93 of 16
+
+A server that is the bottleneck does not leave ten cores unused. And the
+throughput follows from the client's own arithmetic: six connections at
+`--pipeline=50` is 300 requests in flight, and 300 / 0.0786ms is 3.8M ops/s
+against 3.59M measured. The benchmark was measuring how many requests memtier
+was willing to have outstanding.
+
+### What barch does when actually asked
+
+Same six threads, more connections each, so the in-flight budget grows:
+
+| -c | in flight | ops/sec | barch cores | memtier cores |
+| --- | --- | --- | --- | --- |
+| 1 | 300 | 3,596,590 | 3.90 | 2.03 |
+| 2 | 600 | 6,053,038 | 6.25 | 4.06 |
+| 4 | 1200 | 7,005,576 | 7.93 | 4.94 |
+| 8 | 2400 | 7,093,134 | 8.00 | 5.21 |
+
+**7.09M ops/sec**, nearly double the six thread figure in DONE 221, on the same
+build and the same mix. So there is no scaling defect to find - every bench in
+DONE 221 to 223 was run at one connection per thread, which is the recipe DONE
+187 established, and that recipe stops asking long before barch stops
+answering.
+
+The ceiling it does hit is worth naming: 8.00 cores, and the server log says
+`resp pool size 8`. That is `resp_pool_factor = 50` in `src/constants.h` - half
+of sixteen hardware threads. barch saturates its resp pool exactly, and the box
+still has three cores spare with memtier taking five. Whether that factor should
+be higher is a real question and is not answered here, because it is a compile
+time constant and this was measured without changing it.
+
+### The profile, since it was asked for
+
+`perf record -F 499 -g` for twelve seconds at `-c 4`, 7.07M ops/sec, 46,623
+samples. By object: 74% `_barch.so`, 18% unattributed (kernel frames, no
+kallsyms), 6% libc.
+
+| % | symbol |
+| --- | --- |
+| 5.3 | `logical_allocator::basic_resolve` |
+| 5.0 | `redis_parser::read_new_request` |
+| 3.4 | `resp_session::is_authorized` |
+| 2.7 | `sharded_store::search` |
+| 2.6 | `resp_session::run_params` |
+| 2.5 | `oh::unordered_set::find` |
+| 2.5 | `redis_parser::buffer_get_valid_item` |
+| 2.4 | `read_lock_t::read_lock_t` |
+| 1.8 | `shard::from_unordered_set` |
+
+Flat and wide, which is what a healthy CPU-bound server looks like. No futex, no
+spin, no lock symbol anywhere near the top - so the latch is not what is being
+paid for at this rate, which agrees with DONE 223 finding that removing three
+quarters of the writes was worth 8%.
+
+Two things stand out as ordinary optimisation targets rather than defects:
+`is_authorized` at 3.4% is an ACL check on every single command, and routing -
+`key_space::get`, `get_shard_count`, `get_shard_index` together - is about 5%.
+Address resolution and RESP parsing at 5% each are the cost of doing business.
+
+### What to change in the bench
+
+Nothing, for comparability - DONE 187's recipe should stay as it is so the
+numbers keep lining up. But a second line at `-c 4` is worth adding next time,
+because one connection per thread measures the client and the other measures the
+server.
+
+## 225. HTTP latency, and the 40ms every keep-alive request was paying [05-09-2026]
+
+*Was `TODO.md` entry 233.*
+
+Asked for latency numbers on a plain handler and a JSON one. The first
+measurement said 24 requests a second at 42ms each, against a curl that
+answered in 0.35ms, so the numbers waited while that was explained.
+
+### Every request after the first on a connection took 40ms
+
+    fresh connection each time        0.2 - 0.5 ms
+    two requests pipelined in one send 0.27 ms for both
+    keep-alive, one at a time          41 ms each
+
+Client side `TCP_NODELAY` made no difference, so it was the server. `strace` on
+the server settled it - the response leaves as **two** `sendmsg` calls:
+
+    sendmsg(39, [16 iovecs: status line + headers], MSG_NOSIGNAL) = 107
+    sendmsg(39, [{"\r\n"}, {"pong"}], MSG_NOSIGNAL) = 61
+
+Crow builds a separate buffer per header token and asio caps a scatter-gather
+write at 16 iovecs, so the headers go in one segment and the terminator plus
+body in another. That is write-write-read with Nagle enabled: the second small
+write waits on the ACK of the first, and the client - having nothing to send -
+delays that ACK by 40ms. The first request on a connection is fast because
+nothing is unacknowledged yet, and pipelined requests are fast because the next
+request carries the ACK with it.
+
+Confirmed by forcing `TCP_NODELAY` on accepted sockets with an `LD_PRELOAD`
+shim over `accept4` and changing nothing else:
+
+    keep-alive, one at a time: 0.26 0.06 0.05 0.05 0.04 0.04 0.04 0.04 ms
+
+**41ms to 0.04ms.** Crow never sets `TCP_NODELAY` - there is no occurrence of it
+anywhere in the vendored tree - and `SimpleApp` exposes no hook to set it, so
+barch cannot fix this from its own side. That is TODO 234.
+
+### The numbers, with the shim in place
+
+Three handlers: `/ping` replies with a constant, `/json` parses a posted
+document with simdjson and answers a different one built from it, `/store`
+does the same and writes and reads the store on the way through. aiohttp
+clients, keep-alive, 8 connections each, six seconds, release build.
+
+| | clients | rps | p50 | p99 | server |
+| --- | --- | --- | --- | --- | --- |
+| ping | 1 | 20,813 | 0.339 | 0.605 | 0.58 cores |
+| ping | 4 | 69,683 | 0.426 | 0.770 | 1.96 cores |
+| ping | 8 | 94,161 | 0.676 | 1.166 | 4.28 cores |
+| json | 1 | 15,682 | 0.458 | 0.742 | 0.52 cores |
+| json | 4 | 52,608 | 0.548 | 0.991 | 1.89 cores |
+| json | 8 | 70,086 | 0.926 | 1.712 | 4.23 cores |
+
+Single connection, single client, the round trip is **0.078ms for /ping and
+0.099ms for /json** - so parsing a small document, upper-casing a field,
+summing an array and encoding a new document costs about 20 microseconds.
+`/store` adds a set and a get and lands at 0.104ms.
+
+These are not the server's ceiling. At eight client processes barch is on 4.28
+cores of sixteen and the clients are taking the rest - Python asyncio is an
+expensive way to generate HTTP load, and one client process tops out around
+20k rps. The server was never the limit at any row in that table, which is the
+DONE 224 lesson again: the honest reading is p50 and p99 at low concurrency,
+and "at least 94k rps" for throughput.
+
+### Worth knowing
+
+A single aiohttp client process is worth about 20k rps here, so a real ceiling
+needs a compiled load generator - none is installed and the numbers above are
+what an honest Python client can say.
+
+## 226. A file store made of keys, in luau [05-09-2026]
+
+*Was `TODO.md` entry 235, the luau half of it.*
+
+`test/fstest.py` - `TestFileStore` - carries the whole thing: five stored
+functions and the assertions that say the layout works. It is a prototype on
+purpose, so it lives in the test rather than in `src`, and the C++ that serves
+these files over HTTP is still to write.
+
+### The layout
+
+    fs:m:<path>       the metadata, as json: size, type, chunk, chunks
+    fs:d:<path>|<n>   one chunk of the content
+
+A directory is not stored at all. Listing one is
+`barch.store.range("fs:m:" .. prefix, "fs:m:" .. prefix .. "\255", limit)` and
+the paths come back in order, which is the whole reason to build this on
+ordered keys rather than a hash.
+
+Path keyed rather than inode keyed. Inodes buy O(1) rename and hard links and
+cost a lookup per path component plus an allocator - one shared counter, which
+is a write hotspot and a concurrency problem to get right. Neither is worth
+paying for "copy files in, serve them out", and the inode scheme is still there
+to move to if renaming a directory ever matters.
+
+### Two things the sketch had wrong, and one luau corner
+
+The chunk index has to sort numerically. `"5 D 10"` sorts before `"5 D 2"`, so
+a range scan over string indices hands back the chunks out of order from the
+tenth on and the file is quietly corrupt. It is `%08d` here - a numeric
+composite part would be better and is what `composite.h` is for, but nothing
+exposes composite keys to luau yet. The test builds a file of 33 chunks
+specifically so the ordering case is covered.
+
+1KB chunks are too small. `maximum_allocation_size` is 261,888, so a value
+holds a quarter megabyte; the default here is 64KB, and a megabyte file is 16
+keys rather than a thousand.
+
+`simdjson.encode({})` produces `{}` and not `[]`, because an empty luau table
+is not an array or an object until something puts a key in it. An empty
+listing returns the literal `"[]"`.
+
+### What the test proves
+
+- A small file round trips, and its metadata reads back.
+- Binary spanning 33 chunks with an uneven last one comes back byte for byte -
+  every value 0-255, ten times over, with an embedded NUL and 0xff.
+- A prefix scan lists exactly what is under it, nested paths included.
+- Overwriting with something shorter drops the old tail, rather than leaving
+  chunks past the new end to be concatenated onto the next read.
+- Delete takes the metadata and every chunk.
+- A megabyte at the default chunk size is 16 keys and round trips.
+
+### What is deliberately not here
+
+Serving over HTTP through a luau handler, because a handler holds a VM slot for
+the whole call and the pool is 2-8: eight concurrent downloads would exhaust it
+and everything else on that server gets 503. That path is C++, and it is where
+Range requests, `Content-Type` from the extension and ETag belong. TODO 235
+stays open for it.
+
+Also missing, and worth knowing before anyone leans on this: nothing is atomic
+across the chunks. A reader can see a half written file while `fs.put` is
+running, since each chunk is its own write. A version counter in the path or a
+write-then-swap of the metadata key would fix it, and neither is in here.
+
+### Verified
+
+- `TestFileStore` passes; full suite 78/78 with it added.
+
+## 227. barchd, barch as a program [05-09-2026]
+
+*Was `TODO.md` entry 237.*
+
+`src/main/barchd.cpp` and the `barchd` target. A RESP listener with no python and
+no valkey in the process - `TestBarchd` reads `/proc/<pid>/maps` and asserts
+nothing python shaped is in there.
+
+    barchd [-p PORT] [-b ADDR] [--dir PATH] [-c name=value]... [--no-save-on-exit]
+
+### What start-up has to be
+
+`ValkeyModule_OnLoad` in `src/barch.cpp` and the `%init` block in `src/barch.i`
+were the specification; this is the same sequence a third time:
+
+1. environment configuration, then the command line, so an explicit `--config`
+   beats an exported `BARCH_*`
+2. the function watcher, if `functions_dir` is set to something other than `off`
+3. `get_default_ks()`, which is what loads the shards out of the working
+   directory and prints the banner
+4. `server::start`
+
+`--dir` chdirs before any of it, because barch writes its shards to the working
+directory and that is what decides where the data lives.
+
+What it must **not** do is call any `ValkeyModule_*`. Those are function
+pointers a module host fills in and they are null everywhere else, which is why
+`register_valkey_configuration` stays in `OnLoad` and is not part of the shared
+start-up. Nothing here touches one.
+
+### Stopping
+
+`SIGINT`/`SIGTERM` set a flag and notify; the handler does nothing else, since
+logging or saving from inside one is how a shutdown becomes a deadlock. The main
+thread wakes, stops the listener, and calls `saveAll()` - a database that loses
+the last minutes of writes because it was asked to stop politely is not a good
+default. `--no-save-on-exit` turns that off. `SIGPIPE` is ignored.
+
+### Where it lives
+
+`src/main/` is deliberately outside the `file(GLOB SOURCES "src/*.cpp" ...)` at
+the top of `CMakeLists.txt`. A `main()` swept into that glob would be linked
+into both the python extension and the valkey module, which is wrong in both.
+`barchd` was added to the three `foreach (tgt ...)` lists and the four
+`target_link_libraries` blocks that `lbarch` appears in, so it gets luau,
+simdjson, crow, cofetch, zstd, liburing, openssl and fmt on the same terms.
+
+### Verified
+
+`TestBarchd` covers: it serves RESP and a SET/GET round trips; no python in the
+process; `--version` and `--help`; SIGTERM logs the save and the keys are still
+there after a restart; `BARCH_MAX_MEMORY_BYTES` from the environment applies and
+`--config hybrid_keys=off` overrides an exported `BARCH_HYBRID_KEYS=on`; and
+four bad invocations exit 2, 2, 2 and 1 rather than starting anyway.
+
+Full suite 79/79.
+
+### One thing that looked like a regression and was not
+
+An interim full run had sixteen `Not Run` failures across the C++ tests in
+`test/`. `CMakeLists.txt` builds those through an `execute_process` at configure
+time, and the run had started while a reconfigure was still replacing
+`test/RelWithDebInfo/TestStarter`. Nothing to do with this change and it does
+not reproduce - but worth knowing that a `cmake -B` and a `ctest` racing each
+other looks exactly like a broken build.
+
+## 228. Serving the file store, in C++ [05-09-2026]
+
+*Was `TODO.md` entry 235.*
+
+A third transport kind, declared the same way as the other two:
+
+```lua
+function transport()
+    return { kind = "files", route = "/static/*", root = "/", cors = "*" }
+end
+```
+
+The declaration is luau and the serving is not. A `kind = "files"` route has no
+`methods` and no handler; `handle_file` in `src/http_api.cpp` answers it directly
+out of the `fs:m:` and `fs:d:` keys, and no VM slot is taken. That is the whole
+point of doing it in C++: a luau handler holds a slot for the duration of the
+call and the pool is 2-8, so eight concurrent downloads would starve every other
+route on that server.
+
+### What it answers
+
+- `Content-Type` from the stored metadata, falling back to the extension - a
+  short table, the twenty odd types a browser needs to render a page.
+- `Range: bytes=a-b`, `bytes=a-`, and the suffix form `bytes=-n`, as 206 with
+  `Content-Range`. Only the chunks the range covers are read, so a range out of
+  a megabyte reads one 64KB key rather than sixteen. A range past the end is
+  416 with `bytes */<size>`. Multipart ranges are refused - they are legal and
+  no client asks.
+- `HEAD`, by not special casing it at all. That took two wrong turns first: Crow
+  fills in `Content-Length` from the body it is about to write, so setting the
+  header by hand gave `0`, and `manual_length_header` did not help either. The
+  answer is that Crow's router already sets `res.skip_body` for a HEAD and its
+  `end()` takes the length from the body *before* dropping it. Building the
+  response exactly as for a GET is correct and the framework does the rest.
+- `ETag` and `If-None-Match` with a 304. Weak, and it says `W/` because it is
+  built from the size and the chunk count - a rewrite that lands on the same
+  length keeps it. A content hash written at put time is the fix and is not
+  here.
+- 404 for a path that is not there, 403 when the caller may not read the space,
+  405 for anything but GET and HEAD.
+
+Identity is resolved the same way a luau route resolves it - the `sid` cookie,
+then the route's pinned user, then the server default - and the read goes
+through `store_for(space, acl)`, so a file is exactly as private as any other
+key. No VM is entered to work that out.
+
+`..` cannot escape the root: the decoded remainder is rejected if it contains
+`..` or a NUL, before it is joined to the root.
+
+### The macro that was not a macro
+
+`read_file_meta` parses the metadata with simdjson and returned false for every
+file. `BARCH_HAS_SIMDJSON` was a CMake variable that gated a
+`target_link_libraries` and was never a `target_compile_definitions`, so the
+`#ifdef` in `http_api.cpp` was false and the `#else` branch answered "no such
+file" to everything. Nothing had noticed because the only other simdjson user is
+the luau driver, which includes it under its own `BARCH_HAS_LUAU` guard. The
+definition is added where the link is now.
+
+### Not done, on purpose
+
+The body is assembled into `res.body` rather than streamed, because Crow's
+response is a string. A file is held once in memory while it is written, which
+is fine for images and pages and is why Range matters for anything bigger.
+Nothing is atomic across chunks either - a read during a rewrite can see a
+half written file, and gets a 500 saying so when a chunk the metadata promises
+is missing. Both are in DONE 226's list of what the layout does not do yet.
+
+### Verified
+
+`TestFileStore` grew the HTTP half: a 200KB PNG served byte for byte, the
+extension fallback, four range cases including one that spans a chunk boundary,
+416, HEAD with the right length and an empty body, ETag round tripping to a 304,
+404 and `..` refused, 405 on POST, and eight concurrent downloads while a luau
+route is hit twenty times - all 200, which is the assertion that the pool is not
+being taken. Full suite 79/79.

@@ -385,8 +385,8 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
         lua_pop(L, 1);
         for (auto& ch : out.kind)
             ch = (char) std::tolower((unsigned char) ch);
-        if (out.kind != "http" && out.kind != "resource") {
-            err = "transport() kind must be http or resource";
+        if (out.kind != "http" && out.kind != "resource" && out.kind != "files") {
+            err = "transport() kind must be http, resource or files";
             return false;
         }
     }
@@ -399,6 +399,13 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
         if (!out.route.empty() && out.route[0] != '/')
             out.route.insert(out.route.begin(), '/');
         out.has_route = !out.route.empty();
+    }
+    if (field(L, idx, "root")) {
+        if (!as_string(L, -1, out.root, err, "root")) {
+            lua_pop(L, 1);
+            return false;
+        }
+        lua_pop(L, 1);
     }
     if (field(L, idx, "accept")) {
         if (!as_string(L, -1, out.accept, err, "accept")) {
@@ -528,6 +535,18 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
     }
     if (out.kind == "http")
         out.has_route = false;
+    else if (out.kind == "files") {
+        // a files route has no methods and no handler: C++ serves it, so the
+        // checks below that a resource must have both do not apply
+        if (out.route.empty()) {
+            err = "kind=files needs a route";
+            return false;
+        }
+        if (out.root.empty())
+            out.root = "/";
+        out.has_route = true;
+        return true;
+    }
     else if (out.kind == "resource") {
         if (out.route.empty()) {
             err = "kind=resource needs a route";

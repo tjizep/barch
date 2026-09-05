@@ -425,6 +425,12 @@ struct http_route {
     std::string ssl_proto;
     /** empty: session then HTTP default. set: this route always runs as that user */
     std::string user;
+    /**
+     * kind=files only: where under the file store this route serves from, so
+     * `/static/*` with root `/assets/` answers `/static/logo.png` out of
+     * `fs:m:/assets/logo.png`. Served in C++ without entering luau - see TODO 235.
+     */
+    std::string root;
     bool has_transport{false};
     bool has_route{false};
 };

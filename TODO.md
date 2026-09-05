@@ -1097,3 +1097,28 @@
 227. [Done] The chaos thread that had not stopped working [05-09-2026] Nr 220 dfda7a6
 
 228. [Done] The defrag fragmentation read had no latch [05-09-2026] Nr 218 dfda7a6
+
+229. [Done] The bench after the sanitizer work [05-09-2026] Nr 221 198ad57
+
+230. [Done] The same bench at 5% writes [05-09-2026] Nr 222 198ad57
+
+231. [Done] The 20:80 bench on the hash path alone [05-09-2026] Nr 223 198ad57
+
+232. [Done] Six threads was measuring memtier, not barch [05-09-2026] Nr 224 198ad57
+
+233. [Done] HTTP latency, and the 40ms every keep-alive request was paying [05-09-2026] Nr 225 198ad57
+
+234. Crow never sets `TCP_NODELAY` on an accepted socket, so every keep-alive
+    HTTP request after the first on a connection costs 40ms - the diagnosis and
+    the proof are in DONE 225. `SimpleApp` exposes no hook for it, so the
+    options are a `PATCH_COMMAND` on the Crow FetchContent that sets the option
+    on accept, carrying a small fork, or upstreaming it. The shim used to prove
+    it is `LD_PRELOAD` over `accept4` and is not a fix. Settle with the option
+    set on the real accepted sockets and the keep-alive latency test in
+    `httptest.py` so it cannot come back.
+
+235. [Done] Serving the file store, in C++ [05-09-2026] Nr 228 198ad57
+
+236. [Done] A file store made of keys, in luau [05-09-2026] Nr 226 198ad57
+
+237. [Done] barchd, barch as a program [05-09-2026] Nr 227 198ad57

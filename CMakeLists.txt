@@ -700,6 +700,11 @@ add_library(lbarch SHARED ${SOURCES}
         src/shared_mutex.cpp
         src/shared_mutex.h)
 
+# barch as a program: the RESP listener with no python and no valkey in the process.
+# src/main is deliberately outside the SOURCES glob above - a main() linked into the
+# python extension and the valkey module would be wrong in both. See TODO 237.
+add_executable(barchd src/main/barchd.cpp ${SOURCES})
+
 set(TEST_SOURCE_PATH ${CMAKE_SOURCE_DIR}/test)
 set(TEST_BUILD_PATH ${TEST_SOURCE_PATH}/${TEST_BUILD_DIR})
 
@@ -725,26 +730,30 @@ endif ()
 if (ADD_ZSTD_COMPRESSION)
     target_link_libraries(barch PRIVATE libzstd_static)
     target_link_libraries(lbarch PRIVATE libzstd_static)
+    target_link_libraries(barchd PRIVATE libzstd_static)
 endif ()
 
 if (USE_LIBURING)
     target_link_libraries(barch PRIVATE ${LIBURING_LIB_PATH})
     target_link_libraries(lbarch PRIVATE ${LIBURING_LIB_PATH})
+    target_link_libraries(barchd PRIVATE ${LIBURING_LIB_PATH})
 endif ()
 
 if (USE_OPENSSL)
     message("OpenSSL static Linking against ${OPENSSL_LIB_PATH}")
     target_link_libraries(barch PRIVATE ${OPENSSL_LIB_PATH})
     target_link_libraries(lbarch PRIVATE ${OPENSSL_LIB_PATH})
+    target_link_libraries(barchd PRIVATE ${OPENSSL_LIB_PATH})
 endif ()
 
 if (ADD_FMT)
     target_link_libraries(barch PRIVATE fmt::fmt)
     target_link_libraries(lbarch PRIVATE fmt::fmt)
+    target_link_libraries(barchd PRIVATE fmt::fmt)
 endif ()
 
 if (BARCH_HAS_LUAU)
-    foreach (tgt barch lbarch barchjni)
+    foreach (tgt barch lbarch barchjni barchd)
         if (TARGET ${tgt})
             target_compile_definitions(${tgt} PRIVATE BARCH_HAS_LUAU)
             target_include_directories(${tgt} BEFORE PRIVATE
@@ -755,6 +764,12 @@ if (BARCH_HAS_LUAU)
                 target_link_libraries(${tgt} PRIVATE numkong)
             endif ()
             if (BARCH_HAS_SIMDJSON)
+                # the definition as well as the link: http_api.cpp parses the file
+                # store's metadata with simdjson and has to know it is there. Until
+                # TODO 235 nothing outside the luau driver asked, and the driver
+                # includes simdjson under its own guard - so this variable gated the
+                # link and meant nothing to the preprocessor. See DONE 228.
+                target_compile_definitions(${tgt} PRIVATE BARCH_HAS_SIMDJSON)
                 target_link_libraries(${tgt} PRIVATE simdjson_amalg)
             endif ()
             if (BARCH_HAS_CROW)
@@ -784,6 +799,7 @@ if (BARCH_HAS_LUAU)
             target_link_libraries(barchlua PRIVATE numkong)
         endif ()
         if (BARCH_HAS_SIMDJSON)
+            target_compile_definitions(barchlua PRIVATE BARCH_HAS_SIMDJSON)
             target_link_libraries(barchlua PRIVATE simdjson_amalg)
         endif ()
         if (BARCH_HAS_CROW)
@@ -837,7 +853,7 @@ if (TARGET barchlua)
 endif ()
 
 if (BARCH_HAS_MYSQL)
-    foreach (tgt barch lbarch barchlua barchjni)
+    foreach (tgt barch lbarch barchlua barchjni barchd)
         if (TARGET ${tgt})
             target_compile_definitions(${tgt} PRIVATE BARCH_HAS_MYSQL)
             target_include_directories(${tgt} PRIVATE ${MySQL_INCLUDE_DIR})
@@ -847,7 +863,7 @@ if (BARCH_HAS_MYSQL)
 endif ()
 
 if (BARCH_HAS_POSTGRES)
-    foreach (tgt barch lbarch barchlua barchjni)
+    foreach (tgt barch lbarch barchlua barchjni barchd)
         if (TARGET ${tgt})
             target_compile_definitions(${tgt} PRIVATE BARCH_HAS_POSTGRES)
             target_include_directories(${tgt} PRIVATE ${PostgreSQL_INCLUDE_DIRS})
@@ -1040,6 +1056,19 @@ else()
         # stored Luau functions: the key range, SETF/GETF/REMF/KEYSF
         add_test(NAME TestFunctions
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functiontest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+        # the standalone program - TODO 237. Driven from python, but the server
+        # under test has none in it, which is one of the things asserted
+        add_test(NAME TestBarchd
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/barchdtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(TestBarchd PROPERTIES ENVIRONMENT
+                "BARCHD=${CMAKE_BINARY_DIR}/barchd")
+
+        # files modelled as keys, and read back through stored functions - TODO 235
+        add_test(NAME TestFileStore
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/fstest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
         add_test(NAME TestFunctionSync

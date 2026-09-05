@@ -572,6 +572,36 @@ try:
     status, _, _ = http_call("GET", "/echo")
     assert status == 405, status
 
+    # Keep-alive latency - TODO 234.
+    #
+    # Crow does not set TCP_NODELAY and its response leaves as two writes, so
+    # without the patch in cmake/crow_tcp_nodelay.cmake every request after the
+    # first on a connection waits ~40ms for a delayed ACK. That is invisible to
+    # every other test here, because each one opens its own connection and the
+    # first request on a connection is fast. Real clients keep the connection.
+    print("keep-alive requests do not wait on a delayed ACK", flush=True)
+    import socket as _socket
+    _req = b"GET /page HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n"
+    _sock = _socket.create_connection(("127.0.0.1", HTTP_PORT), timeout=10)
+    try:
+        _worst = 0.0
+        for _ in range(6):
+            _t0 = time.time()
+            _sock.sendall(_req)
+            _buf = b""
+            while b"hello" not in _buf:
+                _chunk = _sock.recv(4096)
+                assert _chunk, "the server closed the connection"
+                _buf += _chunk
+            _worst = max(_worst, (time.time() - _t0) * 1000)
+    finally:
+        _sock.close()
+    # the signature is 40ms exactly, so anything under 20 says Nagle is not in the
+    # way. Generous on purpose: this is a latency floor, not a benchmark
+    assert _worst < 20.0, (
+        "a keep-alive request took %.1fms - TCP_NODELAY is not set on the accepted "
+        "socket, see cmake/crow_tcp_nodelay.cmake" % _worst)
+
     # Templated routes - TODO 222.
     print("HTTP templated routes bind path segments and the query", flush=True)
     status, body, _ = http_call("GET", "/notes/7/rev/3?q1=v1")

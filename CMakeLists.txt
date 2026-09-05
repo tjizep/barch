@@ -758,7 +758,14 @@ if (BARCH_HAS_LUAU)
                 target_link_libraries(${tgt} PRIVATE simdjson_amalg)
             endif ()
             if (BARCH_HAS_CROW)
-                target_compile_definitions(${tgt} PRIVATE BARCH_HAS_CROW ASIO_STANDALONE)
+                # CROW_DISABLE_STATIC_DIR: without it Crow adds a route of its own
+                # at run() - /static/<path>, serving files out of `static/` next
+                # to the process cwd, which for barch is wherever the shards are
+                # written. Nothing here asked for that, it is not in HTTP STATUS
+                # beside the routes a transport() declared, and it takes the
+                # /static/* prefix away from anyone who wants it. See TODO 222.
+                target_compile_definitions(${tgt} PRIVATE BARCH_HAS_CROW ASIO_STANDALONE
+                        CROW_DISABLE_STATIC_DIR)
                 target_include_directories(${tgt} PRIVATE ${crow_SOURCE_DIR}/include)
                 if (USE_OPENSSL)
                     target_compile_definitions(${tgt} PRIVATE CROW_ENABLE_SSL)
@@ -780,7 +787,7 @@ if (BARCH_HAS_LUAU)
             target_link_libraries(barchlua PRIVATE simdjson_amalg)
         endif ()
         if (BARCH_HAS_CROW)
-            target_compile_definitions(barchlua PRIVATE BARCH_HAS_CROW ASIO_STANDALONE)
+            target_compile_definitions(barchlua PRIVATE BARCH_HAS_CROW ASIO_STANDALONE CROW_DISABLE_STATIC_DIR)
             target_include_directories(barchlua PRIVATE ${crow_SOURCE_DIR}/include)
             if (USE_OPENSSL)
                 target_compile_definitions(barchlua PRIVATE CROW_ENABLE_SSL)
@@ -809,7 +816,7 @@ if (TARGET barchlua)
             target_link_libraries(barch_luau_driver PRIVATE simdjson_amalg)
         endif ()
         if (BARCH_HAS_CROW)
-            target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_CROW ASIO_STANDALONE)
+            target_compile_definitions(barch_luau_driver PRIVATE BARCH_HAS_CROW ASIO_STANDALONE CROW_DISABLE_STATIC_DIR)
             target_include_directories(barch_luau_driver PRIVATE ${crow_SOURCE_DIR}/include)
             if (USE_OPENSSL)
                 target_compile_definitions(barch_luau_driver PRIVATE CROW_ENABLE_SSL)

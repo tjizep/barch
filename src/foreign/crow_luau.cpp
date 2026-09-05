@@ -557,6 +557,40 @@ void crow_push_request(lua_State* L, const void* req) {
 #endif
 }
 
+void crow_push_params(lua_State* L, const std::vector<barch::foreign::http_binding>* params) {
+#ifdef BARCH_HAS_CROW
+    lua_newtable(L);
+    if (!params)
+        return;
+    for (const auto& b : *params) {
+        lua_pushlstring(L, b.value.data(), b.value.size());
+        lua_setfield(L, -2, b.name.c_str());
+    }
+#else
+    (void) params;
+    lua_pushnil(L);
+#endif
+}
+
+void crow_push_query(lua_State* L, const void* req) {
+#ifdef BARCH_HAS_CROW
+    lua_newtable(L);
+    const auto* r = static_cast<const crow::request*>(req);
+    if (!r)
+        return;
+    // url_params has already been through qs_decode, so these come out decoded
+    // and with `+` read as a space - query rules, unlike the path segments
+    for (const auto& k : r->url_params.keys()) {
+        const char* v = r->url_params.get(k);
+        lua_pushstring(L, v ? v : "");
+        lua_setfield(L, -2, k.c_str());
+    }
+#else
+    (void) req;
+    lua_pushnil(L);
+#endif
+}
+
 void crow_push_response(lua_State* L, void* res) {
 #ifdef BARCH_HAS_CROW
     auto* p = static_cast<res_box*>(lua_newuserdata(L, sizeof(res_box)));
@@ -587,6 +621,8 @@ bool crow_read_transport(lua_State*, int, barch::foreign::http_route&, std::stri
 
 void crow_push_request(lua_State*, const void*) {}
 void crow_push_response(lua_State*, void*) {}
+void crow_push_params(lua_State*, const std::vector<barch::foreign::http_binding>*) {}
+void crow_push_query(lua_State*, const void*) {}
 void crow_http_end_call() {}
 
 #endif

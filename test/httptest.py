@@ -166,7 +166,7 @@ function transport()
         bind = "127.0.0.1",
         user = "web",
         keys = {"ECHO", "BINECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS",
-                "JSON", "HEALTH", "STATS", "LOGIN", "WHO"},
+                "JSON", "HEALTH", "STATS", "LOGIN", "WHO", "NOTES", "FILES"},
     }
 end
 ''' % HTTP_PORT
@@ -221,6 +221,56 @@ function transport()
     }
 end
 """ % UP_PORT
+
+# Templated routes - TODO 222. The route is a pathspec in transport(), and the
+# handler gets two more arguments: the {name} bindings out of the path, and the
+# query string. Crow cannot match this itself (route_dynamic wants a handler
+# arity that matches the rule, and these routes are only known at runtime), so
+# barch hands Crow the literal prefix and does the segments itself.
+NOTES = r'''
+function call()
+    return "notes"
+end
+
+function one(req, res, params, query)
+    res.body = "id=" .. tostring(params.id) .. " n=" .. tostring(params.n) ..
+               " q=" .. tostring(query.q1) .. " url=" .. req.url
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/notes/{id}/rev/{n}",
+        methods = {GET = one},
+        send = "text/plain",
+    }
+end
+'''
+
+# a trailing * binds the rest of the path under "*", which is the sub-routing
+# case: one handler, and the dispatch below it written in luau.
+FILES = r'''
+function call()
+    return "files"
+end
+
+function serve(req, res, params)
+    local rest = params["*"]
+    local head = string.match(rest, "^[^/]+") or ""
+    res.body = "head=" .. head .. " rest=" .. rest
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/files/*",
+        methods = {GET = serve},
+        send = "text/plain",
+    }
+end
+'''
 
 PLAIN = r'''
 function call()
@@ -468,6 +518,8 @@ try:
     assert r.execute_command("SETF", "who", WHO) == b"OK"
     assert r.execute_command("SETF", "slow", SLOW) == b"OK"
     assert r.execute_command("SETF", "fetch", FETCH) == b"OK"
+    assert r.execute_command("SETF", "notes", NOTES) == b"OK"
+    assert r.execute_command("SETF", "files", FILES) == b"OK"
     # no transport: still an ordinary function
     assert r.execute_command("plain") == b"plain"
 
@@ -488,6 +540,9 @@ try:
     assert "WHO /who GET" in text, started
     assert "SLOW /slow GET" in text, started
     assert "FETCH /fetch GET" in text, started
+    # STATUS shows the pathspec as it was written, not the /<path> Crow got
+    assert "NOTES /notes/{id}/rev/{n} GET" in text, started
+    assert "FILES /files/* GET" in text, started
     assert "PLAIN" not in text, started
 
     # Crow bind can take a beat after START returns
@@ -516,6 +571,43 @@ try:
 
     status, _, _ = http_call("GET", "/echo")
     assert status == 405, status
+
+    # Templated routes - TODO 222.
+    print("HTTP templated routes bind path segments and the query", flush=True)
+    status, body, _ = http_call("GET", "/notes/7/rev/3?q1=v1")
+    assert status == 200, (status, body)
+    assert body == b"id=7 n=3 q=v1 url=/notes/7/rev/3", body
+
+    # segments are percent decoded, one at a time. %2F is data inside a segment,
+    # not a separator, which is only true because the split happens first.
+    status, body, _ = http_call("GET", "/notes/a%20b/rev/9")
+    assert status == 200 and body == b"id=a b n=9 q=nil url=/notes/a%20b/rev/9", body
+    status, body, _ = http_call("GET", "/notes/a%2Fb/rev/9")
+    assert status == 200 and body.startswith(b"id=a/b n=9"), body
+
+    # `+` is a plus in a path and a space in a query - different rules, and the
+    # handler sees both in the same call
+    status, body, _ = http_call("GET", "/notes/a+b/rev/1?q1=one+two")
+    assert status == 200 and body.startswith(b"id=a+b n=1 q=one two"), body
+
+    # the literal segment has to match, and the count has to be exact
+    for miss in ("/notes/7/rev", "/notes/7/rev/3/extra", "/notes/7/nope/3"):
+        status, _, _ = http_call("GET", miss)
+        assert status == 404, (miss, status)
+
+    # a trailing * takes the rest, and the routing under it is the handler's job
+    status, body, _ = http_call("GET", "/files/css/app.css")
+    assert status == 200 and body == b"head=css rest=css/app.css", body
+    status, body, _ = http_call("GET", "/files/one")
+    assert status == 200 and body == b"head=one rest=one", body
+    # <path> needs something to match, so the bare prefix is not a hit
+    status, _, _ = http_call("GET", "/files/")
+    assert status == 404, status
+
+    # Crow's own /static/<path> is off (CROW_DISABLE_STATIC_DIR), so it neither
+    # serves files out of the cwd nor takes the prefix from a route
+    status, _, _ = http_call("GET", "/static/anything")
+    assert status == 404, status
 
     # request read as a buffer, response written from one - the bytes are never
     # a lua string on either side. Includes an embedded NUL and every byte

@@ -1083,3 +1083,5 @@
     push that shows the job green, and record the wall clock time.
 
 221. [Done] ubuntu24-sanitize was the coverage job [05-09-2026] Nr 213 31470ca
+
+222. [Done] Templated HTTP routes, and Crow's uninvited /static [05-09-2026] Nr 214 31470ca

@@ -386,10 +386,33 @@ struct http_method {
  * with no transport() is an ordinary stored function. fn_ref values are
  * only valid on the http_vm they were loaded into.
  */
+/** one segment of a parsed route: either a literal, or a `{name}` hole */
+struct http_route_seg {
+    std::string text;  ///< the literal, empty for a hole
+    std::string name;  ///< the binding name, empty for a literal
+    bool hole{false};
+};
+
+/** one `{name}` filled in from the request path */
+struct http_binding {
+    std::string name;
+    std::string value;
+};
+
 struct http_route {
     std::string name;
     std::string kind;
     std::string route;
+    /*
+     * Crow matches the literal prefix and hands us the rest; the segments after
+     * it are matched here. `segs` is `route` split up, `crow_route` is what the
+     * rule is actually registered as, and both are empty on a plain route,
+     * which still goes to Crow whole. See TODO 222.
+     */
+    std::vector<http_route_seg> segs;
+    std::string crow_route;
+    bool wild_tail{false};   ///< route ended in `*`: the rest goes in `params["*"]`
+    bool templated{false};   ///< has holes or a `*`, so barch does the matching
     std::string accept;
     std::string send;
     std::string cors;
@@ -416,7 +439,13 @@ struct http_vm {
 
 bool http_vm_load(http_vm& vm, const std::string& name, const std::string& source,
                   http_route& out, std::string& err);
-void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::string& err);
+/**
+ * Call one HTTP handler. `params` is the `{name}` bindings matched out of the
+ * path, or null for an untemplated route; it reaches the handler as its third
+ * argument, with the query string as its fourth.
+ */
+void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
+                  const std::vector<http_binding>* params, std::string& err);
 
 }
 }

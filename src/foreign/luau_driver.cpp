@@ -2817,7 +2817,8 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
     return true;
 }
 
-void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::string& err) {
+void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
+                  const std::vector<http_binding>* params, std::string& err) {
     err.clear();
     if (!vm.cache) {
         err = "HTTP luau state";
@@ -2858,7 +2859,12 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::stri
     lua_getref(T, fn_ref);
     crow_push_request(T, req);
     crow_push_response(T, res);
-    int rc = lua_pcall(T, 2, 0, 0);
+    // params and query go on every call, templated or not, so a handler that
+    // takes four arguments does not have to care which kind of route it is on.
+    // A two argument handler ignores them - see TODO 222.
+    crow_push_params(T, params);
+    crow_push_query(T, req);
+    int rc = lua_pcall(T, 4, 0, 0);
     lua_setthreaddata(T, nullptr);
     lua_callbacks(L)->userdata = nullptr;
     st->load = nullptr;
@@ -2961,7 +2967,8 @@ bool http_vm_load(http_vm&, const std::string&, const std::string&, http_route&,
     return false;
 }
 
-void http_vm_call(http_vm&, int, const void*, void*, std::string& err) {
+void http_vm_call(http_vm&, int, const void*, void*,
+                  const std::vector<http_binding>*, std::string& err) {
     err = "luau not built";
 }
 

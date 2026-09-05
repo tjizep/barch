@@ -147,6 +147,180 @@ bool load_resource_into(http_vm_slot& slot, const std::string& name,
 std::mutex http_mu;
 heap::string_map<std::shared_ptr<space_http>> http_servers;
 
+/*
+ * Templated routes - TODO 222.
+ *
+ * `route = "/notes/{id}/rev/{n}"` in a resource transport() binds two names out
+ * of the path; a trailing `*` binds whatever is left under `*`. Crow cannot do
+ * this for us: route_dynamic checks the rule's parameter tag against the
+ * handler's arity, and our handler is one lambda for every route, with the
+ * routes themselves only known once someone has stored a function. So Crow gets
+ * the literal prefix and a `<path>` to swallow the rest, and the matching below
+ * runs against req.url, which is the path with the query already split off.
+ */
+
+/** percent decoding for a path segment. `+` is a plus here - this is not a query string. */
+std::string pct_decode(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size()) {
+            int h = hex(in[i + 1]);
+            int l = hex(in[i + 2]);
+            if (h >= 0 && l >= 0) {
+                out.push_back((char) ((h << 4) | l));
+                i += 2;
+                continue;
+            }
+        }
+        // a stray % that is not followed by two hex digits stays a %, which is
+        // what a browser sends for a literal one often enough to matter
+        out.push_back(in[i]);
+    }
+    return out;
+}
+
+/** split on '/', dropping the leading empty piece and one trailing slash */
+std::vector<std::string_view> path_segments(std::string_view path) {
+    std::vector<std::string_view> out;
+    size_t i = 0;
+    if (!path.empty() && path[0] == '/')
+        i = 1;
+    while (i <= path.size()) {
+        size_t j = path.find('/', i);
+        if (j == std::string_view::npos)
+            j = path.size();
+        out.push_back(path.substr(i, j - i));
+        if (j == path.size())
+            break;
+        i = j + 1;
+    }
+    if (!out.empty() && out.back().empty())
+        out.pop_back();
+    return out;
+}
+
+/**
+ * Fill in spec.segs, spec.crow_route and the two flags from spec.route. An
+ * untemplated route comes out with templated=false and goes to Crow whole,
+ * exactly as it did before this existed.
+ */
+bool parse_route(barch::foreign::http_route& spec, std::string& err) {
+    spec.segs.clear();
+    spec.wild_tail = false;
+    spec.templated = false;
+    spec.crow_route = spec.route;
+    // a `?` in the pattern is someone writing the query in as documentation;
+    // the query never takes part in matching, so drop it
+    auto q = spec.route.find('?');
+    std::string route = q == std::string::npos ? spec.route : spec.route.substr(0, q);
+    if (route.find('{') == std::string::npos && route.find('*') == std::string::npos) {
+        spec.crow_route = route;
+        return true;
+    }
+    auto raw = path_segments(route);
+    std::string prefix;
+    bool prefix_open = true;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        std::string_view seg = raw[i];
+        if (seg == "*") {
+            if (i + 1 != raw.size()) {
+                err = spec.name + ": `*` has to be the last segment of " + spec.route;
+                return false;
+            }
+            spec.wild_tail = true;
+            prefix_open = false;
+            break;
+        }
+        if (seg.size() >= 2 && seg.front() == '{' && seg.back() == '}') {
+            barch::foreign::http_route_seg s;
+            s.hole = true;
+            s.name = std::string(seg.substr(1, seg.size() - 2));
+            if (s.name.empty()) {
+                err = spec.name + ": empty {} in " + spec.route;
+                return false;
+            }
+            if (s.name == "*") {
+                err = spec.name + ": {*} is not a name - use a bare * at the end";
+                return false;
+            }
+            for (const auto& done : spec.segs) {
+                if (done.hole && done.name == s.name) {
+                    err = spec.name + ": {" + s.name + "} appears twice in " + spec.route;
+                    return false;
+                }
+            }
+            spec.segs.push_back(std::move(s));
+            prefix_open = false;
+            continue;
+        }
+        if (seg.find('{') != std::string_view::npos || seg.find('}') != std::string_view::npos) {
+            err = spec.name + ": a {name} has to be a whole segment in " + spec.route;
+            return false;
+        }
+        if (seg.find('*') != std::string_view::npos) {
+            err = spec.name + ": `*` has to be a whole segment in " + spec.route;
+            return false;
+        }
+        barch::foreign::http_route_seg s;
+        s.text = pct_decode(seg);
+        spec.segs.push_back(s);
+        if (prefix_open)
+            prefix += "/" + std::string(seg);
+    }
+    spec.templated = true;
+    // Crow matches the literal prefix and `<path>` takes the rest. `<path>`
+    // needs something to match, which is right: /notes/{id} should not answer
+    // for /notes.
+    spec.crow_route = prefix + "/<path>";
+    return true;
+}
+
+/**
+ * Match a request path against a parsed route, filling in the bindings. False
+ * means the path got past Crow's prefix but does not fit the pattern, which is
+ * a 404 rather than a handler call.
+ */
+bool match_route(const barch::foreign::http_route& spec, std::string_view url,
+                 std::vector<barch::foreign::http_binding>& out) {
+    auto segs = path_segments(url);
+    size_t want = spec.segs.size();
+    if (spec.wild_tail ? segs.size() < want : segs.size() != want)
+        return false;
+    for (size_t i = 0; i < want; ++i) {
+        const auto& pat = spec.segs[i];
+        std::string got = pct_decode(segs[i]);
+        if (!pat.hole) {
+            if (got != pat.text)
+                return false;
+            continue;
+        }
+        // a {name} binds something; //, which is an empty segment, is not it
+        if (got.empty())
+            return false;
+        out.push_back({pat.name, std::move(got)});
+    }
+    if (spec.wild_tail) {
+        // the rest, decoded segment by segment and joined back up. A %2F inside
+        // the tail is a / by the time luau sees it - the price of handing over
+        // one string rather than a list.
+        std::string rest;
+        for (size_t i = want; i < segs.size(); ++i) {
+            if (!rest.empty())
+                rest += "/";
+            rest += pct_decode(segs[i]);
+        }
+        out.push_back({"*", std::move(rest)});
+    }
+    return true;
+}
+
 const barch::foreign::http_method* find_method(const barch::foreign::http_route& spec,
                                                const std::string& verb) {
     for (const auto& m : spec.methods) {
@@ -224,6 +398,15 @@ std::string session_user(const barch::key_space_ptr& space, const std::string& s
 void handle_route(const std::shared_ptr<space_http>& server,
                   const barch::foreign::http_route& spec,
                   const crow::request& req, crow::response& res) {
+    std::vector<barch::foreign::http_binding> params;
+    if (spec.templated && !match_route(spec, req.url, params)) {
+        // Crow only matched the literal prefix, so this is ours to refuse
+        res.code = 404;
+        res.body = "not found";
+        apply_cors(res, spec);
+        res.end();
+        return;
+    }
     auto verb = crow::method_name(req.method);
     if (verb == "HEAD")
         verb = "GET";
@@ -288,7 +471,8 @@ void handle_route(const std::shared_ptr<space_http>& server,
     if (it == hold.v->methods.end())
         err = "no handler on this vm";
     else
-        barch::foreign::http_vm_call(hold.v->vm, it->second, &req, &res, err);
+        barch::foreign::http_vm_call(hold.v->vm, it->second, &req, &res,
+                                     spec.templated ? &params : nullptr, err);
     if (ident.sid_new && !ident.sid.empty()) {
         res.add_header("Set-Cookie",
                        "sid=" + ident.sid + "; Path=/; HttpOnly");
@@ -523,14 +707,27 @@ std::string start_space_http(const barch::key_space_ptr& space,
     server->app->timeout(30);
     server->app->server_name("barch");
 
+    for (auto& spec : server->routes) {
+        if (!parse_route(spec, err))
+            return err;
+    }
     for (const auto& spec : server->routes) {
-        auto& rule = server->app->route_dynamic(spec.route);
+        auto& rule = server->app->route_dynamic(spec.crow_route);
         rule.methods(crow::HTTPMethod::Get, crow::HTTPMethod::Post, crow::HTTPMethod::Put,
                      crow::HTTPMethod::Delete, crow::HTTPMethod::Patch,
                      crow::HTTPMethod::Options, crow::HTTPMethod::Head);
-        rule([server, spec](const crow::request& req, crow::response& res) {
-            handle_route(server, spec, req, res);
-        });
+        if (spec.templated) {
+            // the `<path>` argument is only there because Crow insists the
+            // handler's arity match the rule's; the matching itself works off
+            // req.url, which is the same text with the prefix still on it
+            rule([server, spec](const crow::request& req, crow::response& res, std::string) {
+                handle_route(server, spec, req, res);
+            });
+        } else {
+            rule([server, spec](const crow::request& req, crow::response& res) {
+                handle_route(server, spec, req, res);
+            });
+        }
     }
 
 #ifdef CROW_ENABLE_SSL

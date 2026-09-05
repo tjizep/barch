@@ -10320,3 +10320,80 @@ about the day they describe.
 - Not run on a runner. The rename only settles when a push shows the renamed
   workflow and the badge link together, which is the same push that settles
   TODO 220.
+
+## 214. Templated HTTP routes, and Crow's uninvited /static [05-09-2026]
+
+*Was `TODO.md` entry 222.*
+
+A resource `transport()` can now declare a pathspec instead of a fixed path:
+
+```lua
+function one(req, res, params, query)
+    res.body = params.id .. "/" .. params.n .. "?" .. tostring(query.q1)
+end
+
+function transport()
+    return { kind = "resource", route = "/notes/{id}/rev/{n}",
+             methods = {GET = one}, send = "text/plain" }
+end
+```
+
+`{name}` binds one whole segment; a trailing `*` binds everything left under
+`params["*"]`, which is the case where the routing below it is written in luau.
+Handlers get two more arguments than they used to - the bindings and the query -
+and they go on every call, templated route or not, so a two argument handler
+carries on working and a four argument one does not have to ask which kind of
+route it is on.
+
+### Crow cannot do this part
+
+`route_dynamic` checks the rule's parameter tag against the handler's arity and
+throws if they disagree (`routing.h:618`). One lambda serves every route here
+and the routes are strings that only exist once someone has stored a function,
+so there is no arity to write down. Crow therefore gets the literal prefix plus
+`<path>` - `/notes/{id}/rev/{n}` registers as `/notes/<path>` - and the segment
+matching happens in `http_api.cpp` against `req.url`, which is the path with the
+query already split off. The `<path>` argument the handler takes is a formality;
+nothing reads it.
+
+`<path>` needing at least one character is the right behaviour rather than a
+limitation: `/notes/{id}` should not answer for `/notes`.
+
+### Decoding, which is where the corners are
+
+Segments are split first and percent decoded after, so `%2F` is data inside one
+segment rather than a separator - `/notes/a%2Fb/rev/9` binds `id = "a/b"`. `+`
+stays a plus in a path and becomes a space in the query, because those are two
+different specifications and the handler sees both in one call. The query table
+comes from Crow's `url_params`, which has already been through `qs_decode`.
+
+A `*` tail is decoded segment by segment and joined back with `/`, so a `%2F`
+inside the tail is indistinguishable from a separator by the time luau sees it.
+That is the price of handing over one string instead of a list, and it is what
+every framework that has a splat does.
+
+Bad patterns are refused at `HTTP START` with the function name on the front:
+`*` not last, an empty `{}`, a `{name}` that is not a whole segment, and the
+same name twice.
+
+### Crow was serving /static out of the working directory
+
+Found by the `/files/*` test failing with `handler already exists for
+/static/<path>` before it was renamed. `app.run()` calls `add_static_dir()`,
+which registers `CROW_STATIC_ENDPOINT` - `/static/<path>` - serving files from
+`static/` relative to the process cwd, which for barch is wherever the shards
+are written. Nobody asked for it, it never appeared in `HTTP STATUS` beside the
+declared routes, and it quietly owned the `/static` prefix.
+
+`CROW_DISABLE_STATIC_DIR` is defined for every target that includes Crow now.
+Nothing in the tree used it, and `/static/anything` returning 404 is asserted so
+it cannot come back unnoticed.
+
+### Verified
+
+- `TestHttpLuau` covers: both names bound plus the query, `%20` and `%2F` and
+  `+` decoding, three shapes of 404 (short, long, wrong literal), the `*` tail
+  with luau doing the sub-dispatch, the bare prefix 404ing, and `/static`
+  staying dead. The untemplated routes in the same file still run on two
+  argument handlers.
+- Full suite, no sanitizer, `-j4`: 77/77.

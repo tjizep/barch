@@ -4,6 +4,7 @@
 
 #ifndef BARCH_ABSTRACT_SHARD_H
 #define BARCH_ABSTRACT_SHARD_H
+#include <atomic>
 #include <memory>
 #include <shared_mutex>
 #include <utility>
@@ -66,13 +67,20 @@ namespace barch {
         bool opt_hybrid_keys = barch::get_hybrid_keys();
         bool hybrid_active() const { return opt_ordered_keys && opt_hybrid_keys; }
         virtual void apply_hybrid_keys() = 0;
-        bool opt_evict_all_keys_lru = barch::get_evict_allkeys_lru();
-        bool opt_evict_all_keys_lfu = barch::get_evict_allkeys_lfu();
-        bool opt_evict_all_keys_random = barch::get_evict_allkeys_random();
-        bool opt_evict_volatile_keys_lru = barch::get_evict_volatile_lru();
-        bool opt_evict_volatile_keys_lfu = barch::get_evict_volatile_lfu();
-        bool opt_evict_volatile_keys_random = false; //barch::get_evict_volatile_lfu();
-        bool opt_evict_volatile_ttl = barch::get_evict_volatile_ttl();
+        /*
+         * KSPACE EVICT writes these from a session thread while the maintenance
+         * thread is reading them to decide whether to run an eviction pass, so
+         * they are atomic - same reasoning as the shutdown flags in DONE 204.
+         * Relaxed is enough: nothing is ordered against them, a pass either
+         * sees the new setting or picks it up on the next tick. See TODO 214.
+         */
+        std::atomic<bool> opt_evict_all_keys_lru{barch::get_evict_allkeys_lru()};
+        std::atomic<bool> opt_evict_all_keys_lfu{barch::get_evict_allkeys_lfu()};
+        std::atomic<bool> opt_evict_all_keys_random{barch::get_evict_allkeys_random()};
+        std::atomic<bool> opt_evict_volatile_keys_lru{barch::get_evict_volatile_lru()};
+        std::atomic<bool> opt_evict_volatile_keys_lfu{barch::get_evict_volatile_lfu()};
+        std::atomic<bool> opt_evict_volatile_keys_random{false};
+        std::atomic<bool> opt_evict_volatile_ttl{barch::get_evict_volatile_ttl()};
         bool opt_active_defrag = barch::get_active_defrag();
         bool opt_drop_on_release = false;
         bool saving = false;

@@ -1,4 +1,9 @@
-name: Ubuntu 24.04 CI Sanitized (GCC 13)
+name: Ubuntu 24.04 CI Coverage (GCC 13)
+
+# The full suite with coverage instrumentation, plus the badge it publishes.
+# This was called ubuntu24-sanitize until 05-09-2026, which was never true -
+# it builds with -DCOVERAGE=ON and no sanitizer. The sanitizer job is
+# ubuntu24-tsan.yml.
 
 on:
   push:

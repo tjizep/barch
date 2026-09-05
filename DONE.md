@@ -10207,3 +10207,116 @@ check in defrag wanted.
   get_size vs `_clear`.
 - RelWithDebInfo still links.
 
+
+## 212. The short set is clean under TSan, and 66 is on [05-09-2026]
+
+*Was `TODO.md` entry 214.*
+
+**18 reports down to 0.** 22/22 in the short set with
+`SANITIZE_EXITCODE=66`, so the repo default is 66 now: a new report fails the
+test that produced it.
+
+### `auth_api.cpp:15` was a dangling reference, not stale shadow
+
+TODO 214 flagged this one as worth checking for stale shadow off a reused
+frame, because the location was the *main thread's stack* and the reader was a
+worker. It is not stale shadow. Nine of the eighteen reports were this, and
+they are one line:
+
+```cpp
+server_context(Proto::endpoint ep, bool ssl)   // by value
+    ...
+    pool.start([this,&ep](size_t tid) { auto addr = address_off(ep); ... });
+```
+
+`ep` is a by-value constructor parameter, so it lives in the constructor's
+frame on whichever thread called it. The accept threads read it whenever they
+got round to it, which was after `make_shared` had returned and the main thread
+had reused that memory for the next command - hence the reader looking like it
+raced a `std::string` being built inside AUTH, or an `unordered_dense` table,
+or a `char_traits::assign`. All five distinct-looking library frames were the
+same stack slot at different moments, which is exactly why the family looked
+strange from the report text.
+
+`address_off(ep)` and `proto_name(ep)` are computed before `pool.start` now and
+captured by value. Whether it ever actually misbehaved in a release build is
+luck - the frame usually still held a plausible endpoint - which is the sort of
+bug TSan is worth running for.
+
+### `shard::search` wrote shard state on the read path (3)
+
+```cpp
+last_leaf_added = nullptr; // clear it before trying to retrieve
+return this->last_leaf_added;
+```
+
+Two GETs missing at once, both under the shared latch, both writing the same
+member. The write is not needed for the return value - the function returns
+null either way - and it also threw away the leaf an insert had left there for
+`get_last_leaf_added()`, which `list_api` reads. Now `return nullptr;`. The
+`TODO: retrieve if pull is enabled` note above it stays.
+
+That accounted for all three `art/nodes.h` and `logical_address.h` reports,
+which are the same store seen through different inlined frames.
+
+### The eviction flags (2)
+
+`opt_evict_all_keys_random` and friends are written by `KSPACE EVICT` on a
+session thread and read by `maintenance()` on its own thread to decide whether
+to run a pass. Plain bools; `std::atomic<bool>` now, same reasoning as the
+shutdown flags in DONE 204. Nothing is ordered against them, so a pass either
+sees the new setting or picks it up on the next tick.
+
+### Configuration (3)
+
+`get_max_module_memory()` and `get_pre_evict_thresh()` are on the insert path -
+every insert checks memory - and read `config()` with the mutex commented out
+while CONFIG SET wrote it. They read `std::atomic` copies that CONFIG SET
+stores alongside the record. `get_configuration()` returned a `const&` to the
+shared record; it returns a copy taken under the mutex now, so a caller cannot
+read strings while they are being replaced.
+
+### Verified
+
+- Short set under TSan at `exitcode=66`, `BARCH_TEST_SCALE=0.05`: three runs,
+  0 reports each. 22/22, 22/22, 20/22.
+- The two that failed in the third run (`TestRespClientLocalRESP3`,
+  `TestFetchLuau`) produced no TSan report and pass on their own - timeouts on
+  a loaded machine under instrumentation, not races.
+- Full suite, no sanitizer, `-j4`: 76/77. `TestForeignPostgres` aborted and
+  passes on its own; nothing it touches is in this change.
+
+## 213. ubuntu24-sanitize was the coverage job [05-09-2026]
+
+*Was `TODO.md` entry 221.*
+
+Renamed to `.github/workflows/ubuntu24-coverage.yml`, and the `name:` line with
+it - `Ubuntu 24.04 CI Coverage (GCC 13)`. It builds `-DCOVERAGE=ON` and no
+sanitizer, and has never built one; the name was wrong from the start and only
+became confusing when `ubuntu24-tsan.yml` (TODO 220) landed beside it and made
+it look like there were two sanitizer jobs.
+
+The file keeps a header comment saying what it used to be called, because the
+old name is all over `DONE.md` and someone reading back will want the link.
+
+Also updated:
+
+- the README coverage badge, which linked to
+  `actions/workflows/ubuntu24-sanitize.yml` and would have 404'd after the
+  rename. That link is the only place outside `DONE.md` that named the file.
+- the `--parallel` comments in `ubuntu22.yml` and `ubuntu24.yml`, which both
+  said "the sanitized workflow hit the same wall". They meant coverage, which
+  is what made the build fat enough to get SIGTERM'd.
+
+`DONE.md` keeps the old name wherever it already appears - that is what the
+file was called at the time, and rewriting it would make those entries lie
+about the day they describe.
+
+### Verified
+
+- All four workflow files parse, and each still has exactly one job.
+- Nothing outside `DONE.md` refers to `ubuntu24-sanitize` any more, except the
+  header comment that deliberately does.
+- Not run on a runner. The rename only settles when a push shows the renamed
+  workflow and the badge link together, which is the same push that settles
+  TODO 220.

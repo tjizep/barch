@@ -7,6 +7,7 @@
 #include "sharded_store.h"
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <string>
 #include <regex>
@@ -108,6 +109,12 @@ static config_state& state() {
 static barch::configuration_record& config() {
     return state().record;
 }
+
+// Hot getters skip config_mutex (every insert checks max memory). CONFIG SET
+// still takes the mutex for the strings; these atomics are what the unlocked
+// readers actually look at. See TODO 214.
+static std::atomic<uint64_t> live_max_memory{std::numeric_limits<uint64_t>::max()};
+static std::atomic<double> live_pre_evict{0.85};
 static restarter restart;
 
 template<typename VT>
@@ -487,6 +494,7 @@ static int SetMaxMemoryBytes(const std::string& test_max_memory_bytes) {
         ++notn;
     }
     config().n_max_memory_bytes = n_max_memory_bytes;
+    live_max_memory.store(n_max_memory_bytes, std::memory_order_relaxed);
     return VALKEYMODULE_OK;
 }
 
@@ -991,6 +999,7 @@ static int SetPreEvictThresh(const std::string& val) {
     // stod, not stof: the field is a double, and parsing it as a float first meant
     // 0.85 came back as 0.8500000238418579
     config().pre_evict_thresh = std::stod(state().pre_evict_thresh.c_str());
+    live_pre_evict.store(config().pre_evict_thresh, std::memory_order_relaxed);
     return VALKEYMODULE_OK;
 }
 
@@ -1937,7 +1946,7 @@ bool barch::get_compression_enabled() {
 }
 
 uint64_t barch::get_max_module_memory() {
-    return config().n_max_memory_bytes;
+    return live_max_memory.load(std::memory_order_relaxed);
 }
 
 float barch::get_min_fragmentation_ratio() {
@@ -1945,8 +1954,7 @@ float barch::get_min_fragmentation_ratio() {
     return config().min_fragmentation_ratio;
 }
 double barch::get_pre_evict_thresh() {
-    //std::lock_guard lock(state().config_mutex);
-    return config().pre_evict_thresh;
+    return live_pre_evict.load(std::memory_order_relaxed);
 }
 uint64_t barch::get_min_compressed_size() {
     //std::lock_guard lock(state().config_mutex);
@@ -2012,7 +2020,7 @@ bool barch::get_static_bloom_filter() {
 bool barch::get_use_minimum_threads() {
     return config().use_minimum_threads;
 }
-const barch::configuration_record& barch::get_configuration() {
+barch::configuration_record barch::get_configuration() {
     std::lock_guard lock(state().config_mutex);
     return state().record;
 }

@@ -1419,9 +1419,12 @@ art::node_ptr barch::shard::search(value_type unfiltered_key) {
                 return r;
             }
         }
-        last_leaf_added = nullptr; // clear it before trying to retrieve
+        // this used to null last_leaf_added and return it, which returns the same
+        // nullptr but writes a shard member from the read path - two GETs missing
+        // at once raced on it, and it also threw away the leaf an insert had left
+        // there for get_last_leaf_added(). See TODO 214.
         // TODO: retrieve if pull is enabled
-        return this->last_leaf_added;
+        return nullptr;
     }
     if (r.cl()->is_tomb()) {
         return nullptr;

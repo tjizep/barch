@@ -1,0 +1,63 @@
+name: Ubuntu 24.04 TSan (GCC 13)
+
+# The thread sanitizer over the short test set, and nothing else. The full
+# suite is far too slow under TSan, so this job runs the set that puts several
+# threads through the server at once - which is where TSan has actually found
+# things - and leaves the rest to the other three workflows.
+#
+# A finding fails the job: SANITIZE_EXITCODE defaults to 66 now that the set
+# runs clean (DONE 212), so anything reported here is a regression.
+
+on:
+  push:
+    paths-ignore:
+      - "**/coverage.svg"
+      - "**/README.md"
+      - "**/DOCKER.md"
+  pull_request:
+    paths-ignore:
+      - "**/coverage.svg"
+
+jobs:
+  ubuntu-tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # TSan lays out its shadow memory at fixed addresses and dies with
+      # "FATAL: ThreadSanitizer: unexpected memory mapping" if the kernel has
+      # already put something there. ubuntu-24.04 ships 32 bits of mmap
+      # randomisation, which is enough to land on it. The tests themselves run
+      # under `setarch -R` (CMakeLists wires that in), so this only covers the
+      # build and anything else that loads the runtime, but it costs nothing.
+      - name: Make room for the TSan shadow
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Build with the thread sanitizer
+        run: |
+          set -xe
+          cmake -B build-tsan \
+             -DTEST_OD=ON \
+             -DSANITIZE=thread \
+             -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          # only barch: ctest uses _barch.so, and lbarch is a second copy of
+          # the same sources. --parallel 2 for the same reason the coverage
+          # job caps it - an unlimited `-j` starts every source at once and
+          # the job dies with SIGTERM and no compiler error, and an
+          # instrumented translation unit is fatter still.
+          cmake --build build-tsan --target barch --parallel 2
+
+      - name: Short set under TSan
+        run: |
+          set -xe
+          # BARCH_TEST_SCALE shrinks the key counts so the set finishes - see
+          # test/scale.py and ci/README.md. 0.05 is what the timings in
+          # DONE 212 are from: about a hundred seconds locally.
+          #
+          # Serially, unlike the other jobs. The tests are already isolated
+          # enough to run in parallel, but instrumentation makes everything
+          # slow enough that two servers on a 4 vCPU runner start timing each
+          # other out, which fails tests for a reason that has nothing to do
+          # with threading.
+          cd build-tsan
+          BARCH_TEST_SCALE=0.05 ctest -L short --output-on-failure

@@ -47,10 +47,15 @@ have compiled quite happily.
 
 ## Sanitizers and the short test set
 
-Not part of any CI job - too slow for the full suite - but the short set finishes
-under TSan in about four and a half minutes, which is worth running before
-anything that touches threading. It has found four real bugs so far: DONE 186,
-188, 190 and 192.
+The short set finishes under TSan in about four and a half minutes, which is
+worth running before anything that touches threading. It has found real bugs
+repeatedly: DONE 186, 188, 190, 192, and the dangling endpoint reference in
+DONE 212.
+
+`.github/workflows/ubuntu24-tsan.yml` is that run as a CI job - the fourth
+workflow, and the only one that builds with a sanitizer. It does the short set
+and nothing else, because the full suite under TSan is far too slow for CI. To
+reproduce what it does, locally:
 
     cmake -B build-tsan -DTEST_OD=ON -DSANITIZE=thread \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -74,11 +79,11 @@ above are from. Tests that already had their own knob still honour it, so
 
 Two things worth knowing:
 
-- A sanitizer finding is reported but does not fail the test, because there are
-  still known-benign races in the tail (DONE 193, 195) and failing everything
-  teaches people to ignore it. `-DSANITIZE_EXITCODE=66` makes findings fail the
-  run, which is where this should end up once that tail is empty. Real test
-  failures fail either way.
+- A TSan finding fails the test that produced it, because the short set runs
+  clean now, so anything new is a regression. That was not always so - it started
+  at 0, reporting without failing, while the tail of known races was still there.
+  `-DSANITIZE_EXITCODE=0` puts it back to reporting only, which is what an ASan
+  run still wants. Real test failures fail either way.
 - `TestBarchLru` is not in the short set. Its assertions are about absolute
   memory pressure rather than key counts, so a smaller run just means eviction
   keeps up and it fails for the wrong reason.

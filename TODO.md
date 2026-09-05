@@ -1059,19 +1059,7 @@
 
 213. [Done] Four of the families behind exitcode 66 [04-09-2026] Nr 204 52881bc
 
-214. The 18 reports still standing between here and
-    `SANITIZE_EXITCODE=66`, after DONE 211. In order:
-    the `auth_api.cpp:15` pair against a worker stack (9), `art/nodes.h`
-    (4), configuration (3), then singles (`keyspace_api` SIZEALL-shaped,
-    `blocked_sessions` in shard.h).
-
-    `auth_api.cpp:15` is still the odd one: the location is the
-    *main thread's stack*, read by a worker. Worth confirming it is not
-    stale shadow from a reused frame before spending time on it.
-
-    The size/tombstone family and the hash RNG are gone (DONE 211).
-    Teaching TSan the custom latch with `__tsan_acquire`/`__tsan_release`
-    does not work: those are a binary synch, not a reader-writer lock.
+214. [Done] The short set is clean under TSan, and 66 is on [05-09-2026] Nr 212 31470ca
 
 215. [Done] simdjson takes a luau buffer, and now makes one [04-09-2026] Nr 205 07786c1
 
@@ -1082,3 +1070,16 @@
 218. [Done] Space flag vs shard file after load, SET-OK-GET-miss [04-09-2026] Nr 209 ee012e3
 
 219. [Done] HTTP identity so `barch.call` can run under an ACL [04-09-2026] Nr 210 9c603b4
+
+220. A fourth CI job that builds and runs only the TSan short set.
+    `.github/workflows/ubuntu24-tsan.yml`: RelWithDebInfo with
+    `-DSANITIZE=thread`, build `barch` alone, then
+    `BARCH_TEST_SCALE=0.05 ctest -L short` serially, with the exit code left
+    at the repo default of 66 so a report fails the job. The recipe is the
+    one in `ci/README.md` and it passes locally (DONE 212), so what is not
+    settled is runner specific: whether `setarch -R` is allowed on a
+    GitHub runner, whether the shadow mapping survives ubuntu-24.04's
+    `vm.mmap_rnd_bits`, and how long the job takes. Settle with the first
+    push that shows the job green, and record the wall clock time.
+
+221. [Done] ubuntu24-sanitize was the coverage job [05-09-2026] Nr 213 31470ca

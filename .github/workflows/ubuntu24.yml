@@ -24,7 +24,7 @@ jobs:
           # means no limit: every ready source starts at once. That is 58
           # compiles of around a gigabyte each on a 16GB runner, and the job
           # dies with SIGTERM (exit 143) and no gcc error to explain it. The
-          # sanitized workflow hit the same wall. Ninja caps itself, so a
+          # coverage workflow hit the same wall. Ninja caps itself, so a
           # local build never shows this.
           cmake --build build --target barch --parallel "$(nproc)"
           cmake --build build --target lbarch --parallel "$(nproc)"

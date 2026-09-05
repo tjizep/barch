@@ -152,12 +152,13 @@ if (SANITIZE)
     # preloaded. And the runtimes lay out their own shadow memory, which ASLR
     # can land on top of: without setarch -R, TSan dies with "unexpected memory
     # mapping" before the first test runs. See ci/README.md.
-    # 0 means a sanitizer finding is reported but does not fail the test, which is
-    # where this has to start: there are still known-benign races in the tail (see
-    # DONE 193 and 195), so 66 would fail every test in the set and teach everyone
-    # to ignore it. Set -DSANITIZE_EXITCODE=66 to make findings fail the run, which
-    # is the point to get to once that tail is empty.
-    set(SANITIZE_EXITCODE 0 CACHE STRING "Exit code a sanitizer finding produces: 0 reports, 66 fails")
+    # 66 means a sanitizer finding fails the test that produced it. That started at
+    # 0, because the tail of known races would have failed every test in the set and
+    # taught everyone to ignore it; the tail is empty now - the short set runs clean
+    # under TSan - so a new report is a regression and should fail. Set
+    # -DSANITIZE_EXITCODE=0 to go back to reporting without failing, which is what
+    # ASan still needs.
+    set(SANITIZE_EXITCODE 66 CACHE STRING "Exit code a sanitizer finding produces: 0 reports, 66 fails")
     if (SANITIZE STREQUAL "thread")
         set(_san_libs libtsan.so.2 libtsan.so.0 libtsan.so)
         set(_san_env "TSAN_OPTIONS=halt_on_error=0 exitcode=${SANITIZE_EXITCODE} history_size=4 suppressions=${CMAKE_SOURCE_DIR}/ci/tsan.supp")

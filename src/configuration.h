@@ -85,7 +85,8 @@ namespace barch {
 
     int register_valkey_configuration(ValkeyModuleCtx *ctx);
 
-    const configuration_record& get_configuration();
+    /** snapshot, copied under the config mutex so CONFIG SET cannot tear it */
+    configuration_record get_configuration();
 
     // all sizes in bytes, time/delay in milliseconds
     bool get_compression_enabled();

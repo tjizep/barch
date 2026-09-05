@@ -468,9 +468,17 @@ namespace barch {
              * ready by the time it runs.
              */
             start_accept();
-            pool.start([this,&ep](size_t tid) -> void{
-                auto addr = address_off(ep);
-                auto prot_name = proto_name(ep);
+            /*
+             * addr and prot_name are worked out here and captured by value. `ep`
+             * is a by-value constructor parameter, so it lives on the stack frame
+             * of whichever thread called the constructor - capturing it by
+             * reference left the accept threads reading that frame long after it
+             * had returned and been reused by the next call on that thread. See
+             * TODO 214.
+             */
+            auto accept_addr = address_off(ep);
+            auto accept_proto = proto_name(ep);
+            pool.start([this,addr = accept_addr,prot_name = accept_proto](size_t tid) -> void{
                 asio::dispatch(io ,[this,tid,addr,prot_name]() {
                     log({use_ssl ? "TLS/SSL":prot_name,"connections accepted on",addr,"using thread",tid});
                 });

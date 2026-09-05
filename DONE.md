@@ -10397,3 +10397,194 @@ it cannot come back unnoticed.
   staying dead. The untemplated routes in the same file still run on two
   argument handlers.
 - Full suite, no sanitizer, `-j4`: 77/77.
+
+## 215. Three TSan reports the CI found and the local runs did not [05-09-2026]
+
+*Was `TODO.md` entry 223.*
+
+The first CI run of `ubuntu24-tsan` failed `TestRespClientLocal` and
+`TestFetchLuau` on three reports. Both are real, and neither had shown up in
+any local run - which is the whole argument for the job existing.
+
+### `call_unblock` on the foreign pool, with nothing held (2 reports)
+
+`blocked_sessions` is a map on the shard, and the rule around it is written
+down in `defer_wakes::~defer_wakes`: every caller of `call_unblock` holds the
+shard's latch, because they are all inside a write when they wake somebody.
+
+The wake in `FUNCTION` is not. It runs when a parked luau job finishes, on the
+foreign pool thread, and it went straight into `call_unblock`. TSan caught one
+thread erasing from the map while another was looking a key up in it - two
+scripts finishing at once on the same space, both waking through shard 0. An
+`unordered_dense` erase moves the last element into the hole and pops the
+vector, so the reader was walking a container being reshaped underneath it.
+
+The lambda takes `std::unique_lock lock(shard->get_latch())` now, the same as
+the deferred path. Neither call site holds the latch already:
+`transfer_rpc_blocks` takes and drops it per shard before
+`after_blocks_registered` runs, and a job that finishes inside its first slice
+returns at the `can_wake` check before reaching the lock.
+
+### `opt_ordered_keys` read by maintenance (1 report)
+
+`get_size()` picks the tree or the hash by `opt_ordered_keys`, on the
+maintenance thread, while `KSPACE ORDERED` wrote it from a session. The evict
+flags got this treatment in DONE 212 and these two - `opt_ordered_keys` and
+`opt_hybrid_keys` - were missed because the KSPACE branch that writes them is a
+few lines above the one that writes the evict flags.
+
+`std::atomic<bool>`, relaxed, on the shard and on `key_space`. The `key_space`
+pair was not in any report, but it is the same command handler writing the same
+setting one level up while every other command reads it to choose hashed or
+ordered, so it is the same defect and only luck decides which one a run finds.
+Making them atomic broke three assignments where both sides are now atomic -
+`a = b` picks the deleted copy assignment rather than converting - so those
+read `.load()` explicitly.
+
+### Verified
+
+- Short set under TSan, `BARCH_TEST_SCALE=0.05`: four runs, 0 reports, 22/22
+  each.
+- `TestFetchLuau`, `TestRespClientLocal`, `TestFunctions` and `TestBpopThread`
+  - the ones that exercise the parked wake - six more runs under TSan, 0
+  reports.
+- Full suite, no sanitizer, `-j4`: 77/77.
+- None of this proves the races are gone, only that they are no longer being
+  hit; the argument that they are fixed is that both were plainly wrong reads
+  of the invariants around them.
+
+## 216. Running the TSan set under CPU pressure [05-09-2026]
+
+*Was `TODO.md` entry 224.*
+
+`ci/tsan-stress.sh`. It pins the run to a few cores, puts busy loops on those
+same cores, and runs the set several times, reporting the report count and the
+pass rate per iteration.
+
+    ci/tsan-stress.sh                       # 3 runs of the short set on 2 cpus
+    ci/tsan-stress.sh -n 10 -c 1            # 10 runs, everything on cpu 0
+    ci/tsan-stress.sh -q 20%                # a cgroup quota instead of crowding
+    ci/tsan-stress.sh -- -R TestFetchLuau   # anything after -- goes to ctest
+
+### What each lever actually does
+
+**`taskset` on its own: almost nothing.** Four tests took 36s on sixteen cores
+and 39s pinned to cpu 0. These tests wait on sockets far more than they compute,
+so taking cores away does not make anything queue - there was nothing runnable
+to displace. Three runs pinned to one core produced no new reports.
+
+**Hogs are the lever that works.** Four un-nice'd busy loops on the two cores
+the tests were pinned to, and the second run of four tests produced two TSan
+reports this machine had never produced idle (now TODO 225). The mechanism is
+the obvious one: a test thread that wakes goes to the back of a runqueue behind
+something that never blocks, so it gets descheduled in places it otherwise
+never would. Not nice'ing them is the point - a polite neighbour yields the
+moment the tests want the cpu, which is the opposite of the thing being
+reproduced.
+
+**The quota** (`systemd-run --user --scope -p CPUQuota=`) works and is a
+different shape: it throttles the whole run rather than crowding it, so the
+cgroup gets a slice of the wall clock and is frozen for the rest. It needs a
+user systemd session, which a GitHub runner does not have, so it is a
+workstation lever. `taskset` is the portable one and is the default.
+
+### The CI job stays unstressed
+
+Two stressed runs of four tests failed twice: once on a real race, and once on
+`FUNCTION timeout` - a script that missed its deadline because the machine was
+busy, nothing to do with threading. `SANITIZE_EXITCODE=66` cannot tell those
+apart; both are a failed test. A stressed CI job would produce failures that
+need the log opened before anyone knows whether they matter, which is how a
+sanitizer job stops being read. So the job runs unstressed, where a failure is
+a real signal, and the stress script is for a workstation where somebody is
+already looking.
+
+### A measurement mistake worth recording
+
+The counts in DONE 215 - "four runs, 0 reports" - were counted by grepping
+`WARNING: ThreadSanitizer` out of a plain `ctest` log. `ctest` does not print a
+test's stdout unless `--output-on-failure` is given, and a TSan report only ever
+appears there, so that grep was counting nothing and would have said zero
+whatever happened. The conclusion held up because the pass rate was the real
+evidence: at `exitcode=66` a report fails its test, so 22/22 does mean no
+reports. The script uses `--output-on-failure` and says so where the count is
+taken.
+
+Backing the `call_unblock` fix out of the tsan build and running `TestFetchLuau`
+on its own reproduced that race first time, with no stress at all - which is a
+much better argument for the fix than a run that did not fail.
+
+### Verified
+
+- `-c 2` with four hogs: 2 iterations, one real race found, one timeout
+  failure. Both understood.
+- `-q 30%` with `-R TestBarchPy`: clean, 33s against 4s unstressed.
+- The script cleans up its hogs on exit, interrupt and terminate.
+
+## 217. A parked client that disconnects is never noticed [05-09-2026]
+
+*Was `TODO.md` entry 226.*
+
+`BZPOPMIN with same key multiple times should work` failed in the differential
+run with a timeout on the deferred read. It is not a BZPOP bug and it is not
+new - the 02-09 build does exactly the same, so none of the TSan work is
+involved.
+
+### What actually happens
+
+While a connection is parked the read chain is deliberately down: it owes the
+client one reply and must not run anything else first. Nothing was watching the
+socket, so a client that went away mid-block was never noticed, and its entry
+stayed in the shard's `blocked_sessions` for the life of the process.
+
+That is three problems, in order of how much they matter:
+
+1. The next wake on that key goes to the dead session, which pops the value
+   and drops it. A live waiter behind it waits forever and the element is
+   gone. Reproduced deterministically: park, close the socket, park a live
+   client on the same key, `ZADD` - the live client gets nothing and the key
+   is empty.
+2. `blocked_clients` never comes back down. Measured: 12 of 12 parked clients
+   whose socket closed still counted after 30 seconds.
+3. The session itself is kept alive by the registration.
+
+Point 2 is what turned this into a test failure. `differential.py` closes a
+case's deferred connections and then waits up to 2s for `blocked_clients` to
+reach zero, exactly so the next case does not inherit a parked client - the
+comment there calls it DONE 116's lesson in a different costume. That wait can
+never succeed, so every later case's `wait_blocked` passes on the stale count,
+and a case that then races its own park against a `ZADD` loses whenever the
+machine is slow enough. Which is why it failed on CI and not here.
+
+### The fix
+
+`watch_for_disconnect()` in `asio_resp_session.h`, armed from
+`add_caller_blocks()` - the one place all three park paths go through.
+
+`async_wait(wait_read)` rather than a read: it reports the socket readable
+without taking any bytes, so a command pipelined behind the blocking one is
+still in the buffer for `consume_available()` afterwards. Readable with nothing
+to peek is the peer having closed, and the peek goes through `::recv` with
+`MSG_PEEK|MSG_DONTWAIT` because `lowest_layer()` is a `basic_socket`, which has
+no `receive` of its own. On a real disconnect it cancels the block timer and
+calls `erase_blocks()`, the same thing the read error path does; the session
+then dies with the handler's reference.
+
+The handler runs on `socket_.get_executor()`, like every other handler on the
+session, so this adds no new thread to the picture. A `watching_disconnect`
+flag keeps it to one armed watch, and a watch that fires after the block has
+been answered returns on the `has_blocks()` check.
+
+### Verified
+
+- `TestBpopThread` covers all three: the block released when the socket closes,
+  a live waiter behind a dead one getting both the wake and the value, and a
+  `PING` pipelined behind a `BLPOP` still answered in order afterwards. With
+  `watch_for_disconnect()` commented out the first of those fails, so the test
+  is testing what it says.
+- Release latency after a disconnect went from never to 0.000s over 8 tries.
+- Full suite, no sanitizer, `-j4`: 77/77.
+- Short set under TSan: 22/22, no reports.
+- Under `ci/tsan-stress.sh -c 2`, two runs of the short set found an unrelated
+  allocator race and a chaos timeout, both now TODO 227. Neither is in the
+  session path.

@@ -23,8 +23,15 @@ namespace barch {
     public:
         typedef std::shared_ptr<key_space> key_space_ptr;
         typedef key_space* key_space_ref;
-        bool opt_ordered_keys = barch::get_ordered_keys();
-        bool opt_hybrid_keys = barch::get_hybrid_keys();
+        /*
+         * The same race as the shard's copies of these, one level up: KSPACE
+         * ORDERED and KSPACE HYBRID write them from one session thread while
+         * every other command on the space reads them to pick hashed or
+         * ordered. TSan caught the shard pair first (TODO 223); this pair is
+         * the same defect and would have been next.
+         */
+        std::atomic<bool> opt_ordered_keys{barch::get_ordered_keys()};
+        std::atomic<bool> opt_hybrid_keys{barch::get_hybrid_keys()};
         size_t opt_shard_count = barch::get_shard_count().size();
         /**
          * Route keys to shards by the range they fall in rather than by their hash, so

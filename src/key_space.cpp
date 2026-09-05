@@ -361,8 +361,8 @@ namespace barch {
             size_t shards_loaded = shard_thread_processor(shards_out.size(),[&](size_t shard_num) {
                 shard_ptr& shard = shards_out[shard_num];
                 shard = std::allocate_shared<barch::shard>(alloc,  name, 0, shard_num);
-                shard->opt_ordered_keys = opt_ordered_keys;
-                shard->opt_hybrid_keys = opt_hybrid_keys;
+                shard->opt_ordered_keys = opt_ordered_keys.load();
+                shard->opt_hybrid_keys = opt_hybrid_keys.load();
                 shard->load(true);
             });
             if (shards_out.size() != shards_loaded) {
@@ -373,8 +373,8 @@ namespace barch {
             // space has to take the loaded fact or a HashBenchy save (ordered off)
             // comes up with SET writing ART and GET looking in the hash.
             // the default space "node" is not configured from KV. See TODO 218.
-            opt_ordered_keys = shards_out[0]->opt_ordered_keys;
-            opt_hybrid_keys = shards_out[0]->opt_hybrid_keys;
+            opt_ordered_keys = shards_out[0]->opt_ordered_keys.load();
+            opt_hybrid_keys = shards_out[0]->opt_hybrid_keys.load();
             statistics::shards = shards_out.size();
             auto end_time = std::chrono::high_resolution_clock::now();
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
@@ -436,8 +436,8 @@ namespace barch {
         shards.resize(1);
         heap::allocator<barch::shard> alloc;
         shards[0] = std::allocate_shared<barch::shard>(alloc, name, barch::shard::scratch_t{});
-        shards[0]->opt_ordered_keys = opt_ordered_keys;
-        shards[0]->opt_hybrid_keys = opt_hybrid_keys;
+        shards[0]->opt_ordered_keys = opt_ordered_keys.load();
+        shards[0]->opt_hybrid_keys = opt_hybrid_keys.load();
         shards[0]->opt_drop_on_release = true;
     }
 

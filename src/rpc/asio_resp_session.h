@@ -4,6 +4,8 @@
 
 #ifndef BARCH_ASIO_RESP_SESISON_H
 #define BARCH_ASIO_RESP_SESISON_H
+#include <sys/socket.h>
+#include <cerrno>
 #include <cctype>
 #include <mutex>
 #include <utility>
@@ -462,6 +464,54 @@ namespace barch {
                 if (d.space && d.space->has_foreign())
                     barch::foreign::kick(d.space, d.key);
             }
+            watch_for_disconnect();
+        }
+        /**
+         * Notice a parked client going away.
+         *
+         * While parked the read chain is deliberately down - the connection owes the
+         * client one reply and must not run anything else first - so nothing was
+         * watching the socket, and a client that disconnected mid-block left its
+         * registration in the shard's blocked_sessions for good. That is not just a
+         * leak: `blocked_clients` never comes back down, and the next wake on that key
+         * goes to the dead session, which pops the value and drops it while a live
+         * waiter behind it carries on waiting. See TODO 226.
+         *
+         * async_wait, not a read: it reports the socket readable without taking any
+         * bytes, so a command pipelined behind the blocking one is still in the buffer
+         * for consume_available() to find when the block answers. Readable with
+         * nothing to peek is the peer having closed.
+         */
+        void watch_for_disconnect() {
+            if (watching_disconnect || !caller.has_blocks())
+                return;
+            watching_disconnect = true;
+            auto self(this->shared_from_this());
+            socket_.lowest_layer().async_wait(
+                asio::socket_base::wait_read,
+                [this, self](const std::error_code& ec) {
+                    watching_disconnect = false;
+                    if (ec)
+                        return;                       // cancelled, or the socket is gone
+                    if (!caller.has_blocks())
+                        return;                       // answered while this was armed
+                    // through the fd: lowest_layer() is a basic_socket, which has no
+                    // receive of its own, and MSG_PEEK is the whole point here
+                    char probe = 0;
+                    auto n = ::recv(socket_.lowest_layer().native_handle(), &probe, 1,
+                                    MSG_PEEK | MSG_DONTWAIT);
+                    if (n > 0)
+                        return;                       // pipelined bytes, not a disconnect
+                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                        watch_for_disconnect();       // readable but nothing there yet
+                        return;
+                    }
+                    // gone. Drop the blocks the way the read error path does and let
+                    // the session go with them - holding the last reference here means
+                    // it dies when this handler returns
+                    timer.cancel();
+                    erase_blocks();
+                });
         }
         /** parse already-buffered requests. true if the connection is parked. */
         bool consume_available() {
@@ -715,6 +765,8 @@ namespace barch {
         // Set while the chain is suspended and cleared as it is picked back up.
         asynch_batch_ptr pending_batch{};
         size_t pending_at{0};
+        // one disconnect watch at a time while parked - see watch_for_disconnect
+        bool watching_disconnect{false};
         std::string prev_cn{};
         function_map::iterator ic{};
         uint64_t id = ++client_id;

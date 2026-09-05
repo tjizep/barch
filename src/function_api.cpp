@@ -1233,8 +1233,21 @@ namespace functions {
             if (!slot->can_wake.load(std::memory_order_acquire))
                 return;                       // not parked, or not published yet
             auto shard = slot->wake_space->get((size_t) 0);
-            if (shard)
+            if (shard) {
+                /*
+                 * blocked_sessions is the shard's, and every other caller of
+                 * call_unblock is inside a write when it wakes somebody - see
+                 * defer_wakes::~defer_wakes. This one is not: it runs on the
+                 * foreign pool when a job finishes, so two of them on one shard
+                 * were erasing from that map at the same time a third was
+                 * looking in it. Nothing holds the latch on either path here -
+                 * transfer_rpc_blocks drops it per shard before
+                 * after_blocks_registered runs - so taking it is safe.
+                 * See TODO 223.
+                 */
+                std::unique_lock lock(shard->get_latch());
                 shard->call_unblock(slot->wake_key);
+            }
         };
 
         /*

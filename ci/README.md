@@ -77,6 +77,38 @@ means 1.0 and a normal run is exactly what it was. 0.05 is what the numbers
 above are from. Tests that already had their own knob still honour it, so
 `BARCH_PERF_ENTRIES=50000` means fifty thousand whatever the scale says.
 
+### Running it under CPU pressure
+
+`ci/tsan-stress.sh` runs the set on a couple of cores with busy loops pinned to
+those same cores, several times over. The point is the interleavings, not the
+speed: a race that needs an unlucky one turns up on a loaded CI runner and not
+on a workstation with sixteen idle cores, which is how the two in DONE 215 got
+in.
+
+    ci/tsan-stress.sh                       # 3 runs of the short set on 2 cpus
+    ci/tsan-stress.sh -n 10 -c 1            # 10 runs, everything on cpu 0
+    ci/tsan-stress.sh -q 20%                # a cgroup quota instead of crowding
+    ci/tsan-stress.sh -- -R TestFetchLuau   # anything after -- goes to ctest
+
+Pinning on its own does almost nothing here - the tests spend their time
+waiting on sockets, so squeezing them onto one core costs about 8% of the wall
+clock and changes little else. The hogs are what makes the difference: they are
+not nice'd, so a test thread that wakes up goes to the back of a queue. That is
+the state a shared runner is in.
+
+The quota (`-q`) throttles instead of crowding - the cgroup gets a slice of the
+wall clock and is frozen for the rest of it. It needs a user systemd session,
+which a GitHub runner does not have, so it is a workstation lever; `taskset` is
+the portable one.
+
+**The CI job does not run this way, on purpose.** Two stressed runs of four
+tests failed twice: once on a real race (TODO 225) and once on `FUNCTION
+timeout`, a deadline missed because the machine was busy. `SANITIZE_EXITCODE=66`
+cannot tell those apart - both are just a failed test - so a stressed CI job
+would produce failures nobody can triage without opening the log, which is how a
+sanitizer job gets ignored. Stress locally, where a failure has someone looking
+at it already.
+
 Two things worth knowing:
 
 - A TSan finding fails the test that produced it, because the short set runs

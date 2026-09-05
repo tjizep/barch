@@ -60,11 +60,18 @@ namespace barch {
         bool has_static_bloom_filter() const {
             return opt_static_bloom_filter;
         }
-        bool opt_ordered_keys = barch::get_ordered_keys();
+        /*
+         * Atomic for the same reason the evict flags are: KSPACE ORDERED and
+         * KSPACE HYBRID write them from a session thread while maintenance is
+         * reading them - get_size() picks the tree or the hash by
+         * opt_ordered_keys on the maintenance thread. Relaxed: a pass either
+         * sees the new setting or the next one does. See TODO 223.
+         */
+        std::atomic<bool> opt_ordered_keys{barch::get_ordered_keys()};
         // ART owns the leaves; the overflow hash is only an index of 32-bit
         // pointers. GET and in-place SET can use it. Anything that needs a
         // trace still walks the tree. Off unless ordered_keys is on.
-        bool opt_hybrid_keys = barch::get_hybrid_keys();
+        std::atomic<bool> opt_hybrid_keys{barch::get_hybrid_keys()};
         bool hybrid_active() const { return opt_ordered_keys && opt_hybrid_keys; }
         virtual void apply_hybrid_keys() = 0;
         /*

@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <netinet/in.h>
@@ -98,11 +99,15 @@ namespace art {
         tree(const std::string& name, size_t shard_number, node_ptr rrrr, uint64_t ssss)
         : alloc_pair(shard_number,name), root(rrrr), size(ssss) {}
         node_ptr root{};
-        uint64_t size{};
+        // get_size() is called from maintenance under a shared latch, and
+        // sometimes without one. Writers still take the unique latch; relaxed
+        // is enough that a concurrent SIZE is defined rather than a data race.
+        // See TODO 214.
+        std::atomic<uint64_t> size{};
         bool opt_use_trace = true;
         trace_list trace{};
         node_ptr last_leaf_added{};
-        uint64_t tomb_stones {};
+        std::atomic<uint64_t> tomb_stones {};
         void update_trace(int direction);
         void clear_trace() {
             if (opt_use_trace)
@@ -123,10 +128,10 @@ namespace art {
         bool erase_tomb(leaf* dl) {
             if (dl && dl->is_tomb()) {
                 dl->unset_tomb();
-                if (tomb_stones == 0) {
+                if (tomb_stones.load(std::memory_order_relaxed) == 0) {
                     throw_exception<std::runtime_error>("invalid tombstone count");
                 }
-                --tomb_stones;
+                tomb_stones.fetch_sub(1, std::memory_order_relaxed);
                 return true;
             }
             return false;

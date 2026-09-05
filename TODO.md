@@ -1059,26 +1059,19 @@
 
 213. [Done] Four of the families behind exitcode 66 [04-09-2026] Nr 204 52881bc
 
-214. The 37 reports still standing between here and
-    `SANITIZE_EXITCODE=66`, after DONE 204. In order:
-    `sastam.cpp:50` against `overflow_hash.h:228` (8), `shard.h:383`
-    against `:393` and `:394` against `:389` (11), the `auth_api.cpp:15`
-    pair (8), `shard.cpp:528` against `keyspace_api.cpp:506` (3), then
-    singles in art, configuration and shard.
+214. The 18 reports still standing between here and
+    `SANITIZE_EXITCODE=66`, after DONE 211. In order:
+    the `auth_api.cpp:15` pair against a worker stack (9), `art/nodes.h`
+    (4), configuration (3), then singles (`keyspace_api` SIZEALL-shaped,
+    `blocked_sessions` in shard.h).
 
-    Start with `shard.h:383`. A reader holding the shard's shared latch
-    reports a race against `shard::clear()` holding its unique latch,
-    which should not be possible. DONE 204 ruled out the obvious
-    explanation - that TSan cannot see `try_lock_for` acquiring - by
-    making the acquire blocking and getting the same reports. So either
-    TSan cannot follow the happens-before this lock builds out of its
-    atomics, or the lock does not build it. The second would matter a
-    great deal.
+    `auth_api.cpp:15` is still the odd one: the location is the
+    *main thread's stack*, read by a worker. Worth confirming it is not
+    stale shadow from a reused frame before spending time on it.
 
-    `auth_api.cpp:15` is odd in a different way: the location is the
-    *main thread's stack*, read by a worker at `rpc/proto_info.cpp:26`.
-    Worth confirming it is not stale shadow from a reused frame before
-    spending time on it.
+    The size/tombstone family and the hash RNG are gone (DONE 211).
+    Teaching TSan the custom latch with `__tsan_acquire`/`__tsan_release`
+    does not work: those are a binary synch, not a reader-writer lock.
 
 215. [Done] simdjson takes a luau buffer, and now makes one [04-09-2026] Nr 205 07786c1
 

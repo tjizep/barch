@@ -1365,7 +1365,7 @@ bool art::insert
         art::node_ptr old = recursive_insert(t, options, t->root, t->root, key, value, 0, &old_val, replace ? 1 : 0, fc);
 
         if (!old_val) {
-            t->size++;
+            t->size.fetch_add(1, std::memory_order_relaxed);
             t->update_trace(+1);
             ++statistics::insert_ops;
             ++statistics::new_keys_added;
@@ -1502,7 +1502,7 @@ void art::erase(art::tree *t, art::value_type key, const art::NodeResult &fc) {
         art::node_ptr l = recursive_delete(t, t->root, t->root, key, 0);
         if (!l.null()) {
             t->erase_tomb(l.l());
-            t->size--;
+            t->size.fetch_sub(1, std::memory_order_relaxed);
             t->update_trace(-1);
             if (!l.const_leaf()->expired())
                 fc(l);
@@ -1713,7 +1713,7 @@ void art::tree::update_trace(int direction) {
         }
         auto trd = trace[0].parent->data().descendants;
         if (trd + direction != size) {
-            barch::err({"descendant count invalid", trd, "!=", size});
+            barch::err({"descendant count invalid", trd, "!=", size.load(std::memory_order_relaxed)});
             abort_with("invalid descendant count");
         }
         for (auto &ut: trace) {
@@ -1721,7 +1721,7 @@ void art::tree::update_trace(int direction) {
         }
         trd = trace[0].parent->data().descendants;
         if (trd != size) {
-            barch::err({"descendant count invalid", trd, "!=", size});
+            barch::err({"descendant count invalid", trd, "!=", size.load(std::memory_order_relaxed)});
             abort_with("invalid descendant count");
         }
     }
@@ -1867,7 +1867,7 @@ void art::values(tree * t, const keys_spec &spec, value_type pattern,
 static void log_trace(const art::tree* t , const std::string& name, const art::trace_list& tl)  {
     size_t ctr = 0;
     barch::log({"====-tree trace-",name,"===="});
-    barch::log({"  tree size: ", t->size});
+    barch::log({"  tree size: ", t->size.load(std::memory_order_relaxed)});
     for (auto &el: tl) {
         auto tp = el.parent->type();
         auto checked = el.parent->check_data();

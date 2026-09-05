@@ -10158,3 +10158,52 @@ still says web. A request with no cookie is `web`.
 Covered by `test/httptest.py` (login, pin, `barch.call` STATS/OPS/PING)
 and `readops` in `test/functiontest.py`.
 
+## 211. A few of the leftover TSan families [05-09-2026]
+
+*Was `TODO.md` entry 214, partly - the rest is still 214.*
+
+**37 reports down to 18** on the short set under TSan. Three real
+races, same shape as DONE 204: a counter or generator shared across
+threads without being atomic, or without a lock TSan (or anyone) can
+follow.
+
+### The hash RNG (`sastam.cpp:50` vs `overflow_hash.h:228`, 8)
+
+`heap::random_range` used one process-wide `std::mt19937`. Hash resize
+calls it from many shards at once. `mt19937` is not safe to share, so
+that was a real race, not a sanitizer quirk. It is `thread_local`
+`mt19937_64` now. The random-eviction generator in `shard.cpp` was the
+same bug and got the same fix. The lazy `physical_ram_cache` next to it
+was a racy first write of a constant; that is an atomic now.
+
+### Save metadata (`shard.cpp:528` vs maintenance / SAVEALL, 3)
+
+`save()` wrote `mods` and `start_save_time` under `save_load_mutex`.
+`maintenance()` read them with no lock at all, to decide whether it was
+time to save. Relaxed atomics, same as `inserts`/`deletes` already were.
+The check is "has enough changed", not an exact clock.
+
+### Tree size vs CLEAR (`shard.h` get_size vs `_clear`, 11)
+
+This was the interesting one. A reader in `run_defrag` holding the
+shared latch, a writer in `CLEAR` holding the unique latch, racing on
+`size` and `tomb_stones`. DONE 204 already showed TSan sees a blocking
+`lock()` acquire, so it is not the `try_lock_for` gap.
+
+`__tsan_acquire`/`__tsan_release` on the latch does not help. Those
+mark a binary synch, and a reader-writer lock is not one: the writer
+showed `mutexes: write M0` and the reader showed nothing. Reverted.
+
+`get_size()` already said it should be thread-safe. `size` and
+`tomb_stones` are relaxed atomics now, the same as `saf_keys_found`.
+Writers still take the unique latch for the tree itself. A concurrent
+SIZE can be a few keys off; that is defined, and it is what the empty
+check in defrag wanted.
+
+### Verified
+
+- Short set under TSan, `BARCH_TEST_SCALE=0.05`: 22/22, 18 reports
+  (was 37). No `random_range`, no `overflow_hash`, no `start_save`, no
+  get_size vs `_clear`.
+- RelWithDebInfo still links.
+

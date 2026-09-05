@@ -9,22 +9,18 @@
 #include <sys/sysinfo.h>
 #include "lzr_log.h"
 #include <random>
-static long long physical_ram_cache = 0;
 
-static std::mt19937& get_gen() {
-    static  std::random_device rd;
-    static  std::mt19937 gen(rd());
-    return gen;
-}
-
+static std::atomic<long long> physical_ram_cache{0};
 
 long long get_total_physical_memory() {
-    if (!physical_ram_cache) {
+    long long c = physical_ram_cache.load(std::memory_order_relaxed);
+    if (!c) {
         struct sysinfo memInfo;
         sysinfo(&memInfo);
-        physical_ram_cache = memInfo.totalram * memInfo.mem_unit;
+        c = (long long) memInfo.totalram * memInfo.mem_unit;
+        physical_ram_cache.store(c, std::memory_order_relaxed);
     }
-    return physical_ram_cache;
+    return c;
 }
 
 enum {
@@ -46,9 +42,11 @@ static uint32_t get_ptr_val(const void *v) {
 }
 
 uint64_t heap::random_range(uint64_t lower, uint64_t upper) {
+    // one engine per thread: mt19937 is not safe to share, and hash resize
+    // calls this from many shards at once. See TODO 214.
+    static thread_local std::mt19937_64 gen{std::random_device{}()};
     std::uniform_int_distribution<uint64_t> dist(lower, upper);
-    uint64_t r = dist(get_gen());
-    return r;
+    return dist(gen);
 }
 
 void *heap::allocate(size_t size) {

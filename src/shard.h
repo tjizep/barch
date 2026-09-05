@@ -192,8 +192,11 @@ namespace barch {
         std::shared_mutex save_load_mutex{};
 
         std::atomic<size_t> queue_size{};
-        std::chrono::high_resolution_clock::time_point start_save_time {};
-        uint64_t mods{};
+        // maintenance() reads these on its own thread while save() writes them
+        // under save_load_mutex. Relaxed: "is it time to save" does not need
+        // an exact clock. See TODO 214.
+        std::atomic<int64_t> start_save_ns{};
+        std::atomic<uint64_t> mods{};
 
         node_ptr get_root() const override {
             return root;
@@ -380,7 +383,7 @@ namespace barch {
         }
         uint64_t get_tree_size() const final{
             uint64_t dep_size = 0; //dependencies ? dependencies->get_tree_size() : 0;
-            return this->size + dep_size;
+            return this->size.load(std::memory_order_relaxed) + dep_size;
         }
         uint64_t get_size() const final {
             uint64_t src_size = 0;
@@ -391,10 +394,11 @@ namespace barch {
             // ordered (and hybrid): ART is the set of keys, the hash is only an index.
             // unordered: the hash is the set of keys and the tree is empty.
             auto total = (opt_ordered_keys ? get_tree_size() : get_hash_size()) + src_size;
-            if (tomb_stones >total) {
+            auto tombs = tomb_stones.load(std::memory_order_relaxed);
+            if (tombs > total) {
                 throw_exception<std::runtime_error>("invalid tombstone count");
             }
-            return  total - this->tomb_stones;
+            return  total - tombs;
         };
         uint64_t get_hash_size() const final{
             uint64_t dep_size = 0;//dependencies ? dependencies->get_hash_size() : 0;

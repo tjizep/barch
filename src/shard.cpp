@@ -12,8 +12,7 @@
 #include "keys.h"
 #include "time_conversion.h"
 
-static std::random_device rd;
-static std::mt19937 gen(rd());
+static thread_local std::mt19937 gen{std::random_device{}()};
 
 
 using namespace art;
@@ -398,7 +397,7 @@ void barch::shard::hash_unindex(value_type key) {
 void barch::shard::rebuild_hybrid_index() {
     h.clear();
     if (!hybrid_active()) return;
-    if (size == 0) return;
+    if (size.load(std::memory_order_relaxed) == 0) return;
     auto &lc = get_leaves();
     lc.iterate_pages([this](size_t s, size_t page, auto& data) {
         if (s == 0) return;
@@ -490,7 +489,7 @@ bool barch::shard::_save(bool stats) const {
     //arena::hash_arena leaves{get_leaves().get_name()};
     //arena::hash_arena nodes{get_nodes().get_name()};
     {
-        tsize = t->size;
+        tsize = t->size.load(std::memory_order_relaxed);
         troot = t->root;
         saved = true;
         //leaves.borrow(get_leaves().get_main());
@@ -520,12 +519,16 @@ bool barch::shard::save(bool stats) {
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
     if (log_saving_messages == 1)
-        log({"saved barch db:", this->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+        log({"saved barch db:", this->size.load(std::memory_order_relaxed), "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
             "seconds"});
     saving = false;
 
-    start_save_time = std::chrono::high_resolution_clock::now();
-    mods = get_modifications();
+    start_save_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now().time_since_epoch())
+            .count(),
+        std::memory_order_relaxed);
+    mods.store(get_modifications(), std::memory_order_relaxed);
     return success;
 }
 bool barch::shard::send(std::ostream& unused(out)) {
@@ -554,7 +557,7 @@ bool barch::shard::send(std::ostream& unused(out)) {
     arena::hash_arena nodes{get_nodes().get_name()};
     {
         storage_release release(this->shared_from_this()); // only lock during partial copy
-        tsize = t->size;
+        tsize = t->size.load(std::memory_order_relaxed);
         troot = t->root;
         saved = true;
         leaves.borrow(get_leaves().get_main());
@@ -574,7 +577,7 @@ bool barch::shard::send(std::ostream& unused(out)) {
     const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(current - st);
     const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(current - st);
 
-    log({"sent barch db:", t->size, "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
+    log({"sent barch db:", t->size.load(std::memory_order_relaxed), "keys written in", d.count(), "millis or", (float) dm.count() / 1000000,
             "seconds"});
 #endif
 
@@ -619,7 +622,11 @@ bool barch::shard::_load(bool) {
         }
         readp(in, root);
         readp(in, is_leaf);
-        readp(in, t->size);
+        {
+            uint64_t sz = 0;
+            readp(in, sz);
+            t->size.store(sz, std::memory_order_relaxed);
+        }
         read_extra(in);
 
     };
@@ -703,7 +710,11 @@ bool barch::shard::retrieve(std::istream& unused(in)) {
 
             readp(in, root);
             readp(in, is_leaf);
-            readp(in, t->size);
+            {
+            uint64_t sz = 0;
+            readp(in, sz);
+            t->size.store(sz, std::memory_order_relaxed);
+        }
             read_extra(in);
         };
         auto st = std::chrono::high_resolution_clock::now();
@@ -729,7 +740,7 @@ bool barch::shard::retrieve(std::istream& unused(in)) {
         auto now = std::chrono::high_resolution_clock::now();
         const auto d = std::chrono::duration_cast<std::chrono::milliseconds>(now - st);
         const auto dm = std::chrono::duration_cast<std::chrono::microseconds>(now - st);
-        log({"Done loading BARCH, keys loaded:", t->size, ""});
+        log({"Done loading BARCH, keys loaded:", t->size.load(std::memory_order_relaxed), ""});
 
         log({"loaded barch db in", d.count(), "millis or", (float) dm.count() / 1000000, "seconds"});
         log({"db memory when created", (float) get_total_memory() / (1024 * 1024), "Mb"});
@@ -745,7 +756,7 @@ bool barch::shard::retrieve(std::istream& unused(in)) {
 void barch::shard::begin() {
     if (transacted) return;
     save_root = root;
-    save_size = size;
+    save_size = size.load(std::memory_order_relaxed);
     save_stats.clear();
     stats_to_stream(save_stats, owned);
     {
@@ -794,7 +805,7 @@ void barch::shard::_clear() {
     transacted = false;
     tomb_stones = 0;
     blocked_sessions.clear();
-    mods = 0;
+    mods.store(0, std::memory_order_relaxed);
     saf_get_ops = 0;
     saf_keys_found = 0;
     queue_size = 0;
@@ -903,7 +914,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
 
     // tree size when ordered (hybrid included), hash size when unordered.
     // size+h.size() double-counts hybrid and makes every update look like a new key.
-    size_t before = opt_ordered_keys ? size : h.size();
+    size_t before = opt_ordered_keys ? size.load(std::memory_order_relaxed) : h.size();
     if (options.is_hashed() && !hybrid_active()) {
         hash_insert(options, key, value, update, fc);
     }else {
@@ -939,7 +950,7 @@ bool barch::shard::opt_rpc_insert(const key_options& options, value_type unfilte
         }
     }
     call_unblock(std::string(key.chars(), key.size));
-    return (opt_ordered_keys ? size : h.size()) > before;
+    return (opt_ordered_keys ? size.load(std::memory_order_relaxed) : h.size()) > before;
 }
 
 
@@ -974,10 +985,10 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
             node_ptr old = logical_address{i->addr,this};
             if (old.l()->is_tomb()) {
                 old.l()->unset_tomb();
-                if (tomb_stones == 0) {
+                if (tomb_stones.load(std::memory_order_relaxed) == 0) {
                     throw_exception<std::runtime_error>("invalid tombstone count");
                 }
-                --tomb_stones;
+                tomb_stones.fetch_sub(1, std::memory_order_relaxed);
             }
             bool hashed = old.cl()->is_hashed();
             if (!hashed)
@@ -1028,7 +1039,7 @@ bool barch::shard::update(value_type unfiltered_key, const std::function<node_pt
 }
 bool barch::shard::evict(const leaf* l) {
     if (l->deleted()) return false;
-    size_t before = size;
+    size_t before = size.load(std::memory_order_relaxed);
     if (l->is_hashed()) {
         auto i = h.find(key_query{l->get_key()});
         if (i != h.end()) { // we don't need to de-count delete ops here
@@ -1046,14 +1057,14 @@ bool barch::shard::evict(const leaf* l) {
     if (hybrid_active())
         hash_unindex(l->get_key());
     art::erase(this, l->get_key(), [](const art::node_ptr &){});
-    if (size < before) {
+    if (size.load(std::memory_order_relaxed) < before) {
         ++statistics::keys_evicted;
     }
     --statistics::delete_ops; // were not counting these deletes
-    return size < before;
+    return size.load(std::memory_order_relaxed) < before;
 }
 bool barch::shard::evict(value_type unfiltered_key) {
-    size_t before = size;
+    size_t before = size.load(std::memory_order_relaxed);
 
     std::string kbuf;
     auto key = s_filter_key(kbuf, unfiltered_key);
@@ -1072,22 +1083,22 @@ bool barch::shard::evict(value_type unfiltered_key) {
         hash_unindex(key);
     --statistics::delete_ops; // were not counting these deletes
     art::erase(this, key, [](const art::node_ptr &){});
-    return size < before;
+    return size.load(std::memory_order_relaxed) < before;
 
 }
 bool barch::shard::tree_remove(value_type key, const NodeResult &fc) {
-    auto sbef = size;
+    auto sbef = size.load(std::memory_order_relaxed);
     ++deletes;
     if (hybrid_active())
         hash_unindex(key);
     art::erase(this, key, fc);
-    return sbef < size;
+    return sbef < size.load(std::memory_order_relaxed);
 }
 
 
 bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     ++deletes;
-    size_t before = size;
+    size_t before = size.load(std::memory_order_relaxed);
     // this one matters most: key stays live across dependencies->search(key), which
     // filters again, and is still used afterwards by h.erase and the tree paths
     std::string kbuf;
@@ -1108,7 +1119,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
                 bool r = this->hash_insert({},key,{},true,[](node_ptr){});
                 if (r) {
                     last_leaf_added.l()->set_tomb();
-                    ++tomb_stones;
+                    tomb_stones.fetch_add(1, std::memory_order_relaxed);
                     return true;
                 }
                 return false;
@@ -1130,7 +1141,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
         auto dep = dependencies->search(key);
         if (!dep.null()) {
             fc(dep);
-            ++tomb_stones;
+            tomb_stones.fetch_add(1, std::memory_order_relaxed);
             tree_insert({},key,{},true,[](node_ptr){});
             if (!last_leaf_added.null())
                 last_leaf_added.l()->set_tomb();
@@ -1140,7 +1151,7 @@ bool barch::shard::remove(value_type unfiltered_key, const NodeResult &fc) {
     } // else continue
 
     art::erase(this, key, fc);
-    return size < before;
+    return size.load(std::memory_order_relaxed) < before;
 }
 
 int barch::shard::range(art::value_type key, art::value_type key_end, CallBack cb, void *data) {
@@ -1331,7 +1342,7 @@ void barch::shard::insert_cached_miss(value_type unfiltered_key, uint64_t ttl_ms
     const bool already_tomb = n.cl()->is_tomb();
     n.l()->set_tomb();
     if (!already_tomb)
-        ++tomb_stones;
+        tomb_stones.fetch_add(1, std::memory_order_relaxed);
     call_unblock(std::string(key.chars(), key.size));
 }
 
@@ -1514,7 +1525,7 @@ void barch::shard::load_hash() {
         page_iterator(data, s, [page,this,&encountered](const leaf *l, uint32_t pos) {
 
             if (l->is_tomb()) {
-                ++tomb_stones;
+                tomb_stones.fetch_add(1, std::memory_order_relaxed);
             }else {
                 add_bloom(l->get_key());
             }
@@ -1790,10 +1801,12 @@ uint64_t barch::shard::get_modifications() const {
 }
 
 void barch::shard::start_maintain() {
-    this->mods = get_modifications();
-    this->start_save_time = std::chrono::high_resolution_clock::now();
-
-
+    this->mods.store(get_modifications(), std::memory_order_relaxed);
+    this->start_save_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now().time_since_epoch())
+            .count(),
+        std::memory_order_relaxed);
 }
 void barch::shard::maintenance() {
     try {
@@ -1820,11 +1833,15 @@ void barch::shard::maintenance() {
             statistics::keys_found += found;
             statistics::get_ops += ops;
         }
-        auto currtime = std::chrono::high_resolution_clock::now();
-        if (millis(currtime, start_save_time) > get_save_interval()
-            || get_modifications() - mods > get_max_modifications_before_save()
+        auto curr_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::high_resolution_clock::now().time_since_epoch())
+                           .count();
+        auto last_ns = start_save_ns.load(std::memory_order_relaxed);
+        auto last_mods = mods.load(std::memory_order_relaxed);
+        if ((uint64_t) ((curr_ns - last_ns) / 1000000) > get_save_interval()
+            || get_modifications() - last_mods > get_max_modifications_before_save()
         ) {
-            if (get_modifications() - mods > 0) {
+            if (get_modifications() - last_mods > 0) {
 
                 //log({"saving",get_leaves().get_name(), "modifications",get_modifications(),"time",millis(currtime, start_save_time)});
                 this->save(with_stats);

@@ -10588,3 +10588,139 @@ been answered returns on the `has_blocks()` check.
 - Under `ci/tsan-stress.sh -c 2`, two runs of the short set found an unrelated
   allocator race and a chaos timeout, both now TODO 227. Neither is in the
   session path.
+
+## 218. The defrag fragmentation read had no latch [05-09-2026]
+
+*Was `TODO.md` entry 228, which was the first half of 227.*
+
+The TSan job failed `TestBarchRPC` on one report: `logical_allocator::new_address`
+writing `allocated` on a SET, against `logical_allocator::fragmentation_ratio()`
+reading it from `run_defrag()` on the maintenance thread.
+
+Same family as DONE 204 and 212, and in the same function as one of them. DONE
+204 put a shared latch around `run_defrag`'s `get_size() == 0` early-out for
+exactly this reason; `fragmentation_ratio()` is fifteen lines further down and
+reads `allocated` and the emancipated counter the same way, without one. It was
+missed because the fix went where the report pointed rather than through the
+rest of the function.
+
+The read takes a shared latch now, scoped tight for the reason the comment
+above it already gives: `run_defrag` takes a unique latch below and must not
+still be holding a shared one when it does.
+
+A shared latch rather than making `allocated` atomic, because the writer is
+every insert - `allocated += size` on the allocation path - and the reader is
+one maintenance pass. Putting an atomic on the hot path to satisfy a reader
+that runs every 80ms would be the wrong way round.
+
+### Verified
+
+- The stressed run that found it locally, three iterations of
+  `TestBarchRPC|TestChaos` under `-c 2`: 0 reports. `TestBarchRPC`, which is
+  what CI failed, passed all three.
+- Short set under TSan, unstressed: 22/22, 0 reports.
+- Full suite, no sanitizer, `-j4`: 77/77.
+- `TestChaos` still fails under stress on `thread chaos-N did not exit`. That
+  is TODO 227 and it is not this - no report, and it fails the same way with
+  the latch in place.
+
+## 219. The latch TSan could not see [05-09-2026]
+
+*Was `TODO.md` entry 225.*
+
+`foreign_flight` looked like two threads touching one flight without a lock.
+They were not. Both held the shard's **write** lock, on the **same** shard, and
+the report was still honest from TSan's side, because it could not see either
+acquire.
+
+### Getting to it
+
+The hypothesis in the entry - a stale `shard_hold` thread local making
+`with_key_write` a no-op on a pool worker - was wrong. A probe printing the
+space, the shard and `our_hold()` from inside both critical sections settled it
+in one run: same space, same shard, `hold=W` on both sides.
+
+So the exclusion was real and the edge was missing. `lock_unique()` goes to
+`debuggable_server_lock::try_lock_for`, whose writer-against-writer exclusion is
+`upgrade_write_mtx`, a `std::timed_mutex`, taken with `try_lock_until` - which
+is `pthread_mutex_timedlock`, the one call TSan does not intercept. That is
+already written down in `ci/tsan.supp`, for the *unlock* side: TSan sees the
+unlock of a mutex it never saw locked. The half that was not written down is the
+consequence: with no acquire, there is no happens-before between two writers, so
+**every pair of write-locked critical sections touching the same memory is a
+report**. Under CPU pressure enough of those pairs land close enough together to
+be reported.
+
+### DONE 204 got this wrong, and it steered a day of triage
+
+DONE 204 tested exactly this and concluded "TSan does see the acquire", on the
+grounds that replacing `lock_unique()` with a blocking `lock()` changed nothing.
+It changed nothing because `debuggable_server_lock::lock()` takes the same
+`upgrade_write_mtx` through `try_lock_for` as well - the probe swapped one
+invisible acquire for another. Every triage since has started from "the lock is
+visible, so a report means a real defect", which is why this took a probe rather
+than a reading.
+
+### The fix
+
+`__tsan_acquire(this)` on every successful acquire, `__tsan_release(this)`
+before every release, behind `__SANITIZE_THREAD__`. Readers included, so a
+reader-writer pair is ordered too.
+
+The `__tsan_mutex_*` family models a reader-writer lock properly and was tried
+first. It does not survive this lock: `pre_unlock`/`post_unlock` must bracket
+the release with no other synchronisation between them, and `unlock()` takes
+`cv_mtx` and notifies inside that window, which trips
+`CHECK failed: "((thr->ignore_sync)) > ((0))"` in the runtime and kills the
+process. DONE 211 dismissed `__tsan_acquire`/`__tsan_release` as "a binary
+synch, not a reader-writer lock" - correct, and it does not matter: two readers
+being ordered against each other costs nothing, since a pair of readers cannot
+race, and the pairs that matter come out right.
+
+### It still catches the real ones
+
+Worth proving, since an annotation that suppresses everything would look exactly
+like a fix. With the annotations in place, taking the shared latch back off the
+`fragmentation_ratio()` read from DONE 218 brings that report straight back - 2
+of 3 stressed runs - and putting it back makes it go away. One side unlocked is
+still a race; both sides locked no longer is.
+
+### Verified
+
+- `ci/tsan-stress.sh -n 4 -c 2 -- -R "TestFetchLuau|TestFunctions"`, the recipe
+  that produced the flight race in 2 of 4 runs: 0 reports in 4 of 4.
+- Short set under TSan, unstressed: 22/22, 0 reports.
+- Full suite, no sanitizer, `-j4`: 77/77.
+- `ci/tsan.supp` keeps its `debuggable_server_lock::unlock` entry. The inner
+  pthread mutex is still unbalanced from TSan's point of view; the annotations
+  are on the latch, not on it.
+
+## 220. The chaos thread that had not stopped working [05-09-2026]
+
+*Was `TODO.md` entry 227.*
+
+`thread chaos-0 did not exit` under `ci/tsan-stress.sh -c 2`, two runs in six,
+never idle. The entry said a thread dump should come before assuming it was the
+test's fault, so the test dumps one now - `sys._current_frames()` for the thread
+that outlived its join, formatted into the failure. That answered it first time.
+
+The thread was in `sock.recv`, reading the reply to `KEYS t*:* COUNT`.
+
+Nothing is stuck. `KEYS` writes the socket as it walks, so the client is never
+idle long enough for its 2s socket timeout to fire, and the walk itself - every
+key of thirty-two workers, under two cores and thread sanitizer - takes longer
+than the fifteen seconds the join allowed. A worker still receiving a reply it
+asked for is working, not wedged, and the reasoning in the entry (nothing should
+hold a thread past a 2s socket timeout) missed that a reply arriving in pieces
+resets the timeout each time.
+
+So the join waits 90s now, `CHAOS_JOIN_TIMEOUT` if that is ever not enough. The
+number is not the interesting part - the stack dump is, because it is what turns
+the next occurrence into a diagnosis instead of a guess. A thread that really is
+wedged still fails the test, and now says where.
+
+### Verified
+
+- Six stressed runs of `TestChaos` at `-c 2`: 6 of 6 clean, against 2 of 6
+  failing before.
+- Full suite, no sanitizer, `-j4`: 77/77.

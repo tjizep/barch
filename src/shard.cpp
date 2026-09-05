@@ -1627,7 +1627,17 @@ void barch::shard::run_defrag() {
         this->shrink();
     }
 
-    auto logical_frag = lc.fragmentation_ratio();
+    // fragmentation_ratio() reads `allocated` and the emancipated counter, and
+    // every insert writes `allocated` under the latch - so this is the same
+    // unlocked statistic read as the get_size() one above, a few lines further
+    // down the same function. TSan caught it on CI against a SET. Scoped tight
+    // for the same reason: a unique latch is taken below and a shared one must
+    // not still be held. See TODO 228.
+    float logical_frag;
+    {
+        shared_latch guard(this->latch);
+        logical_frag = lc.fragmentation_ratio();
+    }
     try {
 
         if (logical_frag > 0.3) //get_min_fragmentation_ratio())

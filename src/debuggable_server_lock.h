@@ -60,6 +60,52 @@ struct LockDiagnostics {
  * replace the value. Timeout dumps, labels, and writer backtraces are
  * compiled in when BARCH_LOCK_DEBUG is defined.
  */
+/*
+ * Teaching TSan about this latch - TODO 225.
+ *
+ * Writer against writer is excluded by upgrade_write_mtx, a std::timed_mutex,
+ * and every acquire of it goes through try_lock_until - which is
+ * pthread_mutex_timedlock, the one call TSan does not intercept. It sees the
+ * unlock and never the lock, so it builds no happens-before between two
+ * writers and reports every pair of write-locked critical sections touching the
+ * same memory as a data race. That is where TODO 225 came from: both sides held
+ * this shard's write lock, and the report was still real from TSan's point of
+ * view because it could not see either acquire.
+ *
+ * So every acquire releases and acquires on `this`: a release before the latch
+ * is given up, an acquire once it is held. That is the edge TSan was missing.
+ * Two readers end up ordered against each other as well, which costs nothing -
+ * a pair of readers cannot race by definition - and writer against writer and
+ * writer against reader, which are the pairs that matter, come out right.
+ *
+ * The __tsan_mutex_* family models a reader-writer lock properly and was tried
+ * first. It does not survive this lock: pre_unlock/post_unlock have to bracket
+ * the release with no other synchronisation between them, and unlock() takes
+ * cv_mtx and notifies inside that window, which trips
+ * `CHECK failed: "((thr->ignore_sync)) > ((0))"` in the TSan runtime. DONE 211
+ * dismissed __tsan_acquire/__tsan_release as "a binary synch, not a
+ * reader-writer lock" - true, and it does not matter here.
+ *
+ * ci/tsan.supp still hides the inner pthread mutex's unbalanced unlock, since
+ * that half of it is unchanged.
+ */
+#if defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define BARCH_TSAN_BUILD 1
+#  endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+#  define BARCH_TSAN_BUILD 1
+#endif
+#ifdef BARCH_TSAN_BUILD
+#include <sanitizer/tsan_interface.h>
+#define BARCH_TSAN_ACQUIRE(p) __tsan_acquire((void*)(p))
+#define BARCH_TSAN_RELEASE(p) __tsan_release((void*)(p))
+#else
+#define BARCH_TSAN_ACQUIRE(p) ((void)0)
+#define BARCH_TSAN_RELEASE(p) ((void)0)
+#endif
+
 class debuggable_server_lock {
 public:
     // DEPENDS takes every shard of two spaces, then storage_release
@@ -183,6 +229,7 @@ private:
         mark_reader(s);
 #endif
         set_our_hold('U');
+        BARCH_TSAN_ACQUIRE(this);
     }
 
     void push_hold(char mode) noexcept {
@@ -464,6 +511,7 @@ public:
 #endif
         if (!write_intent.load(std::memory_order_seq_cst)) {
             push_hold('R');
+            BARCH_TSAN_ACQUIRE(this);
             return true;
         }
         backoff_reader(s);
@@ -481,6 +529,7 @@ public:
 
             if (!write_intent.load(std::memory_order_seq_cst)) {
                 push_hold('R');
+                BARCH_TSAN_ACQUIRE(this);
                 return true;
             }
 
@@ -538,6 +587,7 @@ public:
 #endif
         if (!write_intent.load(std::memory_order_seq_cst)) {
             push_hold('R');
+            BARCH_TSAN_ACQUIRE(this);
             return true;
         }
         backoff_reader(s);
@@ -557,6 +607,7 @@ public:
 #endif
             if (!write_intent.load(std::memory_order_seq_cst)) {
                 push_hold('R');
+                BARCH_TSAN_ACQUIRE(this);
                 return;
             }
             backoff_reader(s);
@@ -575,8 +626,12 @@ public:
     }
 
     void unlock_shared() noexcept {
-        if (pop_hold())
+        // only the outermost release is annotated: a nested shared acquire on a
+        // lock this thread already holds takes no atomic and gets no post_lock
+        if (pop_hold()) {
+            BARCH_TSAN_RELEASE(this);
             backoff_reader(slot());
+        }
     }
 
     // --- WRITE PATH ---
@@ -663,6 +718,9 @@ public:
         note_writer();
 #endif
         push_hold('W');
+        // the acquire TSan could not see: upgrade_write_mtx went through
+        // pthread_mutex_timedlock. See TODO 225.
+        BARCH_TSAN_ACQUIRE(this);
         lock.release();
         return true;
     }
@@ -703,6 +761,7 @@ public:
 
         note_writer();
         push_hold('W');
+        BARCH_TSAN_ACQUIRE(this);
         ul.release();
 #else
         std::unique_lock<std::timed_mutex> ul(upgrade_write_mtx);
@@ -712,11 +771,13 @@ public:
             cv.wait(cv_lock, [this] { return readers_drained(); });
         }
         push_hold('W');
+        BARCH_TSAN_ACQUIRE(this);
         ul.release();
 #endif
     }
 
     void unlock() noexcept {
+        BARCH_TSAN_RELEASE(this);
         pop_hold();
 #ifdef BARCH_LOCK_DEBUG
         clear_writer();

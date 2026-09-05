@@ -13,6 +13,8 @@ import os
 import scale
 import random
 import threading
+import traceback
+import sys
 import time
 
 import redis
@@ -272,10 +274,25 @@ for t in threads:
 
 time.sleep(SECONDS + 0.5)
 done.set()
+# The join has to outlast the longest reply still in flight, not the longest
+# operation. `KEYS t*:*` writes the socket as it walks, so the client is never
+# idle long enough for its 2s socket timeout to fire, and on a loaded box the
+# whole walk can take longer than the fifteen seconds this used to allow -
+# which read as `thread chaos-0 did not exit` when the thread was working
+# normally, just slowly. Two of six stressed runs failed that way. A thread
+# that is genuinely wedged still fails, with the stack below to prove it.
+# See TODO 227.
+JOIN_TIMEOUT = float(os.environ.get("CHAOS_JOIN_TIMEOUT", "90"))
 for t in threads:
-    t.join(timeout=15)
+    t.join(timeout=JOIN_TIMEOUT)
     if t.is_alive():
-        record("thread %s did not exit" % t.name)
+        # where it is stuck, not just that it is. Every connection has
+        # socket_timeout=2 and the loop tests `done` each pass, so nothing
+        # should be able to sit here for fifteen seconds - see TODO 227
+        frames = sys._current_frames()
+        where = frames.get(t.ident)
+        stack = "".join(traceback.format_stack(where)) if where else "no frame"
+        record("thread %s did not exit, stuck at:\n%s" % (t.name, stack))
 
 if restarting.is_set():
     try:

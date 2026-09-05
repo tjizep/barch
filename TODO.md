@@ -1090,37 +1090,10 @@
 
 224. [Done] Running the TSan set under CPU pressure [05-09-2026] Nr 216 dfda7a6
 
-225. `foreign_flight::resp_pending` raced under load, found by the stress
-    harness on its second run (DONE 216). `reply_after_wait` decrements it at
-    `foreign.cpp:71` on a session thread while `maybe_erase` reads it at
-    `foreign.cpp:47` from `finish_fetch` on a foreign pool worker. Both look
-    like they are inside `store.with_key_write` on the same key, so on the
-    face of it this should be impossible - which makes it the interesting
-    one.
-
-    First hypothesis, not yet checked: `route_locked` in `sharded_store.cpp`
-    returns the shard *without taking any lock* when
-    `shard_already_held(space, shard)` says this thread already holds it, and
-    that answer comes from a `thread_local` in `shard_hold::current()`. On a
-    pool worker that thread local belongs to whatever ran there last. If a
-    hold is left registered after a job finishes, every later
-    `with_key_write` on that worker is a no-op lock. Worth confirming before
-    anything else, because if true it is not specific to flights.
-
-    Reproduce with:
-    `ci/tsan-stress.sh -n 5 -c 2 -- -R "TestFetchLuau|TestFunctions"`
-
-    Settle with: the mechanism named, a fix, and the same command clean over
-    several runs.
+225. [Done] The latch TSan could not see [05-09-2026] Nr 219 dfda7a6
 
 226. [Done] A parked client that disconnects is never noticed [05-09-2026] Nr 217 dfda7a6
 
-227. Two things the stressed TSan run turns up that the unstressed one does
-    not, both found while verifying TODO 226 and neither related to it:
-    a race in `logical_allocator::new_address` (`logical_allocator.h:892`),
-    and `TestChaos` failing on `thread chaos-0 did not exit`, which looks like
-    its own deadline being missed on a busy machine rather than a defect.
-    Reproduce both with
-    `ci/tsan-stress.sh -b cmake-build-tsan -n 2 -c 2 -- -L short`.
-    Settle the first with the mechanism named and a fix; settle the second by
-    deciding whether the chaos test's deadline should scale with the machine.
+227. [Done] The chaos thread that had not stopped working [05-09-2026] Nr 220 dfda7a6
+
+228. [Done] The defrag fragmentation read had no latch [05-09-2026] Nr 218 dfda7a6

@@ -17,6 +17,12 @@ extern "C" {
 
 const heap::vector<bool>& get_all_acl();
 
+/** cats stored for `user`, or the built-in `web` rights if that name has none */
+heap::vector<bool> acl_for_user(const std::string& user);
+/** true and fills acl when user/secret match the auth shard */
+bool authenticate_user(const std::string& user, const std::string& secret,
+                       heap::vector<bool>& acl);
+
 /**
  * A user's rights in one key space, as the differences from their global ones.
  *

@@ -433,6 +433,13 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
             out.port = (uint16_t) lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+    if (field(L, idx, "user")) {
+        if (!as_string(L, -1, out.user, err, "user")) {
+            lua_pop(L, 1);
+            return false;
+        }
+        lua_pop(L, 1);
+    }
     if (field(L, idx, "methods")) {
         if (!lua_istable(L, -1)) {
             lua_pop(L, 1);

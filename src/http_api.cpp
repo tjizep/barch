@@ -2,8 +2,10 @@
 
 #include "function_api.h"
 #include "foreign/driver.h"
+#include "auth_api.h"
 #include "lzr_log.h"
 #include "key_space.h"
+#include "sharded_store.h"
 
 #include <atomic>
 #include <cctype>
@@ -77,6 +79,7 @@ struct http_vm_slot {
 };
 
 struct space_http {
+    barch::key_space_ptr space;
     std::unique_ptr<crow::SimpleApp> app;
     std::thread thread;
     std::vector<barch::foreign::http_route> routes;
@@ -85,6 +88,7 @@ struct space_http {
     std::string ssl_proto;
     std::string ssl_cert;
     std::string ssl_key;
+    std::string default_user{"web"};
     std::string fail;
     std::atomic<bool> running{false};
     std::mutex pool_mu;
@@ -184,6 +188,39 @@ bool accept_ok(const crow::request& req, const barch::foreign::http_route& spec)
     return ct.find(want) != std::string::npos;
 }
 
+std::string cookie_value(const std::string& header, const std::string& name) {
+    size_t nlen = name.size();
+    size_t i = 0;
+    while (i < header.size()) {
+        while (i < header.size() && (header[i] == ' ' || header[i] == ';'))
+            ++i;
+        if (i + nlen < header.size() && header.compare(i, nlen, name) == 0 &&
+            header[i + nlen] == '=') {
+            size_t v = i + nlen + 1;
+            size_t e = header.find(';', v);
+            if (e == std::string::npos)
+                e = header.size();
+            return header.substr(v, e - v);
+        }
+        i = header.find(';', i);
+        if (i == std::string::npos)
+            break;
+        ++i;
+    }
+    return {};
+}
+
+std::string session_user(const barch::key_space_ptr& space, const std::string& sid) {
+    if (!space || sid.empty())
+        return {};
+    std::string key = "http:sess:" + sid;
+    std::string value;
+    auto acc = barch::functions::store_for_owner(space);
+    if (acc.get && acc.get(key, value) == barch::foreign::store_access::read_state::present)
+        return value;
+    return {};
+}
+
 void handle_route(const std::shared_ptr<space_http>& server,
                   const barch::foreign::http_route& spec,
                   const crow::request& req, crow::response& res) {
@@ -224,12 +261,38 @@ void handle_route(const std::shared_ptr<space_http>& server,
         std::shared_ptr<http_vm_slot> v;
         ~put_back() { push_vm(*s, std::move(v)); }
     } hold{server.get(), std::move(slot)};
+
+    barch::functions::http_ident ident;
+    ident.sid = cookie_value(req.get_header_value("Cookie"), "sid");
+    if (!spec.user.empty()) {
+        ident.user = spec.user;
+        ident.pinned = true;
+    } else if (!ident.sid.empty()) {
+        ident.user = session_user(server->space, ident.sid);
+    }
+    if (ident.user.empty())
+        ident.user = server->default_user.empty() ? "web" : server->default_user;
+    ident.acl = acl_for_user(ident.user);
+    ident.space = server->space;
+    auto*& tls = barch::functions::http_ident_tls();
+    auto* prev = tls;
+    tls = &ident;
+    struct drop_ident {
+        barch::functions::http_ident** p;
+        barch::functions::http_ident* was;
+        ~drop_ident() { *p = was; }
+    } drop{&tls, prev};
+
     std::string err;
     auto it = hold.v->methods.find(spec.name + ":" + verb);
     if (it == hold.v->methods.end())
         err = "no handler on this vm";
     else
         barch::foreign::http_vm_call(hold.v->vm, it->second, &req, &res, err);
+    if (ident.sid_new && !ident.sid.empty()) {
+        res.add_header("Set-Cookie",
+                       "sid=" + ident.sid + "; Path=/; HttpOnly");
+    }
     if (!err.empty()) {
         res.code = 500;
         res.body = err;
@@ -271,6 +334,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
     }
 
     auto server = std::make_shared<space_http>();
+    server->space = space;
     auto iface = std::make_shared<barch::foreign::call_interface>();
     iface->running_in = canon;
     iface->defined_in = canon;
@@ -279,6 +343,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
         return barch::functions::source_of(space, want, source);
     };
     iface->store = barch::functions::store_for_owner(space);
+    iface->run_command = barch::functions::runner_for_http(space);
     uint64_t deadline = space->function_deadline();
     auto slot0 = make_vm_slot(canon, iface, deadline, server->luau_bytes);
 
@@ -302,6 +367,8 @@ std::string start_space_http(const barch::key_space_ptr& space,
         }
         if (port == 0 && conf.port)
             port = conf.port;
+        if (!conf.user.empty())
+            server->default_user = conf.user;
         if (bind.empty() && !conf.bind.empty())
             bind = conf.bind;
         if (server->ssl_proto.empty() && !conf.ssl_proto.empty())

@@ -1421,12 +1421,20 @@ try:
     r.execute_command("CONFIG", "SET", "function_deadline_ms", "1000")
     r.execute_command("CONFIG", "SET", "function_slice_insns", "1000000")
 
-    # STATS/OPS counters as a table, so an HTTP health/stats route can read them
-    # without barch.call. See TODO 217.
+    # STATS/OPS through barch.call, the same path HTTP /stats uses. See TODO 219.
     assert r.execute_command("SETF", "readops", """
         function call()
-            local o = barch.ops()
-            local s = barch.stats()
+            local function kvmap(arr)
+                local m = {}
+                local i = 1
+                while arr[i] ~= nil do
+                    m[tostring(arr[i])] = arr[i + 1]
+                    i = i + 2
+                end
+                return m
+            end
+            local o = kvmap(barch.call("OPS"))
+            local s = kvmap(barch.call("STATS"))
             return {o.retrieve_ops, o.set_ops, s.heap_bytes_allocated, s.shards}
         end
     """) == b"OK"

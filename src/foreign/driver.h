@@ -400,6 +400,8 @@ struct http_route {
     std::string ssl_cert;
     std::string ssl_key;
     std::string ssl_proto;
+    /** empty: session then HTTP default. set: this route always runs as that user */
+    std::string user;
     bool has_transport{false};
     bool has_route{false};
 };

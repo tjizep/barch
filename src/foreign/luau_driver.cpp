@@ -8,6 +8,8 @@
 #include "abstract_shard.h"
 #include "statistics.h"
 #include "function_api.h"
+#include "auth_api.h"
+#include <random>
 
 #include <cmath>
 #include <cerrno>
@@ -1605,84 +1607,55 @@ static int current_space_handle(lua_State* L) {
     return push_space_handle(L, st, st->store);
 }
 
-static void set_i64_field(lua_State* L, const char* k, int64_t v) {
-    lua_pushinteger64(L, v);
-    lua_setfield(L, -2, k);
-}
-
-/*
- * barch.ops() / barch.stats() - the same counters RESP STATS and OPS return,
- * as a table. HTTP handlers have no barch.call (Crow is unauthenticated), so
- * this is how a health or stats route reads them. ops() is atomics; stats()
- * takes a shared latch on every shard, the same as the STATS command.
- */
-static int barch_ops(lua_State* L) {
-    auto as = barch::get_ops_statistics();
-    lua_createtable(L, 0, 18);
-    set_i64_field(L, "delete_ops", as.delete_ops);
-    set_i64_field(L, "retrieve_ops", as.get_ops);
-    set_i64_field(L, "insert_ops", as.insert_ops);
-    set_i64_field(L, "iterations", as.iter_ops);
-    set_i64_field(L, "range_iterations", as.iter_range_ops);
-    set_i64_field(L, "lower_bound_ops", as.lb_ops);
-    set_i64_field(L, "maximum_ops", as.max_ops);
-    set_i64_field(L, "minimum_ops", as.min_ops);
-    set_i64_field(L, "range_ops", as.range_ops);
-    set_i64_field(L, "set_ops", as.set_ops);
-    set_i64_field(L, "size_ops", as.size_ops);
-    set_i64_field(L, "foreign_queries", (int64_t) statistics::foreign_queries.load());
-    set_i64_field(L, "foreign_misses", (int64_t) statistics::foreign_misses.load());
-    set_i64_field(L, "foreign_errors", (int64_t) statistics::foreign_errors.load());
-    set_i64_field(L, "foreign_waiters", (int64_t) statistics::foreign_waiters.load());
-    set_i64_field(L, "foreign_coalesced", (int64_t) statistics::foreign_coalesced.load());
-    set_i64_field(L, "foreign_overloaded", (int64_t) statistics::foreign_overloaded.load());
-    set_i64_field(L, "foreign_cancelled", (int64_t) statistics::foreign_cancelled.load());
-    set_i64_field(L, "foreign_slow", (int64_t) statistics::foreign_slow.load());
+static int barch_auth(lua_State* L) {
+    auto* id = barch::functions::http_ident_tls();
+    if (!id)
+        luaL_error(L, "FUNCTION barch.auth is only available in HTTP handlers");
+    if (id->pinned)
+        luaL_error(L, "FUNCTION barch.auth cannot change a pinned route user");
+    size_t ul = 0, sl = 0;
+    const char* u = luaL_checklstring(L, 1, &ul);
+    const char* pw = luaL_checklstring(L, 2, &sl);
+    heap::vector<bool> acl;
+    if (!authenticate_user(std::string(u, ul), std::string(pw, sl), acl)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    id->user.assign(u, ul);
+    id->acl = std::move(acl);
+    if (id->sid.empty()) {
+        static thread_local std::mt19937_64 rng{std::random_device{}()};
+        static const char* hex = "0123456789abcdef";
+        id->sid.assign(32, '0');
+        for (int i = 0; i < 32; i += 2) {
+            auto v = (uint8_t) rng();
+            id->sid[i] = hex[v >> 4];
+            id->sid[i + 1] = hex[v & 15];
+        }
+        id->sid_new = true;
+    }
+    if (id->space) {
+        auto acc = barch::functions::store_for_owner(id->space);
+        std::string err;
+        if (!acc.set || !acc.set("http:sess:" + id->sid, id->user, err)) {
+            std::string msg = "FUNCTION could not store the HTTP session";
+            if (!err.empty()) {
+                msg += ": ";
+                msg += err;
+            }
+            luaL_error(L, "%s", msg.c_str());
+        }
+    }
+    lua_pushboolean(L, 1);
     return 1;
 }
 
-static int barch_stats(lua_State* L) {
-    auto as = barch::get_statistics();
-    lua_createtable(L, 0, 32);
-    set_i64_field(L, "heap_bytes_allocated", as.heap_bytes_allocated);
-    set_i64_field(L, "vmm_bytes_allocated", as.vmm_bytes_allocated);
-    set_i64_field(L, "value_bytes_compressed", as.value_bytes_compressed);
-    set_i64_field(L, "last_vacuum_time", as.last_vacuum_time);
-    set_i64_field(L, "vacuum_count", as.vacuums_performed);
-    set_i64_field(L, "bytes_addressable", as.bytes_allocated);
-    set_i64_field(L, "interior_bytes_addressable", as.bytes_interior);
-    set_i64_field(L, "leaf_nodes", as.leaf_nodes);
-    set_i64_field(L, "size_4_nodes", as.node4_nodes);
-    set_i64_field(L, "size_16_nodes", as.node16_nodes);
-    set_i64_field(L, "size_48_nodes", as.node48_nodes);
-    set_i64_field(L, "size_256_nodes", as.node256_nodes);
-    set_i64_field(L, "size_256_occupancy", as.node256_occupants);
-    set_i64_field(L, "leaf_nodes_replaced", as.leaf_nodes_replaced);
-    set_i64_field(L, "pages_evicted", as.pages_evicted);
-    set_i64_field(L, "keys_evicted", as.keys_evicted);
-    set_i64_field(L, "pages_defragged", as.pages_defragged);
-    set_i64_field(L, "vmm_pages_defragged", as.vmm_pages_defragged);
-    set_i64_field(L, "vmm_pages_popped", as.vmm_pages_popped);
-    set_i64_field(L, "read_locks_active", as.read_locks_active);
-    set_i64_field(L, "write_locks_active", as.write_locks_active);
-    set_i64_field(L, "exceptions_raised", as.exceptions_raised);
-    set_i64_field(L, "maintenance_cycles", as.maintenance_cycles);
-    set_i64_field(L, "shards", as.shards);
-    set_i64_field(L, "local_calls", as.local_calls);
-    set_i64_field(L, "max_spin", as.max_spin);
-    set_i64_field(L, "logical_allocated", as.logical_allocated);
-    set_i64_field(L, "bytes_in_free_lists", as.bytes_in_free_lists);
-    set_i64_field(L, "oom_avoided_inserts", as.oom_avoided_inserts);
-    set_i64_field(L, "keys_found", as.keys_found);
-    set_i64_field(L, "foreign_queries", (int64_t) statistics::foreign_queries.load());
-    set_i64_field(L, "foreign_misses", (int64_t) statistics::foreign_misses.load());
-    set_i64_field(L, "foreign_errors", (int64_t) statistics::foreign_errors.load());
-    set_i64_field(L, "foreign_waiters", (int64_t) statistics::foreign_waiters.load());
-    set_i64_field(L, "foreign_coalesced", (int64_t) statistics::foreign_coalesced.load());
-    set_i64_field(L, "foreign_overloaded", (int64_t) statistics::foreign_overloaded.load());
-    set_i64_field(L, "foreign_cancelled", (int64_t) statistics::foreign_cancelled.load());
-    set_i64_field(L, "foreign_slow", (int64_t) statistics::foreign_slow.load());
-    set_i64_field(L, "luau_bytes", (int64_t) statistics::luau_bytes.load());
+static int barch_user(lua_State* L) {
+    auto* id = barch::functions::http_ident_tls();
+    if (!id || id->user.empty())
+        lua_pushlstring(L, "", 0);
+    else
+        lua_pushlstring(L, id->user.data(), id->user.size());
     return 1;
 }
 
@@ -2027,10 +2000,10 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "current");
     lua_pushcfunction(L, running_space_name, "running");
     lua_setfield(L, -2, "running");
-    lua_pushcfunction(L, barch_ops, "ops");
-    lua_setfield(L, -2, "ops");
-    lua_pushcfunction(L, barch_stats, "stats");
-    lua_setfield(L, -2, "stats");
+    lua_pushcfunction(L, barch_auth, "auth");
+    lua_setfield(L, -2, "auth");
+    lua_pushcfunction(L, barch_user, "user");
+    lua_setfield(L, -2, "user");
 
     // a key space read and written as a value - see TODO 98 F2
     lua_newtable(L);
@@ -2863,7 +2836,14 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res, std::stri
         ctx.deadline = art::now() + static_cast<int64_t>(vm.deadline_ms);
     lua_callbacks(L)->userdata = &ctx;
     st->load = vm.iface ? &vm.iface->load : nullptr;
-    st->store = vm.iface ? &vm.iface->store : nullptr;
+    barch::foreign::store_access local_store;
+    auto* id = barch::functions::http_ident_tls();
+    if (id && id->space) {
+        local_store = barch::functions::store_for(id->space, id->acl);
+        st->store = &local_store;
+    } else {
+        st->store = vm.iface ? &vm.iface->store : nullptr;
+    }
     st->run_command = vm.iface && vm.iface->run_command ? &vm.iface->run_command : nullptr;
     st->open_space = vm.iface && vm.iface->open_space ? &vm.iface->open_space : nullptr;
     st->opened = vm.iface ? &vm.iface->opened : nullptr;

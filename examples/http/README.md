@@ -41,6 +41,8 @@ curl http://127.0.0.1:18088/hits
 curl -H 'Content-Type: application/json' -d '{"user":{"id":1},"ok":true}' http://127.0.0.1:18088/json
 curl http://127.0.0.1:18088/health
 curl http://127.0.0.1:18088/stats
+curl http://127.0.0.1:18088/who
+curl -H 'Content-Type: application/json' -d '{"user":"alice","pass":"secret"}' http://127.0.0.1:18088/login
 redis-cli -p 14000 HTTP STATUS
 ```
 
@@ -98,11 +100,17 @@ curl http://127.0.0.1:18088/hits
 ```
 
 POST `/json` parses the body and encodes the same document back, so nested
-objects and arrays survive. GET `/health` is liveness: `{ok, space,
-retrieve_ops}`. GET `/stats` is the STATS and OPS counters as JSON.
-`barch.stats()` / `barch.ops()` are how a handler reads those; HTTP does
-not get `barch.call`, because Crow is unauthenticated. `ops()` is atomics.
-`stats()` takes a shared latch on every shard, the same as the STATS command.
+objects and arrays survive. GET `/health` is liveness: `{ok, space, user,
+retrieve_ops}`. GET `/stats` is the STATS and OPS counters as JSON, plus
+the user the route is pinned to.
+
+Handlers run as a user, so `barch.call` is just another command. Precedence
+is: `transport().user` on the route, else the user bound to the `sid`
+cookie at `http:sess:<sid>`, else the HTTP conf `user` (default `web`).
+`web` can read, write, and call STATS/OPS/PING. The cookie is an opaque
+token; the user name stays in the store. POST `/login` calls
+`barch.auth(user, pass)` and sets `sid` if needed. GET `/who` is unpinned,
+so a login shows up there; `/stats` has `user = "web"` and stays on web.
 
 `barch.store.getInt32At` / `setInt32At` write in place once the key exists,
 so there is no `tonumber`/`tostring` on the hot path. GET `/hits-str` is
@@ -246,7 +254,9 @@ rather than going out over HTTP for it.
 - `luau/json.luau` — `kind = "resource"`, POST `/json`, full document round trip
 - `luau/page.luau` — `kind = "resource"`, GET `/page`
 - `luau/session.luau` — `kind = "resource"`, GET `/sess`, cookie + store
-- `luau/health.luau` — `kind = "resource"`, GET `/health`
-- `luau/stats.luau` — `kind = "resource"`, GET `/stats`, STATS and OPS as JSON
-- `luau/conf.luau` — `kind = "http"`, lists the other keys
+- `luau/health.luau` — `kind = "resource"`, GET `/health`, `barch.call("PING")` / `OPS`
+- `luau/stats.luau` — `kind = "resource"`, GET `/stats`, pinned to `web`
+- `luau/login.luau` — `kind = "resource"`, POST `/login`, `barch.auth`
+- `luau/who.luau` — `kind = "resource"`, GET `/who`, current HTTP user
+- `luau/conf.luau` — `kind = "http"`, lists the other keys, default `user = "web"`
 - `deploy.py` — SETF in order, then `HTTP START CONF`

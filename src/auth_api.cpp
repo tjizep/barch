@@ -42,9 +42,17 @@ static void init_auth(barch::shard_ptr auth) {
         heap::string_map<bool> cats;
         cats.emplace("data",true);
         cats.emplace("all",true);
+        heap::string_map<bool> web;
+        web.emplace("read", true);
+        web.emplace("write", true);
+        web.emplace("data", true);
+        web.emplace("stats", true);
+        web.emplace("keys", true);
+        web.emplace("connection", true);
         {
             unique_latch write(auth->get_latch());
             add_cats(auth,"default","empty",cats);
+            add_cats(auth,"web","",web);
         }
         auth->save(false);
         barch::log({"Saved initial acl"});
@@ -163,6 +171,71 @@ void write_space_overrides(const std::string& user, const std::string& space,
         a->insert(prefix + c.first, c.second ? "true" : "false", true);
     }
 }
+}
+
+static heap::vector<bool> web_acl() {
+    catmap cats;
+    cats["read"] = true;
+    cats["write"] = true;
+    cats["data"] = true;
+    cats["stats"] = true;
+    cats["keys"] = true;
+    cats["connection"] = true;
+    return cats2vec(cats);
+}
+
+static bool load_user_cats(const std::string& user, catmap& cats) {
+    auto a = get_auth();
+    read_lock read(a);
+    std::string key = user_cats(user);
+    barch::iterator cat_data(a, key);
+    while (cat_data.ok()) {
+        auto k = cat_data.key();
+        auto v = cat_data.value();
+        if (!k.starts_with(key))
+            break;
+        std::string cat = k.sub(key.size()).pref(1).to_string();
+        cats[cat] = v == "true";
+        cat_data.next();
+    }
+    return !cats.empty();
+}
+
+heap::vector<bool> acl_for_user(const std::string& user) {
+    catmap cats;
+    if (load_user_cats(user, cats))
+        return cats2vec(cats);
+    if (user == "web" || user.empty())
+        return web_acl();
+    if (user == "default")
+        return get_all_acl();
+    return {};
+}
+
+bool authenticate_user(const std::string& user, const std::string& secret,
+                       heap::vector<bool>& acl) {
+    std::string u = user.empty() ? "default" : user;
+    auto a = get_auth();
+    if (a->get_size() == 0) {
+        acl = get_all_acl();
+        return true;
+    }
+    catmap cats;
+    load_user_cats(u, cats);
+    std::string key = SECRET_PREFIX;
+    key += u;
+    read_lock read(a);
+    auto s = a->search(key);
+    if (!s.null() && s.const_leaf()->get_value() == art::value_type{secret}) {
+        acl = cats.empty() ? get_all_acl() : cats2vec(cats);
+        return true;
+    }
+    // web has no secret; AUTH as web is not a login, it is the anonymous user
+    if (u == "web" && secret.empty()) {
+        acl = acl_for_user("web");
+        return true;
+    }
+    return false;
 }
 
 extern "C"

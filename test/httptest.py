@@ -164,8 +164,9 @@ function transport()
         kind = "http",
         port = %d,
         bind = "127.0.0.1",
+        user = "web",
         keys = {"ECHO", "BINECHO", "PAGE", "SESS", "SLOW", "FETCH", "HITS",
-                "JSON", "HEALTH", "STATS"},
+                "JSON", "HEALTH", "STATS", "LOGIN", "WHO"},
     }
 end
 ''' % HTTP_PORT
@@ -254,11 +255,25 @@ function call()
     return "health"
 end
 
+local function kvmap(arr)
+    local m = {}
+    if type(arr) ~= "table" then
+        return m
+    end
+    local i = 1
+    while arr[i] ~= nil do
+        m[tostring(arr[i])] = arr[i + 1]
+        i = i + 2
+    end
+    return m
+end
+
 function health(req, res)
-    local ops = barch.ops()
+    local ops = kvmap(barch.call("OPS"))
     res.body = simdjson.encode({
-        ok = true,
+        ok = barch.call("PING") == "PONG",
         space = barch.running(),
+        user = barch.user(),
         retrieve_ops = ops.retrieve_ops,
     })
     res.code = 200
@@ -280,10 +295,24 @@ function call()
     return "stats"
 end
 
+local function kvmap(arr)
+    local m = {}
+    if type(arr) ~= "table" then
+        return m
+    end
+    local i = 1
+    while arr[i] ~= nil do
+        m[tostring(arr[i])] = arr[i + 1]
+        i = i + 2
+    end
+    return m
+end
+
 function stats(req, res)
     res.body = simdjson.encode({
-        stats = barch.stats(),
-        ops = barch.ops(),
+        user = barch.user(),
+        stats = kvmap(barch.call("STATS")),
+        ops = kvmap(barch.call("OPS")),
     })
     res.code = 200
 end
@@ -293,6 +322,63 @@ function transport()
         kind = "resource",
         route = "/stats",
         methods = {GET = stats},
+        send = "application/json",
+        cors = "*",
+        user = "web",
+    }
+end
+'''
+
+LOGIN = r'''
+function call()
+    return "login"
+end
+
+function login(req, res)
+    local j = simdjson.parse(req.body)
+    local user = j.user
+    local pass = j.pass
+    if type(user) ~= "string" or type(pass) ~= "string" then
+        res.body = simdjson.encode({ok = false, error = "user and pass required"})
+        res.code = 400
+        return
+    end
+    if barch.auth(user, pass) then
+        res.body = simdjson.encode({ok = true, user = barch.user()})
+        res.code = 200
+    else
+        res.body = simdjson.encode({ok = false})
+        res.code = 401
+    end
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/login",
+        methods = {POST = login},
+        accept = "application/json",
+        send = "application/json",
+        cors = "*",
+    }
+end
+'''
+
+WHO = r'''
+function call()
+    return "who"
+end
+
+function who(req, res)
+    res.body = simdjson.encode({user = barch.user()})
+    res.code = 200
+end
+
+function transport()
+    return {
+        kind = "resource",
+        route = "/who",
+        methods = {GET = who},
         send = "application/json",
         cors = "*",
     }
@@ -378,6 +464,8 @@ try:
     assert r.execute_command("SETF", "json", JSON) == b"OK"
     assert r.execute_command("SETF", "health", HEALTH) == b"OK"
     assert r.execute_command("SETF", "stats", STATS) == b"OK"
+    assert r.execute_command("SETF", "login", LOGIN) == b"OK"
+    assert r.execute_command("SETF", "who", WHO) == b"OK"
     assert r.execute_command("SETF", "slow", SLOW) == b"OK"
     assert r.execute_command("SETF", "fetch", FETCH) == b"OK"
     # no transport: still an ordinary function
@@ -396,6 +484,8 @@ try:
     assert "JSON /json POST" in text, started
     assert "HEALTH /health GET" in text, started
     assert "STATS /stats GET" in text, started
+    assert "LOGIN /login POST" in text, started
+    assert "WHO /who GET" in text, started
     assert "SLOW /slow GET" in text, started
     assert "FETCH /fetch GET" in text, started
     assert "PLAIN" not in text, started
@@ -481,13 +571,53 @@ try:
     assert status == 200, (status, body)
     health = json.loads(body)
     assert health["ok"] is True and "retrieve_ops" in health, health
+    assert health.get("user") == "web", health
 
     status, body, _ = http_call("GET", "/stats", timeout=10)
     assert status == 200, (status, body)
     stbody = json.loads(body)
+    assert stbody.get("user") == "web", stbody
     assert "retrieve_ops" in stbody["ops"], stbody
     assert "heap_bytes_allocated" in stbody["stats"], stbody
     assert int(stbody["stats"]["heap_bytes_allocated"]) > 0, stbody
+
+    status, body, _ = http_call("GET", "/who", timeout=10)
+    assert status == 200, (status, body)
+    assert json.loads(body)["user"] == "web", body
+
+    print("HTTP login upgrades the session; /stats stays pinned to web", flush=True)
+    r.execute_command("ACL", "SETUSER", "alice", "on", ">secret",
+                      "+read", "+write", "+stats", "+keys", "+connection")
+    status, body, _ = http_call(
+        "POST", "/login",
+        data=json.dumps({"user": "alice", "pass": "wrong"}),
+        headers={"Content-Type": "application/json"}, timeout=10)
+    assert status == 401, (status, body)
+    assert json.loads(body)["ok"] is False, body
+
+    status, body, hdrs = http_call(
+        "POST", "/login",
+        data=json.dumps({"user": "alice", "pass": "secret"}),
+        headers={"Content-Type": "application/json"}, timeout=10)
+    assert status == 200, (status, body)
+    assert json.loads(body)["ok"] is True and json.loads(body)["user"] == "alice", body
+    login_sid = None
+    for k, v in hdrs.items():
+        if k.lower() == "set-cookie" and v.startswith("sid="):
+            login_sid = v.split(";")[0]
+            break
+    assert login_sid, hdrs
+    status, body, _ = http_call("GET", "/who", headers={"Cookie": login_sid}, timeout=10)
+    assert status == 200, (status, body)
+    assert json.loads(body)["user"] == "alice", body
+    status, body, _ = http_call("GET", "/health", headers={"Cookie": login_sid}, timeout=10)
+    assert status == 200, (status, body)
+    assert json.loads(body)["user"] == "alice", body
+    status, body, _ = http_call("GET", "/stats", headers={"Cookie": login_sid}, timeout=10)
+    assert status == 200, (status, body)
+    assert json.loads(body)["user"] == "web", body
+    status, body, _ = http_call("GET", "/who", timeout=10)
+    assert status == 200 and json.loads(body)["user"] == "web", body
 
     print("handler calls out with http.request", flush=True)
     status, body, _ = http_call("GET", "/fetch", timeout=15)

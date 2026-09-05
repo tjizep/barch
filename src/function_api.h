@@ -70,6 +70,23 @@ namespace functions {
     barch::foreign::store_access store_for_owner(const barch::key_space_ptr& space);
 
     /**
+     * HTTP request identity. Opaque sid in the cookie; user name in the store.
+     * Set around a handler so barch.call and barch.store see this ACL, not owner.
+     */
+    struct http_ident {
+        std::string user;
+        heap::vector<bool> acl;
+        std::string sid;
+        bool sid_new{false};
+        /** transport().user is set; barch.auth must not replace it */
+        bool pinned{false};
+        key_space_ptr space;
+    };
+    http_ident*& http_ident_tls();
+    /** barch.call for Crow: rights come from http_ident_tls(), not a RESP caller */
+    barch::foreign::command_runner runner_for_http(const key_space_ptr& space);
+
+    /**
      * drop what this space's functions were known to expose - TODO 188.
      *
      * Called whenever a function key is written or removed, which is the only

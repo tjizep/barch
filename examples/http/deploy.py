@@ -23,7 +23,8 @@ PORT = 14000
 HTTP_PORT = 18088
 
 ORDER = ("echo.luau", "page.luau", "session.luau", "hits.luau", "hitsstr.luau",
-         "json.luau", "health.luau", "stats.luau", "conf.luau")
+         "json.luau", "health.luau", "stats.luau", "login.luau", "who.luau",
+         "conf.luau")
 
 
 def read_luau(name):
@@ -121,7 +122,7 @@ def demo(http_host, http_port):
     if status != 200:
         return False
     health = json.loads(body)
-    if health.get("ok") is not True:
+    if health.get("ok") is not True or health.get("user") != "web":
         print("health was not ok:", health)
         return False
     status, body, _ = http("GET", base + "/stats")
@@ -129,8 +130,17 @@ def demo(http_host, http_port):
     if status != 200:
         return False
     stats = json.loads(body)
-    if "retrieve_ops" not in stats.get("ops", {}) or "heap_bytes_allocated" not in stats.get("stats", {}):
+    if (stats.get("user") != "web" or "retrieve_ops" not in stats.get("ops", {})
+            or "heap_bytes_allocated" not in stats.get("stats", {})):
         print("stats missing counters:", stats)
+        return False
+    status, body, _ = http("GET", base + "/who")
+    print("GET /who ->", status, body)
+    if status != 200:
+        return False
+    who = json.loads(body)
+    if who.get("user") != "web":
+        print("who was not web:", who)
         return False
     return True
 

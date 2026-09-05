@@ -10124,3 +10124,37 @@ CLEAR-then-SAVE case.
 The Lua tests still dump those files in the build directory. That is a
 separate mess; it is no longer enough to make SET a liar.
 
+## 210. HTTP identity so `barch.call` can run under an ACL [04-09-2026]
+
+*Was `TODO.md` entry 219.*
+
+Crow had no user, so HTTP VMs used `store_for_owner` and had no command
+runner. `barch.call("STATS")` was not available, which is why `/health`
+and `/stats` grew their own `barch.ops()` / `barch.stats()` instead of
+using the commands.
+
+Those dedicated APIs are gone. A request now has a user, in this order:
+
+1. `transport().user` on the route, which pins it
+2. else the user stored at `http:sess:<sid>` for the `sid` cookie
+3. else the HTTP conf `user`, which defaults to `web`
+
+The cookie is an opaque token. The user name is a store value, not a
+cookie field. `barch.auth(user, pass)` checks the auth shard, mints a
+`sid` if the browser has none, and writes the binding. A pinned route
+refuses `barch.auth`, so login cannot punch through `/stats`.
+
+`web` is created with the auth shard: read, write, data, stats, keys,
+connection, and no secret. If an old auth file has no `web` row, the
+same rights are used as a builtin. STATS/OPS/PING are `read`+`stats` or
+`read`+`connection`, so they work. HTTP is `write`+`data`+`function`
+(the declared `admin` is not a real category), so `web` still cannot
+`barch.call("HTTP", "STOP")`.
+
+GET `/who` follows the session. GET `/stats` is pinned to `web`. After
+`POST /login` as alice, `/who` and `/health` say alice and `/stats`
+still says web. A request with no cookie is `web`.
+
+Covered by `test/httptest.py` (login, pin, `barch.call` STATS/OPS/PING)
+and `readops` in `test/functiontest.py`.
+

@@ -302,6 +302,89 @@ namespace functions {
         };
     }
 
+    http_ident*& http_ident_tls() {
+        thread_local http_ident* p = nullptr;
+        return p;
+    }
+
+    barch::foreign::command_runner runner_for_http(const key_space_ptr& space) {
+        auto held = std::make_shared<std::shared_ptr<sub_caller_state>>();
+        return [space, held](const heap::vector<std::string>& argv, Variable& out,
+                             std::string& err) -> bool {
+            auto* id = http_ident_tls();
+            if (!id) {
+                err = "FUNCTION no HTTP user";
+                return false;
+            }
+            if (argv.empty()) {
+                err = "barch.call needs a command name";
+                return false;
+            }
+            if (!*held)
+                *held = std::make_shared<sub_caller_state>();
+            auto& st = **held;
+            const barch_info* fn = nullptr;
+            auto seen = st.known.find(argv[0]);
+            if (seen != st.known.end()) {
+                fn = seen->second;
+            } else {
+                std::string name = argv[0];
+                for (auto& ch : name)
+                    ch = (char) toupper((unsigned char) ch);
+                if (name == "MULTI" || name == "EXEC" || name == "DISCARD" || name == "WATCH"
+                    || name == "UNWATCH") {
+                    err = "FUNCTION cannot call " + name;
+                    return false;
+                }
+                auto f = st.table->find(name);
+                if (f == st.table->end()) {
+                    err = "FUNCTION unknown command '" + name + "'";
+                    return false;
+                }
+                if (f->second.is_asynch) {
+                    err = "FUNCTION cannot call '" + name + "', it is asynchronous";
+                    return false;
+                }
+                fn = &f->second;
+                st.known.emplace(argv[0], fn);
+            }
+            if (!allowed(fn->cats, id->acl)) {
+                err = "FUNCTION not authorized to call '" + argv[0] + "'";
+                return false;
+            }
+            int depth = 1;
+            if (depth > (int) barch::get_function_max_depth()) {
+                err = std::string("FUNCTION ") + barch::foreign::too_deep_marker;
+                return false;
+            }
+            std::unique_ptr<rpc_caller> nested;
+            if (st.busy)
+                nested = std::make_unique<rpc_caller>();
+            rpc_caller& sub = nested ? *nested : st.sub;
+            bool mine = !nested;
+            if (mine)
+                st.busy = true;
+            struct release {
+                sub_caller_state& s; bool mine; rpc_caller& c;
+                ~release() { if (mine) s.busy = false; c.set_script_depth(0); }
+            } rel{st, mine, sub};
+            sub.set_kspace(space);
+            sub.set_acl(id->user, id->acl);
+            sub.set_script_depth(depth);
+            out = sub.callv(argv, fn->call, Variable(nullptr));
+            if (sub.has_blocks()) {
+                sub.clear_blocks();
+                err = "FUNCTION cannot call '" + argv[0] + "', it blocks";
+                return false;
+            }
+            if (out.index() == var_error) {
+                err = std::get<error>(out).what();
+                return false;
+            }
+            return true;
+        };
+    }
+
     /**
      * What `barch.store` reaches. Bound to the space the function runs against.
      *

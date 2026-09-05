@@ -1,6 +1,18 @@
--- GET /stats — the STATS and OPS counters, as JSON.
--- stats() takes a shared latch on every shard, the same as the STATS command.
--- HTTP handlers do not get barch.call; Crow is unauthenticated.
+-- GET /stats — STATS and OPS as JSON, always as the web user.
+-- transport().user pins the route, so a login cookie does not change it.
+
+local function kvmap(arr)
+    local m = {}
+    if type(arr) ~= "table" then
+        return m
+    end
+    local i = 1
+    while arr[i] ~= nil do
+        m[tostring(arr[i])] = arr[i + 1]
+        i = i + 2
+    end
+    return m
+end
 
 function call()
     return "stats"
@@ -8,8 +20,9 @@ end
 
 function stats(req, res)
     res.body = simdjson.encode({
-        stats = barch.stats(),
-        ops = barch.ops(),
+        user = barch.user(),
+        stats = kvmap(barch.call("STATS")),
+        ops = kvmap(barch.call("OPS")),
     })
     res.code = 200
 end
@@ -21,5 +34,6 @@ function transport()
         methods = {GET = stats},
         send = "application/json",
         cors = "*",
+        user = "web",
     }
 end

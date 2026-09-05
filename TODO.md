@@ -1087,3 +1087,5 @@
 217. [Done] JSON round-trip, health, and internal counters over Crow [04-09-2026] Nr 208 ee012e3
 
 218. [Done] Space flag vs shard file after load, SET-OK-GET-miss [04-09-2026] Nr 209 ee012e3
+
+219. [Done] HTTP identity so `barch.call` can run under an ACL [04-09-2026] Nr 210 9c603b4

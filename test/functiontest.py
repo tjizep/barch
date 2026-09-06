@@ -253,18 +253,33 @@ try:
     assert r.execute_command("readsglobal").decode() == "clean", \
         "a global set by one function must not be visible to another"
 
-    # --- the compiled function is held for the life of the connection ---------------
-    # nothing invalidates it, so a redefinition reaches new connections and not this
-    # one. That is the deal in TODO 98 C, and 137 is where it gets revisited
+    # --- a quiet write keeps what this connection compiled ---------------------------
+    # 98 C's deal, and the default: a redefinition reaches new connections and not the
+    # ones already running. Publishing to everything the moment a write lands means
+    # behaviour changing under a caller, event chains nobody can follow, and no way to
+    # stage a rollout - so it is opt in, one write at a time. See DONE 236 and TODO 245.
     assert r.execute_command("SETF", "version", 'function call() return "one" end') == b"OK"
     assert r.execute_command("version").decode() == "one"
     assert r.execute_command("SETF", "version", 'function call() return "two" end') == b"OK"
     assert r.execute_command("version").decode() == "one", \
-        "this connection keeps what it compiled"
+        "a quiet write must not change what this connection is running"
     fresh = redis.Redis(host="127.0.0.1", port=PORT, db=0)
     assert fresh.execute_command("version").decode() == "two", \
         "a new connection gets the new code"
     fresh.close()
+
+    # --- RELOAD publishes it, for the fix that cannot wait ---------------------------
+    assert r.execute_command("SETF", "version",
+                             'function call() return "three" end', "RELOAD") == b"OK"
+    assert r.execute_command("version").decode() == "three", \
+        "SETF ... RELOAD must reach the connection that made it"
+    # and the word is checked rather than swallowed
+    try:
+        r.execute_command("SETF", "version", 'function call() return "four" end', "PLEASE")
+        raise AssertionError("SETF took a third argument that is not RELOAD")
+    except redis.exceptions.ResponseError:
+        pass
+    assert r.execute_command("version").decode() == "three"
 
     # --- require, between functions in a space -------------------------------------
     # what comes back is the required function's globals table, so a module can offer

@@ -28,6 +28,10 @@
 #include "configuration.h"
 #include <set>
 
+#ifdef BARCH_HAS_SIMDJSON
+#include <simdjson.h>
+#endif
+
 #include "function_api.h"
 #include "function_sync.h"
 #include "module.h"
@@ -109,31 +113,83 @@ std::string type_of(const std::string& name) {
     return it == known.end() ? "application/octet-stream" : it->second;
 }
 
+/** the optional trailing RELOAD, the same word the writes take - see TODO 245 */
+bool takes_reload(const arg_t& argv, size_t& used) {
+    if (argv.size() <= used)
+        return false;
+    std::string word(argv[used].chars(), argv[used].size);
+    for (auto& c : word)
+        c = (char) toupper((unsigned char) c);
+    if (word != "RELOAD")
+        return false;
+    --used;                     // it is not one of the positional arguments
+    return true;
+}
+
 std::string chunk_key(const std::string& path, size_t n) {
     char idx[32];
     std::snprintf(idx, sizeof idx, "%08zu", n);
     return "fs:d:" + path + "|" + idx;
 }
 
-/** every key one file becomes: the metadata, then a chunk at a time */
+/** what a file's metadata will say, once the version it replaces is known */
+struct meta_entry {
+    std::string path;
+    std::string type;
+    size_t size{0};
+    size_t chunk{0};
+    size_t chunks{0};
+};
+
+/** the metadata as both writers spell it - see TODO 248 for the version */
+std::string meta_json(const meta_entry& m, uint64_t version) {
+    return "{\"size\":" + std::to_string(m.size) +
+           ",\"type\":\"" + m.type + "\"" +
+           ",\"chunk\":" + std::to_string(m.chunk) +
+           ",\"chunks\":" + std::to_string(m.chunks) +
+           ",\"version\":" + std::to_string(version) + "}";
+}
+
+/** the version a stored metadata blob carries, or 0 when it has none */
+uint64_t version_of(const std::string& raw) {
+#ifdef BARCH_HAS_SIMDJSON
+    if (raw.empty())
+        return 0;
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw).get(doc) != simdjson::SUCCESS)
+        return 0;
+    uint64_t v = 0;
+    if (doc["version"].get(v) == simdjson::SUCCESS)
+        return v;
+#else
+    (void) raw;
+#endif
+    return 0;
+}
+
+/** the chunks one file becomes; its metadata waits until the old version is read */
 void spread(const std::string& stored_path, const std::string& content,
             const std::string& type, size_t chunk,
-            std::vector<std::pair<std::string, std::string>>& into) {
+            std::vector<std::pair<std::string, std::string>>& into,
+            std::vector<meta_entry>& metas) {
     size_t chunks = chunk ? (content.size() + chunk - 1) / chunk : 0;
     for (size_t i = 0; i < chunks; ++i)
         into.emplace_back(chunk_key(stored_path, i),
                           content.substr(i * chunk, chunk));
-    // written the way the luau side writes it, since both have to read the other's
-    std::string meta = "{\"size\":" + std::to_string(content.size()) +
-                       ",\"type\":\"" + type + "\"" +
-                       ",\"chunk\":" + std::to_string(chunk) +
-                       ",\"chunks\":" + std::to_string(chunks) + "}";
-    into.emplace_back("fs:m:" + stored_path, std::move(meta));
+    meta_entry m;
+    m.path = stored_path;
+    m.type = type;
+    m.size = content.size();
+    m.chunk = chunk;
+    m.chunks = chunks;
+    metas.push_back(std::move(m));
 }
 
 /** walk `dir`, adding the keys every file under it becomes */
 bool gather(const std::string& dir, const std::string& at, size_t chunk,
             std::vector<std::pair<std::string, std::string>>& into,
+            std::vector<meta_entry>& metas,
             size_t& files, uint64_t& bytes, std::string& err) {
     for (const auto& name : list_dir(dir)) {
         if (skipped_name(name))
@@ -143,7 +199,7 @@ bool gather(const std::string& dir, const std::string& at, size_t chunk,
         // "/sub/name" below it - the same shape the luau side writes
         std::string stored = at + "/" + name;
         if (is_dir(path)) {
-            if (!gather(path, stored, chunk, into, files, bytes, err))
+            if (!gather(path, stored, chunk, into, metas, files, bytes, err))
                 return false;
             continue;
         }
@@ -156,7 +212,7 @@ bool gather(const std::string& dir, const std::string& at, size_t chunk,
         }
         bytes += content.size();
         ++files;
-        spread(stored, content, type_of(name), chunk, into);
+        spread(stored, content, type_of(name), chunk, into, metas);
     }
     return true;
 }
@@ -170,7 +226,7 @@ bool gather(const std::string& dir, const std::string& at, size_t chunk,
  */
 std::string barch::load_fs_directory(const std::string& into_dir, const std::string& into_root,
                                      size_t chunk, const barch::key_space_ptr& space,
-                                     std::vector<std::string>& reply) {
+                                     std::vector<std::string>& reply, bool publish) {
     std::string dir = into_dir;
     std::string root = into_root;
     if (chunk == 0 || chunk > (size_t) maximum_allocation_size - 1024)
@@ -187,19 +243,34 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
         root.pop_back();
 
     std::vector<std::pair<std::string, std::string>> writes;
+    std::vector<meta_entry> metas;
     size_t files = 0;
     uint64_t bytes = 0;
     std::string err;
     // everything is read and chunked before a single key is written, so a directory
     // that cannot be read does not leave half an import behind
-    if (!gather(dir, root == "/" ? std::string() : root, chunk, writes, files, bytes, err))
+    if (!gather(dir, root == "/" ? std::string() : root, chunk, writes, metas, files, bytes, err))
         return err;
-    if (writes.empty())
+    if (writes.empty() && metas.empty())
         return "nothing to import";
 
     auto acc = barch::functions::store_for_owner(space);
     if (!acc.set || !acc.get)
         return "this key space cannot be written";
+
+    /*
+     * The metadata is written last because its version has to be one past whatever
+     * is there now - that is what lets a forced require, and an ETag, tell a rewrite
+     * from a file that has not moved. See TODO 248.
+     */
+    for (const auto& m : metas) {
+        std::string key = "fs:m:" + m.path;
+        std::string prev;
+        uint64_t version = 1;
+        if (acc.get(key, prev) == barch::foreign::store_access::read_state::present)
+            version = version_of(prev) + 1;
+        writes.emplace_back(std::move(key), meta_json(m, version));
+    }
 
     // what those keys hold now, so a failure half way can be put back
     std::vector<std::pair<std::string, std::string>> had;
@@ -233,6 +304,15 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
         }
     }
 
+    if (publish) {
+        // the paths this import wrote, so a module compiled from one of them is
+        // rebuilt and everything else staged stays staged - TODO 245
+        for (const auto& [k, v] : writes) {
+            if (k.compare(0, 5, "fs:m:") == 0)
+                barch::functions::publish_compiled(
+                    barch::functions::compiled_path_key(space->canonical(), k.substr(5)));
+        }
+    }
     reply.push_back("files=" + std::to_string(files));
     reply.push_back("bytes=" + std::to_string(bytes));
     reply.push_back("keys=" + std::to_string(writes.size()));
@@ -266,7 +346,7 @@ std::string barch::load_fs_directory(const std::string& dir, const std::string& 
  */
 std::string barch::load_keys_directory(const std::string& into_dir, const std::string& prefix,
                                        const barch::key_space_ptr& space,
-                                       std::vector<std::string>& reply) {
+                                       std::vector<std::string>& reply, bool publish) {
     std::string dir = into_dir;
     while (dir.size() > 1 && dir.back() == '/')
         dir.pop_back();
@@ -338,6 +418,13 @@ std::string barch::load_keys_directory(const std::string& into_dir, const std::s
         if (f.luau) ++functions; else ++keys;
     }
 
+    if (publish) {
+        for (const auto& f : files) {
+            if (f.luau)
+                barch::functions::publish_compiled(
+                    barch::functions::compiled_key(space->canonical(), f.name));
+        }
+    }
     reply.push_back("functions=" + std::to_string(functions));
     reply.push_back("keys=" + std::to_string(keys));
     reply.push_back("bytes=" + std::to_string(bytes));
@@ -350,13 +437,69 @@ std::string barch::load_keys_directory(const std::string& dir, const std::string
     return load_keys_directory(dir, prefix, get_default_ks(), reply);
 }
 
+/**
+ * The whole content of a stored file. False when there is no such file, or when the
+ * metadata cannot be read. Shared so that everything reading the file store - the
+ * HTTP routes, `require`, whatever comes next - agrees about the layout.
+ *
+ * The read goes through the store_access it is handed, so a caller with no rights in
+ * the space gets nothing. That is the whole of the access control: files are keys.
+ */
+bool barch::read_fs_file(const barch::foreign::store_access& acc, const std::string& path,
+                         std::string& out, std::string& type) {
+    std::string raw;
+    if (!acc.get || acc.get("fs:m:" + path, raw) !=
+                    barch::foreign::store_access::read_state::present)
+        return false;
+#ifdef BARCH_HAS_SIMDJSON
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw).get(doc) != simdjson::SUCCESS)
+        return false;
+    uint64_t size = 0, chunks = 0;
+    if (doc["size"].get(size) != simdjson::SUCCESS)
+        return false;
+    doc["chunks"].get(chunks);
+    std::string_view t;
+    if (doc["type"].get(t) == simdjson::SUCCESS)
+        type.assign(t);
+    out.clear();
+    out.reserve((size_t) size);
+    for (uint64_t i = 0; i < chunks; ++i) {
+        std::string part;
+        if (acc.get(chunk_key(path, (size_t) i), part) !=
+            barch::foreign::store_access::read_state::present)
+            return false;               // the metadata promised a chunk that is not there
+        out.append(part);
+    }
+    return out.size() == size;
+#else
+    (void) out; (void) type;
+    return false;
+#endif
+}
+
+uint64_t barch::fs_file_version(const barch::foreign::store_access& acc,
+                               const std::string& path) {
+    std::string raw;
+    if (!acc.get || acc.get("fs:m:" + path, raw) !=
+                    barch::foreign::store_access::read_state::present)
+        return 0;
+    return version_of(raw);
+}
+
 int LOADKEYS(caller& call, const arg_t& argv) {
-    if (argv.size() < 2 || argv.size() > 3)
+    if (argv.size() < 2 || argv.size() > 4)
         return call.wrong_arity();
+    size_t last = argv.size() - 1;
+    const bool reload = takes_reload(argv, last);
+    const size_t positional = reload ? argv.size() - 1 : argv.size();
+    if (positional > 3)
+        return call.push_error("LOADKEYS path [prefix] [RELOAD]");
     std::string dir = as_text(argv[1]);
-    std::string prefix = argv.size() > 2 ? as_text(argv[2]) : std::string();
+    std::string prefix = positional > 2 ? as_text(argv[2]) : std::string();
     std::vector<std::string> reply;
-    auto err = barch::load_keys_directory(dir, prefix, call.kspace(), reply);
+    auto err = barch::load_keys_directory(dir, prefix, call.kspace(), reply, reload);
     if (!err.empty())
         return call.push_error(err.c_str());
     call.start_array();
@@ -371,15 +514,20 @@ int cmd_LOADKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 }
 
 int LOADFS(caller& call, const arg_t& argv) {
-    if (argv.size() < 2 || argv.size() > 4)
+    if (argv.size() < 2 || argv.size() > 5)
         return call.wrong_arity();
+    size_t last = argv.size() - 1;
+    const bool reload = takes_reload(argv, last);
+    const size_t positional = reload ? argv.size() - 1 : argv.size();
+    if (positional > 4)
+        return call.push_error("LOADFS path [root] [chunk] [RELOAD]");
     std::string dir = as_text(argv[1]);
-    std::string root = argv.size() > 2 ? as_text(argv[2]) : std::string("/");
+    std::string root = positional > 2 ? as_text(argv[2]) : std::string("/");
     size_t chunk = default_chunk;
-    if (argv.size() > 3)
+    if (positional > 3)
         chunk = (size_t) strtoull(as_text(argv[3]).c_str(), nullptr, 10);
     std::vector<std::string> reply;
-    auto err = barch::load_fs_directory(dir, root, chunk, call.kspace(), reply);
+    auto err = barch::load_fs_directory(dir, root, chunk, call.kspace(), reply, reload);
     if (!err.empty())
         return call.push_error(err.c_str());
     call.start_array();

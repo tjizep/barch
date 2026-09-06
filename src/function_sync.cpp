@@ -1,6 +1,7 @@
 #include "function_sync.h"
 
 #include "configuration.h"
+#include "git_repos.h"
 #include "function_api.h"
 #include "key_space.h"
 #include "lzr_log.h"
@@ -20,6 +21,9 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
+extern char** environ;
+
+#include <poll.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -38,13 +42,35 @@ struct checkout_file {
 std::mutex mu;
 std::condition_variable cv;
 std::atomic<bool> running{false};
-std::atomic<bool> kick{false};
 std::thread worker;
-std::string last_ok;
-std::string last_err;
-std::string last_stamp;
-heap::string_set managed;
+
+/*
+ * What is known about one repository between syncs. `state` is what FUNCTIONS
+ * STATUS reports and is the thing that makes an asynchronous first fetch visible
+ * rather than mysterious: a client that gets "no such command" for a function the
+ * checkout provides can be told the repository is still pending.
+ */
+struct repo_state {
+    std::string last_ok;
+    std::string last_err;
+    std::string last_stamp;
+    std::string state{"pending"};
+    std::chrono::steady_clock::time_point due{};
+    bool due_set{false};
+};
+
+std::mutex state_mu;
+heap::string_map<repo_state> states;
+/** which repository owns a key space, so one cannot swap away another's work */
+heap::string_map<std::string> managed_by;
 heap::string_map<heap::string_set> managed_data;
+/** repositories asked for by name, and the "everything" flag */
+heap::string_set kick_names;
+std::atomic<bool> kick_all{false};
+
+repo_state& state_of(const std::string& name) {
+    return states[name];
+}
 
 std::string fold_name(std::string s) {
     for (auto& ch : s)
@@ -100,21 +126,21 @@ std::vector<std::string> list_dir(const std::string& path) {
     return out;
 }
 
-std::string resolve_secret(const std::string& raw, std::string& err) {
-    if (raw.size() >= 5 && raw.compare(0, 5, "file:") == 0) {
-        std::string body;
-        if (!read_file(raw.substr(5), body) || body.empty()) {
-            err = "cannot read git ssh key file";
-            return {};
-        }
-        while (!body.empty() && (body.back() == '\n' || body.back() == '\r' || body.back() == ' '))
-            body.pop_back();
-        return body;
-    }
-    if (raw.size() >= 4 && raw.compare(0, 4, "env:") == 0) {
+/*
+ * A deploy key setting is a *reference*: a path, `file:/path`, or `env:VAR` naming
+ * one. It resolves to a path here because that is what `ssh -i` wants; the key
+ * material is never read into barch and never stored in a key.
+ *
+ * `env:` used to be refused outright with "must be a path to a key file", which was
+ * the right requirement attached to the wrong answer - the variable holds the path.
+ */
+std::string key_file_of(const std::string& raw, std::string& err) {
+    if (raw.compare(0, 5, "file:") == 0)
+        return raw.substr(5);
+    if (raw.compare(0, 4, "env:") == 0) {
         const char* v = std::getenv(raw.substr(4).c_str());
         if (!v || !*v) {
-            err = "git ssh key env not set";
+            err = "git ssh key env " + raw.substr(4) + " is not set";
             return {};
         }
         return v;
@@ -122,37 +148,168 @@ std::string resolve_secret(const std::string& raw, std::string& err) {
     return raw;
 }
 
+/**
+ * Flatten a message onto one line.
+ *
+ * A RESP error is terminated by CRLF, so an error carrying one of its own ends the
+ * reply early and everything after it is read as the next reply - the client then
+ * waits for an answer that already went past it, gives up, reconnects and sends the
+ * command again. git's stderr is multi line and keeps its trailing newline, which is
+ * exactly how a failing FUNCTIONS SYNC turned into the same sync running over and
+ * over on different threads. Anything that can reach push_error goes through here.
+ */
+std::string one_line(std::string text) {
+    for (auto& c : text) {
+        if (c == '\n' || c == '\r' || c == '\t')
+            c = ' ';
+    }
+    std::string out;
+    out.reserve(text.size());
+    bool space = false;
+    for (char c : text) {
+        if (c == ' ') {
+            space = !out.empty();
+            continue;
+        }
+        if (space)
+            out.push_back(' ');
+        space = false;
+        out.push_back(c);
+    }
+    return out;
+}
+
+/** the absolute path of a program, resolved here so the child never searches PATH */
+std::string program_path(const std::string& name) {
+    if (name.find('/') != std::string::npos)
+        return name;
+    const char* path = std::getenv("PATH");
+    if (!path)
+        path = "/usr/local/bin:/usr/bin:/bin";
+    std::string all = path;
+    size_t at = 0;
+    while (at <= all.size()) {
+        auto end = all.find(':', at);
+        if (end == std::string::npos)
+            end = all.size();
+        std::string dir = all.substr(at, end - at);
+        if (!dir.empty()) {
+            std::string full = dir + "/" + name;
+            if (::access(full.c_str(), X_OK) == 0)
+                return full;
+        }
+        at = end + 1;
+    }
+    return {};
+}
+
+/**
+ * Run a program and collect what it said.
+ *
+ * Everything the child needs - the resolved program path, the argument vector and
+ * the whole environment - is built before the fork, and the child then does nothing
+ * but dup2, close and execve. That is not tidiness. Between fork and exec the child
+ * may only call async-signal-safe functions, because it holds copies of every lock
+ * the other threads happened to be holding: the old shape called setenv and execvp
+ * in the child, both of which allocate, and a git command run while another thread
+ * was inside malloc would hang forever in the child with the parent blocked in
+ * waitpid. It showed up as a FUNCTIONS SYNC that never answered and no git process
+ * anywhere, since the child died before it ever became git.
+ */
 int run_cmd(const std::vector<std::string>& args,
             const std::vector<std::pair<std::string, std::string>>& extra_env,
             std::string& out, std::string& err) {
+    if (args.empty())
+        return -1;
+    std::string exe = program_path(args[0]);
+    if (exe.empty()) {
+        err = args[0] + " is not on the path";
+        return -1;
+    }
+
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& a : args)
+        argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    std::vector<std::string> env_strings;
+    for (char** e = environ; e && *e; ++e) {
+        std::string entry = *e;
+        bool replaced = false;
+        for (const auto& [k, v] : extra_env)
+            replaced = replaced || (entry.compare(0, k.size(), k) == 0
+                                    && entry.size() > k.size() && entry[k.size()] == '=');
+        if (!replaced)
+            env_strings.push_back(std::move(entry));
+    }
+    for (const auto& [k, v] : extra_env)
+        env_strings.push_back(k + "=" + v);
+    std::vector<char*> envp;
+    envp.reserve(env_strings.size() + 1);
+    for (auto& e : env_strings)
+        envp.push_back(const_cast<char*>(e.c_str()));
+    envp.push_back(nullptr);
+
     int outp[2], errp[2];
-    if (pipe(outp) != 0 || pipe(errp) != 0)
+    if (pipe(outp) != 0)
         return -1;
+    if (pipe(errp) != 0) {
+        close(outp[0]); close(outp[1]);
+        return -1;
+    }
     pid_t pid = fork();
-    if (pid < 0)
+    if (pid < 0) {
+        close(outp[0]); close(outp[1]);
+        close(errp[0]); close(errp[1]);
         return -1;
+    }
     if (pid == 0) {
         dup2(outp[1], STDOUT_FILENO);
         dup2(errp[1], STDERR_FILENO);
         close(outp[0]); close(outp[1]);
         close(errp[0]); close(errp[1]);
-        for (const auto& [k, v] : extra_env)
-            setenv(k.c_str(), v.c_str(), 1);
-        std::vector<char*> argv;
-        for (const auto& a : args)
-            argv.push_back(const_cast<char*>(a.c_str()));
-        argv.push_back(nullptr);
-        execvp(argv[0], argv.data());
+        execve(exe.c_str(), argv.data(), envp.data());
         _exit(127);
     }
     close(outp[1]);
     close(errp[1]);
+    /*
+     * Both pipes are drained together. Reading one to the end first deadlocks as
+     * soon as the other fills its buffer, which git does happily on a big fetch.
+     */
     char buf[4096];
-    ssize_t n;
-    while ((n = read(outp[0], buf, sizeof buf)) > 0)
-        out.append(buf, (size_t) n);
-    while ((n = read(errp[0], buf, sizeof buf)) > 0)
-        err.append(buf, (size_t) n);
+    int fds[2] = {outp[0], errp[0]};
+    std::string* into[2] = {&out, &err};
+    bool open_fd[2] = {true, true};
+    while (open_fd[0] || open_fd[1]) {
+        struct pollfd p[2];
+        int n = 0;
+        int which[2] = {-1, -1};
+        for (int i = 0; i < 2; ++i) {
+            if (!open_fd[i])
+                continue;
+            p[n].fd = fds[i];
+            p[n].events = POLLIN;
+            p[n].revents = 0;
+            which[n] = i;
+            ++n;
+        }
+        if (::poll(p, (nfds_t) n, -1) < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        for (int j = 0; j < n; ++j) {
+            if (!(p[j].revents & (POLLIN | POLLHUP | POLLERR)))
+                continue;
+            ssize_t got = read(p[j].fd, buf, sizeof buf);
+            if (got > 0)
+                into[which[j]]->append(buf, (size_t) got);
+            else
+                open_fd[which[j]] = false;
+        }
+    }
     close(outp[0]);
     close(errp[0]);
     int st = 0;
@@ -173,47 +330,81 @@ bool git_head(const std::string& dir, std::string& sha) {
     return !sha.empty();
 }
 
-std::string git_pull(const std::string& dir, std::string& err, const std::string& pin) {
-    if (!is_dir(dir + "/.git"))
-        return {};
-    std::string branch = barch::get_functions_git_branch();
-    if (branch.empty())
-        branch = "main";
-    std::vector<std::pair<std::string, std::string>> env;
-    std::string keyspec = barch::get_functions_git_ssh_key();
-    if (!keyspec.empty()) {
-        std::string key = resolve_secret(keyspec, err);
-        if (key.empty())
-            return err;
-        // a path: file: already returned file contents which is not a path.
-        // if it looks like a path on disk, use it; otherwise write a temp key.
-        std::string keyfile = keyspec;
-        if (keyspec.size() >= 5 && keyspec.compare(0, 5, "file:") == 0)
-            keyfile = keyspec.substr(5);
-        else if (keyspec.size() >= 4 && keyspec.compare(0, 4, "env:") == 0) {
-            err = "env git ssh key must be a path to a key file";
-            return err;
+/** mkdir -p, so a clone into <base>/<name> does not need the base to exist */
+bool make_dirs(const std::string& path) {
+    std::string at;
+    for (size_t i = 0; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            if (!at.empty() && !is_dir(at) && ::mkdir(at.c_str(), 0755) != 0 && errno != EEXIST)
+                return false;
         }
+        if (i < path.size())
+            at.push_back(path[i]);
+    }
+    return true;
+}
+
+std::string parent_of(const std::string& path) {
+    auto at = path.rfind('/');
+    if (at == std::string::npos || at == 0)
+        return {};
+    return path.substr(0, at);
+}
+
+/**
+ * Bring the checkout to where the repository says it should be.
+ *
+ * A missing checkout is cloned when there is a url, which is new - before this
+ * there was no url anywhere and a missing `.git` simply meant "leave it alone",
+ * so somebody set the checkout up by hand. Without a url that is still what
+ * happens, which is what keeps the old `functions_dir` behaviour intact.
+ */
+std::string git_checkout(const barch::repo_conf& r, const std::string& pin, std::string& err) {
+    std::string branch = r.branch.empty() ? "main" : r.branch;
+    std::vector<std::pair<std::string, std::string>> env;
+    if (!r.ssh_key.empty()) {
+        auto keyfile = key_file_of(r.ssh_key, err);
+        if (keyfile.empty())
+            return err.empty() ? "no git ssh key" : err;
         env.emplace_back("GIT_SSH_COMMAND",
                          "ssh -i " + keyfile +
                          " -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new");
     }
-    std::string spec = pin.empty() ? branch : pin;
     std::string out, e2;
-    int rc = run_cmd({"git", "-C", dir, "fetch", "--quiet", "origin", spec}, env, out, e2);
+    if (!is_dir(r.dir + "/.git")) {
+        if (r.url.empty())
+            return {};                       // somebody else's checkout, as before
+        auto parent = parent_of(r.dir);
+        if (!parent.empty() && !make_dirs(parent)) {
+            err = "cannot create " + parent;
+            return err;
+        }
+        int rc = run_cmd({"git", "clone", "--quiet", "--branch", branch, r.url, r.dir},
+                         env, out, e2);
+        if (rc != 0) {
+            err = one_line(e2.empty() ? ("git clone of " + r.url + " failed") : e2);
+            return err;
+        }
+    }
+    if (!r.pull && pin.empty())
+        return {};
+    std::string spec = pin.empty() ? branch : pin;
+    out.clear(); e2.clear();
+    int rc = run_cmd({"git", "-C", r.dir, "fetch", "--quiet", "origin", spec}, env, out, e2);
     if (rc != 0 && !pin.empty() && pin != branch) {
+        // a pinned rev is often not a ref origin will serve by name
         out.clear(); e2.clear();
-        rc = run_cmd({"git", "-C", dir, "fetch", "--quiet", "origin", branch}, env, out, e2);
+        rc = run_cmd({"git", "-C", r.dir, "fetch", "--quiet", "origin", branch}, env, out, e2);
     }
     if (rc != 0) {
-        err = e2.empty() ? "git fetch failed" : e2;
+        err = one_line(e2.empty() ? "git fetch failed" : e2);
         return err;
     }
     std::string target = pin.empty() ? "FETCH_HEAD" : pin;
     out.clear(); e2.clear();
-    rc = run_cmd({"git", "-C", dir, "reset", "--hard", "--quiet", target}, env, out, e2);
+    rc = run_cmd({"git", "-C", r.dir, "reset", "--hard", "--quiet", target}, env, out, e2);
     if (rc != 0) {
-        err = e2.empty() ? "git reset failed" : e2;
+        err = one_line(e2.empty() ? "git reset failed" : e2);
         return err;
     }
     return {};
@@ -495,29 +686,56 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
     return true;
 }
 
-std::string do_sync(const std::string& pin) {
-    std::string dir = barch::get_functions_dir();
-    if (dir.empty())
-        return "functions_dir is not set";
-    if (!is_dir(dir))
-        return "functions_dir is not a directory";
+/**
+ * Apply one repository's checkout.
+ *
+ * A repository either maps each top level folder onto the key space of that name,
+ * which is what the single `functions_dir` always did, or declares one `space` and
+ * puts everything there. The second form is how the same repository at two branches
+ * is configured: two entries with the same url, different checkouts and different
+ * spaces. Two of them landing in one space is refused rather than resolved - see
+ * TODO 252 - because a sync swaps a space wholesale and the pair would delete each
+ * other's work on alternate polls.
+ */
+std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
+    if (r.dir.empty())
+        return "repository " + r.name + " has no checkout directory";
 
-    std::string want = pin.empty() ? barch::get_functions_git_commit() : pin;
-    if (barch::get_functions_git_pull() || !pin.empty()) {
+    std::string want = pin.empty() ? r.commit : pin;
+    {
         std::string err;
-        auto failed = git_pull(dir, err, want);
+        auto failed = git_checkout(r, want, err);
         if (!failed.empty())
             return failed;
     }
+    if (!is_dir(r.dir))
+        return r.dir + " is not a directory";
 
     std::vector<checkout_file> files;
     std::string err;
-    if (!scan_checkout(dir, files, err))
+    if (!r.space.empty()) {
+        if (!scan_tree(r.dir, r.space, {}, files, err))
+            return err;
+    } else if (!scan_checkout(r.dir, files, err)) {
         return err;
+    }
 
     heap::string_map<std::vector<checkout_file>> by_space;
     for (auto& f : files)
         by_space[f.space].push_back(std::move(f));
+
+    /*
+     * The folder-per-space mapping is not known until the checkout has been
+     * scanned, so this is where that half of the overlap check has to happen -
+     * the declared `space` half is caught earlier, in refuse_overlap.
+     */
+    for (const auto& [space, group] : by_space) {
+        (void) group;
+        auto owner = managed_by.find(space);
+        if (owner != managed_by.end() && owner->second != r.name)
+            return "key space " + (space.empty() ? std::string("(default)") : space)
+                 + " is owned by repository " + owner->second;
+    }
 
     heap::string_set seen;
     for (auto& [space, group] : by_space) {
@@ -546,11 +764,11 @@ std::string do_sync(const std::string& pin) {
             return err;
         }
         tmp.reset();
-        managed.insert(space);
+        managed_by[space] = r.name;
     }
     heap::vector<std::string> gone;
-    for (const auto& space : managed) {
-        if (seen.find(space) == seen.end())
+    for (const auto& [space, owner] : managed_by) {
+        if (owner == r.name && seen.find(space) == seen.end())
             gone.push_back(space);
     }
     for (const auto& space : gone) {
@@ -561,9 +779,32 @@ std::string do_sync(const std::string& pin) {
             return err;
         }
         tmp.reset();
-        managed.erase(space);
+        managed_by.erase(space);
     }
     return {};
+}
+
+/** run one repository and record what happened. Returns the error, if any */
+std::string run_repo(const barch::repo_conf& r, const std::string& pin) {
+    // one line, always: a luau compile error is as multi line as git's stderr, and
+    // both end up in a RESP error - see one_line
+    auto err = one_line(do_sync_repo(r, pin));
+    std::lock_guard<std::mutex> g(state_mu);
+    auto& st = state_of(r.name);
+    if (err.empty()) {
+        st.last_err.clear();
+        st.last_ok = "ok";
+        st.state = "ok";
+        st.last_stamp.clear();
+        std::string sha;
+        if (git_head(r.dir, sha))
+            st.last_stamp = sha;
+    } else {
+        st.last_err = err;
+        st.state = "failed";
+        barch::err({"function sync", r.name, err});
+    }
+    return err;
 }
 
 } // namespace
@@ -575,73 +816,258 @@ bool scan_directory(const std::string& dir, const std::string& prefix,
     return scan_as_keys(dir, prefix, out, err);
 }
 
+/**
+ * Sync every enabled repository. The first error is returned, but the rest still
+ * run: one repository that cannot fetch is not a reason to leave the others stale.
+ */
 std::string sync_functions(const std::string& pin) {
     std::lock_guard<std::mutex> g(mu);
-    auto err = do_sync(pin);
-    if (err.empty()) {
-        last_err.clear();
-        last_ok = "ok";
-        last_stamp.clear();
-        std::string dir = get_functions_dir();
-        std::string sha;
-        if (!dir.empty() && git_head(dir, sha))
-            last_stamp = sha;
-    } else {
-        last_err = err;
-        barch::err({"function sync", err});
+    auto repos = read_repos();
+    if (repos.empty())
+        return "no git repositories are configured";
+    auto conflicts = refuse_overlap(repos);
+    std::string first;
+    for (const auto& line : conflicts) {
+        barch::err({"git repositories", line});
+        if (first.empty())
+            first = line;
     }
-    return err;
+    {
+        std::lock_guard<std::mutex> sg(state_mu);
+        for (const auto& r : repos) {
+            if (!r.enabled)
+                state_of(r.name).state = first.empty() ? "disabled" : "conflict";
+        }
+    }
+    if (!pin.empty()) {
+        /*
+         * `FUNCTIONS SYNC <rev>` was unambiguous while there was one checkout to
+         * mean it about. With several it is not, and quietly resetting every
+         * repository to one rev is not a reasonable reading of it.
+         */
+        size_t live = 0;
+        for (const auto& r : repos)
+            live += r.enabled ? 1 : 0;
+        if (live > 1)
+            return "a commit needs a repository: FUNCTIONS SYNC <repo> <commit>";
+    }
+    size_t ran = 0;
+    for (const auto& r : repos) {
+        if (!r.enabled)
+            continue;
+        ++ran;
+        auto err = run_repo(r, pin);
+        if (!err.empty() && first.empty())
+            first = err;
+    }
+    if (ran == 0 && first.empty())
+        first = "every configured repository is disabled";
+    return first;
+}
+
+std::string sync_repo(const std::string& name, const std::string& pin) {
+    std::lock_guard<std::mutex> g(mu);
+    auto repos = read_repos();
+    auto conflicts = refuse_overlap(repos);
+    for (const auto& r : repos) {
+        if (r.name != name)
+            continue;
+        if (!r.enabled) {
+            if (!r.invalid.empty())
+                return r.name + ": " + r.invalid;
+            for (const auto& line : conflicts) {
+                if (line.find(name) != std::string::npos)
+                    return line;
+            }
+            return "repository " + name + " is disabled";
+        }
+        return run_repo(r, pin);
+    }
+    return "no repository called " + name;
+}
+
+bool have_repo(const std::string& name) {
+    for (const auto& r : read_repos()) {
+        if (r.name == name)
+            return true;
+    }
+    return false;
+}
+
+bool any_repo_configured() {
+    return !read_repos().empty();
+}
+
+/**
+ * The repositories that asked not to be waited for are left to the sync thread.
+ * These are the ones that said `asynch off`, meaning they must be in place before
+ * anything is served, so a failure here is a failure to start.
+ */
+std::string sync_startup_repos() {
+    std::lock_guard<std::mutex> g(mu);
+    auto repos = read_repos();
+    auto conflicts = refuse_overlap(repos);
+    for (const auto& line : conflicts)
+        barch::err({"git repositories", line});
+    for (const auto& r : repos) {
+        if (!r.enabled || r.asynch)
+            continue;
+        auto err = run_repo(r, {});
+        if (!err.empty())
+            return r.name + ": " + err;
+    }
+    return {};
 }
 
 std::string functions_sync_status() {
-    std::lock_guard<std::mutex> g(mu);
+    auto repos = read_repos();
+    auto conflicts = refuse_overlap(repos);
+    std::lock_guard<std::mutex> g(state_mu);
     std::ostringstream o;
-    o << "dir=" << get_functions_dir()
-      << " pull=" << (get_functions_git_pull() ? "on" : "off")
-      << " branch=" << get_functions_git_branch()
-      << " pin=" << (get_functions_git_commit().empty() ? "off" : get_functions_git_commit())
-      << " interval=" << get_functions_sync_ms()
-      << " last=" << (last_err.empty() ? (last_ok.empty() ? "never" : last_ok) : last_err);
-    if (!last_stamp.empty())
-        o << " commit=" << last_stamp;
+    if (repos.empty())
+        return "no repositories";
+    bool first = true;
+    for (const auto& r : repos) {
+        if (!first)
+            o << "\n";
+        first = false;
+        auto it = states.find(r.name);
+        std::string state = "pending", last = "never", stamp;
+        if (it != states.end()) {
+            state = it->second.state;
+            if (!it->second.last_err.empty())
+                last = it->second.last_err;
+            else if (!it->second.last_ok.empty())
+                last = it->second.last_ok;
+            stamp = it->second.last_stamp;
+        }
+        if (!r.enabled) {
+            state = "disabled";
+            if (!r.invalid.empty())
+                last = r.invalid;
+        }
+        for (const auto& line : conflicts) {
+            if (line.find(r.name) != std::string::npos) {
+                state = "conflict";
+                last = line;
+            }
+        }
+        o << "name=" << r.name
+          << " state=" << state
+          << " dir=" << r.dir
+          << " url=" << (r.url.empty() ? "off" : r.url)
+          << " space=" << (r.space.empty() ? "folders" : r.space)
+          << " pull=" << (r.pull ? "on" : "off")
+          << " branch=" << r.branch
+          << " pin=" << (r.commit.empty() ? "off" : r.commit)
+          << " interval=" << r.ms
+          << " asynch=" << (r.asynch ? "on" : "off")
+          << " last=" << last;
+        if (!stamp.empty())
+            o << " commit=" << stamp;
+    }
     return o.str();
 }
 
 void request_function_sync() {
-    kick.store(true);
+    kick_all.store(true);
+    cv.notify_all();
+}
+
+void request_repo_sync(const std::string& name) {
+    {
+        std::lock_guard<std::mutex> g(state_mu);
+        kick_names.insert(name);
+    }
     cv.notify_all();
 }
 
 void stop_function_sync() {
+
     running.store(false);
     cv.notify_all();
     if (worker.joinable())
         worker.join();
 }
 
+/**
+ * One thread, a due time per repository. It used to be one interval for the one
+ * checkout; now each repository has its own `ms`, and a repository whose interval
+ * is 0 only runs when it is asked for.
+ *
+ * The first run of each is staggered rather than fired at once, for the same
+ * reason a scheduled job carries a jitter: a fleet coming up together should not
+ * arrive at the remote in one burst.
+ */
 void start_function_sync() {
     if (running.exchange(true))
         return;
     worker = std::thread([] {
+        using clock = std::chrono::steady_clock;
         while (running.load()) {
-            uint64_t ms = barch::get_functions_sync_ms();
+            auto repos = read_repos();
+            auto conflicts = refuse_overlap(repos);
+            for (const auto& line : conflicts)
+                barch::err({"git repositories", line});
+
+            auto now = clock::now();
+            uint64_t wait_ms = 60000;         // an idle cap, so configuration changes land
+            size_t index = 0;
+            std::vector<barch::repo_conf> due;
             {
-                std::unique_lock<std::mutex> lk(mu);
-                if (ms == 0) {
-                    cv.wait(lk, [] { return !running.load() || kick.load(); });
-                } else {
-                    cv.wait_for(lk, std::chrono::milliseconds(ms),
-                                [] { return !running.load() || kick.load(); });
+                std::lock_guard<std::mutex> g(state_mu);
+                bool all = kick_all.exchange(false);
+                for (auto& r : repos) {
+                    auto& st = state_of(r.name);
+                    bool asked = all;
+                    auto k = kick_names.find(r.name);
+                    if (k != kick_names.end()) {
+                        kick_names.erase(k);
+                        asked = true;
+                    }
+                    if (!r.enabled) {
+                        st.state = conflicts.empty() ? "disabled" : "conflict";
+                        continue;
+                    }
+                    /*
+                     * An interval of 0 does not poll and does not run itself, which
+                     * is what the single `functions_sync_ms` did when it was 0. A
+                     * repository that wants to be applied at boot without polling
+                     * says so with `asynch off`, which start-up runs.
+                     */
+                    if (r.ms == 0) {
+                        if (asked)
+                            due.push_back(r);
+                        continue;
+                    }
+                    if (!st.due_set) {
+                        st.due = now + std::chrono::milliseconds(200 * (index++));
+                        st.due_set = true;
+                    }
+                    if (asked || now >= st.due) {
+                        due.push_back(r);
+                        st.due = now + std::chrono::milliseconds(r.ms);
+                        continue;
+                    }
+                    auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        st.due - now).count();
+                    if (left > 0 && (uint64_t) left < wait_ms)
+                        wait_ms = (uint64_t) left;
                 }
+            }
+            for (const auto& r : due) {
+                if (!running.load())
+                    break;
+                (void) run_repo(r, {});
             }
             if (!running.load())
                 break;
-            bool run_now = kick.exchange(false) || barch::get_functions_sync_ms() > 0;
-            if (!run_now)
-                continue;
-            if (barch::get_functions_dir().empty())
-                continue;
-            (void) sync_functions();
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait_for(lk, std::chrono::milliseconds(wait_ms), [] {
+                    return !running.load() || kick_all.load() || !kick_names.empty();
+                });
+            }
         }
     });
 }

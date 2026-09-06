@@ -13,6 +13,8 @@
 # The chunk index is zero padded to a fixed width because a range scan returns
 # keys in lexicographic order, and "10" sorts before "2". Fixed width is the
 # poor relation of a numeric composite part and does the same job here.
+import os
+
 import scale
 import redis
 import barch
@@ -222,12 +224,27 @@ CONF = r"""
 function call() return "http" end
 function transport()
     return { kind = "http", port = %d, bind = "127.0.0.1", user = "web",
-             keys = {"FILES", "PING"} }
+             keys = {"FILES", "PING", "VER"} }
 end
 """ % HTTP_PORT
 
 assert r.execute_command("SETF", "files", FILES) == b"OK"
+VER = """
+function call() return "ver" end
+function hit(req, res)
+    local m = require(":/mod/http.luau")
+    res.body = m.version()
+    res.code = 200
+end
+function transport()
+    return { kind = "resource", route = "/ver", methods = {GET = hit}, send = "text/plain" }
+end
+"""
+
+r.execute_command("fsput", "/mod/http.luau", "text/plain",
+                  "function version() return 'one' end\n")
 assert r.execute_command("SETF", "ping", PING) == b"OK"
+assert r.execute_command("SETF", "ver", VER) == b"OK"
 assert r.execute_command("SETF", "httpconf", CONF) == b"OK"
 started = b" ".join(r.execute_command("HTTP", "START", "HTTPCONF", str(HTTP_PORT), "127.0.0.1"))
 assert b"FILES /static/*" in started, started
@@ -326,6 +343,79 @@ assert all(st == 200 and n == len(png) for st, n in downloads), downloads
 assert len(pings) == 20, len(pings)
 assert all(st == 200 and b == b"pong" for _, st, b in pings), \
     "a luau route was starved while files were downloading: %s" % pings[:4]
+
+print("a rewritten handler is picked up without a restart", flush=True)
+# Two different mechanisms, and it is worth keeping them apart. A module the
+# handler requires is looked up per request, so the epoch of DONE 234 covers it
+# on its own. The handler's *own* source is compiled into the slot at HTTP START
+# and called by reference, so only the slot reload of TODO 244 reaches it - that
+# is what the /ping rewrite below tests, and it is the one that fails without it.
+assert http_get("/ver")[1] == b"one", http_get("/ver")
+import shutil as _shutil
+import tempfile as _tempfile
+
+# a script write is quiet, and publishing the *handler* does not publish the module
+# it requires - the two are separate names. See TODO 246
+r.execute_command("fsput", "/mod/http.luau", "text/plain",
+                  "function version() return 'two' end\n")
+assert http_get("/ver")[1] == b"one", "a script write published itself to the handler"
+r.execute_command("SETF", "ver", VER, "RELOAD")
+assert http_get("/ver")[1] == b"one", "publishing the handler published its module too"
+
+# LOADFS ... RELOAD is how a module goes live
+_moddir = _tempfile.mkdtemp(prefix="httpmod")
+try:
+    open(os.path.join(_moddir, "http.luau"), "w").write("function version() return 'two' end\n")
+    r.execute_command("LOADFS", _moddir, "/mod", "RELOAD")
+    assert http_get("/ver")[1] == b"two", "the module change did not reach the handler"
+finally:
+    _shutil.rmtree(_moddir, ignore_errors=True)
+
+# and the handler's own source, not only what it requires
+r.execute_command("SETF", "ping", PING.replace('"pong"', '"pong2"'))
+assert http_get("/ping")[1] == b"pong", "a quiet write reached a live route"
+r.execute_command("SETF", "ping", PING.replace('"pong"', '"pong2"'), "RELOAD")
+assert http_get("/ping")[1] == b"pong2", "the handler rewrite did not reach the route"
+
+# every slot in the pool, not just the one that happened to serve the last request
+_moddir = _tempfile.mkdtemp(prefix="httpmod3")
+try:
+    open(os.path.join(_moddir, "http.luau"), "w").write("function version() return 'three' end\n")
+    r.execute_command("LOADFS", _moddir, "/mod", "RELOAD")
+finally:
+    _shutil.rmtree(_moddir, ignore_errors=True)
+_seen = set()
+for _ in range(24):
+    _seen.add(http_get("/ver")[1])
+assert _seen == {b"three"}, ("a slot was still serving old code", _seen)
+
+print("a versioned file gets a strong ETag that moves on a same-size rewrite", flush=True)
+# the weak form could not tell these apart: same length, same type, same chunk count
+_etagdir = _tempfile.mkdtemp(prefix="etag")
+try:
+    open(os.path.join(_etagdir, "f.txt"), "w").write("aaaaaaaa")
+    r.execute_command("LOADFS", _etagdir, "/etag")
+    _st, _b, _h = http_get("/static/etag/f.txt")
+    _first = _h.get("etag")
+    assert _st == 200 and _b == b"aaaaaaaa", (_st, _b)
+    assert _first and not _first.startswith("W/"), ("expected a strong etag", _first)
+
+    open(os.path.join(_etagdir, "f.txt"), "w").write("bbbbbbbb")   # same length
+    r.execute_command("LOADFS", _etagdir, "/etag")
+    _st, _b, _h = http_get("/static/etag/f.txt")
+    assert _b == b"bbbbbbbb", _b
+    assert _h.get("etag") != _first, "a same-size rewrite kept the same ETag"
+
+    # and the conditional still works with it
+    _st, _b, _ = http_get("/static/etag/f.txt", {"If-None-Match": _h.get("etag")})
+    assert _st == 304, _st
+
+    # a file written without a version still gets the weak form, and says so
+    r.execute_command("fsput", "/etag/nover.txt", "text/plain", b"zzzz")
+    _st, _b, _h = http_get("/static/etag/nover.txt")
+    assert _st == 200 and _h.get("etag", "").startswith("W/"), _h.get("etag")
+finally:
+    _shutil.rmtree(_etagdir, ignore_errors=True)
 
 assert r.execute_command("HTTP", "STOP") == b"OK"
 print("http file serving complete", flush=True)
@@ -443,6 +533,223 @@ try:
         assert r.execute_command("page") == b"page"
 finally:
     shutil.rmtree(src, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# require() out of the file store - TODO 242
+#
+# `space:path` and `:path` load a module from fs: instead of a function key.
+# require already returns the module's environment table, so a file that
+# defines add() and closest() is used as hnsw.add(...) with nothing new
+# invented - the only thing the fs form had to change is that a module is not
+# a command and so does not need call().
+print("require reads a module out of the file store", flush=True)
+HNSW_MODULE = (
+    "local counted = 0\n"
+    "function add(a, b) counted = counted + 1 return a + b end\n"
+    "function closest(x) return 'closest of ' .. tostring(x) end\n"
+    "function calls() return counted end\n"
+)
+r.execute_command("fsput", "/extensions/hnsw.luau", "text/plain", HNSW_MODULE)
+assert r.execute_command("SETF", "usehnsw",
+    "function call()\n"
+    "    local hnsw = require(':extensions/hnsw.luau')\n"
+    "    return tostring(hnsw.add(2, 3)) .. ' / ' .. hnsw.closest('q')\n"
+    "end") == b"OK"
+assert r.execute_command("usehnsw") == b"5 / closest of q"
+
+print("a module keeps its state between requires, like a lua module", flush=True)
+assert r.execute_command("SETF", "twice",
+    "function call()\n"
+    "    local a = require(':extensions/hnsw.luau')\n"
+    "    local b = require(':extensions/hnsw.luau')\n"
+    "    a.add(1, 1)\n"
+    "    b.add(1, 1)\n"
+    "    return tostring(a.calls()) .. ':' .. tostring(b.calls())\n"
+    "end") == b"OK"
+_out = r.execute_command("twice").decode()
+_lhs, _rhs = _out.split(":")
+assert _lhs == _rhs, ("two requires gave two different modules", _out)
+
+
+def _refused(*args):
+    try:
+        r.execute_command(*args)
+        return None
+    except redis.exceptions.ResponseError as e:
+        return str(e)
+
+
+print("a missing file and a cycle are both refused", flush=True)
+r.execute_command("SETF", "nofile", "function call() require(':no/such.luau') return 'x' end")
+_e = _refused("nofile")
+assert _e and "has no file" in _e, _e
+r.execute_command("fsput", "/extensions/loop.luau", "text/plain",
+                  "local me = require(':extensions/loop.luau')\n")
+r.execute_command("SETF", "cyc", "function call() require(':extensions/loop.luau') return 'x' end")
+_e = _refused("cyc")
+assert _e and "cycle" in _e, _e
+
+print("a path may not climb out with ..", flush=True)
+r.execute_command("SETF", "climb", "function call() require(':../etc/passwd') return 'x' end")
+_e = _refused("climb")
+assert _e and ".." in _e, _e
+
+print("space:path reads from that space, not this one", flush=True)
+r.execute_command("USE", "modules")
+r.execute_command("SETF", "fsput", PUT)          # the writer, in the other space too
+r.execute_command("fsput", "/shared/math.luau", "text/plain",
+                  "function double(x) return x * 2 end\n")
+r.execute_command("USE", "")
+assert r.execute_command("SETF", "usemodules",
+    "function call()\n"
+    "    local m = require('modules:/shared/math.luau')\n"
+    "    return tostring(m.double(21))\n"
+    "end") == b"OK"
+assert r.execute_command("usemodules") == b"42"
+r.execute_command("SETF", "usehere", "function call() require(':/shared/math.luau') return 'x' end")
+_e = _refused("usehere")
+assert _e and "has no file" in _e, _e
+
+# ---------------------------------------------------------------------------
+# a rewrite is picked up by a live connection - TODO 243
+#
+# Nothing used to invalidate compiled luau: SETF followed by a call on the same
+# connection ran the old source, because the compiled copy is cached for the
+# life of the session. Both kinds of source are covered now, through an epoch
+# bumped on any write that can change one.
+print("a quiet write does not change what this connection runs", flush=True)
+assert r.execute_command("SETF", "vers", "function call() return 'one' end") == b"OK"
+assert r.execute_command("vers") == b"one"
+assert r.execute_command("SETF", "vers", "function call() return 'two' end") == b"OK"
+assert r.execute_command("vers") == b"one", "a quiet write published itself"
+
+print("RELOAD on the write publishes it", flush=True)
+assert r.execute_command("SETF", "vers", "function call() return 'two' end", "RELOAD") == b"OK"
+assert r.execute_command("vers") == b"two", "SETF ... RELOAD did not publish"
+
+print("a module in the file store follows the same rule", flush=True)
+r.execute_command("fsput", "/mod/v.luau", "text/plain", "function v() return 'v1' end\n")
+assert r.execute_command("SETF", "usev",
+    "function call() local m = require(':/mod/v.luau') return m.v() end") == b"OK"
+assert r.execute_command("usev") == b"v1"
+# a script writing the file is quiet - there is no RELOAD to put on a store.set
+r.execute_command("fsput", "/mod/v.luau", "text/plain", "function v() return 'v2' end\n")
+assert r.execute_command("usev") == b"v1", "a script write published itself"
+# and LOADFS with the word publishes what is on disk now
+_pub = tempfile.mkdtemp(prefix="pubfs")
+try:
+    open(os.path.join(_pub, "v.luau"), "w").write("function v() return 'v2' end\n")
+    r.execute_command("LOADFS", _pub, "/mod", "RELOAD")
+    assert r.execute_command("usev") == b"v2", "LOADFS ... RELOAD did not publish"
+finally:
+    shutil.rmtree(_pub, ignore_errors=True)
+
+print("LOADFS and LOADKEYS publish only when asked", flush=True)
+# two directories, because LOADKEYS installs a .luau as a *function key* and
+# refuses one with no call() - which is right, and means a module belongs in the
+# file store and not in a LOADKEYS directory
+_files = tempfile.mkdtemp(prefix="epochfs")
+_fns = tempfile.mkdtemp(prefix="epochfn")
+try:
+    open(os.path.join(_files, "v.luau"), "w").write("function v() return 'v3' end\n")
+    r.execute_command("LOADFS", _files, "/mod")
+    assert r.execute_command("usev") == b"v2", "LOADFS published without being asked"
+    r.execute_command("LOADFS", _files, "/mod", "RELOAD")
+    assert r.execute_command("usev") == b"v3", "LOADFS ... RELOAD did not publish"
+
+    open(os.path.join(_fns, "vers.luau"), "w").write("function call() return 'three' end\n")
+    r.execute_command("LOADKEYS", _fns)
+    assert r.execute_command("vers") == b"two", "LOADKEYS published without being asked"
+    r.execute_command("LOADKEYS", _fns, "RELOAD")
+    assert r.execute_command("vers") == b"three", "LOADKEYS ... RELOAD did not publish"
+finally:
+    shutil.rmtree(_files, ignore_errors=True)
+    shutil.rmtree(_fns, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# require(path, true) - the session asks for current code - TODO 247
+#
+# RELOAD on a write publishes to everything; this changes one VM. That is what
+# makes it safe to give a script: a loader can ask for the current files without
+# altering what any other connection is running.
+print("a forced require reads the file again", flush=True)
+r.execute_command("fsput", "/mod/f.luau", "text/plain", "function v() return 'f1' end\n")
+assert r.execute_command("SETF", "fplain",
+    "function call() return require(':/mod/f.luau').v() end") == b"OK"
+assert r.execute_command("SETF", "fforce",
+    "function call() return require(':/mod/f.luau', true).v() end") == b"OK"
+assert r.execute_command("fplain") == b"f1"
+
+# a second connection that has also compiled it, so the isolation check means
+# something: it holds f1 from before the change
+other = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+assert other.execute_command("fplain") == b"f1"
+
+r.execute_command("fsput", "/mod/f.luau", "text/plain", "function v() return 'f2' end\n")
+assert r.execute_command("fplain") == b"f1", "a quiet write reached a compiled module"
+assert r.execute_command("fforce") == b"f2", "a forced require did not read the file again"
+
+print("and only this session is affected by it", flush=True)
+assert other.execute_command("fplain") == b"f1", \
+    "one session forcing a reload changed another session's module"
+# within the session it is a replacement, not a one-off: everything here sees it now
+assert r.execute_command("fplain") == b"f2"
+other.close()
+
+print("the flag works on the function form too", flush=True)
+r.execute_command("SETF", "helper", "function h() return 'h1' end\nfunction call() return 'helper' end")
+r.execute_command("SETF", "usesh", "function call() return require('helper', true).h() end")
+assert r.execute_command("usesh") == b"h1"
+r.execute_command("SETF", "helper", "function h() return 'h2' end\nfunction call() return 'helper' end")
+assert r.execute_command("usesh") == b"h2", "a forced require of a function key did not reload"
+
+# ---------------------------------------------------------------------------
+# a version in the metadata - TODO 248
+#
+# It buys two things: a forced require can tell "unchanged" from "rewritten"
+# and skip the compile, and the HTTP ETag becomes strong, so a rewrite that
+# lands on the same length is no longer indistinguishable from no rewrite.
+_vdir = tempfile.mkdtemp(prefix="vers")
+try:
+    print("LOADFS versions what it writes, and the version moves per write", flush=True)
+    open(os.path.join(_vdir, "m.luau"), "w").write("function v() return 'V1' end\n")
+    r.execute_command("LOADFS", _vdir, "/vers")
+    _m1 = json.loads(r.execute_command("GET", "fs:m:/vers/m.luau"))
+    assert _m1["version"] == 1, _m1
+    r.execute_command("LOADFS", _vdir, "/vers")
+    _m2 = json.loads(r.execute_command("GET", "fs:m:/vers/m.luau"))
+    assert _m2["version"] == 2, _m2
+
+    print("a forced require of an unchanged file keeps what it compiled", flush=True)
+    # the module holds a counter in its own state: if it is recompiled the counter
+    # goes back to zero, which is how the test can see a compile happen at all
+    open(os.path.join(_vdir, "m.luau"), "w").write(
+        "local seen = 0\nfunction bump() seen = seen + 1 return seen end\n")
+    r.execute_command("LOADFS", _vdir, "/vers")
+    assert r.execute_command("SETF", "vbump",
+        "function call() return require(':/vers/m.luau', true).bump() end") == b"OK"
+    assert r.execute_command("vbump") == 1
+    # no write in between, so nothing should be recompiled and the counter carries on
+    assert r.execute_command("vbump") == 2, "a forced require recompiled an unchanged file"
+    assert r.execute_command("vbump") == 3
+
+    print("and rebuilds when the version has moved", flush=True)
+    open(os.path.join(_vdir, "m.luau"), "w").write(
+        "local seen = 100\nfunction bump() seen = seen + 1 return seen end\n")
+    r.execute_command("LOADFS", _vdir, "/vers")
+    assert r.execute_command("vbump") == 101, "a forced require missed a new version"
+
+    print("a file with no version is rebuilt every time", flush=True)
+    # fsput is the luau writer and keeps no version, so absent must mean "assume
+    # changed" - the counter restarting is the compile happening
+    r.execute_command("fsput", "/vers/nover.luau", "text/plain",
+                      "local seen = 0\nfunction bump() seen = seen + 1 return seen end\n")
+    assert r.execute_command("SETF", "nbump",
+        "function call() return require(':/vers/nover.luau', true).bump() end") == b"OK"
+    assert r.execute_command("nbump") == 1
+    assert r.execute_command("nbump") == 1, "a file with no version was treated as unchanged"
+finally:
+    shutil.rmtree(_vdir, ignore_errors=True)
 
 print("fs test complete", flush=True)
 barch.stop()

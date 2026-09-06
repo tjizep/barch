@@ -95,6 +95,43 @@ namespace functions {
      */
     void forget_exposed(const std::string& space);
 
+    /**
+     * Bumped whenever something that can change compiled luau is written - a
+     * function key through install/remove, a directory through LOADFS/LOADKEYS, a
+     * file written from a script. A compiled copy remembers the epoch it was built
+     * at, and a session that finds a newer one throws its copy away and compiles
+     * again. See TODO 243.
+     *
+     * Deliberately one counter for the whole process rather than one per space or
+     * per key: it costs a relaxed load per call, and over-invalidating on an
+     * unrelated write is far easier to reason about than tracking which key a
+     * compiled function might have read. Writes are rare next to calls.
+     *
+     * It does not see a plain `SET fs:d:...` over RESP. Files written that way are
+     * not noticed by a session that has already compiled them.
+     */
+    uint64_t compile_epoch();
+    void bump_compile_epoch();
+
+    /**
+     * Publishing is per name, because publishing one thing must not publish every
+     * other change that happened to be staged - that was the first attempt and it
+     * defeated the point of asking. `publish_compiled` records that this one entry
+     * has moved, and `published_at` says when.
+     *
+     * The global epoch stays as the fast path: a compiled copy whose epoch matches
+     * it is current and nothing is looked up. Only after somebody publishes does a
+     * call consult the map, once, and then catch its own epoch up.
+     *
+     * The keys are the ones the luau side caches under - `compiled_key` for a
+     * function, `compiled_path_key` for a module in the file store. Built here so
+     * that the publisher and the cache cannot disagree about the shape.
+     */
+    uint64_t published_at(const std::string& key);
+    void publish_compiled(const std::string& key);
+    std::string compiled_key(const std::string& space, const std::string& folded_name);
+    std::string compiled_path_key(const std::string& space, const std::string& path);
+
     /** one command a resp transport() exposes, as FUNCTIONS COMMANDS shows it */
     struct exposed_info {
         std::string name;

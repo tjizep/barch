@@ -89,6 +89,8 @@ struct http_vm_slot {
     barch::foreign::http_vm vm;
     /** "NAME:VERB" -> lua ref, valid only on this vm */
     std::unordered_map<std::string, int> methods;
+    /** what compile_epoch() said when these methods were compiled - TODO 244 */
+    uint64_t epoch{0};
 };
 
 struct space_http {
@@ -424,6 +426,8 @@ struct file_meta {
     uint64_t size{0};
     uint64_t chunk{0};
     uint64_t chunks{0};
+    /** 0 when the writer keeps none, which is what makes the ETag weak - TODO 248 */
+    uint64_t version{0};
     std::string type;
 };
 
@@ -442,6 +446,7 @@ bool read_file_meta(const barch::foreign::store_access& acc, const std::string& 
     if (doc["size"].get(n) == simdjson::SUCCESS) out.size = n;
     if (doc["chunk"].get(n) == simdjson::SUCCESS) out.chunk = n;
     if (doc["chunks"].get(n) == simdjson::SUCCESS) out.chunks = n;
+    if (doc["version"].get(n) == simdjson::SUCCESS) out.version = n;
     std::string_view t;
     if (doc["type"].get(t) == simdjson::SUCCESS) out.type.assign(t);
     return out.chunk > 0 || out.size == 0;
@@ -597,12 +602,14 @@ void handle_file(const std::shared_ptr<space_http>& server,
     }
 
     /*
-     * Weak, and says so. It is built from the metadata, so it changes when the size
-     * or the type does and not when a rewrite happens to land on the same length -
-     * a content hash written at put time is the fix and is not here yet.
+     * Strong when the file carries a version, since that moves on every write - so a
+     * rewrite that lands on the same length gets a new ETag, which is exactly what
+     * the weak one could not do. A file whose writer keeps no version falls back to
+     * the weak form and says so with the W/ prefix. See TODO 248.
      */
-    std::string etag = "W/\"" + std::to_string(meta.size) + "-" +
-                       std::to_string(meta.chunks) + "\"";
+    std::string etag = meta.version
+        ? "\"" + std::to_string(meta.version) + "-" + std::to_string(meta.size) + "\""
+        : "W/\"" + std::to_string(meta.size) + "-" + std::to_string(meta.chunks) + "\"";
     if (req.get_header_value("If-None-Match") == etag) {
         res.code = 304;
         res.set_header("ETag", etag);
@@ -732,6 +739,62 @@ void handle_route(const std::shared_ptr<space_http>& server,
         std::shared_ptr<http_vm_slot> v;
         ~put_back() { push_vm(*s, std::move(v)); }
     } hold{server.get(), std::move(slot)};
+
+    /*
+     * A handler is compiled into each slot at HTTP START and called by reference, so
+     * it never goes through the compiled cache and the epoch of DONE 234 would never
+     * reach it - a rewritten resource function would be picked up by RESP callers and
+     * not by the server. So a slot rebuilds its handlers when it finds the epoch has
+     * moved, which is once per slot per change.
+     *
+     * Only the handlers. The routes Crow knows about were registered at START and a
+     * running app cannot be re-routed, so a transport() that changes its route, its
+     * verbs or its cors still needs a STOP and START. See TODO 244.
+     *
+     * A source that will not compile leaves the slot as it was and the epoch alone,
+     * so the request is answered by the last code that worked and the next one tries
+     * again. A broken save should not take a running server down with it.
+     */
+    if (hold.v->epoch != barch::functions::compile_epoch()) {
+        auto want = barch::functions::compile_epoch();
+        // which of *these* routes was published, not whether anything anywhere was -
+        // a publish of an unrelated function must not rebuild this server's handlers
+        bool any = false;
+        const auto& canon = server->space->canonical();
+        for (const auto& r : server->routes) {
+            if (is_files_kind(r))
+                continue;
+            if (barch::functions::published_at(
+                    barch::functions::compiled_key(canon, r.name)) > hold.v->epoch) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            hold.v->epoch = want;               // caught up, nothing to do
+        } else {
+            std::string reload_err;
+            auto fresh = hold.v->methods;
+            hold.v->methods.clear();
+            for (const auto& r : server->routes) {
+                if (is_files_kind(r))
+                    continue;
+                std::string src;
+                if (!barch::functions::source_in(server->space, r.name, src)) {
+                    reload_err = r.name + ": no source";
+                    break;
+                }
+                if (!load_resource_into(*hold.v, r.name, src, reload_err))
+                    break;
+            }
+            if (reload_err.empty()) {
+                hold.v->epoch = want;
+            } else {
+                hold.v->methods = std::move(fresh);
+                barch::err({"HTTP could not reload", reload_err});
+            }
+        }
+    }
 
     barch::functions::http_ident ident;
     ident.sid = cookie_value(req.get_header_value("Cookie"), "sid");
@@ -968,6 +1031,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
     if (pool > 8)
         pool = 8;
     server->pool_size = pool;
+    slot0->epoch = barch::functions::compile_epoch();
     server->idle.push_back(std::move(slot0));
     for (unsigned i = 1; i < pool; ++i) {
         auto slot = make_vm_slot(canon, iface, deadline, server->luau_bytes);
@@ -980,6 +1044,7 @@ std::string start_space_http(const barch::key_space_ptr& space,
                 return err;
             }
         }
+        slot->epoch = barch::functions::compile_epoch();
         server->idle.push_back(std::move(slot));
     }
 

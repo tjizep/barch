@@ -11517,3 +11517,464 @@ box will not trip it.
 Upstream would be better than carrying this. `CrowCpp/Crow` has no `TCP_NODELAY`
 anywhere in the tree, and a one line `set_option` in `do_accept` is the whole
 fix, so it is worth a pull request rather than a fork.
+
+## 233. require out of the file store [05-09-2026]
+
+*Was `TODO.md` entry 242.*
+
+    local hnsw = require(":extensions/hnsw.luau")          -- this space
+    local math = require("modules:/shared/math.luau")      -- another one
+    hnsw.add(2, 3)
+
+A colon means a path in the `fs:` layout; the existing dot form still means a
+function key. The two cannot be confused - a dot may not start a name and a
+colon may, and a path keeps its case where a function name is folded.
+
+### The naming needed nothing
+
+`require` already returned the module's environment table, so a file that
+defines `add` and `closest` as globals is used as `hnsw.add(...)` with no new
+concept. What it *did* need was permission not to be a command: `compile_into`
+insisted on a `call()` global, which is right for a function key - the key is a
+command - and wrong for a module. It takes a `needs_call` flag now, false for
+the fs form, and a module compiled that way has `fn = LUA_NOREF` so nothing can
+invoke it as a command by accident.
+
+### The four questions the entry raised, answered
+
+**Rights.** The read goes through a `store_access`, so a file is exactly as
+reachable as any other key. For `:path` that is `st->store`, the caller's own.
+For `space:path` it is `st->open_space`, the same route `barch.space.NAME`
+takes - which means per space ACLs apply and an unknown space is refused rather
+than created.
+
+That last part was a bug first. The cache key used the named space but the
+*read* used `st->store` regardless, so `modules:/shared/math.luau` quietly meant
+`:/shared/math.luau` and found nothing. The test that caught it is the one that
+writes the same path into two spaces and asks for it in one.
+
+**Cache key.** `qualified(space, "\x01" + path)`. The `\x01` keeps paths and
+folded function names in separate namespaces inside the one table, so
+`:a/b.luau` and a function called `B` cannot collide.
+
+**Cycles.** The existing `st->loading` stack, with the cache key on it. A module
+that requires itself is refused with the path in the message.
+
+**Invalidation.** Not solved, and the reason given here was wrong - corrected in
+DONE 234. This said a function key that changes drops its compiled copy through
+a hook and that only `fs:` lacked one. There is no such hook for either:
+`forget_exposed` (function_api.h:92) drops the exposed *command list*, not
+compiled code, and a `SETF` of a function already called on a connection is not
+picked up by that connection at all. An fs module is no worse than a function
+key - both stay compiled for the life of the session. TODO 243, widened.
+
+### Wildcards: not doing them
+
+`require(":extensions/*.luau")` would have to return a table of modules keyed by
+stem, which is a different shape from what the same call returns for one path -
+`hnsw` meaning the module, or `hnsw` meaning an entry inside the result. One
+call returning two shapes depending on whether its argument contained a `*` is
+the kind of thing that reads fine when written and badly when debugged. A caller
+that wants several requires several, and if a "load all of these" is wanted
+later it should be its own function with its own name and one shape.
+
+### Verified
+
+`TestFileStore`: a module required and called; two requires giving the same
+table, proven by a counter shared between them; a missing file and a
+self-requiring module both refused; `..` refused; and the same path written into
+two spaces, with `modules:` reaching the right one and `:` refusing.
+
+Full suite 79/79.
+
+## 234. Compiled luau is invalidated when its source changes [06-09-2026]
+
+*Was `TODO.md` entry 243, and it settles 137.*
+
+A rewritten function is picked up by the connection that rewrote it, and a
+rewritten module by anything that requires it.
+
+### What 243 said, and what was actually true
+
+243 - which I wrote - said a function key had an invalidation hook and only the
+file store lacked one, and DONE 233 said the same. Both were wrong.
+`forget_exposed` drops the exposed *command list*, not compiled code, and
+nothing dropped compiled code at all. Measured rather than reasoned:
+
+    SETF f "...return 'one'..."   f -> one
+    SETF f "...return 'two'..."   f -> one      on the same connection
+
+So the gap was not fs specific, and DONE 233's paragraph has been corrected in
+place.
+
+### It was also deliberate, and 137 is where it was to be settled
+
+`functiontest.py` asserted the old behaviour with "this connection keeps what it
+compiled", citing 98 C for the deal and 137 for the revisit. 98 C took it on
+purpose: it removes the generation counter, the atomic on the call path, and
+every question about a call already running when its definition changes.
+
+TODO 137 then wrote down what that costs - a long lived connection pool never
+picking up a fix, so "I deployed a new function" answered by "restart your
+clients"; two connections running different versions indefinitely with nothing
+reporting it; and eviction quietly recompiling a version that a deliberate
+redefinition could not. It listed three shapes to weigh, the first being a
+generation checked on the call path.
+
+That is what this is, so 137 is settled rather than still open. **The contract
+changed**: the test that asserted the old promise now asserts the new one. Worth
+saying plainly, because a passing test was changed to say the opposite of what
+it used to.
+
+### How
+
+`barch::functions::compile_epoch()`, one relaxed atomic for the process. A
+`compiled` records the epoch it was built at; the three places that take a
+cached entry - the call path, `require`'s function form, `require`'s fs form -
+drop and rebuild when it has moved. Bumped by `functions::install` and `remove`,
+by LOADFS and LOADKEYS, and by a luau `store.set` to a key starting `fs:`.
+
+One counter for everything, not one per space or per key. It over-invalidates -
+any write recompiles everyone's next call - and that is the point: tracking
+which compiled function might have read which key is a much harder thing to be
+right about, and writes are rare next to calls. 98 C's objection to "an atomic
+on the call path" is a relaxed load against a call that costs tens of
+microseconds end to end.
+
+### What it still does not cover
+
+- A plain `SET fs:d:...` over RESP. The bump is on the luau write path and the
+  import commands, not on every key write, because that would put a prefix test
+  on the hot path for every SET in the system.
+- **HTTP routes.** A resource handler is compiled into each VM slot at
+  `HTTP START` and invoked by reference, so it never goes through the cache
+  lookup and the epoch never sees it. Changing a route still needs
+  `HTTP STOP`/`START`. TODO 244.
+- A call already running when its definition changes finishes on the old code,
+  which is the only sane answer and is what 98 C was worried about.
+
+### Verified
+
+- `TestFileStore`: a rewritten function, a rewritten module, and both import
+  commands, each picked up by the connection that made the change. Neutering
+  the epoch check makes the first of them fail with "the old compiled copy was
+  reused".
+- `functiontest.py` carries the new contract, with the old one and its reasoning
+  in the comment.
+- Full suite 79/79.
+- Cost: a stored function call is 29.8us round trip from python, which is
+  dominated by the client and says nothing precise about a relaxed load. No
+  microbenchmark of the call path itself was run.
+
+## 235. HTTP handlers reload too [06-09-2026]
+
+*Was `TODO.md` entry 244.*
+
+A resource handler is compiled into every VM slot at `HTTP START` and invoked by
+reference, so it never went near the compiled cache and the epoch of DONE 234
+never reached it. A rewritten function was picked up by RESP callers and not by
+the HTTP server - half reloading, which is worse than none.
+
+A slot carries the epoch it was built at now, and rebuilds its handlers when it
+finds the epoch has moved. Once per slot per change, on the request that finds
+it.
+
+### Two mechanisms, and they are not the same one
+
+Worth keeping apart, because the test says both and only one of them is this
+entry:
+
+- A **module the handler requires** is looked up per request through `require`,
+  which goes through the compiled cache, so DONE 234 already covered it. Turning
+  the slot reload off does not break it.
+- The **handler's own source** is the fn_ref the slot holds. Only the reload
+  reaches that, and turning it off fails with "the handler rewrite did not reach
+  the route".
+
+### What it does not reload
+
+Only the handlers. The routes Crow knows about were registered at `HTTP START`
+and a running app cannot be re-routed, so a `transport()` that changes its
+route, its verbs or its cors still needs `HTTP STOP` and `START`. That is a
+real limit rather than an oversight: Crow's router builds a trie per method at
+`validate()` and has no way to take an entry out.
+
+### A source that will not load
+
+The slot keeps the handlers it has, leaves its epoch alone so the next request
+tries again, and logs. A running server is not taken down by a bad save, and a
+fix is picked up without anyone restarting anything.
+
+In practice `SETF` makes that hard to reach: it compiles *and calls*
+`transport()` before storing, so a source that throws is refused at write time -
+tested, and the server kept answering with the previous version. What the
+fallback is really for is a source that stops loading for a reason SETF could
+not see, such as a module it requires being deleted afterwards.
+
+### The leak that was already there
+
+`http_vm_load` ended with `st->functions.emplace(key, c)`, and emplace does not
+replace. Compiling the same key twice - which is exactly what a reload does -
+kept the *old* entry and dropped the new one's registry refs on the floor, with
+the caller then using closures from a compiled chunk that nothing owned. It
+erases and drops the old entry first now. Nothing hit this before because
+nothing ever compiled the same key into a slot twice.
+
+### Verified
+
+`TestFileStore`: a handler rewritten through SETF and answered by the route
+without a restart; a module rewritten in the file store and answered; and
+twenty-four requests after a change, all of them new, which is the assertion
+that every slot in the pool reloaded rather than the one that happened to serve
+the next request. Disabling the reload fails it.
+
+Full suite 79/79.
+
+## 236. Publishing a change is opt in, and per name [06-09-2026]
+
+*Was `TODO.md` entry 245, and it revises 234 and 235.*
+
+    SETF name source RELOAD
+    REMF name RELOAD
+    LOADKEYS path [prefix] RELOAD
+    LOADFS path [root] [chunk] RELOAD
+
+Without the word a write is quiet: connections that have already compiled that
+function keep what they have, a fresh connection gets the new source. That is
+98 C's promise, restored as the default. With it, the change reaches everything
+on its next call - which is the fix that cannot wait for clients to reconnect.
+
+234 made every write publish itself. The objection to that is right and is worth
+recording as given: sudden behaviour changes, event chains that are hard to
+follow, races against calls already in flight, no way to stage a rollout. The
+one thing worth the risk is a security fix, and that is now the case you have to
+ask for.
+
+### Per name, because the first attempt was not
+
+The first cut moved one global epoch, so *any* publish republished every staged
+change with it. Measured, because it is not obvious from the code:
+
+    SETF a "a2"            -- staged, deliberately not published
+    SETF b "b2" RELOAD     -- the urgent one
+    a -> a2                -- wrong: a went live too
+
+That is precisely the rollout control the whole change was for. So a publish
+records the *name* it published, and a compiled copy asks whether its own name
+moved:
+
+    SETF a "a2"            -- staged
+    SETF b "b2" RELOAD     -- urgent
+    a -> a1  b -> b2       -- right
+    SETF a "a2" RELOAD
+    a -> a2                -- and now
+
+The global epoch stays as the fast path: a compiled entry whose epoch matches it
+is current and nothing is looked up. After somebody publishes, each cached entry
+misses that once, consults the map for its own name, and catches its epoch up
+either way - so the cost is one lookup per entry per publish, not one per call.
+The HTTP slots ask the same question about their own routes, so a publish
+elsewhere does not rebuild a server's handlers.
+
+### What a script cannot do
+
+A stored function writing an `fs:` module cannot publish it: RELOAD is a word on
+a command and `barch.store.set` has no room for one. Publishing the *handler*
+does not publish the module it requires either - separate names, which is the
+point. So a script-deployed module is live for connections that have not
+compiled it and stale for those that have. TODO 246, and it is a real gap rather
+than an oversight - whether a script should be able to publish to everyone
+mid-request is a question worth answering before adding the button.
+
+### Verified
+
+- `functiontest.py` carries the old assertion again - a quiet write does not
+  change what this connection runs - beside a new one for RELOAD, and a check
+  that a third argument which is not RELOAD is refused rather than ignored.
+- `TestFileStore`: quiet and published writes for a function, for a module in
+  the file store, and for both import commands; an HTTP handler republished by
+  a RELOAD without STOP/START; and twenty-four requests after a publish, all
+  new, which says every slot in the pool reloaded.
+- Full suite 79/79.
+
+## 237. require(what, true) [06-09-2026]
+
+*Was `TODO.md` entry 247.*
+
+A second argument throws this session's compiled copy away and reads the source
+again. It works on both forms - a module in the file store and a function key.
+
+**Session scoped, and that is the whole reason it is safe to have.** `RELOAD` on
+a write publishes to everything and is the thing 245 made you ask for; this
+changes one VM. A loader can say "give me the current files" without altering
+what any other connection is running, which is the bootloader pattern working
+properly rather than by accident.
+
+Within the session it is a replacement rather than a one-off: after a forced
+require, everything else in that session sees the new module too. That is what
+makes it useful as a loader and worth knowing before putting one in a handler.
+
+It compiles every time it is asked, so it belongs in something that runs once.
+A handler calling it per request pays a compile per request.
+
+### Verified
+
+`TestFileStore`: a module changed quietly, a plain require still returning the
+old one and a forced require the new one; a second connection that had compiled
+the module *before* the change still holding the old one after another session
+forced a reload - which is the assertion that this does not leak across
+sessions; and the same flag on a function key.
+
+Full suite 79/79.
+
+## 238. A version in the file metadata [06-09-2026]
+
+*Was `TODO.md` entry 248.*
+
+The metadata was `{size, type, chunk, chunks}` - nothing that moves when the
+content does. Two things were paying for that and both are fixed by the same
+field:
+
+- **A forced require compiled every time.** `require(path, true)` had no way to
+  ask whether the file had changed, so a loader that forced on every pass paid a
+  compile on every pass. It compares the version now and hands back what it has
+  when nothing moved.
+- **The ETag was weak.** `W/"size-chunks"` cannot tell a rewrite that lands on
+  the same length from no rewrite at all. With a version it is
+  `"<version>-<size>"`, and it is strong.
+
+LOADFS reads the version it is replacing and writes one past it, which is why
+the metadata is built after the previous value is read rather than while the
+file is being chunked.
+
+### Absent means changed
+
+A writer that keeps no version - a script setting `fs:` keys directly, which is
+what the tests' own `fsput` does - leaves the field out, and 0 has to mean
+"assume it changed". The other reading would be a forced require quietly serving
+stale code, which is the one outcome nobody wants from a thing called force.
+Same for the ETag: no version, weak form, and the `W/` says so.
+
+### How the test can see a compile
+
+A module that keeps a counter in its own state:
+
+    local seen = 0
+    function bump() seen = seen + 1 return seen end
+
+Compiling it again resets the counter, so `1, 2, 3` across three forced requires
+says nothing was recompiled and `1, 1` says everything was. That is the whole
+mechanism under test, visible from the outside without a probe.
+
+### Verified
+
+`TestFileStore`: LOADFS writing version 1 then 2 for the same path; three forced
+requires of an unchanged file carrying the counter forward; a rewrite bringing
+the new module; a file with no version rebuilt on every force; a strong ETag
+that changes across a same-size rewrite, still answering 304 to a matching
+If-None-Match; and a versionless file still getting the weak form.
+
+Full suite 79/79.
+
+## 239. A cron ACL category [06-09-2026]
+
+`cron` appended to `categories()` (`barch_apis.cpp:43`). The comment above that
+list already says why an append is safe and an insert is not: `get_category_map()`
+numbers the names by position and `is_authorized` compares by index, but stored
+ACLs are keyed by name and re-vectorised at AUTH, so a name on the end cannot
+move anyone's existing bits.
+
+What it is for, written into the comment so the next reader does not have to
+infer it: the category says who may *install* a schedule, not what a scheduled
+job may do. A job's rights come from the user its entry names, in the space it
+targets - see TODO 249, where the entry is a proxy pointing at a function in
+another space rather than the job itself. That split is the whole point, and it
+means `+cron` on its own lets someone see and schedule work and run none of it.
+
+Nothing reads the bit yet, so it is inert until 249 lands. Added now because the
+list is the one place where ordering matters and adding it late, next to a batch
+of other changes, is how an insert happens by accident.
+
+Full suite 79/79 - `categories()` is on the path of every authorised command, so
+the whole set was run rather than the ACL tests alone.
+
+Found while doing it, and left as TODO 251: `"admin"` is used as a category by
+six commands and is not in the list at all - it is a role in `auth_api.cpp:37`.
+`cats2vec` drops names it does not know, so those bits have never been set.
+
+## 240. Git repositories, configured as files in the configuration space [06-09-2026]
+
+Six flat globals became a directory per repository. `configuration:git/repositories/
+<name>/{url,dir,branch,commit,pull,ms,ssh_key,space,enabled,asynch}`, one file per
+setting, no suffix - `LOADKEYS` only strips an extension for `.luau`, so an
+extensionless file is a value, a `.luau` file is code, and a file on disk and a key
+in the store stay one to one with nothing guessed at import.
+
+New: `src/git_repos.h/.cpp` reads and validates them; `function_sync.cpp` syncs per
+repository rather than per process; `FUNCTIONS SYNC [repo] [commit]`; `FUNCTIONS
+STATUS` prints a line per repository; `barchd` and the valkey module apply the
+synchronous ones before listening.
+
+What it can do that it could not:
+
+- **Several repositories at once.** Including the same origin twice at different
+  branches, which is what the `space` setting is for - `main` into `site`, `next`
+  into `sitenext`. The test does exactly that.
+- **Clone.** `git_pull` returned early unless `<dir>/.git` existed and no url was
+  stored anywhere, so somebody set every checkout up by hand. With a url a missing
+  checkout is cloned into `<functions_dir>/<name>`. Without one, nothing changes.
+- **Not block start-up.** `asynch` defaults to true, so the first fetch is the sync
+  thread's problem. `asynch off` is applied before the listener opens and a failure
+  refuses the start, in barchd and in OnLoad both, because that is what asking for
+  it synchronously means.
+- **Refuse an overlap.** Two repositories declaring the same `space`, or sharing a
+  `dir`, disable *both* and every other repository keeps syncing. Not a winner by
+  iteration order, not a whole sync failed by one typo. The folder-per-space half
+  cannot be checked before the scan, so `managed_by` records which repository owns
+  each space and a scan that lands on somebody else's is refused.
+
+The old settings still work: with no `git/repositories/` keys and `functions_dir`
+set, they are read as one repository called `default`. `functionsynctest` was left
+alone as the guard on that and still passes untouched.
+
+`FUNCTIONS SYNC <arg>` keeps meaning a pin while there is one repository to mean it
+about; with several it is refused with "a commit needs a repository", because
+quietly resetting every checkout to one rev is not a reasonable reading of it.
+
+### Two bugs found by building it, both older than it
+
+**fork() in a threaded process.** `run_cmd` called `setenv` and `execvp` in the
+child. Both allocate, and between fork and exec the child holds a copy of every
+lock the other threads happened to be holding - so a git command run while another
+thread was inside malloc hung in the child forever with the parent blocked in
+`waitpid`. It presented as a `FUNCTIONS SYNC` that never answered and no git process
+anywhere, because the child died before it ever became git. Now the program path,
+argv and the whole environment are built before the fork and the child does nothing
+but dup2, close and `execve`. The two pipes are also drained together through
+`poll` rather than one after the other, which would deadlock on a fetch big enough
+to fill the second buffer.
+
+**A newline in a RESP error.** git's stderr is multi line and keeps its trailing
+newline, and it went straight into `push_error`. A RESP error ends at CRLF, so the
+rest of the message was read as the next reply, the client waited for an answer that
+had already gone past it, gave up and reconnected - which is why one failing sync
+appeared in the log three times on three different threads. Everything that can
+reach `push_error` from here goes through `one_line` now. This was reachable before
+this change, by any `functions_git_pull` against a remote that refused.
+
+`env:VAR` for the ssh key used to be refused outright with "must be a path to a key
+file", which was the right requirement attached to the wrong answer. The variable
+now holds the path. The key material itself is still never stored: `check_repo_setting`
+refuses a PEM in `ssh_key`, because a key in the configuration space is a key in the
+saved shards and on every replica.
+
+New test `test/gitrepostest.py`: two branches of one origin into two spaces, the
+clone barch does itself, status per repository, sync by name, the overlap refusal
+and that the survivor keeps its content, the PEM refusal, and the fallback to
+`default`. Full suite 80/80.
+
+Not done, and left in TODO 252: rejecting a declared collision at the *write* rather
+than at the read. Settings are ordinary keys and anyone can SET one, so validation
+happens where they are read - a repository with a bad setting is disabled and says
+why in STATUS. Also still open there: how a checkout deletes a job once
+`configuration/cron/` is merged rather than swapped (TODO 249's half).

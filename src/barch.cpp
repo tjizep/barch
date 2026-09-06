@@ -167,11 +167,23 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
     // the config file does not mention, so anything taken from the environment earlier
     // would be undone here
     barch::apply_environment_configuration();
-    if (!barch::get_functions_dir().empty())
-        barch::start_function_sync();
     auto ks = get_default_ks();
     if (ks == nullptr) {
         return VALKEYMODULE_ERR;
+    }
+    /*
+     * Repositories live in the configuration space now, so this has to come after
+     * the default space is up. A repository that said `asynch off` is applied here
+     * and a failure refuses the load, which is what asking for it synchronously
+     * means; everything else is the sync thread's problem. See TODO 252.
+     */
+    if (barch::any_repo_configured()) {
+        auto sync_err = barch::sync_startup_repos();
+        if (!sync_err.empty()) {
+            barch::err({"git repository", sync_err});
+            return VALKEYMODULE_ERR;
+        }
+        barch::start_function_sync();
     }
     if (!barch::get_server_binding().empty())
         barch::server::start(barch::get_server_binding(),barch::get_server_port(), false);

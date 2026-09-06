@@ -26,12 +26,28 @@ namespace barch {
     bool scan_directory(const std::string& dir, const std::string& prefix,
                         std::vector<import_file>& out, std::string& err);
 
-    /** apply the checkout. empty string is success; anything else is the reason.
-     *  `pin` is a git rev for this call; empty uses functions_git_commit. */
+    /**
+     * Apply every enabled repository. Empty is success; anything else is the first
+     * reason, and the rest are attempted anyway - one repository that cannot fetch
+     * is no reason to leave the others stale. `pin` is a git rev for this call.
+     */
     std::string sync_functions(const std::string& pin = {});
+    /** apply one repository by name - see TODO 252 */
+    std::string sync_repo(const std::string& name, const std::string& pin = {});
+    bool have_repo(const std::string& name);
+    bool any_repo_configured();
+    /**
+     * Apply the repositories that said `asynch off`, which is a promise that they
+     * are in place before anything is served. Everything else is left to the sync
+     * thread so start-up never waits on somebody else's network. Non-empty is a
+     * reason not to start.
+     */
+    std::string sync_startup_repos();
+    /** one line per repository, as FUNCTIONS STATUS reports it */
     std::string functions_sync_status();
     void start_function_sync();
     void stop_function_sync();
     /** wake a waiting poller, used by FUNCTIONS SYNC */
     void request_function_sync();
+    void request_repo_sync(const std::string& name);
 }

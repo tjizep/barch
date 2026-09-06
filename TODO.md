@@ -811,42 +811,7 @@
 
 136. [Done] ACL SETUSER accepted ~pattern and dropped it [22-08-2026] Nr 128 1c17a23
 
-137. Live reload and versioning for Luau functions.
-
-    98 settles that a session compiles a function once and keeps
-    it, so a redefinition reaches new sessions and no others. That
-    is deliberate - it removes the generation counter, the atomic
-    on the call path, and every question about a call that is
-    already running when its definition changes. Reconnecting is
-    how a client picks up new code.
-
-    What it costs is worth writing down, because it is the reason
-    this entry exists:
-
-      - a long-lived connection pool never picks up a fix. That is
-        most production clients, so the practical answer to "I
-        deployed a new function" is "restart your clients", which
-        is not much of an answer.
-      - two connections can be running different versions of the
-        same function at the same time, indefinitely, with nothing
-        that reports it.
-      - eviction from the session cache recompiles from whatever
-        the key holds now, so a version can change by accident
-        under memory pressure while a redefinition on purpose does
-        nothing.
-
-    The shapes worth weighing when this is picked up: a generation
-    counter per space, checked on the call path and closing the
-    session's state for that space when it moves; per-key
-    versioning, which is finer and means picking entries out of a
-    state rather than dropping it; or an explicit command that
-    tells a session to drop what it has cached, which puts the
-    choice with the client rather than guessing.
-
-    Not urgent until functions are actually being used, and the
-    right time to decide is when there is a real script being
-    edited against a real client, since which of the three is
-    tolerable depends on how often that happens.
+137. [Done] Live reload, settled by the compile epoch [06-09-2026] Nr 234 527bfe8
 
 138. [Done] art::iterator::last() finds nothing in a single key tree [24-08-2026] Nr 129 1fee45f
 
@@ -1148,50 +1113,257 @@
     restart anything at all, or whether the restart belongs behind an explicit
     call that CONFIG SET makes and start-up does not.
 
-242. `require` should be able to load from the file store, not only from
-    function keys. Today `function_require` (luau_driver.cpp:2221) takes
-    `require("space.NAME")` or `require("NAME")` in the current space, folds
-    the name to upper case and asks the loader for a *function key*. The
-    proposal is a second form for a path in the `fs:` layout:
+242. [Done] require out of the file store [05-09-2026] Nr 233 527bfe8
 
-        require("somespace:extensions/hnsw.luau")
-        require(":extensions/hnsw.luau")        -- the default space
+243. [Done] Compiled luau is invalidated when its source changes [06-09-2026] Nr 234 527bfe8
 
-    The colon is a good separator for it: the existing form splits on a dot
-    and a dot cannot start a name, so the two cannot be confused.
+244. [Done] HTTP handlers reload too [06-09-2026] Nr 235 527bfe8
 
-    **The naming question is already answered by what require does now.** It
-    returns the module's environment table - `lua_getref(L, envt)` - so a
-    stored function that defines `add` and `closest` as globals is already
-    used as `local hnsw = require(...)` then `hnsw.add(...)`, exactly like a
-    normal lua module. The fs form should return the same shape and nothing
-    new needs inventing.
+245. [Done] Publishing a change is opt in, and per name [06-09-2026] Nr 236 527bfe8
 
-    What does need deciding:
+246. A stored function that writes an `fs:` module has no way to publish it.
+    RELOAD is a word on a command (DONE 236) and a script write is a
+    `barch.store.set`, which has no room for one - so a module deployed by a
+    script is live for connections that have not compiled it and stale for
+    those that have, with no way to change that short of `LOADFS ... RELOAD`
+    from outside or a restart. Publishing the *handler* does not help: the
+    handler and the module it requires are separate names and only the named
+    one is published, which is the point of per-name publishing and is what
+    `TestFileStore` asserts.
 
-    - The cache key. `st->functions` is keyed by `qualified(space, NAME)`, and
-      a path is not a folded name, so the two namespaces have to be kept
-      apart or `:a/b.luau` and a function called `B` will collide. Paths keep
-      their case; function names do not.
-    - Invalidation. A function key that changes has a hook that drops the
-      compiled copy (function_api.h:92). A file in `fs:` has no such hook, so
-      a required module would stay compiled in the VM until the state is
-      recycled - which for the HTTP pool is a long time. Either the fs writes
-      grow the same hook, or an fs require documents that it is a boot time
-      thing.
-    - Rights. `require` reaches keys; the fs read has to go through the same
-      ACL the store does, or it becomes a way to read a space a caller cannot
-      otherwise see.
-    - Cycles. The existing `st->loading` stack should cover it as long as the
-      path is what goes on the stack, not the folded name.
+    Worth a `barch.publish(path)` for a script to say so itself, or an
+    optional flag on `store.set`. Neither is obviously right: publishing is a
+    deployment act and a script doing it to itself mid-request is exactly the
+    sudden behaviour change 245 took out. Settle by deciding whether a script
+    should be able to publish at all, and if so under what rights.
 
-    And the one that is genuinely open: **wildcards**, `require(":extensions/*.luau")`.
-    A single require returns one module table; a wildcard would have to return
-    a table of them keyed by stem, which is a different shape from the same
-    call - and `hnsw` in `{hnsw = {...}, other = {...}}` reads differently
-    from `hnsw` being the module itself. Worth settling that before building
-    it, or leaving wildcards out and letting a caller require what it names.
+247. [Done] require(what, true) [06-09-2026] Nr 237 527bfe8
 
-    Settle with the single path form working, a module used as `hnsw.add`,
-    the cache and rights questions answered in code, and a decision recorded
-    on wildcards either way.
+248. [Done] A version in the file metadata [06-09-2026] Nr 238 527bfe8
+
+249. Nothing in barch runs a stored function on a schedule. A function is
+    activated by a RESP command (its own name, `CALLF`, or a name a
+    `kind = "resp"` transport exposes), by an HTTP request into a
+    `kind = "resource"` route, by another script through `CALLF` or
+    `require`, or by a read miss in a key space configured
+    `foreign = luau` - and that is the whole list. There is no timer, no
+    interval, no cron, and no boot hook, so anything periodic needs
+    something outside the process to poke it. The only periodic thread that
+    exists is the function sync watcher (`function_sync.cpp:622`), and it
+    imports code rather than running any.
+
+    A `kind = "cron"` transport is the obvious shape, since a function
+    already declares how it wants to be reached and this is one more way:
+    a schedule, a method to call, and the user to run as. The open
+    questions are the ones that make a scheduler hard rather than the
+    syntax.
+
+    Where it runs, and how often it does not: a schedule that fires on
+    every node of a replicated set runs the job once per node, so either
+    the job is declared node-local or it needs a lease in the store so one
+    winner runs it. Which of those is the default matters more than either
+    mechanism.
+
+    What "every five minutes" means across a restart, a `LOADKEYS` that
+    replaces the key, and a clock that jumps. Whether a missed fire is
+    caught up or dropped, and whether two fires can overlap when a job
+    outruns its interval - a job that takes six minutes on a five minute
+    schedule has to either skip, queue, or overlap, and the wrong choice
+    there is how a scheduler takes a server down.
+
+    What it costs: stored functions run on the plain thread pool with no
+    event loop, so a scheduler is either its own thread with a heap of due
+    times or a timer on an existing reactor. It needs its own budget
+    (`function_slice_insns` / `function_deadline_ms` are per call and a
+    scheduled call has no client to time out) and its own rights, since
+    there is no connection to take an ACL from - the same problem
+    `http_ident` solves for Crow.
+
+    And what happens to a job whose target space is not loaded, since a
+    schedule that lives in one place now outlives the spaces it points at.
+
+    Settle by picking the replication story first - node-local or leased -
+    because the answer decides whether this is a small feature or a
+    distributed one. A first cut that only ever fires on the node that
+    holds the key, skips rather than overlaps, and drops missed fires,
+    would be enough to see whether the shape is right.
+
+    Where they live is the `configuration` space, under a path: a job is
+    `configuration:cron/jobs/<name>` and a setting is
+    `configuration:cron/conf/<name>` - `cron/conf/workers` for how many
+    threads the scheduler runs, and whatever else turns out to be needed.
+    Boot reads one prefix range in one space and never walks the others.
+
+    That space is already the right home rather than a convenient one. It
+    is explicitly not data (`keyspace_api.cpp:548`): `FLUSHALL` skips it,
+    so clearing the caches does not silently unschedule everything, and it
+    is where every other per-space setting already lives as a key -
+    `media.foreign_script`, `media.shards`. A schedule is configuration by
+    the same argument those are. It is a single shard by construction
+    (`key_space.cpp:257`), which for a few hundred entries read once at
+    boot is exactly right.
+
+    The two key shapes cannot collide. Existing configuration keys are
+    `<space>.<setting>` and a space name is `[0-9,A-Z,a-z,_]+`
+    (`key_space.cpp:132`), so no space name contains a `/` and nothing
+    that exists today can look like `cron/…`. It also disposes of the
+    earlier worry about reserving a top level space called `cron`: there
+    is no new space, so there is nothing to reserve and no name to take
+    away from anyone.
+
+    A file per job and a file per setting is then the natural deployment,
+    which is the point: `cron/jobs/compact.luau` and `cron/conf/workers`
+    are files in a directory, so `LOADKEYS` and a git checkout carry them
+    with no new mechanism. It also makes one job's schedule diffable and
+    revertible on its own, where a single blob of all schedules would not
+    be.
+
+    One thing that has to change for it to work. `scan_checkout` skips a
+    top level folder called `configuration` outright
+    (`function_sync.cpp:273`), so a checkout cannot deploy any of this
+    today. The skip is there for a good reason - sync swaps a space
+    wholesale, and doing that to `configuration` would drop every
+    foreign setting on the floor - so the fix is not to remove it but to
+    let `configuration/cron/` through as a merge rather than a swap.
+    Which then raises the question the swap answers for every other
+    space: how a job is *deleted* by a checkout that no longer contains
+    it, if the import no longer removes what it does not mention.
+
+    The alternative considered first was a `__cron__` name prefix on
+    ordinary function keys, found by a prefix range over the
+    `ts_function` keys of each space. It needs no side bookkeeping
+    either, but it spreads the jobs across every space and makes boot walk
+    all of them, mixes schedules in with the data they operate on, and
+    puts a policy in a name that `SETF` then has to police in both
+    directions.
+
+    What a job entry holds is a *schedule*, not the work. It points at a
+    function somewhere else - a target space, a name, the arguments, the
+    schedule, the user to run as - and the tick calls it. A function proxy
+    with a timer on it.
+
+    This is what makes the entries being somewhere else than the code
+    cost nothing. A function's space is otherwise always where it lives,
+    so a job body parked in `configuration` would see the configuration
+    space through `barch.store`, which is never what it wants. A proxy has
+    no such problem, and needs nothing new to resolve either: `resolve()`
+    already takes a `from_space` and is what `KS.NAME` and `CALLF` go
+    through, so a tick is an existing call into an existing space. The job
+    code also stops knowing it is scheduled - the same function stays an
+    ordinary RESP command, can be scheduled twice with different
+    arguments, and needs no cron-shaped declaration of its own.
+
+    An entry should still be a function key with a `kind = "cron"`
+    `transport()` rather than a plain value: `configuration` already holds
+    stored functions, so nothing new is needed to keep one there, and it
+    means an entry deploys and validates by the paths that already exist
+    and can carry a little code of its own - a guard that decides whether
+    today is a day to run, or one that computes the arguments. The
+    `conf/` half is the opposite and should stay dumb values, one setting
+    per key, so `workers` can be read at boot without compiling anything.
+
+    Two things follow from the indirection. Rights: a tick has no
+    connection, so the entry names a user the way `transport().user` does
+    for an HTTP route, and what the job may do comes from that user in the
+    *target* space - keeping "who may schedule" and "what the job may do"
+    separate, which is right, since the cron space is the one place a
+    scheduling right can be granted without granting anything else. And
+    lifetime: an entry outlives its target easily - a `REMF`, a space that
+    is not loaded, a checkout that dropped the file - so a tick that
+    cannot resolve has to record that and skip, not fail the scheduler.
+    Validating hard at install does not work either, because a boot import
+    may well load the schedule before the target.
+
+    An entry, then - stored as `configuration:cron/jobs/compact`, so the
+    last path segment is the job's name and the table needs no name field
+    of its own:
+
+    ```lua
+    function transport()
+        return {
+            kind = "cron",
+            space = "media",        -- target. Required: the space an entry
+                                    -- sits in is configuration, which is
+                                    -- never what a job means
+            call = "COMPACT",       -- the function to run there
+            args = {"7"},           -- strings, as a command line has
+            every = "5m",           -- or: cron = "0 3 * * *"
+            user = "jobs",
+            jitter = "30s",         -- spread, so a fleet does not stampede
+            overlap = "skip",       -- skip | queue | allow
+            catchup = false,        -- a fire missed while down is dropped
+            tz = "UTC",
+            enabled = true,
+        }
+    end
+    ```
+
+    Two schedule forms, because one text cannot do both jobs well.
+    `every` is a duration - `<n><unit>` repeated, units `ms s m h d`, so
+    `5m`, `90s`, `2h30m` - and covers "every so often", which is most
+    jobs, with no calendar and no timezone to be wrong about. `cron` is
+    the classic five fields (`min hour dom mon dow`) with `*` `,` `-` `/`,
+    names for month and weekday, and the `@daily` `@hourly` `@weekly`
+    `@monthly` `@yearly` shorthands, for the jobs that really do mean
+    3am. Exactly one of the two, and an entry naming both is refused
+    rather than resolved by precedence.
+
+    Deliberately not the six field variant with seconds: `every` already
+    says `30s` and better, and a seconds column makes every parser
+    ambiguous about which dialect it is reading. No `@reboot` either -
+    that is a boot hook, which is a different feature and should not
+    arrive disguised as a schedule.
+
+    Where the classic form is surprising it stays surprising: day-of-month
+    and day-of-week are OR'd when both are restricted, as every crontab
+    since the seventies has done, because a schedule that reads like cron
+    and does not behave like it is worse than one that is odd in the
+    documented way. `tz` is an IANA zone, default UTC, and a wall clock
+    time that does not exist on a DST forward jump fires once at the first
+    moment that does, while one that happens twice fires once.
+
+    Settle two things before writing any of it. How a checkout deletes a
+    job, once `configuration/cron/` is merged rather than swapped, since
+    that is the one part of the layout with no answer yet. And whether the
+    lease deciding which node runs a job lives on the entry - which it
+    should, being the only thing that knows the job exists.
+
+250. [Done] A cron ACL category [06-09-2026] Nr 239 c5df974
+
+251. `"admin"` is not a category. `categories()` (`barch_apis.cpp:43`)
+    lists fifteen names and `admin` is not among them - it is a *role* in
+    `auth_api.cpp:37`, alongside `all`, `readonly` and `user`. But six
+    commands register with it: `LOADFS` and `LOADKEYS` (`fs_api.cpp:547`,
+    `:550`), `EXPORT` and `IMPORT` (`export_api.cpp:395`, `:396`), `HTTP`
+    (`http_api.cpp:1345`) and `FUNCTIONS` (`function_api.cpp:1716`).
+
+    `set_cats` runs the list through `cats2vec`, which ignores a name it
+    does not know (`barch_apis.cpp:64`), so the bit is silently dropped
+    and those commands are gated only by their remaining categories. The
+    intent was clearly that they need something more than `write` and
+    `data`; the effect is that they do not.
+
+    Two ways out and they are not equivalent. Appending `admin` to
+    `categories()` makes the six mean what they say - and immediately
+    refuses those commands to every existing user who was getting them
+    through `+write +data`, which is a rights change on an upgrade and
+    cannot be quiet. Dropping the word from the six registrations makes
+    the code honest about what it does today and changes nothing at
+    runtime. Settle by deciding whether these six should have been
+    privileged, and if so, say so in the release notes rather than in a
+    surprise.
+
+    Worth checking at the same time whether an unknown name should fail a
+    registration outright. A resp `transport()` already refuses one
+    (DONE: "a category that does not exist fails the SETF"), on the
+    grounds that a name nobody recognises reads as "needs nothing" - which
+    is exactly what happened here, in the builtins, where nothing was
+    checking.
+
+252. [Done] Git repositories in the configuration space [06-09-2026] Nr 240 c5df974
+
+    Left open from it: rejecting a declared collision at the write rather than
+    at the read, which needs a hook on SET into the configuration space -
+    settings are ordinary keys and anyone can write one, so today a bad
+    setting disables its repository and says why in FUNCTIONS STATUS. And a
+    `FUNCTIONS REPOS` listing, if STATUS turns out not to be enough.

@@ -43,7 +43,11 @@ heap::vector<std::string> categories() {
     heap::vector<std::string> r = {"read","write","data", "stats",
         "dangerous","acl", "keyspace",
         "keys", "orderedset","hash","list","auth",
-        "connection","config","function"};
+        "connection","config","function",
+        // scheduling a job is a right of its own: it says who may install a cron
+        // entry, not what the job may do - that comes from the user the entry names,
+        // in the space it targets. See TODO 249 and 250
+        "cron"};
 
     return r;
 }

@@ -194,8 +194,8 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_signal);
     std::signal(SIGPIPE, SIG_IGN);
 
-    if (!barch::get_functions_dir().empty() && barch::get_functions_dir() != "off")
-        barch::start_function_sync();
+    // the default key space has to exist before a repository can be read out of the
+    // configuration space, so the watcher is started after it below
 
     // constructing the default key space is what loads the shards out of the working
     // directory and prints the banner
@@ -279,6 +279,22 @@ int main(int argc, char** argv) {
         for (const auto& part : reply)
             line += (line.empty() ? "" : " ") + part;
         barch::log({"barchd imported", path, "as keys in", space->get_canonical_name(), line});
+    }
+
+    /*
+     * Repositories that said `asynch off` are applied before anything listens,
+     * because that is what asking for it synchronously means: they have to be in
+     * place before a request can arrive for something they provide. Everything
+     * else is left to the sync thread, so start-up never waits on somebody else's
+     * network - see TODO 252.
+     */
+    if (barch::any_repo_configured()) {
+        auto err = barch::sync_startup_repos();
+        if (!err.empty()) {
+            std::cerr << argv[0] << ": git repository " << err << "\n";
+            return 1;
+        }
+        barch::start_function_sync();
     }
 
     auto listen_on = bind.empty() ? barch::get_server_binding() : bind;

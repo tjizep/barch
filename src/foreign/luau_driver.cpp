@@ -1,4 +1,6 @@
 #include "driver.h"
+#include "../fs_api.h"
+#include "../function_api.h"
 #include "pool.h"
 #include "sql.h"
 #include "key_space.h"
@@ -540,6 +542,11 @@ static void function_interrupt(lua_State* L, int gc) {
  * a session runs one call at a time. See TODO 98 C.
  */
 struct compiled {
+    /** what barch::functions::compile_epoch() said when this was built - TODO 243 */
+    uint64_t epoch{0};
+    /** for a module out of the file store, the version it was compiled from. 0 when
+     *  the file carries none, which means a forced require always rebuilds - TODO 248 */
+    uint64_t fs_version{0};
     int fn{LUA_NOREF};      // the function itself, pinned in the registry
     int env{LUA_NOREF};     // its thread, which owns the globals table it closed over
     int envt{LUA_NOREF};    // that globals table, which is what require hands back
@@ -549,6 +556,25 @@ struct compiled {
     /** and the arity each declared, same convention as the script-level one */
     heap::string_map<int> method_arity{};
 };
+
+/**
+ * Has this been published since it was compiled? - TODO 245.
+ *
+ * The global epoch is the fast path: an entry that matches it is current and nothing
+ * is looked up. Once somebody publishes anything, every entry misses that check once,
+ * asks whether *its own* name was the one published, and catches its epoch up either
+ * way - so a publish costs one map lookup per cached entry, once, and not a lookup
+ * per call for ever after.
+ */
+static bool published_since(const std::string& key, compiled& c) {
+    auto now = barch::functions::compile_epoch();
+    if (c.epoch == now)
+        return false;
+    if (barch::functions::published_at(key) > c.epoch)
+        return true;
+    c.epoch = now;
+    return false;
+}
 
 /** hand a compiled function's registry refs back, or the state keeps it alive
  *  forever - the state now lives for the session, so nothing else will drop them */
@@ -812,6 +838,10 @@ static int store_set(lua_State* L) {
     std::string err;
     if (!s->set({k, n}, {v, vn}, err))
         luaL_error(L, "%s", err.empty() ? "FUNCTION write refused" : err.c_str());
+    // a script write does not republish: there is no RELOAD to carry on one, and a
+    // write that goes live the moment it lands is the thing TODO 245 took out. A
+    // module deployed this way is picked up by connections that have not compiled it
+    // and by everything else on the next RELOAD.
     return 0;
 }
 
@@ -2199,7 +2229,8 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
 }
 
 static bool compile_into(space_state& st, const std::string& name,
-                         const std::string& source, compiled& out, std::string& err);
+                         const std::string& source, compiled& out, std::string& err,
+                         bool needs_call = true);
 
 static space_state*& state_of(lua_State* L) {
     lua_getfield(L, LUA_REGISTRYINDEX, "barch.function.state");
@@ -2222,9 +2253,123 @@ static int function_require(lua_State* L) {
     size_t n = 0;
     const char* raw = luaL_checklstring(L, 1, &n);
     std::string given(raw, n);
+    /*
+     * require(what, true) throws this session's compiled copy away and reads the
+     * source again - TODO 247. Session scoped on purpose: RELOAD on a write
+     * publishes to everything, and this changes one VM, so a loader can ask for
+     * current code without altering what any other connection is running.
+     *
+     * It compiles, so it belongs in something that runs once rather than in a
+     * handler that runs per request.
+     */
+    const bool forced = lua_gettop(L) > 1 && lua_toboolean(L, 2);
     space_state* st = state_of(L);
     if (!st || !st->load)
         luaL_error(L, "FUNCTION require is not available here");
+
+    /*
+     * `space:path/file.luau`, or `:path/file.luau` for the space this is running in,
+     * loads from the file store instead of a function key - see TODO 242. The colon
+     * cannot be confused with the dot form: a dot may not start a name and this may,
+     * and a path keeps its case where a function name is folded.
+     *
+     * The read goes through `st->store`, which is the caller's own access, so a file
+     * is exactly as reachable as any other key in that space and require is not a way
+     * round an ACL.
+     */
+    auto colon = given.find(':');
+    if (colon != std::string::npos) {
+        std::string fs_space = given.substr(0, colon);
+        std::string path = given.substr(colon + 1);
+        if (path.empty())
+            luaL_error(L, "FUNCTION require wants a path after the ':'");
+        if (path.front() != '/')
+            path.insert(path.begin(), '/');
+        if (path.find("..") != std::string::npos)
+            luaL_error(L, "FUNCTION require path may not contain '..'");
+        const std::string in_space = fs_space.empty() ? current_space(L) : fs_space;
+        // \x01 in front, so a path can never collide with a folded function name in
+        // the same table - the two namespaces share one cache
+        const std::string fs_key = qualified(in_space, "\x01" + path);
+        /*
+         * A forced require rebuilds - unless the file says it has not changed. The
+         * version is one small read against a compile, so a loader can force on every
+         * pass and only pay for it when something actually moved. A file whose writer
+         * keeps no version reads as 0, and 0 means rebuild: assuming "unchanged"
+         * there would serve stale code. See TODO 248.
+         */
+        auto cached = st->functions.find(fs_key);
+        bool rebuild = false;
+        if (cached != st->functions.end()) {
+            rebuild = published_since(fs_key, cached->second);
+            if (!rebuild && forced) {
+                const store_access* look = st->store;
+                if (!fs_space.empty() && st->opened) {
+                    auto o = st->opened->find(fs_space);
+                    if (o != st->opened->end())
+                        look = &o->second;
+                }
+                uint64_t now = look ? barch::fs_file_version(*look, path) : 0;
+                rebuild = now == 0 || now != cached->second.fs_version;
+            }
+        }
+        if (cached != st->functions.end() && rebuild) {
+            drop_compiled(st->L, cached->second);
+            if (statistics::luau_functions > 0)
+                --statistics::luau_functions;
+            st->functions.erase(cached);
+            cached = st->functions.end();
+        }
+        if (cached != st->functions.end()) {
+            lua_getref(L, cached->second.envt);
+            return 1;
+        }
+        for (const auto& busy : st->loading) {
+            if (busy == fs_key)
+                luaL_error(L, "FUNCTION cycle through %s", path.c_str());
+        }
+        /*
+         * A named space is opened the way `barch.space.NAME` opens one, so the rights
+         * asked for are the caller's *in that space* - per space ACLs, TODO 135 - and
+         * an unknown name is refused rather than created. Without this the read went
+         * to whatever space the call was running in and `modules:/x.luau` quietly
+         * meant `:/x.luau`.
+         */
+        const store_access* from = st->store;
+        if (!fs_space.empty()) {
+            if (!st->open_space || !st->opened)
+                luaL_error(L, "FUNCTION require cannot reach another space here");
+            auto have = st->opened->find(fs_space);
+            if (have == st->opened->end()) {
+                store_access opened;
+                if (!(*st->open_space)(fs_space, opened))
+                    luaL_error(L, "FUNCTION no key space called %s", fs_space.c_str());
+                have = st->opened->emplace(fs_space, std::move(opened)).first;
+            }
+            from = &have->second;
+        }
+        if (!from)
+            luaL_error(L, "FUNCTION require has no store here");
+        std::string source, type;
+        if (!barch::read_fs_file(*from, path, source, type))
+            luaL_error(L, "FUNCTION require has no file %s", path.c_str());
+        if (!fs_space.empty())
+            st->space_stack.push_back(fs_space);
+        struct pop_fs {
+            space_state* st{};
+            bool armed{false};
+            ~pop_fs() { if (armed && st && !st->space_stack.empty()) st->space_stack.pop_back(); }
+        } fs_popper{st, !fs_space.empty()};
+        compiled c;
+        std::string err;
+        if (!compile_into(*st, fs_key, source, c, err, false))
+            luaL_error(L, "%s", err.c_str());
+        c.fs_version = barch::fs_file_version(*from, path);
+        st->functions.emplace(fs_key, c);
+        ++statistics::luau_functions;
+        lua_getref(L, c.envt);
+        return 1;
+    }
 
     // split before folding: space names keep their case, same as HNSW.SET
     std::string space_name;
@@ -2263,6 +2408,13 @@ static int function_require(lua_State* L) {
 
     const std::string key = qualified(space_name.empty() ? current_space(L) : space_name, name);
     auto have = st->functions.find(key);
+    if (have != st->functions.end() && (forced || published_since(key, have->second))) {
+        drop_compiled(st->L, have->second);
+        if (statistics::luau_functions > 0)
+            --statistics::luau_functions;
+        st->functions.erase(have);
+        have = st->functions.end();
+    }
     if (have != st->functions.end()) {
         lua_getref(L, have->second.envt);
         return 1;
@@ -2294,7 +2446,8 @@ static int function_require(lua_State* L) {
 
 /** compile `source` into this space's state and pin what it left behind */
 static bool compile_into(space_state& st, const std::string& name,
-                         const std::string& source, compiled& out, std::string& err) {
+                         const std::string& source, compiled& out, std::string& err,
+                         bool needs_call) {
     std::string bytecode;
     size_t n = 0;
     char* bc = luau_compile(source.data(), source.size(), nullptr, &n);
@@ -2354,17 +2507,29 @@ static bool compile_into(space_state& st, const std::string& name,
     // the chunk can require others, which compiles them into this same state
     if (lua_pcall(T, 0, 0, 0) != 0)
         return give_up("luau script error");
+    /*
+     * A function key is a command and must define call(). A module required out of
+     * the file store is not - it exports whatever it exports, the way a lua module
+     * does, and forcing a dummy call() on every one of them would be silly. It has
+     * no `fn`, so nothing can invoke it as a command by accident. See TODO 242.
+     */
     lua_getglobal(T, "call");
     if (lua_type(T, -1) != LUA_TFUNCTION) {
-        err = "luau script has no call()";
-        lua_unref(L, env);
-        lua_unref(L, envt);
-        return false;
+        if (needs_call) {
+            err = "luau script has no call()";
+            lua_unref(L, env);
+            lua_unref(L, envt);
+            return false;
+        }
+        out.fn = LUA_NOREF;
+        lua_pop(T, 1);
+    } else {
+        out.fn = lua_ref(T, -1);
+        lua_pop(T, 1);
     }
-    out.fn = lua_ref(T, -1);
-    lua_pop(T, 1);
     out.env = env;
     out.envt = envt;
+    out.epoch = barch::functions::compile_epoch();
     // arity is declared by the script, so it travels with the source rather than
     // needing a second thing stored beside it. Redis's convention: n means exactly n,
     // -n means at least n, absent means the script will take whatever it is given
@@ -2639,6 +2804,15 @@ void start_function(const std::string& space, const std::string& name,
     key.push_back('\0');
     key.append(name);
     auto it = st->functions.find(key);
+    // a write since this was compiled means the source may have changed under it,
+    // so the copy goes and it is built again - see TODO 243
+    if (it != st->functions.end() && published_since(key, it->second)) {
+        drop_compiled(st->L, it->second);
+        if (statistics::luau_functions > 0)
+            --statistics::luau_functions;
+        st->functions.erase(it);
+        it = st->functions.end();
+    }
     if (it == st->functions.end()) {
         if (st->functions.size() >= max_cached_functions) {
             // the backstop. Give the refs back rather than just dropping the map, or
@@ -2812,6 +2986,16 @@ bool http_vm_load(http_vm& vm, const std::string& name, const std::string& sourc
     out.name = name;
     // keep the compiled chunk so method closures stay alive
     std::string key = qualified(vm.space, name);
+    // and replace rather than emplace: a reload compiles the same key again, and
+    // emplace would keep the old entry and drop the new one's refs on the floor -
+    // the closures the caller is about to use belong to this compile. See TODO 244
+    auto had = st->functions.find(key);
+    if (had != st->functions.end()) {
+        drop_compiled(st->L, had->second);
+        if (statistics::luau_functions > 0)
+            --statistics::luau_functions;
+        st->functions.erase(had);
+    }
     st->functions.emplace(std::move(key), c);
     ++statistics::luau_functions;
     return true;

@@ -2,6 +2,9 @@
 // Created by teejip on 8/23/26.
 //
 
+#include <atomic>
+#include <shared_mutex>
+
 #include "function_api.h"
 
 #include <algorithm>
@@ -1004,6 +1007,52 @@ namespace functions {
         return c;
     }
 
+    /** see function_api.h - one counter, relaxed, for the whole process */
+    static std::atomic<uint64_t> the_compile_epoch{1};
+
+    uint64_t compile_epoch() {
+        return the_compile_epoch.load(std::memory_order_relaxed);
+    }
+
+    void bump_compile_epoch() {
+        the_compile_epoch.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /** name -> the epoch at which it was last published. See function_api.h */
+    static std::shared_mutex published_mu;
+    static heap::string_map<uint64_t> published_names;
+
+    uint64_t published_at(const std::string& key) {
+        std::shared_lock lock(published_mu);
+        auto it = published_names.find(key);
+        return it == published_names.end() ? 0 : it->second;
+    }
+
+    void publish_compiled(const std::string& key) {
+        auto now = the_compile_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+        std::unique_lock lock(published_mu);
+        published_names[key] = now;
+    }
+
+    std::string compiled_key(const std::string& space, const std::string& folded_name) {
+        std::string q;
+        q.reserve(space.size() + folded_name.size() + 1);
+        q.append(space);
+        q.push_back('\0');
+        q.append(folded_name);
+        return q;
+    }
+
+    std::string compiled_path_key(const std::string& space, const std::string& path) {
+        std::string q;
+        q.reserve(space.size() + path.size() + 2);
+        q.append(space);
+        q.push_back('\0');
+        q.push_back('\x01');
+        q.append(path);
+        return q;
+    }
+
     void forget_exposed(const std::string& space) {
         std::lock_guard<std::mutex> lk(exposed_mu());
         exposed_cache().erase(space);
@@ -1139,6 +1188,8 @@ namespace functions {
             t->opt_insert(opts, key, art::value_type{source.data(), source.size()}, true, fc);
         });
         forget_exposed(space->canonical());
+        // no bump here: a write is quiet unless the caller asked for it with
+        // RELOAD - see TODO 245 and DONE 236
         return true;
     }
 
@@ -1469,9 +1520,29 @@ extern "C" {
  * cannot run. A name that is already a builtin is allowed: SET stays SET, and the
  * stored one is reached as SPACE.SET. See TODO 160.
  */
+/**
+ * The optional trailing RELOAD - see TODO 245.
+ *
+ * Without it a write is quiet: connections that have already compiled this keep
+ * what they have and a fresh one gets the new source, which is what 98 C settled.
+ * With it the change is published to everything on its next call, which is for the
+ * fix that cannot wait for clients to reconnect.
+ */
+bool wants_reload(const arg_t& argv, size_t at) {
+    if (argv.size() <= at)
+        return false;
+    std::string word(argv[at].chars(), argv[at].size);
+    for (auto& c : word)
+        c = (char) toupper((unsigned char) c);
+    return word == "RELOAD";
+}
+
 int SETF(caller& call, const arg_t& argv) {
-    if (argv.size() != 3)
+    if (argv.size() < 3 || argv.size() > 4)
         return call.wrong_arity();
+    const bool reload = wants_reload(argv, 3);
+    if (argv.size() == 4 && !reload)
+        return call.push_error("SETF name source [RELOAD]");
     auto name = argv[1];
     auto source = argv[2];
     if (key_ok(name) != 0)
@@ -1483,6 +1554,13 @@ int SETF(caller& call, const arg_t& argv) {
                                    {name.chars(), name.size},
                                    {source.chars(), source.size}, err))
         return call.push_error(err.c_str());
+    if (reload) {
+        // this one name, not everything staged - see TODO 245
+        auto folded = upper_name(name);
+        barch::functions::publish_compiled(
+            barch::functions::compiled_key(call.kspace()->canonical(),
+                                           {folded.data(), folded.size()}));
+    }
     return call.push_simple("OK");
 }
 
@@ -1506,8 +1584,11 @@ int GETF(caller& call, const arg_t& argv) {
 
 /* REMF <name> - 1 if a function went, 0 if there was nothing there */
 int REMF(caller& call, const arg_t& argv) {
-    if (argv.size() != 2)
+    if (argv.size() < 2 || argv.size() > 3)
         return call.wrong_arity();
+    const bool reload = wants_reload(argv, 2);
+    if (argv.size() == 3 && !reload)
+        return call.push_error("REMF name [RELOAD]");
     auto name = argv[1];
     if (key_ok(name) != 0)
         return call.key_check_error(name);
@@ -1522,6 +1603,10 @@ int REMF(caller& call, const arg_t& argv) {
     // names outlive the function that declared them - TODO 188
     if (gone)
         barch::functions::forget_exposed(call.kspace()->canonical());
+    if (gone && reload)
+        barch::functions::publish_compiled(
+            barch::functions::compiled_key(call.kspace()->canonical(),
+                                           {folded.data(), folded.size()}));
     return call.push_ll(gone ? 1 : 0);
 }
 
@@ -1579,11 +1664,13 @@ int KEYSF(caller& call, const arg_t& argv) {
     return call.end_array();
 }
 
-/* FUNCTIONS SYNC [commit] | STATUS
+/* FUNCTIONS SYNC [repo] [commit] | STATUS | COMMANDS
  *
- * SYNC applies the checkout in functions_dir. An optional commit pins that
- * rev for this apply (functions_git_commit does the same until unset).
- * STATUS is the last result.
+ * SYNC with nothing applies every enabled repository. One argument is a
+ * repository name if it is one, and otherwise a commit to pin this apply to -
+ * which is what it always meant, and still works while there is only one
+ * repository to mean it about. Two arguments are the repository and the pin.
+ * STATUS is one line per repository. See TODO 252.
  */
 int FUNCTIONS(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
@@ -1594,12 +1681,21 @@ int FUNCTIONS(caller& call, const arg_t& argv) {
     if (sub == "STATUS")
         return call.push_string(barch::functions_sync_status());
     if (sub == "SYNC") {
-        if (argv.size() > 3)
+        if (argv.size() > 4)
             return call.wrong_arity();
-        std::string pin;
-        if (argv.size() == 3)
-            pin.assign(argv[2].chars(), argv[2].size);
-        auto err = barch::sync_functions(pin);
+        std::string err;
+        if (argv.size() == 4) {
+            std::string repo(argv[2].chars(), argv[2].size);
+            std::string pin(argv[3].chars(), argv[3].size);
+            err = barch::sync_repo(repo, pin);
+        } else if (argv.size() == 3) {
+            std::string one(argv[2].chars(), argv[2].size);
+            // a name if it names something, a pin otherwise - the old spelling
+            err = barch::have_repo(one) ? barch::sync_repo(one)
+                                        : barch::sync_functions(one);
+        } else {
+            err = barch::sync_functions();
+        }
         if (!err.empty())
             return call.push_error(err.c_str());
         return call.push_simple("OK");
@@ -1616,7 +1712,7 @@ int FUNCTIONS(caller& call, const arg_t& argv) {
         }
         return call.end_array();
     }
-    return call.push_error("FUNCTIONS SYNC [commit]|STATUS|COMMANDS");
+    return call.push_error("FUNCTIONS SYNC [repo] [commit]|STATUS|COMMANDS");
 }
 }
 

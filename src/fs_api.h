@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "barch_apis.h"
+#include "foreign/driver.h"
 #include "key_space.h"
 
 namespace barch {
@@ -19,7 +20,20 @@ namespace barch {
      */
     std::string load_fs_directory(const std::string& dir, const std::string& root,
                                   size_t chunk, const barch::key_space_ptr& space,
-                                  std::vector<std::string>& reply);
+                                  std::vector<std::string>& reply, bool publish = false);
+    /**
+     * The whole content of a stored file, through the rights the store_access
+     * carries. False when there is no such file. See fs_api.cpp.
+     */
+    bool read_fs_file(const barch::foreign::store_access& acc, const std::string& path,
+                      std::string& out, std::string& type);
+    /**
+     * The version a stored file carries, or 0 when its writer does not maintain one.
+     * 0 has to mean "assume it changed": a forced require that treated absent as
+     * unchanged would quietly serve stale code. See TODO 248.
+     */
+    uint64_t fs_file_version(const barch::foreign::store_access& acc,
+                             const std::string& path);
     /** into the default key space, at the default chunk size */
     std::string load_fs_directory(const std::string& dir, const std::string& root,
                                   std::vector<std::string>& reply);
@@ -30,7 +44,7 @@ namespace barch {
      */
     std::string load_keys_directory(const std::string& dir, const std::string& prefix,
                                     const barch::key_space_ptr& space,
-                                    std::vector<std::string>& reply);
+                                    std::vector<std::string>& reply, bool publish = false);
     std::string load_keys_directory(const std::string& dir, const std::string& prefix,
                                     std::vector<std::string>& reply);
 }

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>barch file browser</title>
+<link rel="stylesheet" href="/browser/filemanager.css">
+<style>
+  html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
+  #app { height: 100vh; }
+  .bar { padding: 8px 12px; border-bottom: 1px solid #ddd; color: #444; }
+  .bar b { color: #000; }
+</style>
+</head>
+<body>
+<div class="bar"><b>barch</b> — a git checkout in the file store, browsed over REST</div>
+<div id="app"></div>
+
+<!-- everything the page loads comes out of the barch file store, including these
+     two bundles: setup.sh fetched them once and LOADFS put them in. Nothing here
+     is fetched from a CDN at run time. -->
+<script type="importmap">
+{ "imports": { "vue": "/browser/vue.js" } }
+</script>
+<script type="module">
+import { createApp, h, ref, onMounted } from "vue";
+import { Filemanager } from "/browser/filemanager.js";
+
+const API = "/api";
+
+// the provider that ships with the widget expects a whole REST backend; this
+// example serves the read half, so the loading is done here and saving is not
+// wired up at all
+async function load(id) {
+  const at = id ? `${API}/files/${encodeURIComponent(id)}` : `${API}/files`;
+  const res = await fetch(at);
+  return res.json();
+}
+
+createApp({
+  setup() {
+    const data = ref([]);
+    const drive = ref({ used: 0, total: 0 });
+    onMounted(async () => { data.value = await load(""); });
+
+    function init(api) {
+      // one level at a time: the widget asks for a folder when it is opened
+      api.on("open-file", async ev => {
+        const rows = await load(ev.id);
+        api.exec("provide-data", { id: ev.id, data: rows });
+      });
+      api.on("download-file", ({ id }) => {
+        window.open("/files" + id, "_blank");
+      });
+    }
+
+    return () => h(Filemanager, {
+      data: data.value,
+      drive: drive.value,
+      readonly: true,
+      init,
+    });
+  },
+}).mount("#app");
+</script>
+</body>
+</html>

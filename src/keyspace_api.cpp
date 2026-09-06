@@ -5,6 +5,7 @@
 //
 
 #include "keyspace_api.h"
+#include "ids.h"
 #include <algorithm>
 #include <ranges>
 #include <cctype>
@@ -534,6 +535,9 @@ int CLEAR(caller& call, const arg_t& argv) {
 
     barch::sharded_store store(call.kspace());
     store.each_shard([](const barch::shard_ptr& shard) { shard->clear(); });
+    // the id counter is a key, so clearing the space reset it - a block cached from
+    // before would hand out numbers the counter is about to hand out again
+    barch::forget_sequences(call.kspace()->get_canonical_name());
 
     return call.push_simple("OK");
 }
@@ -558,6 +562,7 @@ int CLEARALL(caller& call, const arg_t& argv) {
         for (auto& shard : ks->get_shards()) {
             shard->clear();
         }
+        barch::forget_sequences(ks->get_canonical_name());
     });
 
 

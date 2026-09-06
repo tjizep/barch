@@ -1,5 +1,6 @@
 #include "sastam.h"
 #include "barch_apis.h"
+#include "dir_api.h"
 #include "keys_api.h"
 #include "list_api.h"
 #include "hash_api.h"
@@ -88,6 +89,7 @@ std::shared_ptr<function_map>  functions_by_name() {
         register_function_api(*r);
         register_http_api(*r);
         register_fs_api(*r);
+        register_dir_api(*r);
     }
 
     return r;

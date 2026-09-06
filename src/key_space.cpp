@@ -3,6 +3,7 @@
 //
 
 #include "key_space.h"
+#include "ids.h"
 #include <thread>
 #include <version.h>
 
@@ -246,6 +247,9 @@ namespace barch {
         }
         if (held)
             held->fail_foreign_flights();
+        // the space is going away and will be rebuilt from disk if it comes back, so
+        // a cached id block belongs to a counter that may no longer exist - TODO 253
+        barch::forget_sequences(undecorate(name));
         return r; // destruction happens in callers thread - so hopefully no dl because shared ptr
     }
 

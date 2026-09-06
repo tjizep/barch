@@ -1367,3 +1367,138 @@
     settings are ordinary keys and anyone can write one, so today a bad
     setting disables its repository and says why in FUNCTIONS STATUS. And a
     `FUNCTIONS REPOS` listing, if STATUS turns out not to be enough.
+
+253. [Done] A git checkout in the file store, browsed in a browser [06-09-2026] Nr 241 c5df974
+
+    Left open from it: the write half of the file manager REST - create, rename,
+    move, copy, delete. The blocker is real rather than effort: the fs layout has
+    no directory object, so a folder is implied by the paths under it and a rename
+    is a rewrite of every key beneath a prefix. Doing that atomically wants the
+    staging `load_fs_directory` already has, which means the operation belongs in
+    C++ beside it rather than in a luau handler. A modification time in the
+    metadata would go in at the same time, since the widget has a date column and
+    nothing to put in it.
+
+254. [Done] A directory interface over RESP [06-09-2026] Nr 245 and 247 c5df974
+
+    `FS` for the file store, `DIR` for a key namespace with the separator as an
+    argument. Left over, and not part of this: `git_repos.cpp` still parses
+    `git/repositories/<name>/<setting>` by hand, and moving it onto `DIR` needs
+    the slash-versus-colon question settled - the reader wants colons so that a
+    directory of little files actually deploys, which is TODO 252's unfinished
+    half. The original entry follows, for the reasoning.
+
+    A directory interface over RESP. The browser example (DONE 241) was picked
+    as a hard problem to see what was missing, and this is what it found.
+
+    There are three ways to spell a path in barch today and no way to walk one.
+    A configuration setting is `<space>.<setting>`, dotted. A directory imported
+    by LOADKEYS or a checkout is `a:b:file`, colon joined - `key_in` in
+    `function_sync.cpp`. The file store is `fs:m:/a/b/file` with real slashes,
+    because there a path is content rather than a namespace. And DONE 240 added
+    a fourth, `git/repositories/<name>/url`, which is the one that gave the game
+    away: it is read by a range scan splitting on `/`, so the directory of little
+    files it was supposed to be deployed from would import as
+    `git:repositories:<name>:url` and never be seen. The story was file per
+    setting; the code only ever accepted SET.
+
+    The deeper miss is that the listing itself does not exist. `fmapi.luau` in
+    the example lists a folder by ranging over every descendant key and
+    deduplicating the first segment in luau - O(everything below) to show one
+    level, written by hand because there was nothing to call. That is the third
+    time a directory walk has been written in this codebase: `scan_checkout`,
+    `gather`, and now a handler.
+
+    So: a `DIR` family over ordinary keys, with the separator as an argument
+    rather than a convention baked in, defaulting to `:` because that is what
+    the importer already produces:
+
+        DIR LS    <path> [SEP s] [LIMIT n] [AFTER name]
+        DIR COUNT <path> [SEP s]
+        DIR RM    <path> [SEP s]
+        DIR MV    <from> <to> [SEP s]
+        DIR CP    <from> <to> [SEP s]
+
+    `LS` answers one level: each child with its name, whether it is a leaf or has
+    children, and a leaf's size. `AFTER` pages it. Nothing else needs inventing -
+    GET and SET already work on a leaf, because a leaf is just a key.
+
+    Making the separator an argument is what makes this worth having rather than
+    a fourth convention. `DIR LS fs:m:/repo SEP /` lists the file store, which is
+    exactly the listing the example hand wrote. `DIR LS git` lists the
+    repositories. One implementation, both layouts, and no adapter.
+
+    It can be done in O(children) rather than O(descendants), which is the whole
+    point: `LB` already exists (`keys_api.cpp:2366`, an ART lower bound), so a
+    listing seeks to the prefix, takes the first key, derives the child, and then
+    seeks past that child's whole subtree instead of reading it. It needs an
+    ordered space - a hash routed one cannot range at all - and should say so
+    rather than quietly returning nothing.
+
+    What it deliberately is not: there is no directory object, so an empty
+    directory cannot exist and `DIR RM` of a leaf and of a node are the same
+    operation. No metadata, no times - those belong to the fs store, which has
+    them.
+
+    `MV`, `CP` and `RM` are the half that needs care rather than typing, and they
+    are the same problem TODO 253 parked: a subtree spans shards, so atomicity
+    wants the staging `load_fs_directory` already has rather than a loop. Settle
+    that before writing them; `LS` and `COUNT` are read only and can land first.
+
+    Doing this also settles the naming for what has not been built yet - the cron
+    layout in TODO 249 is written with slashes on the same wrong assumption, and
+    should be `cron:jobs:<name>` and `cron:conf:workers` so a directory of files
+    deploys as one.
+
+255. [Done] barch::staged, and three rollbacks deleted [06-09-2026] Nr 242 c5df974
+
+256. A path based file API, and the layout to go under it. The design is in the
+    session that produced DONE 241 and 242; this is the entry it is being built
+    against.
+
+    The layout changes from two key classes to three, so that a file's data is
+    keyed by an id rather than by its path:
+
+        fs:n:<path>      name  -> {id, size, type, version}   the directory entry
+        fs:n:<path>/     a directory: {dir:true}, no id
+        fs:i:<id>        inode -> {size, chunk, chunks, type, version}
+        fs:c:<id>:<n>    one chunk, id and n both fixed width hex
+
+    Three things that buys. A read stops rebuilding a key that carries the whole
+    path, so a file with a 120 byte path stops paying for it on every chunk. The
+    `|` in today's `fs:d:<path>|<n>` stops being a reserved character nothing
+    enforces - no part of a chunk key comes from user text any more, so a file
+    called `a|00000000` cannot reach another file's chunks. And a rename becomes
+    a rewrite of name records only: moving a 1GB directory writes a few hundred
+    bytes and touches no inode and no chunk, which is most of what the file
+    manager's write half was blocked on.
+
+    The cost, and the one invariant to keep: a listing would otherwise need an
+    inode read per entry to show a size, so the name record carries `size`,
+    `type` and `version` as well. The inode is the truth and the name record is
+    a hint refreshed on every commit.
+
+    The interface over it is `barch::fs` - `normalise`, `stat`, `read`, `write`,
+    `mkdir`, `remove`, `list`, and a `file` handle that holds an id rather than a
+    path so `open_id` never walks one. One shot calls are the handle underneath.
+
+    Steps, each landing on its own with the suite as the check:
+
+      0. [Done] `barch::staged` - Nr 242.
+      1. [Done] the id allocator, `src/ids.h` - blocks, and the invalidation any
+         clear of a space needs.
+      2. [Done] `src/fs.h` over the new layout, and the importers onto it.
+      3. [Done] `handle_file` onto it, the second metadata parser deleted.
+         Landed with 2: the layout changed, and with no dual format reader every
+         reader had to move at once. Nr 243.
+      4. [Done] Directory markers, mkdir and rmdir - Nr 244.
+      5. [Done] `barch.fs.*` in luau and the RESP `FS` family - Nr 243 and 245.
+      6. [Done] The file manager write half - Nr 246.
+
+    The old layout is incompatible in both directions and no dual format reader
+    should be attempted: getting that subtly wrong serves half a file. A
+    `fs:layout` marker is written by the new code, and a store holding `fs:m:`
+    keys without one is refused with a message saying to re-import. Every store
+    that exists was made by LOADFS and can be remade by re-running it.
+
+257. [Done] HTTP STOP left the port open [06-09-2026] Nr 248 c5df974

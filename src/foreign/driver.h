@@ -431,6 +431,12 @@ struct http_route {
      * `fs:m:/assets/logo.png`. Served in C++ without entering luau - see TODO 235.
      */
     std::string root;
+    /**
+     * what a files route serves when the url names a directory - "index.html",
+     * typically. Empty means a directory is a 404, which is what a files route did
+     * before there was an entry point to land on. See TODO 253.
+     */
+    std::string index;
     bool has_transport{false};
     bool has_route{false};
 };

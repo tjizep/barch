@@ -37,7 +37,7 @@ jobs:
           # -j8 was no faster than -j4 and failed a different test each
           # run. Tests isolate themselves into <build>/t/<name> and take
           # their port from ctest, so parallel is safe - see DONE 197-199.
-          ( cd build ; ctest -j 2 --output-on-failure )
+          ( cd build ; ctest --output-on-failure )
       - name: Log in to Docker Hub
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
         with:

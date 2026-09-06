@@ -1,4 +1,5 @@
 #include "driver.h"
+#include "../fs.h"
 #include "../fs_api.h"
 #include "../function_api.h"
 #include "pool.h"
@@ -1637,6 +1638,188 @@ static int current_space_handle(lua_State* L) {
     return push_space_handle(L, st, st->store);
 }
 
+/*
+ * barch.fs - the file store as paths. See fs.h and TODO 256.
+ *
+ * Reads go through the same `store_access` the rest of the script uses, so a user
+ * with no rights in the space gets nothing. A write checks `may_write` here and then
+ * uses the space directly, because `fs::batch` needs the shards to stage a commit and
+ * a store_access does not carry them - the check above is what keeps that honest, and
+ * it is the same shape `store_of` uses one layer down.
+ */
+static const store_access* fs_store(lua_State* L, const char* what, bool writing) {
+    space_state* st = state_of(L);
+    if (!st || !st->store)
+        luaL_error(L, "FUNCTION barch.fs.%s is not available here", what);
+    if (writing ? !st->store->may_write : !st->store->may_read)
+        luaL_error(L, "FUNCTION not authorized to %s here", writing ? "write" : "read");
+    return st->store;
+}
+
+static barch::key_space_ptr fs_space(lua_State* L, const char* what) {
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    if (!rc)
+        luaL_error(L, "FUNCTION barch.fs.%s needs a running call", what);
+    return barch::get_keyspace(rc->running);
+}
+
+static void push_fs_entry(lua_State* L, const barch::fs::entry& e) {
+    lua_newtable(L);
+    lua_pushlstring(L, e.name.data(), e.name.size());
+    lua_setfield(L, -2, "name");
+    lua_pushlstring(L, e.path.data(), e.path.size());
+    lua_setfield(L, -2, "path");
+    lua_pushboolean(L, e.dir);
+    lua_setfield(L, -2, "dir");
+    if (e.dir)
+        return;
+    lua_pushnumber(L, (double) e.size);
+    lua_setfield(L, -2, "size");
+    lua_pushnumber(L, (double) e.chunks);
+    lua_setfield(L, -2, "chunks");
+    lua_pushnumber(L, (double) e.version);
+    lua_setfield(L, -2, "version");
+    lua_pushlstring(L, e.type.data(), e.type.size());
+    lua_setfield(L, -2, "type");
+}
+
+static int fs_put(lua_State* L) {
+    size_t pn = 0, bn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    const char* body = luaL_checklstring(L, 2, &bn);
+    std::string type;
+    if (lua_isstring(L, 3)) {
+        size_t tn = 0;
+        const char* t = lua_tolstring(L, 3, &tn);
+        type.assign(t, tn);
+    }
+    size_t chunk = lua_isnumber(L, 4) ? (size_t) lua_tonumber(L, 4) : 0;
+    (void) fs_store(L, "put", true);
+    auto space = fs_space(L, "put");
+    barch::fs::batch b(space);
+    b.write(std::string(path, pn), std::string(body, bn), type, chunk);
+    std::string err;
+    if (!b.commit(err))
+        luaL_error(L, "FUNCTION barch.fs.put %s", err.c_str());
+    // the chunk count, which is what a caller sizing a write wants to know. It is
+    // the inode that has it, so this is stat_full rather than stat
+    barch::fs::entry e;
+    const auto* acc = state_of(L)->store;
+    lua_pushnumber(L, (double) (barch::fs::stat_full(*acc, std::string(path, pn), e) ? e.chunks : 0));
+    return 1;
+}
+
+static int fs_get(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    const auto* acc = fs_store(L, "get", false);
+    std::string body;
+    barch::fs::entry meta;
+    if (!barch::fs::read(*acc, std::string(path, pn), body, meta)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, body.data(), body.size());
+    return 1;
+}
+
+static int fs_stat(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    const auto* acc = fs_store(L, "stat", false);
+    barch::fs::entry e;
+    if (!barch::fs::stat_full(*acc, std::string(path, pn), e)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    push_fs_entry(L, e);
+    return 1;
+}
+
+static int fs_list(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    std::string after;
+    if (lua_isstring(L, 2)) {
+        size_t an = 0;
+        const char* a = lua_tolstring(L, 2, &an);
+        after.assign(a, an);
+    }
+    size_t limit = lua_isnumber(L, 3) ? (size_t) lua_tonumber(L, 3) : 0;
+    const auto* acc = fs_store(L, "list", false);
+    std::vector<barch::fs::entry> got;
+    barch::fs::list(*acc, std::string(path, pn), got, after, limit);
+    lua_createtable(L, (int) got.size(), 0);
+    int at = 1;
+    for (const auto& e : got) {
+        push_fs_entry(L, e);
+        lua_rawseti(L, -2, at++);
+    }
+    return 1;
+}
+
+static int fs_move(lua_State* L, bool copying) {
+    size_t fn = 0, tn = 0;
+    const char* from = luaL_checklstring(L, 1, &fn);
+    const char* to = luaL_checklstring(L, 2, &tn);
+    (void) fs_store(L, copying ? "copy" : "rename", true);
+    auto space = fs_space(L, copying ? "copy" : "rename");
+    std::string err;
+    bool ok = copying ? barch::fs::copy(space, std::string(from, fn), std::string(to, tn), err)
+                      : barch::fs::rename(space, std::string(from, fn), std::string(to, tn), err);
+    if (!ok) {
+        // "exists", "no such file", "into itself" are answers a caller can act on
+        lua_pushboolean(L, false);
+        lua_pushlstring(L, err.data(), err.size());
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int fs_rename(lua_State* L) { return fs_move(L, false); }
+static int fs_copy(lua_State* L)   { return fs_move(L, true); }
+
+static int fs_mkdir(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    (void) fs_store(L, "mkdir", true);
+    auto space = fs_space(L, "mkdir");
+    std::string err;
+    if (!barch::fs::mkdir(space, std::string(path, pn), err))
+        luaL_error(L, "FUNCTION barch.fs.mkdir %s", err.c_str());
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int fs_rmdir(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    bool recursive = lua_isboolean(L, 2) && lua_toboolean(L, 2);
+    (void) fs_store(L, "rmdir", true);
+    auto space = fs_space(L, "rmdir");
+    std::string err;
+    if (!barch::fs::rmdir(space, std::string(path, pn), recursive, err)) {
+        // "not empty" and "no such directory" are answers, not faults: a script
+        // asking to remove a directory can reasonably be told no
+        lua_pushboolean(L, false);
+        lua_pushlstring(L, err.data(), err.size());
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int fs_remove(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    (void) fs_store(L, "remove", true);
+    auto space = fs_space(L, "remove");
+    std::string err;
+    lua_pushboolean(L, barch::fs::erase(space, std::string(path, pn), err));
+    return 1;
+}
+
 static int barch_auth(lua_State* L) {
     auto* id = barch::functions::http_ident_tls();
     if (!id)
@@ -2032,6 +2215,29 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "running");
     lua_pushcfunction(L, barch_auth, "auth");
     lua_setfield(L, -2, "auth");
+
+    // barch.fs - the file store as paths rather than as keys, TODO 256
+    lua_newtable(L);
+    lua_pushcfunction(L, fs_put, "put");
+    lua_setfield(L, -2, "put");
+    lua_pushcfunction(L, fs_get, "get");
+    lua_setfield(L, -2, "get");
+    lua_pushcfunction(L, fs_stat, "stat");
+    lua_setfield(L, -2, "stat");
+    lua_pushcfunction(L, fs_list, "list");
+    lua_setfield(L, -2, "list");
+    lua_pushcfunction(L, fs_remove, "remove");
+    lua_setfield(L, -2, "remove");
+    lua_pushcfunction(L, fs_mkdir, "mkdir");
+    lua_setfield(L, -2, "mkdir");
+    lua_pushcfunction(L, fs_rmdir, "rmdir");
+    lua_setfield(L, -2, "rmdir");
+    lua_pushcfunction(L, fs_rename, "rename");
+    lua_setfield(L, -2, "rename");
+    lua_pushcfunction(L, fs_copy, "copy");
+    lua_setfield(L, -2, "copy");
+    lua_setreadonly(L, -1, true);
+    lua_setfield(L, -2, "fs");
     lua_pushcfunction(L, barch_user, "user");
     lua_setfield(L, -2, "user");
 

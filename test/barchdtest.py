@@ -142,15 +142,16 @@ try:
         r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=10)
         # the default space got neither
         assert r.execute_command("GET", "sub:data.txt") is None
-        assert r.execute_command("GET", "fs:m:/files/sub/data.txt") is None
+        assert r.execute_command("GET", "fs:n:/files/sub/data.txt") is None
 
         r.execute_command("USE", "site")
         assert r.execute_command("GET", "sub:data.txt") == b"a value"
         assert r.execute_command("greeting") == b"hi from a loaded function"
 
         r.execute_command("USE", "media")
-        assert r.execute_command("GET", "fs:m:/files/sub/data.txt") is not None
-        assert r.execute_command("GET", "fs:d:/files/sub/data.txt|00000000") == b"a value"
+        # through the file API rather than the keys behind it - fs.h owns the layout
+        r.execute_command("SETF", "fsget", "function call(p) return barch.fs.get(p) end")
+        assert r.execute_command("fsget", "/files/sub/data.txt") == b"a value"
     finally:
         stop(proc)
 

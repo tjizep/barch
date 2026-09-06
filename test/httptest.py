@@ -825,6 +825,34 @@ try:
 
     assert r.execute_command("HTTP", "STOP") == b"OK"
     assert r.execute_command("HTTP", "STATUS") == b"stopped"
+
+    # --- STOP really stops, and START works again - TODO 257 ---------------
+    # a stopped server used to leave its socket open: connections were accepted
+    # and never answered, and the next START saw the port open, believed it had
+    # come up, and stored a server whose own bind had failed
+    print("STOP closes the port, and START comes back up", flush=True)
+    import socket as _socket
+    try:
+        _s = _socket.create_connection(("127.0.0.1", HTTP_PORT), timeout=2)
+        _s.close()
+        raise AssertionError("the port is still accepting after HTTP STOP")
+    except (ConnectionRefusedError, OSError):
+        pass
+
+    assert r.execute_command("HTTP", "START", "HTTPCONF", str(HTTP_PORT), "127.0.0.1")
+    assert r.execute_command("HTTP", "STATUS") != b"stopped"
+    assert http_call("GET", "/page")[0] == 200
+
+    # a route that gains a verb between starts is picked up: the rules Crow knows
+    # are registered at START, so a slot reload alone would not do it
+    r.execute_command("SETF", "page", PAGE.replace(
+        "methods = {GET = getpage}", "methods = {GET = getpage, POST = getpage}"))
+    assert http_call("POST", "/page", b"")[0] == 405, "a new verb before a restart"
+    r.execute_command("HTTP", "STOP")
+    r.execute_command("HTTP", "START", "HTTPCONF", str(HTTP_PORT), "127.0.0.1")
+    assert http_call("POST", "/page", b"")[0] == 200, "a new verb after a restart"
+    r.execute_command("HTTP", "STOP")
+
     print("complete http luau test")
 finally:
     try:

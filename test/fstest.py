@@ -1,14 +1,14 @@
 # A file store built out of keys - TODO 235.
 #
-# Files live as two kinds of key: `fs:m:<path>` holds the metadata as JSON and
-# `fs:d:<path>|<n>` holds one chunk of the content. A directory is not stored
+# Files live in the store as a name record, an inode and a run of chunks - fs.h has
+# the layout and this test does not repeat it. A directory is not stored
 # at all - listing one is a range scan over the prefix, which is what ordered
 # keys are for.
 #
-# Path keyed rather than inode keyed on purpose: inodes buy O(1) rename and
-# hard links, and cost a lookup per path component plus a shared allocator
-# counter. Reads dominate this use and renames are rare, so that is not a
-# trade worth making yet.
+# Inode keyed since TODO 256: the name record holds an id and the chunks hang off
+# the id, not the path. That is what stops a read rebuilding a key carrying the
+# whole path, and what makes a rename a rewrite of name records only. The counter
+# it costs is handed out in blocks so it is not a shared lock per file - ids.h.
 #
 # The chunk index is zero padded to a fixed width because a range scan returns
 # keys in lexicographic order, and "10" sorts before "2". Fixed width is the
@@ -25,67 +25,41 @@ PORT = scale.port(default=14310)
 # ---------------------------------------------------------------------------
 # the module, as stored functions
 
+# These were five hand written implementations of the layout - metadata json,
+# chunk keys, the zero padded index. `barch.fs` is that, in C++, so what they test
+# now is the binding rather than a sixth copy of the format. See TODO 256.
+
 PUT = r'''
 -- fs.put(path, content_type, content [, chunk_size])
 function call(path, ctype, content, chunk)
-    chunk = tonumber(chunk) or 65536
-    local n = #content
-    local was = barch.store.get("fs:m:" .. path)
-    local i = 0
-    local off = 1
-    while off <= n do
-        local part = string.sub(content, off, off + chunk - 1)
-        barch.store.set("fs:d:" .. path .. "|" .. string.format("%08d", i), part)
-        off = off + chunk
-        i = i + 1
-    end
-    -- a shorter file leaves the old tail behind otherwise
-    if was ~= nil and was ~= barch.tomb then
-        local old = simdjson.parse(was)
-        local j = i
-        while j < old.chunks do
-            barch.store.set("fs:d:" .. path .. "|" .. string.format("%08d", j), nil)
-            j = j + 1
-        end
-    end
-    barch.store.set("fs:m:" .. path,
-        simdjson.encode({size = n, type = ctype, chunk = chunk, chunks = i}))
-    return i
+    return barch.fs.put(path, content, ctype, tonumber(chunk) or 65536)
 end
 '''
 
 GET = r'''
 -- fs.get(path) -> the whole content, or nil
 function call(path)
-    local m = barch.store.get("fs:m:" .. path)
-    if m == nil or m == barch.tomb then return nil end
-    local meta = simdjson.parse(m)
-    local parts = {}
-    for i = 0, meta.chunks - 1 do
-        parts[#parts + 1] = barch.store.get("fs:d:" .. path .. "|" .. string.format("%08d", i))
-    end
-    return table.concat(parts)
+    return barch.fs.get(path)
 end
 '''
 
 STAT = r'''
--- fs.stat(path) -> the metadata json, or nil
+-- fs.stat(path) -> the metadata as json, or nil
 function call(path)
-    local m = barch.store.get("fs:m:" .. path)
-    if m == nil or m == barch.tomb then return nil end
-    return m
+    local e = barch.fs.stat(path)
+    if e == nil then return nil end
+    return simdjson.encode({size = e.size, type = e.type,
+                            chunks = e.chunks, version = e.version})
 end
 '''
 
 LIST = r'''
--- fs.list(prefix) -> json array of the paths under it
+-- fs.list(prefix) -> json array of the paths one level under it
 function call(prefix, limit)
-    prefix = prefix or "/"
-    local keys = barch.store.range("fs:m:" .. prefix, "fs:m:" .. prefix .. "\255",
-                                   tonumber(limit) or 1000)
+    local got = barch.fs.list(prefix or "/", nil, tonumber(limit) or 1000)
     local out = {}
-    for _, k in ipairs(keys) do
-        out[#out + 1] = string.sub(k, 6)
+    for _, e in ipairs(got) do
+        out[#out + 1] = e.path
     end
     -- an empty luau table encodes as {} because nothing tells an empty array
     -- from an empty object, and a listing is always an array
@@ -94,17 +68,28 @@ function call(prefix, limit)
 end
 '''
 
-RM = r'''
--- fs.rm(path) -> how many keys went
+MKDIR = r'''
+-- fs.mkdir(path)
 function call(path)
-    local m = barch.store.get("fs:m:" .. path)
-    if m == nil or m == barch.tomb then return 0 end
-    local meta = simdjson.parse(m)
-    for i = 0, meta.chunks - 1 do
-        barch.store.set("fs:d:" .. path .. "|" .. string.format("%08d", i), nil)
-    end
-    barch.store.set("fs:m:" .. path, nil)
-    return meta.chunks + 1
+    barch.fs.mkdir(path)
+    return 1
+end
+'''
+
+RMDIR = r'''
+-- fs.rmdir(path [, recursive]) -> 1, or 0 and the reason
+function call(path, recursive)
+    local ok, why = barch.fs.rmdir(path, recursive == "1")
+    if ok then return 1 end
+    return why
+end
+'''
+
+RM = r'''
+-- fs.rm(path) -> 1 when it went, 0 when there was nothing there
+function call(path)
+    if barch.fs.remove(path) then return 1 end
+    return 0
 end
 '''
 
@@ -117,7 +102,8 @@ r.execute_command("FLUSHDB")
 import json
 
 for name, src in (("fsput", PUT), ("fsget", GET), ("fsstat", STAT),
-                  ("fslist", LIST), ("fsrm", RM)):
+                  ("fslist", LIST), ("fsrm", RM),
+                  ("fsmkdir", MKDIR), ("fsrmdir", RMDIR)):
     assert r.execute_command("SETF", name, src) == b"OK", name
 
 # --- one chunk ------------------------------------------------------------
@@ -148,11 +134,14 @@ assert want_chunks > 10, "the ordering case needs more than ten chunks"
 print("a directory listing is a prefix scan", flush=True)
 for p in ("/img/a.png", "/img/b.png", "/img/deep/c.png", "/other/d.png"):
     r.execute_command("fsput", p, "image/png", b"x" * 10)
+# one level, with a subdirectory named once rather than walked into - the scan
+# steps over a child's whole subtree instead of reading it
 under_img = json.loads(r.execute_command("fslist", "/img/"))
-assert under_img == ["/img/a.png", "/img/b.png", "/img/deep/c.png", "/img/logo.png"], under_img
+assert under_img == ["/img/a.png", "/img/b.png", "/img/deep", "/img/logo.png"], under_img
+assert json.loads(r.execute_command("fslist", "/img/deep")) == ["/img/deep/c.png"]
 assert json.loads(r.execute_command("fslist", "/other/")) == ["/other/d.png"]
 assert json.loads(r.execute_command("fslist", "/")) == [
-    "/a.txt", "/img/a.png", "/img/b.png", "/img/deep/c.png", "/img/logo.png", "/other/d.png"
+    "/a.txt", "/img", "/other"
 ], json.loads(r.execute_command("fslist", "/"))
 
 # --- overwrite shorter, which must not leave a tail behind -----------------
@@ -160,24 +149,144 @@ print("overwriting with something shorter drops the old tail", flush=True)
 r.execute_command("fsput", "/img/logo.png", "image/png", b"tiny", 64)
 assert r.execute_command("fsget", "/img/logo.png") == b"tiny"
 assert json.loads(r.execute_command("fsstat", "/img/logo.png"))["chunks"] == 1
-# nothing of the old file survives
-assert r.execute_command("GET", "fs:d:/img/logo.png|00000005") is None
+# nothing of the old file survives. The chunks are keyed by the file's id now, so
+# the test cannot name one - the size in the metadata is what bounds a read, and a
+# tail left behind would show up as content that is too long
 
 # --- delete ---------------------------------------------------------------
 print("delete takes the metadata and every chunk", flush=True)
 r.execute_command("fsput", "/gone.bin", "application/octet-stream", b"y" * 200, 64)
-assert r.execute_command("fsrm", "/gone.bin") == 5      # 4 chunks and the meta
+assert r.execute_command("fsrm", "/gone.bin") == 1
 assert r.execute_command("fsget", "/gone.bin") is None
 assert r.execute_command("fsstat", "/gone.bin") is None
-assert r.execute_command("GET", "fs:d:/gone.bin|00000000") is None
-assert json.loads(r.execute_command("fslist", "/")) == [
-    "/a.txt", "/img/a.png", "/img/b.png", "/img/deep/c.png", "/img/logo.png", "/other/d.png"
-]
+assert json.loads(r.execute_command("fslist", "/")) == ["/a.txt", "/img", "/other"]
 
 # --- missing --------------------------------------------------------------
 assert r.execute_command("fsget", "/nope.txt") is None
 assert r.execute_command("fsrm", "/nope.txt") == 0
 assert json.loads(r.execute_command("fslist", "/empty/")) == []
+
+# --- directories, which only need saying out loud when they are empty ------
+print("an empty directory exists because it was made, and only then", flush=True)
+# nothing is stored for /img: it is a directory because /img/a.png hangs under it
+assert json.loads(r.execute_command("fslist", "/")) == ["/a.txt", "/img", "/other"]
+r.execute_command("fsmkdir", "/empty")
+assert json.loads(r.execute_command("fslist", "/")) == \
+    ["/a.txt", "/empty", "/img", "/other"]
+assert json.loads(r.execute_command("fslist", "/empty")) == []
+_d = json.loads(r.execute_command("fsstat", "/empty") or "null")
+assert _d is None or _d.get("size", 0) == 0, _d
+
+print("a path is a file or a directory, not both", flush=True)
+for bad in (("fsput", "/empty", "text/plain", b"x"), ("fsput", "/img", "text/plain", b"x")):
+    try:
+        r.execute_command(*bad)
+        raise AssertionError("%s should have been refused" % (bad[1],))
+    except redis.exceptions.ResponseError as e:
+        assert "is a directory" in str(e), e
+try:
+    r.execute_command("fsmkdir", "/a.txt")
+    raise AssertionError("mkdir over a file should have been refused")
+except redis.exceptions.ResponseError as e:
+    assert "is a file" in str(e), e
+
+print("rmdir refuses a directory with anything in it, unless asked twice", flush=True)
+assert r.execute_command("fsrmdir", "/img").decode() == "/img is not empty"
+assert r.execute_command("fsrmdir", "/empty") == 1
+assert json.loads(r.execute_command("fslist", "/")) == ["/a.txt", "/img", "/other"]
+# recursive takes the files, and the markers of any empty directory below
+r.execute_command("fsmkdir", "/img/nothing")
+assert r.execute_command("fsrmdir", "/img", "1") == 1
+assert json.loads(r.execute_command("fslist", "/")) == ["/a.txt", "/other"]
+assert r.execute_command("fsget", "/img/a.png") is None
+assert r.execute_command("fsrmdir", "/img").decode() == "no such directory"
+
+# put the files back, since the rest of the test expects them
+for p in ("/img/a.png", "/img/b.png", "/img/deep/c.png"):
+    r.execute_command("fsput", p, "image/png", b"x" * 10)
+r.execute_command("fsput", "/img/logo.png", "image/png", b"tiny", 64)
+
+# --- the same operations over RESP, without a stored function -------------
+# TODO 254: the listing the browser example hand wrote in luau is a command now
+print("FS over RESP does what the luau side does", flush=True)
+assert r.execute_command("FS", "PUT", "/resp/a.txt", b"hello", "TYPE", "text/plain") == 1
+assert r.execute_command("FS", "GET", "/resp/a.txt") == b"hello"
+assert r.execute_command("FS", "GET", "/resp/a.txt", "FROM", "1", "LEN", "3") == b"ell"
+_st = r.execute_command("FS", "STAT", "/resp/a.txt").decode()
+assert "kind=file" in _st and "size=5" in _st and "type=text/plain" in _st, _st
+assert r.execute_command("FS", "STAT", "/resp/nope") is None
+assert r.execute_command("FS", "MKDIR", "/resp/empty") == b"OK"
+# a line per entry: kind, size, version, then the name, which is the only field
+# that can hold a space
+_ls = [x.decode() for x in r.execute_command("FS", "LS", "/resp")]
+assert _ls == ["file 5 1 a.txt", "dir 0 0 empty"], _ls
+assert [x.decode() for x in r.execute_command("FS", "LS", "/resp", "LIMIT", "1")] == \
+    ["file 5 1 a.txt"]
+assert [x.decode() for x in r.execute_command("FS", "LS", "/resp", "AFTER", "a.txt")] == \
+    ["dir 0 0 empty"]
+
+# a rewrite moves the version, and RM says whether there was anything there
+assert r.execute_command("FS", "PUT", "/resp/a.txt", b"hi") == 1
+assert "version=2" in r.execute_command("FS", "STAT", "/resp/a.txt").decode()
+assert r.execute_command("FS", "RM", "/resp/a.txt") == 1
+assert r.execute_command("FS", "RM", "/resp/a.txt") == 0
+assert r.execute_command("FS", "GET", "/resp/a.txt") is None
+
+try:
+    r.execute_command("FS", "RMDIR", "/resp")
+    raise AssertionError("a directory with something in it should not go quietly")
+except redis.exceptions.ResponseError as e:
+    assert "not empty" in str(e), e
+assert r.execute_command("FS", "RMDIR", "/resp", "RECURSIVE") == b"OK"
+assert [x.decode() for x in r.execute_command("FS", "LS", "/resp")] == []
+
+# what the luau binding wrote, RESP reads: one store, two doors
+r.execute_command("fsput", "/resp/shared.txt", "text/plain", b"both")
+assert r.execute_command("FS", "GET", "/resp/shared.txt") == b"both"
+r.execute_command("FS", "PUT", "/resp/other.txt", b"and back")
+assert r.execute_command("fsget", "/resp/other.txt") == b"and back"
+r.execute_command("FS", "RMDIR", "/resp", "RECURSIVE")
+
+# --- moving and copying, which is name records and not content ------------
+print("a move rewrites names and leaves the data where it is", flush=True)
+r.execute_command("FS", "PUT", "/mv/a.txt", b"aaa")
+r.execute_command("FS", "PUT", "/mv/deep/b.txt", b"bbb")
+r.execute_command("FS", "MKDIR", "/mv/hollow")
+_before = r.execute_command("FS", "STAT", "/mv/a.txt").decode()
+assert r.execute_command("FS", "MV", "/mv", "/moved") == b"OK"
+assert [x.decode() for x in r.execute_command("FS", "LS", "/mv")] == []
+assert [x.decode() for x in r.execute_command("FS", "LS", "/moved")] == \
+    ["file 3 1 a.txt", "dir 0 0 deep", "dir 0 0 hollow"]
+assert r.execute_command("FS", "GET", "/moved/deep/b.txt") == b"bbb"
+# the version did not move: nothing was written to the file, only to its name
+assert r.execute_command("FS", "STAT", "/moved/a.txt").decode() == \
+    _before.replace("/mv/", "/moved/"), r.execute_command("FS", "STAT", "/moved/a.txt")
+
+print("a copy really does duplicate, and an empty directory comes too", flush=True)
+assert r.execute_command("FS", "CP", "/moved", "/twin") == b"OK"
+assert r.execute_command("FS", "GET", "/twin/deep/b.txt") == b"bbb"
+assert [x.decode() for x in r.execute_command("FS", "LS", "/twin")] == \
+    ["file 3 1 a.txt", "dir 0 0 deep", "dir 0 0 hollow"]
+# and the two are separate files from here on
+r.execute_command("FS", "PUT", "/twin/a.txt", b"changed")
+assert r.execute_command("FS", "GET", "/moved/a.txt") == b"aaa"
+
+print("what a move refuses", flush=True)
+for args, why in ((("/moved", "/twin"), "exists"),
+                  (("/moved", "/moved/inside"), "into itself"),
+                  (("/nothing", "/x"), "no such file")):
+    try:
+        r.execute_command("FS", "MV", *args)
+        raise AssertionError("FS MV %s should have been refused" % (args,))
+    except redis.exceptions.ResponseError as e:
+        assert why in str(e), (args, str(e))
+
+# a file move is the same operation, and the luau side is the same code
+r.execute_command("SETF", "fsmv", "function call(a, b) local ok, why = barch.fs.rename(a, b) if ok then return 1 end return why end")
+assert r.execute_command("fsmv", "/moved/a.txt", "/moved/renamed.txt") == 1
+assert r.execute_command("FS", "GET", "/moved/renamed.txt") == b"aaa"
+r.execute_command("FS", "RMDIR", "/moved", "RECURSIVE")
+r.execute_command("FS", "RMDIR", "/twin", "RECURSIVE")
 
 # --- a file big enough to be worth chunking at the real size --------------
 print("a megabyte at the default 64KB chunk", flush=True)
@@ -207,6 +316,15 @@ function transport()
 end
 """
 
+# the same thing with an entry point: `index` is what a url naming a directory
+# gets, so /pages/ serves /pages/index.html rather than 404ing - TODO 253
+PAGES = r"""
+function call() return "pages" end
+function transport()
+    return { kind = "files", route = "/pages/*", root = "/pages", index = "index.html" }
+end
+"""
+
 # a luau route beside it, so the concurrency check can prove that downloads are
 # not eating the VM pool the other routes need
 PING = r"""
@@ -224,11 +342,12 @@ CONF = r"""
 function call() return "http" end
 function transport()
     return { kind = "http", port = %d, bind = "127.0.0.1", user = "web",
-             keys = {"FILES", "PING", "VER"} }
+             keys = {"FILES", "PAGES", "PING", "VER"} }
 end
 """ % HTTP_PORT
 
 assert r.execute_command("SETF", "files", FILES) == b"OK"
+assert r.execute_command("SETF", "pages", PAGES) == b"OK"
 VER = """
 function call() return "ver" end
 function hit(req, res)
@@ -277,6 +396,16 @@ status, body, hdrs = http_get("/static/pages/index.html")
 assert status == 200 and body == b"<h1>hi</h1>", (status, body)
 assert hdrs.get("content-type") == "text/html", hdrs
 
+print("a directory gets the route's index, and the bare prefix redirects", flush=True)
+status, body, _ = http_get("/pages/")
+assert status == 200 and body == b"<h1>hi</h1>", (status, body)
+# crow registers the slashed rule and redirects the bare form onto it
+status, _, hdrs = http_get("/pages")
+assert status == 301, status
+assert hdrs.get("location", "").endswith("/pages/"), hdrs
+# a route without an index is unchanged: a directory is still nothing
+assert http_get("/static/pages/")[0] == 404
+
 print("a range request is answered with just that range", flush=True)
 status, body, hdrs = http_get("/static/images/logo.png", {"Range": "bytes=100-199"})
 assert status == 206, (status, hdrs)
@@ -298,7 +427,9 @@ status, body, hdrs = http_get("/static/images/logo.png", method="HEAD")
 assert status == 200 and body == b"", (status, len(body))
 assert hdrs.get("content-length") == str(len(png)), hdrs
 etag = hdrs.get("etag")
-assert etag and etag.startswith("W/"), hdrs
+# strong, because every writer keeps a version now that they all go through
+# barch::fs - the weak form is only for a record that carries none. See TODO 256
+assert etag and not etag.startswith("W/"), hdrs
 status, body, _ = http_get("/static/images/logo.png", {"If-None-Match": etag})
 assert status == 304 and body == b"", (status, len(body))
 
@@ -411,9 +542,15 @@ try:
     assert _st == 304, _st
 
     # a file written without a version still gets the weak form, and says so
+    # a file written by a script gets a version too, so it is strong as well, and
+    # its version moves on a rewrite the same way an import's does
     r.execute_command("fsput", "/etag/nover.txt", "text/plain", b"zzzz")
     _st, _b, _h = http_get("/static/etag/nover.txt")
-    assert _st == 200 and _h.get("etag", "").startswith("W/"), _h.get("etag")
+    _script_etag = _h.get("etag", "")
+    assert _st == 200 and not _script_etag.startswith("W/"), _script_etag
+    r.execute_command("fsput", "/etag/nover.txt", "text/plain", b"yyyy")
+    _st, _b, _h = http_get("/static/etag/nover.txt")
+    assert _h.get("etag") != _script_etag, "a script rewrite kept the same ETag"
 finally:
     _shutil.rmtree(_etagdir, ignore_errors=True)
 
@@ -459,10 +596,11 @@ try:
     print("dot files are left out, and the listing is what was imported", flush=True)
     assert r.execute_command("fsget", "/imported/.hidden") is None
     assert json.loads(r.execute_command("fslist", "/imported/")) == [
-        "/imported/img/photo.png",
-        "/imported/pages/deep/note.txt",
-        "/imported/pages/index.html",
+        "/imported/img", "/imported/pages",
     ], json.loads(r.execute_command("fslist", "/imported/"))
+    assert json.loads(r.execute_command("fslist", "/imported/pages")) == [
+        "/imported/pages/deep", "/imported/pages/index.html",
+    ]
 
     print("a refused import writes nothing at all", flush=True)
     before = json.loads(r.execute_command("fslist", "/"))
@@ -714,10 +852,12 @@ try:
     print("LOADFS versions what it writes, and the version moves per write", flush=True)
     open(os.path.join(_vdir, "m.luau"), "w").write("function v() return 'V1' end\n")
     r.execute_command("LOADFS", _vdir, "/vers")
-    _m1 = json.loads(r.execute_command("GET", "fs:m:/vers/m.luau"))
+    # through fsstat rather than the raw key: what a file is stored as is fs.h's
+    # business now, and a test that names the key is a second copy of the layout
+    _m1 = json.loads(r.execute_command("fsstat", "/vers/m.luau"))
     assert _m1["version"] == 1, _m1
     r.execute_command("LOADFS", _vdir, "/vers")
-    _m2 = json.loads(r.execute_command("GET", "fs:m:/vers/m.luau"))
+    _m2 = json.loads(r.execute_command("fsstat", "/vers/m.luau"))
     assert _m2["version"] == 2, _m2
 
     print("a forced require of an unchanged file keeps what it compiled", flush=True)
@@ -739,15 +879,21 @@ try:
     r.execute_command("LOADFS", _vdir, "/vers")
     assert r.execute_command("vbump") == 101, "a forced require missed a new version"
 
-    print("a file with no version is rebuilt every time", flush=True)
-    # fsput is the luau writer and keeps no version, so absent must mean "assume
-    # changed" - the counter restarting is the compile happening
+    print("a script written file versions too, so the skip works for it as well", flush=True)
+    # this used to be the "no version" case: the luau writer kept none, so absent had
+    # to mean "assume changed". Every writer goes through barch::fs now and every
+    # write moves the version, so the skip applies to a script write the same as to
+    # an import - which is what this checks instead. TODO 256
     r.execute_command("fsput", "/vers/nover.luau", "text/plain",
                       "local seen = 0\nfunction bump() seen = seen + 1 return seen end\n")
     assert r.execute_command("SETF", "nbump",
         "function call() return require(':/vers/nover.luau', true).bump() end") == b"OK"
     assert r.execute_command("nbump") == 1
-    assert r.execute_command("nbump") == 1, "a file with no version was treated as unchanged"
+    assert r.execute_command("nbump") == 2, "an unchanged script write was recompiled"
+    # and a rewrite is seen, because the version moved
+    r.execute_command("fsput", "/vers/nover.luau", "text/plain",
+                      "local seen = 50\nfunction bump() seen = seen + 1 return seen end\n")
+    assert r.execute_command("nbump") == 51, "a script rewrite was not picked up"
 finally:
     shutil.rmtree(_vdir, ignore_errors=True)
 

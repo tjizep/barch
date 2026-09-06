@@ -46,6 +46,15 @@ namespace barch {
          * goes into this one space.
          */
         std::string space;
+        /**
+         * what an import means: "keys" is the historical mapping - `.luau` becomes
+         * a stored function and everything else a key - and "fs" puts the checkout
+         * in the chunked file store instead, which is what a repository of images,
+         * fonts or a built web application wants. See TODO 253.
+         */
+        std::string as{"keys"};
+        /** where an `as = fs` checkout hangs, the way LOADFS takes a root */
+        std::string fs_root{"/"};
         bool enabled{true};
         /**
          * true keeps start-up off the network: the first fetch happens on the sync

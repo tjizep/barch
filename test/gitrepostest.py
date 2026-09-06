@@ -83,6 +83,23 @@ def in_space(space, *cmd):
         c.close()
 
 
+FSGET = "function call(p) return barch.fs.get(p) end"
+FSSTAT = "function call(p) local e = barch.fs.stat(p) if e == nil then return nil end return tostring(e.size) end"
+
+
+def fs_in(space, fn, path):
+    """the file store as a file store: what a stored file is belongs to fs.h, and a
+    test that names its keys is another copy of the layout"""
+    c = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+    try:
+        c.execute_command("USE", space)
+        c.execute_command("SETF", "fsget", FSGET)
+        c.execute_command("SETF", "fsstat", FSSTAT)
+        return c.execute_command(fn, path)
+    finally:
+        c.close()
+
+
 def status():
     return r.execute_command("FUNCTIONS", "STATUS").decode()
 
@@ -157,6 +174,37 @@ try:
     # the other repository is untouched by its neighbour being wrong
     assert r.execute_command("FUNCTIONS", "SYNC", "site") == b"OK"
     unconf("nxt", "ssh_key")
+
+    print("a repository can land in the file store instead of in keys", flush=True)
+    # a directory of things that are not key values - which is the point of as=fs
+    write("assets/logo.svg", "<svg/>\n")
+    write("assets/app.js", "console.log(1)\n")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-m", "assets")
+    conf("files", "url", origin)
+    conf("files", "space", "media")
+    conf("files", "pull", "on")
+    conf("files", "as", "fs")
+    conf("files", "fs_root", "/repo")
+    assert r.execute_command("FUNCTIONS", "SYNC", "files") == b"OK"
+    assert "as=fs" in status() and "root=/repo" in status(), status()
+    assert fs_in("media", "fsstat", "/repo/assets/logo.svg") is not None, \
+        "the file store has no metadata for the imported file"
+    assert fs_in("media", "fsget", "/repo/assets/logo.svg") == b"<svg/>\n"
+    # a .luau in an fs repository stays a file: it is content, not a function
+    assert fs_in("media", "fsstat", "/repo/ver.luau") is not None
+
+    print("a file deleted upstream leaves the store", flush=True)
+    os.remove(os.path.join(origin, "assets", "app.js"))
+    git(origin, "add", "-A")
+    git(origin, "commit", "-m", "drop app.js")
+    assert r.execute_command("FUNCTIONS", "SYNC", "files") == b"OK"
+    assert fs_in("media", "fsstat", "/repo/assets/app.js") is None
+    assert fs_in("media", "fsget", "/repo/assets/app.js") is None
+    assert fs_in("media", "fsstat", "/repo/assets/logo.svg") is not None
+
+    for setting in ("url", "space", "pull", "as", "fs_root"):
+        unconf("files", setting)
 
     print("the old settings still describe one repository called default", flush=True)
     for name in ("site", "nxt"):

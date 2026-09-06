@@ -2,11 +2,11 @@
 
 #include "configuration.h"
 #include "git_repos.h"
+#include "fs_api.h"
+#include "staged.h"
 #include "function_api.h"
 #include "key_space.h"
 #include "lzr_log.h"
-#include "shard.h"
-#include "sharded_store.h"
 
 #include <algorithm>
 #include <atomic>
@@ -504,16 +504,6 @@ bool set_plain(const barch::key_space_ptr& space, const std::string& key,
     return acc.set(key, value, err);
 }
 
-bool rem_plain(const barch::key_space_ptr& space, const std::string& key) {
-    auto acc = barch::functions::store_for_owner(space);
-    return acc.remove(key);
-}
-
-bool get_plain(const barch::key_space_ptr& space, const std::string& key, std::string& value) {
-    auto acc = barch::functions::store_for_owner(space);
-    return acc.get(key, value) == barch::foreign::store_access::read_state::present;
-}
-
 bool fill_temp(const std::vector<const checkout_file*>& luau,
                const std::vector<const checkout_file*>& data,
                barch::key_space_ptr& tmp, std::string& err) {
@@ -550,135 +540,56 @@ bool fill_temp(const std::vector<const checkout_file*>& luau,
     return true;
 }
 
-bool install_all(const barch::key_space_ptr& dest,
-                 const heap::string_map<std::string>& sources,
-                 const heap::vector<std::string>& want,
-                 std::string& err) {
-    std::vector<const std::string*> left;
-    left.reserve(want.size());
-    for (const auto& n : want)
-        left.push_back(&n);
-    while (!left.empty()) {
-        std::vector<const std::string*> next;
-        std::string last;
-        size_t progress = 0;
-        for (auto* n : left) {
-            auto it = sources.find(*n);
-            std::string e;
-            if (it != sources.end() && barch::functions::install(dest, *n, it->second, e)) {
-                ++progress;
-            } else {
-                last = e.empty() ? ("missing source for " + *n) : e;
-                next.push_back(n);
-            }
-        }
-        if (progress == 0) {
-            err = last.empty() ? "function sync could not apply" : last;
-            return false;
-        }
-        left.swap(next);
-    }
-    return true;
-}
-
-void restore_functions(const barch::key_space_ptr& dest,
-                       const heap::vector<std::string>& previous,
-                       const heap::string_map<std::string>& previous_src) {
-    for (const auto& n : barch::functions::names(dest))
-        barch::functions::remove(dest, n);
-    std::string ignored;
-    (void) install_all(dest, previous_src, previous, ignored);
-}
-
-struct data_snap {
-    std::string name;
-    std::string value;
-    bool had{false};
-};
-
-void restore_data(const barch::key_space_ptr& dest, const std::vector<data_snap>& snap) {
-    std::string ignored;
-    for (const auto& s : snap) {
-        if (s.had)
-            (void) set_plain(dest, s.name, s.value, ignored);
-        else
-            (void) rem_plain(dest, s.name);
-    }
-}
-
+/**
+ * Swap a space's functions and keys for what the checkout holds.
+ *
+ * One staged write - TODO 255 - which is where the snapshot, the apply, the putting
+ * back and the retry that installs a module before the function requiring it all
+ * live now. This is left with the part that is actually about a checkout: what
+ * should be there, and what was there and no longer should be.
+ *
+ * `managed_data` is why the keys half is not simply "everything that is there now".
+ * A key someone SET by hand has no checkout to be missing from, so only keys a
+ * previous sync wrote are candidates for removal. Functions are different - the
+ * space's whole function list is the checkout's business.
+ */
 bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& dest,
                 const std::vector<const checkout_file*>& data, const std::string& space,
                 std::string& err) {
+    barch::staged batch(dest);
+
     auto want = barch::functions::names(tmp);
-    heap::string_map<std::string> sources;
+    heap::string_set want_fn;
     for (const auto& n : want) {
         std::string src;
         if (!barch::functions::source_in(tmp, n, src)) {
             err = "temp function " + n + " had no source";
             return false;
         }
-        sources[n] = std::move(src);
+        want_fn.insert(n);
+        batch.set_function(n, src);
     }
-    auto had = barch::functions::names(dest);
-    heap::string_map<std::string> had_src;
-    for (const auto& n : had) {
-        std::string src;
-        if (barch::functions::source_in(dest, n, src))
-            had_src[n] = std::move(src);
+    for (const auto& n : barch::functions::names(dest)) {
+        if (want_fn.find(n) == want_fn.end())
+            batch.remove_function(n);
     }
 
     heap::string_set want_keys;
-    for (auto* f : data)
+    for (auto* f : data) {
         want_keys.insert(f->name);
-    heap::string_set prev_keys;
+        batch.set(f->name, f->source);
+    }
     auto mit = managed_data.find(space);
-    if (mit != managed_data.end())
-        prev_keys = mit->second;
-    std::vector<data_snap> snap;
-    heap::string_set touch = want_keys;
-    for (const auto& k : prev_keys)
-        touch.insert(k);
-    for (const auto& k : touch) {
-        data_snap s;
-        s.name = k;
-        s.had = get_plain(dest, k, s.value);
-        snap.push_back(std::move(s));
+    if (mit != managed_data.end()) {
+        for (const auto& k : mit->second) {
+            if (want_keys.find(k) == want_keys.end())
+                batch.remove(k);
+        }
     }
 
-    const bool one_shard = dest->get_shard_count() == 1;
-    barch::sharded_store store(dest);
-    if (one_shard)
-        store.each_shard([](const barch::shard_ptr& t) { t->begin(); });
-    auto undo = [&] {
-        if (one_shard)
-            store.each_shard([](const barch::shard_ptr& t) { t->rollback(); });
-        else {
-            restore_functions(dest, had, had_src);
-            restore_data(dest, snap);
-        }
-    };
-    if (!install_all(dest, sources, want, err)) {
-        undo();
+    if (!batch.commit(err))
         return false;
-    }
-    for (auto* f : data) {
-        std::string e;
-        if (!set_plain(dest, f->name, f->source, e)) {
-            err = f->path + ": " + (e.empty() ? "could not apply key" : e);
-            undo();
-            return false;
-        }
-    }
-    for (const auto& n : had) {
-        if (sources.find(n) == sources.end())
-            barch::functions::remove(dest, n);
-    }
-    for (const auto& k : prev_keys) {
-        if (want_keys.find(k) == want_keys.end())
-            rem_plain(dest, k);
-    }
-    if (one_shard)
-        store.each_shard([](const barch::shard_ptr& t) { t->commit(); });
+
     if (want_keys.empty())
         managed_data.erase(space);
     else
@@ -686,17 +597,6 @@ bool apply_dest(const barch::key_space_ptr& tmp, const barch::key_space_ptr& des
     return true;
 }
 
-/**
- * Apply one repository's checkout.
- *
- * A repository either maps each top level folder onto the key space of that name,
- * which is what the single `functions_dir` always did, or declares one `space` and
- * puts everything there. The second form is how the same repository at two branches
- * is configured: two entries with the same url, different checkouts and different
- * spaces. Two of them landing in one space is refused rather than resolved - see
- * TODO 252 - because a sync swaps a space wholesale and the pair would delete each
- * other's work on alternate polls.
- */
 std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
     if (r.dir.empty())
         return "repository " + r.name + " has no checkout directory";
@@ -711,8 +611,38 @@ std::string do_sync_repo(const barch::repo_conf& r, const std::string& pin) {
     if (!is_dir(r.dir))
         return r.dir + " is not a directory";
 
-    std::vector<checkout_file> files;
     std::string err;
+    /*
+     * `as = fs` puts the checkout in the chunked file store rather than turning it
+     * into keys and functions - a repository of images, fonts or a built web
+     * application is not a directory of key values. The import is LOADFS, so it is
+     * the same code path a client gets, and the stale sweep afterwards is what
+     * makes it a *sync*: the checkout is the truth, so a file deleted upstream
+     * leaves the store, the way a deleted .luau is removed. See TODO 253.
+     */
+    if (r.as == "fs") {
+        auto dest = dest_of(r.space);
+        auto owner = managed_by.find(r.space);
+        if (owner != managed_by.end() && owner->second != r.name)
+            return "key space " + (r.space.empty() ? std::string("(default)") : r.space)
+                 + " is owned by repository " + owner->second;
+        std::vector<std::string> reply;
+        std::vector<std::string> imported;
+        auto failed = barch::load_fs_directory(r.dir, r.fs_root, 65536, dest, reply,
+                                               true, &imported);
+        if (!failed.empty())
+            return failed;
+        auto gone = barch::drop_fs_missing(dest, r.fs_root, imported);
+        managed_by[r.space] = r.name;
+        std::string line;
+        for (const auto& part : reply)
+            line += (line.empty() ? "" : " ") + part;
+        barch::log({"function sync", r.name, "imported as files", line,
+                    "removed", (uint64_t) gone});
+        return {};
+    }
+
+    std::vector<checkout_file> files;
     if (!r.space.empty()) {
         if (!scan_tree(r.dir, r.space, {}, files, err))
             return err;
@@ -956,7 +886,10 @@ std::string functions_sync_status() {
           << " state=" << state
           << " dir=" << r.dir
           << " url=" << (r.url.empty() ? "off" : r.url)
-          << " space=" << (r.space.empty() ? "folders" : r.space)
+          << " as=" << r.as
+          << (r.as == "fs" ? " root=" + r.fs_root : std::string())
+          << " space=" << (r.space.empty() ? (r.as == "fs" ? "(default)" : "folders")
+                                           : r.space)
           << " pull=" << (r.pull ? "on" : "off")
           << " branch=" << r.branch
           << " pin=" << (r.commit.empty() ? "off" : r.commit)

@@ -1094,6 +1094,10 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/functionsynctest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        add_test(NAME TestDir
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/dirtest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         add_test(NAME TestGitRepos
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/gitrepostest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1309,7 +1313,7 @@ else()
                 TestBarchPy TestBarchRPC
                 TestRespClientLocal TestRespClientLocalRESP3
                 TestAsyncPipeline TestHybrid
-                TestFunctions TestFunctionSync TestGitRepos TestFetchLuau
+                TestFunctions TestFunctionSync TestGitRepos TestDir TestFetchLuau
                 TestKeysStream TestChaos TestScanGuarantees
                 TestMerge TestSpaceThread TestBpopThread
                 TestCompression TestScan

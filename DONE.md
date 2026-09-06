@@ -11978,3 +11978,389 @@ than at the read. Settings are ordinary keys and anyone can SET one, so validati
 happens where they are read - a repository with a bad setting is disabled and says
 why in STATUS. Also still open there: how a checkout deletes a job once
 `configuration/cron/` is merged rather than swapped (TODO 249's half).
+
+## 241. A git checkout in the file store, browsed in a browser [06-09-2026]
+
+`examples/browser` - barch clones `github.com/svar-widgets/vue-filemanager` into a
+key space's file store and serves the SVAR file manager at `/browser` to walk
+around inside it. Three things had to be built for it, and two of those are the
+useful part.
+
+**`as = fs` on a repository.** Git could not reach the file store at all: a
+checkout was imported as keys and stored functions, which is right for scripts and
+wrong for anything else. `configuration:git/repositories/<name>/as` is now `keys`
+(default, unchanged) or `fs`, with `fs_root` saying where it hangs. An fs import is
+LOADFS, so it is the same code a client gets, followed by `drop_fs_missing` - a
+range over `fs:m:<root>/` removing what the checkout no longer has, chunk by chunk
+out of each file's own metadata. Without that sweep it would be an import, not a
+sync: a file deleted upstream would live forever. `load_fs_directory` grew an
+optional out-list of the paths it wrote, which is what the sweep compares against.
+
+**`index` on a files route.** `/browser` was a 404 and only `/browser/index.html`
+worked, because a files route maps the url tail onto the root and an empty tail is
+nothing. A route can now declare `index`, and a url naming a directory gets it.
+
+The registration is the interesting half. Crow's `<path>` must match at least one
+character - correct, `/notes/{id}` should not answer for `/notes` - so `/browser`
+and `/browser/` reached no rule and Crow answered 404 before any of our code ran.
+The fix is a second rule for the prefix, and *which* spelling matters: registering
+`/browser` makes `/browser/` a 404, registering both is refused outright with
+"handler already exists", and registering `/browser/` gets Crow's own
+RULE_SPECIAL_REDIRECT_SLASH, which 301s the bare form onto it. So the slashed form
+is registered and both work. Only when a route declares an index, so nothing
+changes for a route that does not.
+
+**The example.** One key space holds the lot: `/app/*` is the page and its bundles
+from LOADFS, `/repo/*` is the checkout from the git sync, and three stored
+functions declare the routes - `/browser/*` and `/files/*` are `kind = "files"`
+answered in C++, `/api/*` is a luau resource doing the REST.
+
+The repository is source, not an application - `.vue` under `src/`, built by vite -
+so serving the checkout as a web site was never on. The checkout is the content and
+the file manager browsing it is three pre-bundled files `setup.sh` fetches once,
+plus our `index.html` with an import map. Nothing comes from a CDN at run time,
+which is what makes it a demonstration of the store rather than of a CDN.
+
+The REST contract was read out of `@svar-ui/filemanager-data-provider` 2.6.0, not
+guessed. The two GETs are answered; create, upload, rename, move, copy and delete
+are refused with a 405 saying why. That is a decision, not an omission: the layout
+has no directory object, so a folder exists only because paths hang under it, and a
+rename is a rewrite of every key beneath a prefix wanting the same staging the
+imports use. Half a write path in an example is worse than none. Nor is there a
+date column - the metadata carries size, chunks, content type and version, but no
+modification time.
+
+Measured against a real clone: `/browser` 301 to `/browser/` then 200, the three
+assets served (118KB, 191KB, 15KB), `GET /api/files` listing the repository root,
+`GET /api/files/%2Fsrc` listing a folder, and `/files/package.json` served with a
+content type off the extension.
+
+`test/fstest.py` gained the index case - a directory served, the bare prefix
+redirecting, and a route without an index still 404ing a directory. Full suite
+80/80.
+
+## 242. barch::staged, and three rollbacks deleted [06-09-2026]
+
+`src/staged.h` / `staged.cpp`: a set of writes that lands whole or not at all, with
+four ops - `set`, `remove`, `set_function`, `remove_function` - applied in the order
+they were added. The three call sites that had written this by hand now use it:
+`apply_dest` in `function_sync.cpp`, and both directory importers in `fs_api.cpp`.
+148 lines added against 214 removed, and `staged.cpp` is 160 of the additions, so
+the three copies were about 200 lines of the same idea.
+
+What each site lost: `load_fs_directory` its `had` / `was_absent` vectors and
+`roll_back` lambda; `load_keys_directory` its `previous` struct and a second
+`roll_back`; `apply_dest` its `install_all`, `restore_functions`, `data_snap` and
+`restore_data`, plus the single-shard `begin`/`commit`/`rollback` dance, which is
+now inside `staged` and therefore applies to all three rather than one.
+`get_plain` and `rem_plain` went with them.
+
+Two things are written into the header because they are properties callers have to
+know rather than implementation detail. It is **atomicity, not isolation** - a
+multi-shard commit has no single latch, so a concurrent reader can see some shards
+applied and others not; what is promised is that a failure leaves nothing behind. A
+single-shard space keeps the real shard transaction, which the configuration space
+gets for free. And **rollback is best effort**, since putting a value back can fail
+the same way writing it did; now it says so in the log rather than silently.
+
+The one piece of behaviour that had to move rather than be dropped is `install_all`'s
+retry: a stored function that will not install because a module it requires is not
+there yet is set aside and tried again after the rest, while any pass makes
+progress. That is an ordering the apply discovers rather than one the caller knows,
+so it belongs in `staged`. Key ops do not retry - a key that will not write will not
+write - and that asymmetry is deliberate and commented.
+
+`apply_dest` is now only the part that is about a checkout: which functions and keys
+should be there, and which of the ones a previous sync wrote should not. The
+`managed_data` bookkeeping stayed, because it is the answer to a question `staged`
+has no view of - a key SET by hand has no checkout to be missing from, so only keys
+a sync wrote are candidates for removal.
+
+**Caught by the suite**: the first cut dropped the `publish` loop in
+`load_fs_directory`, because it sat inside the block being replaced.
+`TestFileStore` failed on "the module change did not reach the handler" - the
+assertion for `LOADFS ... RELOAD` making a required module go live, which is DONE
+235's whole point. Restored, and worth noting the test was written for a different
+reason and caught this one anyway.
+
+Full suite 80/80. Next: the id allocator on `key_space`, then `fs.h` over the
+name/inode/chunk layout - TODO 253 and 254.
+
+## 243. The file store as paths, and the layout under it [06-09-2026]
+
+`src/fs.h` / `fs.cpp`. Steps 2, 3 and half of 5 from TODO 256 landed together,
+because they had to: the layout changed and there is no dual format reader, so every
+reader moved on the same day. There were four of them, which is the reason this was
+worth doing at all - `fs_api.cpp`, a second metadata struct and json parser in
+`http_api.cpp`, a handler in the browser example, and five Luau fixtures in
+`fstest.py` that spelled the format out by hand.
+
+### The layout
+
+    fs:n:<path>       name  -> {id, size, type, version}
+    fs:i:<id>         inode -> {size, chunk, chunks, type, version}
+    fs:c:<id>:<n>     one chunk, id and n both fixed width hex
+    fs:layout         "2"
+
+The data hangs off an id, not off the path. A read stops rebuilding a key carrying
+the whole path on every chunk; `|` stops being a reserved character nothing enforced,
+since no part of a chunk key comes from user text any more; and a rename becomes a
+rewrite of name records only, which is most of what the file manager's write half was
+blocked on.
+
+`stat` reads the name record only and is what a listing uses; `stat_full` reads the
+inode behind it as well. That split is the price of the denormalisation - `size`,
+`type` and `version` are in both so a thousand entry listing does not do a thousand
+inode reads - and the invariant is in the header: the inode is the truth, the name
+record is a hint rewritten on every commit.
+
+### What it is made of
+
+`fs::batch` over `barch::staged` (DONE 242), reserving ids once per batch through
+`reserve_ids` (DONE 242's sibling in ids.h) before any latch is taken. Chunks are
+staged before the inode and the inode before the name, so nothing reaches a chunk
+except through metadata and a half applied write is invisible rather than wrong.
+`fs::file` holds an id rather than a path, so after `open` the path is never walked
+again and `open_id` never sees one.
+
+`load_fs_directory` is now the directory walk plus a batch; `handle_file` in
+`http_api.cpp` lost its metadata struct, its parser and its chunk loop and uses
+`fs::file::read_at`; `read_fs_file` and `fs_file_version` are two lines each over
+`fs::`. `barch.fs.put/get/stat/list/remove` is the Luau half, which is what let the
+test fixtures stop being a fifth copy.
+
+### Two bugs worth recording
+
+**A NUL is not a successor key here.** Paging a range by re-ranging from
+`key + "\0"` is the standard trick and it silently returns nothing, because keys go
+through `encode_key` and a NUL does not survive it. A listing returned exactly one
+entry. Pages are re-ranged from the last key seen and skip it by name instead.
+Stepping over a child directory needs no successor at all: '/' is 0x2f so everything
+under `name/` sorts below `name0`, and that jump is what makes a listing cost a seek
+per child rather than a read per descendant.
+
+**`stat` does not know how many chunks a file has**, by design, and the first cut of
+`barch.fs.put` returned its chunk count from a `stat` - so it answered 0 for every
+write. That is the denormalisation biting within an hour of existing, which is a fair
+warning about it.
+
+### What the tests say now
+
+Four assertions changed meaning rather than breaking, and all four are improvements:
+
+* A listing is one level. `fslist("/")` was every descendant and is now `/a.txt`,
+  `/img`, `/other`, with a subdirectory named once instead of walked into.
+* Every file carries a version, so the HTTP ETag is always strong. The weak form is
+  now only reachable by a record with no version, which no writer produces.
+* A script written file versions too, so a forced `require` of an unchanged one is
+  skipped. That test used to assert the opposite, because the Luau writer kept no
+  version - it now checks the skip *and* that a rewrite is still seen.
+* `fsrm` returns 1 rather than "chunks plus one", because how many keys a file is
+  is not something a caller should be counting.
+
+Tests that named `fs:m:` or `fs:d:` directly - in `fstest.py`, `gitrepostest.py` and
+`barchdtest.py` - go through `barch.fs` now. A test that spells out the layout is one
+more copy of it.
+
+The browser example was re-run against a real clone on the new layout: `/browser/`,
+the three assets, `/api/files`, `/api/files/%2Fsrc` and `/files/package.json` all
+answer as before. `fmapi.luau` lost thirty lines of prefix ranging and first segment
+deduplication to one `barch.fs.list` call - which is the thing that showed the
+primitive was missing in the first place.
+
+Full suite 80/80.
+
+## 244. Directories that exist when they are empty [06-09-2026]
+
+Step 4 of TODO 256. `fs:n:<path>/` holding `{"dir":true}` is a directory marker, and
+`fs::mkdir` / `fs::rmdir` / `barch.fs.mkdir` / `barch.fs.rmdir` write and remove one.
+
+Every other directory still needs no making, and the header says so: a directory
+exists because paths hang under it, so `/a/b` is one the moment `/a/b/c` is written
+and stops being one when the last thing under it goes. The marker changes exactly one
+thing - the directory survives being empty. Parents are not required and not created,
+because an unmarked parent of a marked child is already a directory by that same rule.
+
+`rmdir` refuses a directory with anything in it unless asked recursively, and the
+recursive form takes markers as well as files: a nested empty directory is a key too,
+and leaving those behind would leave directories with nothing above them able to name
+them. The importers do not write markers, so a marker is always something a user
+asked for, which is why a sync leaves them alone.
+
+**A path is now one thing or the other.** `batch::commit` refuses writing a file
+where a directory is, and `mkdir` where a file is. Without that a file could be
+written over a directory whose contents would go on existing with nothing able to
+name them. It costs a `has_children` range per write, which is a seek against the
+chunk writes an import is doing anyway.
+
+**The bug this shape has, found immediately**: a directory's own marker sorts first
+*inside its own prefix* - `fs:n:/empty/` is both the marker for `/empty` and the
+first key a listing of `/empty` scans - so an empty directory listed itself as an
+entry with an empty name. `list`, `walk_entries` and `has_children` all skip the key
+whose length is exactly the prefix. It is the kind of thing that only shows up with a
+marker present, which is precisely what nothing had before this.
+
+Full suite 80/80.
+
+Left of TODO 256: the RESP `FS` family (TODO 254) and the file manager write half
+(TODO 253). Both are now small - the operations they need exist and are tested.
+
+## 245. FS over RESP [06-09-2026]
+
+Step 5 of TODO 256, and the half of TODO 254 that the file store needed:
+
+    FS LS <path> [AFTER name] [LIMIT n]
+    FS STAT <path>
+    FS GET <path> [FROM off] [LEN n]
+    FS PUT <path> <content> [TYPE t] [CHUNK n]
+    FS RM <path>
+    FS MKDIR <path>
+    FS RMDIR <path> [RECURSIVE]
+
+All of it is `barch::fs` with argument parsing in front, so RESP and luau are two
+doors onto one implementation rather than two implementations - which the test
+checks directly: a file written through `barch.fs.put` is read by `FS GET`, and one
+written by `FS PUT` is read by `barch.fs.get`.
+
+**Flat replies, deliberately.** A nested array is the obvious shape for `LS` and the
+module caller cannot send one: `vk_caller` counts a single array with one counter,
+so an inner `end_array` would set the outer's length. A line per row is what
+`FUNCTIONS COMMANDS` already does, for the same reason. `LS` is `kind size version
+name`, with the name last because it is the only field that can hold a space, and
+`STAT` is `k=v` the way `FUNCTIONS STATUS` reads.
+
+`GET` takes `FROM` and `LEN`, which is `fs::file::read_at` and therefore reads only
+the chunks a range covers - the same path the HTTP Range handler uses.
+
+**One command, so the categories are the widest of what it can do**: `read`, `write`,
+`keys`, `data`. A caller with only `+read` cannot have `FS` at all. Splitting it into
+separate commands is the way out if that turns out to matter, and it is not obviously
+wrong to leave it - `FS` is one verb over one store.
+
+Full suite 80/80.
+
+TODO 254 is not finished by this. What it asked for was a walk over *any* key
+namespace with the separator as an argument - the config tree at
+`git/repositories/...` is the other case, and it is still hand parsed in
+`git_repos.cpp`. `FS` covers the store that has a real layout behind it; a generic
+`DIR LS <prefix> SEP <c>` over arbitrary keys is a separate thing and should not
+pretend to be this one.
+
+## 246. The file manager can write [06-09-2026]
+
+Step 6 of TODO 256, which closes what TODO 253 parked. `barch::fs::rename` and
+`fs::copy` in C++, `barch.fs.rename` / `barch.fs.copy` in luau, `FS MV` / `FS CP`
+over RESP, and `examples/browser/luau/fmapi.luau` answering create, rename, move,
+copy and delete instead of refusing them.
+
+**A move is name records only.** `batch::relink` moves one name record and leaves
+the inode and the chunks where they are, so renaming a directory is that once per
+name beneath it and touches no content at all - which is the payoff the id keyed
+layout was for. A copy cannot do the same: one name has one file and there is no
+reference counting, so it duplicates for real and costs what the data costs. Both
+are one batch, so a move of five files either happens or does not.
+
+Three refusals, all tested: the destination already exists, the destination is
+inside the source, and there is no source. `upload` stays refused because it is
+multipart and nothing here parses it - a 405 saying so is better than a half
+implementation.
+
+Measured against the live example: create a folder, create a file in it, rename the
+file, list, copy a subtree, delete recursively, and the repository listing intact
+afterwards.
+
+### Two things found while doing it
+
+**`HTTP STOP` then `HTTP START` leaves a port that listens and never answers** -
+`HTTP STATUS` says stopped, a second `START` says "already running", and a
+connection is accepted and then hangs. Filed as TODO 257 with the reproduction.
+Nothing in this work touched it; it turned up because a route whose method map had
+changed needs a real restart to be picked up, which is itself undocumented and is in
+the same entry.
+
+**An edit that swallowed a function.** Replacing the block from `refuse` to
+`transport` took `get` with it, and the symptom was every GET answering "method not
+allowed" - which reads like a routing bug and is not. The route registers whatever
+`transport()` names at START, so a missing handler is a missing method. Worth
+knowing before debugging the router.
+
+Full suite 80/80. `examples/browser/README.md` updated: the read-only paragraph is
+now the move-versus-copy cost.
+
+## 247. DIR, the other half of 254 [06-09-2026]
+
+`src/dir_api.h/.cpp`. `FS` walks the file store, which has a layout behind it; this
+walks a key namespace that is a tree only because somebody named it that way.
+
+    DIR LS    <path> [SEP s] [AFTER name] [LIMIT n]
+    DIR COUNT <path> [SEP s]
+    DIR RM    <path> [SEP s]
+    DIR MV    <from> <to> [SEP s]
+    DIR CP    <from> <to> [SEP s]
+
+**The separator is an argument, defaulting to `:`** - what LOADKEYS and the
+checkout sync produce. That is what keeps this from being a fifth spelling of
+"path": `DIR LS a SEP /` walks a slash tree and `DIR LS git` walks the
+configuration space's repositories, one implementation over both.
+
+**`both` is a real answer.** A raw key tree can hold a value at `a:b` and more keys
+under `a:b:c`, which the file store cannot - a path there is one thing or the other.
+So a child is reported as `key`, `node` or `both`, rather than picking one and
+hiding the rest.
+
+Costs two seeks per child and not one read per descendant: the first finds the
+child, the second asks whether anything lives below it, and then the scan jumps past
+its whole subtree by stepping the separator byte. `COUNT` is `store_access::count`,
+which is one range rather than a walk. `MV`, `CP` and `RM` are one `barch::staged`
+each, so a subtree either moves or does not.
+
+**The root has no prefix to stop at**, and an empty high bound is an empty range,
+not an open one - `DIR LS ""` returned nothing at first. The largest key in the
+space is the bound now, one byte past it so it is included.
+
+`test/dirtest.py` is new: the both case, paging, counting, the separator being an
+argument and a bad one refused, moving a subtree with a key at its own root, copy
+leaving the original, and the two refusals. Full suite 81/81.
+
+What this does *not* do, deliberately: it does not touch `git_repos.cpp`, which
+still parses `git/repositories/<name>/<setting>` by hand with slashes. Moving that
+onto `DIR` is a separate change and needs the slash-versus-colon question settled
+first - the reader wants colons so a directory of files deploys, which is the
+unfinished half of that story.
+
+## 248. HTTP STOP left the port open [06-09-2026]
+
+TODO 257. A stopped server went on accepting connections and never answered them,
+and the next START looked like it worked and did not.
+
+**The cause is a reference cycle.** Every route handler is a lambda capturing the
+`shared_ptr<space_http>`; the Crow app owns the handlers; the server owns the app.
+So the last reference in `stop_http_server` going out of scope destroyed nothing -
+the server kept the app, the app kept the acceptor, and the listening socket stayed
+open for the life of the process.
+
+Everything else followed from that. `port_open` saw the old socket and reported the
+new server up, so a START whose own bind had failed with "address in use" was stored
+as running, then its run thread set `running` back to false. Which is why `STATUS`
+said stopped while a second START said "already running": one reads the flag and the
+other read the map.
+
+Three changes:
+
+* `stop_http_server` destroys the app explicitly after joining, which drops the
+  handlers, which drops their references. The routes and the idle VM slots go with
+  it.
+* The start path no longer believes `port_open` on its own: something listening is
+  not necessarily us, so the run thread gets a moment to report a bind failure and
+  that is believed over the probe.
+* The "already running" guard reads the same `running` flag STATUS does, so an
+  entry left by a failed start is replaced rather than blocking the port forever.
+
+The second half of the entry - whether a route changing between starts is picked
+up - turns out to be yes, and now has a test: the rules Crow knows about are
+registered at START, so a `transport()` that gains a verb needs a real STOP and
+START and a slot reload alone will not do it. That was already true and undocumented;
+`test/httptest.py` asserts both halves now, including that the port is actually
+refused after a STOP.
+
+Full suite 81/81.

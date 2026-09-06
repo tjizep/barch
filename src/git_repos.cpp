@@ -77,7 +77,8 @@ std::string repo_default_dir(const std::string& name) {
 
 std::string check_repo_setting(const std::string& setting, const std::string& value) {
     static const char* known[] = {"url", "dir", "branch", "commit", "pull", "ms",
-                                  "ssh_key", "space", "enabled", "asynch"};
+                                  "ssh_key", "space", "enabled", "asynch",
+                                  "as", "fs_root"};
     bool found = false;
     for (auto* k : known)
         found = found || setting == k;
@@ -89,6 +90,8 @@ std::string check_repo_setting(const std::string& setting, const std::string& va
             if (!isdigit((unsigned char) c))
                 return "ms is a number of milliseconds";
     }
+    if (setting == "as" && !v.empty() && v != "keys" && v != "fs")
+        return "as is 'keys' or 'fs'";
     if (setting == "space" && !v.empty() && !is_off(v) && !check_ks_name(v))
         return "'" + v + "' is not a key space name";
     /*
@@ -157,6 +160,8 @@ heap::vector<repo_conf> read_repos() {
         else if (setting == "space")     r.space = is_off(value) ? std::string() : value;
         else if (setting == "enabled")   r.enabled = truth(value, true);
         else if (setting == "asynch")    r.asynch = truth(value, true);
+        else if (setting == "as")        r.as = value.empty() ? "keys" : value;
+        else if (setting == "fs_root")   r.fs_root = value.empty() ? "/" : value;
 
     }
 

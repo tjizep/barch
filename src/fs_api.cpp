@@ -1,21 +1,23 @@
 //
 // LOADFS - import a directory into the key space as the chunked file store.
 //
-// The layout is DONE 226 and 228: `fs:m:<path>` is the metadata as json and
-// `fs:d:<path>|<n>` is one chunk of the content, the index zero padded so a range
-// scan and a counted loop agree about the order. `kind = "files"` HTTP routes serve
-// straight out of these keys.
+// The layout itself now lives in fs.h - see TODO 256. This file is the commands and
+// the directory walks that feed them: LOADFS and LOADKEYS, and the boot equivalents
+// barchd calls. What a stored file *is* is not decided here any more.
 //
-// The whole import lands or none of it does. That is done by reading and chunking
-// everything first, snapshotting whatever the destination keys hold now, and rolling
-// that snapshot back if any write fails - so the cost of the guarantee is holding the
-// import in memory while it is in flight. TODO 239 is the way out of that ceiling:
+// The whole import lands or none of it does. That is done by reading everything
+// first and handing it to one `fs::batch`, which is a `staged` underneath - so the
+// cost of the guarantee is holding the import in memory while it is in flight.
+// TODO 239 is the way out of that ceiling:
 // hash_arena backing its pages with a named memory mapped file instead of anonymous
 // memory, so a set of files larger than RAM can be held.
 //
 // See TODO 238.
 //
 #include "fs_api.h"
+
+#include "fs.h"
+#include "staged.h"
 
 #include <cstdio>
 #include <string>
@@ -126,93 +128,40 @@ bool takes_reload(const arg_t& argv, size_t& used) {
     return true;
 }
 
-std::string chunk_key(const std::string& path, size_t n) {
-    char idx[32];
-    std::snprintf(idx, sizeof idx, "%08zu", n);
-    return "fs:d:" + path + "|" + idx;
-}
-
-/** what a file's metadata will say, once the version it replaces is known */
-struct meta_entry {
+/** one file the walk found, held until the whole directory has been read */
+struct found {
     std::string path;
     std::string type;
-    size_t size{0};
-    size_t chunk{0};
-    size_t chunks{0};
+    std::string content;
 };
 
-/** the metadata as both writers spell it - see TODO 248 for the version */
-std::string meta_json(const meta_entry& m, uint64_t version) {
-    return "{\"size\":" + std::to_string(m.size) +
-           ",\"type\":\"" + m.type + "\"" +
-           ",\"chunk\":" + std::to_string(m.chunk) +
-           ",\"chunks\":" + std::to_string(m.chunks) +
-           ",\"version\":" + std::to_string(version) + "}";
-}
-
-/** the version a stored metadata blob carries, or 0 when it has none */
-uint64_t version_of(const std::string& raw) {
-#ifdef BARCH_HAS_SIMDJSON
-    if (raw.empty())
-        return 0;
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(raw).get(doc) != simdjson::SUCCESS)
-        return 0;
-    uint64_t v = 0;
-    if (doc["version"].get(v) == simdjson::SUCCESS)
-        return v;
-#else
-    (void) raw;
-#endif
-    return 0;
-}
-
-/** the chunks one file becomes; its metadata waits until the old version is read */
-void spread(const std::string& stored_path, const std::string& content,
-            const std::string& type, size_t chunk,
-            std::vector<std::pair<std::string, std::string>>& into,
-            std::vector<meta_entry>& metas) {
-    size_t chunks = chunk ? (content.size() + chunk - 1) / chunk : 0;
-    for (size_t i = 0; i < chunks; ++i)
-        into.emplace_back(chunk_key(stored_path, i),
-                          content.substr(i * chunk, chunk));
-    meta_entry m;
-    m.path = stored_path;
-    m.type = type;
-    m.size = content.size();
-    m.chunk = chunk;
-    m.chunks = chunks;
-    metas.push_back(std::move(m));
-}
-
-/** walk `dir`, adding the keys every file under it becomes */
-bool gather(const std::string& dir, const std::string& at, size_t chunk,
-            std::vector<std::pair<std::string, std::string>>& into,
-            std::vector<meta_entry>& metas,
-            size_t& files, uint64_t& bytes, std::string& err) {
+/** walk `dir`, collecting the files under it */
+bool gather(const std::string& dir, const std::string& at,
+            std::vector<found>& into, size_t& files, uint64_t& bytes, std::string& err) {
     for (const auto& name : list_dir(dir)) {
         if (skipped_name(name))
             continue;
         std::string path = dir + "/" + name;
         // always rooted: `at` is "" for the root, so this is "/name" there and
-        // "/sub/name" below it - the same shape the luau side writes
+        // "/sub/name" below it
         std::string stored = at + "/" + name;
         if (is_dir(path)) {
-            if (!gather(path, stored, chunk, into, metas, files, bytes, err))
+            if (!gather(path, stored, into, files, bytes, err))
                 return false;
             continue;
         }
         if (!is_reg(path))
             continue;                       // a socket or a device is not a file here
-        std::string content;
-        if (!read_file(path, content)) {
+        found f;
+        f.path = stored;
+        f.type = type_of(name);
+        if (!read_file(path, f.content)) {
             err = "could not read " + path;
             return false;
         }
-        bytes += content.size();
+        bytes += f.content.size();
         ++files;
-        spread(stored, content, type_of(name), chunk, into, metas);
+        into.push_back(std::move(f));
     }
     return true;
 }
@@ -226,7 +175,8 @@ bool gather(const std::string& dir, const std::string& at, size_t chunk,
  */
 std::string barch::load_fs_directory(const std::string& into_dir, const std::string& into_root,
                                      size_t chunk, const barch::key_space_ptr& space,
-                                     std::vector<std::string>& reply, bool publish) {
+                                     std::vector<std::string>& reply, bool publish,
+                                     std::vector<std::string>* imported) {
     std::string dir = into_dir;
     std::string root = into_root;
     if (chunk == 0 || chunk > (size_t) maximum_allocation_size - 1024)
@@ -242,89 +192,39 @@ std::string barch::load_fs_directory(const std::string& into_dir, const std::str
     while (root.size() > 1 && root.back() == '/')
         root.pop_back();
 
-    std::vector<std::pair<std::string, std::string>> writes;
-    std::vector<meta_entry> metas;
+    std::vector<found> files_found;
     size_t files = 0;
     uint64_t bytes = 0;
     std::string err;
-    // everything is read and chunked before a single key is written, so a directory
-    // that cannot be read does not leave half an import behind
-    if (!gather(dir, root == "/" ? std::string() : root, chunk, writes, metas, files, bytes, err))
+    // everything is read before a single key is written, so a directory that cannot
+    // be read does not leave half an import behind
+    if (!gather(dir, root == "/" ? std::string() : root, files_found, files, bytes, err))
         return err;
-    if (writes.empty() && metas.empty())
+    if (files_found.empty())
         return "nothing to import";
 
-    auto acc = barch::functions::store_for_owner(space);
-    if (!acc.set || !acc.get)
-        return "this key space cannot be written";
-
-    /*
-     * The metadata is written last because its version has to be one past whatever
-     * is there now - that is what lets a forced require, and an ETag, tell a rewrite
-     * from a file that has not moved. See TODO 248.
-     */
-    for (const auto& m : metas) {
-        std::string key = "fs:m:" + m.path;
-        std::string prev;
-        uint64_t version = 1;
-        if (acc.get(key, prev) == barch::foreign::store_access::read_state::present)
-            version = version_of(prev) + 1;
-        writes.emplace_back(std::move(key), meta_json(m, version));
-    }
-
-    // what those keys hold now, so a failure half way can be put back
-    std::vector<std::pair<std::string, std::string>> had;
-    std::vector<std::string> was_absent;
-    had.reserve(writes.size());
-    for (const auto& [k, v] : writes) {
-        std::string prev;
-        if (acc.get(k, prev) == barch::foreign::store_access::read_state::present)
-            had.emplace_back(k, std::move(prev));
-        else
-            was_absent.push_back(k);
-    }
-
-    auto roll_back = [&]() {
-        for (const auto& [k, v] : had) {
-            std::string e;
-            acc.set(k, v, e);
-        }
-        for (const auto& k : was_absent)
-            acc.remove(k);
-    };
-
-    for (const auto& [k, v] : writes) {
-        std::string e;
-        if (!acc.set(k, v, e)) {
-            roll_back();
-            std::string why = "could not write " + k;
-            if (!e.empty())
-                why += ": " + e;
-            return why;
-        }
-    }
+    barch::fs::batch batch(space);
+    for (auto& f : files_found)
+        batch.write(f.path, std::move(f.content), f.type, chunk);
+    std::string failed;
+    if (!batch.commit(failed))
+        return failed;
 
     if (publish) {
         // the paths this import wrote, so a module compiled from one of them is
         // rebuilt and everything else staged stays staged - TODO 245
-        for (const auto& [k, v] : writes) {
-            if (k.compare(0, 5, "fs:m:") == 0)
-                barch::functions::publish_compiled(
-                    barch::functions::compiled_path_key(space->canonical(), k.substr(5)));
-        }
+        for (const auto& path : batch.written())
+            barch::functions::publish_compiled(
+                barch::functions::compiled_path_key(space->canonical(), path));
     }
+    if (imported)
+        imported->insert(imported->end(), batch.written().begin(), batch.written().end());
     reply.push_back("files=" + std::to_string(files));
     reply.push_back("bytes=" + std::to_string(bytes));
-    reply.push_back("keys=" + std::to_string(writes.size()));
+    reply.push_back("keys=" + std::to_string(batch.written().size()));
     reply.push_back("root=" + root);
     reply.push_back("chunk=" + std::to_string(chunk));
     return {};
-}
-
-/** the same, into the default key space, for a caller that has no space of its own */
-std::string barch::load_fs_directory(const std::string& dir, const std::string& root,
-                                     std::vector<std::string>& reply) {
-    return load_fs_directory(dir, root, default_chunk, get_default_ks(), reply);
 }
 
 /**
@@ -373,50 +273,27 @@ std::string barch::load_keys_directory(const std::string& into_dir, const std::s
             return "two files map to " + std::string(f.luau ? "function " : "key ") + f.name;
     }
 
-    struct previous {
-        std::string name;
-        std::string value;
-        bool luau{false};
-        bool had{false};
-    };
-    std::vector<previous> before;
-    before.reserve(files.size());
-    for (const auto& f : files) {
-        previous p;
-        p.name = f.name;
-        p.luau = f.luau;
-        if (f.luau)
-            p.had = barch::functions::source_in(space, f.name, p.value);
-        else
-            p.had = acc.get(f.name, p.value) == barch::foreign::store_access::read_state::present;
-        before.push_back(std::move(p));
-    }
-    auto roll_back = [&]() {
-        for (const auto& p : before) {
-            std::string e;
-            if (p.luau) {
-                if (p.had) barch::functions::install(space, p.name, p.value, e);
-                else barch::functions::remove(space, p.name);
-            } else {
-                if (p.had) acc.set(p.name, p.value, e);
-                else acc.remove(p.name);
-            }
-        }
-    };
-
+    /*
+     * One staged write for the lot - TODO 255. The dependency order a `.luau` that
+     * requires another needs is `staged`'s retry rather than anything here: this
+     * only has to say what should end up in the space.
+     */
+    barch::staged batch(space);
     size_t functions = 0, keys = 0;
     uint64_t bytes = 0;
     for (const auto& f : files) {
-        std::string e;
-        bool ok = f.luau ? barch::functions::install(space, f.name, f.source, e)
-                         : acc.set(f.name, f.source, e);
-        if (!ok) {
-            roll_back();
-            return f.path + ": " + (e.empty() ? "could not be stored" : e);
+        if (f.luau) {
+            batch.set_function(f.name, f.source);
+            ++functions;
+        } else {
+            batch.set(f.name, f.source);
+            ++keys;
         }
         bytes += f.source.size();
-        if (f.luau) ++functions; else ++keys;
     }
+    std::string failed;
+    if (!batch.commit(failed))
+        return failed;
 
     if (publish) {
         for (const auto& f : files) {
@@ -447,45 +324,24 @@ std::string barch::load_keys_directory(const std::string& dir, const std::string
  */
 bool barch::read_fs_file(const barch::foreign::store_access& acc, const std::string& path,
                          std::string& out, std::string& type) {
-    std::string raw;
-    if (!acc.get || acc.get("fs:m:" + path, raw) !=
-                    barch::foreign::store_access::read_state::present)
+    barch::fs::entry meta;
+    if (!barch::fs::read(acc, path, out, meta))
         return false;
-#ifdef BARCH_HAS_SIMDJSON
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(raw).get(doc) != simdjson::SUCCESS)
-        return false;
-    uint64_t size = 0, chunks = 0;
-    if (doc["size"].get(size) != simdjson::SUCCESS)
-        return false;
-    doc["chunks"].get(chunks);
-    std::string_view t;
-    if (doc["type"].get(t) == simdjson::SUCCESS)
-        type.assign(t);
-    out.clear();
-    out.reserve((size_t) size);
-    for (uint64_t i = 0; i < chunks; ++i) {
-        std::string part;
-        if (acc.get(chunk_key(path, (size_t) i), part) !=
-            barch::foreign::store_access::read_state::present)
-            return false;               // the metadata promised a chunk that is not there
-        out.append(part);
-    }
-    return out.size() == size;
-#else
-    (void) out; (void) type;
-    return false;
-#endif
+    type = meta.type;
+    return true;
 }
 
 uint64_t barch::fs_file_version(const barch::foreign::store_access& acc,
-                               const std::string& path) {
-    std::string raw;
-    if (!acc.get || acc.get("fs:m:" + path, raw) !=
-                    barch::foreign::store_access::read_state::present)
+                                const std::string& path) {
+    barch::fs::entry e;
+    if (!barch::fs::stat(acc, path, e))
         return 0;
-    return version_of(raw);
+    return e.version;
+}
+
+size_t barch::drop_fs_missing(const barch::key_space_ptr& space, const std::string& root,
+                              const std::vector<std::string>& keep) {
+    return barch::fs::drop_missing(space, root, keep);
 }
 
 int LOADKEYS(caller& call, const arg_t& argv) {
@@ -543,7 +399,172 @@ int cmd_LOADFS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return call.vk_call(ctx, argv, argc, LOADFS);
 }
 
+/*
+ * FS - the file store over RESP, TODO 254 and 256.
+ *
+ *   FS LS <path> [AFTER name] [LIMIT n]     a line per entry, one level
+ *   FS STAT <path>                          k=v, the way FUNCTIONS STATUS reads
+ *   FS GET <path> [FROM off] [LEN n]        the content, or nil
+ *   FS PUT <path> <content> [TYPE t] [CHUNK n]
+ *   FS MV <path> <to>                       a file or a whole directory
+ *   FS CP <path> <to>
+ *   FS RM <path>                            1, or 0 when there was nothing
+ *   FS MKDIR <path>
+ *   FS RMDIR <path> [RECURSIVE]
+ *
+ * Flat replies on purpose. A nested array would be the obvious shape for LS, and
+ * the module caller cannot send one: `vk_caller` counts a single array with one
+ * counter, so an inner end_array sets the outer's length. A line per row is what
+ * FUNCTIONS COMMANDS already does for the same reason.
+ */
+namespace {
+
+/** an optional NAME VALUE pair after the positional arguments */
+bool option_at(const arg_t& argv, size_t at, const char* name, std::string& value) {
+    if (at + 1 >= argv.size())
+        return false;
+    std::string word = as_text(argv[at]);
+    for (auto& c : word)
+        c = (char) toupper((unsigned char) c);
+    if (word != name)
+        return false;
+    value = as_text(argv[at + 1]);
+    return true;
+}
+
+std::string ls_line(const barch::fs::entry& e) {
+    // three fields and then the name, which is the only one that can hold a space
+    return std::string(e.dir ? "dir" : "file") + " " + std::to_string(e.size) + " " +
+           std::to_string(e.version) + " " + e.name;
+}
+
+}
+
+int FS(caller& call, const arg_t& argv) {
+    if (argv.size() < 3)
+        return call.wrong_arity();
+    std::string sub = as_text(argv[1]);
+    for (auto& c : sub)
+        c = (char) toupper((unsigned char) c);
+    std::string path = as_text(argv[2]);
+    auto space = call.kspace();
+    auto acc = barch::functions::store_for_owner(space);
+
+    if (sub == "LS") {
+        std::string after, limit;
+        for (size_t at = 3; at + 1 < argv.size(); at += 2) {
+            if (!option_at(argv, at, "AFTER", after) && !option_at(argv, at, "LIMIT", limit))
+                return call.push_error("FS LS path [AFTER name] [LIMIT n]");
+        }
+        std::vector<barch::fs::entry> got;
+        if (!barch::fs::list(acc, path, got, after,
+                             limit.empty() ? 0 : (size_t) strtoull(limit.c_str(), nullptr, 10)))
+            return call.push_error("not a path");
+        call.start_array();
+        for (const auto& e : got)
+            call.push_string(ls_line(e));
+        return call.end_array();
+    }
+    if (sub == "STAT") {
+        barch::fs::entry e;
+        if (!barch::fs::stat_full(acc, path, e))
+            return call.push_null();
+        std::string line = "path=" + e.path +
+                           " kind=" + (e.dir ? "dir" : "file");
+        if (!e.dir) {
+            line += " size=" + std::to_string(e.size) +
+                    " chunk=" + std::to_string(e.chunk) +
+                    " chunks=" + std::to_string(e.chunks) +
+                    " version=" + std::to_string(e.version) +
+                    " type=" + e.type;
+        }
+        return call.push_string(line);
+    }
+    if (sub == "GET") {
+        std::string from, len;
+        for (size_t at = 3; at + 1 < argv.size(); at += 2) {
+            if (!option_at(argv, at, "FROM", from) && !option_at(argv, at, "LEN", len))
+                return call.push_error("FS GET path [FROM off] [LEN n]");
+        }
+        barch::fs::file f;
+        std::string err;
+        if (!barch::fs::file::open(acc, path, f, err))
+            return call.push_null();
+        uint64_t at_off = from.empty() ? 0 : strtoull(from.c_str(), nullptr, 10);
+        uint64_t want = len.empty() ? f.meta().size : strtoull(len.c_str(), nullptr, 10);
+        std::string body;
+        if (!f.read_at(at_off, want, body, err))
+            return call.push_error(err.c_str());
+        return call.push_string(body);
+    }
+    if (sub == "PUT") {
+        if (argv.size() < 4)
+            return call.wrong_arity();
+        std::string type, chunk;
+        for (size_t at = 4; at + 1 < argv.size(); at += 2) {
+            if (!option_at(argv, at, "TYPE", type) && !option_at(argv, at, "CHUNK", chunk))
+                return call.push_error("FS PUT path content [TYPE t] [CHUNK n]");
+        }
+        barch::fs::batch b(space);
+        b.write(path, as_text(argv[3]), type,
+                chunk.empty() ? 0 : (size_t) strtoull(chunk.c_str(), nullptr, 10));
+        std::string err;
+        if (!b.commit(err))
+            return call.push_error(err.c_str());
+        barch::fs::entry e;
+        return call.push_int(barch::fs::stat_full(acc, path, e) ? (int64_t) e.chunks : 0);
+    }
+    if (sub == "MV" || sub == "CP") {
+        if (argv.size() != 4)
+            return call.wrong_arity();
+        std::string to = as_text(argv[3]);
+        std::string err;
+        bool ok = sub == "MV" ? barch::fs::rename(space, path, to, err)
+                              : barch::fs::copy(space, path, to, err);
+        if (!ok)
+            return call.push_error(err.c_str());
+        return call.push_simple("OK");
+    }
+    if (sub == "RM") {
+        std::string err;
+        return call.push_int(barch::fs::erase(space, path, err) ? 1 : 0);
+    }
+    if (sub == "MKDIR") {
+        std::string err;
+        if (!barch::fs::mkdir(space, path, err))
+            return call.push_error(err.c_str());
+        return call.push_simple("OK");
+    }
+    if (sub == "RMDIR") {
+        bool recursive = false;
+        if (argv.size() == 4) {
+            std::string word = as_text(argv[3]);
+            for (auto& c : word)
+                c = (char) toupper((unsigned char) c);
+            if (word != "RECURSIVE")
+                return call.push_error("FS RMDIR path [RECURSIVE]");
+            recursive = true;
+        } else if (argv.size() > 4) {
+            return call.wrong_arity();
+        }
+        std::string err;
+        if (!barch::fs::rmdir(space, path, recursive, err))
+            return call.push_error(err.c_str());
+        return call.push_simple("OK");
+    }
+    return call.push_error("FS LS|STAT|GET|PUT|RM|MV|CP|MKDIR|RMDIR");
+}
+
+int cmd_FS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    vk_caller call;
+    return call.vk_call(ctx, argv, argc, FS);
+}
+
 void register_fs_api(function_map& r) {
+    // one command for both halves, so the categories are the widest of what it can
+    // do - a read only caller cannot have FS at all. Splitting FSGET from FSPUT is
+    // the way out of that if it turns out to matter
+    r["FS"] = {::FS, {"read", "write", "keys", "data"}};
     r["LOADFS"] = {::LOADFS, {"write", "keys", "data", "admin", "dangerous"}};
     // `function` as well as the rest: a .luau file in the directory becomes a
     // stored function, so this writes more than data

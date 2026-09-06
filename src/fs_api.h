@@ -20,7 +20,16 @@ namespace barch {
      */
     std::string load_fs_directory(const std::string& dir, const std::string& root,
                                   size_t chunk, const barch::key_space_ptr& space,
-                                  std::vector<std::string>& reply, bool publish = false);
+                                  std::vector<std::string>& reply, bool publish = false,
+                                  std::vector<std::string>* imported = nullptr);
+    /**
+     * Remove stored files under `root` that are not in `keep`, and say how many
+     * went. What a git repository imported as a file store needs after a sync: the
+     * checkout is the truth, so a file deleted upstream has to leave the store too,
+     * the way a deleted `.luau` is REMF'd. See TODO 253.
+     */
+    size_t drop_fs_missing(const barch::key_space_ptr& space, const std::string& root,
+                           const std::vector<std::string>& keep);
     /**
      * The whole content of a stored file, through the rights the store_access
      * carries. False when there is no such file. See fs_api.cpp.
@@ -50,6 +59,8 @@ namespace barch {
 }
 
 int LOADFS(caller& call, const arg_t& argv);
+int FS(caller& call, const arg_t& argv);
+int cmd_FS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
 int LOADKEYS(caller& call, const arg_t& argv);
 int cmd_LOADKEYS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
 int cmd_LOADFS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);

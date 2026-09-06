@@ -1,5 +1,7 @@
 #include "http_api.h"
 
+#include "fs.h"
+
 #include "function_api.h"
 #include "foreign/driver.h"
 #include "auth_api.h"
@@ -418,56 +420,11 @@ std::string session_user(const barch::key_space_ptr& space, const std::string& s
  * a VM slot for the whole call and the pool is 2-8, so eight concurrent downloads
  * would exhaust it and every other request on that server would get a 503.
  *
- * The layout is DONE 226 - `fs:m:<path>` is the metadata as json and
- * `fs:d:<path>|<n>` is one chunk, the index zero padded so a range scan and a
- * counted loop agree about the order.
+ * What a stored file is lives in fs.h - TODO 256. This used to carry its own
+ * metadata struct, its own json parse and its own chunk key builder, which was one
+ * of two parsers for the same document and the reason the layout could not be
+ * changed in one place.
  */
-struct file_meta {
-    uint64_t size{0};
-    uint64_t chunk{0};
-    uint64_t chunks{0};
-    /** 0 when the writer keeps none, which is what makes the ETag weak - TODO 248 */
-    uint64_t version{0};
-    std::string type;
-};
-
-/** the metadata for a stored file, or false when there is no such file */
-bool read_file_meta(const barch::foreign::store_access& acc, const std::string& path,
-                    file_meta& out) {
-    std::string raw;
-    if (!acc.get || acc.get("fs:m:" + path, raw) != barch::foreign::store_access::read_state::present)
-        return false;
-#ifdef BARCH_HAS_SIMDJSON
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(raw).get(doc) != simdjson::SUCCESS)
-        return false;
-    uint64_t n = 0;
-    if (doc["size"].get(n) == simdjson::SUCCESS) out.size = n;
-    if (doc["chunk"].get(n) == simdjson::SUCCESS) out.chunk = n;
-    if (doc["chunks"].get(n) == simdjson::SUCCESS) out.chunks = n;
-    if (doc["version"].get(n) == simdjson::SUCCESS) out.version = n;
-    std::string_view t;
-    if (doc["type"].get(t) == simdjson::SUCCESS) out.type.assign(t);
-    return out.chunk > 0 || out.size == 0;
-#else
-    (void) out;
-    return false;
-#endif
-}
-
-/** the nth chunk, appended to `into` */
-bool read_chunk(const barch::foreign::store_access& acc, const std::string& path,
-                uint64_t n, std::string& into) {
-    char idx[32];
-    std::snprintf(idx, sizeof idx, "%08llu", (unsigned long long) n);
-    std::string value;
-    if (!acc.get || acc.get("fs:d:" + path + "|" + idx, value) !=
-                    barch::foreign::store_access::read_state::present)
-        return false;
-    into.append(value);
-    return true;
-}
 
 /**
  * A guess from the extension, for a file stored without a type. Deliberately
@@ -547,8 +504,13 @@ std::string file_path_for(const barch::foreign::http_route& spec, const std::str
         root += '/';
     while (!rest.empty() && rest.front() == '/')
         rest.erase(rest.begin());
-    if (rest.empty())
-        return {};
+    // a url naming a directory gets the route's index, when it declared one. That
+    // is what makes /browser an entry point rather than a 404 - TODO 253
+    if (rest.empty() || rest.back() == '/') {
+        if (spec.index.empty())
+            return {};
+        rest += spec.index;
+    }
     return root + rest;
 }
 
@@ -592,14 +554,16 @@ void handle_file(const std::shared_ptr<space_http>& server,
         return;
     }
 
-    file_meta meta;
-    if (!read_file_meta(acc, path, meta)) {
+    barch::fs::file open_file;
+    std::string open_err;
+    if (!barch::fs::file::open(acc, path, open_file, open_err)) {
         res.code = 404;
         res.body = "not found";
         apply_cors(res, spec);
         res.end();
         return;
     }
+    const auto& meta = open_file.meta();
 
     /*
      * Strong when the file carries a version, since that moves on every write - so a
@@ -653,29 +617,15 @@ void handle_file(const std::shared_ptr<space_http>& server,
      */
     std::string body;
     if (meta.size) {
-        uint64_t want = last - first + 1;
-        body.reserve((size_t) want);
-        uint64_t chunk = meta.chunk ? meta.chunk : 65536;
-        uint64_t from_chunk = first / chunk;
-        uint64_t to_chunk = last / chunk;
-        std::string scratch;
-        for (uint64_t n = from_chunk; n <= to_chunk && n < meta.chunks; ++n) {
-            scratch.clear();
-            if (!read_chunk(acc, path, n, scratch)) {
-                // the metadata says there is a chunk and there is not: a half written
-                // file, or one being overwritten while it is read. Nothing here is
-                // atomic across chunks - see DONE 226
-                res.code = 500;
-                res.body = "file is incomplete";
-                res.end();
-                return;
-            }
-            uint64_t chunk_start = n * chunk;
-            uint64_t take_from = first > chunk_start ? first - chunk_start : 0;
-            uint64_t take_to = last < chunk_start + scratch.size() - 1
-                             ? last - chunk_start : scratch.size() - 1;
-            if (take_from < scratch.size() && take_from <= take_to)
-                body.append(scratch, (size_t) take_from, (size_t) (take_to - take_from + 1));
+        std::string why;
+        if (!open_file.read_at(first, last - first + 1, body, why)) {
+            // the metadata says there is a chunk and there is not: a half written
+            // file, or one being overwritten while it is read. Nothing here is
+            // atomic across chunks - see DONE 226
+            res.code = 500;
+            res.body = "file is incomplete";
+            res.end();
+            return;
         }
     }
 
@@ -862,9 +812,15 @@ std::string start_space_http(const barch::key_space_ptr& space,
     auto canon = space->canonical();
     {
         std::lock_guard<std::mutex> g(http_mu);
-        if (http_servers.find(canon) != http_servers.end()) {
-            err = "HTTP already running in this space";
-            return err;
+        auto found = http_servers.find(canon);
+        if (found != http_servers.end()) {
+            // an entry whose server is not running is not a running server. STATUS
+            // reads the same flag, and the two used to disagree - TODO 257
+            if (found->second && found->second->running.load()) {
+                err = "HTTP already running in this space";
+                return err;
+            }
+            http_servers.erase(found);
         }
     }
 
@@ -1089,6 +1045,33 @@ std::string start_space_http(const barch::key_space_ptr& space,
                 else handle_route(server, spec, req, res);
             });
         }
+        /*
+         * A files route that declares an index needs the bare prefix as well.
+         * Crow's `<path>` has to match at least one character - which is right,
+         * /notes/{id} should not answer for /notes - so /browser and /browser/
+         * reach no rule at all and Crow answers 404 before any of this is
+         * consulted. Both spellings get their own rule, and file_path_for turns
+         * an empty remainder into the index. See TODO 253.
+         */
+        if (files && !spec.index.empty() && spec.wild_tail) {
+            std::string prefix = spec.crow_route;
+            auto at = prefix.rfind("/<path>");
+            if (at != std::string::npos && at > 0) {
+                /*
+                 * With the trailing slash, which is the useful direction: Crow
+                 * registers a rule ending in `/` and adds a redirect to it from
+                 * the bare form, so /browser answers 301 to /browser/ and both
+                 * work. Registering the bare form instead takes the name and
+                 * makes the slashed one a 404, and registering both is refused
+                 * with "handler already exists".
+                 */
+                auto& entry = server->app->route_dynamic(prefix.substr(0, at) + "/");
+                entry.methods(crow::HTTPMethod::Get, crow::HTTPMethod::Head);
+                entry([server, spec](const crow::request& req, crow::response& res) {
+                    handle_file(server, spec, req, res);
+                });
+            }
+        }
     }
 
 #ifdef CROW_ENABLE_SSL
@@ -1149,13 +1132,24 @@ std::string start_space_http(const barch::key_space_ptr& space,
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    if (!up) {
+    /*
+     * `port_open` says something is listening, not that it is us - a socket left by
+     * anything else answers the same way. So the run thread gets a moment to report
+     * a bind failure, and that is believed over the probe.
+     */
+    if (up && server->fail.empty()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (!server->fail.empty())
+            up = false;
+    }
+    if (!up || !server->fail.empty()) {
         try {
             server->app->stop();
         } catch (...) {
         }
         if (server->thread.joinable())
             server->thread.join();
+        server->app.reset();
         err = server->fail.empty() ? "HTTP server failed to start" : server->fail;
         return err;
     }
@@ -1247,6 +1241,23 @@ void stop_http_server(const std::string& space) {
     }
     if (server && server->thread.joinable())
         server->thread.join();
+    /*
+     * The app has to be destroyed here, and not left to the shared_ptr going out of
+     * scope, because it cannot go out of scope: every route handler is a lambda
+     * capturing this same shared_ptr, the app owns the handlers, and the server owns
+     * the app. That cycle kept the whole thing alive after a STOP, and with it the
+     * listening socket - so the port went on accepting connections that nothing
+     * would ever answer, and the next START saw the port open, decided it had come
+     * up, and stored a server whose own bind had failed. See TODO 257.
+     *
+     * Destroying the app drops the handlers, which drops their references, which is
+     * what lets the rest of it go.
+     */
+    if (server) {
+        server->app.reset();
+        server->routes.clear();
+        server->idle.clear();
+    }
 #else
     (void) space;
 #endif

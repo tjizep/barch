@@ -1083,35 +1083,11 @@
 
 238. [Done] LOADKEYS, and deploy.py retired [05-09-2026] Nr 230 527bfe8
 
-239. `hash_arena` should be able to back its pages with a named memory mapped
-    file, not only anonymous memory. It already mmaps when `use_vmm_memory` is
-    on (`hash_arena.h:495` and `:529`), but always `MAP_PRIVATE|MAP_ANONYMOUS`,
-    so every page costs RAM or swap. Backing a named file instead would let a
-    set of files larger than memory be held - which is exactly what an atomic
-    LOADFS of a big directory needs (238), and what a file store that is meant
-    to hold images and video wants in general. Open questions: whether the
-    mapping is MAP_SHARED over a real file or MAP_PRIVATE over one, where the
-    file lives and who cleans it up, and what it means for the existing save
-    and load path, which already writes shards of its own.
+239. [Done] An arena's pages can come from a named file [07-09-2026] Nr 255 c5df974
 
 240. [Done] A key space for the boot imports [05-09-2026] Nr 231 527bfe8
 
-241. Setting `server_port` or `server_binding` starts a server as a side
-    effect. `configuration.cpp:422` and `:450` call
-    `restarter::asynch_restart`, which stops and starts the listener on a
-    thread of its own, so a caller that only meant to record a port gets a
-    running server - and a caller that then starts one itself gets two. DONE
-    231 works around it in barchd by keeping `--port` and `--bind` local
-    rather than writing them through the configuration, but the wart is still
-    there for anything that sets those from the environment
-    (`BARCH_SERVER_PORT`) or `--config server_port=`, and for the python
-    binding, which applies the environment on import.
-
-    It also leaves a thread starting a server while the process is exiting,
-    which is where `failed to start server std::bad_alloc` on a refused
-    start-up came from. Settle by deciding whether recording a port should
-    restart anything at all, or whether the restart belongs behind an explicit
-    call that CONFIG SET makes and start-up does not.
+241. [Done] Recording a port stopped starting a server [07-09-2026] Nr 254 c5df974
 
 242. [Done] require out of the file store [05-09-2026] Nr 233 527bfe8
 
@@ -1121,21 +1097,7 @@
 
 245. [Done] Publishing a change is opt in, and per name [06-09-2026] Nr 236 527bfe8
 
-246. A stored function that writes an `fs:` module has no way to publish it.
-    RELOAD is a word on a command (DONE 236) and a script write is a
-    `barch.store.set`, which has no room for one - so a module deployed by a
-    script is live for connections that have not compiled it and stale for
-    those that have, with no way to change that short of `LOADFS ... RELOAD`
-    from outside or a restart. Publishing the *handler* does not help: the
-    handler and the module it requires are separate names and only the named
-    one is published, which is the point of per-name publishing and is what
-    `TestFileStore` asserts.
-
-    Worth a `barch.publish(path)` for a script to say so itself, or an
-    optional flag on `store.set`. Neither is obviously right: publishing is a
-    deployment act and a script doing it to itself mid-request is exactly the
-    sudden behaviour change 245 took out. Settle by deciding whether a script
-    should be able to publish at all, and if so under what rights.
+246. [Done] A script can publish what it wrote [07-09-2026] Nr 253 c5df974
 
 247. [Done] require(what, true) [06-09-2026] Nr 237 527bfe8
 
@@ -1502,3 +1464,35 @@
     that exists was made by LOADFS and can be remade by re-running it.
 
 257. [Done] HTTP STOP left the port open [06-09-2026] Nr 248 c5df974
+
+258. [Done] A shop example [07-09-2026] Nr 249 c5df974
+
+    The original entry follows, for what the data is.
+
+    A shop example: `examples/shop`. The amazon-products.csv in
+    `examples/shopping` as a storefront - a grid, a product page, a basket and a
+    checkout - with the catalog as files in an fs tree keyed by category, and the
+    product images cached on demand from `m.media-amazon.com` rather than shipped.
+
+    It is there to put the pieces together on something that looks like a real
+    site: fs directories as the category tree, `barch.fs` from luau, a files
+    route for the static app, resource routes for the API, and a second key space
+    holding images that fills itself from the network as they are asked for.
+
+    The data is 1000 products, 55 columns, of which 14 are always filled and three
+    are always empty. `categories` is a clean JSON array 2 to 9 deep, which is the
+    category tree. `image_url` is filled on 995 rows and the images are small -
+    WebP at 4 to 20KB, because the URL carries Amazon's size suffix - so the whole
+    image set is about 10MB rather than the 800MB the Myntra file would have been.
+    `final_price` is a quoted string, `initial_price` is the literal text `null` on
+    186 rows, and `domain` disagrees with itself (`https://www.amazon.com/` on 793
+    rows, `www.amazon.com` on 174), with 31 rows on .in and 2 on .co.uk, so prices
+    are not comparable across the file.
+
+259. [Done] A script can ask a foreign space to fill [07-09-2026] Nr 252 c5df974
+
+260. [Done] A range reaches both key regions [07-09-2026] Nr 250 c5df974
+
+261. [Done] barch.call returns the value, not the framing [07-09-2026] Nr 251 c5df974
+
+262. [Done] An arena maps its pages back instead of loading them [07-09-2026] Nr 256 c5df974

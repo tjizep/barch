@@ -148,8 +148,12 @@ int reply_variable(ValkeyModuleCtx *ctx, const Variable var) {
             return ValkeyModule_ReplyWithLongLong(ctx, std::get<uint64_t>(var));
         case var_double:
             return ValkeyModule_ReplyWithDouble(ctx, std::get<double>(var));
-        case var_string:
-            return ValkeyModule_ReplyWithStringBuffer(ctx, std::get<std::string>(var).c_str(), std::get<std::string>(var).size());
+        case var_string: {
+            // the same bulk marker the luau side had to learn about - TODO 261
+            const auto& s = std::get<std::string>(var);
+            auto body = var.bulk_vt(s);
+            return ValkeyModule_ReplyWithStringBuffer(ctx, body.chars(), body.size);
+        }
         case var_null:
             return ValkeyModule_ReplyWithNull(ctx);
         case var_error:

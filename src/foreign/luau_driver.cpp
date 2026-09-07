@@ -702,8 +702,19 @@ static void push_variable(lua_State* L, const Variable& v) {
             lua_pushnumber(L, std::get<double>(v));
             return;
         case var_string: {
+            /*
+             * Through bulk_vt, not raw. A bulk string is held in `results` as `$`
+             * followed by the value - the marker is how one is told from a simple
+             * string, since both are var_string - and every other reader strips it:
+             * `Variable::to_string` does, and so does the wire writer. This did not,
+             * so `barch.call('GET', k)` handed a script `$value` while
+             * `barch.store.get(k)` handed it `value`, and the difference only showed
+             * up when something looked at the bytes: simdjson refusing a document
+             * that began `${"asin":`. See TODO 261.
+             */
             const auto& s = std::get<std::string>(v);
-            lua_pushlstring(L, s.data(), s.size());
+            auto body = v.bulk_vt(s);
+            lua_pushlstring(L, body.chars(), body.size);
             return;
         }
         case var_verbatim: {
@@ -788,6 +799,54 @@ static void make_tomb(lua_State* L) {
     lua_setfield(L, -2, "__metatable");     // not rewritable from a script
     lua_setmetatable(L, -2);
     lua_setfield(L, LUA_REGISTRYINDEX, "barch.tomb");
+}
+
+/**
+ * `fetch` - a read that is allowed to go and get it.
+ *
+ * A key space configured `foreign` fills a missing key from its source, and until
+ * now only a client could make that happen: the miss path parks the connection that
+ * asked, and inside a script there is no connection to park. So a script reading a
+ * foreign space saw whatever was already cached and nothing else - see TODO 259.
+ *
+ * It is a separate call rather than something `get` does quietly, because the two
+ * are not the same operation. This one can take the source's latency and the
+ * space's timeout, and in an HTTP handler it holds the VM slot while it does. That
+ * should be visible at the call, not a property of the key space that the reader
+ * cannot see.
+ *
+ * Returns the value, or nil and the reason.
+ */
+static int push_store_fetch(lua_State* L, const store_access* s, art::value_type key) {
+    if (!s->fetch) {
+        lua_pushnil(L);
+        lua_pushstring(L, "not a foreign key space");
+        return 2;
+    }
+    std::string value;
+    std::string err;
+    auto state = s->fetch(std::string(key.chars(), key.size), value, err);
+    if (state == store_access::read_state::present) {
+        lua_pushlstring(L, value.data(), value.size());
+        return 1;
+    }
+    lua_pushnil(L);
+    if (state == store_access::read_state::tombed) {
+        lua_pushstring(L, "the source has no such key");
+        return 2;
+    }
+    if (!err.empty()) {
+        lua_pushlstring(L, err.data(), err.size());
+        return 2;
+    }
+    return 1;
+}
+
+static int store_fetch(lua_State* L) {
+    size_t n = 0;
+    const char* k = luaL_checklstring(L, 1, &n);
+    const auto* s = store_of(L, "fetch");
+    return push_store_fetch(L, s, {k, n});
 }
 
 static int store_get(lua_State* L) {
@@ -1497,6 +1556,13 @@ static int space_namecall(lua_State* L) {
         const char* k = luaL_checklstring(L, 2, &n);
         return push_store_get(L, s, {k, n});
     }
+    if (!strcmp(m, "fetch")) {
+        if (!s->may_read)
+            luaL_error(L, "FUNCTION not authorized to read there");
+        size_t n = 0;
+        const char* k = luaL_checklstring(L, 2, &n);
+        return push_store_fetch(L, s, {k, n});
+    }
     if (!strcmp(m, "set")) {
         if (!s->may_write)
             luaL_error(L, "FUNCTION not authorized to write there");
@@ -1779,6 +1845,44 @@ static int fs_move(lua_State* L, bool copying) {
 
 static int fs_rename(lua_State* L) { return fs_move(L, false); }
 static int fs_copy(lua_State* L)   { return fs_move(L, true); }
+
+/**
+ * `barch.fs.publish(path)` - say that a module written here should be picked up.
+ *
+ * A file written by a script is live for a session that has not compiled it yet and
+ * stale for one that has, and until now only `LOADFS ... RELOAD` from outside could
+ * change that. A script deploying its own module had no way to finish the job - see
+ * TODO 246.
+ *
+ * Separate from `put` on purpose, and opt in, for the reason TODO 245 made
+ * publishing opt in on the command: a write is a write, and publishing is the
+ * moment every session already running picks the change up. Doing that quietly
+ * inside `put` is the sudden behaviour change that was deliberately taken out.
+ *
+ * The right to do it is the right to write the file. A script that can write the
+ * module can already change what the next session compiles; publishing only decides
+ * when the ones already running see it, so it grants no reach the writer did not
+ * have - what it decides is timing, which is why it is a decision and not a default.
+ */
+static int fs_publish(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    (void) fs_store(L, "publish", true);
+    auto* rc = static_cast<running_call*>(lua_getthreaddata(L));
+    if (!rc)
+        luaL_error(L, "FUNCTION barch.fs.publish needs a running call");
+    std::string clean, err;
+    if (!barch::fs::normalise(std::string(path, pn), clean, err)) {
+        lua_pushboolean(L, false);
+        lua_pushlstring(L, err.data(), err.size());
+        return 2;
+    }
+    auto space = barch::get_keyspace(rc->running);
+    barch::functions::publish_compiled(
+        barch::functions::compiled_path_key(space ? space->canonical() : rc->running, clean));
+    lua_pushboolean(L, true);
+    return 1;
+}
 
 static int fs_mkdir(lua_State* L) {
     size_t pn = 0;
@@ -2174,6 +2278,8 @@ static space_state* state_for(function_states& cache) {
     lua_newtable(L);
     lua_pushcfunction(L, store_get, "get");
     lua_setfield(L, -2, "get");
+    lua_pushcfunction(L, store_fetch, "fetch");
+    lua_setfield(L, -2, "fetch");
     lua_pushcfunction(L, store_set, "set");
     lua_setfield(L, -2, "set");
     lua_pushcfunction(L, store_remove, "remove");
@@ -2236,6 +2342,8 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "rename");
     lua_pushcfunction(L, fs_copy, "copy");
     lua_setfield(L, -2, "copy");
+    lua_pushcfunction(L, fs_publish, "publish");
+    lua_setfield(L, -2, "publish");
     lua_setreadonly(L, -1, true);
     lua_setfield(L, -2, "fs");
     lua_pushcfunction(L, barch_user, "user");

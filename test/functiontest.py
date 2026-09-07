@@ -597,8 +597,12 @@ try:
     #
     # It also sits in a different part of the key order: a key holding the split is
     # stored under tplain and a plain string under tstring, so a range over string
-    # bounds does not contain it. That is not this interface being odd, it is what
-    # the built-in RANGE does, and the test says so both ways
+    # bounds does not contain it - and a range over plain bounds reaches it anyway,
+    # which is TODO 260 and a reversal of what this test used to assert. A key
+    # holding the split character is a composite and lives in another region of the
+    # tree; scanning only the plain region meant `SET "k with space" v` could be
+    # read by GET and never appear in a range, and an fs listing of 992 files
+    # returned three. A text range asks both regions now
     r.execute_command("SET", "part one", "composite")
     r.execute_command("SET", "partplain", "plain")
     assert r.execute_command("SETF", "myComposite", '''
@@ -606,19 +610,59 @@ try:
             -- bounds holding the split are composites too, so they bracket one
             local found = barch.store.range("part a", "part z", 10)
             local plain = barch.store.range("part", "partz", 10)
-            return {found[1], barch.store.get(found[1]), #plain, plain[1]}
+            return {found[1], barch.store.get(found[1]), #plain, plain[1], plain[2]}
         end
     ''') == b"OK"
     got = r.execute_command("myComposite")
     assert got[0] == b"part one", f"a composite key should render as written, got {got[0]!r}"
     assert got[1] == b"composite", "and read back through that same rendering"
     assert got[0] in r.execute_command("KEYS", "*"), "the script and KEYS should agree"
-    # a range over plain string bounds does not reach it, because a composite is a
-    # different lead and sorts elsewhere. The built-in does the same
-    assert got[2] == 1 and got[3] == b"partplain", f"the plain range gave {got[2:]}"
-    assert [k.decode() for k in r.execute_command("RANGE", "part", "partz")] == ["partplain"], \
-        "and the built-in agrees with the script"
+    # both, in text order - a space sorts below every letter
+    assert got[2] == 2, f"the plain range gave {got[2:]}"
+    assert got[3] == b"part one" and got[4] == b"partplain", f"out of order: {got[3:]}"
+    assert [k.decode() for k in r.execute_command("RANGE", "part", "partz")] == \
+        ["part one", "partplain"], "and the built-in agrees with the script"
     r.execute_command("DEL", "part one"); r.execute_command("DEL", "partplain")
+
+    # --- what barch.call hands back is the value, not the wire - TODO 261 -------
+    # a bulk string is held internally as `$` and then the value, which is how one
+    # is told from a simple string. Every reader strips that; this one did not, so
+    # a script got `$hello` and only noticed when something looked at the bytes
+    print("barch.call returns values, not framing", flush=True)
+    assert r.execute_command("SETF", "callinner", 'function call() return "hello" end') == b"OK"
+    assert r.execute_command("SETF", "callshapes", '''
+        function call()
+            barch.store.set("cv", "plainvalue")
+            barch.store.set("cv2", "second")
+            barch.store.set("cj", '{"a":7}')
+            local arr = barch.call("MGET", "cv", "cv2")
+            return {
+                barch.store.get("cv"),          -- the one that was always right
+                barch.call("GET", "cv"),
+                barch.call("CALLF", "callinner"),
+                barch.call("PING"),
+                barch.call("EXISTS", "cv"),
+                -- as a word, not as nil: a nil in the middle of a table ends it
+                tostring(barch.call("GET", "no such key")),
+                arr[1], arr[2],
+                #barch.call("GET", "cv"),
+                simdjson.parse(barch.call("GET", "cj")).a,
+            }
+        end
+    ''') == b"OK"
+    shapes = r.execute_command("callshapes")
+    assert shapes[0] == b"plainvalue", shapes
+    assert shapes[1] == b"plainvalue", f"barch.call kept the bulk marker: {shapes[1]!r}"
+    assert shapes[2] == b"hello", f"CALLF kept the bulk marker: {shapes[2]!r}"
+    assert shapes[3] == b"PONG", shapes          # a simple string was never marked
+    assert shapes[4] == 1, shapes                # nor an integer
+    assert shapes[5] == b"nil", shapes           # nor a null
+    # an array's elements carry the same marker and were wrong the same way
+    assert shapes[6] == b"plainvalue" and shapes[7] == b"second", f"MGET: {shapes[6:8]}"
+    assert shapes[8] == len("plainvalue"), f"a marked string is one byte too long: {shapes[8]}"
+    assert shapes[9] == 7, "a json document read through barch.call would not parse"
+    for k in ("cv", "cv2", "cj"):
+        r.execute_command("DEL", k)
 
     for i in range(4):
         r.execute_command("DEL", "sk%d" % i)

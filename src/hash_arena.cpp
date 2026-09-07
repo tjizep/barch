@@ -216,6 +216,10 @@ bool arena::base_hash_arena::arena_retrieve(base_hash_arena &arena, std::istream
 bool arena::base_hash_arena::load(const std::string &filename, const std::function<void(std::istream &)> &extra) {
     base_hash_arena anew_one;
     anew_one.set_check_mem(this->is_check_mem());
+    // and where its pages are mapped from, before it allocates any - otherwise a
+    // load lands in anonymous memory whatever `arena_dir` says. TODO 239
+    anew_one.set_backing_name(this->get_backing_name());
+    this->close_backing_file();     // the file is about to be the new arena's
     if (arena_read(anew_one, extra, filename)) {
         *this = std::move(anew_one); // only update if successful
         return true;
@@ -229,4 +233,161 @@ bool arena::base_hash_arena::retrieve(std::istream &in, const std::function<void
         return true;
     }
     return false;
+}
+
+/*
+ * The snapshot beside a mapped arena - TODO 262. See hash_arena.h for what it is
+ * for; this is the format.
+ *
+ * The completion stamp is written last and to the front, the way `save` already
+ * does it: a file that was cut short still has a zero there and is refused rather
+ * than half believed. Written to a temporary and renamed, so a reader never sees a
+ * partial one at all.
+ */
+std::atomic<uint64_t>& arena::mapped_count() {
+    static std::atomic<uint64_t> n{0};
+    return n;
+}
+
+namespace {
+    constexpr uint64_t snapshot_stamp = 0x424152434853ull;   // "BARCHS"
+
+    std::string snapshot_path_of(const std::string& arena_path) {
+        return arena_path + ".meta";
+    }
+}
+
+bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream &)> &extra) const {
+    if (backing_path.empty() || page_data == nullptr)
+        return false;
+    const std::string path = snapshot_path_of(backing_path);
+    const std::string tmp = path + ".wal";
+    std::remove(tmp.c_str());
+    std::ofstream out{tmp, std::ios::out | std::ios::binary};
+    if (!out.is_open()) {
+        barch::err({"could not write the arena snapshot", tmp});
+        return false;
+    }
+    uint64_t completed = 0;
+    writep(out, completed);
+    uint64_t version = storage_version;
+    uint64_t psize = page_size;
+    uint64_t bytes = page_data_size;
+    writep(out, version);
+    writep(out, psize);
+    writep(out, bytes);
+    uint64_t w_top = top, w_free = free_pages, w_max = max_allocated_page, w_last = last_allocated;
+    writep(out, w_top);
+    writep(out, w_free);
+    writep(out, w_max);
+    writep(out, w_last);
+    // the same allocator state the shard file carries, through the same writer
+    extra(out);
+    uint64_t count = hidden_arena.size();
+    writep(out, count);
+    for (const auto& [at, value] : hidden_arena) {
+        uint64_t a = at, v = value;
+        writep(out, a);
+        writep(out, v);
+    }
+    if (out.fail()) {
+        barch::err({"could not write the arena snapshot", tmp});
+        return false;
+    }
+    out.seekp(0);
+    completed = snapshot_stamp;
+    writep(out, completed);
+    out.flush();
+    out.close();
+    if (out.fail())
+        return false;
+    std::remove(path.c_str());
+    std::rename(tmp.c_str(), path.c_str());
+    return true;
+}
+
+bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream &)> &extra) {
+    if (!wants_backing())
+        return false;
+    auto dir = barch::get_arena_dir();
+    const std::string arena_file = dir + "/" + backing_name + ".arena";
+    const std::string path = snapshot_path_of(arena_file);
+
+    std::ifstream in{path, std::ios::in | std::ios::binary};
+    if (!in.is_open())
+        return false;
+    /*
+     * Read once. Whatever happens next - mapped, refused, or a crash a second
+     * later - this file has had its one chance, and start-up after a crash finds
+     * nothing to trust.
+     */
+    std::remove(path.c_str());
+
+    uint64_t completed = 0, version = 0, psize = 0, bytes = 0;
+    readp(in, completed);
+    if (completed != snapshot_stamp)
+        return false;                            // cut short, or not one of ours
+    readp(in, version);
+    readp(in, psize);
+    readp(in, bytes);
+    if (version != (uint64_t) storage_version || psize != (uint64_t) page_size || bytes == 0)
+        return false;                            // a different build wrote it
+
+    struct stat st{};
+    if (::stat(arena_file.c_str(), &st) != 0 || (uint64_t) st.st_size < bytes)
+        return false;                            // the pages it describes are not there
+
+    uint64_t w_top = 0, w_free = 0, w_max = 0, w_last = 0;
+    readp(in, w_top);
+    readp(in, w_free);
+    readp(in, w_max);
+    readp(in, w_last);
+    extra(in);
+    uint64_t count = 0;
+    readp(in, count);
+    hash_type restored;
+    restored.reserve(count);
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t a = 0, v = 0;
+        readp(in, a);
+        readp(in, v);
+        restored[a] = v;
+    }
+    if (in.fail())
+        return false;
+
+    // nothing has been changed until here, so a refusal above costs only the load
+    // that was going to happen anyway
+    // clear() drops the mapping and the path but keeps the name, which is
+    // configuration rather than state
+    clear();
+    if (!prepare_backing(false)) {
+        return false;
+    }
+    int fd = ::open(backing_path.c_str(), O_RDWR);
+    if (fd < 0) {
+        close_backing();
+        return false;
+    }
+    auto* mapped = (uint8_t*) mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (mapped == MAP_FAILED) {
+        close_backing();
+        return false;
+    }
+    page_data = mapped;
+    page_data_size = bytes;
+    heap::allocated += bytes;
+    heap::vmm_allocated += bytes;
+    top = w_top;
+    free_pages = w_free;
+    max_allocated_page = w_max;
+    last_allocated = w_last;
+    hidden_arena = std::move(restored);
+    // derived, so it is rebuilt rather than stored
+    reconcile_free_list();
+    modified.resize(page_data_size / physical_page_size + 1);
+    page_modifications::inc_all_tickers();
+    ++mapped_count();
+    return true;
 }

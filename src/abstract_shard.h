@@ -141,6 +141,11 @@ namespace barch {
         virtual void run_defrag() = 0;
 
         virtual bool save(bool stats) = 0;
+        /**
+         * The snapshot beside a mapped arena - TODO 262. Default is "nothing to
+         * write", so a shard kind that holds no arena is not made to care.
+         */
+        virtual bool save_snapshot() { return true; }
 
         virtual bool send(std::ostream& out) = 0;
 

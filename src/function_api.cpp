@@ -6,6 +6,8 @@
 #include <shared_mutex>
 
 #include "function_api.h"
+#include "key_range.h"
+#include "foreign/foreign.h"
 
 #include <algorithm>
 #include <cstring>
@@ -451,16 +453,7 @@ namespace functions {
         // from a client's string - min and max are the two that reach the range
         // today, and they filter their single answer below
         composite fq;
-        auto fn_start_v = fq.create(art::ts_function, {}, false);
-        const std::string fn_start(fn_start_v.chars(), fn_start_v.size);
         const bool hide = !s.may_see_functions;
-        /** the caller's upper bound, or where the functions begin, whichever is lower */
-        auto clamp_hi = [hide, fn_start](art::value_type hi) -> art::value_type {
-            if (!hide)
-                return hi;
-            art::value_type limit{fn_start.data(), fn_start.size()};
-            return hi < limit ? hi : limit;
-        };
         s.get = [space](const std::string& key,
                         std::string& value) -> barch::foreign::store_access::read_state {
             auto converted = space->encode_key(art::value_type{key.data(), key.size()});
@@ -486,26 +479,47 @@ namespace functions {
                     return barch::foreign::store_access::read_state::absent;
             }
         };
+        if (space->opt_foreign != barch::key_space::foreign_kind::off) {
+            s.fetch = [space, get = s.get](const std::string& key, std::string& value,
+                              std::string& err) -> barch::foreign::store_access::read_state {
+                auto state = get(key, value);
+                if (state != barch::foreign::store_access::read_state::absent)
+                    return state;
+                auto converted = space->encode_key(art::value_type{key.data(), key.size()});
+                if (!barch::foreign::fetch_now(space, converted.get_value(), err))
+                    return barch::foreign::store_access::read_state::absent;
+                return get(key, value);
+            };
+        }
         s.exists = [space](const std::string& key) -> bool {
             auto converted = space->encode_key(art::value_type{key.data(), key.size()});
             barch::sharded_store store(space);
             return store.exists(converted.get_value());
         };
-        s.count = [space, clamp_hi](const std::string& lo, const std::string& hi) -> int64_t {
-            auto l = space->encode_key(art::value_type{lo.data(), lo.size()});
-            auto h = space->encode_key(art::value_type{hi.data(), hi.size()});
-            barch::sharded_store store(space);
-            return store.count(l.get_value(), clamp_hi(h.get_value()));
+        /*
+         * Stored functions stay hidden from a caller without the `function`
+         * category. That used to be a clamp on the encoded upper bound, and cannot
+         * be now: a text range bounds two regions and a function key is in a third.
+         * It is a filter on the key instead, which is what min and max already do.
+         */
+        auto keep = hide ? barch::key_filter([](art::value_type k) {
+            return !(k.size && k.bytes[0] == art::tfunction);
+        }) : barch::key_filter();
+        s.count = [space, keep](const std::string& lo, const std::string& hi) -> int64_t {
+            return barch::text_count(space, art::value_type{lo.data(), lo.size()},
+                                     art::value_type{hi.data(), hi.size()}, keep);
         };
-        s.range = [space, sep, clamp_hi](const std::string& lo, const std::string& hi, int64_t limit,
+        s.range = [space, sep, keep](const std::string& lo, const std::string& hi, int64_t limit,
                           heap::vector<std::string>& out) {
-            auto l = space->encode_key(art::value_type{lo.data(), lo.size()});
-            auto h = space->encode_key(art::value_type{hi.data(), hi.size()});
-            barch::sharded_store store(space);
-            // the callback runs under the lock, so it only copies - no Luau here
-            store.range(l.get_value(), clamp_hi(h.get_value()), limit, [&](art::value_type key) {
+            // the callback runs under the lock, so it only copies - no Luau here.
+            // text_range rather than the store's own: a key holding the split
+            // character is a composite in another part of the tree, and a scan of
+            // one region cannot see the other - TODO 260
+            barch::text_range(space, art::value_type{lo.data(), lo.size()},
+                              art::value_type{hi.data(), hi.size()}, limit,
+                              [&](art::value_type key) {
                 out.push_back(encoded_key_as_string(key, sep));
-            });
+            }, keep);
         };
         s.min = [space, sep, hide](std::string& key) -> bool {
             barch::sharded_store store(space);

@@ -89,4 +89,30 @@ assert got == ["is is|2", "is is|7"], got
 assert r.get("is is|2") == "1"
 assert r.get("is_is 2") is None
 
+
+# --- a range reaches both regions - TODO 260 ------------------------------------
+# a key holding the split character is a composite and sorts elsewhere. It used to
+# be that a range over plain bounds could not see one, so `SET "k with space" v`
+# read back with GET and never appeared in a scan
+print("a scan sees a split key as well as a plain one", flush=True)
+r.execute_command("USE", "ks_both")
+for k in ("alpha", "alpha beta", "beta", "k with space"):
+    r.set(k, "v")
+assert r.execute_command("RANGE", "a", "z", 20) == \
+    ["alpha", "alpha beta", "beta", "k with space"], r.execute_command("RANGE", "a", "z", 20)
+assert r.execute_command("RANGE", "k", "l", 20) == ["k with space"]
+assert r.execute_command("COUNT", "a", "z") == 4
+# bounds that hold the split still mean that region on its own, which is what the
+# feature is for
+assert r.execute_command("RANGE", "alpha a", "alpha z", 20) == ["alpha beta"]
+
+# and with a configured separator it is that character, not a space
+conf.set("ks_bothc.key_split", ":")
+conf.save()
+r.execute_command("USE", "ks_bothc")
+for k in ("dept", "dept:42", "zoo"):
+    r.set(k, "v")
+assert r.execute_command("RANGE", "d", "e", 20) == ["dept", "dept:42"], \
+    r.execute_command("RANGE", "d", "e", 20)
+
 print("complete key split test")

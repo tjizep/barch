@@ -405,7 +405,7 @@ int cmd_LOADFS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
  *   FS LS <path> [AFTER name] [LIMIT n]     a line per entry, one level
  *   FS STAT <path>                          k=v, the way FUNCTIONS STATUS reads
  *   FS GET <path> [FROM off] [LEN n]        the content, or nil
- *   FS PUT <path> <content> [TYPE t] [CHUNK n]
+ *   FS PUT <path> <content> [TYPE t] [CHUNK n] [RELOAD]
  *   FS MV <path> <to>                       a file or a whole directory
  *   FS CP <path> <to>
  *   FS RM <path>                            1, or 0 when there was nothing
@@ -500,10 +500,15 @@ int FS(caller& call, const arg_t& argv) {
     if (sub == "PUT") {
         if (argv.size() < 4)
             return call.wrong_arity();
+        // the same trailing RELOAD LOADFS takes: a write is a write, and publishing
+        // is the separate moment a session already running picks it up - TODO 246
+        size_t last = argv.size() - 1;
+        const bool reload = takes_reload(argv, last);
+        const size_t positional = reload ? argv.size() - 1 : argv.size();
         std::string type, chunk;
-        for (size_t at = 4; at + 1 < argv.size(); at += 2) {
+        for (size_t at = 4; at + 1 < positional; at += 2) {
             if (!option_at(argv, at, "TYPE", type) && !option_at(argv, at, "CHUNK", chunk))
-                return call.push_error("FS PUT path content [TYPE t] [CHUNK n]");
+                return call.push_error("FS PUT path content [TYPE t] [CHUNK n] [RELOAD]");
         }
         barch::fs::batch b(space);
         b.write(path, as_text(argv[3]), type,
@@ -511,6 +516,11 @@ int FS(caller& call, const arg_t& argv) {
         std::string err;
         if (!b.commit(err))
             return call.push_error(err.c_str());
+        if (reload) {
+            for (const auto& written : b.written())
+                barch::functions::publish_compiled(
+                    barch::functions::compiled_path_key(space->canonical(), written));
+        }
         barch::fs::entry e;
         return call.push_int(barch::fs::stat_full(acc, path, e) ? (int64_t) e.chunks : 0);
     }

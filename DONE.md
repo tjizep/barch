@@ -12364,3 +12364,395 @@ START and a slot reload alone will not do it. That was already true and undocume
 refused after a STOP.
 
 Full suite 81/81.
+
+## 249. A shop, out of a key space [07-09-2026]
+
+`examples/shop`. 992 Amazon products as a storefront: a grid with a category tree
+and search, a product page, a basket, a checkout that writes an order, and product
+images that are not shipped at all but arrive from Amazon the first time somebody
+looks at one.
+
+One key space holds the lot. `/catalog/<top>/<sub>/<asin>.json` is the catalog and
+**the directories are the category tree** - `GET /api/categories` has no index
+behind it, it is `fs.list("/catalog")` and then `fs.list` on each result.
+`/meta/index.json` is one compact row per product so the front page is one read
+rather than 992. `/modules/catalog.luau` is the lookup both routes share.
+`/cache/<asin>` is an image once somebody has asked for it. Orders are plain keys.
+
+Images: `/img/<asin>` reads `/cache/<asin>`, and on a miss fetches the url once and
+writes it to the file store with its content type. **135ms cold, 0.4ms warm**, and
+about 10MB if every product is eventually viewed. The fetch waits inline and holds
+a VM slot, so a cold gallery is bounded by the pool - the trade for not shipping the
+pictures.
+
+A `shopimg` space is configured `foreign = luau` beside it, filling itself from the
+url a missing key names - 318ms cold, 0ms warm over RESP. It is left in because it
+is the honest version of the same idea and because the difference is the point: it
+answers clients and not scripts, so the route has its own fetch. See TODO 259.
+
+### Three bugs, all found by building it
+
+**A key containing a space is invisible to a range scan** - TODO 260. The first cut
+used category names as directory names, so `/catalog/Home & Kitchen/...` stored 992
+files of which a listing found three. `SET "k with space" v` reads back with GET and
+never appears in `RANGE`. Of fifteen punctuation cases probed only the two with a
+space are missed, so it is the space specifically. Everything built this week walks
+keys with a range, and all of it skips those keys silently. The example slugs its
+paths, which is a workaround.
+
+**`barch.call` hands a script the RESP type byte** - TODO 261. `barch.call('GET',k)`
+returns `$plainvalue` where `barch.store.get(k)` returns `plainvalue`; `CALLF`
+likewise. Integers, simple strings and nulls are clean, so it is the bulk string
+case. It surfaced as `simdjson.parse` refusing a record that began `${"asin":`,
+which was the parser being right. The example uses a `require`d module rather than
+the documented `CALLF` because of it.
+
+**A `require` at the top of a file fails at install** with "require has no store
+here": storing a function runs the chunk, and at that moment there is no store to
+read a module out of. The requires are inside the handlers, where `require`'s cache
+makes it one lookup per session.
+
+Also confirmed while wiring it: `barch.space` is not available in an HTTP handler,
+and the `web` user needs `+function +data` granted before a route can call a stored
+function or write an order.
+
+### The look of it
+
+Restrained on purpose: one page, system fonts, a 220px category rail, cards in a
+responsive grid with the image, brand, name, stars and price, and a modal for the
+product, the basket and the checkout. No framework and no build step - it is one
+HTML file in the file store, and the whole storefront is 15KB.
+
+Prices are totalled on the server from the catalog. The basket posts asins and
+quantities and never prices, because a basket that arrives with its own totals is a
+basket that can arrive with any totals it likes.
+
+## 250. A range reaches both key regions [07-09-2026]
+
+TODO 260. `SET "k with space" v` read back with GET and never appeared in
+`RANGE k l`; an fs listing of 992 files under directories like `Home & Kitchen`
+returned three.
+
+### What it actually was
+
+Not a broken range. A caller's key is encoded one of two ways, and the content
+decides which: without the space's split character - a space, unless `key_split`
+says otherwise - it becomes a plain string under `tstring`, and with one it becomes
+a multi-part composite under `tplain`. That is the feature `key_split` exists for,
+and `RANGE "alpha a" "alpha z"` walking the parts under `alpha` is it working.
+
+The two regions are far apart in the tree and each is correctly ordered inside
+itself. So a scan of one never sees the other, and which one a key went to is
+decided by whether it happens to contain a space. Both halves were behaving
+exactly as designed, and the design was the problem.
+
+`test/functiontest.py` asserted the old behaviour deliberately - "that is not this
+interface being odd, it is what the built-in RANGE does, and the test says so both
+ways" - so this is a reversal of a documented decision, not the fixing of an
+oversight. The evidence for reversing it is the 992 files.
+
+### The fix
+
+`src/key_range.h/.cpp`: `text_range` and `text_count` bound *both* regions and
+merge in text order. Each region gets bounds encoded the way keys in it were
+encoded - a plain bound for the string region and, for the composite region, either
+the caller's own split bound or a one-part composite of the same text, which sorts
+below every longer key sharing that first part. `RANGE`, `COUNT` and the
+`store_access` range and count all go through it, so `FS LS`, `DIR LS`, `fs::walk`
+and `drop_fs_missing` are fixed by the same change.
+
+Bounds have to be built for both regions whatever the caller's own bound looks
+like. The first cut only did the second scan when both bounds were plain, which
+left the mixed case - a `lo` with a space and a `hi` without - encoding one bound
+into each region and scanning nonsense between them. That showed up as a listing
+that found one directory out of three.
+
+**The common case costs nothing.** The composite region is scanned first, because
+it is usually empty, and when it is the plain scan streams straight to the callback
+with no copy and no merge, exactly as before. Only a space that really holds split
+keys pays for the second half.
+
+### The one thing it had to keep
+
+Hiding stored functions from a caller without the `function` category used to be a
+clamp on the encoded upper bound. That cannot work now - there are two regions to
+bound and a function key is in a third - so it is a filter on the key instead,
+which is what `min` and `max` already did. Routing the range through `text_range`
+without this would have quietly shown function keys to callers who may not see
+them; the clamp is gone and the filter replaces it.
+
+### Measured
+
+The case that started it: 1000 products under 28 categories named `Home & Kitchen`,
+`Tools & Home Improvement` and so on. `FS LS /catalog` returned 3 before and
+returns 28 now. `RANGE k l` finds `k with space`. `COUNT` agrees with the listing.
+`RANGE "alpha a" "alpha z"` still means the composite region on its own, so
+`key_split` is untouched. Full suite 81/81, with the new case in
+`test/keysplittest.py` and the reversal written into `test/functiontest.py`.
+
+## 251. barch.call returns the value, not the framing [07-09-2026]
+
+TODO 261. `barch.call('GET', k)` handed a script `$plainvalue` where
+`barch.store.get(k)` handed it `plainvalue`.
+
+The `$` is not junk: a bulk string is held in a caller's results as `$` followed by
+the value, because a bulk and a simple string are both `var_string` and that is how
+one is told from the other. Every reader strips it - `Variable::to_string` does,
+and so does the wire writer - and two did not: `push_variable` in the luau driver,
+and `reply_variable` on the valkey module path. Both use `Variable::bulk_vt` now,
+which is the accessor the rest of the code already used.
+
+Silent, which is the point: the value was right and one byte too long, so anything
+that passed it straight on looked fine. It surfaced as `simdjson.parse` refusing a
+document that began `${"asin":`, and the parser was telling the truth.
+
+**Arrays were wrong the same way.** Elements are marked by the same `push_vt_impl`,
+so `barch.call('MGET', a, b)` returned `$` on each of them; `push_variable` recurses
+through the same case, so one fix covers both. The regression test in
+`test/functiontest.py` checks a value, a `CALLF` result, an MGET element, the length
+of a string, a json document parsed out of one, and that a simple string, an integer
+and a null were never marked and still are not.
+
+One thing worth knowing that the test now documents: a `nil` in the middle of a Lua
+table ends it, so the null case is returned as the word rather than as nil - the
+first cut of the test lost three elements to that and looked like a fix that had not
+worked.
+
+The shop example keeps its `require`d module rather than going back to
+`barch.call("CALLF", ...)`: one copy in a file that both routes read is the better
+arrangement whatever the bug was doing.
+
+Full suite 81/81.
+
+## 252. A script can ask a foreign space to fill [07-09-2026]
+
+TODO 259. A key space configured `foreign` fills a missing key from its source, and
+only a client could make that happen: the miss path is `point_get`, which parks the
+*connection* that asked, and inside a script there is no connection to park. So a
+script reading a foreign space saw whatever happened to be cached and nothing else -
+`GET <url>` over RESP was 318ms cold and 0ms warm, while `barch.space.pics[url]` for
+the same missing key returned nil at once.
+
+**`barch.store.fetch(key)`**, and `:fetch(key)` on a space handle. It is a separate
+call and not something `get` does quietly, which is the decision this entry was
+open on. The two are not the same operation: one can take the source's latency and
+the space's timeout, and in an HTTP handler it holds the VM slot for the whole
+fetch. A read that does that should say so where it is written, not leave it as a
+property of the key space that whoever reads the line cannot see. `get` is
+unchanged and still cannot fill.
+
+Underneath is `foreign::fetch_now`, which is the wait the SWIG path already did,
+without a caller: `start_or_join` and `release_join` were already the reusable
+halves, and they coalesce a second asker onto a flight in progress and clean up
+after both. On a space that is not foreign `store_access::fetch` is empty and the
+binding says "not a foreign key space" rather than pretending.
+
+**`barch.space` now works in an HTTP handler.** It was never wired into the HTTP
+interface, so a route could only see the space its own server runs in - which is the
+other half of why the shop example could not use the cache it had configured. The
+rights are asked for again in the other space rather than inherited, the same as the
+RESP path, so per-space overrides still apply and naming a space that does not exist
+does not build one.
+
+The shop example is on it now: `/img/<asin>` reads `barch.space.shopimg:fetch(url)`,
+374ms cold and 0.5ms warm, and a `GET <url>` from redis-cli in that space fills the
+very same cache. Its own `/cache` directory is gone.
+
+Found while wiring it: a multi-line luau function cannot be installed through a
+`redis-cli` heredoc, which reads a line at a time - the fill script goes in with
+`LOADKEYS` from a directory of its own, and the setup script says so.
+
+Full suite 81/81, with the new case in `test/foreign_luau.py`: `get` sees nothing,
+`fetch` fills it, `get` then sees it, a client sees it too, a source that has no
+such key comes back as a reason rather than an error, and a space that is not
+foreign says which it is.
+
+## 253. A script can publish what it wrote [07-09-2026]
+
+TODO 246, which was written before `barch.fs` existed and asked a question the file
+API has since sharpened: a script writes a module through `barch.fs.put` now, not
+through `store.set`, so the only thing missing was the publish.
+
+**`barch.fs.publish(path)`**, and a trailing `RELOAD` on `FS PUT` - the same word
+`LOADFS` already takes. Both are opt in, separately from the write, which is the
+question the entry was open on. A write is a write; publishing is the moment every
+session already running picks the change up, and doing that quietly inside `put`
+is precisely the sudden behaviour change TODO 245 took out of the command.
+
+On rights, which the entry also asked: the right to publish is the right to write
+the file. A script that can write a module can already change what the next session
+compiles, so publishing grants it no reach it did not have - what it decides is
+*when* the sessions already running see it. That is a decision worth making
+explicitly, and it is why this is a verb rather than a default, but it is not a
+privilege worth a category of its own.
+
+That makes three verbs now that exist because the ordinary one would hide a
+consequence: `fetch` is a read that may go to the network (DONE 252), `publish` is a
+write that changes what other sessions are running, and `require(path, true)` is a
+compile that ignores the cache (DONE 237). The pattern seems worth keeping.
+
+Measured end to end: a session holding a compiled module reads `one`; a script
+rewrites the file and does not publish, and the session still reads `one`; the
+script publishes and it reads `three`; `FS PUT` alone leaves it at `three`; `FS PUT
+... RELOAD` moves it to `five`. All six steps are in `test/fstest.py`. Full suite
+81/81.
+
+## 254. Recording a port stopped starting a server [07-09-2026]
+
+TODO 241. Setting `server_port` or `server_binding` restarted the listener on a
+thread of its own, so a caller that only meant to record a port got a running
+server, and one that then started its own got two.
+
+**`set_configuration_value(name, value, live)`.** The value is recorded either way;
+`live` decides whether it acts. `CONFIG SET server_port 15000` should move a running
+listener and does. Start-up should not start one and no longer does: the environment
+sweep and `barchd --config` pass false.
+
+Five settings act, and the header names them - `server_port`, `server_binding`,
+`listen_port`, `functions_dir` and `functions_sync_ms`. Everything else only
+recomputes a derived value and does not care, which is why this is a flag on five
+branches rather than a rule about all forty.
+
+**barchd stopped working around it.** DONE 231 kept `--port` and `--bind` out of the
+configuration precisely because writing them started a server; they go through it
+now, so `CONFIG GET server_port` reports the port the process is actually on rather
+than whatever the configuration happened to hold. The local variables and the
+paragraph explaining them are gone.
+
+**And a restart cannot start into a teardown.** `restarter` has a `shutting_down`
+flag, checked before a restart is queued and again after the 100ms wait, and
+`barch::stop_configuration_restarts()` sets it and joins. barchd calls that before
+`server::stop()`. That is where `failed to start server std::bad_alloc` on a refused
+start-up came from: the thread reached `server::start` while everything under it was
+being destroyed.
+
+Measured: `BARCH_SERVER_PORT=15999 barchd --port 14980` listens on 14980 only,
+nothing answers on 15999, `CONFIG GET server_port` says 14980, and the listener is
+started once rather than up to three times. `CONFIG SET server_port` then moves it
+and the new port answers. `test/barchdtest.py` asserts all of that, with the move in
+a run of its own - putting it in the same one made the "started once" count two, for
+the good reason that a deliberate move is a second start.
+
+Full suite 81/81.
+
+## 255. An arena's pages can come from a named file [07-09-2026]
+
+TODO 239. `base_hash_arena` mapped `MAP_PRIVATE|MAP_ANONYMOUS`, so every page it
+held cost RAM or swap and a set of files larger than memory could not be held at
+all.
+
+`arena_dir` names a directory; empty - the default - is exactly what it was. When it
+is set, an arena maps `MAP_SHARED` over `<dir>/<arena>.arena`, the arena's own name
+being unique per space and shard already (`leaves_node017`, `nodes_media3`).
+
+**Measured, which is the whole point.** 80,000 keys holding about 250MB:
+
+| | RssAnon | RssFile |
+|---|---|---|
+| anonymous, as before | 272 MB | 16 MB |
+| mapped from files | 19 MB | 308 MB |
+
+The same data, moved out of anonymous memory and into page cache the kernel can
+evict and read back. That is what makes an arena bigger than RAM possible, and it
+works where swap is off, which containers usually are.
+
+### What is authoritative, which was the open question
+
+The shard file, still. The save path writes a compacted logical dump with a version,
+a completion stamp written last and an atomic rename, and that is what makes a barch
+database survive a crash. A live mapping as the authority would need page-granular
+crash consistency that does not exist. So the mapped file is where pages live while
+running and the shard file is what they are rebuilt from - which answers the rest by
+construction: the two cannot disagree because the mapping is never read back, a torn
+page cannot be observed because nothing trusts it, and it needs no format version
+because nothing parses it. Verified: data written with `arena_dir` on comes back
+after a restart, out of the shard file as it always did.
+
+Mapping it back *instead* of loading is TODO 262, and it is a real piece of work
+rather than a follow-up: the pages are not the arena. `hidden_arena`, the free list,
+`top` and `last_allocated` live in memory and only the save format writes them, so a
+mapped file restores bytes and nothing that says which are live.
+
+### The descriptor problem, found by measuring
+
+The first cut kept the fd open per arena, which is how one would naturally write it -
+`ftruncate` needs a descriptor to grow the file. A default server is 347 shards times
+two allocators, and `/proc/<pid>/fd` had **696 arena descriptors open before a single
+client connected**. That is fine on this box, whose limit is a million, and fatal on
+the 1024 that is still common.
+
+An mmap holds its own reference to the file, so the descriptor is not needed once the
+mapping exists. It is opened for the moment it takes to create or grow the file and
+closed again: steady state is zero. The test asserts that by reading
+`/proc/<pid>/fd`, because it is the kind of thing that comes back quietly.
+
+Two smaller things: the files are sparse, so 696 of them are 522MB apparent and 8.9MB
+actual; and `load()` had to be told the backing name before it allocates, the same
+way it is already told about `check_mem`, or a load lands in anonymous memory
+whatever the setting says.
+
+`test/configtest.py` caught the new setting missing from the list it keeps of every
+registered variable, which is exactly what that list is for. Full suite 81/81.
+
+## 256. An arena maps its pages back instead of loading them [07-09-2026]
+
+TODO 262. DONE 255 put the pages in a named file and start-up still replayed the
+shard file into a fresh anonymous arena and copied every one of them in.
+
+**Measured, 30,000 keys across 347 shards:**
+
+| | shard load |
+|---|---|
+| replayed from the shard files | 0.275 s |
+| mapped back | 0.019 s |
+
+The mapping is a `mmap` and a few thousand metadata entries; the load is every page
+read and copied.
+
+### What was in the way
+
+The pages are not the arena. `hidden_arena`, the free list, `top` and
+`last_allocated` live in memory and only the save format writes them, so a mapped
+file restores bytes and nothing that says which of them are live - and the shard
+file also carries an `extra` block of allocator state that a load restores through
+the same reader.
+
+So the snapshot is **the save file minus the page data**: `<arena>.arena.meta`,
+holding a stamp, the version and page size, the arena scalars, that same `extra`
+block through the same writer, and the `hidden_arena` entries. The free list is
+derived and is rebuilt rather than stored. `logical_allocator::state_writer` is now
+one function used by both the shard file and the snapshot, so the two cannot drift
+into disagreeing about what a load has to restore.
+
+### When it can be believed
+
+Written **only during an orderly shutdown**, after the last save, because that is
+the only moment it can be true - the mapping goes on changing after any other save,
+and a snapshot describing a state the file has moved past is worse than none.
+`barchd` calls `snapshot_arenas()` after `saveAll()`, when nothing is serving.
+
+**Read once and unlinked.** Whatever happens next - mapped, refused, or a crash a
+second later - the file has had its chance, so a start-up after a crash finds
+nothing to trust. The stamp is written last and to the front, the way `save`
+already does it, and the whole thing is renamed into place, so a reader never sees a
+partial one. A mismatched version, page size, or an arena file shorter than the
+snapshot describes all fall through to the ordinary load, which costs only the load
+that was going to happen anyway.
+
+Verified: a clean stop writes 694 snapshots and the next start maps 694 arenas with
+every key intact; `kill -9` leaves none, the next start maps nothing, and the data
+comes back from the shard file including a key written after the last snapshot.
+
+### The bug this grew, which is worth remembering
+
+The first cut logged a line per arena mapped. A default server is 694 of them, and
+start-up's stdout is a pipe that whoever launched it has not started draining yet.
+The pipe filled at 64KB, the writing thread blocked, and the server never finished
+starting - it looked exactly like a hang in the mapping code. It is a counter and one
+summary line now.
+
+What found it was making `start()` in `test/barchdtest.py` print the daemon's own
+output when it times out instead of throwing it away, which took a minute and turned
+an invisible hang into an obvious one. That change is worth more than the fix.
+
+Full suite 81/81.

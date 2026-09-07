@@ -879,6 +879,32 @@ try:
     r.execute_command("LOADFS", _vdir, "/vers")
     assert r.execute_command("vbump") == 101, "a forced require missed a new version"
 
+    print("a script can publish what it wrote, and only when it says so", flush=True)
+    # TODO 246. A write is a write; publishing is the separate moment a session that
+    # has already compiled the module picks the change up. `barch.fs.put` does not do
+    # it and `barch.fs.publish` does, the same way RELOAD is a word on the command
+    r.execute_command("FS", "PUT", "/vers/dep.luau", "function version() return 'one' end")
+    assert r.execute_command("SETF", "depver",
+        "function call() return require(':/vers/dep.luau').version() end") == b"OK"
+    assert r.execute_command("depver") == b"one"
+
+    assert r.execute_command("SETF", "deploy", """function call(body, publish)
+        barch.fs.put('/vers/dep.luau', body, 'text/plain')
+        if publish == '1' then barch.fs.publish('/vers/dep.luau') end
+        return 'ok'
+    end""") == b"OK"
+    r.execute_command("deploy", "function version() return 'two' end", "0")
+    assert r.execute_command("depver") == b"one", "a plain write published itself"
+    r.execute_command("deploy", "function version() return 'three' end", "1")
+    assert r.execute_command("depver") == b"three", "publish did not reach the session"
+
+    # the command has the same two halves
+    r.execute_command("FS", "PUT", "/vers/dep.luau", "function version() return 'four' end")
+    assert r.execute_command("depver") == b"three", "FS PUT published without being asked"
+    r.execute_command("FS", "PUT", "/vers/dep.luau",
+                      "function version() return 'five' end", "RELOAD")
+    assert r.execute_command("depver") == b"five", "FS PUT RELOAD did not publish"
+
     print("a script written file versions too, so the skip works for it as well", flush=True)
     # this used to be the "no version" case: the luau writer kept none, so absent had
     # to mean "assume changed". Every writer goes through barch::fs now and every

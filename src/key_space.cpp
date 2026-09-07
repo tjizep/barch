@@ -229,6 +229,17 @@ namespace barch {
         return flush_keyspace(name);
     }
 
+    void snapshot_arenas() {
+        if (barch::get_arena_dir().empty())
+            return;
+        size_t written = 0;
+        all_shards([&written](const barch::shard_ptr& s) {
+            if (s && s->save_snapshot())
+                ++written;
+        });
+        barch::log({"wrote", written, "arena snapshots"});
+    }
+
     bool flush_keyspace(const std::string& name_) {
         bool r = false;
         if (!check_ks_name(name_)) {
@@ -384,6 +395,9 @@ namespace barch {
             double millis = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             shards.swap(shards_out);
             barch::log({"Loaded",shards.size(),"shards in", millis/1000.0f, "s", shards_loaded});
+            // one line for all of them, not one each - see arena::mapped_count
+            if (auto mapped = arena::mapped_count().exchange(0); mapped > 0)
+                barch::log({"mapped", mapped, "arenas back rather than loading them"});
             if (opt_range_sharded) {
                 build_range_index();
             }

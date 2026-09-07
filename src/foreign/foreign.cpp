@@ -379,6 +379,51 @@ static void release_join(const key_space_ptr& space, join_handle& h) {
     h.fl.reset();
 }
 
+/*
+ * The same wait the SWIG path does, without a caller. Everything here is
+ * `start_or_join` and `release_join`, which already coalesce a second asker onto a
+ * flight in progress and clean up after both - see TODO 259.
+ */
+bool fetch_now(const key_space_ptr& space, art::value_type key, std::string& err) {
+    if (!space || space->opt_foreign == key_space::foreign_kind::off) {
+        err = "not a foreign key space";
+        return false;
+    }
+    auto h = start_or_join(space, key);
+    if (h.status == join_handle::status::overloaded) {
+        release_join(space, h);
+        err = "FOREIGN overloaded";
+        return false;
+    }
+    if (h.status == join_handle::status::failed) {
+        err = h.error.empty() ? "FOREIGN failed" : h.error;
+        release_join(space, h);
+        return false;
+    }
+    if (h.status != join_handle::status::waiting || !h.fl) {
+        // already answered under the lock: present, or a cached miss
+        release_join(space, h);
+        return true;
+    }
+    {
+        std::unique_lock lk(h.fl->swig_mu);
+        h.fl->swig_cv.wait_for(lk, std::chrono::milliseconds(space->waiter_timeout_ms()),
+                               [&] { return h.fl->finished; });
+    }
+    const bool finished = h.fl->finished;
+    const std::string flight_error = h.fl->error;
+    release_join(space, h);
+    if (!finished) {
+        err = "FOREIGN timeout";
+        return false;
+    }
+    if (!flight_error.empty()) {
+        err = flight_error;
+        return false;
+    }
+    return true;
+}
+
 static int wait_joins(caller& call, const key_space_ptr& space, std::vector<join_handle>& hs) {
     auto deadline = art::now() + static_cast<int64_t>(space->waiter_timeout_ms());
     std::string err;

@@ -169,24 +169,28 @@ int main(int argc, char** argv) {
         }
     }
     /*
-     * --port and --bind are kept here rather than written through
-     * set_configuration_value, because setting `server_port` or `server_binding`
-     * asynchronously restarts the server (configuration.cpp:422, through
-     * restarter::asynch_restart). Doing that and then starting the listener below
-     * built it up to three times on one boot, and on an early exit left a thread
-     * starting a server while the process was tearing down - which is where the
-     * `failed to start server std::bad_alloc` in a refused start-up came from.
-     * See TODO 241.
+     * Recorded through the configuration like everything else, so `CONFIG GET
+     * server_port` reports the port this process is actually on. That used to start
+     * a server as a side effect - setting `server_port` restarted the listener on a
+     * thread of its own - which is why these two were kept local. They are recorded
+     * and not acted on now; TODO 241 has the rest of it.
      */
-    uint_least16_t listen_port = (uint_least16_t) barch::get_server_port();
     if (!port.empty()) {
         auto n = strtoul(port.c_str(), nullptr, 10);
         if (n == 0 || n > 65535) {
             std::cerr << argv[0] << ": bad port '" << port << "'\n";
             return 2;
         }
-        listen_port = (uint_least16_t) n;
+        if (barch::set_configuration_value("server_port", port, false) != 0) {
+            std::cerr << argv[0] << ": cannot listen on port '" << port << "'\n";
+            return 2;
+        }
     }
+    if (!bind.empty() && barch::set_configuration_value("server_binding", bind, false) != 0) {
+        std::cerr << argv[0] << ": cannot bind '" << bind << "'\n";
+        return 2;
+    }
+    auto listen_port = (uint_least16_t) barch::get_server_port();
 
     // signals armed before the listener, so a SIGTERM arriving during start-up is not
     // the default disposition
@@ -297,7 +301,7 @@ int main(int argc, char** argv) {
         barch::start_function_sync();
     }
 
-    auto listen_on = bind.empty() ? barch::get_server_binding() : bind;
+    auto listen_on = barch::get_server_binding();
     if (listen_on.empty())
         listen_on = "0.0.0.0";
     try {
@@ -315,12 +319,18 @@ int main(int argc, char** argv) {
     }
     barch::log({"barchd stopping on signal", stop_signal.load()});
 
+    // nothing may start a listener from here on: a restart already on its way would
+    // otherwise build one while the process is being torn down - TODO 241
+    barch::stop_configuration_restarts();
     barch::server::stop();
     if (save_on_exit) {
         // a database that loses the last minutes of writes because it was asked to stop
         // is not a good default. saveAll, not save: every space, not the default one
         barch::log({"barchd saving"});
         saveAll();
+        // and the snapshots beside the mapped arenas, last of all: nothing writes
+        // after this, which is the only thing that makes them true - TODO 262
+        barch::snapshot_arenas();
     }
     barch::log({"barchd stopped"});
     return 0;

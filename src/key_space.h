@@ -200,6 +200,12 @@ namespace barch {
     const std::string& get_ks_pattern_error();
     bool is_keyspace(const std::string& name_);
     bool check_ks_name(const std::string& name_);
+    /**
+     * Write the snapshot beside every mapped arena, so the next start can map its
+     * pages back instead of replaying the shard files. Only ever called during an
+     * orderly shutdown, after the last save - see TODO 262.
+     */
+    void snapshot_arenas();
     std::string ks_undecorate(const std::string& name);
     key_space_ptr get_keyspace(const std::string &name);
     void all_shards(const std::function<void(const shard_ptr&)>& cb );

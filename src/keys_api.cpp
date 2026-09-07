@@ -15,6 +15,7 @@
 #include <shared_mutex>
 
 #include "keys_api.h"
+#include "key_range.h"
 #include <algorithm>
 #include <random>
 #include "sharded_store.h"
@@ -157,13 +158,12 @@ int RANGE(caller& call, const arg_t& argv) {
     if (key_ok(k2) != 0)
         return call.key_check_error(k2);
 
-    auto c1 = call.kspace()->encode_key(k1);
-    auto c2 = call.kspace()->encode_key(k2);
-
-    barch::sharded_store store(call.kspace());
     call.start_array();
     // TODO: replace this with streaming api to reduce memory
-    store.range(c1.get_value(), c2.get_value(), count, [&](art::value_type k) {
+    // text_range and not sharded_store::range: a key with the split character in it
+    // is a composite and lives elsewhere in the tree, and a scan that only asked the
+    // plain region silently misses it - see TODO 260
+    barch::text_range(call.kspace(), k1, k2, count, [&](art::value_type k) {
         if (visible_key(call, k))
             call.push_encoded_key(k);
     });
@@ -189,10 +189,8 @@ int COUNT(caller& call, const arg_t& argv) {
     if (key_ok(k2) != 0)
         return call.key_check_error(k2);
 
-    auto c1 = call.kspace()->encode_key(k1);
-    auto c2 = call.kspace()->encode_key(k2);
-    barch::sharded_store store(call.kspace());
-    return call.push_int(store.count(c1.get_value(), c2.get_value()));
+    // both regions, the same as RANGE - TODO 260
+    return call.push_int(barch::text_count(call.kspace(), k1, k2));
 }
 int cmd_COUNT(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 

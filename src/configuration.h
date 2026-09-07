@@ -73,6 +73,8 @@ namespace barch {
         std::string bind_interface{"127.0.0.1"};
         int listen_port{12145};
         /** checkout of luau functions; "off" means the watcher is idle */
+        /** where an arena maps its pages from; "off" is anonymous memory - TODO 239 */
+        std::string arena_dir{"off"};
         std::string functions_dir{"off"};
         uint64_t functions_sync_ms{0};
         bool functions_git_pull{false};
@@ -137,6 +139,11 @@ namespace barch {
     bool get_hybrid_keys();
 
     bool get_static_bloom_filter();
+    /**
+     * Where an arena maps its pages from. Empty is anonymous memory, which is what
+     * it was before there was a choice - see TODO 239.
+     */
+    std::string get_arena_dir();
     std::string get_functions_dir();
     uint64_t get_functions_sync_ms();
     bool get_functions_git_pull();
@@ -168,7 +175,25 @@ namespace barch {
     std::chrono::seconds get_rpc_write_to_s() ;
     bool get_use_minimum_threads();
     int set_configuration_value(ValkeyModuleString *name, ValkeyModuleString *value);
-    int set_configuration_value(const std::string& name, const std::string &val);
+    /**
+     * Record a setting, and by default act on it.
+     *
+     * `live` is the difference between `CONFIG SET server_port 15000`, which should
+     * move a running listener, and start-up reading `BARCH_SERVER_PORT`, which
+     * should not start one - a caller that only meant to record a port used to get
+     * a server, and one that then started its own got two. Five settings act:
+     * `server_port`, `server_binding`, `listen_port`, `functions_dir` and
+     * `functions_sync_ms`. Everything else only recomputes a derived value and does
+     * not care. See TODO 241.
+     */
+    int set_configuration_value(const std::string& name, const std::string &val,
+                                bool live = true);
+
+    /**
+     * Stop the configuration from restarting the listener, and wait for one that is
+     * already going. Called when the process is on its way out - see TODO 241.
+     */
+    void stop_configuration_restarts();
     /**
      * the current value of a configuration variable as text. Read from the live record
      * rather than the reflection strings, because those are only filled in once

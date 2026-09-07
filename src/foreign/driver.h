@@ -143,6 +143,17 @@ struct store_access {
      */
     enum class read_state { absent, tombed, present };
     std::function<read_state(const std::string& key, std::string& value)> get{};
+    /**
+     * `get`, and on a miss in a foreign key space, the fill - waited for. Empty on a
+     * space that is not foreign, which is how a caller can tell the two apart.
+     *
+     * Separate from `get` on purpose. A read that might go to the network and take
+     * a timeout is not the same operation as a read that cannot, and a handler that
+     * did the first while believing the second would hold its VM slot for the whole
+     * fetch without anything saying so. See TODO 259.
+     */
+    std::function<read_state(const std::string& key, std::string& value,
+                             std::string& err)> fetch{};
     std::function<bool(const std::string& key)> exists{};
     std::function<int64_t()> size{};
     std::function<int64_t(const std::string& lo, const std::string& hi)> count{};

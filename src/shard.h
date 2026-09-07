@@ -313,6 +313,8 @@ namespace barch {
         void run_defrag() final;
 
         bool save(bool stats) final;
+        /** the snapshot beside a mapped arena, written at shutdown - TODO 262 */
+        bool save_snapshot();
         bool _save(bool stats) const;
         bool _load(bool stats);
 

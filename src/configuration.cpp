@@ -75,6 +75,8 @@ struct config_state {
     heap::string ordered_keys{};
     heap::string hybrid_keys{};
     heap::string functions_dir{"off"};
+    /** where an arena's pages are mapped from; "off" is anonymous memory - TODO 239 */
+    heap::string arena_dir{"off"};
     heap::string functions_sync_ms{"0"};
     heap::string functions_git_pull{"off"};
     heap::string functions_git_branch{"main"};
@@ -1112,6 +1114,26 @@ static int ApplyHybridKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, Valkey
     return VALKEYMODULE_OK;
 }
 
+static ValkeyModuleString *GetArenaDir(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().arena_dir.c_str(), state().arena_dir.length());
+}
+static int SetArenaDir(const std::string& val) {
+    std::lock_guard lock(state().config_mutex);
+    state().arena_dir = val;
+    config().arena_dir = val;
+    return VALKEYMODULE_OK;
+}
+static int SetArenaDir(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                       ValkeyModuleString **unused_arg) {
+    return SetArenaDir(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyArenaDir(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    // arenas that already exist keep the backing they were built with; this is read
+    // when one is first allocated - see base_hash_arena::alloc_main
+    return VALKEYMODULE_OK;
+}
+
 static ValkeyModuleString *GetFunctionsDir(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().functions_dir.c_str(), state().functions_dir.length());
@@ -1503,6 +1525,8 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                      GetHybridKeys, SetHybridKeys,
                                                      ApplyHybridKeys, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "arena_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
+                                            GetArenaDir, SetArenaDir, ApplyArenaDir, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                                      GetFunctionsDir, SetFunctionsDir,
                                                      ApplyFunctionsDir, nullptr);
@@ -1543,6 +1567,10 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                          ApplyTlsTmpDhFile, nullptr);
 
     return ret;
+}
+
+void barch::stop_configuration_restarts() {
+    restart.shutdown();
 }
 
 int barch::set_configuration_value(ValkeyModuleString *Name, ValkeyModuleString *Value) {
@@ -1672,7 +1700,9 @@ size_t barch::apply_environment_configuration() {
             barch::err({"ignoring", env, "-", why});
             return;
         }
-        if (set_configuration_value(name, value) == VALKEYMODULE_OK) {
+        // recorded, not acted on: reading BARCH_SERVER_PORT should not start a
+        // server, and whoever is starting up will do that itself - TODO 241
+        if (set_configuration_value(name, value, false) == VALKEYMODULE_OK) {
             barch::log({"configured", name, "from", env});
             ++applied;
         } else {
@@ -1724,7 +1754,8 @@ bool barch::get_redis_configuration_value(const std::string& name, std::string& 
     return false;
 }
 
-int barch::set_configuration_value(const std::string& name, const std::string &val) {
+int barch::set_configuration_value(const std::string& name, const std::string &val,
+                                   bool live) {
     barch::log({"setting", name, "to", val});
 
     // a redis name is resolved to the barch variable it means before anything else
@@ -1796,6 +1827,8 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
     } else if (name == "listen_port") {
         auto r = SetListenPort(val);
         if ( VALKEYMODULE_OK == r) {
+            if (!live)
+                return r;
             return ApplyListenPort(nullptr, nullptr, nullptr);
         }
         return r;
@@ -1859,14 +1892,19 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyHybridKeys(nullptr, nullptr, nullptr);
         }
         return r;
+    }else if (name == "arena_dir") {
+        auto r = SetArenaDir(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyArenaDir(nullptr, nullptr, nullptr);
+        return r;
     }else if (name == "functions_dir") {
         auto r = SetFunctionsDir(val);
-        if (r == VALKEYMODULE_OK)
+        if (r == VALKEYMODULE_OK && live)
             return ApplyFunctionsDir(nullptr, nullptr, nullptr);
         return r;
     }else if (name == "functions_sync_ms") {
         auto r = SetFunctionsSyncMs(val);
-        if (r == VALKEYMODULE_OK)
+        if (r == VALKEYMODULE_OK && live)
             return ApplyFunctionsSyncMs(nullptr, nullptr, nullptr);
         return r;
     }else if (name == "functions_git_pull") {
@@ -1892,12 +1930,18 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
     }else if (name == "server_port") {
         auto r = SetServerPort(val);
         if (r == VALKEYMODULE_OK) {
+            // recorded either way; `live` decides whether it acts - TODO 241
+            if (!live)
+                return r;
             return ApplyServerPort(nullptr, nullptr, nullptr);
         }
         return r;
     }else if (name == "server_binding") {
         auto r = SetServerBinding(val);
         if (r == VALKEYMODULE_OK) {
+            // recorded either way; `live` decides whether it acts - TODO 241
+            if (!live)
+                return r;
             return ApplyServerBinding(nullptr, nullptr, nullptr);
         }
         return r;
@@ -2126,6 +2170,9 @@ static bool cfg_off(const std::string& s) {
     return s.empty() || s == "off" || s == "none" || s == "no";
 }
 
+std::string barch::get_arena_dir() {
+    return cfg_off(config().arena_dir) ? std::string() : config().arena_dir;
+}
 std::string barch::get_functions_dir() {
     return cfg_off(config().functions_dir) ? std::string() : config().functions_dir;
 }
@@ -2225,7 +2272,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
         "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
-        "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
+        "arena_dir", "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
         "functions_git_commit", "functions_git_ssh_key",
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
@@ -2262,6 +2309,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "min_fragmentation_ratio")     value = cfg_float(c.min_fragmentation_ratio);
     else if (name == "ordered_keys")                value = cfg_bool(c.ordered_keys);
     else if (name == "hybrid_keys")                 value = cfg_bool(c.hybrid_keys);
+    else if (name == "arena_dir")                   value = c.arena_dir;
     else if (name == "functions_dir")                value = c.functions_dir;
     else if (name == "functions_sync_ms")            value = std::to_string(c.functions_sync_ms);
     else if (name == "functions_git_pull")           value = cfg_bool(c.functions_git_pull);

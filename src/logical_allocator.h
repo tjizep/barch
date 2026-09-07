@@ -1010,9 +1010,14 @@ public:
     }
 
 public:
-    bool save_extra(const arena::hash_arena &copy, const std::string &filename,
-                    const std::function<void(std::ostream &of)> &extra1) const {
-        auto writer = [&](std::ostream &of) -> void {
+    /**
+     * The allocator state that travels with an arena, wherever it is written - the
+     * shard file and the mapped-arena snapshot both use this, so the two cannot
+     * come to disagree about what a load has to restore. See TODO 262.
+     */
+    std::function<void(std::ostream &of)> state_writer(
+            const std::function<void(std::ostream &of)> &extra1) const {
+        return [this, &extra1](std::ostream &of) {
             long ts = 0;
             writep(of, ts);
             bool opt_enable_lru = false;
@@ -1030,8 +1035,16 @@ public:
             write_emancipated(of);
             extra1(of);
         };
+    }
 
-        return copy.save(copy.name+filename, writer);
+    bool save_extra(const arena::hash_arena &copy, const std::string &filename,
+                    const std::function<void(std::ostream &of)> &extra1) const {
+        return copy.save(copy.name+filename, state_writer(extra1));
+    }
+
+    /** the snapshot beside a mapped arena, from the live one - TODO 262 */
+    bool snapshot_extra(const std::function<void(std::ostream &of)> &extra1) const {
+        return main.save_snapshot(state_writer(extra1));
     }
     bool self_save_extra(const std::string &filename,
                     const std::function<void(std::ostream &of)> &extra1) const {
@@ -1142,6 +1155,16 @@ public:
             extra1(in);
         };
         try {
+            emancipated.clear();
+            /*
+             * The snapshot first, when there is one. It restores the same state
+             * through the same reader and the pages come from the mapping rather
+             * than being copied out of the shard file - which is the whole saving.
+             * Anything wrong with it and this falls through to the load that would
+             * have happened anyway. See TODO 262.
+             */
+            if (main.load_snapshot(reader))
+                return true;
             emancipated.clear();
             return main.load(main.name+filenname, reader);
         } catch (std::exception &e) {

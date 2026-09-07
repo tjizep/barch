@@ -835,6 +835,30 @@ std::string start_space_http(const barch::key_space_ptr& space,
     };
     iface->store = barch::functions::store_for_owner(space);
     iface->run_command = barch::functions::runner_for_http(space);
+    /*
+     * `barch.space.other` from a handler. It was not wired here at all, so a route
+     * could only ever see the space its own server runs in - which is what stopped
+     * the shop example reading its image cache next door, and half of TODO 259.
+     *
+     * The rights are asked for again in the other space rather than inherited, the
+     * same as the RESP path does, so per space overrides still apply and naming a
+     * space that does not exist must not build one.
+     */
+    iface->open_space = [](const std::string& name,
+                           barch::foreign::store_access& out) -> bool {
+        auto* id = barch::functions::http_ident_tls();
+        if (!id || !barch::is_keyspace(name))
+            return false;
+        auto other = barch::get_keyspace(name);
+        if (!other)
+            return false;
+        auto rights = barch::read_space_overrides(id->user);
+        auto found = rights.find(other->get_canonical_name());
+        out = barch::functions::store_for(other, found == rights.end()
+                                          ? id->acl
+                                          : barch::apply_overrides(id->acl, found->second));
+        return true;
+    };
     uint64_t deadline = space->function_deadline();
     auto slot0 = make_vm_slot(canon, iface, deadline, server->luau_bytes);
 

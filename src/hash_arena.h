@@ -12,11 +12,24 @@
 #include <unordered_set>
 #include <ankerl/unordered_dense.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
 #include "configuration.h"
 #include "lzr_log.h"
 #include "sastam.h"
 
 namespace arena {
+    /**
+     * How many arenas mapped their pages back instead of loading them - TODO 262.
+     * Counted rather than logged per arena: a default server is 694 of them, and a
+     * line each is 694 lines into whatever start-up's stdout happens to be. When
+     * that is a pipe nobody is draining yet, the writer blocks and the server never
+     * finishes starting, which is exactly what happened.
+     */
+    std::atomic<uint64_t>& mapped_count();
+
     typedef std::unordered_set<size_t> address_set;
     typedef heap::allocator<std::pair<size_t, size_t> > allocator_type;
     typedef ankerl::unordered_dense::map<
@@ -45,6 +58,19 @@ namespace arena {
         mutable size_t cow_alllocated{};
         bool borrowed{false};
         bool opt_check_mem = true;
+        /*
+         * Backing this arena's pages with a named file rather than anonymous memory
+         * - TODO 239. `backing_name` is what the file is called; it is configuration
+         * and survives a clear, so re-allocating maps the same file again. The fd is
+         * state and does not: it is closed with the mapping.
+         *
+         * The file is where the pages live while running and is not read back
+         * afterwards - the shard file is what an arena is rebuilt from, and it is
+         * the one with a version, a completion stamp and an atomic rename behind it.
+         * TODO 262 is what it would take to trust this one.
+         */
+        std::string backing_name{};
+        std::string backing_path{};
 
         void reconcile_free_list() {
             free_address_list.clear();
@@ -97,6 +123,10 @@ namespace arena {
                 cow = other.cow;
                 cow_size = other.cow_size;
                 cow_alllocated = other.cow_alllocated;
+                backing_name = std::move(other.backing_name);
+                backing_path = std::move(other.backing_path);
+                other.backing_name.clear();
+                other.backing_path.clear();
                 other.page_data = nullptr;
                 other.page_data_size = 0;
 
@@ -253,6 +283,7 @@ namespace arena {
             borrowed = false;
             page_data = nullptr;
             page_data_size = 0;
+            close_backing();
         }
         void borrow(base_hash_arena &other) {
             rollback();
@@ -476,6 +507,62 @@ namespace arena {
 
         void move_to_source() {
         }
+        /** the file this arena maps, when it has one to map */
+        bool wants_backing() const {
+            return !backing_name.empty() && !barch::get_arena_dir().empty();
+        }
+
+        /**
+         * Create the file once, and after that only name it.
+         *
+         * The descriptor is not kept: an mmap holds its own reference, so the file
+         * stays alive without one, and a default server is 347 shards times two
+         * allocators - 696 open files before a single client connects, which a
+         * 1024 descriptor limit does not survive. It is opened again for the moment
+         * it takes to grow the file and closed again straight away.
+         */
+        bool prepare_backing(bool truncate = true) {
+            if (!backing_path.empty())
+                return true;
+            auto dir = barch::get_arena_dir();
+            if (dir.empty() || backing_name.empty())
+                return false;
+            ::mkdir(dir.c_str(), 0755);                 // already there is fine
+            std::string path = dir + "/" + backing_name + ".arena";
+            /*
+             * Truncated on creation. The file holds the pages of the process that is
+             * running, not of the one that ran before - nothing reads it back, so
+             * starting from what a previous run left would only mean mapping bytes
+             * that are about to be overwritten. TODO 262 is what changes that.
+             */
+            int fd = ::open(path.c_str(), O_RDWR | O_CREAT | (truncate ? O_TRUNC : 0), 0644);
+            if (fd < 0) {
+                barch::err({"could not open arena file", path, strerror(errno)});
+                return false;
+            }
+            ::close(fd);
+            backing_path = path;
+            return true;
+        }
+
+        /** grow the file to `size`; false says why in the log */
+        bool size_backing(size_t size) {
+            int fd = ::open(backing_path.c_str(), O_RDWR);
+            if (fd < 0) {
+                barch::err({"could not open arena file", backing_path, strerror(errno)});
+                return false;
+            }
+            bool ok = ::ftruncate(fd, (off_t) size) == 0;
+            if (!ok)
+                barch::err({"could not size the arena file", backing_path, strerror(errno)});
+            ::close(fd);
+            return ok;
+        }
+
+        void close_backing() {
+            backing_path.clear();
+        }
+
         void alloc_cow(size_t new_size) {
             if (new_size < physical_page_size) {
                 new_size = physical_page_size;
@@ -511,6 +598,43 @@ namespace arena {
         bool alloc_main(size_t new_size) {
             if (new_size < physical_page_size) {
                 new_size = physical_page_size;
+            }
+            /*
+             * File backed, when one was asked for. MAP_SHARED so the kernel writes
+             * dirty pages out to that file and can drop them again - which is the
+             * whole point: the arena is bounded by the device rather than by RAM
+             * plus swap, and it works where swap is off. The file has to be grown
+             * before the mapping is, or the pages past the old end have nothing
+             * behind them.
+             */
+            if (wants_backing() && (page_data == nullptr || !backing_path.empty())) {
+                if (!prepare_backing()) {
+                    backing_name.clear();               // said why; carry on anonymously
+                } else if (!size_backing(new_size)) {
+                    return false;
+                } else {
+                    uint8_t* mapped;
+                    if (page_data_size > 0) {
+                        mapped = (uint8_t*) mremap(page_data, page_data_size, new_size,
+                                                   MREMAP_MAYMOVE);
+                    } else {
+                        int fd = ::open(backing_path.c_str(), O_RDWR);
+                        if (fd < 0)
+                            abort_with("failed to open the arena file");
+                        mapped = (uint8_t*) mmap(nullptr, new_size, PROT_READ | PROT_WRITE,
+                                                 MAP_SHARED, fd, 0);
+                        ::close(fd);                    // the mapping holds the file
+                    }
+                    if (mapped == MAP_FAILED) {
+                        abort_with("failed to map the arena file");
+                    }
+                    heap::allocated += new_size - page_data_size;
+                    heap::vmm_allocated += new_size - page_data_size;
+                    page_data = mapped;
+                    page_data_size = new_size;
+                    page_modifications::inc_all_tickers();
+                    return true;
+                }
             }
             if (opt_use_vmmap) {
                 if (page_data_size > 0) {
@@ -663,6 +787,19 @@ namespace arena {
             cow = nullptr;
             cow_size = 0;
         }
+        /** name the file this arena maps, when `arena_dir` says to map one */
+        void set_backing_name(const std::string& name) {
+            backing_name = name;
+        }
+        const std::string& get_backing_name() const {
+            return backing_name;
+        }
+        void close_backing_file() {
+            close_backing();
+        }
+        const std::string& get_backing_path() const {
+            return backing_path;
+        }
         void set_check_mem(bool check) {
             opt_check_mem = check;
         }
@@ -670,6 +807,23 @@ namespace arena {
             return opt_check_mem;
         }
         bool save(const std::string &filename, const std::function<void(std::ostream &)> &extra) const;
+
+        /**
+         * The snapshot beside a mapped arena - TODO 262.
+         *
+         * The pages are already in the `.arena` file; what a load also needs is the
+         * metadata that says which of them are live - `hidden_arena`, `top`,
+         * `last_allocated` - and the allocator state the shard file carries in its
+         * `extra` block. So this is the save file minus the page data, written to
+         * `<arena>.arena.meta`.
+         *
+         * Written only during an orderly shutdown, because that is the only moment
+         * it can be true: the mapping goes on changing after any other save, and a
+         * snapshot describing a state the file has moved past is worse than none.
+         * Read once and unlinked, so a crash after start-up leaves nothing to trust.
+         */
+        bool save_snapshot(const std::function<void(std::ostream &)> &extra) const;
+        bool load_snapshot(const std::function<void(std::istream &)> &extra);
 
         bool load(const std::string &filename, const std::function<void(std::istream &)> &extra);
 
@@ -688,9 +842,19 @@ namespace arena {
         base_hash_arena main{};
         hash_arena(const hash_arena &) = default;
         hash_arena& operator=(const hash_arena &) = default;
-        explicit hash_arena(std::string name) : name(std::move(name)) {}
+        explicit hash_arena(std::string name) : name(std::move(name)) {
+            // the arena's own name is what its file is called, and it is already
+            // unique per space and shard - `nodes_<space><shard>` - TODO 239
+            main.set_backing_name(this->name);
+        }
         // arena virtualization functions
 
+        bool save_snapshot(const std::function<void(std::ostream &)> &extra) const {
+            return main.save_snapshot(extra);
+        }
+        bool load_snapshot(const std::function<void(std::istream &)> &extra) {
+            return main.load_snapshot(extra);
+        }
         [[nodiscard]] float fragmentation() const {
             return main.fragmentation_ratio();
         }

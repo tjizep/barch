@@ -179,5 +179,45 @@ try:
 except redis.ResponseError as e:
     assert "FOREIGN" in str(e), e
 
+
+# --- a script can ask for a fill - TODO 259 --------------------------------------
+# the miss path parks the connection that asked, and inside a function there is no
+# connection to park, so a script used to see only what was already cached. `fetch`
+# is the read that is allowed to go and get it - a separate call, because it can
+# take the source's latency and `get` cannot
+print("barch.store.fetch fills where get does not", flush=True)
+SCRIPTS["lx_fetch"] = ("function call(key, space)\n"
+                       "    if key == 'known' then return 'filled' end\n"
+                       "    return nil\n"
+                       "end\n")
+conf.set("lx_fetch.foreign_script", "filler")
+conf.set("lx_fetch.foreign", "luau")
+conf.save()
+install("lx_fetch")
+r.execute_command("SETF", "probe", """function call(k)
+    local before = barch.store.get(k)
+    local got, why = barch.store.fetch(k)
+    local after = barch.store.get(k)
+    return string.format('%s|%s|%s|%s', tostring(before), tostring(got),
+                         tostring(why), tostring(after))
+end""")
+# get sees nothing, fetch fills it, and then get does too
+assert r.execute_command("probe", "known") == "nil|filled|nil|filled", \
+    r.execute_command("probe", "known")
+# and it stays filled for a client as well
+assert r.get("known") == "filled"
+# what the source does not have comes back as a reason rather than an error
+missed = r.execute_command("probe", "absent")
+assert missed.startswith("nil|nil|"), missed
+assert "no such key" in missed, missed
+
+# a space that is not foreign says so rather than pretending
+r.execute_command("USE", "lx_plain")
+r.execute_command("SETF", "probe2",
+                  "function call(k) local v, why = barch.store.fetch(k) "
+                  "return tostring(v) .. '|' .. tostring(why) end")
+assert r.execute_command("probe2", "nothing") == "nil|not a foreign key space", \
+    r.execute_command("probe2", "nothing")
+
 print("complete foreign luau test")
 

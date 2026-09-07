@@ -505,6 +505,36 @@ bool barch::shard::_save(bool stats) const {
     }
     return true;
 }
+/**
+ * The snapshots beside the mapped arenas - TODO 262.
+ *
+ * The same extra blocks `_save` writes into the shard file, so a snapshot restores
+ * exactly what a load would have; only the page data is left out, being in the
+ * mapping already. Written under the same lock a save takes, and only at shutdown,
+ * because that is the only moment nothing will write again.
+ */
+bool barch::shard::save_snapshot() {
+    auto *t = this;
+    if ((nodes.get_main().get_bytes_allocated()+leaves.get_main().get_bytes_allocated())==0)
+        return true;
+    std::unique_lock guard(save_load_mutex);
+    shared_latch release(this->latch);
+    node_ptr troot = t->root;
+    size_t tsize = t->size.load(std::memory_order_relaxed);
+    auto save_stats_and_root = [&](std::ostream &of) {
+        uint32_t w_stats = 0;
+        writep(of, w_stats);
+        auto root = logical_address(troot.logical);
+        writep(of, root);
+        writep(of, troot.is_leaf);
+        writep(of, tsize);
+        write_extra(of);
+    };
+    bool ok = get_leaves().snapshot_extra(save_stats_and_root);
+    ok = get_nodes().snapshot_extra([](std::ostream &) {}) && ok;
+    return ok;
+}
+
 bool barch::shard::save(bool stats) {
     //std::unique_lock guard(save_load_mutex); // prevent save and load from occurring concurrently
     bool success = false;

@@ -6,7 +6,11 @@
 #include "lzr_log.h"
 #include "staged.h"
 
+#include <cctype>
+#include <chrono>
 #include <cstdio>
+#include <unordered_map>
+#include <cstdlib>
 
 #ifdef BARCH_HAS_SIMDJSON
 #include <simdjson.h>
@@ -79,6 +83,7 @@ bool parse_record(const std::string& raw, barch::fs::entry& into, bool& is_dir) 
     if (doc["chunk"].get(n) == simdjson::SUCCESS) into.chunk = n;
     if (doc["chunks"].get(n) == simdjson::SUCCESS) into.chunks = n;
     if (doc["version"].get(n) == simdjson::SUCCESS) into.version = n;
+    if (doc["src"].get(n) == simdjson::SUCCESS) into.sourced = n != 0;
     std::string_view t;
     if (doc["type"].get(t) == simdjson::SUCCESS) into.type.assign(t);
     return true;
@@ -100,10 +105,13 @@ std::string quoted(const std::string& s) {
 }
 
 std::string name_json(const barch::fs::entry& e) {
+    // `src` says the space's source can produce this again, which is what makes it
+    // safe to evict. Absent means the only copy is this one - TODO 263
     return "{\"id\":" + std::to_string(e.id) +
            ",\"size\":" + std::to_string(e.size) +
            ",\"type\":" + quoted(e.type) +
-           ",\"version\":" + std::to_string(e.version) + "}";
+           ",\"version\":" + std::to_string(e.version) +
+           (e.sourced ? ",\"src\":1" : "") + "}";
 }
 
 std::string inode_json(const barch::fs::entry& e) {
@@ -122,6 +130,31 @@ std::string last_segment(const std::string& path) {
 }
 
 namespace barch::fs {
+
+std::string type_from_path(const std::string& path) {
+    auto lower_copy = [](std::string v) {
+        for (auto& ch : v)
+            ch = (char) std::tolower((unsigned char) ch);
+        return v;
+    };
+    auto dot = path.find_last_of('.');
+    if (dot == std::string::npos)
+        return "application/octet-stream";
+    auto ext = lower_copy(path.substr(dot + 1));
+    static const std::unordered_map<std::string, std::string> known = {
+        {"html", "text/html"},   {"htm", "text/html"},    {"css", "text/css"},
+        {"js", "text/javascript"}, {"mjs", "text/javascript"},
+        {"json", "application/json"}, {"txt", "text/plain"},  {"csv", "text/csv"},
+        {"xml", "application/xml"},  {"svg", "image/svg+xml"},
+        {"png", "image/png"},    {"jpg", "image/jpeg"},   {"jpeg", "image/jpeg"},
+        {"gif", "image/gif"},    {"webp", "image/webp"},  {"avif", "image/avif"},
+        {"ico", "image/x-icon"}, {"woff", "font/woff"},   {"woff2", "font/woff2"},
+        {"pdf", "application/pdf"}, {"wasm", "application/wasm"},
+        {"mp4", "video/mp4"},    {"webm", "video/webm"},  {"mp3", "audio/mpeg"},
+    };
+    auto it = known.find(ext);
+    return it == known.end() ? "application/octet-stream" : it->second;
+}
 
 std::string name_key(const std::string& path)          { return NAMES + path; }
 std::string inode_key(file_id id)                      { return INODES + hex16(id); }
@@ -356,6 +389,68 @@ bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
     return true;
 }
 
+bool list_with_source(const key_space_ptr& space, const std::string& dir,
+                      std::vector<entry>& out, const std::string& after, size_t limit) {
+    auto acc = barch::functions::store_for_owner(space);
+    if (!list(acc, dir, out, after, limit))
+        return false;
+    if (!space || space->fs_source_list.empty())
+        return true;
+
+    std::string clean, err;
+    if (!normalise(dir, clean, err))
+        return true;                        // the local half is still an answer
+
+    Variable answer;
+    if (!barch::functions::call_named(space, space->fs_source_list, {clean}, answer, err)) {
+        barch::err({"fs source listing", clean, err});
+        return true;                        // what is stored is better than nothing
+    }
+    if (answer.index() != var_array)
+        return true;                        // no names is a legitimate answer
+
+    heap::string_set already;
+    for (const auto& e : out)
+        already.insert(e.name);
+
+    /*
+     * The source's half is sorted and paged the same way the stored half was, and
+     * the limit is applied to the merge rather than to each side. Taking the first
+     * `limit` names as the source happened to give them would make a page whose
+     * contents depended on which half an entry came from.
+     */
+    std::vector<std::string> names;
+    for (const auto& item : std::get<heap::vector<wrapped_variable_t>>(answer)) {
+        const Variable& v = static_cast<const variable_t&>(item);
+        if (v.index() != var_string)
+            continue;
+        auto name = v.to_string();
+        if (name.empty() || name.find('/') != std::string::npos)
+            continue;                       // a name, not a path: one level at a time
+        if (!after.empty() && name <= after)
+            continue;                       // the page starts after this
+        if (already.find(name) != already.end())
+            continue;                       // stored already, and what is stored wins
+        names.push_back(std::move(name));
+    }
+    std::sort(names.begin(), names.end());
+
+    const std::string base = (clean == "/" ? std::string() : clean) + "/";
+    for (const auto& name : names) {
+        entry e;
+        e.name = name;
+        e.path = base + name;
+        e.remote = true;
+        out.push_back(std::move(e));
+    }
+    // one order whichever half an entry came from, and then the page
+    std::sort(out.begin(), out.end(),
+              [](const entry& a, const entry& b) { return a.name < b.name; });
+    if (limit && out.size() > limit)
+        out.resize(limit);
+    return true;
+}
+
 bool walk(const access& acc, const std::string& dir, std::vector<std::string>& out) {
     std::string clean, err;
     if (!normalise(dir, clean, err) || !acc.range)
@@ -397,6 +492,12 @@ void batch::write(const std::string& path, std::string body, const std::string& 
     i.type = type;
     i.chunk = chunk ? chunk : default_chunk;
     pending.push_back(std::move(i));
+}
+
+void batch::write_sourced(const std::string& path, std::string body,
+                          const std::string& type, size_t chunk) {
+    write(path, std::move(body), type, chunk);
+    pending.back().sourced = true;
 }
 
 void batch::mkdir(const std::string& path) {
@@ -529,6 +630,7 @@ bool batch::commit(std::string& err) {
         e.chunk = it.chunk;
         e.chunks = it.chunk ? (it.body.size() + it.chunk - 1) / it.chunk : 0;
         e.version = before[i].had ? before[i].now.version + 1 : 1;
+        e.sourced = it.sourced;
 
         // chunks, then the inode, then the name: nothing reaches a chunk except
         // through metadata, so a half applied write is invisible rather than wrong
@@ -586,6 +688,206 @@ static bool walk_entries(const access& acc, const std::string& dir,
             break;
     }
     return true;
+}
+
+/*
+ * The eviction index and the running total - TODO 263.
+ *
+ * `fs:lru:<016x fetched at>:<path>` orders the fetched files by when they arrived,
+ * so finding the oldest is a seek from the low end rather than a walk of every
+ * file. `fs:cache` is what they add up to, kept as a number so a budget check does
+ * not have to add them up.
+ *
+ * The index is only an ordering. Whether a file may actually go is the `src` mark
+ * on its own name record, checked when it is about to be evicted - an entry can
+ * outlive the file it points at, and a file that was fetched and then written over
+ * by hand is nobody's copy but ours.
+ */
+static std::string lru_key(uint64_t when, const std::string& path) {
+    char stamp[24];
+    std::snprintf(stamp, sizeof stamp, "%016llx", (unsigned long long) when);
+    return std::string("fs:lru:") + stamp + ":" + path;
+}
+
+static const char* CACHE_BYTES = "fs:cache";
+
+static uint64_t read_counter(const access& acc, const char* key) {
+    std::string raw;
+    if (!acc.get || acc.get(key, raw) != access::read_state::present)
+        return 0;
+    return strtoull(raw.c_str(), nullptr, 10);
+}
+
+uint64_t cached_bytes(const key_space_ptr& space) {
+    if (!space)
+        return 0;
+    auto acc = barch::functions::store_for_owner(space);
+    return read_counter(acc, CACHE_BYTES);
+}
+
+size_t evict_to_budget(const key_space_ptr& space) {
+    if (!space || space->fs_cache_bytes == 0)
+        return 0;
+    auto acc = barch::functions::store_for_owner(space);
+    if (!acc.range || !acc.get || !acc.set)
+        return 0;
+    uint64_t held = read_counter(acc, CACHE_BYTES);
+    if (held <= space->fs_cache_bytes)
+        return 0;
+
+    const std::string lo = "fs:lru:";
+    const std::string hi = past(lo);
+    size_t gone = 0;
+    std::string at = lo;
+    std::string seen;
+    while (held > space->fs_cache_bytes) {
+        heap::vector<std::string> got;
+        acc.range(at, hi, (int64_t) page, got);
+        bool moved = false;
+        for (const auto& key : got) {
+            if (key == seen)
+                continue;
+            seen = key;
+            at = key;
+            moved = true;
+            // fs:lru:<16 hex>:<path>
+            if (key.size() < lo.size() + 17)
+                continue;
+            std::string path = key.substr(lo.size() + 17);
+            entry e;
+            const bool have = stat(acc, path, e);
+            if (!have || !e.sourced) {
+                // gone already, or written over by hand since - either way this
+                // index entry is stale and the file is not ours to drop
+                acc.remove(key);
+                continue;
+            }
+            batch b(space);
+            b.erase(path);
+            std::string err;
+            if (!b.commit(err)) {
+                barch::err({"fs eviction", path, err});
+                continue;
+            }
+            acc.remove(key);
+            held = e.size < held ? held - e.size : 0;
+            ++gone;
+            if (held <= space->fs_cache_bytes)
+                break;
+        }
+        if (!moved || got.empty())
+            break;
+    }
+    std::string err;
+    acc.set(CACHE_BYTES, std::to_string(held), err);
+    return gone;
+}
+
+bool has_source(const key_space_ptr& space) {
+    return space && !space->fs_source.empty();
+}
+
+/*
+ * A miss is a key of its own rather than anything in the file layout: a listing
+ * scans `fs:n:` and never sees these, and an expiry is what `missing_ttl` already
+ * means everywhere else in the server.
+ */
+static std::string miss_key(const std::string& path) {
+    return "fs:miss:" + path;
+}
+
+/*
+ * What a fetch has to do besides writing the file: mark it, index it by when it
+ * arrived, add it to the running total, and then drop the oldest if that put the
+ * space over its budget. See TODO 263.
+ */
+static bool store_fetched(const key_space_ptr& space, const std::string& clean,
+                          const std::string& body, const std::string& type,
+                          entry& out, std::string& err) {
+    auto acc = barch::functions::store_for_owner(space);
+    batch b(space);
+    b.write_sourced(clean, body, type);
+    if (!b.commit(err))
+        return false;
+    if (space->fs_cache_bytes) {
+        const auto now = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::string e;
+        acc.set(lru_key(now, clean), clean, e);
+        acc.set(CACHE_BYTES, std::to_string(read_counter(acc, CACHE_BYTES) + body.size()), e);
+        evict_to_budget(space);
+    }
+    return stat(acc, clean, out);
+}
+
+bool fetch(const key_space_ptr& space, const std::string& path, entry& out,
+           std::string& err) {
+    auto acc = barch::functions::store_for_owner(space);
+    if (stat(acc, path, out))
+        return true;
+    if (!has_source(space))
+        return false;
+
+    std::string clean;
+    if (!normalise(path, clean, err))
+        return false;
+
+    const uint64_t ttl = space->missing_ttl;
+    const auto now = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string when;
+    if (ttl && acc.get && acc.get(miss_key(clean), when) == access::read_state::present) {
+        auto at = strtoull(when.c_str(), nullptr, 10);
+        if (at && now - at < ttl) {
+            err = "no such file";               // asked recently and it was not there
+            return false;
+        }
+    }
+
+    Variable answer;
+    if (!barch::functions::call_named(space, space->fs_source, {clean}, answer, err))
+        return false;
+
+    /*
+     * Two shapes, because a path is not always enough to say what a file is. A
+     * string is the body, and the type is guessed from the extension - which
+     * `/img/<asin>` has none of, and then everything is octet-stream. A list of two
+     * is `{body, type}`, and the source says what it made.
+     *
+     * A list and not `{body = ..., type = ...}`: a table's string keys do not
+     * survive the return, only its array part does, and that shape is fixed on
+     * purpose - see to_variable in luau_driver.cpp.
+     */
+    if (answer.index() == var_array) {
+        const auto& items = std::get<heap::vector<wrapped_variable_t>>(answer);
+        if (!items.empty()) {
+            const Variable& first = static_cast<const variable_t&>(items[0]);
+            if (first.index() == var_string) {
+                std::string type_str;
+                if (items.size() > 1) {
+                    const Variable& second = static_cast<const variable_t&>(items[1]);
+                    if (second.index() == var_string)
+                        type_str = second.to_string();
+                }
+                return store_fetched(space, clean, first.to_string(),
+                                     type_str.empty() ? type_from_path(clean) : type_str,
+                                     out, err);
+            }
+        }
+    }
+    if (answer.index() != var_string) {
+        // nil is the source saying it has no such file, which is an answer
+        std::string e;
+        if (ttl && acc.set)
+            acc.set(miss_key(clean), std::to_string(now), e);
+        err = "no such file";
+        return false;
+    }
+    const auto& raw = std::get<std::string>(answer);
+    auto body = answer.bulk_vt(raw);
+
+    return store_fetched(space, clean, std::string(body.chars(), body.size),
+                         type_from_path(clean), out, err);
 }
 
 bool has_children(const access& acc, const std::string& path) {

@@ -1737,7 +1737,9 @@ static void push_fs_entry(lua_State* L, const barch::fs::entry& e) {
     lua_setfield(L, -2, "path");
     lua_pushboolean(L, e.dir);
     lua_setfield(L, -2, "dir");
-    if (e.dir)
+    lua_pushboolean(L, e.remote);
+    lua_setfield(L, -2, "remote");
+    if (e.dir || e.remote)
         return;
     lua_pushnumber(L, (double) e.size);
     lua_setfield(L, -2, "size");
@@ -1789,6 +1791,32 @@ static int fs_get(lua_State* L) {
     return 1;
 }
 
+/**
+ * `barch.fs.fetch(path)` - a read that may ask the space's file source, where
+ * `barch.fs.get` only ever answers from what is already here. See TODO 263, and
+ * `barch.store.fetch` for the same distinction one layer down.
+ */
+static int fs_fetch(lua_State* L) {
+    size_t pn = 0;
+    const char* path = luaL_checklstring(L, 1, &pn);
+    const auto* acc = fs_store(L, "fetch", false);
+    auto space = fs_space(L, "fetch");
+    barch::fs::entry meta;
+    std::string err;
+    if (!barch::fs::fetch(space, std::string(path, pn), meta, err)) {
+        lua_pushnil(L);
+        lua_pushlstring(L, err.data(), err.size());
+        return 2;
+    }
+    std::string body;
+    if (!barch::fs::read(*acc, std::string(path, pn), body, meta)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, body.data(), body.size());
+    return 1;
+}
+
 static int fs_stat(lua_State* L) {
     size_t pn = 0;
     const char* path = luaL_checklstring(L, 1, &pn);
@@ -1812,9 +1840,16 @@ static int fs_list(lua_State* L) {
         after.assign(a, an);
     }
     size_t limit = lua_isnumber(L, 3) ? (size_t) lua_tonumber(L, 3) : 0;
+    // a fourth argument asks the space's source what else could be there, which is
+    // a question that can take as long as the source does - TODO 263
+    const bool ask_source = lua_isboolean(L, 4) && lua_toboolean(L, 4);
     const auto* acc = fs_store(L, "list", false);
     std::vector<barch::fs::entry> got;
-    barch::fs::list(*acc, std::string(path, pn), got, after, limit);
+    if (ask_source)
+        barch::fs::list_with_source(fs_space(L, "list"), std::string(path, pn), got,
+                                    after, limit);
+    else
+        barch::fs::list(*acc, std::string(path, pn), got, after, limit);
     lua_createtable(L, (int) got.size(), 0);
     int at = 1;
     for (const auto& e : got) {
@@ -2330,6 +2365,8 @@ static space_state* state_for(function_states& cache) {
     lua_setfield(L, -2, "get");
     lua_pushcfunction(L, fs_stat, "stat");
     lua_setfield(L, -2, "stat");
+    lua_pushcfunction(L, fs_fetch, "fetch");
+    lua_setfield(L, -2, "fetch");
     lua_pushcfunction(L, fs_list, "list");
     lua_setfield(L, -2, "list");
     lua_pushcfunction(L, fs_remove, "remove");

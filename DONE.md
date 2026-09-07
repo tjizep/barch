@@ -12756,3 +12756,161 @@ output when it times out instead of throwing it away, which took a minute and tu
 an invisible hang into an obvious one. That change is worth more than the fix.
 
 Full suite 81/81.
+
+## 257. A file source: a space that fetches a file it does not have [07-09-2026]
+
+TODO 263. A key space can name a stored function in `fs_source` that produces a file
+by path. `fs::fetch` asks it when a file is missing and writes what comes back as a
+whole file in one batch; `FS FETCH` and `barch.fs.fetch` are the explicit reads, and
+a `kind = "files"` route opts in with `source = true`.
+
+### Why it is not a foreign fill on the keys
+
+That was the obvious answer and it cannot work. A fill is handed the key verbatim -
+confirmed by asking one - and of the three keys a file is made of, only the first
+carries a path:
+
+    fs:n:/hello.txt                  the path, which a fill could answer
+    fs:i:0000000000000007            an id, and no way back to the path
+    fs:c:0000000000000007:00000000   the same
+
+A fill has no `barch.store` either, so it cannot look the mapping up. The id
+indirection that makes a rename free (DONE 243) is exactly what makes the chunks
+unfillable. The fs layer was also never asking: `stat` and `open` read through
+`store_access::get`, so `GET fs:n:/x` runs a fill and `FS STAT /x` does not.
+
+So the hook is one layer up, where the path is still in hand and a file can be
+written as the unit it is.
+
+### What it needed underneath
+
+`functions::call_named` - running a stored function with no client. Nothing inside
+the server could: `resolve` needs a caller, and every caller until now was a
+connection or an HTTP request.
+
+The first version used an `rpc_caller` and `callv`, which is wrong for this and said
+so: **"imgsource blocks"**. A source is exactly the thing that parks - `http.request`
+suspends the coroutine so the pool thread goes back to other work - and a caller
+refuses that, because nothing would service the blocks. It runs on the function pool
+through `foreign::start_function` and waits for the completion instead, which is
+what the foreign fill has always done one layer down.
+
+### Three things that cost an hour between them
+
+**Names are folded.** A stored function's key is upper case because the dispatcher
+upper-cases before it looks one up, so `call_named(space, "imgsource")` found
+nothing while calling `imgsource` by hand worked perfectly.
+
+**`start_function` takes the arguments alone**, where a command's argv[0] is the
+command. Passing the name first meant the source was handed `IMGSOURCE` where it
+expected a path, and it dutifully returned nil.
+
+**An interface needs its `run_command`.** Without it a source that calls
+`barch.call` dies with `bad_function_call`, which says nothing at all. The shop's
+source did not use it and the test's did, so it passed by hand and failed in the
+suite.
+
+### Shapes
+
+A source returns the body, or `{body, type}` when a path does not say what the file
+is - `/img/<asin>` has no extension, and everything was octet-stream until it could.
+A *list* rather than `{body = ..., type = ...}`: a returned table keeps only its
+array part, and that shape is fixed on purpose.
+
+A miss is remembered for the space's `missing_ttl`, so a file the source does not
+have is not a round trip per request. A source that *fails* is told apart from one
+that says no: `FS FETCH` answers null for the second and an error for the first,
+which is the difference between "no such file" and "the source broke".
+
+### The shop
+
+Its image route was a luau handler doing this by hand, and before that a fill script
+on a separate foreign space. It is now a plain files route with `source = true` and
+no luau per request: **220ms cold, 0.3ms warm**, with a 404 for a product nobody
+sells that is remembered rather than re-asked.
+
+Full suite 81/81.
+
+## 258. A source can say what a directory could hold [07-09-2026]
+
+The half of TODO 263 left open. A listing of a source-backed space showed the files
+somebody happened to ask for, which is a strange thing to hand anyone browsing.
+
+`fs_source_list` names a stored function given a directory path and returning the
+names it could hold. `FS LS <path> SOURCE` and `barch.fs.list(path, after, limit,
+true)` merge that with what is stored: an entry that exists is a `file`, one only
+the source knows about is **`remote`**, with a name and nothing else.
+
+`remote` is a kind of its own rather than a file of size zero, because a caller that
+cannot tell those apart will treat the second as the first. `FS LS` says
+`remote 0 0 <name>` and the luau entry carries `remote = true`.
+
+**A separate setting, not a mode of `fs_source`.** A file source answers
+`{body, type}` and a listing answers names, and both are lists - one function could
+not tell you which it meant, and guessing from the shape would have been a bug
+waiting for the first source whose file happened to be two strings long.
+
+**Paging is over the merge**, not over each half: both sides are sorted, `after`
+applies to both, and the limit is applied last. Taking the first `limit` names as
+the source gave them would make a page whose contents depended on which half an
+entry came from - which the first version did, and it happened to look right on
+three files.
+
+Not cached, and the header says so: a listing is a question about the source's
+present state and the answer stops being true as soon as it is stored. A caller that
+wants it kept can keep it.
+
+The shop lists its whole catalog now - **992 entries, one file and 991 remote**
+after a single image has been viewed - out of the index it already loads, so the
+source is six lines.
+
+Caught by the test rather than by reading: a space reads its configuration when it
+is built, so `fs_source_list` has to be set before anything uses the space. That is
+the same order the foreign settings have always needed and it is now written down in
+the test that tripped on it.
+
+Full suite 81/81.
+
+## 259. Evicting what a source can fetch again [07-09-2026]
+
+The last of TODO 263. A read-through cache that only grows is a copy of the source
+with extra steps, so `fs_cache_bytes` is how much of it a space keeps. 0 - the
+default - keeps everything, which is what a space that did not ask for a ceiling
+gets.
+
+### The keystone
+
+**Only a file the source can produce again may ever be evicted.** A file written by
+`LOADFS`, `FS PUT` or a script is the only copy there is, and dropping one to make
+room would be losing data to save space. So a fetch marks its file `"src":1` in the
+name record, and eviction checks that mark on the file it is about to remove - not
+the index that led it there.
+
+That check matters for a case that is easy to miss: a file that was fetched and
+then written over by hand. It is in the eviction index, it looks like a candidate,
+and it is nobody's copy but ours. The mark is on the name record, an ordinary write
+does not set it, and `batch::commit` writes a fresh record every time - so the file
+stops being a candidate the moment somebody writes it. Both cases are tested.
+
+### How it finds the oldest
+
+`fs:lru:<016x when>:<path>` orders the fetched files by arrival, so the oldest is a
+seek from the low end rather than a walk of every file, and `fs:cache` is the
+running total so a budget check does not have to add anything up. The index is only
+an ordering; an entry can outlive its file, and a stale one is dropped when it is
+met.
+
+**FIFO, not LRU, and the header says so** rather than claiming otherwise. A true LRU
+wants the read path to write, and a read here goes through a `store_access` that has
+no space to write against - and turning every read into a write to approximate
+recency is a poor trade for a cache whose misses cost one fetch. Approximate LRU
+with a coarse clock is the way in if it is ever wanted.
+
+### Measured
+
+A budget of 3000 bytes and 1000-byte files: three are held, the fourth pushes the
+oldest out, the total sits at 3000 and stays there. A hand-written file survives
+every round of it. A fetched file written over by hand stops being a candidate and
+survives too. A space with no budget has no `fs:cache` key at all.
+
+Full suite 81/81. TODO 263 is closed.

@@ -448,6 +448,13 @@ struct http_route {
      * before there was an entry point to land on. See TODO 253.
      */
     std::string index;
+    /**
+     * whether this route may ask the space's file source for a file it does not
+     * have. Off by default: a fetch can take a source's latency and holds a
+     * handler's place while it does, so a route says so rather than a key space
+     * deciding it for every reader. See TODO 263.
+     */
+    bool source{false};
     bool has_transport{false};
     bool has_route{false};
 };

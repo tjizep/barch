@@ -402,9 +402,13 @@ int cmd_LOADFS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
 /*
  * FS - the file store over RESP, TODO 254 and 256.
  *
- *   FS LS <path> [AFTER name] [LIMIT n]     a line per entry, one level
+ *   FS LS <path> [AFTER name] [LIMIT n] [SOURCE]
+ *                                           a line per entry, one level. SOURCE
+ *                                           also asks what could be fetched
  *   FS STAT <path>                          k=v, the way FUNCTIONS STATUS reads
  *   FS GET <path> [FROM off] [LEN n]        the content, or nil
+ *   FS FETCH <path>                         the same, asking the space's source
+ *                                           for it first when it is not there
  *   FS PUT <path> <content> [TYPE t] [CHUNK n] [RELOAD]
  *   FS MV <path> <to>                       a file or a whole directory
  *   FS CP <path> <to>
@@ -433,8 +437,11 @@ bool option_at(const arg_t& argv, size_t at, const char* name, std::string& valu
 }
 
 std::string ls_line(const barch::fs::entry& e) {
-    // three fields and then the name, which is the only one that can hold a space
-    return std::string(e.dir ? "dir" : "file") + " " + std::to_string(e.size) + " " +
+    // three fields and then the name, which is the only one that can hold a space.
+    // `remote` is a name the source knows about and nothing has fetched, which a
+    // caller must not mistake for an empty file
+    const char* kind = e.remote ? "remote" : (e.dir ? "dir" : "file");
+    return std::string(kind) + " " + std::to_string(e.size) + " " +
            std::to_string(e.version) + " " + e.name;
 }
 
@@ -452,13 +459,28 @@ int FS(caller& call, const arg_t& argv) {
 
     if (sub == "LS") {
         std::string after, limit;
-        for (size_t at = 3; at + 1 < argv.size(); at += 2) {
+        size_t last = argv.size();
+        bool ask_source = false;
+        if (last > 3) {
+            std::string word = as_text(argv[last - 1]);
+            for (auto& c : word)
+                c = (char) toupper((unsigned char) c);
+            if (word == "SOURCE") {
+                ask_source = true;
+                --last;
+            }
+        }
+        for (size_t at = 3; at + 1 < last; at += 2) {
             if (!option_at(argv, at, "AFTER", after) && !option_at(argv, at, "LIMIT", limit))
-                return call.push_error("FS LS path [AFTER name] [LIMIT n]");
+                return call.push_error("FS LS path [AFTER name] [LIMIT n] [SOURCE]");
         }
         std::vector<barch::fs::entry> got;
-        if (!barch::fs::list(acc, path, got, after,
-                             limit.empty() ? 0 : (size_t) strtoull(limit.c_str(), nullptr, 10)))
+        const size_t cap = limit.empty() ? 0 : (size_t) strtoull(limit.c_str(), nullptr, 10);
+        // SOURCE also asks what could be there, which is a question for the source
+        // and may take as long as one - TODO 263
+        bool ok = ask_source ? barch::fs::list_with_source(space, path, got, after, cap)
+                             : barch::fs::list(acc, path, got, after, cap);
+        if (!ok)
             return call.push_error("not a path");
         call.start_array();
         for (const auto& e : got)
@@ -479,6 +501,23 @@ int FS(caller& call, const arg_t& argv) {
                     " type=" + e.type;
         }
         return call.push_string(line);
+    }
+    if (sub == "FETCH") {
+        // the source may be slow and may be a network away, which is why it is a
+        // verb of its own rather than something GET does quietly - TODO 263
+        barch::fs::entry e;
+        std::string err;
+        if (!barch::fs::fetch(space, path, e, err)) {
+            // "no such file" is an answer and comes back as a null; anything else is
+            // the source failing, and saying so beats an empty reply
+            if (err.empty() || err == "no such file")
+                return call.push_null();
+            return call.push_error(err.c_str());
+        }
+        std::string body;
+        if (!barch::fs::read(acc, path, body, e))
+            return call.push_null();
+        return call.push_string(body);
     }
     if (sub == "GET") {
         std::string from, len;
@@ -562,7 +601,7 @@ int FS(caller& call, const arg_t& argv) {
             return call.push_error(err.c_str());
         return call.push_simple("OK");
     }
-    return call.push_error("FS LS|STAT|GET|PUT|RM|MV|CP|MKDIR|RMDIR");
+    return call.push_error("FS LS|STAT|GET|FETCH|PUT|RM|MV|CP|MKDIR|RMDIR");
 }
 
 int cmd_FS(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

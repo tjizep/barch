@@ -7,7 +7,7 @@
 #include <cstdlib>
 enum {
     node_checks = 0,
-    page_size = 32768*8, // must be a power of two
+    page_size = 32768*16, // must be a power of two
     physical_page_size = page_size,
     logical_allocation_padding = 128,
     min_logical_allocation_for_pad = 1024,

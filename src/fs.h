@@ -50,6 +50,19 @@ struct entry {
     uint64_t chunks{0};
     uint64_t version{0};
     std::string type;
+    /**
+     * The source says this exists and it has not been fetched, so there is no size
+     * and no version - only a name. `FS LS` calls it `remote`, because a caller that
+     * cannot tell it from an empty file will treat it as one.
+     */
+    bool remote{false};
+    /**
+     * This file came from the space's source and the source can produce it again,
+     * which is the only thing that makes it safe to evict. A file written by
+     * LOADFS, FS PUT or a script is the only copy there is and is never a
+     * candidate. See TODO 263.
+     */
+    bool sourced{false};
 };
 
 /**
@@ -57,6 +70,14 @@ struct entry {
  * False fills `err` with what is wrong with it.
  */
 bool normalise(const std::string& in, std::string& out, std::string& err);
+
+/**
+ * A content type guessed from the extension, for a file stored without one.
+ * Deliberately short: what a browser needs to render a page and refuse to sniff.
+ * Here rather than in the HTTP code because the file store is what decides what a
+ * stored file is, and an import and a source both have to agree with a route.
+ */
+std::string type_from_path(const std::string& path);
 
 /** the keys, exposed because the tests and the importers name them */
 std::string name_key(const std::string& path);
@@ -97,6 +118,43 @@ private:
 };
 
 /**
+ * `stat`, and on a miss the space's file source - TODO 263.
+ *
+ * A space can name a stored function in `fs_source` that produces a file by path.
+ * When one is missing this asks for it, writes what comes back as a whole file
+ * through a single batch, and answers from that; without a source it is `stat`.
+ *
+ * A separate call, not something `stat` does quietly, for the same reason
+ * `store.fetch` is separate from `store.get` (DONE 252): this one can take a
+ * source's latency, and in an HTTP handler it holds a VM slot while it waits. A
+ * read that does that should say so where it is written.
+ *
+ * A miss is remembered for the space's `missing_ttl`, so a file the source does not
+ * have does not become a round trip per request.
+ */
+bool fetch(const key_space_ptr& space, const std::string& path, entry& out,
+           std::string& err);
+
+/** whether this space has anywhere to fetch a missing file from */
+bool has_source(const key_space_ptr& space);
+
+/**
+ * Drop fetched files until the space is inside `fs_cache_bytes` - see TODO 263.
+ *
+ * Only files that came from the source, oldest fetch first. That is FIFO and not
+ * LRU, said plainly: a true LRU wants the read path to write, and a read here goes
+ * through `store_access` with no space to write against and no wish to turn every
+ * read into one.
+ *
+ * Returns how many went. A budget of 0 is no eviction, which is what a space that
+ * has not asked for one gets.
+ */
+size_t evict_to_budget(const key_space_ptr& space);
+
+/** what the fetched files in this space add up to */
+uint64_t cached_bytes(const key_space_ptr& space);
+
+/**
  * One level of a directory, in name order. `after` continues a listing and `limit`
  * caps it; 0 is no cap.
  *
@@ -105,6 +163,19 @@ private:
  */
 bool list(const access& acc, const std::string& dir, std::vector<entry>& out,
           const std::string& after = {}, size_t limit = 0);
+
+/**
+ * The same, plus whatever the space's `fs_source_list` says could be there - see
+ * TODO 263. What is stored comes back as it is; what only the source knows about is
+ * marked `remote` and has a name and nothing else.
+ *
+ * Not cached: a listing is a question about the source's present state, and the
+ * answer stops being true the moment it is stored. A caller that wants it kept can
+ * keep it.
+ */
+bool list_with_source(const key_space_ptr& space, const std::string& dir,
+                      std::vector<entry>& out, const std::string& after = {},
+                      size_t limit = 0);
 
 /** every path under `dir`, files only, for a caller that wants the subtree */
 bool walk(const access& acc, const std::string& dir, std::vector<std::string>& out);
@@ -122,6 +193,13 @@ public:
     /** `chunk` of 0 takes the default */
     void write(const std::string& path, std::string body, const std::string& type,
                size_t chunk = 0);
+    /**
+     * The same, marked as having come from the space's source - so it is countable
+     * against a cache budget and evictable. Only `fs::fetch` uses this; an ordinary
+     * write clears the mark, because what it wrote is now the only copy.
+     */
+    void write_sourced(const std::string& path, std::string body, const std::string& type,
+                       size_t chunk = 0);
     /** an empty directory, which is the only kind that needs saying out loud */
     void mkdir(const std::string& path);
     /** a file, or a directory marker; a directory's contents are not touched */
@@ -148,6 +226,7 @@ private:
         bool erase{false};
         bool mkdir{false};
         bool relink{false};
+        bool sourced{false};
     };
     key_space_ptr space;
     std::vector<item> pending;

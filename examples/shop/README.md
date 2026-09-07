@@ -23,45 +23,56 @@ One key space, `shop`:
 | `/catalog/<top>/<sub>/<asin>.json` | the full record. **The directories are the category tree** |
 | `/meta/index.json` | one compact row per product, so the front page is one read |
 | `/meta/names.json` | slug to display name |
-| `/modules/catalog.luau` | the lookup both routes share, loaded with `require` |
+| `/modules/catalog.luau` | the lookup the API and the source share, loaded with `require` |
 | `/app/index.html` | the storefront |
 | `order:<id>` | what checkout writes |
 
 and four stored functions: `CONF` (the http key), `SHOPUI` (`kind = "files"`, the
-page), `SHOPAPI` (`/api/*`), `SHOPIMG` (`/img/{asin}`).
+page), `SHOPAPI` (`/api/*`), and `SHOPIMG` (`/img/*`, a files route with a source).
 
 `GET /api/categories` has no index behind it: it is `fs.list("/catalog")` and then
 `fs.list` on each of those. The tree on disk *is* the answer.
 
 ## Images arrive as they are asked for
 
-The catalog holds urls. `/img/<asin>` looks the product up, asks the image space
-for that url, and serves what comes back. Measured: **374ms cold, 0.5ms warm**, and
-the whole set is about 10MB if every product is eventually looked at.
+The catalog holds urls, not pictures - about 10MB across 992 products, and no reason
+to hold any of it until somebody looks at one. `/img/<asin>` is a **plain files
+route**: no luau runs per request, and the space fetches what it does not have.
 
-The fetch waits inline and holds a VM slot while it does, so a cold gallery is
-bounded by the pool size. That is the trade for not shipping 10MB of pictures.
-
-The cache is the `shopimg` key space, configured `foreign = luau`: a key that is
-not there is filled by `imgspace/imgfetch.luau`, which fetches the url the key
-names. So the same cache fills two ways and both are the real one:
+That is `fs_source`, a stored function the space names, which is given a path and
+produces the file:
 
 ```
-redis-cli -p 14000
-> USE shopimg
-> GET https://m.media-amazon.com/images/I/71QeGmahUnL._AC_UX500_.jpg
+USE configuration
+SET shop.fs_source imgsource
+SET shop.missing_ttl 60000
 ```
 
-is 280ms the first time and 0ms after, and a page view of the same product is
-served out of what that left behind.
+`imgsource.luau` turns `/img/<asin>` into a catalog lookup and one `http.request`,
+and returns `{body, type}` - a list rather than a string, because `/img/<asin>` has
+no extension to guess a content type from. Measured: **220ms cold, 0.3ms warm**, and
+a product nobody sells is a 404 that is remembered for `missing_ttl` rather than a
+round trip every time.
 
-The route reads it with `fetch` rather than `get`, and the difference is the point:
-`get` returns what is cached and nothing else, while `fetch` is allowed to go and
-get it. A read that can take the source's latency is not the same operation as one
-that cannot, and in a handler it holds a VM slot while it waits - so it says so at
-the call rather than being a property of the key space that the reader cannot see.
-That is TODO 259, which also wired `barch.space` into handlers: a route could not
-reach another key space at all before it.
+`FS LS /img SOURCE` lists the whole catalog rather than the handful of pictures
+somebody has looked at - 992 entries, one of them a `file` and the rest `remote`,
+meaning the source knows the name and nothing has fetched it. That is
+`fs_source_list`, and it is a separate setting from `fs_source` because a file
+source answers `{body, type}` and a listing answers names, and both are lists.
+
+Nothing here sets `fs_cache_bytes`, so the whole catalog's worth of images - about
+10MB if every product is viewed - stays once fetched. A space that wanted a ceiling
+would set one and the oldest fetches would go; what was loaded by `LOADFS` is never
+a candidate, because the source cannot produce it again.
+
+The route opts in with `source = true`, and that is deliberate rather than a
+property of the key space: a fetch waits inline and holds the route's place in the
+VM pool while it does, and whoever reads the route ought to see that.
+
+This used to be a luau handler here doing the fetching by hand, and before that a
+fill script on a separate foreign key space - which cannot work at all. A fill is
+handed a key, and of the three keys a file is made of only the name record carries a
+path; the inode and the chunks are keyed by an id with no way back. See TODO 263.
 
 ## Both ways of holding a catalog
 

@@ -60,6 +60,24 @@ namespace barch {
         std::string foreign_database{};
         std::string foreign_query{};
         std::string foreign_script{};
+        /**
+         * A stored function that produces a file this space does not have, by path -
+         * see TODO 263. Empty means a missing file is simply missing.
+         */
+        std::string fs_source{};
+        /**
+         * A stored function that lists what a directory *could* hold, by path - see
+         * TODO 263. Separate from `fs_source` and not a mode of it: a file source
+         * answers `{body, type}` and a listing answers names, and both are lists, so
+         * one function could not tell you which it meant.
+         */
+        std::string fs_source_list{};
+        /**
+         * How many bytes of fetched files this space will hold before it starts
+         * dropping the oldest. 0 keeps everything, which is what a space that has
+         * not asked for a budget gets. See TODO 263.
+         */
+        uint64_t fs_cache_bytes{0};
         std::string luau_bytecode{};
         uint64_t foreign_script_insns{0};
         uint64_t foreign_port{0};

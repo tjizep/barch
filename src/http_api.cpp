@@ -427,30 +427,6 @@ std::string session_user(const barch::key_space_ptr& space, const std::string& s
  */
 
 /**
- * A guess from the extension, for a file stored without a type. Deliberately
- * short: what a browser needs to render a page and refuse to sniff.
- */
-std::string type_from_extension(const std::string& path) {
-    auto dot = path.find_last_of('.');
-    if (dot == std::string::npos)
-        return "application/octet-stream";
-    auto ext = lower_copy(path.substr(dot + 1));
-    static const std::unordered_map<std::string, std::string> known = {
-        {"html", "text/html"},   {"htm", "text/html"},    {"css", "text/css"},
-        {"js", "text/javascript"}, {"mjs", "text/javascript"},
-        {"json", "application/json"}, {"txt", "text/plain"},  {"csv", "text/csv"},
-        {"xml", "application/xml"},  {"svg", "image/svg+xml"},
-        {"png", "image/png"},    {"jpg", "image/jpeg"},   {"jpeg", "image/jpeg"},
-        {"gif", "image/gif"},    {"webp", "image/webp"},  {"avif", "image/avif"},
-        {"ico", "image/x-icon"}, {"woff", "font/woff"},   {"woff2", "font/woff2"},
-        {"pdf", "application/pdf"}, {"wasm", "application/wasm"},
-        {"mp4", "video/mp4"},    {"webm", "video/webm"},  {"mp3", "audio/mpeg"},
-    };
-    auto it = known.find(ext);
-    return it == known.end() ? "application/octet-stream" : it->second;
-}
-
-/**
  * `Range: bytes=a-b`, in the one form worth supporting: a single range. Multipart
  * ranges are legal and no client asks for them. False means "not a range request
  * we understand", and the whole file is the right answer to that.
@@ -554,6 +530,16 @@ void handle_file(const std::shared_ptr<space_http>& server,
         return;
     }
 
+    /*
+     * A route that declared `source = true` may ask the space's file source for
+     * something it does not have. It waits inline and holds this slot while it
+     * does, which is why it is opt in - TODO 263.
+     */
+    if (spec.source) {
+        barch::fs::entry got;
+        std::string why;
+        (void) barch::fs::fetch(server->space, path, got, why);
+    }
     barch::fs::file open_file;
     std::string open_err;
     if (!barch::fs::file::open(acc, path, open_file, open_err)) {
@@ -582,7 +568,7 @@ void handle_file(const std::shared_ptr<space_http>& server,
         return;
     }
 
-    auto type = meta.type.empty() ? type_from_extension(path) : meta.type;
+    auto type = meta.type.empty() ? barch::fs::type_from_path(path) : meta.type;
     res.set_header("Content-Type", type);
     res.set_header("ETag", etag);
     res.set_header("Accept-Ranges", "bytes");

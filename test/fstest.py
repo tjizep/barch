@@ -298,6 +298,178 @@ assert json.loads(r.execute_command("fsstat", "/big.bin"))["size"] == len(big)
 
 
 # ---------------------------------------------------------------------------
+# a file source: the space fills its own store when a file is asked for - TODO 263
+#
+# Not a foreign fill on the keys, which cannot work: a file is a name record, an
+# inode and chunks, and only the first carries a path. So the hook is at the fs
+# layer, where the path is still in hand, and what comes back is written as a whole
+# file in one batch.
+print("a space can fetch a file it does not have", flush=True)
+conf = barch.KeyValue("configuration")
+conf.set("srcspace.fs_source", "fetcher")
+conf.set("srcspace.fs_source_list", "lister")
+conf.set("srcspace.missing_ttl", "60000")
+conf.save()
+
+sc = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+sc.execute_command("USE", "srcspace")
+sc.execute_command("SETF", "fetcher", """function call(path)
+    barch.call("INCRBY", "asked", 1)
+    if string.sub(path, 1, 5) == "/gen/" then
+        return "generated for " .. path
+    end
+    return nil
+end""")
+
+# get answers from what is there; fetch is the one allowed to go and get it
+assert sc.execute_command("FS", "GET", "/gen/a.txt") is None
+assert sc.execute_command("FS", "FETCH", "/gen/a.txt") == b"generated for /gen/a.txt"
+# and now it is an ordinary file: readable, listed, and typed from its extension
+assert sc.execute_command("FS", "GET", "/gen/a.txt") == b"generated for /gen/a.txt"
+assert [x.decode() for x in sc.execute_command("FS", "LS", "/gen")] == ["file 24 1 a.txt"]
+assert "type=text/plain" in sc.execute_command("FS", "STAT", "/gen/a.txt").decode()
+assert int(sc.execute_command("GET", "asked")) == 1, "the source was asked more than once"
+
+# a second read does not ask again, because it is a file now
+assert sc.execute_command("FS", "FETCH", "/gen/a.txt") == b"generated for /gen/a.txt"
+assert int(sc.execute_command("GET", "asked")) == 1
+
+# what the source does not have is remembered, so a 404 is not a round trip each time
+assert sc.execute_command("FS", "FETCH", "/nowhere.txt") is None
+assert int(sc.execute_command("GET", "asked")) == 2
+assert sc.execute_command("FS", "FETCH", "/nowhere.txt") is None
+assert int(sc.execute_command("GET", "asked")) == 2, "a remembered miss asked again"
+
+# a space with no source is unchanged: fetch is get
+assert r.execute_command("FS", "FETCH", "/gen/a.txt") is None
+
+# a source can say what it made, since a path is not always enough to tell - a
+# list, because a returned table keeps only its array part
+sc.execute_command("SETF", "fetcher", """function call(path)
+    barch.call("INCRBY", "asked", 1)
+    if path == "/typed/thing" then
+        return { "<h1>made</h1>", "text/html" }
+    end
+    if string.sub(path, 1, 5) == "/gen/" then
+        return "generated for " .. path
+    end
+    return nil
+end""")
+assert sc.execute_command("FS", "FETCH", "/typed/thing") == b"<h1>made</h1>"
+assert "type=text/html" in sc.execute_command("FS", "STAT", "/typed/thing").decode(), \
+    sc.execute_command("FS", "STAT", "/typed/thing")
+
+# and a source that fails says so rather than answering an empty file
+sc.execute_command("SETF", "fetcher", "function call(path) error('the source broke') end")
+sc.execute_command("DEL", "fs:miss:/broken.txt")
+try:
+    sc.execute_command("FS", "FETCH", "/broken.txt")
+    raise AssertionError("a broken source should not look like a missing file")
+except redis.exceptions.ResponseError as e:
+    assert "broke" in str(e), e
+
+print("a source can say what a directory could hold", flush=True)
+# what is stored is what a listing shows, and a source-backed space can also say
+# what could be fetched - marked `remote`, because a caller that cannot tell it from
+# an empty file will treat it as one
+# the space read its configuration when it was built, which is why fs_source_list
+# is set at the top with the rest and not here - the same order the foreign
+# settings need
+sc.execute_command("SETF", "lister", """function call(path)
+    if path == "/gen" then return { "c.txt", "a.txt", "b.txt" } end
+    return nil
+end""")
+sc.execute_command("SETF", "fetcher", """function call(path)
+    barch.call("INCRBY", "asked", 1)
+    if string.sub(path, 1, 5) == "/gen/" then
+        return "generated for " .. path
+    end
+    return nil
+end""")
+
+
+def srcls(*args):
+    return [x.decode() for x in sc.execute_command("FS", "LS", *args)]
+
+
+# a.txt is stored from the fetch above; the rest are only names the source knows
+assert srcls("/gen") == ["file 24 1 a.txt"], srcls("/gen")
+assert srcls("/gen", "SOURCE") == \
+    ["file 24 1 a.txt", "remote 0 0 b.txt", "remote 0 0 c.txt"], srcls("/gen", "SOURCE")
+
+# fetching one moves it from one half to the other, and what is stored wins
+assert sc.execute_command("FS", "FETCH", "/gen/b.txt") == b"generated for /gen/b.txt"
+assert srcls("/gen", "SOURCE") == \
+    ["file 24 1 a.txt", "file 24 1 b.txt", "remote 0 0 c.txt"]
+
+# the page is over the merge, not over each half
+assert srcls("/gen", "LIMIT", "2", "SOURCE") == ["file 24 1 a.txt", "file 24 1 b.txt"]
+assert srcls("/gen", "AFTER", "b.txt", "SOURCE") == ["remote 0 0 c.txt"]
+
+# a directory the source knows nothing about is what is stored, and no more
+assert srcls("/typed", "SOURCE") == ["file 13 1 thing"], srcls("/typed", "SOURCE")
+
+print("a fetched file can be evicted; anything else never is", flush=True)
+# a read-through cache that only grows is a copy of the source with extra steps, so
+# a space can say how much of it to keep. Only what the source can produce again is
+# ever a candidate - a file written by hand is the only copy there is
+import time as _time
+evc = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2)
+conf.set("evict.fs_source", "gen")
+conf.set("evict.fs_cache_bytes", "3000")        # room for three of them
+conf.save()
+evc.execute_command("USE", "evict")
+evc.execute_command("SETF", "gen", """function call(path)
+    if string.sub(path, 1, 5) == "/gen/" then return string.rep("x", 1000) end
+    return nil
+end""")
+
+
+def evls():
+    return sorted(x.decode().split()[-1] for x in evc.execute_command("FS", "LS", "/gen"))
+
+
+for n in range(1, 4):
+    assert evc.execute_command("FS", "FETCH", "/gen/f%d" % n) is not None
+    _time.sleep(0.01)                            # so the fetch stamps differ
+assert evls() == ["f1", "f2", "f3"], evls()
+assert evc.execute_command("GET", "fs:cache") == b"3000"
+
+# the fourth pushes the oldest out, and the total stays where the budget put it
+evc.execute_command("FS", "FETCH", "/gen/f4")
+assert evls() == ["f2", "f3", "f4"], evls()
+assert evc.execute_command("GET", "fs:cache") == b"3000"
+
+# a file written by hand is not the source's to drop
+evc.execute_command("FS", "PUT", "/gen/mine", "the only copy")
+for n in range(5, 8):
+    evc.execute_command("FS", "FETCH", "/gen/f%d" % n)
+    _time.sleep(0.01)
+assert "mine" in evls(), evls()
+assert evc.execute_command("FS", "GET", "/gen/mine") == b"the only copy"
+
+# and neither is one that was fetched and then written over: it stopped being a copy
+fetched = [f for f in evls() if f != "mine"][0]
+evc.execute_command("FS", "PUT", "/gen/" + fetched, "now mine")
+for n in range(8, 12):
+    evc.execute_command("FS", "FETCH", "/gen/f%d" % n)
+    _time.sleep(0.01)
+assert fetched in evls(), (fetched, evls())
+assert evc.execute_command("FS", "GET", "/gen/" + fetched) == b"now mine"
+
+# a space with no budget keeps everything, which is what one that did not ask gets
+assert sc.execute_command("GET", "fs:cache") is None
+
+# put a working one back: the HTTP section below serves out of this same space
+sc.execute_command("SETF", "fetcher", """function call(path)
+    barch.call("INCRBY", "asked", 1)
+    if string.sub(path, 1, 5) == "/gen/" then
+        return "generated for " .. path
+    end
+    return nil
+end""")
+
+# ---------------------------------------------------------------------------
 # served over HTTP from C++, without entering luau - TODO 235
 #
 # The point of the C++ path is that a download does not take a VM slot: a luau
@@ -432,6 +604,51 @@ etag = hdrs.get("etag")
 assert etag and not etag.startswith("W/"), hdrs
 status, body, _ = http_get("/static/images/logo.png", {"If-None-Match": etag})
 assert status == 304 and body == b"", (status, len(body))
+
+print("a files route may ask the source, if it says so - TODO 263", flush=True)
+# opt in per route: a fetch waits inline and holds the handler's slot while it does,
+# so a key space does not get to decide that for every reader
+SOURCED = r"""
+function call() return "sourced" end
+function transport()
+    return { kind = "files", route = "/onto/*", root = "/", source = true }
+end
+"""
+assert r.execute_command("SETF", "sourced", SOURCED) == b"OK"
+# the route lives in the space with the source, which is srcspace, so it needs its
+# own server there - one space, one server
+sc.execute_command("SETF", "sourceconf", """function call() return "c" end
+function transport()
+    return { kind = "http", bind = "127.0.0.1", keys = {"SOURCED"} }
+end""")
+sc.execute_command("SETF", "sourced", SOURCED)
+SRC_PORT = scale.port(2, default=18320)
+sc.execute_command("HTTP", "START", "SOURCECONF", str(SRC_PORT), "127.0.0.1")
+try:
+    def sourced_get(path):
+        conn = http.client.HTTPConnection("127.0.0.1", SRC_PORT, timeout=10)
+        try:
+            conn.request("GET", path, headers={"Connection": "close"})
+            resp = conn.getresponse()
+            return (resp.status, resp.read(),
+                    dict((k.lower(), v) for k, v in resp.getheaders()))
+        finally:
+            conn.close()
+
+    before = int(sc.execute_command("GET", "asked"))
+    st, body, hdrs = sourced_get("/onto/gen/fresh.txt")
+    assert st == 200 and body == b"generated for /gen/fresh.txt", (st, body)
+    assert hdrs.get("content-type") == "text/plain", hdrs
+    assert int(sc.execute_command("GET", "asked")) == before + 1
+
+    # it is a stored file from here on, so the second request asks nobody
+    assert sourced_get("/onto/gen/fresh.txt")[0] == 200
+    assert int(sc.execute_command("GET", "asked")) == before + 1
+
+    # and what the source refuses is still a 404
+    assert sourced_get("/onto/no/such.txt")[0] == 404
+finally:
+    sc.execute_command("HTTP", "STOP")
 
 print("what is not there is a 404, and .. does not escape the root", flush=True)
 assert http_get("/static/nope.png")[0] == 404

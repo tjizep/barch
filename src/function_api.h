@@ -140,6 +140,20 @@ namespace functions {
     };
     heap::vector<exposed_info> exposed_commands(const barch::key_space_ptr& space);
 
+    /**
+     * Run a stored function without a client - the C++ side of `CALLF`.
+     *
+     * `resolve` needs a caller and every caller so far has been a connection or an
+     * HTTP request, so nothing inside the server could call a stored function. The
+     * file source needs to (TODO 263) and it is the sort of thing that will be
+     * wanted again. Runs with owner rights, because the caller is the server.
+     *
+     * False fills `err`; a function that parks is refused rather than waited for,
+     * the same as CALLF refuses one.
+     */
+    bool call_named(const barch::key_space_ptr& space, const std::string& name,
+                    const std::vector<std::string>& args, Variable& out, std::string& err);
+
     /** SETF/REMF/KEYSF without a client. false fills err and writes nothing. */
     bool install(const barch::key_space_ptr& space, const std::string& name,
                  const std::string& source, std::string& err);

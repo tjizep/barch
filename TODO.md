@@ -1496,3 +1496,8 @@
 261. [Done] barch.call returns the value, not the framing [07-09-2026] Nr 251 c5df974
 
 262. [Done] An arena maps its pages back instead of loading them [07-09-2026] Nr 256 c5df974
+
+263. [Done] A file source: a space that fetches a file it does not have [07-09-2026] Nr 257 c5df974
+
+    All three parts are done: the source itself Nr 257, listing Nr 258, eviction
+    Nr 259.

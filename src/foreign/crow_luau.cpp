@@ -414,6 +414,10 @@ bool crow_read_transport(lua_State* L, int idx, barch::foreign::http_route& out,
         }
         lua_pop(L, 1);
     }
+    if (field(L, idx, "source")) {
+        out.source = lua_toboolean(L, -1) != 0;
+        lua_pop(L, 1);
+    }
     if (field(L, idx, "accept")) {
         if (!as_string(L, -1, out.accept, err, "accept")) {
             lua_pop(L, 1);

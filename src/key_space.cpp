@@ -304,6 +304,9 @@ namespace barch {
                 foreign_database = kv.get(real+".foreign_database");
                 foreign_query = kv.get(real+".foreign_query");
                 foreign_script = kv.get(real+".foreign_script");
+                fs_source = kv.get(real+".fs_source");
+                fs_source_list = kv.get(real+".fs_source_list");
+                read_u64(kv, real+".fs_cache_bytes", fs_cache_bytes);
                 read_u64(kv, real+".foreign_port", foreign_port);
                 read_u64(kv, real+".missing_ttl", missing_ttl);
                 read_u64(kv, real+".foreign_timeout_ms", foreign_timeout_ms);

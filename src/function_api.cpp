@@ -1161,6 +1161,144 @@ namespace functions {
         return out;
     }
 
+    bool call_named(const barch::key_space_ptr& space, const std::string& name,
+                    const std::vector<std::string>& args, Variable& out, std::string& err) {
+        if (!space) {
+            err = "no key space";
+            return false;
+        }
+        /*
+         * Folded, because a stored function's key is: the dispatcher upper-cases
+         * whatever arrived before it looks one up, so a name written as it was typed
+         * never matches.
+         */
+        std::string folded = name;
+        for (auto& ch : folded)
+            ch = (char) toupper((unsigned char) ch);
+
+        /*
+         * Run the way the foreign fill runs one, and not through a caller.
+         *
+         * The obvious version - an rpc_caller and `callv` - refuses anything that
+         * parks, because nothing would service the blocks. And a file source is
+         * exactly the thing that parks: `http.request` suspends the coroutine so the
+         * pool thread goes back to other work, which is the whole point of it. So
+         * this starts the function on the function pool and waits for the completion,
+         * which is what `foreign::fetch_now` does one layer down. See TODO 263.
+         */
+        auto iface = std::make_shared<barch::foreign::call_interface>();
+        iface->running_in = space->canonical();
+        iface->defined_in = space->canonical();
+        // the real loader, not a stored-function-only one: a source is as likely to
+        // `require` a module out of the file store as anything else is
+        iface->load = loader_for(space);
+        iface->store = store_for_owner(space);
+        /*
+         * `barch.call` has to work too. Without this the interface holds an empty
+         * std::function and a source that counts what it did dies with
+         * `bad_function_call`, which says nothing about what is wrong.
+         */
+        iface->run_command = [space](const heap::vector<std::string>& argv, Variable& out,
+                                     std::string& err) -> bool {
+            if (argv.empty()) {
+                err = "barch.call needs a command name";
+                return false;
+            }
+            std::string name = argv[0];
+            for (auto& ch : name)
+                ch = (char) toupper((unsigned char) ch);
+            if (name == "MULTI" || name == "EXEC" || name == "DISCARD" || name == "WATCH"
+                || name == "UNWATCH") {
+                err = "FUNCTION cannot call " + name;
+                return false;
+            }
+            auto table = functions_by_name();
+            auto found = table->find(name);
+            if (found == table->end()) {
+                err = "FUNCTION unknown command '" + name + "'";
+                return false;
+            }
+            if (found->second.is_asynch) {
+                err = "FUNCTION cannot call '" + name + "', it is asynchronous";
+                return false;
+            }
+            rpc_caller sub;
+            sub.set_kspace(space);
+            sub.set_acl("default", get_all_acl());
+            sub.set_script_depth(1);
+            out = sub.callv(argv, found->second.call, Variable(nullptr));
+            if (sub.has_blocks()) {
+                sub.clear_blocks();
+                err = "FUNCTION cannot call '" + argv[0] + "', it blocks";
+                return false;
+            }
+            if (out.index() == var_error) {
+                err = std::get<error>(out).what();
+                return false;
+            }
+            return true;
+        };
+        iface->open_space = [](const std::string& other,
+                               barch::foreign::store_access& opened) -> bool {
+            if (!barch::is_keyspace(other))
+                return false;
+            auto s = barch::get_keyspace(other);
+            if (!s)
+                return false;
+            opened = store_for_owner(s);
+            return true;
+        };
+
+        /*
+         * The arguments alone. `start_function` is told the name separately and
+         * hands these straight to the script's `call(...)`, unlike a command, whose
+         * argv[0] is the command itself - which is what the first version passed,
+         * so a source saw its own name where it expected a path.
+         */
+        heap::vector<std::string> argv;
+        argv.reserve(args.size());
+        for (const auto& a : args)
+            argv.push_back(a);
+
+        struct waiting {
+            std::mutex mu;
+            std::condition_variable cv;
+            bool done{false};
+            bool ok{false};
+            Variable value;
+            std::string error;
+        };
+        auto slot = std::make_shared<waiting>();
+        auto states = barch::foreign::make_function_states();
+        barch::foreign::start_function(
+            space->canonical(), folded, iface, argv,
+            space->function_slice(), space->function_deadline(), states,
+            [slot](bool ok, Variable value, std::string failed) {
+                std::unique_lock lock(slot->mu);
+                slot->ok = ok;
+                slot->value = std::move(value);
+                slot->error = std::move(failed);
+                slot->done = true;
+                slot->cv.notify_all();
+            });
+
+        std::unique_lock lock(slot->mu);
+        const auto wait_ms = space->function_deadline() ? space->function_deadline() + 1000
+                                                        : 30000;
+        slot->cv.wait_for(lock, std::chrono::milliseconds(wait_ms),
+                          [&] { return slot->done; });
+        if (!slot->done) {
+            err = folded + " did not finish";
+            return false;
+        }
+        if (!slot->ok) {
+            err = slot->error.empty() ? (folded + " failed") : slot->error;
+            return false;
+        }
+        out = std::move(slot->value);
+        return true;
+    }
+
     bool install(const key_space_ptr& space, const std::string& name,
                  const std::string& source, std::string& err) {
         if (!space) {

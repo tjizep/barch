@@ -82,6 +82,71 @@ same records work as plain keys - `prepare.py` writes one JSON per product and
 instead. What that loses is the directory listing: a key namespace is walked with
 `DIR LS ... SEP :`, which gives the same shape by a different route.
 
+## Accounts, in a space of their own
+
+`POST /api/register`, `POST /api/signon`, `POST /api/signout` and `GET /api/me`
+add registration and sign-on, with a `/shop/register.html` and
+`/shop/signon.html` page over them. What they store is deliberately **not**
+in `shop`: a customer record is not catalog data, and this space has already
+been dropped and reloaded more than once while getting the catalog right (see
+the arena and re-import work in the history above) - an account must survive
+that.
+
+So accounts live in a second key space, `users`, reached cross-space with
+`barch.space.users.<key>` from the handlers in `shopapi.luau`:
+
+| path | what |
+|---|---|
+| `user:<email>` | `{email, name, salt, hash}` - the account |
+| `sess:<sid>` | the email a signed-in cookie belongs to |
+
+`barch.space.NAME` looks a space up; it does not create one, so `setup.sh`
+runs a bare `USE users` before the HTTP server starts - the same way `USE`
+already brings `shop` and `configuration` into being.
+
+There is no crypto library in the Luau sandbox (`open_safe` in
+`luau_driver.cpp` opens base, math, string, table, bit32, and the rest - no
+hashing), so `modules/sha256.luau` is a pure-Luau SHA-256 over `bit32`, and a
+password is stored as `sha256(salt .. password)` with an 8 byte random salt
+per account. It is not a KDF and it is not constant time - fine for an
+example storefront, not a reason to reuse it anywhere that has to resist a
+real attacker.
+
+Signing in sets an `sid` cookie the same way `examples/http/luau/session.luau`
+does, except the session points into `users` rather than into `barch.store`
+on `shop` - a session is data about an account, and belongs with it.
+
+`POST /api/send-email` is the shape a real deployment would want for a
+welcome mail or a reset link, in `luau/sendemail.luau`: it validates
+`{to, subject, ...}` and answers `{ok, queued}` without contacting any
+provider. Wiring SMTP or a provider API in is future work; the point here is
+the endpoint, not the delivery.
+
+## Ratings, kept apart from the catalog import
+
+`p.rating`/`p.reviews` on a product record are the Amazon numbers `prepare.py`
+imported once and never change. What a shopper actually says on this
+storefront is a separate thing, `POST /api/ratings` and `GET
+/api/ratings/<asin>`, and it lives in `shop` next to `order:<id>` rather than
+in `users` - a rating is data about a product, not about an account, the same
+distinction that put accounts in a space of their own.
+
+| path | what |
+|---|---|
+| `rating:<asin>:<email>` | `{stars, comment, seq}` - one per account per product, replaced on a second submit |
+| `ratingsum:<asin>` / `ratingcount:<asin>` | running totals, so the average is not recomputed from every review on every read |
+
+Posting again on a product you already rated overwrites that one document
+rather than adding a second line, and the two counters move by the
+difference (`INCRBYFLOAT`) rather than being resummed - the same shape as
+`order:seq`'s `INCRBY` a few lines up. The list of reviews for a product is
+`DIR LS rating:<asin> SEP :`, the composite-key walk from "Both ways of
+holding a catalog" above, applied to a key namespace this time instead of a
+file tree. There is no clock in the Luau sandbox (`open_safe` opens no `os`
+library), so "newest first" is a per-product `ratingseq:<asin>` counter
+handed out at write time instead of a timestamp. Rating a product requires
+being signed in, the same `sid` cookie `/api/me` reads.
+
 ## Things it ran into
 
 **A key with a space in it was invisible to a range scan** (TODO 260, since

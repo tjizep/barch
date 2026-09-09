@@ -37,6 +37,15 @@ LOADFS $HERE/modules /modules
 LOADFS $HERE/app /app
 EOF
 
+# --- accounts live in a key space of their own -----------------------------
+# register/signon/me in shopapi.luau reach it through `barch.space.users`,
+# which looks a space up rather than creating one - so it has to exist
+# before the first request does. USE is what brings a key space into being.
+echo "creating the users space"
+$CLI -3 <<EOF >/dev/null
+USE users
+EOF
+
 # The routes call a stored function (SEARCHCAT) and write an order, so the user the
 # handlers run as needs `function` and `data` on top of what the built-in `web` has.
 # Naming a user `web` here replaces that default for this server.

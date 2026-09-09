@@ -415,7 +415,8 @@ struct free_list {
 // it also emits page modification notifications
 struct logical_allocator {
 
-    logical_allocator(abstract_leaf_pair* ap,std::string name): ap(ap), main(std::move(name)), emancipated(ap) {}
+    logical_allocator(abstract_leaf_pair* ap,std::string name,std::string space = {})
+        : ap(ap), main(std::move(name), std::move(space)), emancipated(ap) {}
 
     logical_allocator(const logical_allocator &) = delete;
     logical_allocator &operator=(const logical_allocator &t) = delete;
@@ -1286,7 +1287,7 @@ struct alloc_pair : public abstract_leaf_pair{
     explicit alloc_pair(size_t shard_number) : shard_number(shard_number), nodes(this,"nodes_"+std::to_string(shard_number)),leaves(this,"leaves_"+std::to_string(shard_number)) {
         latch.set_label("#" + std::to_string(shard_number));
     }
-    alloc_pair(size_t shard_number,const std::string& name) : shard_number(shard_number), name(name), nodes(this,"nodes_"+name+std::to_string(shard_number)),leaves(this,"leaves_"+name+std::to_string(shard_number)) {
+    alloc_pair(size_t shard_number,const std::string& name) : shard_number(shard_number), name(name), nodes(this,"nodes_"+name+std::to_string(shard_number),name),leaves(this,"leaves_"+name+std::to_string(shard_number),name) {
         latch.set_label(name + "#" + std::to_string(shard_number));
     }
     logical_allocator& get_nodes() {

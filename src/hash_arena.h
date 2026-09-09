@@ -71,6 +71,8 @@ namespace arena {
          */
         std::string backing_name{};
         std::string backing_path{};
+        /** decorated space name, so this arena can ask what its own space wants */
+        std::string backing_space{};
 
         void reconcile_free_list() {
             free_address_list.clear();
@@ -509,7 +511,15 @@ namespace arena {
         }
         /** the file this arena maps, when it has one to map */
         bool wants_backing() const {
-            return !backing_name.empty() && !barch::get_arena_dir().empty();
+            if (backing_name.empty() || barch::get_arena_dir(backing_space).empty())
+                return false;
+            // matched on the name an arena already has - `leaves_<space><shard>`
+            const auto which = barch::get_arena_map(backing_space);
+            if (which == "all")
+                return true;
+            if (which == "off")
+                return false;
+            return backing_name.compare(0, which.size(), which) == 0;
         }
 
         /**
@@ -524,7 +534,7 @@ namespace arena {
         bool prepare_backing(bool truncate = true) {
             if (!backing_path.empty())
                 return true;
-            auto dir = barch::get_arena_dir();
+            auto dir = barch::get_arena_dir(backing_space);
             if (dir.empty() || backing_name.empty())
                 return false;
             ::mkdir(dir.c_str(), 0755);                 // already there is fine
@@ -791,6 +801,17 @@ namespace arena {
         void set_backing_name(const std::string& name) {
             backing_name = name;
         }
+        /**
+         * The space this arena belongs to, decorated - `node`, `auth`, `shop_`. Only
+         * used to ask whether that space has its own `arena_dir`/`arena_map`; empty
+         * means the global answer, which is what an arena with no space gets. TODO 268.
+         */
+        void set_backing_space(const std::string& space) {
+            backing_space = space;
+        }
+        const std::string& get_backing_space() const {
+            return backing_space;
+        }
         const std::string& get_backing_name() const {
             return backing_name;
         }
@@ -842,10 +863,11 @@ namespace arena {
         base_hash_arena main{};
         hash_arena(const hash_arena &) = default;
         hash_arena& operator=(const hash_arena &) = default;
-        explicit hash_arena(std::string name) : name(std::move(name)) {
+        explicit hash_arena(std::string name, std::string space = {}) : name(std::move(name)) {
             // the arena's own name is what its file is called, and it is already
             // unique per space and shard - `nodes_<space><shard>` - TODO 239
             main.set_backing_name(this->name);
+            main.set_backing_space(space);
         }
         // arena virtualization functions
 

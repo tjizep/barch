@@ -230,14 +230,18 @@ namespace barch {
     }
 
     void snapshot_arenas() {
-        if (barch::get_arena_dir().empty())
-            return;
+        /*
+         * No global check here: a space can map while the server default is off, so
+         * the only honest answer is to ask every arena. One that is not mapped has
+         * no `backing_path` and says no straight away. TODO 268.
+         */
         size_t written = 0;
         all_shards([&written](const barch::shard_ptr& s) {
             if (s && s->save_snapshot())
                 ++written;
         });
-        barch::log({"wrote", written, "arena snapshots"});
+        if (written)
+            barch::log({"wrote", written, "arena snapshots"});
     }
 
     bool flush_keyspace(const std::string& name_) {
@@ -261,6 +265,8 @@ namespace barch {
         // the space is going away and will be rebuilt from disk if it comes back, so
         // a cached id block belongs to a counter that may no longer exist - TODO 253
         barch::forget_sequences(undecorate(name));
+        // and what it asked of its arenas, so a space that comes back reads it fresh
+        barch::forget_space_arena(name);
         return r; // destruction happens in callers thread - so hopefully no dl because shared ptr
     }
 
@@ -304,6 +310,20 @@ namespace barch {
                 foreign_database = kv.get(real+".foreign_database");
                 foreign_query = kv.get(real+".foreign_query");
                 foreign_script = kv.get(real+".foreign_script");
+                /*
+                 * Where this space's arenas map from, if it wants something other
+                 * than the server default - TODO 268. Registered before a shard
+                 * exists, because an arena reads it the first time it allocates.
+                 */
+                arena_dir = kv.get(real+".arena_dir");
+                arena_map = kv.get(real+".arena_map");
+                if (!arena_map.empty() && arena_map != "all" && arena_map != "leaves"
+                    && arena_map != "nodes" && arena_map != "off") {
+                    barch::err({"arena_map is all, leaves, nodes or off - ignoring it for space",
+                                name, arena_map});
+                    arena_map.clear();
+                }
+                barch::set_space_arena(name, arena_dir, arena_map);
                 fs_source = kv.get(real+".fs_source");
                 fs_source_list = kv.get(real+".fs_source_list");
                 read_u64(kv, real+".fs_cache_bytes", fs_cache_bytes);

@@ -20,7 +20,8 @@ PORT = scale.port(default=14000)
 # that a variable added to the server without being added to the reflection - or the
 # other way round - shows up as a failure instead of being quietly skipped.
 EXPECTED = {
-    "active_defrag", "arena_dir", "compression", "db_number_prefix", "eviction_policy",
+    "active_defrag", "arena_dir", "arena_map", "compression", "db_number_prefix",
+    "eviction_policy",
     "external_host", "foreign_pool_max_age_ms", "foreign_script_insns",
     "foreign_timeout_ms", "function_deadline_ms", "function_max_depth",
     "function_slice_insns",
@@ -94,6 +95,8 @@ NEW_VALUE = {
     "hybrid_keys": "off",
     # where an arena maps its pages from; a directory it will make when it needs to
     "arena_dir": "/tmp/barch-arenas",
+    # which of a space's arenas map from it - all, leaves, nodes or off
+    "arena_map": "leaves",
     "functions_dir": "/tmp/barch-functions",
     "functions_sync_ms": "5000",
     "functions_git_pull": "on",

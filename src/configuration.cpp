@@ -11,6 +11,8 @@
 #include <limits>
 #include <string>
 #include <regex>
+#include <shared_mutex>
+#include <unordered_map>
 #include "art/art.h"
 #include "module.h"
 #include "rpc/server.h"
@@ -77,6 +79,8 @@ struct config_state {
     heap::string functions_dir{"off"};
     /** where an arena's pages are mapped from; "off" is anonymous memory - TODO 239 */
     heap::string arena_dir{"off"};
+    /** which of a space's arenas map from it: all, leaves, nodes, off - TODO 264 */
+    heap::string arena_map{"all"};
     heap::string functions_sync_ms{"0"};
     heap::string functions_git_pull{"off"};
     heap::string functions_git_branch{"main"};
@@ -1114,6 +1118,26 @@ static int ApplyHybridKeys(ValkeyModuleCtx *unused_arg, void *unused_arg, Valkey
     return VALKEYMODULE_OK;
 }
 
+static ValkeyModuleString *GetArenaMap(const char *unused_arg, void *unused_arg) {
+    std::lock_guard lock(state().config_mutex);
+    return ValkeyModule_CreateString(nullptr, state().arena_map.c_str(), state().arena_map.length());
+}
+static int SetArenaMap(const std::string& val) {
+    if (val != "all" && val != "leaves" && val != "nodes" && val != "off")
+        return VALKEYMODULE_ERR;
+    std::lock_guard lock(state().config_mutex);
+    state().arena_map = val;
+    config().arena_map = val;
+    return VALKEYMODULE_OK;
+}
+static int SetArenaMap(const char *unused_arg, ValkeyModuleString *val, void *unused_arg,
+                       ValkeyModuleString **unused_arg) {
+    return SetArenaMap(ValkeyModule_StringPtrLen(val, nullptr));
+}
+static int ApplyArenaMap(ValkeyModuleCtx *unused_arg, void *unused_arg, ValkeyModuleString **unused_arg) {
+    return VALKEYMODULE_OK;                     // read when an arena first allocates
+}
+
 static ValkeyModuleString *GetArenaDir(const char *unused_arg, void *unused_arg) {
     std::lock_guard lock(state().config_mutex);
     return ValkeyModule_CreateString(nullptr, state().arena_dir.c_str(), state().arena_dir.length());
@@ -1525,6 +1549,8 @@ int barch::register_valkey_configuration(ValkeyModuleCtx *ctx) {
                                                      GetHybridKeys, SetHybridKeys,
                                                      ApplyHybridKeys, nullptr);
 
+    ret |= ValkeyModule_RegisterStringConfig(ctx, "arena_map", "all", VALKEYMODULE_CONFIG_DEFAULT,
+                                            GetArenaMap, SetArenaMap, ApplyArenaMap, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "arena_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
                                             GetArenaDir, SetArenaDir, ApplyArenaDir, nullptr);
     ret |= ValkeyModule_RegisterStringConfig(ctx, "functions_dir", "off", VALKEYMODULE_CONFIG_DEFAULT,
@@ -1892,6 +1918,11 @@ int barch::set_configuration_value(const std::string& name, const std::string &v
             return ApplyHybridKeys(nullptr, nullptr, nullptr);
         }
         return r;
+    }else if (name == "arena_map") {
+        auto r = SetArenaMap(val);
+        if (r == VALKEYMODULE_OK)
+            return ApplyArenaMap(nullptr, nullptr, nullptr);
+        return r;
     }else if (name == "arena_dir") {
         auto r = SetArenaDir(val);
         if (r == VALKEYMODULE_OK)
@@ -2170,8 +2201,75 @@ static bool cfg_off(const std::string& s) {
     return s.empty() || s == "off" || s == "none" || s == "no";
 }
 
+std::string barch::get_arena_map() {
+    return config().arena_map.empty() ? std::string("all") : config().arena_map;
+}
 std::string barch::get_arena_dir() {
     return cfg_off(config().arena_dir) ? std::string() : config().arena_dir;
+}
+
+/*
+ * What each named space asked for, keyed by the decorated name an arena carries.
+ * Written once while a space is built and read whenever one of its arenas grows,
+ * so a shared_mutex rather than a plain one: growth is rare but it happens on every
+ * shard thread at once when a space is filling.
+ */
+namespace {
+    struct space_arena {
+        std::string dir;
+        std::string map;
+    };
+    std::shared_mutex& space_arena_lock() {
+        static std::shared_mutex m;
+        return m;
+    }
+    std::unordered_map<std::string, space_arena>& space_arenas() {
+        static std::unordered_map<std::string, space_arena> m;
+        return m;
+    }
+}
+
+void barch::set_space_arena(const std::string& space, const std::string& dir, const std::string& map) {
+    std::unique_lock l(space_arena_lock());
+    if (dir.empty() && map.empty()) {
+        space_arenas().erase(space);
+        return;
+    }
+    space_arenas()[space] = {dir, map};
+}
+
+void barch::forget_space_arena(const std::string& space) {
+    std::unique_lock l(space_arena_lock());
+    space_arenas().erase(space);
+}
+
+/** the space's answer if it has one, else the global */
+static bool space_arena_setting(const std::string& space, bool want_dir, std::string& out) {
+    if (space.empty())
+        return false;
+    std::shared_lock l(space_arena_lock());
+    auto i = space_arenas().find(space);
+    if (i == space_arenas().end())
+        return false;
+    const auto& v = want_dir ? i->second.dir : i->second.map;
+    if (v.empty())
+        return false;
+    out = v;
+    return true;
+}
+
+std::string barch::get_arena_dir(const std::string& space) {
+    std::string mine;
+    if (space_arena_setting(space, true, mine))
+        return cfg_off(mine) ? std::string() : mine;
+    return get_arena_dir();
+}
+
+std::string barch::get_arena_map(const std::string& space) {
+    std::string mine;
+    if (space_arena_setting(space, false, mine))
+        return mine;
+    return get_arena_map();
 }
 std::string barch::get_functions_dir() {
     return cfg_off(config().functions_dir) ? std::string() : config().functions_dir;
@@ -2272,7 +2370,7 @@ const std::vector<std::string>& barch::configuration_names() {
         "maintenance_poll_delay", "max_defrag_page_count", "max_memory_bytes",
         "max_modifications_before_save", "max_resp_connections", "max_scan_iterators",
         "min_compressed_size", "min_fragmentation_ratio", "ordered_keys", "hybrid_keys",
-        "arena_dir", "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
+        "arena_dir", "arena_map", "functions_dir", "functions_sync_ms", "functions_git_pull", "functions_git_branch",
         "functions_git_commit", "functions_git_ssh_key",
         "pre_evict_thresh", "rpc_client_max_wait_ms", "rpc_max_buffer", "save_interval",
         "server_binding", "server_port", "static_bloom_filter",
@@ -2310,6 +2408,7 @@ static bool get_native_configuration_value(const std::string& name, std::string&
     else if (name == "ordered_keys")                value = cfg_bool(c.ordered_keys);
     else if (name == "hybrid_keys")                 value = cfg_bool(c.hybrid_keys);
     else if (name == "arena_dir")                   value = c.arena_dir;
+    else if (name == "arena_map")                   value = c.arena_map;
     else if (name == "functions_dir")                value = c.functions_dir;
     else if (name == "functions_sync_ms")            value = std::to_string(c.functions_sync_ms);
     else if (name == "functions_git_pull")           value = cfg_bool(c.functions_git_pull);

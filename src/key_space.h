@@ -91,6 +91,14 @@ namespace barch {
         uint64_t foreign_pool_size{8};
         uint64_t foreign_pool_max_age_ms{0};
         std::string key_split{};
+        /**
+         * What this space asked for instead of the server's `arena_dir`/`arena_map`,
+         * empty meaning it asked for nothing. Kept so INFO and the tests can say what
+         * a space is doing; the arenas themselves read it through
+         * `barch::get_arena_dir(space)`. TODO 268.
+         */
+        std::string arena_dir{};
+        std::string arena_map{};
         std::shared_ptr<std::regex> key_split_re{};
         std::atomic<uint32_t> foreign_inflight{0};
         std::shared_ptr<foreign::sql_backend> sql{};

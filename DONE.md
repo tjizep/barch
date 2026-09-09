@@ -12914,3 +12914,302 @@ every round of it. A fetched file written over by hand stops being a candidate a
 survives too. A space with no budget has no `fs:cache` key at all.
 
 Full suite 81/81. TODO 263 is closed.
+
+## 260. Half in memory: leaves from a file, the tree in RAM [08-09-2026]
+
+TODO 264. `arena_dir` was one switch for every arena, and the two are not alike:
+`leaves_*` holds the key and value bytes and is nearly all of the size, `nodes_*` is
+the tree every lookup walks. `arena_map` picks - `all` (the default, DONE 255),
+`leaves`, `nodes` or `off` - matched on the name an arena already has.
+
+### Measured: 20 million keys, 256 byte values
+
+Random inserts, 200M id space so almost all of them are distinct, 8 threads x 8
+clients x pipeline 32 through memtier on the same 16 core box as the server.
+
+| | sets/sec | wall | RssAnon | RssFile | on disk |
+|---|---|---|---|---|---|
+| `arena_map=leaves` | **672,310** | 32s | 1.0 GB | 5.36 GB | 5.1 GB, 348 files |
+| everything anonymous | **1,022,419** | 21s | 6.31 GB | 15 MB | - |
+
+19,033,109 distinct keys either way, which is what 20M draws from 200M gives.
+
+**A sixth of the anonymous memory for two thirds of the write rate.** That is the
+trade, and it is the whole point: 1.0GB against 6.31GB of pages that actually claim
+the machine, for 672k sets/sec against 1,022k. The 5.36GB of leaves is page cache -
+the kernel can drop it and read it back - so on a box of a given size this holds
+about six times the dataset for a third off the writes.
+
+It is a trade available now and not only past the size of RAM. Both versions fit
+here; the anonymous one simply spends six times as much of what cannot be reclaimed
+to do it.
+
+What it costs beyond throughput is the tail: p50 2.3ms against 1.9ms, but p99
+**36.9ms against 5.1ms** and p99.9 97ms against 9.2ms, which is writeback showing
+through. A workload that cares about p99 more than about density should know that
+before choosing.
+
+Past the size of RAM the comparison stops being a trade at all - the anonymous
+version has nowhere to put the pages and this one is bounded by the disk - but that
+crossover is a different measurement and this is not it.
+
+### Two things the benchmark itself taught
+
+**memtier caps a key at 248 bytes.** A 247 character prefix plus an 8 digit id
+produced keys with an interior NUL, barch refused every one of them - correctly, and
+saying exactly that - and memtier reported 170,000 ops/sec of refusals. The rate
+looked plausible. `DBSIZE` said 0, which is the only reason it was caught, and it is
+the reason every run since checks the count as well as the rate.
+
+**Without `--distinct-client-seed` every client writes the same keys.** The first
+20M run took 11 seconds at 1.77M ops/sec and left 312,261 keys - one client's worth,
+64 times over, hot in cache. Also caught by `DBSIZE`, and the honest run is three
+times slower.
+
+Full suite 81/81, with the split covered in `test/barchdtest.py`.
+
+## 261. Random reads when the leaves do not fit [08-09-2026]
+
+The other half of DONE 260. 20,000,000 keys loaded sequentially so every read hits,
+256 byte values, `arena_map=leaves` - 1.15GB of tree in anonymous memory and 5.5GB
+of leaves mapped from 348 files.
+
+| | anon | reads/sec | p50 | major faults per read |
+|---|---|---|---|---|
+| everything cached, 17GB free | 1.15 GB | **4,648,287** | 0.38ms | ~0 |
+| 2 GiB cgroup, 8 connections | 1.25 GB | **27,770** | 0.28ms | 0.74 |
+| 2 GiB cgroup, 2048 deep | 1.25 GB | 27,532 | 74ms | 0.85 |
+| all anonymous, 2 GiB cgroup | - | **OOM killed before it served anything** | - | - |
+
+That last row is the point. 5.5GB of data in a 2GiB budget serves 27,770 random
+reads a second; the in-memory version does not start.
+
+**Cold reads cost one disk read each and nothing more.** 0.74 major faults per read
+and 0.28ms at the p50 is the device's random read service time - the mapping adds no
+overhead of its own. The throughput ceiling is the device: 8 connections reach
+27,770/s and 2048 outstanding requests reach 27,532/s, so queueing deeper buys
+nothing and costs 74ms instead of 0.28ms. An archival store wants shallow
+concurrency and will be disappointed by pipelining.
+
+168x slower than warm, which is the honest cost of not having the data in memory,
+and it is a cost paid per read rather than per byte.
+
+### Making the measurement honest took three tries
+
+**Page cache does not care which process brought it in.** The first capped run
+looked fine because the leaves were still cached from the load, charged to the dead
+cgroup of the process that faulted them. The server has to be stopped, the cache
+actually pushed out, and only then started under the cap so every fault is its own.
+`fadvise(DONTNEED)` will not do it - it skips pages a process has mapped - so this
+takes anonymous memory until the cache falls and gives it back.
+
+**A cap without `MemorySwapMax=0` evicts the wrong half.** With swap available the
+kernel put 1.18GB of the *tree* out and kept leaf pages, which is the opposite of
+the design: 29,143 reads/sec with p99 178ms, worse and less even than the honest
+configuration. Pinning anonymous memory by refusing the cgroup swap gives 27,770/s
+at p99 96ms - slightly slower, far steadier, and actually the thing being described.
+
+**`-d 256` on a read-only run reports zero.** A `--ratio=0:1` run with a data size
+set printed `Gets 0.00` while quietly doing the work. Dropping the flag showed
+3.5M/s. Worth remembering: a memtier row of zeroes is not always a server that did
+nothing.
+
+## 262. Random writes when the leaves do not fit [08-09-2026]
+
+TODO 267, and the other half of DONE 261. Same load as DONE 260 - 20,000,000 random
+SETs over a 200M id space, 256 byte values, 8 threads x 8 clients x pipeline 32 -
+into an empty space, once with the machine's memory and once inside
+`MemoryMax=2G MemorySwapMax=0`. Same binary for all three rows.
+
+| | sets/sec | wall | RssAnon | RssFile | major faults per set |
+|---|---|---|---|---|---|
+| `arena_map=leaves`, uncapped | **711,932** | 29s | 1.01 GB | 5.23 GB | 0.0005 |
+| `arena_map=leaves`, 2 GiB cap | **24,537** | 822s | 1.03 GB | 0.59 GB | **0.60** |
+| everything anonymous, 2 GiB cap | **OOM killed after 5s** | - | - | - | - |
+
+Both surviving runs ended with `DBSIZE` 19,031,272, the same number to the key, so
+the capped one is slower and not wronger. That is the property an archive wants: it
+degrades, it does not fail.
+
+**Writes take the cap better than reads do.** 29x slower against the 168x that DONE
+261 measured for reads, and 0.60 major faults per set against 0.74 per get. An
+insert can land in a leaf page that is already dirty and resident, so some of them
+cost nothing; a random read has no such luck. The absolute floor is the same either
+way - 24,537 writes/sec and 27,770 reads/sec are both just the device doing random
+IO - so a capped barch does something like 25-28k random operations a second and it
+does not much matter which kind.
+
+### The rate decays through the run, and the reason is worth knowing
+
+Distinct keys added per second, sampled every minute:
+
+```
+first minute   ~151,000       (the leaves still fit in the budget)
+minute 3        20,849
+minute 6        13,007
+minute 10       10,878
+minute 13        8,974
+```
+
+`RssAnon` climbed 372MB -> 1032MB across the run while `RssFile` fell 1306MB ->
+603MB. The two arenas share one budget and **the tree wins, because it cannot be
+evicted.** Every key added makes the tree bigger, which takes a page away from the
+leaf cache, which makes the next key more likely to fault - so the cost per insert
+rises as the space fills. The 24,537 average is the whole curve; the steady state at
+this cap is nearer 9,000.
+
+That is an argument for sizing the cap against the *tree* rather than the dataset.
+1.0GB of tree in a 2 GiB cap leaves half the budget for 5GB of leaves; the same tree
+in a 4 GiB cap would leave three times as much, and the decay would start much later.
+
+### The anonymous version does not get to have an opinion
+
+Five seconds, then killed - faster than the ten it lasted on reads, since writes
+claim anonymous pages as fast as the clients can send them and none of them can be
+given back. memtier reported `Sets 0.00` with a perfectly healthy looking 1.28ms
+p50, which is what a benchmark prints when the server dies mid-run: the latency is
+real, it is just the latency of the ops that happened before the kill. Worth
+recognising, the same way `Gets 0.00` was in DONE 261.
+
+## 263. `arena_dir` and `arena_map` per space [08-09-2026]
+
+TODO 268. Both were one switch for the whole server, which is the wrong grain - a
+space already decides its own shard count, ordering, hybrid keys, range sharding and
+foreign source, and where its pages live is the same kind of decision. An archive
+wants its leaves on disk; the session store beside it does not.
+
+So they join the settings a space already has, read from the configuration space
+while the space is built:
+
+```
+configuration:<space>.arena_dir     a directory, or off
+configuration:<space>.arena_map     all | leaves | nodes | off
+```
+
+with `CONFIG SET arena_dir` / `arena_map` as the default for any space that says
+nothing. Both directions work: a space maps while the server default is off, and a
+space says `off` while the server maps.
+
+### How it is wired
+
+An arena knew its own file name (`leaves_<space><shard>`) but not its space, and
+parsing one out of the other would have meant guessing where the shard number
+starts. Instead `alloc_pair` passes the decorated space name it already holds down
+through `logical_allocator` and `hash_arena` into `base_hash_arena::backing_space`,
+and `wants_backing`/`prepare_backing` ask `barch::get_arena_dir(space)` rather than
+the global.
+
+The settings themselves live in a small registry in `configuration.cpp`, written by
+`set_space_arena` once while the space is built - before any shard exists, since an
+arena reads it the first time it allocates - and dropped by `forget_space_arena`
+when the space is flushed, so a space that comes back reads it fresh. A shared_mutex
+rather than a plain one: growth is rare, but when a space is filling it happens on
+every shard thread at once.
+
+The default space and `configuration` keep taking the global. They are built before
+there is anywhere to read a per-space setting from, which is the same reason they
+already opt out of per-space shard counts.
+
+`snapshot_arenas` lost its `if (get_arena_dir().empty()) return;` short circuit. It
+was reading the global to decide whether any arena anywhere was mapped, which stops
+being true the moment one space can map on its own; every arena is asked now, and an
+unmapped one has no `backing_path` and says no immediately.
+
+### Two things worth knowing
+
+**A bad `arena_map` is refused where it is read, not where it is written.** These are
+ordinary keys and anyone can SET one, so the space logs `arena_map is all, leaves,
+nodes or off` and carries on with the global. Same reasoning as `check_repo_setting`
+in DONE 252.
+
+**A single key does not prove `all` maps both.** A space written one key deep showed
+only `leaves_*`, which looked like `arena_map=all` was being ignored - the tree just
+still fitted in the page it was given and the nodes arena had never grown. 3,000 keys
+and both appear. Worth remembering before believing a small test.
+
+Full suite 81/81, with the two directions covered in `test/barchdtest.py`.
+
+### One measurement that stops being interesting
+
+The run behind this - "no real difference between mapping half and mapping all" - is
+why the knob moved from *which arena* to *which space*. `arena_map` still exists and
+still does what DONE 260 measured, but the choice that pays is `arena_dir` on the
+space that wants it.
+
+## 264. What a 4 GB machine looks like [08-09-2026]
+
+TODO 269. 20,000,000 keys, 256 byte values, in a space that maps through its own
+`arch1.arena_dir` with `arena_map=all` while the server default stays `off` - the
+switch from DONE 263, doing the job it was added for. Everything the process touches
+lives inside `MemoryMax=4G MemorySwapMax=0`: the tree, the leaves and the page cache
+under both. 7.1 GB of arena, 5.8 GB of it actually on disk.
+
+| | 4 GiB | 2 GiB (DONE 261/262) | uncapped (DONE 260/261) |
+|---|---|---|---|
+| random inserts | **28,926/s** | 24,537/s | 711,932/s |
+| random reads | **51,300/s** | 27,770/s | 4,648,287/s |
+| major faults per read | 0.45 | 0.74 | ~0 |
+| all-anonymous, same cap | **OOM at 11s** | OOM at 5s | 1,022,419/s |
+
+**Doubling the memory doubles the reads and does almost nothing for the writes.**
+51,300 against 27,770 is close to linear in the cache that is left over; 28,926
+against 24,537 is not, because a write has to get a dirty page back out to the same
+device either way and the cap only changes how long it can put that off. Reads scale
+with memory, writes scale with the disk.
+
+The write tail is where the 4 GiB run is actually *worse*: p50 3.9ms against 68.6ms
+at 2 GiB, but p99 **2113ms** against 234ms. More budget means longer between
+writebacks and more of it at once when it comes, so the median run is fast and the
+occasional request waits two seconds. A small machine that cares about p99 should
+know the extra memory bought it a worse tail.
+
+### The shape of the client barely matters
+
+At 4 GiB, fresh keys each pass:
+
+| shape | reads/sec | p50 |
+|---|---|---|
+| 8 threads x 8 clients x pipeline 32 | 51,308 | 40.2ms |
+| 8 threads x 8 clients, no pipeline | 51,298 | 1.20ms |
+| 8 connections total, no pipeline | 45,809 | 0.039ms |
+
+Same throughput to three digits, latency across three orders of magnitude. The device
+is the ceiling and everything above it is queue. Same finding as DONE 261 at 2 GiB,
+and it did not move with the budget.
+
+### Starting is free
+
+The restart mapped 20,000,000 keys back in **3 seconds** - the arena snapshots from
+DONE 262, which are read as a mapping rather than loaded. The stop that wrote them
+logged `wrote 694 arena snapshots` with the server's own `arena_dir` set to `off`,
+which is the DONE 263 change working: `snapshot_arenas` no longer asks the global
+whether anything is mapped.
+
+### Three ways this measurement lied before it stopped
+
+**memtier draws the same keys every run unless told not to.** Three read passes in a
+row reported 5.8M/s at *zero* major faults, which looked like the dataset fitting in
+4 GiB. It was one 3 GB working set being read again and again - without
+`--distinct-client-seed --randomize` every pass asks for the same 1.28M keys. With
+fresh keys the same server does 51,300/s at 0.45 faults per read, and holds it across
+three passes.
+
+**`fadvise(DONTNEED)` works once nothing maps the file.** DONE 261 had to push the
+page cache out by taking anonymous memory, because a mapped page ignores the hint.
+With the server stopped, fadvise over the 2,086 data and arena files took the cache
+from 18.6 GB to 2.7 GB in about a second - where taking 22 GB of anonymous memory had
+only got it to 9 GB, because this box has other things running on it.
+
+**`wait` waits for the server too.** The load ran 8 memtier processes in the
+background of a script that had also started barchd in the background, so a bare
+`wait` sat there until the server exited. It looked exactly like a load that had
+hung, and the load had in fact finished - `DBSIZE` said 20,000,000 while the script
+was still waiting.
+
+### What it does not simulate
+
+The cores and the NVMe are this box's. A real 4 GB instance has neither 16 cores nor
+this device, so these numbers are the memory pressure honestly and everything else
+optimistically. What survives the caveat is the comparison: at the same cap, the same
+data, the mapped version serves 51,300 reads a second and the anonymous one is killed
+in eleven seconds.

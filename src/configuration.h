@@ -75,6 +75,7 @@ namespace barch {
         /** checkout of luau functions; "off" means the watcher is idle */
         /** where an arena maps its pages from; "off" is anonymous memory - TODO 239 */
         std::string arena_dir{"off"};
+        std::string arena_map{"all"};
         std::string functions_dir{"off"};
         uint64_t functions_sync_ms{0};
         bool functions_git_pull{false};
@@ -144,6 +145,32 @@ namespace barch {
      * it was before there was a choice - see TODO 239.
      */
     std::string get_arena_dir();
+    /**
+     * Which of a space's arenas map from `arena_dir`: `all`, `leaves`, `nodes` or
+     * `off`. The leaves hold the key and value bytes and are most of the size; the
+     * nodes are the tree every lookup walks. See TODO 264.
+     */
+    std::string get_arena_map();
+    /**
+     * The same two, as a named space sees them. A space that says nothing gets the
+     * global; one that sets `<space>.arena_dir` or `<space>.arena_map` in the
+     * configuration space gets its own, because "leaves on disk, bounded by the
+     * device" is a decision about one archive and not about the server. The
+     * default space and `configuration` always take the global - they are built
+     * before there is anywhere to read a per-space setting from. See TODO 268.
+     *
+     * `space` is the decorated name an arena already carries, so `node`, `auth`,
+     * `shop_`, which is what `set_space_arena` is keyed by.
+     */
+    std::string get_arena_dir(const std::string& space);
+    std::string get_arena_map(const std::string& space);
+    /**
+     * Remember what a space asked for. Called once while the space is built, before
+     * its shards exist, since an arena reads this the first time it allocates.
+     * Empty values mean "no opinion" and leave the global showing through.
+     */
+    void set_space_arena(const std::string& space, const std::string& dir, const std::string& map);
+    void forget_space_arena(const std::string& space);
     std::string get_functions_dir();
     uint64_t get_functions_sync_ms();
     bool get_functions_git_pull();

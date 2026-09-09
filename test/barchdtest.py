@@ -225,6 +225,24 @@ try:
         # one per allocator per shard, named after the arena
         assert any(f.startswith("leaves_") for f in files), files[:4]
         assert any(f.startswith("nodes_") for f in files), files[:4]
+    finally:
+        stop(proc)
+
+    # --- half of it: the leaves from a file, the tree in memory - TODO 264 ------
+    print("arena_map picks which arenas map", flush=True)
+    halved = os.path.join(src, "halved")
+    proc = start("--config", "arena_dir=" + halved, "--config", "arena_map=leaves")
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=60)
+        assert r.execute_command("CONFIG", "GET", "arena_map")[1] == b"leaves"
+        for i in range(2000):
+            r.set("halved%05d" % i, "v" * 400)
+        assert r.get("halved01999") == b"v" * 400
+        half = [f for f in os.listdir(halved) if f.endswith(".arena")]
+        assert half, "arena_map=leaves mapped nothing"
+        assert all(f.startswith("leaves_") for f in half), \
+            "arena_map=leaves mapped something else: %s" % [f for f in half
+                                                            if not f.startswith("leaves_")][:3]
 
         # and not one descriptor held for them: an mmap keeps its own reference, and
         # 347 shards times two allocators would exhaust a 1024 limit on its own
@@ -245,6 +263,47 @@ try:
                 if line.startswith("RssAnon:"):
                     anon = int(line.split()[1])
         assert anon > 0, "could not read RssAnon"
+    finally:
+        stop(proc)
+
+    # --- and per space, either way round - TODO 268 -----------------------------
+    print("a space maps on its own account", flush=True)
+    mine = os.path.join(src, "mine")
+    theirs = os.path.join(src, "theirs")
+    os.makedirs(mine, exist_ok=True)
+    proc = start()                                  # no arena_dir: the server maps nothing
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=60)
+        assert r.execute_command("CONFIG", "GET", "arena_dir")[1] == b"off"
+        r.execute_command("configuration:SET", "arch.arena_dir", mine)
+        r.execute_command("configuration:SET", "arch.arena_map", "leaves")
+        for i in range(2000):
+            r.execute_command("arch:SET", "a%05d" % i, "v" * 400)
+            r.execute_command("plain:SET", "a%05d" % i, "v" * 400)
+        assert r.execute_command("arch:GET", "a01999") == b"v" * 400
+
+        got = [f for f in os.listdir(mine) if f.endswith(".arena")]
+        assert got, "a space asked to map and nothing did"
+        assert all(f.startswith("leaves_arch") for f in got), \
+            "only arch's leaves belong here: %s" % got[:4]
+    finally:
+        stop(proc)
+
+    # the other way: the server maps, one space says no
+    print("a space opts out of the server's arena_dir", flush=True)
+    proc = start("--config", "arena_dir=" + theirs)
+    try:
+        r = redis.Redis(host="127.0.0.1", port=PORT, db=0, protocol=2, socket_timeout=60)
+        r.execute_command("configuration:SET", "quiet.arena_dir", "off")
+        for i in range(2000):
+            r.execute_command("quiet:SET", "q%05d" % i, "v" * 400)
+            r.execute_command("loud:SET", "l%05d" % i, "v" * 400)
+        assert r.execute_command("quiet:GET", "q01999") == b"v" * 400
+
+        got = [f for f in os.listdir(theirs) if f.endswith(".arena")]
+        assert any("_loud" in f for f in got), "the space with no opinion should map: %s" % got[:4]
+        assert not [f for f in got if "_quiet" in f], \
+            "a space that said off still mapped: %s" % [f for f in got if "_quiet" in f]
     finally:
         stop(proc)
 

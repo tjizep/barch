@@ -1501,3 +1501,50 @@
 
     All three parts are done: the source itself Nr 257, listing Nr 258, eviction
     Nr 259.
+
+264. [Done] Half in memory: leaves from a file, the tree in RAM [08-09-2026] Nr 260 c5df974
+
+265. Two tiers rather than two arenas. `arena_map` (DONE 260) splits by *what a
+    page holds* - the tree stays in memory, the leaves go to a file - and the
+    split is fixed for the life of the space. What it cannot do is put the hot
+    leaves in memory and the cold ones on disk, which is what an archive with a
+    working set actually wants: DONE 261 measured 4.6M reads a second when the
+    leaves are cached and 27,770 when they are not, and a real workload sits
+    between those and would like to choose where.
+
+    The kernel already does a version of this - a mapped page that is read often
+    stays in cache - and the numbers say it does it well: 0.74 major faults per
+    read for a uniformly random access pattern over five times the memory is
+    about what a perfect cache would manage. So the question is not whether to
+    reimplement it but whether barch knows anything the kernel does not.
+
+    It does know two things. Which pages hold leaves that a query is about to
+    want, because it walked the tree to get there - that is a readahead hint,
+    `madvise(WILLNEED)`, and it is cheap to try. And which spaces matter, because
+    a space is a unit of configuration and the kernel has no idea that one of
+    them is an archive and another is a session store; `arena_dir` per space
+    rather than per server would let the archive spill and the session store stay.
+
+    Settle by measuring whether a hint before a leaf read moves the 27,770 at
+    all. If it does not, the honest answer is that the kernel's cache is the
+    second tier and barch should say so rather than build another one.
+
+266. [Done] Random reads when the leaves do not fit [08-09-2026] Nr 261 c8fe198
+
+267. [Done] Random writes when the leaves do not fit [08-09-2026] Nr 262 c8fe198
+
+268. [Done] arena_dir and arena_map per space [08-09-2026] Nr 263 c8fe198
+
+269. [Done] What a 4 GB machine looks like [08-09-2026] Nr 264 c8fe198
+
+270. The curve, not three points. DONE 264 measured 4 GiB, 2 GiB and "the whole
+    box", which is three scattered points with the rest of the machine moving
+    underneath them, and it cannot show where the fall-off starts. What is wanted is
+    reads/sec and major faults per read against the cap, swept over one fixed
+    dataset in one process - `systemctl set-property MemoryMax` on a live scope, so
+    nothing but the budget changes between points. The expectation to check is
+    whether the fall-off is a knee or a cliff: throughput is roughly
+    1/(miss rate x device time), so faults per read should be near linear in how much
+    of the dataset does not fit while ops/sec is its reciprocal, which would make the
+    cliff arithmetic rather than a property of barch. Settle by sweeping 16G down to
+    1G over the 5.8 GB set and plotting both.

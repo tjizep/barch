@@ -7,68 +7,111 @@
 <style>
   :root {
     --ink: #17202a; --muted: #6b7785; --line: #e3e8ef; --bg: #f7f8fa;
-    --card: #ffffff; --accent: #1a6fdc; --accent-ink: #ffffff; --good: #0a7d4f;
-    --warn: #b4530a; --radius: 10px;
+    --card: #ffffff; --accent: #1a6fdc; --accent2: #8e44ad; --accent-ink: #ffffff;
+    --good: #0a7d4f; --warn: #b4530a; --sale: #e0393e; --wish: #e0356b;
+    --star: #f5a623; --radius: 10px;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink);
          font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  header { position: sticky; top: 0; z-index: 20; background: var(--card);
-           border-bottom: 1px solid var(--line); }
+  header { position: sticky; top: 0; z-index: 20;
+           background: linear-gradient(120deg, #1a6fdc, #6c3fc5 65%, #8e44ad);
+           box-shadow: 0 2px 14px rgba(30,20,60,.18); }
   .bar { display: flex; align-items: center; gap: 16px; max-width: 1180px;
          margin: 0 auto; padding: 12px 20px; }
-  .logo { font-weight: 650; font-size: 17px; letter-spacing: -0.01em; white-space: nowrap; }
-  .logo span { color: var(--accent); }
+  .logo { font-weight: 700; font-size: 18px; letter-spacing: -0.01em; white-space: nowrap; color: #fff; }
+  .logo span { color: #ffd166; }
   .search { flex: 1; display: flex; }
-  .search input { width: 100%; padding: 9px 13px; border: 1px solid var(--line);
-                  border-radius: var(--radius); font: inherit; background: var(--bg); }
-  .search input:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: #fff; }
+  .search input { width: 100%; padding: 9px 13px; border: 1px solid rgba(255,255,255,.35);
+                  border-radius: var(--radius); font: inherit; background: rgba(255,255,255,.16); color: #fff; }
+  .search input::placeholder { color: rgba(255,255,255,.75); }
+  .search input:focus { outline: 2px solid #ffd166; outline-offset: -1px; background: rgba(255,255,255,.28); }
   button { font: inherit; cursor: pointer; border-radius: var(--radius);
            border: 1px solid var(--line); background: var(--card); padding: 8px 14px; }
   button:hover { border-color: #c9d2dd; }
   .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .primary:hover { background: #145bb5; border-color: #145bb5; }
   .primary[disabled] { background: #a8bdd8; border-color: #a8bdd8; cursor: not-allowed; }
-  .basket-btn { position: relative; white-space: nowrap; }
-  .pill { background: var(--accent); color: #fff; border-radius: 999px; font-size: 12px;
-          padding: 1px 7px; margin-left: 6px; }
+  .head-btn { position: relative; white-space: nowrap; background: rgba(255,255,255,.14);
+              border-color: rgba(255,255,255,.4); color: #fff; }
+  .head-btn:hover { background: rgba(255,255,255,.24); border-color: rgba(255,255,255,.6); }
+  .pill { background: #ffd166; color: #5a3d00; border-radius: 999px; font-size: 12px;
+          font-weight: 700; padding: 1px 7px; margin-left: 6px; }
+  .pill.wish { background: var(--wish); color: #fff; }
 
   main { max-width: 1180px; margin: 0 auto; padding: 20px; display: grid;
          grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
   nav { position: sticky; top: 66px; }
   nav h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
            color: var(--muted); margin: 0 0 8px; }
-  nav a { display: block; padding: 5px 8px; border-radius: 7px; color: var(--ink);
-          text-decoration: none; font-size: 14px; }
+  nav a { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 7px;
+          color: var(--ink); text-decoration: none; font-size: 14px; }
   nav a:hover { background: #eef2f7; }
   nav a.on { background: var(--accent); color: #fff; }
+  nav a.on .dot { box-shadow: 0 0 0 2px rgba(255,255,255,.6); }
+  nav a.special { font-weight: 600; }
   nav .sub { padding-left: 18px; font-size: 13px; color: var(--muted); }
+  nav .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  nav hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
 
   .head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
   .head h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   .count { color: var(--muted); font-size: 13px; }
 
+  .recent { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 14px; margin-bottom: 4px; }
+  .recent .r-card { flex: none; width: 96px; text-align: center; cursor: pointer; }
+  .recent .r-card .shot { width: 96px; height: 96px; border-radius: 8px; }
+  .recent .r-card .t { font-size: 11px; color: var(--muted); margin-top: 4px;
+                        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+             flex-wrap: wrap; margin-bottom: 14px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { padding: 5px 12px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--line);
+          background: var(--card); color: var(--ink); }
+  .chip.on { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+  #chip-sale.on { background: var(--sale); border-color: var(--sale); }
+  #sort { padding: 7px 10px; border-radius: var(--radius); border: 1px solid var(--line);
+          font: inherit; background: var(--card); }
+
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  .card { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
           overflow: hidden; display: flex; flex-direction: column; cursor: pointer;
           transition: box-shadow .12s ease, transform .12s ease; }
-  .card:hover { box-shadow: 0 6px 20px rgba(20,40,80,.09); transform: translateY(-2px); }
-  .shot { aspect-ratio: 1; background: #fff; display: flex; align-items: center;
+  .card:hover { box-shadow: 0 8px 22px rgba(70,30,120,.14); transform: translateY(-2px); }
+  .shot { position: relative; aspect-ratio: 1; background: #fff; display: flex; align-items: center;
           justify-content: center; border-bottom: 1px solid var(--line); }
   .shot img { max-width: 88%; max-height: 88%; object-fit: contain; }
+  .ribbon { position: absolute; top: 8px; left: 8px; background: var(--sale); color: #fff;
+            font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px;
+            box-shadow: 0 2px 6px rgba(0,0,0,.18); }
+  .heart { position: absolute; top: 6px; right: 6px; width: 30px; height: 30px; padding: 0;
+           border-radius: 50%; border: none; background: rgba(255,255,255,.9); color: #c6cad2;
+           font-size: 15px; line-height: 1; display: flex; align-items: center; justify-content: center;
+           box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+  .heart.on { color: var(--wish); }
+  .quick { position: absolute; bottom: 6px; right: 6px; width: 30px; height: 30px; padding: 0;
+           border-radius: 50%; border: none; background: var(--accent); color: #fff; font-size: 17px;
+           line-height: 1; display: flex; align-items: center; justify-content: center;
+           box-shadow: 0 2px 6px rgba(0,0,0,.2); opacity: 0; transition: opacity .12s; }
+  .card:hover .quick { opacity: 1; }
+  .quick:hover { background: #145bb5; }
   .body { padding: 11px 12px 13px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
-  .brand { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .brand { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+           display: flex; align-items: center; gap: 6px; }
+  .brand .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
   .name { font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2;
           -webkit-box-orient: vertical; overflow: hidden; }
-  .stars { font-size: 12px; color: var(--warn); }
+  .stars { font-size: 12px; color: var(--star); }
   .stars small { color: var(--muted); }
-  .price { font-weight: 650; font-size: 16px; margin-top: auto; }
+  .price { font-weight: 700; font-size: 16px; margin-top: auto; color: var(--ink); }
   .price s { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px; }
+  .price .off { color: var(--sale); font-weight: 700; font-size: 12px; margin-left: 6px; }
 
   .more { text-align: center; padding: 24px 0; }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
 
-  .veil { position: fixed; inset: 0; background: rgba(15,25,40,.45); display: none;
+  .veil { position: fixed; inset: 0; background: rgba(15,10,35,.5); display: none;
           align-items: center; justify-content: center; padding: 20px; z-index: 30; }
   .veil.on { display: flex; }
   .panel { background: var(--card); border-radius: 14px; max-width: 860px; width: 100%;
@@ -83,7 +126,24 @@
   .desc { color: #3d4854; font-size: 14px; white-space: pre-wrap; margin: 10px 0 14px;
           max-height: 260px; overflow: auto; }
   .crumbs { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
-  .row { display: flex; gap: 10px; align-items: center; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .badge { font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; }
+  .badge.good { background: #e4f6ee; color: var(--good); }
+  .badge.warn { background: #fdeee2; color: var(--warn); }
+  .seller { font-size: 12.5px; color: var(--muted); }
+  .wish-toggle { display: flex; align-items: center; gap: 6px; }
+  .wish-toggle.on { color: var(--wish); border-color: var(--wish); }
+
+  .related { margin: 4px 18px 20px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .related h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
+                color: var(--muted); margin: 0 0 10px; }
+  .related .rgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
+  .related .rcard { cursor: pointer; border: 1px solid var(--line); border-radius: 8px;
+                     overflow: hidden; background: #fff; }
+  .related .rcard .shot { aspect-ratio: 1; height: auto; }
+  .related .rcard .t { font-size: 11.5px; padding: 6px 8px 0; display: -webkit-box;
+                        -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .related .rcard .p { font-size: 12px; font-weight: 700; padding: 4px 8px 8px; }
 
   .lines { padding: 6px 18px 18px; }
   .line { display: grid; grid-template-columns: 56px 1fr auto auto; gap: 12px;
@@ -92,14 +152,25 @@
   .line .t { font-size: 13.5px; }
   .qty { display: flex; align-items: center; gap: 6px; }
   .qty button { padding: 2px 9px; }
-  .total { display: flex; justify-content: space-between; font-weight: 650;
-           font-size: 17px; padding: 14px 0 4px; }
+  .total { display: flex; justify-content: space-between; font-weight: 700;
+           font-size: 17px; padding: 14px 0 4px; color: var(--accent2); }
   form.checkout { display: grid; gap: 10px; padding: 4px 18px 20px; }
   form.checkout input, form.checkout textarea { padding: 9px 11px; border: 1px solid var(--line);
            border-radius: var(--radius); font: inherit; }
   .done { padding: 26px 18px 30px; text-align: center; }
   .done .tick { font-size: 34px; color: var(--good); }
   .note { color: var(--muted); font-size: 12.5px; }
+
+  .toasts { position: fixed; bottom: 18px; right: 18px; z-index: 50; display: flex;
+            flex-direction: column; gap: 8px; align-items: flex-end; }
+  .toast { padding: 10px 16px; border-radius: 10px; color: #fff; font-size: 13.5px;
+           box-shadow: 0 6px 18px rgba(0,0,0,.2); opacity: 1; transform: translateY(0);
+           transition: opacity .3s, transform .3s; background: var(--ink); }
+  .toast.success { background: var(--good); }
+  .toast.error { background: var(--sale); }
+  .toast.wish { background: var(--wish); }
+  .toast.out { opacity: 0; transform: translateY(8px); }
+
   @media (max-width: 820px) {
     main { grid-template-columns: 1fr; }
     nav { position: static; }
@@ -112,7 +183,8 @@
   <div class="bar">
     <div class="logo">Barch <span>Market</span></div>
     <div class="search"><input id="q" type="search" placeholder="Search 992 products…" autocomplete="off"></div>
-    <button class="basket-btn" id="basket-btn">Basket<span class="pill" id="pill">0</span></button>
+    <button class="head-btn" id="wish-btn">♥ Wishlist<span class="pill wish" id="wpill">0</span></button>
+    <button class="head-btn" id="basket-btn">Basket<span class="pill" id="pill">0</span></button>
   </div>
 </header>
 
@@ -123,17 +195,41 @@
       <h1 id="title">All products</h1>
       <div class="count" id="count"></div>
     </div>
+    <div class="recent" id="recent"></div>
+    <div class="toolbar">
+      <div class="chips">
+        <button class="chip" id="chip-sale" onclick="toggleSale()">🔥 On sale</button>
+        <button class="chip on" data-r="0" onclick="setRating(0)">All ratings</button>
+        <button class="chip" data-r="4" onclick="setRating(4)">4★ &amp; up</button>
+        <button class="chip" data-r="3" onclick="setRating(3)">3★ &amp; up</button>
+      </div>
+      <select id="sort" onchange="apply()">
+        <option value="rel">Sort: relevance</option>
+        <option value="price_asc">Price: low to high</option>
+        <option value="price_desc">Price: high to low</option>
+        <option value="rating">Top rated</option>
+        <option value="discount">Biggest discount</option>
+      </select>
+    </div>
     <div class="grid" id="grid"></div>
     <div class="more" id="more"></div>
   </section>
 </main>
 
 <div class="veil" id="veil"><div class="panel" id="panel"></div></div>
+<div class="toasts" id="toasts"></div>
 
 <script>
 const PAGE = 24;
-let index = [], view = [], shown = 0, cat = null, sub = null, catName = null, subName = null, term = "";
+const PALETTE = ["#e0393e","#1a6fdc","#0a7d4f","#b4530a","#8e44ad","#16a085",
+                  "#d35400","#2c3e50","#c0392b","#2980b9","#f39c12","#27ae60"];
+let index = [], cats = [], view = [], shown = 0;
+let cat = null, sub = null, catName = null, subName = null, term = "";
+let mode = null;          // null | "deals" | "wishlist"
+let onlySale = false, minRating = 0;
 let basket = load("basket", {});
+let wishlist = load("wishlist", {});
+let recent = load("recent", []);
 
 function load(k, dflt) { try { return JSON.parse(localStorage.getItem(k)) || dflt; } catch (e) { return dflt; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
@@ -144,82 +240,184 @@ const money = (n, c) => (c === "INR" ? "₹" : c === "GBP" ? "£" : "$") +
 const shot = asin => "/img/" + encodeURIComponent(asin);
 const esc = s => (s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const stars = r => "★".repeat(Math.round(r)) + "☆".repeat(5 - Math.round(r));
+const discountOf = p => (p.was && p.was > p.price) ? Math.round((1 - p.price / p.was) * 100) : 0;
+
+function colorFor(slug) {
+  let h = 0;
+  for (let i = 0; i < (slug || "").length; i++) h = (h * 31 + slug.charCodeAt(i)) | 0;
+  return PALETTE[Math.abs(h) % PALETTE.length];
+}
+
+function toast(msg, kind) {
+  const box = document.getElementById("toasts");
+  const el = document.createElement("div");
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => el.classList.add("out"), 1700);
+  setTimeout(() => el.remove(), 2100);
+}
 
 async function boot() {
-  const [idx, cats] = await Promise.all([
+  const [idx, c] = await Promise.all([
     fetch("/api/index").then(r => r.json()),
     fetch("/api/categories").then(r => r.json()),
   ]);
   index = idx;
+  cats = c;
   document.getElementById("q").placeholder = `Search ${index.length} products…`;
-  drawNav(cats);
+  drawNav();
   apply();
+  wishCount();
   count();
 }
 
-function drawNav(cats) {
+function goto(next) {
+  next();
+  apply();
+  drawNav();
+}
+
+function drawNav() {
   const nav = document.getElementById("nav");
-  nav.innerHTML = "<h3>Categories</h3>";
+  nav.innerHTML = "<h3>Browse</h3>";
+
+  const deals = document.createElement("a");
+  deals.className = "special" + (mode === "deals" ? " on" : "");
+  deals.href = "#";
+  deals.innerHTML = "🔥 Today's deals";
+  deals.onclick = e => { e.preventDefault(); goto(() => { mode = "deals"; cat = sub = catName = subName = null; }); };
+  nav.appendChild(deals);
+
+  const wish = document.createElement("a");
+  wish.className = "special" + (mode === "wishlist" ? " on" : "");
+  wish.href = "#";
+  wish.innerHTML = "♥ My wishlist";
+  wish.onclick = e => { e.preventDefault(); goto(() => { mode = "wishlist"; cat = sub = catName = subName = null; }); };
+  nav.appendChild(wish);
+
+  nav.appendChild(document.createElement("hr"));
+
   const all = document.createElement("a");
   all.textContent = "All products";
   all.href = "#";
-  all.className = cat ? "" : "on";
-  all.onclick = e => { e.preventDefault(); cat = sub = catName = subName = null; apply(); drawNav(cats); };
+  all.className = (!mode && !cat) ? "on" : "";
+  all.onclick = e => { e.preventDefault(); goto(() => { mode = cat = sub = catName = subName = null; }); };
   nav.appendChild(all);
+
   for (const c of cats) {
     const a = document.createElement("a");
-    a.textContent = c.name;
     a.href = "#";
-    a.className = cat === c.slug && !sub ? "on" : "";
-    a.onclick = e => { e.preventDefault(); cat = c.slug; catName = c.name; sub = null; apply(); drawNav(cats); };
+    a.className = (!mode && cat === c.slug && !sub) ? "on" : "";
+    a.innerHTML = `<span class="dot" style="background:${colorFor(c.slug)}"></span>${esc(c.name)}`;
+    a.onclick = e => { e.preventDefault(); goto(() => { mode = null; cat = c.slug; catName = c.name; sub = null; }); };
     nav.appendChild(a);
-    if (cat === c.slug) {
+    if (!mode && cat === c.slug) {
       for (const s of c.subs) {
         const b = document.createElement("a");
-        b.textContent = s.name;
         b.href = "#";
         b.className = "sub" + (sub === s.slug ? " on" : "");
-        b.onclick = e => { e.preventDefault(); sub = s.slug; subName = s.name; apply(); drawNav(cats); };
+        b.textContent = s.name;
+        b.onclick = e => { e.preventDefault(); goto(() => { sub = s.slug; subName = s.name; }); };
         nav.appendChild(b);
       }
     }
   }
 }
 
+function toggleSale() {
+  onlySale = !onlySale;
+  document.getElementById("chip-sale").classList.toggle("on", onlySale);
+  apply();
+}
+
+function setRating(r) {
+  minRating = r;
+  document.querySelectorAll("[data-r]").forEach(b => b.classList.toggle("on", Number(b.dataset.r) === r));
+  apply();
+}
+
+function sortView() {
+  const by = document.getElementById("sort").value;
+  const sorters = {
+    price_asc: (a, b) => a.price - b.price,
+    price_desc: (a, b) => b.price - a.price,
+    rating: (a, b) => b.rating - a.rating,
+    discount: (a, b) => discountOf(b) - discountOf(a),
+  };
+  if (sorters[by]) view.sort(sorters[by]);
+}
+
 function apply() {
   const t = term.trim().toLowerCase();
-  view = index.filter(p =>
-    (!cat || p.top === cat) && (!sub || p.sub === sub) &&
-    (!t || p.title.toLowerCase().includes(t) || (p.brand || "").toLowerCase().includes(t)));
-  document.getElementById("title").textContent = subName || catName || "All products";
+  let base = index;
+  if (mode === "wishlist") base = index.filter(p => wishlist[p.asin]);
+  else if (mode === "deals") base = index.filter(p => discountOf(p) > 0);
+
+  view = base.filter(p => {
+    if (!mode) {
+      if (cat && p.top !== cat) return false;
+      if (sub && p.sub !== sub) return false;
+    }
+    if (onlySale && discountOf(p) <= 0) return false;
+    if (minRating && p.rating < minRating) return false;
+    if (t && !(p.title.toLowerCase().includes(t) || (p.brand || "").toLowerCase().includes(t))) return false;
+    return true;
+  });
+  sortView();
+
+  document.getElementById("title").textContent =
+    mode === "wishlist" ? "My wishlist" : mode === "deals" ? "Today's deals" : (subName || catName || "All products");
   document.getElementById("count").textContent =
     view.length + (view.length === 1 ? " product" : " products");
   document.getElementById("grid").innerHTML = "";
   shown = 0;
   page();
+  renderRecent();
+}
+
+function renderRecent() {
+  const box = document.getElementById("recent");
+  const show = !mode && !cat && !term && recent.length;
+  if (!show) { box.innerHTML = ""; return; }
+  const items = recent.map(a => index.find(p => p.asin === a)).filter(Boolean).slice(0, 8);
+  if (!items.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div style="width:100%;font-size:12px;color:var(--muted);margin-bottom:-8px">Recently viewed</div>` +
+    items.map(p => `
+      <div class="r-card" onclick="openProduct('${p.asin}')">
+        <div class="shot"><img loading="lazy" alt="" src="${shot(p.asin)}"></div>
+        <div class="t">${esc(p.title)}</div>
+      </div>`).join("");
 }
 
 function page() {
   const grid = document.getElementById("grid");
   for (const p of view.slice(shown, shown + PAGE)) {
+    const off = discountOf(p);
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
-      <div class="shot"><img loading="lazy" alt="" src="${shot(p.asin)}"></div>
+      <div class="shot">
+        ${off ? `<div class="ribbon">-${off}%</div>` : ""}
+        <button class="heart${wishlist[p.asin] ? " on" : ""}" data-asin="${p.asin}"
+                onclick="toggleWish(this,'${p.asin}',event)" title="Wishlist">♥</button>
+        <img loading="lazy" alt="" src="${shot(p.asin)}">
+        <button class="quick" onclick="quickAdd('${p.asin}',event)" title="Add to basket">+</button>
+      </div>
       <div class="body">
-        <div class="brand">${esc(p.brand) || "&nbsp;"}</div>
+        <div class="brand"><span class="dot" style="background:${colorFor(p.top)}"></span>${esc(p.brand) || "&nbsp;"}</div>
         <div class="name">${esc(p.title)}</div>
         <div class="stars">${stars(p.rating)} <small>${p.reviews.toLocaleString()}</small></div>
-        <div class="price">${money(p.price, p.currency)}${p.was ? `<s>${money(p.was, p.currency)}</s>` : ""}</div>
+        <div class="price">${money(p.price, p.currency)}${p.was ? `<s>${money(p.was, p.currency)}</s>` : ""}${off ? `<span class="off">-${off}%</span>` : ""}</div>
       </div>`;
-    card.onclick = () => open(p.asin);
+    card.onclick = () => openProduct(p.asin);
     grid.appendChild(card);
   }
   shown = Math.min(shown + PAGE, view.length);
   const more = document.getElementById("more");
   more.innerHTML = "";
   if (!view.length) {
-    more.innerHTML = '<div class="empty">Nothing matches that.</div>';
+    more.innerHTML = `<div class="empty">${mode === "wishlist" ? "Your wishlist is empty." : "Nothing matches that."}</div>`;
   } else if (shown < view.length) {
     const b = document.createElement("button");
     b.textContent = `Show more (${view.length - shown} left)`;
@@ -228,36 +426,115 @@ function page() {
   }
 }
 
-async function open(asin) {
+function quickAdd(asin, ev) {
+  ev.stopPropagation();
+  const row = index.find(p => p.asin === asin);
+  if (!row) return;
+  addToBasket({ asin: row.asin, title: row.title, price: row.price, currency: row.currency });
+  toast("Added to basket", "success");
+}
+
+function toggleWish(btn, asin, ev) {
+  ev.stopPropagation();
+  if (wishlist[asin]) {
+    delete wishlist[asin];
+    toast("Removed from wishlist");
+  } else {
+    wishlist[asin] = true;
+    toast("Added to wishlist ♥", "wish");
+  }
+  save("wishlist", wishlist);
+  btn.classList.toggle("on", !!wishlist[asin]);
+  wishCount();
+  if (mode === "wishlist" && !wishlist[asin]) {
+    const card = btn.closest(".card");
+    if (card) card.remove();
+    view = view.filter(p => p.asin !== asin);
+    document.getElementById("count").textContent = view.length + (view.length === 1 ? " product" : " products");
+    if (!view.length) document.getElementById("more").innerHTML = '<div class="empty">Your wishlist is empty.</div>';
+  }
+}
+
+function wishCount() {
+  document.getElementById("wpill").textContent = Object.keys(wishlist).length;
+}
+
+function recordRecent(asin) {
+  recent = recent.filter(a => a !== asin);
+  recent.unshift(asin);
+  recent = recent.slice(0, 10);
+  save("recent", recent);
+}
+
+async function openProduct(asin) {
   const p = await fetch("/api/product/" + encodeURIComponent(asin)).then(r => r.json());
   if (p.error) return;
+  recordRecent(p.asin);
+  const row = index.find(x => x.asin === p.asin) || {};
+  const off = discountOf({ price: p.price, was: p.was });
+  const wished = !!wishlist[p.asin];
+  const rel = index.filter(x => x.asin !== p.asin && row.sub && x.sub === row.sub).slice(0, 6)
+    .concat(index.filter(x => x.asin !== p.asin && row.top && x.top === row.top && x.sub !== row.sub))
+    .slice(0, 6);
+
   show(`
     <div class="top"><h2>Product</h2><button onclick="shut()">Close</button></div>
     <div class="detail">
-      <div class="shot"><img alt="" src="${shot(p.asin)}"></div>
+      <div class="shot">${off ? `<div class="ribbon">-${off}%</div>` : ""}
+        <img alt="" src="${shot(p.asin)}"></div>
       <div>
         <div class="crumbs">${p.categories.map(esc).join(" &rsaquo; ")}</div>
         <h2>${esc(p.title)}</h2>
-        <div class="brand">${esc(p.brand)}</div>
-        <div class="stars">${stars(p.rating)} <small>${p.reviews.toLocaleString()} reviews</small></div>
-        <div class="price" style="margin:10px 0">${money(p.price, p.currency)}${p.was ? `<s>${money(p.was, p.currency)}</s>` : ""}</div>
+        <div class="brand"><span class="dot" style="background:${colorFor(row.top || "")}"></span>${esc(p.brand)}</div>
+        ${p.seller ? `<div class="seller">Sold by ${esc(p.seller)}</div>` : ""}
+        <div class="stars" style="margin-top:6px">${stars(p.rating)} <small>${p.reviews.toLocaleString()} reviews</small></div>
+        <div class="price" style="margin:10px 0">${money(p.price, p.currency)}${p.was ? `<s>${money(p.was, p.currency)}</s>` : ""}${off ? `<span class="off">-${off}%</span>` : ""}</div>
         <div class="row">
-          <button class="primary" onclick='add(${JSON.stringify(JSON.stringify({
-            asin: p.asin, title: p.title, price: p.price, currency: p.currency }))})'>Add to basket</button>
-          <span class="note">${esc(p.availability || "")}</span>
+          <button class="primary" onclick='addToBasketJson(${JSON.stringify(JSON.stringify({
+            asin: p.asin, title: p.title, price: p.price, currency: p.currency }))}); toast("Added to basket","success")'>Add to basket</button>
+          <button class="wish-toggle${wished ? " on" : ""}" onclick="toggleWishDetail(this,'${p.asin}')">♥ ${wished ? "Wishlisted" : "Wishlist"}</button>
+          ${p.availability ? `<span class="badge ${/out of stock/i.test(p.availability) ? "warn" : "good"}">${esc(p.availability)}</span>` : ""}
         </div>
         <div class="desc">${esc(p.description) || "No description."}</div>
       </div>
-    </div>`);
+    </div>
+    ${rel.length ? `
+    <div class="related">
+      <h3>You might also like</h3>
+      <div class="rgrid">
+        ${rel.map(r => `
+          <div class="rcard" onclick="openProduct('${r.asin}')">
+            <div class="shot"><img loading="lazy" alt="" src="${shot(r.asin)}"></div>
+            <div class="t">${esc(r.title)}</div>
+            <div class="p">${money(r.price, r.currency)}</div>
+          </div>`).join("")}
+      </div>
+    </div>` : ""}`);
 }
 
-function add(json) {
-  const p = JSON.parse(json);
+function toggleWishDetail(btn, asin) {
+  if (wishlist[asin]) {
+    delete wishlist[asin];
+    toast("Removed from wishlist");
+  } else {
+    wishlist[asin] = true;
+    toast("Added to wishlist ♥", "wish");
+  }
+  save("wishlist", wishlist);
+  const on = !!wishlist[asin];
+  btn.classList.toggle("on", on);
+  btn.innerHTML = "♥ " + (on ? "Wishlisted" : "Wishlist");
+  wishCount();
+  document.querySelectorAll(`.heart[data-asin="${asin}"]`).forEach(b => b.classList.toggle("on", on));
+}
+
+function addToBasketJson(json) { addToBasket(JSON.parse(json)); }
+
+function addToBasket(p) {
   const have = basket[p.asin];
   basket[p.asin] = { ...p, qty: (have ? have.qty : 0) + 1 };
   save("basket", basket);
   count();
-  shut();
 }
 
 function count() {
@@ -322,7 +599,8 @@ async function checkout(ev) {
     .then(r => r.json()).catch(e => ({ error: String(e) }));
   if (out.error) {
     f.querySelector("button").disabled = false;
-    return alert("Could not place the order: " + out.error);
+    toast("Could not place the order: " + out.error, "error");
+    return false;
   }
   basket = {};
   save("basket", basket);
@@ -336,6 +614,7 @@ async function checkout(ev) {
       <p class="note">Stored as <code>order:${esc(out.order.id)}</code>. Priced on the
          server from the catalog, not from the basket.</p>
     </div>`);
+  toast("Order placed", "success");
   return false;
 }
 
@@ -347,6 +626,7 @@ function shut() { document.getElementById("veil").classList.remove("on"); }
 
 document.getElementById("q").addEventListener("input", e => { term = e.target.value; apply(); });
 document.getElementById("basket-btn").onclick = openBasket;
+document.getElementById("wish-btn").onclick = () => goto(() => { mode = "wishlist"; cat = sub = catName = subName = null; });
 document.getElementById("veil").onclick = e => { if (e.target.id === "veil") shut(); };
 document.addEventListener("keydown", e => { if (e.key === "Escape") shut(); });
 boot();

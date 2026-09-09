@@ -219,6 +219,7 @@ bool arena::base_hash_arena::load(const std::string &filename, const std::functi
     // and where its pages are mapped from, before it allocates any - otherwise a
     // load lands in anonymous memory whatever `arena_dir` says. TODO 239
     anew_one.set_backing_name(this->get_backing_name());
+    anew_one.set_backing_space(this->get_backing_space());
     this->close_backing_file();     // the file is about to be the new arena's
     if (arena_read(anew_one, extra, filename)) {
         *this = std::move(anew_one); // only update if successful
@@ -309,7 +310,7 @@ bool arena::base_hash_arena::save_snapshot(const std::function<void(std::ostream
 bool arena::base_hash_arena::load_snapshot(const std::function<void(std::istream &)> &extra) {
     if (!wants_backing())
         return false;
-    auto dir = barch::get_arena_dir();
+    auto dir = barch::get_arena_dir(backing_space);
     const std::string arena_file = dir + "/" + backing_name + ".arena";
     const std::string path = snapshot_path_of(arena_file);
 

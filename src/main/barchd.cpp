@@ -29,6 +29,7 @@
 
 #include "configuration.h"
 #include "constants.h"
+#include "cron.h"
 #include "fs_api.h"
 #include "function_sync.h"
 #include "logger.h"
@@ -300,6 +301,9 @@ int main(int argc, char** argv) {
         }
         barch::start_function_sync();
     }
+    // node-local, no relation to whether any repository is configured - a cron
+    // entry is a key under configuration:cron/jobs/ regardless. See TODO 249.
+    barch::cron::start();
 
     auto listen_on = barch::get_server_binding();
     if (listen_on.empty())
@@ -322,6 +326,7 @@ int main(int argc, char** argv) {
     // nothing may start a listener from here on: a restart already on its way would
     // otherwise build one while the process is being torn down - TODO 241
     barch::stop_configuration_restarts();
+    barch::cron::stop();
     barch::server::stop();
     if (save_on_exit) {
         // a database that loses the last minutes of writes because it was asked to stop

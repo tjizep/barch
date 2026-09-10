@@ -26,6 +26,8 @@
 #include "art/key_options.h"
 #include "key_type.h"
 #include "function_sync.h"
+#include "auth_api.h"
+#include "cron.h"
 
 namespace {
     /*
@@ -1099,6 +1101,40 @@ namespace functions {
         return cats2vec(m);
     }
 
+    /*
+     * A cron transport() only makes sense stored where the scheduler looks for it,
+     * and its schedule has to be a schedule - both are checked at SETF time rather
+     * than left for the scheduler to discover on its next tick. See TODO 249.
+     */
+    static bool check_cron_spec(const key_space_ptr& space, const std::string& folded,
+                                const barch::foreign::cron_spec& spec, std::string& err) {
+        if (space->canonical() != "configuration" || folded.rfind("CRON/JOBS/", 0) != 0) {
+            err = "a cron transport() belongs under configuration:cron/jobs/<name>";
+            return false;
+        }
+        uint64_t ms;
+        if (!spec.every.empty() && !barch::cron::parse_duration(spec.every, ms, err))
+            return false;
+        if (!spec.cron.empty()) {
+            barch::cron::expr e;
+            if (!barch::cron::parse_expr(spec.cron, e, err))
+                return false;
+        }
+        if (!spec.jitter.empty() && !barch::cron::parse_duration(spec.jitter, ms, err))
+            return false;
+        if (!barch::is_keyspace(spec.space)) {
+            // not fatal - a target that is not loaded yet is exactly what a
+            // scheduled tick already knows how to skip, see cron.cpp run_job -
+            // but a name that could never be a key space at all is a typo worth
+            // catching now rather than on every tick from here on
+            if (!check_ks_name(spec.space)) {
+                err = "'" + spec.space + "' is not a key space name";
+                return false;
+            }
+        }
+        return true;
+    }
+
     static std::shared_ptr<exposed_map> exposed_in(const key_space_ptr& space) {
         if (!space)
             return nullptr;
@@ -1161,8 +1197,170 @@ namespace functions {
         return out;
     }
 
-    bool call_named(const barch::key_space_ptr& space, const std::string& name,
-                    const std::vector<std::string>& args, Variable& out, std::string& err) {
+    /*
+     * Every `kind = "cron"` transport() under configuration:cron/jobs/ - TODO 249.
+     *
+     * Not cached the way exposed_in is: the scheduler already rescans on its own
+     * clock (see cron.cpp), so a second cache here would only be a second place to
+     * remember to invalidate. Compiling a handful of small schedule declarations
+     * once every scheduler tick is not the cost exposed_in was built to avoid -
+     * that one is paid on every call into a space, this is paid once a tick.
+     */
+    heap::vector<cron_entry> cron_jobs() {
+        heap::vector<cron_entry> out;
+        if (!barch::is_keyspace("configuration"))
+            return out;
+        auto space = barch::get_keyspace("configuration");
+        /*
+         * Folded, because a function key is: SETF upper-cases the name before it
+         * stores it, so what is on disk is CRON/JOBS/TICKER whatever was typed.
+         * A job name is reported back in lower case for the same reason - the case
+         * it was written in is not kept, so picking one is the honest thing.
+         */
+        static const char* PREFIX = "CRON/JOBS/";
+        for (const auto& fname : names(space)) {
+            if (fname.rfind(PREFIX, 0) != 0)
+                continue;
+            auto job_name = fname.substr(strlen(PREFIX));
+            if (job_name.empty() || job_name.find('/') != std::string::npos)
+                continue; // one level of job names, no nesting
+            for (auto& ch : job_name)
+                ch = (char) tolower((unsigned char) ch);
+            std::string source;
+            if (!source_in(space, fname, source))
+                continue;
+            cron_entry e;
+            e.name = job_name;
+            e.key = fname;
+            std::string err;
+            if (!barch::foreign::compile_function(space->get_canonical_name(), fname, source,
+                                                  loader_for(space), err, nullptr, &e.spec)) {
+                e.parse_err = err;
+                out.push_back(std::move(e));
+                continue;
+            }
+            if (!e.spec.is_cron)
+                continue; // an ordinary function parked under cron/jobs/, not an entry
+            out.push_back(std::move(e));
+        }
+        return out;
+    }
+
+    static bool call_stored(const barch::key_space_ptr& space, const std::string& name,
+                            const std::vector<std::string>& args, const std::string& user,
+                            Variable& out, std::string& err);
+
+    /** what calling a stored function at all needs, as asio_resp_session gates it */
+    static const heap::vector<bool>& stored_function_cats() {
+        static heap::vector<bool> cats = [] {
+            catmap m;
+            m["function"] = true;
+            m["data"] = true;
+            return cats2vec(m);
+        }();
+        return cats;
+    }
+
+    /*
+     * The C++ side of a cron tick's call: CALLF with no connection behind it, run
+     * as `user` rather than as whoever is asking, because nobody is. This is
+     * deliberately not call_named - that one runs with owner rights because the
+     * server itself is asking, which is exactly wrong here: a cron entry's whole
+     * point is that scheduling it and doing what it does are two different rights,
+     * see TODO 249 and 250, so this checks the named user's own categories the
+     * way CALLF checks the connection's.
+     */
+    bool call_as(const barch::key_space_ptr& space, const std::string& user,
+                const std::string& call, const heap::vector<std::string>& args,
+                Variable& out, std::string& err) {
+        if (!space) {
+            err = "no key space";
+            return false;
+        }
+        std::string name = call;
+        for (auto& ch : name)
+            ch = (char) toupper((unsigned char) ch);
+        auto acl = acl_for_user(user);
+        auto table = functions_by_name();
+        auto f = table->find(name);
+        if (f == table->end()) {
+            /*
+             * Not a builtin, so a stored function - which is the interesting case
+             * and the one a schedule is usually for. Two authorizations, the same
+             * two the RESP session makes: calling a stored function at all needs
+             * `{function,data}`, and a name a resp transport() exposes then carries
+             * its own categories on top - see TODO 188.
+             */
+            if (!allowed(stored_function_cats(), acl)) {
+                err = "'" + user + "' is not authorized to call functions";
+                return false;
+            }
+            auto index = exposed_in(space);
+            if (index) {
+                auto e = index->find(name);
+                if (e != index->end()) {
+                    if (!allowed(e->second.cats, acl)) {
+                        err = "'" + user + "' is not authorized to call '" + call + "'";
+                        return false;
+                    }
+                    // the key that exposes the name, not the name: that is what the
+                    // function pool loads, and the two differ by design
+                    std::vector<std::string> argv;
+                    argv.push_back(e->second.method);
+                    for (const auto& a : args)
+                        argv.push_back(a);
+                    return call_stored(space, e->second.key, argv, user, out, err);
+                }
+            }
+            std::vector<std::string> argv;
+            for (const auto& a : args)
+                argv.push_back(a);
+            if (!call_stored(space, name, argv, user, out, err)) {
+                if (err.empty())
+                    err = "no such command '" + call + "'";
+                return false;
+            }
+            return true;
+        }
+        if (f->second.is_asynch) {
+            err = "cron cannot call '" + call + "', it is asynchronous";
+            return false;
+        }
+        if (!allowed(f->second.cats, acl)) {
+            err = "'" + user + "' is not authorized to call '" + call + "'";
+            return false;
+        }
+        heap::vector<std::string> argv;
+        argv.push_back(call);
+        for (const auto& a : args)
+            argv.push_back(a);
+        rpc_caller sub;
+        sub.set_kspace(space);
+        sub.set_acl(user, acl);
+        out = sub.callv(argv, f->second.call, Variable(nullptr));
+        if (sub.has_blocks()) {
+            sub.clear_blocks();
+            err = "cron cannot call '" + call + "', it blocks";
+            return false;
+        }
+        if (out.index() == var_error) {
+            err = std::get<error>(out).what();
+            return false;
+        }
+        return true;
+    }
+
+    /*
+     * The body of call_named, with who the script runs as as an argument.
+     *
+     * A foreign fill is the server asking, so it runs as the owner and `user` is
+     * empty. A cron tick is not: the entry names a user and what the job may do
+     * comes from that user's own rights, which is what makes "who may schedule"
+     * and "what the job may do" two different things - TODO 249.
+     */
+    static bool call_stored(const barch::key_space_ptr& space, const std::string& name,
+                            const std::vector<std::string>& args, const std::string& user,
+                            Variable& out, std::string& err) {
         if (!space) {
             err = "no key space";
             return false;
@@ -1198,8 +1396,8 @@ namespace functions {
          * std::function and a source that counts what it did dies with
          * `bad_function_call`, which says nothing about what is wrong.
          */
-        iface->run_command = [space](const heap::vector<std::string>& argv, Variable& out,
-                                     std::string& err) -> bool {
+        iface->run_command = [space, user](const heap::vector<std::string>& argv, Variable& out,
+                                           std::string& err) -> bool {
             if (argv.empty()) {
                 err = "barch.call needs a command name";
                 return false;
@@ -1224,7 +1422,10 @@ namespace functions {
             }
             rpc_caller sub;
             sub.set_kspace(space);
-            sub.set_acl("default", get_all_acl());
+            if (user.empty())
+                sub.set_acl("default", get_all_acl());
+            else
+                sub.set_acl(user, acl_for_user(user));
             sub.set_script_depth(1);
             out = sub.callv(argv, found->second.call, Variable(nullptr));
             if (sub.has_blocks()) {
@@ -1299,6 +1500,11 @@ namespace functions {
         return true;
     }
 
+    bool call_named(const barch::key_space_ptr& space, const std::string& name,
+                    const std::vector<std::string>& args, Variable& out, std::string& err) {
+        return call_stored(space, name, args, std::string{}, out, err);
+    }
+
     bool install(const key_space_ptr& space, const std::string& name,
                  const std::string& source, std::string& err) {
         if (!space) {
@@ -1318,13 +1524,16 @@ namespace functions {
         // call it; HNSW:SET and a bare SET stay the builtin. See TODO 160.
         auto folded = upper_name(raw);
         barch::foreign::resp_spec spec;
+        barch::foreign::cron_spec cspec;
         if (!barch::foreign::compile_function(space->get_canonical_name(), folded, source,
-                                              loader_for(space), err, &spec))
+                                              loader_for(space), err, &spec, &cspec))
             return false;
         // a resp transport() names commands and the rights they need. An unknown
         // category is refused here rather than quietly dropped, because a category
         // that does not exist would otherwise read as "needs nothing" - TODO 188
         if (spec.is_resp && !check_resp_spec(spec, err))
+            return false;
+        if (cspec.is_cron && !check_cron_spec(space, folded, cspec, err))
             return false;
         composite q;
         auto key = function_key(q, art::value_type{folded.data(), folded.size()});
@@ -1340,6 +1549,8 @@ namespace functions {
             t->opt_insert(opts, key, art::value_type{source.data(), source.size()}, true, fc);
         });
         forget_exposed(space->canonical());
+        if (cspec.is_cron)
+            barch::cron::request_rescan();
         // no bump here: a write is quiet unless the caller asked for it with
         // RELOAD - see TODO 245 and DONE 236
         return true;
@@ -1353,8 +1564,14 @@ namespace functions {
         barch::sharded_store store(space);
         auto fc = [](art::node_ptr) -> void {};
         bool gone = store.remove(key, fc);
-        if (gone)
+        if (gone) {
             forget_exposed(space->canonical());
+            // a removed job stops firing next tick rather than the scheduler
+            // discovering it up to a minute late - cheap to always ask, since a
+            // rescan that finds nothing due costs one extra cron_jobs() walk
+            if (space->canonical() == "configuration" && folded.rfind("CRON/JOBS/", 0) == 0)
+                barch::cron::request_rescan();
+        }
         return gone;
     }
 
@@ -1816,13 +2033,14 @@ int KEYSF(caller& call, const arg_t& argv) {
     return call.end_array();
 }
 
-/* FUNCTIONS SYNC [repo] [commit] | STATUS | COMMANDS
+/* FUNCTIONS SYNC [repo] [commit] | STATUS | COMMANDS | CRON
  *
  * SYNC with nothing applies every enabled repository. One argument is a
  * repository name if it is one, and otherwise a commit to pin this apply to -
  * which is what it always meant, and still works while there is only one
  * repository to mean it about. Two arguments are the repository and the pin.
- * STATUS is one line per repository. See TODO 252.
+ * STATUS is one line per repository. CRON is one line per scheduled job. See
+ * TODO 252 and 249.
  */
 int FUNCTIONS(caller& call, const arg_t& argv) {
     if (argv.size() < 2)
@@ -1864,7 +2082,9 @@ int FUNCTIONS(caller& call, const arg_t& argv) {
         }
         return call.end_array();
     }
-    return call.push_error("FUNCTIONS SYNC [repo] [commit]|STATUS|COMMANDS");
+    if (sub == "CRON")
+        return call.push_string(barch::cron::status());
+    return call.push_error("FUNCTIONS SYNC [repo] [commit]|STATUS|COMMANDS|CRON");
 }
 }
 

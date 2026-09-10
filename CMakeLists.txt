@@ -1102,6 +1102,11 @@ else()
                 COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/gitrepostest.py
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+        # a stored function run on a schedule - TODO 249
+        add_test(NAME TestCron
+                COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/crontest.py
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
         if (ADD_LUAU)
             add_test(NAME TestNkLuau
                     COMMAND ${PYTHON3_EXEC} ${TEST_SOURCE_PATH}/nkluautest.py
@@ -1314,6 +1319,7 @@ else()
                 TestRespClientLocal TestRespClientLocalRESP3
                 TestAsyncPipeline TestHybrid
                 TestFunctions TestFunctionSync TestGitRepos TestDir TestFetchLuau
+                TestCron
                 TestKeysStream TestChaos TestScanGuarantees
                 TestMerge TestSpaceThread TestBpopThread
                 TestCompression TestScan

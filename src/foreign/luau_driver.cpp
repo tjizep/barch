@@ -2579,6 +2579,118 @@ static bool read_resp_transport(lua_State* L, lua_State* T, resp_spec& spec,
     return true;
 }
 
+/*
+ * Read a `transport()` of kind "cron" - TODO 249.
+ *
+ * Same shape as read_resp_transport: called on the chunk's own environment thread,
+ * transport() is a plain data table rather than a set of handlers, so there is
+ * nothing here to keep a registry reference to. Absent transport(), or one of
+ * another kind, is not an error.
+ */
+static bool read_cron_transport(lua_State* L, lua_State* T, cron_spec& spec,
+                                std::string& err) {
+    lua_getglobal(T, "transport");
+    if (lua_type(T, -1) != LUA_TFUNCTION) {
+        lua_pop(T, 1);
+        return true;
+    }
+    if (lua_pcall(T, 0, 1, 0) != 0) {
+        err = lua_tostring(T, -1) ? lua_tostring(T, -1) : "transport() failed";
+        lua_pop(T, 1);
+        return false;
+    }
+    if (lua_type(T, -1) != LUA_TTABLE) {
+        err = "transport() must return a table";
+        lua_pop(T, 1);
+        return false;
+    }
+    spec.has_transport = true;
+    lua_getfield(T, -1, "kind");
+    std::string kind = lua_isstring(T, -1) ? lua_tostring(T, -1) : "";
+    lua_pop(T, 1);
+    for (auto& ch : kind)
+        ch = (char) tolower((unsigned char) ch);
+    if (kind != "cron") {
+        lua_pop(T, 1);
+        return true;
+    }
+    spec.is_cron = true;
+
+    auto str_field = [&](const char* name, std::string& out) {
+        lua_getfield(T, -1, name);
+        if (lua_isstring(T, -1))
+            out = lua_tostring(T, -1);
+        else if (!lua_isnil(T, -1) && err.empty())
+            err = std::string("cron transport() field '") + name + "' must be a string";
+        lua_pop(T, 1);
+    };
+
+    str_field("space", spec.space);
+    str_field("call", spec.call);
+    str_field("every", spec.every);
+    str_field("cron", spec.cron);
+    str_field("user", spec.user);
+    str_field("jitter", spec.jitter);
+    std::string overlap;
+    str_field("overlap", overlap);
+    if (!overlap.empty())
+        spec.overlap = overlap;
+    std::string tz;
+    str_field("tz", tz);
+    if (!tz.empty())
+        spec.tz = tz;
+
+    lua_getfield(T, -1, "catchup");
+    if (!lua_isnil(T, -1))
+        spec.catchup = lua_toboolean(T, -1) != 0;
+    lua_pop(T, 1);
+
+    lua_getfield(T, -1, "enabled");
+    if (!lua_isnil(T, -1))
+        spec.enabled = lua_toboolean(T, -1) != 0;
+    lua_pop(T, 1);
+
+    lua_getfield(T, -1, "args");
+    if (lua_type(T, -1) == LUA_TTABLE) {
+        int n = (int) lua_objlen(T, -1);
+        for (int i = 1; i <= n; ++i) {
+            lua_rawgeti(T, -1, i);
+            if (lua_isstring(T, -1))
+                spec.args.push_back(lua_tostring(T, -1));
+            else if (err.empty())
+                err = "cron transport() args must be a list of strings";
+            lua_pop(T, 1);
+        }
+    } else if (!lua_isnil(T, -1) && err.empty()) {
+        err = "cron transport() args must be a list of strings";
+    }
+    lua_pop(T, 1); // args
+
+    lua_pop(T, 1); // the transport table
+    (void) L;
+
+    if (!err.empty())
+        return false;
+
+    if (spec.space.empty() || spec.call.empty()) {
+        err = "cron transport() needs a space and a call";
+        return false;
+    }
+    if (spec.every.empty() == spec.cron.empty()) {
+        err = "cron transport() needs exactly one of every or cron";
+        return false;
+    }
+    if (spec.user.empty()) {
+        err = "cron transport() needs a user to run as";
+        return false;
+    }
+    if (spec.overlap != "skip" && spec.overlap != "queue" && spec.overlap != "allow") {
+        err = "cron transport() overlap must be skip, queue or allow";
+        return false;
+    }
+    return true;
+}
+
 static bool compile_into(space_state& st, const std::string& name,
                          const std::string& source, compiled& out, std::string& err,
                          bool needs_call = true);
@@ -3417,7 +3529,7 @@ void http_vm_call(http_vm& vm, int fn_ref, const void* req, void* res,
 
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
-                      std::string& err, resp_spec* spec) {
+                      std::string& err, resp_spec* spec, cron_spec* cron) {
     // a state of its own, thrown away when this returns. It has to be a real one:
     // the script's top level may require others, and require needs both the loader
     // and a state to compile them into
@@ -3434,8 +3546,15 @@ bool compile_function(const std::string& space, const std::string& name,
     compiled c;
     // the same qualified key the call path uses, or require inside this chunk builds
     // one shape and the loading stack holds another - and a cycle goes undetected
-    bool ok = compile_into(*st, qualified(space, name), source, c, err);
-    if (ok && spec) {
+    /*
+     * `call()` is not insisted on here, and is checked below instead. A cron entry
+     * is a schedule and nothing else - only transport() - so there is no body to
+     * declare, and the transport cannot be read until the chunk has run. An
+     * ordinary function with neither a call() nor a transport() is still refused,
+     * just a few lines later than it used to be. See TODO 249.
+     */
+    bool ok = compile_into(*st, qualified(space, name), source, c, err, false);
+    if (ok && (spec || cron)) {
         // read again for the categories, which the call path has no use for and so
         // does not keep. Only SETF pays this, and only once per stored function
         lua_getref(st->L, c.env);
@@ -3443,10 +3562,24 @@ bool compile_function(const std::string& space, const std::string& name,
         lua_pop(st->L, 1);
         if (T) {
             st->load = &load;
-            ok = read_resp_transport(st->L, T, *spec, nullptr, err);
+            if (spec)
+                ok = read_resp_transport(st->L, T, *spec, nullptr, err);
+            if (ok && cron)
+                ok = read_cron_transport(st->L, T, *cron, err);
         }
     }
     st->load = nullptr;
+    /*
+     * The check compile_into was told to skip. Only a cron entry is excused: a
+     * resp or resource transport still has to carry a call(), because the call
+     * path compiles it again with call() required and a key accepted here that
+     * cannot be run there would be a write that reports OK and a command that
+     * never works.
+     */
+    if (ok && c.fn == LUA_NOREF && !(cron && cron->is_cron)) {
+        err = "luau script has no call()";
+        ok = false;
+    }
     return ok;
 }
 
@@ -3467,7 +3600,7 @@ bool prepare_luau(key_space& ks) {
 }
 
 bool compile_function(const std::string&, const std::string&, const std::string&,
-                      const source_loader&, std::string& err, resp_spec*) {
+                      const source_loader&, std::string& err, resp_spec*, cron_spec*) {
     err = "luau not built";
     return false;
 }

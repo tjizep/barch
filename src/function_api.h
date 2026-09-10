@@ -161,6 +161,35 @@ namespace functions {
     heap::vector<std::string> names(const barch::key_space_ptr& space);
     bool source_in(const barch::key_space_ptr& space, const std::string& name,
                    std::string& out);
+
+    /** one `kind = "cron"` transport(), found under configuration:cron/jobs/<name> */
+    struct cron_entry {
+        /** the last path segment - configuration:cron/jobs/compact is "compact" */
+        std::string name;
+        /** the full function key, as SETF/GETF/REMF see it */
+        std::string key;
+        barch::foreign::cron_spec spec;
+        /** non-empty when the source would not compile, or the transport() is bad */
+        std::string parse_err;
+    };
+    /**
+     * Every cron transport() declared in the configuration space - TODO 249. A
+     * key under cron/jobs/ with no transport(), or one of another kind, is not an
+     * entry and is not among these; one that fails to compile is, with parse_err
+     * set, so the scheduler can say which job is broken rather than only that one
+     * is missing.
+     */
+    heap::vector<cron_entry> cron_jobs();
+
+    /**
+     * Run `call` in `space` as `user`, refusing what that user's rights do not
+     * cover - the same check CALLF makes, with no connection behind it. This is
+     * what a cron tick calls through: the entry says who may *schedule* a job,
+     * this is what decides what the job may *do*, from the user it names.
+     */
+    bool call_as(const barch::key_space_ptr& space, const std::string& user,
+                const std::string& call, const heap::vector<std::string>& args,
+                Variable& out, std::string& err);
 }
 }
 

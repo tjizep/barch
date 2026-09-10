@@ -50,6 +50,7 @@ extern "C" {
 #include "keyspace_locks.h"
 #include "dictionary_compressor.h"
 #include "function_sync.h"
+#include "cron.h"
 
 
 extern "C" {
@@ -185,6 +186,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
         }
         barch::start_function_sync();
     }
+    // node-local, no relation to whether any repository is configured - a cron
+    // entry is a key under configuration:cron/jobs/ regardless. See TODO 249.
+    barch::cron::start();
     if (!barch::get_server_binding().empty())
         barch::server::start(barch::get_server_binding(),barch::get_server_port(), false);
 
@@ -192,6 +196,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **, int) {
 }
 
 int ValkeyModule_OnUnload(void *unused_arg) {
+    barch::cron::stop();
     // TODO: destroy tree
     return VALKEYMODULE_OK;
 }

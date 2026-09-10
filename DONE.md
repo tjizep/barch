@@ -13213,3 +13213,115 @@ this device, so these numbers are the memory pressure honestly and everything el
 optimistically. What survives the caveat is the comparison: at the same cap, the same
 data, the mapped version serves 51,300 reads a second and the anonymous one is killed
 in eleven seconds.
+
+## 265. A stored function on a schedule [09-09-2026]
+
+*Was `TODO.md` entry 249.*
+
+A `transport()` of `kind = "cron"`, stored as a function key under
+`configuration:cron/jobs/<name>`, and one thread that calls what it points at. The
+entry is a schedule and nothing else - a target space, a call, its arguments, the
+user to run as - so the function it fires stays an ordinary RESP command that does
+not know it is scheduled, and can be scheduled twice with different arguments.
+
+The first cut the entry asked for: node-local, `overlap = skip`, and a fire missed
+while the server was down is dropped rather than caught up. No lease, so nothing
+distributed had to be settled to see whether the shape is right.
+
+```lua
+function transport()
+    return {
+        kind = "cron",
+        space = "media",     -- "default" is the unnamed space
+        call = "COMPACT",
+        args = {"7"},
+        every = "5m",        -- or: cron = "0 3 * * *", never both
+        user = "jobs",
+    }
+end
+```
+
+`src/cron.h` and `src/cron.cpp` hold the two schedule parsers - `<n><unit>` durations
+over `ms s m h d`, and the classic five field expression with the `@daily` family,
+day-of-month and day-of-week OR'd when both are restricted - plus `next_after`, the
+tick loop and `FUNCTIONS CRON`.
+
+### What a tick is allowed to do
+
+`functions::call_as` is CALLF with no connection behind it. It deliberately does not
+reuse `call_named`, which runs as the owner because the server itself is asking:
+that is exactly wrong here, since the whole point of the indirection is that
+scheduling a job and doing what it does are two different rights. So it resolves the
+named user's own ACL and makes the same two checks the RESP session makes - a
+builtin against its registered categories, a stored function against
+`{function, data}` and then against whatever a `kind = "resp"` transport declared for
+that name. A job naming a user with no rights records `not authorized` and skips.
+
+`call_named` and `call_as` now share one body, with who the script runs as as an
+argument, rather than the second growing a copy of the first.
+
+### Three defects the tests found, all of them mine
+
+**A job key is stored folded.** `SETF` upper-cases a function name before it stores
+it, so the scan for `cron/jobs/` matched nothing and `FUNCTIONS CRON` reported no
+jobs at all while the key was plainly there. The prefix is `CRON/JOBS/` and the job
+name is reported in lower case, since the case it was written in is not kept.
+
+**The idle cap applied to a job that had just fired.** The loop shortened its wait
+for jobs that were not yet due and forgot the one it had just run, so `every = "300ms"`
+meant "once every sixty seconds" for anything faster than the cap.
+
+**A rescan asked for mid-pass was lost.** `kick` was cleared *after* the job list was
+read, so a `SETF` landing in between was answered by the list from before the write:
+the kick consumed, the new job unseen, and nothing to look again until the cap a
+minute later. Taking the flag first lets such a kick survive into the next pass. This
+is what a scheduler that works for one job and not the next one looks like.
+
+### And one that was not about cron at all
+
+`functiontest.py` took five minutes, of which four and a half were spent exiting.
+The scheduler's `condition_variable` was a file scope static, and static destruction
+runs `pthread_cond_destroy` on it while the scheduler thread is still parked in
+`wait_for` - undefined, and what glibc actually does is block until the waiter
+leaves. The python binding has no shutdown hook to call `stop()` from, so every test
+process paid it, and it read as a hang rather than as a slow exit.
+
+The mutex, the condition variable and the thread are now the never-destroyed form
+`TODO.md` entry 57 names: reached through a function, outliving the process. That
+entry was written about two *other* statics and the caution in it - establish first
+whether the shutdown path is reached at all - is exactly what this confirms, since
+here it demonstrably is. With it fixed `functiontest.py` runs in two seconds.
+
+`start()` is called from all three hosts: the valkey module's `OnLoad`, `barchd`, and
+the `%init` block in `src/barch.i` - which is where the python and lua bindings do
+what `OnLoad` does at its end. A schedule that only ran under `barchd` would be a
+feature that quietly does not exist in two of the three.
+
+### Refused at the write, not discovered on a tick
+
+A cron `transport()` stored anywhere but `configuration:cron/jobs/` is refused by
+`SETF`, as is an unparseable `every` or `cron`, naming both of them, naming neither,
+a target that could never be a key space name, an unknown `overlap`, and a missing
+`user`. A target space that merely is not *loaded* is not refused: a boot import may
+well load the schedule before the target, so that is the case a tick records and
+skips.
+
+An entry needs no `call()`, being only a `transport()`. `compile_function` no longer
+insists on one, but it still refuses a resp or resource transport without one -
+those are compiled again by the call path with `call()` required, and a key accepted
+at the write that cannot be run would be a command that reports OK and never works.
+
+### Still open
+
+The two things entry 249 said to settle before building any of it, both of which
+this first cut sidesteps rather than answers. `scan_checkout` still skips the
+`configuration` folder, so none of this deploys from a git checkout yet, and letting
+`configuration/cron/` through as a merge raises the question of how a checkout
+*deletes* a job it no longer contains. And the lease that decides which node runs a
+job in a replicated set: node-local is the default here because it is the honest
+first cut, not because the question is answered.
+
+`catchup` and `overlap = "queue"` are parsed and reported but behave as `false` and
+`skip`; `jitter` and `tz` are parsed, and `tz` is only consulted for the calendar
+form. The parsers have no unit test of their own beyond what `crontest.py` exercises
+through a live server.

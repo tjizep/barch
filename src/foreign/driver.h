@@ -344,9 +344,50 @@ struct resp_spec {
     std::vector<resp_method> methods;
 };
 
+/**
+ * A `transport()` of kind "cron" - TODO 249. Not the work, a schedule pointing at it:
+ *
+ *     return {
+ *         kind = "cron",
+ *         space = "media",
+ *         call = "COMPACT",
+ *         args = {"7"},
+ *         every = "5m",        -- or: cron = "0 3 * * *"
+ *         user = "jobs",
+ *         jitter = "30s",
+ *         overlap = "skip",    -- skip | queue | allow
+ *         catchup = false,
+ *         tz = "UTC",
+ *         enabled = true,
+ *     }
+ *
+ * `space` and `call` are where the tick calls into, exactly like CALLF but with no
+ * connection behind it - which is why `user` is required: it is who the call runs as,
+ * and `space = "default"` names the unnamed space a plain connection writes to,
+ * the way `transport().user` names who an HTTP route runs as. Exactly one of `every`
+ * or `cron` has to be set; the two schedule forms are documented on cron.h.
+ */
+struct cron_spec {
+    bool has_transport{false};
+    /** transport() was there and said kind = "cron" */
+    bool is_cron{false};
+    std::string space;
+    std::string call;
+    std::vector<std::string> args;
+    std::string every;
+    std::string cron;
+    std::string user;
+    std::string jitter;
+    std::string overlap{"skip"};
+    bool catchup{false};
+    std::string tz{"UTC"};
+    bool enabled{true};
+};
+
 bool compile_function(const std::string& space, const std::string& name,
                       const std::string& source, const source_loader& load,
-                      std::string& err, resp_spec* spec = nullptr);
+                      std::string& err, resp_spec* spec = nullptr,
+                      cron_spec* cron = nullptr);
 
 /**
  * run a stored function's `call(argv)` and hand back what it returned.

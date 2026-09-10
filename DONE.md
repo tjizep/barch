@@ -13325,3 +13325,79 @@ first cut, not because the question is answered.
 `skip`; `jitter` and `tz` are parsed, and `tz` is only consulted for the calendar
 form. The parsers have no unit test of their own beyond what `crontest.py` exercises
 through a live server.
+
+## 266. Cron on the RESP server's io_contexts [10-09-2026]
+
+*Was `TODO.md` entry 271.*
+
+DONE 265 gave cron a thread of its own, a leaked `std::mutex` and
+`std::condition_variable` to park it on, and a detached `std::thread` per fire. All
+of that is gone. The schedule is now an `asio::steady_timer` on a strand, and a run
+is an `asio::post` onto the same worker `io_context` a session posts an asynchronous
+batch to - the shape `asio_resp_session` already had.
+
+### What actually changed, and what did not
+
+Only the threading. `parse_duration`, `parse_expr` and `next_after` are byte for
+byte what they were, as are the jitter, the OR'd dom/dow rule, the overlap rules,
+the 60 second idle cap and the 5ms floor. `run_job` still goes through
+`functions::call_as`, so a job still runs in slices on the foreign pool with the
+target space's own `function_slice` and `function_deadline`, and still bills its
+nanoseconds exactly like a `CALLF` does. The only edit to it is that it returns the
+error string instead of writing the state itself, because the state now belongs to
+the strand.
+
+### Where the locks went
+
+Two of them, and neither is replaced by another.
+
+The scheduler's own state - the due time, the run count, the running flag - is
+touched only from handlers on one strand, so a tick, a rescan and a job reporting
+back are serialised by asio rather than by a mutex. A rescan used to be
+`kick.store(true)` plus `notify_all` and is now a post, which removes the whole
+question the old comment agonised over: there is no window in which a kick is
+consumed by a pass that had already read the job list, because the post *is* the
+pass.
+
+`FUNCTIONS CRON` runs on some connection's thread, so it cannot join the strand
+without blocking it. The strand instead publishes a frozen copy of the state after
+every change, and `status()` reads that through an atomic `shared_ptr`. So the
+status path takes no lock at all and a reader and the scheduler never contend. The
+GCC 11 split is the same one `range_index.h` documents: `std::atomic<shared_ptr>`
+where the library has it, the free functions where it does not.
+
+### Waiting for what is in flight
+
+The detached-thread version could not wait for a running job, so `stop()` returned
+while one was still inside a lua call. Every handler now holds a token whose
+destructor decrements a counter, and `stop()` waits for that counter to reach zero
+before dropping the last reference - which matters, because dropping it destroys
+the timer and the timer belongs to an `io_context` the caller is usually about to
+destroy. A handler destroyed unrun (the context stopped underneath it) counts the
+same as one that finished, so a stopped context cannot hang the wait; the wait is
+capped at ten seconds anyway, after which the scheduler is deliberately leaked. A
+leak at shutdown costs nothing and touching a dead `io_context` costs a crash.
+
+### The compromise, and where start() moved
+
+There is nothing to schedule on until a listener exists, so `cron::start()` is a
+no-op before one does and `server::start()` calls it again once the contexts are up;
+`server::stop()` calls `cron::stop()` before letting them go, and `server::start()`
+calls it too, because `handle_start` destroys whatever context was there before
+building the new one. The calls in `barchd.cpp` and `barch.cpp` are left where they
+were and now simply do nothing on the way past - barchd always starts a server, and
+a process that starts none runs no schedules. That is the accepted compromise: it
+buys the scheduler a thread pool it does not have to own.
+
+`server::worker_io()` is the new accessor and answers the plain tcp listener's
+worker context, falling back to the TLS and unix ones. An `io_context` is thread
+safe, so the pointer is good from any thread; what it must not outlive is the
+server, which is why nothing holds it across a `server::stop()`.
+
+### Checked
+
+`test/crontest.py` passes unchanged, and so do `TestFunctions`, `TestFunctionSync`,
+`TestBarchd`, `TestAsyncPipeline`, `TestRespClientLocal` and
+`TestRespClientLocalRESP3` - `TestBarchd` being the one that runs the real binary,
+so it covers `cron::start()` arriving before the server as well as the shutdown
+order.

@@ -28,6 +28,16 @@ namespace barch {
          * vectors live in here, so the walk does too - a caller never sees a session.
          */
         extern void list_clients(caller& call);
+        /**
+         * The worker io_context of whichever listener is up, or nullptr when none is.
+         *
+         * This is the same context a session posts an asynchronous batch to, so work
+         * queued here runs on the worker pool and never on a service thread. An
+         * io_context is thread safe, so the pointer can be used from any thread; what
+         * it must not outlive is the server, which is why nothing holds it across a
+         * server::stop().
+         */
+        extern asio::io_context* worker_io();
     };
     namespace repl {
         struct call_result {

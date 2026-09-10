@@ -22,6 +22,7 @@
 #include "rpc/barch_session.h"
 //#include "uring_resp_session.h"
 #include "rpc/constants.h"
+#include "cron.h"
 
 namespace barch {
     std::atomic<uint64_t> client_id = 0;
@@ -524,8 +525,25 @@ namespace barch {
 
         s = nullptr;
     }
+    /*
+     * Whichever listener is up, preferring plain tcp because that is the one barchd
+     * builds. There is one worker context per server_context, not one per process, so
+     * a caller that wants "the server's workers" has to be told which server that is,
+     * and this is that answer.
+     */
+    asio::io_context* server::worker_io() {
+        std::unique_lock l(srv_mut());
+        if (auto s = get_srv()) return &s->workers;
+        if (auto s = get_srv_ssl()) return &s->workers;
+        if (auto s = get_srv_unix()) return &s->workers;
+        return nullptr;
+    }
+
     void server::start(const std::string& interface, uint_least16_t port, bool ssl) {
         std::unique_lock l(srv_mut());
+        // the scheduler holds a timer on a worker context, and handle_start below
+        // destroys whatever context is there before building the new one
+        barch::cron::stop();
         if (port == 0) {
             ::unlink(interface.c_str());
             asio::local::stream_protocol::endpoint ep(interface);
@@ -537,11 +555,21 @@ namespace barch {
             auto ep = tcp::endpoint(tcp::v4(), port);
             handle_start(ep, false, get_srv());
         }
+        /*
+         * Cron is armed here rather than where barchd calls cron::start(), because a
+         * schedule needs a worker context to run on and that context only exists once
+         * a listener does. cron::start() before this point is a no-op that leaves the
+         * jobs on disk untouched, which is the accepted compromise in TODO 271: a
+         * process with no server runs no schedules.
+         */
+        barch::cron::start();
     }
 
     void server::stop() {
 
         std::unique_lock l(srv_mut());
+        // before the contexts go: the scheduler's timer lives in one of them
+        barch::cron::stop();
         handle_stop(get_srv());
         handle_stop(get_srv_ssl());
     }

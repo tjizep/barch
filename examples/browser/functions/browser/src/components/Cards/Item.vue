@@ -1,0 +1,241 @@
+<script setup>
+defineOptions({ name: "FilemanagerCardsItem" });
+
+import { computed, inject } from "vue";
+import { subscribe } from "@svar-ui/lib-vue";
+import { setID } from "@svar-ui/lib-dom";
+
+const props = defineProps({
+	item: {},
+});
+
+const api = inject("filemanager-store");
+const _ = inject("wx-i18n").getGroup("filemanager");
+const templates = api.templates;
+
+const { panels, activePanel, mode } = api.getReactiveState();
+
+const sPanels = subscribe(panels, true);
+const sActivePanel = subscribe(activePanel);
+const sMode = subscribe(mode);
+
+const selection = computed(
+	() => sPanels.value[sActivePanel.value].selected
+);
+
+const preview = computed(() => templates.preview(props.item, 214, 163));
+const icon = computed(() => templates.icon(props.item, "big"));
+
+const splitName = computed(() => splitFileName(props.item.name));
+const nameStart = computed(() => splitName.value[0]);
+const nameTail = computed(() => splitName.value[1]);
+
+function splitFileName(name) {
+	const MAX_TAIL_LENGTH = 10;
+	const NO_EXT_TAIL_LENGTH = 5;
+
+	const lastDotIndex = name.lastIndexOf(".");
+	const hasExtension = lastDotIndex > 0 && lastDotIndex < name.length - 1;
+	const tailLength = hasExtension
+		? Math.min(MAX_TAIL_LENGTH, name.length - lastDotIndex)
+		: Math.min(NO_EXT_TAIL_LENGTH, name.length);
+
+	const nameStart = name.slice(0, -tailLength);
+	const nameTail = name.slice(-tailLength);
+
+	return [nameStart, nameTail];
+}
+</script>
+
+<template>
+	<template v-if="props.item.id === '/wx-filemanager-parent-link'">
+		<div v-if="sMode !== 'search'" class="wx-back-item">
+			<div
+				class="wx-back"
+				:data-id="setID('/wx-filemanager-parent-link')"
+				:class="{ 'wx-selected': props.item.navigation }"
+			>
+				<i class="wxi-arrow-left"></i>
+				<span> {{ _("Back to parent folder") }}</span>
+			</div>
+		</div>
+	</template>
+	<template v-else>
+		<div
+			class="wx-item"
+			:class="{
+				'wx-selected':
+					selection?.length && selection.indexOf(props.item.id) >= 0,
+			}"
+			:data-id="setID(props.item.id)"
+		>
+			<div v-if="preview" class="wx-preview wx-file-preview">
+				<img
+					class="wx-card-preview"
+					:alt="_('A miniature file preview')"
+					:src="preview"
+				/>
+			</div>
+			<div v-else-if="icon" class="wx-preview wx-file-icon">
+				<img class="wx-card-preview" alt="" :src="icon" />
+			</div>
+			<div v-else class="wx-preview">
+				<i :class="`wxi-${props.item.type}`"></i>
+			</div>
+			<div v-if="props.item.type === 'folder'" class="wx-info">
+				<div class="wx-folder-name">
+					<span class="wx-type">{{ _("Folder") }}</span>
+					<span class="wx-name">
+						<span>{{ nameStart }}</span><span>{{ nameTail }}</span>
+					</span>
+				</div>
+				<div
+					:data-action-id="setID(props.item.id)"
+					class="wx-more"
+				>
+					<i class="wxi-dots-v"></i>
+				</div>
+			</div>
+			<div v-else class="wx-info">
+				<div class="wx-file-name">
+					<span class="wx-name">
+						<span>{{ nameStart }}</span><span>{{ nameTail }}</span>
+					</span>
+				</div>
+				<div
+					:data-action-id="setID(props.item.id)"
+					class="wx-more"
+				>
+					<i class="wxi-dots-v"></i>
+				</div>
+			</div>
+		</div>
+	</template>
+</template>
+
+<style scoped>
+.wx-item {
+	display: flex;
+	flex-direction: column;
+	width: 210px;
+	height: 200px;
+	margin: 0 20px 20px 0;
+	overflow: hidden;
+	cursor: pointer;
+	background-color: var(--wx-background);
+	border-radius: 6px;
+	box-shadow: var(--wx-fm-box-shadow);
+}
+
+.wx-preview {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-grow: 1;
+}
+
+.wx-preview i {
+	font-size: 105px;
+	color: var(--wx-color-primary);
+}
+
+.wx-preview i:before {
+	line-height: 105px;
+}
+.wx-file-preview .wx-card-preview {
+	height: 154px;
+	width: 100%;
+}
+
+.wx-file-icon .wx-card-preview {
+	height: 100px;
+	width: 100px;
+}
+
+.wx-selected {
+	outline: 1px solid var(--wx-color-primary);
+}
+.wx-info {
+	display: flex;
+	align-items: center;
+	height: 46px;
+	padding: 0 6px 3px 10px;
+}
+.wx-folder-name {
+	display: flex;
+	flex-direction: column;
+	flex-grow: 1;
+	max-width: 80%;
+}
+.wx-more {
+	display: flex;
+	padding: 4px;
+	line-height: 1;
+}
+
+.wx-more i {
+	font-size: 24px;
+	width: 24px;
+	height: 24px;
+	color: var(--wx-icon-color);
+}
+
+.wx-more:hover {
+	background-color: var(--wx-button-background);
+	border-radius: 50%;
+}
+.wx-info .wx-type {
+	color: var(--wx-color-font-alt);
+	font-size: 12px;
+	height: 18px;
+}
+.wx-file-name {
+	display: flex;
+	align-items: center;
+	flex-grow: 1;
+	max-width: 160px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.wx-name {
+	display: flex;
+	min-width: 0;
+	font-size: 14px;
+	font-weight: var(--wx-font-weight-md);
+	overflow: hidden;
+}
+.wx-name > span:first-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+.wx-name > span:last-child {
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+.wx-back-item {
+	width: 100%;
+	margin: 6px 0;
+	font-size: 12px;
+	line-height: 18px;
+}
+.wx-back {
+	display: flex;
+	width: fit-content;
+	color: var(--wx-color-primary);
+	user-select: none;
+}
+
+.wx-back i {
+	display: flex;
+	align-items: center;
+	margin-right: 8px;
+	font-size: 20px;
+}
+
+.wx-back i,
+.wx-back span {
+	cursor: pointer;
+}
+</style>
